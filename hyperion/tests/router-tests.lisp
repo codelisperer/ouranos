@@ -176,6 +176,28 @@
     (is (equal '(:content-type "text/plain") (%rt-headers response)))
     (is (equal '() (%rt-body response)))))
 
+(test a-head-answered-from-a-file-stream-closes-the-stream
+  ;; A static GET route returns the open file stream it checked (#314). HEAD drops
+  ;; the body, so the router must close it; otherwise each HEAD holds a file
+  ;; descriptor until garbage collection.
+  (uiop:with-temporary-file (:pathname file :type "txt")
+    (with-open-file (out file :direction :output :if-exists :supersede)
+      (write-string "content" out))
+    (let* ((stream nil)
+           (r (rt:router
+               (rt:route :get "/x"
+                         (lambda (env) (declare (ignore env))
+                           (setf stream (open file :element-type '(unsigned-byte 8)))
+                           (list 200 '(:content-type "text/plain") stream)))))
+           (response (rt:dispatch r (%rt-env :head "/x"))))
+      (unwind-protect
+           (progn
+             (is (= 200 (%rt-status response)))
+             (is (equal '() (%rt-body response)))
+             (is (typep stream 'file-stream))
+             (is (not (open-stream-p stream))))
+        (when stream (close stream))))))
+
 (test options-is-answered-from-the-same-allow-set
   ;; Derived, not declarable -- so it cannot drift from the routes it describes.
   (let* ((r (rt:router (rt:route :get "/x" (%rt-ok)) (rt:route :put "/x" (%rt-ok))))

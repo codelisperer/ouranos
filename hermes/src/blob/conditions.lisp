@@ -40,6 +40,21 @@ photo whose row still points at it is this, not a bug."))
    "The key is not well-formed -- see MNEMOSYNE/BLOB-KEY:KEY-FAULT for the vocabulary.
 Signalled at the protocol seam, before any backend sees it."))
 
+(define-condition blob-invalid-metadata (blob-error)
+  ((name :initarg :name :initform nil :reader blob-invalid-metadata-name)
+   (fault :initarg :fault :initform "" :reader blob-invalid-metadata-fault))
+  (:report (lambda (c s)
+             ;; NAME is the app's own metadata key, so it is reported; the value never is, for the
+             ;; same reason the key is kept out of BLOB-INVALID-KEY's report.
+             (format s "invalid blob metadata for bucket ~A~@[, name ~S~]: ~A"
+                     (or (blob-error-bucket c) "?") (blob-invalid-metadata-name c)
+                     (blob-invalid-metadata-fault c))))
+  (:documentation
+   "The METADATA passed to PUT-BLOB is not an alist of string names to string values, a name is
+empty or not an HTTP header token, a value is not printable ASCII, two names differ only in
+case, or a name is reserved. \"sha256\", in any case, is reserved: the S3 store keeps the blob's
+checksum under it (#810). Signalled at the protocol seam, before any backend sees it."))
+
 (define-condition blob-backend-error (blob-error)
   ((status :initarg :status :initform nil :reader blob-backend-error-status)
    (detail :initarg :detail :initform nil :reader blob-backend-error-detail))
@@ -64,6 +79,62 @@ S3-compatible backend and NIL for the filesystem."))
   (:documentation
    "A credential or setting the backend cannot run without. Signalled when the store is
 constructed, not at first use, so a misconfigured deploy fails at boot."))
+
+(define-condition blob-upload-refused (blob-error)
+  ((reason :initarg :reason :reader blob-upload-refused-reason)
+   (size :initarg :size :initform nil :reader blob-upload-refused-size)
+   (limit :initarg :limit :initform nil :reader blob-upload-refused-limit))
+  (:report (lambda (c s)
+             (format s "no upload URL issued for bucket ~A: ~A"
+                     (or (blob-error-bucket c) "?")
+                     (ecase (blob-upload-refused-reason c)
+                       (:too-large (format nil "the declared size ~:D bytes is over the limit of ~:D"
+                                           (blob-upload-refused-size c) (blob-upload-refused-limit c)))
+                       (:content-length-required
+                        (format nil "a size limit (~:D bytes) needs the upload's declared content-length"
+                                (blob-upload-refused-limit c)))
+                       (:too-large-for-single-put
+                        (format nil "the declared size ~:D bytes is over the ~:D-byte limit of a single PUT; use a multipart upload"
+                                (blob-upload-refused-size c) (blob-upload-refused-limit c)))
+                       (:bad-content-length "the content-length is not a non-negative integer")
+                       (:bad-max-bytes "max-bytes is not a non-negative integer")
+                       (:bad-content-type "the content-type is empty, not a string, or contains a control character")
+                       (:bad-expiry "expires-in must be an integer number of seconds from 1 to 604800")
+                       (:bad-part-number "a part number must be an integer from 1 to 10000")
+                       (:bad-upload-id "the upload id must be a non-empty string")
+                       (:bad-parts "parts must be a non-empty list of (part-number . etag)")))))
+  (:documentation
+   "UPLOAD-URL or a multipart call refused to sign or send (#770). REASON is :TOO-LARGE,
+:TOO-LARGE-FOR-SINGLE-PUT, :CONTENT-LENGTH-REQUIRED, :BAD-CONTENT-LENGTH, :BAD-MAX-BYTES,
+:BAD-CONTENT-TYPE, :BAD-EXPIRY, :BAD-PART-NUMBER, :BAD-UPLOAD-ID or :BAD-PARTS, so a caller
+branches on the reason and not on the message."))
+
+(define-condition blob-precondition-failed (blob-backend-error)
+  ()
+  (:default-initargs :status 412)
+  (:report (lambda (c s)
+             (format s "the blob ~A/~A is no longer the version the caller named with if-match"
+                     (or (blob-error-bucket c) "?") (or (blob-error-key c) "?"))))
+  (:documentation
+   "A read made with :IF-MATCH found that the blob no longer has that ETag (#826): it was
+replaced after the caller recorded the ETag, so nothing was read. S3 answers such a read with
+412. BUCKET and KEY name the blob. The caller checks the blob again before trusting it. It is a
+BLOB-BACKEND-ERROR subclass, so a handler for that still catches it; BLOB-SOURCE-CHANGED, the
+same failure for a copy or move, is a subclass of this one."))
+
+(define-condition blob-source-changed (blob-precondition-failed)
+  ()
+  (:default-initargs :status 412)
+  (:report (lambda (c s)
+             (format s "the source blob ~A/~A changed after it was read, so it was not copied"
+                     (or (blob-error-bucket c) "?") (or (blob-error-key c) "?"))))
+  (:documentation
+   "COPY-BLOB or MOVE-BLOB found that the source is no longer the object it read at the start
+(#804): the provider refused the copy with 412 because the source's ETag changed. BUCKET and KEY
+name the SOURCE. Nothing was copied, and a move deleted nothing. For a quarantine flow this
+means \"verify the object again\", which a transient BLOB-BACKEND-ERROR does not. It is a
+subclass of BLOB-PRECONDITION-FAILED (#826), so one handler catches a changed blob on a read and
+on a copy, and of BLOB-BACKEND-ERROR, so a handler for that still catches it."))
 
 (define-condition blob-unsupported (blob-error)
   ((operation :initarg :operation :initform nil :reader blob-unsupported-operation))

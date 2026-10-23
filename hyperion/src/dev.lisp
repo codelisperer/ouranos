@@ -38,6 +38,25 @@ poller's biggest saving, and these are the ones that are large, machine-written,
 `fasl` is the load-bearing entry: it is our own compiler output, written beside the source,
 and watching it makes the reload loop feed itself.")
 
+(defvar *watch-file-limit* 100000
+  "The most files WATCH counts under its roots, or NIL for no limit. Past it, WATCH-TOO-LARGE
+is signalled (#730). The watcher keeps a snapshot of every watched file and takes a new one on
+every poll, so a root that is a very large tree, such as a home or temporary directory, would
+otherwise fill the heap with no warning. The default is far above the size of a source tree.")
+
+(define-condition watch-too-large (error)
+  ((root :initarg :root :reader watch-too-large-root)
+   (count :initarg :count :reader watch-too-large-count)
+   (limit :initarg :limit :reader watch-too-large-limit))
+  (:report
+   (lambda (c stream)
+     (format stream "hyperion/dev: the watched roots have more than ~D files between them, so they are not watched. The count passed the limit at ~D files while walking ~A. Pass narrower :PATHS, add large subdirectories to :EXCLUDE-DIRECTORIES, or raise :FILE-LIMIT or *WATCH-FILE-LIMIT*."
+             (watch-too-large-limit c) (watch-too-large-count c)
+             (namestring (watch-too-large-root c)))))
+  (:documentation "The watched roots hold more files than the limit allows (#730). ROOT is the
+root being walked when the count passed LIMIT, and COUNT is the number of files counted by then,
+across this root and the ones walked before it."))
+
 (defstruct (dev (:conc-name dev-))
   builder                                   ; thunk -> a fresh Clack handler
   handler                                   ; the current handler
@@ -45,12 +64,18 @@ and watching it makes the reload loop feed itself.")
   (excluded-dirs *watch-excluded-directories*)   ; pruned subtrees
   (excluded-types *watch-excluded-types*)        ; never-reload extensions
   (interval 0.5)                            ; poll seconds
+  (file-limit *watch-file-limit*)           ; most files watched, or NIL (#730)
   snapshot                                  ; namestring -> file-write-date
+  snapshot-error                            ; WATCH-TOO-LARGE's text while over the limit
+  error-before-limit                        ; the error it replaced, restored on recovery
   thread
   (lock (sb-thread:make-mutex :name "hyperion-dev-reload"))
   (running t)
   last-error                                ; last compile error string, or NIL
-  (failed '()))                             ; Lisp files whose last reload failed (#438)
+  (failed '())                              ; Lisp files whose last reload failed (#438)
+  sidecars                                  ; the HYPERION/SIDECAR set, or NIL (#700)
+  ;; Taken by UNWATCH and by WATCH adopting the set, so neither misses the other.
+  (sidecar-lock (sb-thread:make-mutex :name "hyperion-dev-sidecars")))
 
 ;;; --- what is watched ------------------------------------------------------
 ;;;
@@ -85,32 +110,43 @@ every save, so watching them means reloading twice per keystroke-flush."
     (or (and type (member (string-downcase type) types :test #'string=) t)
         (%editor-noise-p path))))
 
-(defun %walk-files (root excluded-dirs excluded-types)
-  "Every file under ROOT, recursively, pruning excluded directories and files.
+(defun %walk-files (root excluded-dirs excluded-types &key limit (counted 0))
+  "Every file under ROOT, recursively, pruning excluded directories and files. Returns the
+namestrings, and as a second value COUNTED plus their number.
 
 Walks with uiop:subdirectories rather than a `**/*.*` glob precisely so a directory can be
-PRUNED: a glob visits everything and then filters, which does the expensive part first."
-  (let ((out '()))
+PRUNED: a glob visits everything and then filters, which does the expensive part first.
+
+When LIMIT is a number, signals WATCH-TOO-LARGE as soon as COUNTED, the files counted under
+earlier roots, plus this root's passes it, so the walk stops before the list fills the heap."
+  (let ((out '()) (n counted))
     (labels ((walk (dir)
                (dolist (f (ignore-errors (uiop:directory-files dir)))
                  (unless (%excluded-file-p f excluded-types)
-                   (push (namestring f) out)))
+                   (push (namestring f) out)
+                   (when (and limit (> (incf n) limit))
+                     (error 'watch-too-large :root root :count n :limit limit))))
                (dolist (sub (ignore-errors (uiop:subdirectories dir)))
                  (let ((name (car (last (pathname-directory sub)))))
                    (unless (and (stringp name)
                                 (member name excluded-dirs :test #'string-equal))
                      (walk sub))))))
       (walk root))
-    out))
+    (values out n)))
 
 (defun %watched-files (roots &key (excluded-dirs *watch-excluded-directories*)
-                                  (excluded-types *watch-excluded-types*))
-  "All watched files (recursively) under ROOTS, as namestrings."
-  (let ((files '()))
+                                  (excluded-types *watch-excluded-types*)
+                                  limit)
+  "All watched files (recursively) under ROOTS, as namestrings. LIMIT, when a number, is the
+most files counted across all ROOTS before WATCH-TOO-LARGE is signalled."
+  (let ((files '()) (counted 0))
     (dolist (root roots (delete-duplicates files :test #'equal))
       (when (probe-file root)
-        (setf files (nconc (%walk-files (truename root) excluded-dirs excluded-types)
-                           files))))))
+        (multiple-value-bind (found n)
+            (%walk-files (truename root) excluded-dirs excluded-types
+                         :limit limit :counted counted)
+          (setf files (nconc found files)
+                counted n))))))
 
 (defun %lisp-file-p (path)
   "True when PATH is Lisp source -- the only thing COMPILE-FILE should ever be handed."
@@ -118,10 +154,12 @@ PRUNED: a glob visits everything and then filters, which does the expensive part
     (and type (member (string-downcase type) '("lisp" "lsp" "cl") :test #'string=) t)))
 
 (defun %snapshot (roots &key (excluded-dirs *watch-excluded-directories*)
-                             (excluded-types *watch-excluded-types*))
+                             (excluded-types *watch-excluded-types*)
+                             (limit *watch-file-limit*))
   (let ((h (make-hash-table :test 'equal)))
     (dolist (f (%watched-files roots :excluded-dirs excluded-dirs
-                                     :excluded-types excluded-types)
+                                     :excluded-types excluded-types
+                                     :limit limit)
              h)
       (let ((d (ignore-errors (file-write-date f))))
         (when d (setf (gethash f h) d))))))
@@ -293,6 +331,35 @@ failed one UNWATCH, or the next restart, can still try to stop that server."
                      :seconds *restart-port-wait* :stop-error stop-error))
             (sleep 0.1)))))))
 
+(defun %snapshot-or-report (d)
+  "A new snapshot of D's roots. When the roots have grown past D's file limit while it was
+watching (#730), the previous snapshot is kept, the condition's text becomes D's error, so the
+browser overlay shows it, and it is printed once rather than on every poll, and NIL is returned,
+for which RELOAD! returns :ERROR. The error it replaced, such as a Lisp file that still fails to
+compile, is kept, and the next snapshot within the limit puts it back."
+  (handler-case
+      (prog1 (%snapshot (dev-paths d)
+                        :excluded-dirs (dev-excluded-dirs d)
+                        :excluded-types (dev-excluded-types d)
+                        :limit (dev-file-limit d))
+        (when (dev-snapshot-error d)
+          (when (equal (dev-last-error d) (dev-snapshot-error d))
+            (setf (dev-last-error d) (dev-error-before-limit d)))
+          (setf (dev-snapshot-error d) nil
+                (dev-error-before-limit d) nil)
+          (format *error-output* "~&[dev] the watched roots are within the file limit again~%")
+          (finish-output *error-output*)))
+    (watch-too-large (e)
+      (let ((text (princ-to-string e)))
+        (unless (dev-snapshot-error d)
+          (setf (dev-error-before-limit d) (dev-last-error d)))
+        (unless (equal text (dev-snapshot-error d))
+          (format *error-output* "~&[dev] ~A~%" text)
+          (finish-output *error-output*))
+        (setf (dev-snapshot-error d) text
+              (dev-last-error d) text))
+      nil)))
+
 (defun reload! (&optional (d *dev*))
   "Recompile changed watched files; on success rebuild the server via the builder
 (reusing persistent state) and refresh :dev tabs. On failure keep the running
@@ -307,9 +374,7 @@ files change while a Lisp file is failing, the server is still rebuilt and the p
 refreshed, so the other change shows, and the overlay stays."
   (when d
     (sb-thread:with-mutex ((dev-lock d))
-      (let* ((new (%snapshot (dev-paths d)
-                             :excluded-dirs (dev-excluded-dirs d)
-                             :excluded-types (dev-excluded-types d)))
+      (let* ((new (or (%snapshot-or-report d) (return-from reload! :error)))
              (changed (%changed-files (dev-snapshot d) new))
              ;; Only Lisp is compiled. Everything else -- a stylesheet, a template, a JSON
              ;; fixture -- still rebuilds the server and refreshes the browser, but handing
@@ -345,6 +410,13 @@ refreshed, so the other change shows, and the overlay stays."
                     (setf (dev-last-error d) (princ-to-string e))
                     (format *error-output* "~&[dev] restart failed: ~A~%" e)
                     (return-from reload! :error)))
+                ;; The sidecars keep running across the restart (#700). One whose command uses
+                ;; {port} is restarted only when the restarted server is on another port.
+                (when (dev-sidecars d)
+                  (handler-case (sidecar:update-sidecar-port (dev-sidecars d)
+                                                             (srv:handler-port (dev-handler d)))
+                    (error (e)
+                      (format *error-output* "~&[dev] restarting a sidecar failed: ~A~%" e))))
                 (mark-reloaded)
                 (cond
                   (err
@@ -439,7 +511,9 @@ who wrote one is not describing a definition that can be recompiled."
 
 (defun watch (builder &key paths system systems (interval 0.5)
                            (exclude-directories *watch-excluded-directories*)
-                           (exclude-types *watch-excluded-types*))
+                           (exclude-types *watch-excluded-types*)
+                           (file-limit *watch-file-limit*)
+                           sidecars)
   "Start a hot-reload dev server. BUILDER is a thunk returning a fresh Clack
 handler -- call hyperion/server:start (or an app's start-web) inside it, reusing
 *persistent* state so it survives reloads. Watched source roots come from PATHS,
@@ -459,6 +533,14 @@ project, pass the keyword for one call). Compiled output must stay excluded what
 you change: fasls are written beside their sources, so watching them makes a reload trigger
 the next reload, forever.
 
+FILE-LIMIT, defaulting to *WATCH-FILE-LIMIT*, is the most files watched across the roots, or NIL
+for no limit (#730). Past it WATCH signals WATCH-TOO-LARGE, naming the root and the count, before
+the builder runs, so nothing is started. The roots are walked before a previous WATCH is stopped,
+so a refused WATCH leaves the previous dev server, if any, running. It refuses rather than watching part of the tree,
+because a partial watch would leave some edits without a reload and give no sign of which. If
+the roots grow past the limit while watching, the previous snapshot is kept and the condition is
+shown as the reload error until they are back within it.
+
 Per-file recompile covers the common case (editing a function). A *structural* change --
 adding a file, package, or dependency -- still needs a `ql:quickload` or restart.
 
@@ -476,8 +558,12 @@ one layout), and it SELF-HEALS once the last dependent is recompiled -- so an un
 edit clears it and the whole thing reads as intermittent. WATCH now detects the
 redefinition and says all of this on the spot; restart or `ql:quickload' when you see it.
 
+SIDECARS is a list of names declared with HYPERION/SIDECAR:DEFINE-SIDECAR (#700). They start
+once the first build's server has bound its port, with that port for \"{port}\", and WATCH
+returns once each is ready. They keep running across reloads, and stop in UNWATCH. When one
+cannot start, the server is stopped and the sidecar's condition is signalled.
+
 Returns the dev handle; stop with UNWATCH."
-  (unwatch)
   (setf builder (%normalize-builder builder "BUILDER"))
   (flet ((system-src (s) (merge-pathnames "src/" (asdf:system-source-directory s))))
     (let* ((roots (mapcar #'truename
@@ -488,9 +574,13 @@ Returns the dev handle; stop with UNWATCH."
                                     (list (uiop:getcwd))))))
            (d (make-dev :builder builder :paths roots :interval interval
                         :excluded-dirs exclude-directories
-                        :excluded-types exclude-types)))
+                        :excluded-types exclude-types
+                        :file-limit file-limit)))
       (setf (dev-snapshot d) (%snapshot roots :excluded-dirs exclude-directories
-                                              :excluded-types exclude-types))
+                                              :excluded-types exclude-types
+                                              :limit file-limit))
+      ;; Only once the roots are within the limit, so a refused WATCH stops nothing (#730).
+      (unwatch)
       ;; *DEV* IS SET BEFORE THE BUILDER RUNS (#159). HYPERION/SERVER:START now returns only
       ;; once the port is listening, so the port can answer a moment before the builder
       ;; returns. Set afterwards, an UNWATCH arriving in that moment found *DEV* NIL and did
@@ -504,6 +594,19 @@ Returns the dev handle; stop with UNWATCH."
                                (setf built t))
           (unless built
             (when (eq *dev* d) (setf *dev* previous)))))
+      (when sidecars
+        (let ((started nil))
+          (unwind-protect
+               (let ((set (sidecar:start-sidecars sidecars
+                                                  :port (srv:handler-port (dev-handler d)))))
+                 ;; Adopted under the same lock UNWATCH takes, so an UNWATCH that ran while the
+                 ;; sidecars were starting is not missed: the session has ended, so the new set
+                 ;; is stopped instead of being kept by a handle nothing will stop (#708's review).
+                 (if (sb-thread:with-mutex ((dev-sidecar-lock d))
+                       (when (dev-running d) (setf (dev-sidecars d) set) t))
+                     (setf started t)
+                     (sidecar:stop-sidecars set)))
+            (unless started (unwatch d)))))
       (setf (dev-thread d)
             ;; THREAD-LIFETIME: independent -- the watcher runs for the life of the dev
             ;; server, not for the call that started it (#158).
@@ -548,10 +651,13 @@ one root. A single root with no Lisp has already been warned about."
           roots))
 
 (defun unwatch (&optional (d *dev*))
-  "Stop the watcher thread and the server it manages."
+  "Stop the watcher thread, the server it manages, and its sidecars."
   (when d
-    (setf (dev-running d) nil)
-    (when (dev-handler d) (ignore-errors (srv:stop (dev-handler d))))
+    (let ((set (sb-thread:with-mutex ((dev-sidecar-lock d))
+                 (setf (dev-running d) nil)
+                 (shiftf (dev-sidecars d) nil))))
+      (when (dev-handler d) (ignore-errors (srv:stop (dev-handler d))))
+      (when set (ignore-errors (sidecar:stop-sidecars set))))
     (when (eq d *dev*) (setf *dev* nil))
     d))
 
@@ -722,7 +828,7 @@ the others, whose default is the same as production's."
 (defun serve (make-app &key paths system systems (port srv:*default-port*)
                             (host "127.0.0.1") (interval 0.5) block request-guard
                             (server (srv:default-server)) (workers nil workers-p)
-                            (watch-framework t))
+                            (watch-framework t) sidecars)
   "Turnkey hot-reload dev server -- the framework feature. MAKE-APP is a thunk
 returning a fresh Clack app (a handler lambda). SERVE wraps it (WRAP-DEV: reload
 endpoints + poller injection, so the browser auto-refreshes with no app wiring),
@@ -767,6 +873,10 @@ app's. Pass NIL when the framework is a clone that is pulled, not edited: a pull
 dev server recompiles the framework into it, and a structure that gained slots then cannot load
 until a restart (#438). The failed reload says RESTART NEEDED in the console and in the browser.
 
+SIDECARS is passed to WATCH (#700): helper programs declared with
+HYPERION/SIDECAR:DEFINE-SIDECAR, started once the server has bound its port and stopped with the
+dev server, not on each reload.
+
 Returns the dev handle -- or, with :BLOCK T, only when the watcher stops."
   (let* ((guard (%dev-request-guard request-guard host))
          (workers (%dev-workers server workers workers-p))
@@ -777,7 +887,8 @@ Returns the dev handle -- or, with :BLOCK T, only when the watcher stops."
                   :paths paths
                   :system system
                   :systems (%serve-systems systems watch-framework)
-                  :interval interval)))
+                  :interval interval
+                  :sidecars sidecars)))
     (when block
       ;; Join the watcher rather than sleeping in a loop: the thread already owns the
       ;; lifetime, so UNWATCH from another thread (or the REPL) ends this wait too. The

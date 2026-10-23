@@ -61,6 +61,14 @@
 ;;;; excusable: it means a server was named and did not answer, which is a broken
 ;;;; environment rather than a choice.
 ;;;;
+;;;; The same rule covers the operating system's credential store (#357), which
+;;;; hades/credentials/tests reports as `BACKEND-CHECKS credential-store ...'. Its live tests
+;;;; store, read and delete items in the real Credential Manager, Keychain or Secret Service
+;;;; keyring of whoever runs them, so they run only when OURANOS_TEST_REAL_CREDENTIAL_STORE=1 is set. CI sets it, because
+;;;; a runner's store is thrown away with the runner. On a developer's machine the skip fails
+;;;; this gate unless OURANOS_ALLOW_NO_CREDENTIAL_STORE=1 excuses it, and NOT COVERED names it
+;;;; either way. +BACKEND-RULES+ holds both rules.
+;;;;
 ;;;; THE PLATFORM AXIS is the fourth thing, and the same idea one level further out (pre-publication issue 182).
 ;;;; A package that can only be compiled on ONE host is invisible to a total check count and
 ;;;; to per-backend coverage alike. Without an axis, a WINDOWS run that never loads
@@ -142,7 +150,7 @@
     :aion :aion/csv :aion/tz :aion/platform :aion/fs :aion/clock :aion/log :aion/boundary :aion/dynamic :aion/pool :aion/interceptor :aion/signature :aion/http-client :cons :mnemosyne :elenchon :hyperion :praxeon
     :hermes
     :klio
-    :hades :hades/single-instance :hades/credentials
+    :hades :hades/single-instance :hades/credentials :hades/notify :hades/program :hades/open
     ;; aux systems -- these hold real code and were previously never compiled here,
     ;; so a change to any of them could break unnoticed. praxeon/web is the case that
     ;; exposed it: a refactor landed in praxeon/src/web.lisp and a green run of this
@@ -152,6 +160,8 @@
     :hermes/payments
     :hyperion/import :hyperion/desktop :hyperion/update :hyperion/update-ui :hyperion/assets :hyperion/calendar :hyperion/session-db
     :hyperion/auth-db :hyperion/db-connection :hyperion/cli
+    ;; The query-string list component and its mnemosyne half (#488).
+    :hyperion/list :hyperion/list-db
     :aion/random
     ;; The credential wrapper (pre-publication issue 209) and its Coalton view. Two systems because
     ;; aion/secret must stay Coalton-free for cons; both belong in the gate, since a
@@ -162,6 +172,10 @@
     :praxeon/retrieval
     ;; The MCP client and its OAuth sign-in (#527).
     :praxeon/mcp :aion/oauth :hyperion/oauth
+    ;; The job scheduler and its database store (#689).
+    :aion/schedule :mnemosyne/jobs
+    ;; Dev sidecars (#700).
+    :hyperion/sidecar
     ;; example apps -- they are the launch artifacts and the first thing a reader runs
     :praxeon/elise :praxeon/chat-rbt
     :hyperion/examples/active-search :hyperion/examples/active-search-db
@@ -178,6 +192,7 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
 (defparameter +test-systems+
   '(:aion/tests :aion/tz/tests :aion/boundary/tests :aion/dynamic/tests :aion/test-threads/tests :aion/platform/tests :aion/fs/tests :aion/pool/tests :aion/interceptor/tests :aion/signature/tests :aion/http-client/tests :cons/tests :mnemosyne/tests :hyperion/tests :praxeon/tests :hermes/tests :hermes/payments/tests
     :elenchon/tests :klio/tests :hades/single-instance/tests :hades/credentials/tests
+    :hades/notify/tests :hades/open/tests
     ;; aux suites that existed but were never run from here
     :cons/coalton-repl/tests :hyperion/session-db/tests :hyperion/auth-db/tests
     ;; The pooled-connection middleware (#325), registered in the commit that adds it.
@@ -186,6 +201,9 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
     ;; (#355), registered in the commit that adds the suite.
     :hyperion/examples/coalton-repl/tests
     :hyperion/assets/tests :hyperion/calendar/tests :hermes/blob/tests
+    ;; The list component (#488), registered in the commit that adds it. The -db suite
+    ;; reports Postgres, and +REQUIRED-BACKEND-REPORTS+ holds it to that.
+    :hyperion/list/tests :hyperion/list-db/tests
     ;; praxeon/web's own suite (pre-publication issue 151) -- THE GAP THIS FILE ALREADY NAMES. Two entries below,
     ;; `hyperion/update/tests' is justified as "invisible to this checker until someone
     ;; looked, which is the praxeon/web gap exactly", and the praxeon/web gap was still open
@@ -209,9 +227,16 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
     ;; The MCP client (#527), registered in the commit that adds it. Its MCP servers run on
     ;; 127.0.0.1 in the test image, so it runs on every leg with no network.
     :praxeon/mcp/tests
+    ;; Dev sidecars (#700). It was left out of the pull request's first commit, and its first CI run
+    ;; reported the same total as main; registered here so that it runs. Each sidecar is a child SBCL,
+    ;; so it needs nothing installed.
+    :hyperion/sidecar/tests
     ;; The OAuth client and its routes (#527 part 2), registered in the commit that adds them.
     ;; Their authorization server runs on 127.0.0.1 in the test image.
     :aion/oauth/tests :hyperion/oauth/tests
+    ;; The job scheduler (#689) and its database store, registered in the commit that adds
+    ;; them. The store's suite runs on SQLite everywhere and on Postgres where the gate has it.
+    :aion/schedule/tests :mnemosyne/jobs/tests
     ;; The gate's own checkers, tested against trees built to break them (#163). Here
     ;; rather than in the +CHECKERS+ block because that block must not move the check
     ;; count, and a fix for "nothing attests these work" that produces no number would be
@@ -283,14 +308,17 @@ decision someone made, not an accident -- which is the difference that matters."
     ;; see ADR-0015 and the commentary in hyperion/src/http1/packages.lisp.
     :hyperion/server-uv
     ;; Its Clack handler (#373, ADR-0020), here for the same reason: it starts server-uv.
-    :hyperion/clack-handler-uv)
+    :hyperion/clack-handler-uv
+    ;; The scheduler's libuv driver (#689).
+    :aion/schedule/uv)
   "The libuv-backed systems. Absent from +SYSTEMS+ because they need
 scripts/build-libuv.lisp to have run first, so on a machine without it their absence is
 not evidence of anything.")
 
 (defparameter +uv-test-systems+
   '(:aion/uv/tests :aion/uv/net/tests :aion/uv/process/tests
-    :hyperion/server-uv/tests :hyperion/clack-handler-uv/tests)
+    :hyperion/server-uv/tests :hyperion/clack-handler-uv/tests
+    :aion/schedule/uv/tests)
   "Their suites -- real checks over a real libuv, verified by nothing automatic until CI.")
 
 (defparameter +tls-systems+ '(:aion/tls)
@@ -457,15 +485,16 @@ directly is what every other line of this file already does."
             (format t "checkout: ~a commit(s) BEHIND ~a -- this tree is not what ~a says now~%"
                     (or behind "?") upstream upstream))))))))
 
-(defvar *postgres-excused* '()
-  "(suite . reason) for each suite whose Postgres checks were skipped and excused by
-OURANOS_ALLOW_NO_PG. Filled while the suites run; REPORT-NOT-COVERED lists them.")
+(defvar *backends-excused* '()
+  "(suite backend reason excuse-variable) for each suite whose checks of a backend were
+skipped and excused by that backend's variable in +BACKEND-RULES+. Filled while the suites
+run; REPORT-NOT-COVERED lists them.")
 
 (defun report-not-covered ()
   "What this run could have covered and did not: this run's state, printed by
 OURANOS-NOT-COVERED:PRINT-NOT-COVERED (scripts/not-covered.lisp), whose docstring says what
 the section reports and why."
-  (ouranos-not-covered:print-not-covered (axes-declined) (reverse *postgres-excused*) (axes-tag)))
+  (ouranos-not-covered:print-not-covered (axes-declined) (reverse *backends-excused*) (axes-tag)))
 
 (defun report-tls-declined (name)
   "The tls axis is off. One cause only: the caller did not ask for it."
@@ -708,6 +737,8 @@ surfaces -- it just is not confused with a failing test."
      "the Coalton that LOADS is the pinned one")
     ("check-assets.lisp" () nil
      "vendored browser assets still hash to ASSETS.pin")
+    ("check-upstream.lisp" () nil
+     "every pinned version has an entry in upstream.sexp, and every entry finds its pin (#716)")
     ("check-deps.lisp" () t
      "docs/dependencies.md's rows and Headline counts match the .asd files (#118)")
     ("check-asd-collisions.lisp" () nil
@@ -771,16 +802,44 @@ absence is reported as one rather than stepped over."
 
 ;;; --- backend coverage (pre-publication issue 176) ----------------------------------------------
 
-(defparameter +required-backends+ '("postgres")
-  "Backends that must actually execute checks when a suite reports per-backend coverage.
+(defparameter +backend-rules+
+  '(("postgres" :when ("sqlite" "postgres") :excuse "OURANOS_ALLOW_NO_PG"
+     :to-run "set MNEMOSYNE_TEST_PG_URL")
+    ("credential-store" :when ("credential-store") :excuse "OURANOS_ALLOW_NO_CREDENTIAL_STORE"
+     :to-run "set OURANOS_TEST_REAL_CREDENTIAL_STORE=1 to use this machine's real store"))
+  "Backends that must actually execute checks, each as (NAME :WHEN BACKENDS :EXCUSE VARIABLE
+:TO-RUN TEXT). A suite whose per-backend coverage mentions any of BACKENDS must report NAME
+as having run checks. A SKIPPED NAME fails the gate unless VARIABLE is set, and TO-RUN says
+how to run it instead.
 
-SQLite is not listed: it needs no server, so it cannot silently fail to run, and demanding
-it would only produce a rule that never fires. Postgres is the one that quietly does not
-run, which is the whole reason this exists.")
+SQLite is not a rule of its own: it needs no server, so it cannot silently fail to run, and
+demanding it would only produce a rule that never fires. Postgres is the one that quietly
+does not run, which is the whole reason this exists; it is required of every suite that
+reports a database backend. The credential store is the operating system's own, and its
+tests are opt-in on a developer's machine (#357); it is required of the suite that reports
+it, hades/credentials/tests on Windows, macOS and Linux.")
+
+(defparameter +required-backend-reports+
+  '((:hades/credentials/tests "credential-store" :hosts (:windows :darwin :linux))
+    (:mnemosyne/tests "postgres")
+    (:mnemosyne/jobs/tests "postgres")
+    (:praxeon/memory-db/tests "postgres")
+    (:praxeon/results-db/tests "postgres")
+    (:praxeon/retrieval/tests "postgres")
+    (:hyperion/list-db/tests "postgres"))
+  "Each suite that must print a BACKEND-CHECKS line for a backend, as (SUITE BACKEND &key HOSTS),
+on every host or only on HOSTS (values of OURANOS-PLATFORM:HOST-OS). +BACKEND-RULES+ judges a
+line that is there; a missing line passed silently, so a suite that stopped printing it, because
+a reader guard or its test-op changed, went green with none of that backend's checks run (the
+hub's review of #603). Checked by OURANOS-NOT-COVERED:MISSING-BACKEND-REPORTS. hades/credentials
+reports the credential store where it has a backend: Windows, macOS and Linux (#357).")
+
+(defun %env-true-p (name)
+  (let ((v (uiop:getenv name)))
+    (and v (member (string-trim " " v) '("1" "true" "yes") :test #'string-equal) t)))
 
 (defun allow-no-pg-p ()
-  (let ((v (uiop:getenv "OURANOS_ALLOW_NO_PG")))
-    (and v (member (string-trim " " v) '("1" "true" "yes") :test #'string-equal) t)))
+  (%env-true-p "OURANOS_ALLOW_NO_PG"))
 
 (defun backend-coverage (output)
   "Parse `BACKEND-CHECKS <name> <rest>` lines from OUTPUT into an alist of (name . rest).
@@ -810,27 +869,29 @@ storage engine and have nothing to say here."
 (defun coverage-problems (coverage)
   "The reasons COVERAGE is not acceptable, as a list of strings. Empty means fine."
   (let ((problems '()))
-    (dolist (want +required-backends+ (nreverse problems))
-      (let* ((cell (assoc want coverage :test #'string=))
-             (value (cdr cell)))
-        (cond
-          ;; A suite that reports coverage at all must account for every required backend.
-          ((null cell)
-           (push (format nil "~a reported per-backend coverage but never mentioned ~a"
-                         "the suite" want)
-                 problems))
-          ((uiop:string-prefix-p "UNREACHABLE" value)
-           (push (format nil "~a was configured but UNREACHABLE -- ~a" want value) problems))
-          ((uiop:string-prefix-p "SKIPPED" value)
-           (unless (allow-no-pg-p)
-             (push (format nil "~a did not run (~a); set MNEMOSYNE_TEST_PG_URL, or OURANOS_ALLOW_NO_PG=1 to excuse it"
-                           want value)
-                   problems)))
-          ((and (every #'digit-char-p value) (plusp (length value)))
-           (when (zerop (parse-integer value))
-             (push (format nil "~a executed ZERO checks" want) problems)))
-          (t (push (format nil "~a reported an unparseable coverage value ~s" want value)
-                   problems)))))))
+    (dolist (rule +backend-rules+ (nreverse problems))
+      (destructuring-bind (want &key when excuse to-run) rule
+        (when (some (lambda (backend) (assoc backend coverage :test #'string=)) when)
+          (let* ((cell (assoc want coverage :test #'string=))
+                 (value (cdr cell)))
+            (cond
+              ;; A suite that reports one of the rule's backends must account for this one.
+              ((null cell)
+               (push (format nil "~a reported per-backend coverage but never mentioned ~a"
+                             "the suite" want)
+                     problems))
+              ((uiop:string-prefix-p "UNREACHABLE" value)
+               (push (format nil "~a was configured but UNREACHABLE -- ~a" want value) problems))
+              ((uiop:string-prefix-p "SKIPPED" value)
+               (unless (%env-true-p excuse)
+                 (push (format nil "~a did not run (~a); ~a, or ~a=1 to excuse it"
+                               want value to-run excuse)
+                       problems)))
+              ((and (every #'digit-char-p value) (plusp (length value)))
+               (when (zerop (parse-integer value))
+                 (push (format nil "~a executed ZERO checks" want) problems)))
+              (t (push (format nil "~a reported an unparseable coverage value ~s" want value)
+                       problems)))))))))
 
 ;;; --- counting -------------------------------------------------------------
 
@@ -1169,12 +1230,21 @@ let this run claim `view' while the five assertions skipped."
                           "NOT REPORTED (the suite ran SQLite checks and printed no SQLITE-LIBRARY line)")))
             ;; An excused skip is not a problem for the verdict, but it is a gap in what the
             ;; run covered, so NOT COVERED names it (#171).
-            (let ((pg (assoc "postgres" coverage :test #'string=)))
-              (when (and pg (allow-no-pg-p) (uiop:string-prefix-p "SKIPPED" (cdr pg)))
-                (push (cons s (cdr pg)) *postgres-excused*)))
-            (dolist (problem (coverage-problems coverage))
+            (dolist (rule +backend-rules+)
+              (destructuring-bind (want &key excuse &allow-other-keys) rule
+                (let ((cell (assoc want coverage :test #'string=)))
+                  (when (and cell (%env-true-p excuse) (uiop:string-prefix-p "SKIPPED" (cdr cell)))
+                    (push (list s want (cdr cell) excuse) *backends-excused*)))))
+            (dolist (problem (append (coverage-problems coverage)
+                                     (ouranos-not-covered:unattributed-backend-reports coverage)))
               (format t "  COVER   ~a -- ~a~%" s problem)
-              (fail "~a: ~a" s problem))))
+              (fail "~a: ~a" s problem)))
+          ;; A suite that must report a backend and printed no line for it, coverage or not:
+          ;; the rules above judge a line that is there, and this the one that is missing.
+          (dolist (problem (ouranos-not-covered:missing-backend-reports
+                            s (ouranos-platform:host-os) coverage +required-backend-reports+))
+            (format t "  COVER   ~a -- ~a~%" s problem)
+            (fail "~a: ~a" s problem)))
         (report-caught-errors (format nil "suite ~(~a~)" s) text)))
 
     ;; --- the platform axis (pre-publication issue 182) ------------------------------------------
@@ -1312,6 +1382,8 @@ let this run claim `view' while the five assertions skipped."
               (if (null d) "none" (format nil "~{~a~^ ~}" (mapcar #'first d)))))
     (when (allow-no-pg-p)
       (format t "NOTE: OURANOS_ALLOW_NO_PG is set -- a skipped Postgres was EXCUSED, not passed.~%"))
+    (when (%env-true-p "OURANOS_ALLOW_NO_CREDENTIAL_STORE")
+      (format t "NOTE: OURANOS_ALLOW_NO_CREDENTIAL_STORE is set -- a skipped credential store was EXCUSED, not passed.~%"))
     ;; The checkers each run in their own child too, so they are in this count -- a
     ;; number that says how many images ran has to be about how many images ran.
     (format t "elapsed: ~,1F s across ~D isolated images~%"

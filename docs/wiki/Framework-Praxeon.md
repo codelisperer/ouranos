@@ -93,13 +93,16 @@ the CLI and as a web app.
 | **First real means** | `praxeon/web-search` — Tavily-backed, registered when `TAVILY_API_KEY` is set, compact results to respect the budget. |
 | **Translation** | `praxeon/translate` — one-shot, locale-aware, provider-neutral; Elise converses in the user's locale via a **translator agent** on its own model. |
 | **Standalone binary** | `bin/elise` via `save-lisp-and-die`; Woo's libev FFI survives the dump, verified. |
+| **Observational memory** | `praxeon/memory` keeps what an agent has learned about a subject (a person), across sessions: `remember`, `recall`, `recall-similar`, `supersede`, `forget` and `forget-subject`, with an in-memory store, which implements every one of them except `recall-similar`. A correction supersedes the observation it replaces, so `recall :as-of` still answers what was believed before. Every observation must carry a provenance naming the conversation and turn it came from. `praxeon/memory-db` implements the same generics on Postgres, where `recall-similar` ranks by pgvector cosine distance with an HNSW index, and on SQLite, where it ranks in Lisp. `praxeon/distil` asks a model to turn a window of messages into proposed observations, and `apply-distillation` writes them; a proposal to supersede an existing observation is applied only when the app accepts it. `praxeon/observe` runs `distil` over a conversation off the request path, a window at a time, into the conversation's own thread scope, and keeps its progress in the store (#462, step A of #317). |
 | **Build** | A root `cons.lisp` spec driven by `cons <target>` (`check`, `build`, `test`, `elise`, `paper`, `run`, `serve`, `dev`), replacing the removed `Makefile`. |
 
 ### Planned
 
-Growing the Coalton typed core; **Kairos** (the bitemporal context engine) and observational
-memory with semantic retrieval; LLM-layer hardening (streaming, retry/backoff, real token
-counting); model routing; a graphical studio; per-session agents for
+Growing the Coalton typed core; **Kairos** (the bitemporal context engine, #60); the rest of
+observational memory, tracked in #317: a reflector that condenses a scope's observations with
+the app's approval (step B, #464), the thread's observations put into the prompt in place of
+its old messages (step C), and measuring tokens and accuracy together (step D); LLM-layer
+hardening (streaming, retry/backoff, real token counting); model routing; a graphical studio; per-session agents for
 multi-user "as a service"; live-reload layer 3 (conditions with restart selection in the
 browser).
 
@@ -206,8 +209,11 @@ Kairos is the substrate, and the design is a stack of increasingly ambitious lay
 - **Later:** FFI to a columnar store (Apache Arrow, XTDB-style) rather than reimplementing a
   query engine — the same "FFI out for the heavy machinery" instinct as the tensor story.
 
-Kairos is also the storage layer that observational memory reads and writes, which is why it
-is sequenced first: memory needs the store.
+The plan here was for Kairos to be the storage layer that observational memory reads and
+writes, and for Kairos to come first. Memory was built first instead, on a storage protocol of
+its own: the `praxeon/memory` generics, with an in-memory store and a database store
+(`praxeon/memory-db`, on Postgres with pgvector or on SQLite). Kairos is not built (#60), and
+nothing in memory uses it. If Kairos is built, it can implement the same generics.
 
 ### 4. Hardening the LLM layer
 
@@ -266,15 +272,47 @@ Memory that accrues from what the agent *observes* across turns and sessions, no
 verbatim transcript: salient facts, corrections, learned preferences, distilled from the
 conversation and recalled when relevant.
 
-- **Where:** a `memory` module reading and writing **Kairos**. An observation is a context
-  item with a role/value and bitemporal stamps; a recall is a budgeted `assemble` filtered
-  to memory items.
-- **The Praxeon framing:** observation → imputed value → retained means/ends. It is the
-  *same economizing model* as context assembly, extended across sessions — which is exactly
-  why it doesn't need a new subsystem, only a new use of the one being built.
-- **First step:** a `remember`/`recall` pair over the existing context structs, then a
-  distillation pass (an LLM call turning a transcript window into a few high-value
-  observations).
+What is on `main`:
+
+- **`praxeon/memory`:** observations keyed by subject rather than by agent, so several
+  personas share what one of them was told. `remember` writes one, with a provenance naming the
+  conversation and turn it came from. `supersede` records a correction as replacing what was
+  believed, rather than adding beside it. `recall` returns a subject's current observations
+  within a token budget, `:as-of` a past time if asked, and `recall-similar` ranks them by an
+  embedding. `forget` and `forget-subject` erase. Each observation has a value and bitemporal
+  stamps (`valid-from`, `recorded-at`), and `observation->ctx-item` turns one into a context
+  item, so a recall feeds context assembly the same way other items do. The storage is a set of
+  generics with an in-memory store; `recall-similar` needs embeddings, and only the database
+  store implements it.
+- **`praxeon/memory-db`:** the same generics in a database. On Postgres the embedding is a
+  pgvector column, with an HNSW index built for the cosine distance that `recall-similar`
+  queries. On SQLite the embedding is stored as text and `recall-similar` ranks one subject's
+  observations in Lisp. It is an aux system, because praxeon's core takes no database
+  dependency: a store reaches it through the memory generics.
+- **`praxeon/distil`:** the distillation pass. A model reads a window of messages and proposes
+  observations; `apply-distillation` writes them. A proposal that an observation replaces an
+  existing one is applied only when the app's accept function approves it, because a wrong
+  supersession also removes a correct fact.
+- **`praxeon/observe`** (#462, step A of #317): an observer runs `distil` over a conversation
+  off the request path. It writes into the conversation's own thread scope, and a thread
+  observation becomes a fact about the subject only through the app's promote function. It
+  keeps its progress (how far it has distilled, and the windows it gave up on) in the store, and
+  a new observer, or one in an app that restarted, starts from there. On a store with
+  transactions, which both stores in this tree are, a window's observations, its promotions and
+  its progress are written in one transaction (#529): if any of those writes fails, the window's
+  writes are rolled back and the attempt is retried, so the window is written once. The
+  window's embeddings are computed before the transaction takes the store's lock. A store
+  without transactions, such as one an app wrote itself, writes the progress in a separate call
+  after the observations; if that write fails and the observer is stopped or the app restarts
+  before a later turn writes it, the window is distilled again, and a model that words its
+  answer differently leaves both wordings.
+
+Still to come, in #317: a reflector that condenses a scope's observations (step B, #464), the
+thread's observations in the prompt in place of its old messages (step C), and a benchmark that
+measures tokens and accuracy together (step D).
+
+The Praxeon framing is unchanged: observation → imputed value → retained means/ends, the same
+economizing model as context assembly, extended across sessions.
 
 #### "Studio" developer experience
 
@@ -513,12 +551,14 @@ is to disable Ultralisp, update the Quicklisp dist, and clear stale fasls.
 The recorded order is not arbitrary: close out tool-use follow-ups first (small, tidies the
 current work); then **LLM-consumability** (cheap and compounding — every later thread is
 easier to build and to generate against once conventions are written down); then **Kairos**
-before **observational memory** (memory needs the store); the **Coalton core** and **LLM
+before **observational memory** (memory needs the store; in the event, memory was built first on
+a storage protocol of its own, and Kairos is not built, #60); the **Coalton core** and **LLM
 hardening** are independent and can go in either order; the **studio and modularity** grow
 naturally as there is more to inspect and more implementations to swap.
 
 The stated headline want is **Kairos + observational memory with semantic recall** — the
-foundation for agents that remember.
+foundation for agents that remember. Observational memory with semantic recall is on `main`
+(see "Agent memory" above); Kairos is not.
 
 ---
 
@@ -542,8 +582,8 @@ A minimal `.env` — note that per-agent **roles** override the shared default:
 
 ```sh
 PRAXEON_LLM_IMPL=anthropic
-PRAXEON_LLM_MODEL=claude-sonnet-5                  # shared default (any role)
-PRAXEON_ELISE_MODEL=claude-opus-4-8                # the deliberating agent
+PRAXEON_LLM_MODEL=claude-sonnet-5-5                # shared default (any role)
+PRAXEON_ELISE_MODEL=claude-opus-5-5                # the deliberating agent
 PRAXEON_TRANSLATE_MODEL=claude-haiku-4-5-20251001  # the translator agent
 ```
 

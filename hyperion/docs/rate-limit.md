@@ -79,10 +79,11 @@ limited exactly like one with an account, and the 429 response is identical for 
   (rl:make-limit :sign-in-account :capacity 5 :per 900
                  :key (rl:by-form-field "email") :paths '("/sign-in")))
 
-;; Reset and sign-up send mail: 3 per address per hour, and 3 per account per hour.
+;; Reset, sign-up and a change of address send mail: 3 per address per hour, and 3 per
+;; account per hour.
 (defparameter +mail-by-address+
   (rl:make-limit :mail-address :capacity 3 :per 3600
-                 :key (rl:by-address) :paths '("/reset-password" "/sign-up")))
+                 :key (rl:by-address) :paths '("/reset-password" "/sign-up" "/change-email")))
 (defparameter +mail-by-account+
   (rl:make-limit :mail-account :capacity 3 :per 3600
                  :key (rl:by-form-field "email") :paths '("/reset-password" "/sign-up")))

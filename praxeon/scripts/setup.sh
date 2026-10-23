@@ -8,7 +8,8 @@
 #
 # Idempotent (safe to re-run). Does NOT install SBCL or Quicklisp -- it checks
 # for them and tells you how to get them. What it does:
-#   1. Clone Coalton (a local checkout; not pulled by Quicklisp).
+#   1. Check that Coalton is checked out at the commit the monorepo's coalton.pin names. The
+#      monorepo's scripts/setup.sh is what clones it and checks that commit out.
 #   2. Create .env from .env.example (never overwriting an existing one).
 #   3. (optional, with --test) compile and run the network-free test suite.
 #
@@ -70,14 +71,9 @@ else
 fi
 
 # --- 1. Coalton (local checkout; Praxeon's typed core needs it) --------------
-COALTON_DIR="$HOME/common-lisp/coalton"
-if [ -d "$COALTON_DIR/.git" ]; then
-  info "Coalton present at $COALTON_DIR (leave as-is; 'git -C $COALTON_DIR pull' to update)."
-else
-  info "Cloning Coalton into $COALTON_DIR ..."
-  mkdir -p "$HOME/common-lisp"
-  git clone --depth 1 https://github.com/coalton-lang/coalton "$COALTON_DIR"
-fi
+# Coalton: checked here, never cloned. scripts/coalton-pin.sh at the monorepo root stops with
+# what to run when the checkout is missing or not at the commit coalton.pin names (#751).
+bash "$(dirname "${BASH_SOURCE[0]}")/../../scripts/coalton-pin.sh" || exit 1
 
 # --- 2. System discovery (handled by the repo-root bootstrap, not here) -------
 info "Discovery: run \`sbcl --script bootstrap.lisp\` at the repo root (writes the ASDF drop-in)."

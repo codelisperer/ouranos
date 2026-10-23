@@ -35,6 +35,11 @@
   Check the bundle, print the product, version and executable the installer would be built
   for, one "key value" line each, and exit without building it. Needs no packager.
 
+.PARAMETER RequireWebView2
+  Stop the build when the WebView2 bootstrapper cannot be downloaded or fails its signature
+  check, instead of building an installer without it. desktop-release.yml passes it, so a
+  release installer always carries the bootstrapper (#736).
+
 .NOTES
   The bundle's RELEASE file. build-desktop-app.lisp writes RELEASE into the bundle when it is
   given --product, --display-name or --default-channel (#408). When RELEASE names a product or
@@ -68,8 +73,9 @@ param(
   [string]$Icon,
   [switch]$Check,
   [switch]$Describe,
-  [switch]$NoWebView2      # skip embedding the WebView2 bootstrapper (smaller, but a
+  [switch]$NoWebView2,     # skip embedding the WebView2 bootstrapper (smaller, but a
                            # machine without the runtime gets no window)
+  [switch]$RequireWebView2 # fail rather than build without the bootstrapper (#736)
 )
 
 $ErrorActionPreference = 'Stop'
@@ -215,24 +221,29 @@ $viversion = ($parts[0..3] -join '.')
 # ~2 MB Evergreen *bootstrapper* (Tauri's "embedBootstrapper" mode): the installer then
 # repairs a machine that lacks the runtime, with no third-party NSIS plugin and no
 # install-time download of the bootstrapper itself. Fetched once at build time and cached.
+#
+# CHECKED BY SIGNATURE, EVERY BUILD (#736). The fwlink has no version and Microsoft replaces the
+# file behind it, so a sha256 pin would break the build whenever Microsoft ships a new one.
+# check-webview2-bootstrapper.ps1 requires a Valid Authenticode signature from O=Microsoft
+# Corporation, and prints the file's version and sha256. It runs on a cached copy as well as a
+# fresh download, and a copy that fails is deleted so the next build fetches again. Without
+# -RequireWebView2 a failure leaves the installer without the bootstrapper, with a warning, as
+# before; with it, the build stops.
 $wv2Args = @()
+if ($NoWebView2 -and $RequireWebView2) { Die "-NoWebView2 and -RequireWebView2 ask for opposite things" }
 if (-not $NoWebView2) {
-  $cache = Join-Path $Here 'installers\.cache'
-  $boot = Join-Path $cache 'MicrosoftEdgeWebview2Setup.exe'
-  if (-not (Test-Path $boot)) {
-    Info "fetching the WebView2 Evergreen bootstrapper (once; cached)"
-    New-Item -ItemType Directory -Force -Path $cache | Out-Null
-    try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
-    try {
-      Invoke-WebRequest -Uri 'https://go.microsoft.com/fwlink/p/?LinkId=2124703' `
-        -OutFile $boot -UseBasicParsing -MaximumRedirection 10
-    } catch {
-      Remove-Item $boot -Force -ErrorAction SilentlyContinue
-      Write-Host "WARNING: could not fetch the WebView2 bootstrapper ($($_.Exception.Message))." -ForegroundColor Yellow
-      Write-Host "         Building without it; use -NoWebView2 to make that explicit." -ForegroundColor DarkGray
-    }
+  $boot = Join-Path (Join-Path $Here 'installers\.cache') 'MicrosoftEdgeWebview2Setup.exe'
+  # Fetches when there is no cached copy, checks either way, and deletes a copy that fails.
+  & powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $Here 'check-webview2-bootstrapper.ps1') $boot -Fetch
+  $wv2Status = $LASTEXITCODE
+  if ($wv2Status -eq 0) {
+    $wv2Args = @("/DWV2BOOTSTRAPPER=$boot") ; Note "WebView2 bootstrapper: embedded"
+  } elseif ($RequireWebView2) {
+    Die "no WebView2 bootstrapper that passes its signature check (check-webview2-bootstrapper.ps1 exited $wv2Status), and -RequireWebView2 was given"
+  } else {
+    Write-Host "WARNING: no WebView2 bootstrapper that passes its signature check (exit $wv2Status)." -ForegroundColor Yellow
+    Write-Host "         Building without it; use -NoWebView2 to make that explicit." -ForegroundColor DarkGray
   }
-  if (Test-Path $boot) { $wv2Args = @("/DWV2BOOTSTRAPPER=$boot") ; Note "WebView2 bootstrapper: embedded" }
 } else {
   Note "WebView2 bootstrapper: skipped (-NoWebView2)"
 }

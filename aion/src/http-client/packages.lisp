@@ -50,4 +50,6 @@
            #:pinned-connect-unsupported
            #:fetch-refused #:fetch-refused-url #:fetch-refused-host #:fetch-refused-address
            #:fetch-refused-reason
-           #:too-many-redirects #:too-many-redirects-url #:too-many-redirects-limit))
+           #:too-many-redirects #:too-many-redirects-url #:too-many-redirects-limit
+           #:fetch-deadline-exceeded #:fetch-deadline-exceeded-url
+           #:fetch-deadline-exceeded-deadline))

@@ -51,6 +51,10 @@
    #:means-failure #:means-failure-means #:means-failure-cause
    #:tool-error-result #:tool-error-result-text #:tool-error-result-outcome
    #:deliberation-failure
+   #:provider-request-failed #:provider-request-failed-status
+   #:provider-request-failed-error-type #:provider-request-failed-error-code
+   #:provider-request-failed-body
+   #:unknown-tool-choice #:unknown-tool-choice-value #:value-shape
    #:output-limit-reached #:output-limit-reached-max-tokens
    #:output-truncated #:output-truncated-step #:output-truncated-max-tokens
    #:translation-truncated #:translation-truncated-text
@@ -72,6 +76,13 @@
    ;; restarts (as function-style invokers)
    #:retry-action #:substitute-result #:abandon-action
    #:retry-with-max-tokens #:accept-truncated #:abandon-turn))
+
+(defpackage #:praxeon/source
+  (:use #:cl)
+  (:documentation
+   "Text from outside a conversation -- a fetched page, a retrieved document -- marked for a
+    model as quoted source material, between markers it cannot forge (#757).")
+  (:export #:quote-source))
 
 (defpackage #:praxeon/context
   (:use #:cl)
@@ -103,7 +114,9 @@
            #:observation-supersedes #:observation-superseded-by #:observation-superseded-at
            #:observation-current-p
            #:remember #:supersede #:recall #:recall-similar #:observation->ctx-item
-   #:observations-of #:forget #:forget-subject #:thread-progress #:record-thread-progress))
+   #:observations-of #:forget #:forget-subject #:thread-progress #:record-thread-progress
+   ;; a window's writes and its progress in one transaction (#529)
+   #:store-transactions-p #:call-with-store-transaction #:with-store-transaction))
 
 (defpackage #:praxeon/results
   (:use #:cl)
@@ -151,11 +164,15 @@
    #:text-part #:tool-use-part #:tool-result-part
    ;; neutral tools + completions
    #:tool-choice #:supports-tool-choice-p #:check-tool-choice
+   #:supports-response-format-p #:complete-with-schema
    #:anthropic-request-body #:openai-request-body
    #:generate-structured #:validate-arguments #:validate-against-schema
    #:unenforced-declarations #:check-schema-enforceable
    #:unenforceable-schema #:unenforceable-schema-tool
    #:unenforceable-schema-declarations
+   #:check-schema-sendable #:response-format-schema-problem #:schema-recursion
+   #:unsendable-schema #:unsendable-schema-tool
+   #:unsendable-schema-reason
    #:*default-structured-attempts*
    #:structured-result-rejected #:structured-result-rejected-tool
    #:structured-result-rejected-problems #:structured-result-rejected-attempt
@@ -179,7 +196,9 @@
    #:*default-model* #:*default-max-tokens*
    #:*connect-timeout* #:*read-timeout*
    ;; environment-driven provider selection
-   #:make-provider-from-env #:register-provider-impl #:env-setting))
+   #:make-provider-from-env #:register-provider-impl #:env-setting
+   ;; #758: the #719 mapping of a failed HTTP request, for a module that calls a service itself
+   #:request-failure))
 
 (defpackage #:praxeon/distil
   (:use #:cl)
@@ -296,6 +315,7 @@
 (defpackage #:praxeon/actor
   (:use #:cl)
   (:local-nicknames (#:px #:praxeon/praxeology)
+                    (#:log #:aion/log)
                     (#:boundary #:aion/boundary)
                     (#:cnd #:praxeon/conditions)
                     (#:ctx #:praxeon/context)
@@ -316,6 +336,11 @@
    #:agent-cache-system #:agent-system-parts #:agent-max-tokens
    #:request-messages
    #:means-entry #:means-entry-source #:register-means #:means-permitted-p #:agent-means-for
+   ;; untrusted content in a turn (#827)
+   #:means-entry-untrusted #:means-entry-requires-user-intent #:means-entry-allow
+   #:means-entry-max-per-turn
+   #:user-texts #:turn-untrusted-p #:turn-urls #:note-turn-urls #:mark-untrusted
+   #:agent-taint-scope
    ;; The accessors of what AGENT-MEANS-FOR returns. NAME and DESCRIPTION were missing, so an
    ;; app could enumerate the means it may use and not read them -- which is the
    ;; knowable-blast-radius property of ADR-0002 being exported in a form nobody can consume.

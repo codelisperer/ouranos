@@ -329,3 +329,176 @@ A guard that only one of the two spellings can reach is not a guard."
     (signals error
       (q:sql '(:insert-into :t :values ((:_id 1)) :returning (:_id)) :dialect d))
     (is (search "INSERT INTO" (q:sql '(:insert-into :t :values ((:_id 1))) :dialect d)))))
+
+;;; --- identifiers and directions are checked before they are written (#860) ----------
+;;;
+;;; An identifier or an ORDER BY direction is written into the SQL rather than bound, so
+;;; text from a request in either place used to be SQL injection. These are the three forms
+;;; measured on main 4336c6c, which rendered
+;;;   ... ORDER BY name; DROP TABLE contacts; -- ASC
+;;;   ... ORDER BY name ASC, (SELECT PASSWORD FROM USERS LIMIT 1)
+;;;   SELECT id, password FROM contacts c JOIN users u ON true
+
+(test the-measured-injections-are-refused
+  (signals q:invalid-identifier
+    (q:sql '(:select (:id) :from (:contacts) :order-by (("name; DROP TABLE contacts; --" :asc)))))
+  (signals q:invalid-identifier
+    (q:sql '(:select (:id) :from (:contacts)
+             :order-by ((:name "asc, (SELECT password FROM users LIMIT 1)")))))
+  (signals q:invalid-identifier
+    (q:sql '(:select ("id, password") :from ("contacts c JOIN users u ON true"))))
+  (signals q:invalid-identifier
+    (q:sql '(:select (:id) :from ("contacts c JOIN users u ON true")))))
+
+(test unsafe-names-are-refused-wherever-a-name-is-written
+  (dolist (q '((:select (:id) :from ("contacts; drop table x"))
+               (:select ((:as :id "x y")) :from (:t))
+               (:select (:id) :from ((:as :t "t; --")))
+               (:select (:id) :from (:t) :join ((:inner "u ON 1=1 --" (:= :t.id :u.id))))
+               (:select (:id) :from (:t) :group-by ("a, b"))
+               (:select (:id) :from (:t) :order-by ("1; drop"))
+               (:select ((:call "lower(x)--" :y)) :from (:t))
+               (:insert-into "t (a) VALUES (1); --" :values ((:a 1)))
+               (:insert-into :t :values (("a) VALUES (1); --" 1)))
+               (:update "t SET a = 1 --" :set (:a 2))
+               (:delete-from "t; --")
+               (:insert-into :t :values ((:a 1)) :returning ("a, (select 1)"))
+               (:select (:id) :from (:t) :order-by (""))
+               (:select (:id) :from (:t) :order-by ("1abc"))
+               (:select (:id) :from (:t) :order-by ("a..b"))
+               (:select (:id) :from (:t) :order-by ("caf\é"))))
+    (signals q:invalid-identifier (q:sql q) "~S" q)))
+
+(test a-direction-must-be-asc-or-desc
+  (dolist (dir '(:up "sideways" "desc; drop table t" "ASC NULLS LAST" 1))
+    (signals q:invalid-identifier (q:sql `(:select (:id) :from (:t) :order-by ((:id ,dir))))
+      "~S" dir)
+    (signals q:invalid-identifier
+      (q:sql `(:select (:id) :from (:t) :order-by (((:lower :name) ,dir))))
+      "expression form ~S" dir))
+  (dolist (dir '(:asc :desc "asc" "DESC" "Desc"))
+    (is (search (string-upcase (string dir))
+                (q:sql `(:select (:id) :from (:t) :order-by ((:id ,dir))))))))
+
+(test safe-names-still-render-as-before
+  "The control: every form the tree uses still renders, unchanged."
+  (is (string= "SELECT u.email, u.* FROM public.users AS u ORDER BY u.email DESC, 2 ASC, _id"
+               (q:sql '(:select (:u.email "u.*") :from ((:as "public.users" :u))
+                        :order-by ((:u.email :desc) (2 :asc) :_id)))))
+  (is (string= "SELECT * FROM contacts" (q:sql '(:select (:*) :from ("contacts")))))
+  (is (string= "SELECT LOWER(name) AS n FROM t GROUP BY Name_2"
+               (q:sql '(:select ((:as (:lower :name) :n)) :from (:t) :group-by ("Name_2")))))
+  (is (string= "SELECT count(*) AS n FROM t"
+               (q:sql '(:select ((:as (:raw "count(*)") :n)) :from (:t))))
+      "(:raw ...) is still the explicit way to write SQL text"))
+
+(test a-refused-query-never-reaches-the-connection
+  (let ((c (conn:connect (be:make-sqlite ":memory:"))))
+    (unwind-protect
+         (progn
+           (conn:exec c "CREATE TABLE contacts (id INTEGER, name TEXT)")
+           (signals q:invalid-identifier
+             (q:fetch c '(:select (:id) :from (:contacts)
+                          :order-by (("name; DROP TABLE contacts; --" :asc)))
+                      :dialect :sqlite))
+           (is (equal '(0) (mapcar #'second (conn:query c "SELECT count(*) FROM contacts")))
+               "the table is still there"))
+      (conn:disconnect c))))
+
+(test the-condition-names-the-text-and-what-was-expected
+  (let ((e (handler-case (q:sql '(:select (:id) :from ("a b"))) (q:invalid-identifier (e) e))))
+    (is (equal "a b" (q:invalid-identifier-text e)))
+    (is (search "identifier" (q:invalid-identifier-expected e)))
+    (is (search "(:raw" (princ-to-string e)))))
+
+;;; --- expressions where a name or an expression may stand, :quoted, and the clause (#860) ---
+
+(test raw-and-expressions-work-in-group-by-on-conflict-and-returning
+  (is (string= "SELECT count(*) FROM t GROUP BY date_trunc('day', at)"
+               (q:sql '(:select ((:raw "count(*)")) :from (:t)
+                        :group-by ((:raw "date_trunc('day', at)"))))))
+  (is (string= "SELECT n FROM t GROUP BY LOWER(name)"
+               (q:sql '(:select (:n) :from (:t) :group-by ((:lower :name))))))
+  (is (string= "INSERT INTO t (email) VALUES (?) ON CONFLICT (lower(email)) DO NOTHING"
+               (q:sql '(:insert-into :t :values ((:email "a@x"))
+                        :on-conflict ((:raw "lower(email)")) :do-nothing t))))
+  (is (string= "INSERT INTO t (a) VALUES (?) RETURNING id, now() AS at"
+               (q:sql '(:insert-into :t :values ((:a 1)) :returning (:id (:raw "now() AS at")))))))
+
+(test a-quoted-name-is-double-quoted-with-its-quotes-doubled
+  (is (string= "SELECT \"Name\" FROM \"public\".\"MyTable\" ORDER BY \"Name\" DESC"
+               (q:sql '(:select ((:quoted "Name")) :from ((:quoted "public" "MyTable"))
+                        :order-by (((:quoted "Name") :desc))))))
+  (is (string= "SELECT id FROM \"we\"\"ird\"" (q:sql '(:select (:id) :from ((:quoted "we\"ird"))))))
+  (is (string= "SELECT id FROM \"order\" AS o" (q:sql '(:select (:id) :from ((:as (:quoted "order") :o))))))
+  (dolist (bad '((:quoted) (:quoted "") (:quoted "a" 5)))
+    (signals q:invalid-identifier (q:sql `(:select (:id) :from (,bad))) "~S" bad))
+  (signals q:invalid-identifier
+    (q:sql (list :select '(:id) :from (list (list :quoted (format nil "a~Cb" (code-char 0))))))))
+
+(test names-quoted-by-hand-and-other-unsafe-names-are-refused
+  (dolist (q '((:select (:id) :from ("\"MyTable\""))
+               (:select (:id) :from ("a$b"))
+               (:select (:|a b|) :from (:t))
+               (:insert-into :t :values ((:a 1)) :on-conflict ("a) DO NOTHING; --") :do-nothing t)
+               (:insert-into :t :values ((:a 1)) :on-conflict (:a) :do-update (("b = 1, c" 2)))
+               (:insert-into :t :values ((:a 1)) :on-conflict (:a) :do-update (:b (:excluded "b; --")))))
+    (signals q:invalid-identifier (q:sql q) "~S" q)))
+
+(test an-integer-is-accepted-only-where-sql-gives-it-a-meaning
+  "A positive ORDER BY or GROUP BY position, and a non-negative SELECT constant such as the 1 in
+EXISTS (SELECT 1 ...)."
+  (is (string= "SELECT a FROM t GROUP BY 1 ORDER BY 2 DESC, 1"
+               (q:sql '(:select (:a) :from (:t) :group-by (1) :order-by ((2 :desc) 1)))))
+  (is (string= "SELECT 1 FROM t" (q:sql '(:select (1) :from (:t)))))
+  (dolist (pos '(0 -1 1.5))
+    (signals q:invalid-identifier (q:sql `(:select (:a) :from (:t) :order-by (,pos))) "~S" pos)
+    (signals q:invalid-identifier (q:sql `(:select (:a) :from (:t) :group-by (,pos))) "~S" pos))
+  (dolist (q '((:select (-1) :from (:t)) (:select (:a) :from (1))
+               (:insert-into :t :values ((:a 1)) :returning (1)) (:delete-from 1)))
+    (signals q:invalid-identifier (q:sql q) "~S" q)))
+
+(test the-condition-names-the-clause
+  (flet ((clause-of (q) (handler-case (progn (q:sql q) :no-error)
+                          (q:invalid-identifier (e) (q:invalid-identifier-clause e)))))
+    (is (eq :order-by (clause-of '(:select (:id) :from (:t) :order-by ("a b")))))
+    (is (eq :order-by (clause-of '(:select (:id) :from (:t) :order-by ((:id :up))))))
+    (is (eq :from (clause-of '(:select (:id) :from ("a b")))))
+    (is (eq :group-by (clause-of '(:select (:id) :from (:t) :group-by ("a b")))))
+    (is (eq :returning (clause-of '(:delete-from :t :returning ("a b")))))
+    (is (search "in order-by" (handler-case (q:sql '(:select (:id) :from (:t) :order-by ("a b")))
+                                (q:invalid-identifier (e) (princ-to-string e)))))))
+
+;;; --- LIKE with ESCAPE (#862) -------------------------------------------------------
+
+(test like-and-ilike-render-an-escape-character
+  (is (equal '("SELECT id FROM t WHERE name LIKE ? ESCAPE ?" ("%a\\%b%" "\\"))
+             (gen '(:select (:id) :from (:t) :where (:like :name "%a\\%b%" :escape "\\")))))
+  (is (equal '("SELECT id FROM t WHERE name ILIKE ? ESCAPE ?" ("%a!%%" "!"))
+             (gen '(:select (:id) :from (:t) :where (:ilike :name "%a!%%" :escape #\!))
+                  :dialect :postgres)))
+  (is (equal '("SELECT id FROM t WHERE name LIKE ?" ("%a%"))
+             (gen '(:select (:id) :from (:t) :where (:like :name "%a%"))))
+      "control: without :escape, nothing is added"))
+
+(test an-escape-that-is-not-one-safe-character-is-refused
+  "% or _ as the escape would make the escape character a wildcard: like-contains of \"ab\"
+with :escape #\\% gave \"%ab%\", which Postgres refuses and SQLite does not match."
+  (dolist (escape (list "" "ab" "%" #\% "_" #\_ 5 (code-char 0) (string (code-char 7))))
+    (signals q:invalid-identifier
+      (q:sql `(:select (:id) :from (:t) :where (:like :name "%a%" :escape ,escape)))
+      "~S" escape)
+    (signals q:invalid-identifier (q:like-contains "ab" :escape escape) "like-contains ~S" escape))
+  ;; Bound, so a quote or a non-ASCII escape character needs no quoting and is accepted.
+  (dolist (escape (list "'" "é" #\!))
+    (finishes (q:sql `(:select (:id) :from (:t) :where (:like :name "%a%" :escape ,escape))))))
+
+(test like-with-escape-round-trips
+  (is (rt '(:select (:id) :from (:t) :where (:like :name "%a\\%b%" :escape "\\"))))
+  (is (rt '(:select (:id) :from (:t) :where (:and (:like :name "x%" :escape "!") (:= :id 1))))))
+
+(test like-escape-and-like-contains-escape-the-wildcards-and-the-escape
+  (is (string= "50\\%\\_off\\\\x" (q:like-escape "50%_off\\x")))
+  (is (string= "%50!%!_off!!%" (q:like-contains "50%_off!" :escape #\!)))
+  (is (string= "%plain%" (q:like-contains "plain")))
+  (is (string= "%%" (q:like-contains ""))))

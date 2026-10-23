@@ -34,7 +34,15 @@
 ;;;; The tree is the checkout you are standing in (tree-root.lisp). A CL_SOURCE_REGISTRY in
 ;;;; your environment is appended after this tree, never before it.
 ;;;;
-;;;; Exit 0 when every system passes, 1 when any fails, 2 when the check cannot run.
+;;;; A SYSTEM ANOTHER OS OWNS IS SKIPPED, AND SAID SO (#283). scripts/platform-packages.lisp, the
+;;;; registry bootstrap.lisp and verify-tree.lisp use, says which OS owns each platform package;
+;;;; aion/windows and its subsystems cannot load on Linux, so editing aion/aion.asd there made
+;;;; this script fail them. Such a system now gets a SKIPPED line naming its owner and is not
+;;;; loaded. A system the registry gives to this host, or to no OS, is checked as before, so one
+;;;; that should load here and does not still fails. A package can have one owner only, so
+;;;; hyperion/woo, which also loads on macOS, is skipped there, as the gate skips its suite.
+;;;;
+;;;; Exit 0 when every system checked passes, 1 when any fails, 2 when the check cannot run.
 
 (require :asdf)
 
@@ -45,6 +53,7 @@
 (load (merge-pathnames "compile-warnings.lisp" *scripts*))
 (load (merge-pathnames "redefinitions.lisp" *scripts*))   ; a function defined in two files (#577)
 (load (merge-pathnames "caught-errors.lisp" *scripts*))
+(load (merge-pathnames "platform-packages.lisp" *scripts*))   ; which OS owns a system (#283)
 
 (defparameter *root* (tree-root:resolve-or-die *script* "check-compile"))
 (defparameter *quicklisp* (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))
@@ -188,11 +197,18 @@
 
 ;;; --- main ---------------------------------------------------------------------------
 
+(defun skip-reason (name)
+  "Why NAME is not checked on this host, or NIL when it is checked: another OS owns it."
+  (multiple-value-bind (owner entry) (ouranos-platform:system-owner name)
+    (when (and owner (not (eq owner (ouranos-platform:host-os))))
+      (format nil "~(~a~) only: scripts/platform-packages.lisp lists ~A under ~(~S~)"
+              owner (ouranos-platform:entry-system entry) owner))))
+
 (defun main (args)
   (load *quicklisp*)
   (asdf:initialize-source-registry `(:source-registry (:tree ,*root*) :inherit-configuration))
   (format t "~&check-compile: tree ~A~%" (uiop:native-namestring *root*))
-  (let ((systems args))
+  (let ((systems args) (skipped '()))
     (if args
         (format t "  systems named on the command line~%")
         (multiple-value-bind (files base head) (changed-files)
@@ -204,6 +220,13 @@
             (dolist (f unclaimed) (format t "  not in any system: ~A~%" f)))))
     (when (null systems)
       (format t "~&check-compile: no changed file belongs to a system, so nothing was compiled.~%")
+      (uiop:quit 0))
+    (setf skipped (remove-if-not #'skip-reason systems)
+          systems (remove-if #'skip-reason systems))
+    (dolist (s skipped)
+      (format t "  SKIPPED ~A~40T~A~%" s (skip-reason s)))
+    (when (null systems)
+      (format t "~&check-compile: 0 systems checked, 0 failed, ~D skipped.~%" (length skipped))
       (uiop:quit 0))
     (let ((fasls (uiop:ensure-directory-pathname
                   (merge-pathnames (format nil "ouranos-check-compile-~36R/" (random (expt 36 8) (make-random-state t)))
@@ -219,7 +242,8 @@
                (unless ok (incf failed))
                (finish-output)))
         (aion/fs:delete-tree fasls :if-does-not-exist :ignore))
-      (format t "~&check-compile: ~D system~:P checked, ~D failed.~%" (length systems) failed)
+      (format t "~&check-compile: ~D system~:P checked, ~D failed, ~D skipped.~%"
+              (length systems) failed (length skipped))
       (uiop:quit (if (zerop failed) 0 1)))))
 
 (main (rest sb-ext:*posix-argv*))

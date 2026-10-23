@@ -163,6 +163,11 @@ Every assertion inside WITH-EACH-BACKEND must use this rather than IS, or the co
 banner under-reports and the gate's whole premise -- that a per-backend count is evidence --
 stops holding."
   `(progn
+     ;; A check counted under no backend is evidence for none, and the gate refuses the NIL
+     ;; line it would print (OURANOS-NOT-COVERED:UNATTRIBUTED-BACKEND-REPORTS). Refused here
+     ;; as well, so the test that does it fails where it is written.
+     (unless *current-backend*
+       (error "IS* outside WITH-EACH-BACKEND: bind *CURRENT-BACKEND* to the backend this check is about"))
      (let ((cell (assoc *current-backend* *backend-checks* :test #'equal)))
        (if cell
            (incf (cdr cell))

@@ -19,7 +19,7 @@ produces the artifact the updater consumes. The chain, end to end:
         │
         ▼
   CI matrix (native runners — SBCL cannot cross-compile; see docs/ci.md)
-   ubuntu-22.04 ─┐   windows-2022 ─┐   macos-14 ─┐
+   ubuntu-22.04 ─┐   windows-2022 ─┐   macos-15 ─┐
                  │                 │             │
         per-OS bundle + installer, each Ed25519-signed
                  └────────┬────────┴─────────────┘

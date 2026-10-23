@@ -38,15 +38,20 @@
 (defun %run-check-compile (dir &rest more-dirs)
   "Run scripts/check-compile.lisp on the fixture system in DIR, with DIR and MORE-DIRS in the
 source registry. (values EXIT-CODE OUTPUT)."
+  (%run-check-compile-on '("check-compile-fixture") (cons dir more-dirs)))
+
+(defun %run-check-compile-on (systems dirs)
+  "Run scripts/check-compile.lisp on SYSTEMS, with DIRS in the source registry.
+(values EXIT-CODE OUTPUT)."
   (multiple-value-bind (out err code)
       (uiop:run-program
-       (list (namestring sb-ext:*runtime-pathname*) "--script"
-             (namestring (merge-pathnames "scripts/check-compile.lisp" (%tree-root)))
-             "check-compile-fixture")
+       (list* (namestring sb-ext:*runtime-pathname*) "--script"
+              (namestring (merge-pathnames "scripts/check-compile.lisp" (%tree-root)))
+              systems)
        :directory (%tree-root)
        :output :string :error-output :output :ignore-error-status t
        :environment (cons (format nil "CL_SOURCE_REGISTRY=~{~A//~A~}"
-                                  (loop for d in (cons dir more-dirs)
+                                  (loop for d in dirs
                                         collect (uiop:native-namestring d)
                                         collect (uiop:inter-directory-separator)))
                           (remove-if (lambda (e) (uiop:string-prefix-p "CL_SOURCE_REGISTRY=" e))
@@ -187,3 +192,36 @@ not fail the checked system for what the dependency does."
         (is (search "ok      check-compile-fixture" output) "no ok line for the fixture:~%~A" output)
         (is (not (search "CHECK-COMPILE-DEP::HELPER" output))
             "the dependency's redefinition was reported:~%~A" output)))))
+
+;;; --- a system that cannot load on this host (#283) -------------------------------------------
+;;;
+;;; Editing aion/aion.asd made check-compile check the aion/windows systems on Linux, where they
+;;; cannot load, and fail. It now skips a system scripts/platform-packages.lisp says another OS
+;;; owns, and prints a SKIPPED line saying so. The tests name a real system another OS owns,
+;;; chosen from the registry, so they run on every host.
+
+(defun %foreign-system ()
+  "A system some OS other than this host owns, from the registry: (values NAME OWNER)."
+  (%load-platform-registry)
+  (let ((pair (first (%pf not-applicable-for (%pf host-os)))))
+    (values (getf (cdr pair) :system) (car pair))))
+
+(test a-system-another-os-owns-is-skipped-and-said-so
+  (multiple-value-bind (system owner) (%foreign-system)
+    (%with-fixture (dir nil)
+      (multiple-value-bind (code output) (%run-check-compile-on (list system "check-compile-fixture") (list dir))
+        (is (= 0 code) "exit ~D, expected 0:~%~A" code output)
+        (is (search (format nil "SKIPPED ~A" system) output) "no SKIPPED line for ~A:~%~A" system output)
+        (is (search (format nil "~(~a~) only" owner) output) "the line does not name the owner:~%~A" output)
+        (is (not (search (format nil "FAIL    ~A" system) output)) "it was checked anyway:~%~A" output)
+        (is (search "ok      check-compile-fixture" output) "the other system was not checked:~%~A" output)
+        (is (search "1 system checked, 0 failed, 1 skipped" output) "the summary is wrong:~%~A" output)))))
+
+(test a-skip-does-not-hide-a-failure
+  "A skipped system next to one that fails here: the run still fails."
+  (multiple-value-bind (system) (%foreign-system)
+    (%with-fixture (dir t)
+      (multiple-value-bind (code output) (%run-check-compile-on (list system "check-compile-fixture") (list dir))
+        (is (= 1 code) "exit ~D, expected 1:~%~A" code output)
+        (is (search "FAIL    check-compile-fixture" output) "no FAIL line for the fixture:~%~A" output)
+        (is (search (format nil "SKIPPED ~A" system) output) "no SKIPPED line:~%~A" output)))))

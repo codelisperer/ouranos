@@ -401,6 +401,18 @@ root: without CA-PATH the self-signed certificate is refused as well."
         (signals http:http-error (get-as "other.test"))
         (signals http:http-error (get-as "pinned.test" :ca nil))))))
 
+(test the-cl+ssl-patch-for-openssl-4-is-in-place
+  "#706: aion/http-client points cl+ssl's ASN1-STRING-DATA at ASN1_STRING_get0_data, because
+OpenSSL 4 removed ASN1_STRING_data, which cl+ssl calls to read a certificate's names. This fails
+when the patch is missing, and when a later load of cl+ssl has put the old definition back. On a
+host whose libcrypto is OpenSSL 4, the pinned test above fails as well. Remove the patch and this
+test once the pinned cl+ssl contains cl-plus-ssl pull request 202."
+  (skip-on-windows "cl+ssl is not used on Windows"
+    ;; Read only off Windows: there is no CL+SSL package on Windows.
+    #-os-windows
+    (is (eq (fdefinition 'cl+ssl::asn1-string-get0-data) (fdefinition 'cl+ssl::asn1-string-data))
+        "cl+ssl::asn1-string-data is the call to ASN1_STRING_get0_data")))
+
 ;;; --- fetch-public ---------------------------------------------------------------------
 
 (defun %resolver (table)
@@ -465,6 +477,94 @@ be lost, because the connection was closed before the body was read (#527)."
                                   :address-policy #'%loopback-allowed :read-timeout 5)))
         (is (= 400 (http:response-status r)))
         (is (equal "{\"error\":\"invalid_grant\"}" (http:response-body r)))))))
+
+(defun %slow-handler (done)
+  "A handler that declares a 10-byte body and then sends one byte every 2 seconds, until DONE,
+a function of no arguments, returns true."
+  (lambda (path head stream)
+    (declare (ignore path head))
+    (ignore-errors
+     (aion/test-http:write-head stream 200 '(("Content-Type" . "text/plain")
+                                             ("Content-Length" . 10) ("Connection" . "close")))
+     (loop repeat 10 until (funcall done)
+           do (write-byte 97 stream)
+              (finish-output stream)
+              (loop repeat 20 until (funcall done) do (sleep 0.1))))))
+
+(defun %slow-fetch (server &rest options)
+  (apply #'http:fetch-public (%local server "/" "slow.test")
+         :resolve (%resolver '(("slow.test" "127.0.0.1")))
+         :address-policy #'%loopback-allowed :read-timeout 5
+         options))
+
+(test fetch-public-stops-at-its-deadline-while-a-fetch-without-one-is-still-reading
+  "A server that sends a byte every 2 seconds never trips a 5-second read timeout. With
+:DEADLINE 3 the fetch signals FETCH-DEADLINE-EXCEEDED after about 3 seconds; a fetch of the
+same kind of server with no deadline is still reading at that point (#807)."
+  (skip-on-windows "fetch-public pins its connections, which Windows does not support here"
+    (let ((done nil))
+      (with-server (slow (%slow-handler (lambda () done)))
+        (with-server (other (%slow-handler (lambda () done)))
+          ;; THREAD-LIFETIME: reads OTHER until the cleanup below sets DONE, which ends the
+          ;; handler and closes the connection, so the fetch fails and the thread returns; the
+          ;; JOIN waits for that.
+          (let ((control (bt:make-thread (lambda () (ignore-errors (%slow-fetch other)))
+                                         :name "fetch without a deadline")))
+            (unwind-protect
+                 (let* ((start (get-internal-real-time))
+                        (c (handler-case (progn (%slow-fetch slow :deadline 3) nil)
+                             (http:fetch-deadline-exceeded (c) c)))
+                        (seconds (/ (- (get-internal-real-time) start)
+                                    internal-time-units-per-second)))
+                   (is (typep c 'http:fetch-deadline-exceeded))
+                   (is (< 2.5 seconds 6) "it ended after ~,1F seconds" seconds)
+                   (is (eql 3 (and c (http:fetch-deadline-exceeded-deadline c))))
+                   (is (bt:thread-alive-p control)
+                       "the fetch without a deadline is still reading"))
+              (setf done t)
+              (aion/test-threads:join control))))))))
+
+(defun %deadline-timers ()
+  (remove "fetch-public deadline" (sb-ext:list-all-timers)
+          :key #'sb-ext:timer-name :test-not #'equal))
+
+(defun %deadline-threads ()
+  (remove "fetch-public deadline" (bt:all-threads) :key #'bt:thread-name :test-not #'equal))
+
+(test a-fetch-that-ends-before-its-deadline-leaves-no-timer-or-thread
+  "The deadline's timer is unscheduled whether the fetch returns or signals, so no timer is left
+to fire later and no thread is started for it (#807)."
+  (skip-on-windows "fetch-public pins its connections, which Windows does not support here"
+    (with-server (s (lambda (path head stream)
+                      (declare (ignore path head))
+                      (%write-response stream 200 '(("Content-Type" . "text/plain")) "ok")))
+      (is (null (%deadline-timers)) "none before")
+      (let ((r (http:fetch-public (%local s "/" "fast.test")
+                                  :resolve (%resolver '(("fast.test" "127.0.0.1")))
+                                  :address-policy #'%loopback-allowed
+                                  :read-timeout 5 :deadline 30)))
+        (is (equal "ok" (http:response-body r))))
+      (is (null (%deadline-timers)) "none after a fetch that returned")
+      (signals http:fetch-refused
+        (http:fetch-public "http://10.0.0.1/" :deadline 30 :perform (%never-called)))
+      (is (null (%deadline-timers)) "none after a fetch that signalled")
+      (is (null (%deadline-threads)) "no thread was started"))))
+
+(test a-deadline-works-on-every-platform-and-leaves-no-timer
+  "With a stub effect, a fetch with a deadline returns, or signals the effect's own failure, and
+leaves no timer scheduled. This runs on Windows too, where a form the reader dropped once left
+the deadline number where the watch belonged (#807)."
+  (let ((resolve (%resolver '(("public.test" "93.184.216.34")))))
+    (is (= 200 (http:response-status
+                (http:fetch-public "http://public.test/" :deadline 30 :resolve resolve
+                                                         :perform (%ok :body "x")))))
+    (is (null (%deadline-timers)) "none after a fetch that returned")
+    (signals http:http-error
+      (http:fetch-public "http://public.test/" :deadline 30 :resolve resolve
+                                               :perform (lambda (req)
+                                                          (declare (ignore req))
+                                                          (error 'http:http-error :detail "stub"))))
+    (is (null (%deadline-timers)) "none after a fetch whose effect signalled")))
 
 (test fetch-public-returns-an-empty-response
   "A 404 with an empty body is an ordinary response: status 404, no bytes. It used to fail with
@@ -560,6 +660,25 @@ POST is followed with a GET and no body. Control: a 307 on the same origin keeps
         (is (equal "x=1" (http:request-content second)))
         (is (assoc "Authorization" (http:request-headers second) :test #'string-equal))))))
 
+(test fetch-public-returns-the-url-of-the-last-hop
+  "The second value is the URL the response came from: the redirect's target, resolved against
+the URL that redirected, and the URL itself when nothing redirected (#757)."
+  (let ((resolve (%resolver '(("a.test" "93.184.216.34") ("b.test" "93.184.216.35")))))
+    (flet ((perform (req)
+             (let ((path (quri:uri-path (quri:uri (http:request-url req)))))
+               (cond ((string= "/start" path)
+                      (http:make-response :status 301 :headers (%headers "location" "http://b.test/moved")))
+                     ((string= "/moved" path)
+                      (http:make-response :status 302 :headers (%headers "location" "final?x=1")))
+                     (t (http:make-response :status 200))))))
+      (multiple-value-bind (r url) (http:fetch-public "http://a.test/start" :resolve resolve
+                                                                            :perform #'perform)
+        (is (= 200 (http:response-status r)))
+        (is (string= "http://b.test/final?x=1" url)))
+      (is (string= "http://a.test/plain"
+                   (nth-value 1 (http:fetch-public "http://a.test/plain" :resolve resolve
+                                                                         :perform #'perform)))))))
+
 (test a-url-without-a-port-connects-to-its-scheme-default
   "Review of #312: QURI-PORT is NIL when the URL gives no port, and the pinned connection must
 then use 80 for http and 443 for https, not NIL. Checked on the function that chooses the port,
@@ -570,3 +689,153 @@ since binding 80 or 443 in a test needs privileges."
   (is (equal (http::%origin (quri:uri "https://example.com/"))
              (http::%origin (quri:uri "https://example.com:443/x")))
       "the default port and the same port written out are one origin"))
+
+;;; --- a request prints without its secrets (#844) ---------------------------------
+
+(defparameter +printed-secrets+ '("Bearer SECRET-auth-111" "SECRET-goog-222" "SECRET-api-333"
+                                  "session=SECRET-cookie-444"))
+
+(defun %secret-request (&rest args)
+  (apply #'http:make-request
+         :method :post
+         :headers (list (cons "authorization" "Bearer SECRET-auth-111")
+                        (cons "x-goog-api-key" "SECRET-goog-222")
+                        (cons "x-api-key" "SECRET-api-333")
+                        (cons "cookie" "session=SECRET-cookie-444")
+                        (cons "X-Custom-Token" "SECRET-custom-555"))
+         args))
+
+(defun %printings (object)
+  "OBJECT printed every way a log line, an error report or a debugger prints it."
+  (list (prin1-to-string object) (princ-to-string object)
+        (format nil "~A ~S" object object) (format nil "~A" (list object))
+        (let ((*print-escape* nil)) (prin1-to-string object))))
+
+(defun %leaked (text)
+  (remove-if-not (lambda (s) (search s text))
+                 '("SECRET-auth-111" "SECRET-goog-222" "SECRET-api-333" "SECRET-cookie-444"
+                   "SECRET-custom-555" "SECRET-query-666" "SECRET-pass-777" "SECRET-body-888")))
+
+(test a-printed-request-hides-every-header-value
+  "Every header's value is hidden, not only known ones: X-Custom-Token stands for a provider's own
+key header. The names stay, so a reader can see which headers were sent."
+  (let ((req (%secret-request :url "https://api.example.com/v1/images")))
+    (dolist (text (%printings req))
+      (is (null (%leaked text)) "~S in ~A" (%leaked text) text)
+      (is (search "authorization=<hidden>" text) "~A" text)
+      (is (search "x-goog-api-key=<hidden>" text) "~A" text)
+      (is (search "X-Custom-Token=<hidden>" text) "~A" text)
+      (is (search "https://api.example.com/v1/images" text) "the URL is shown: ~A" text)
+      (is (search "POST" text)))))
+
+(test a-printed-request-hides-query-values-the-user-part-and-the-body
+  (let ((req (%secret-request :url "https://user:SECRET-pass-777@api.example.com/v1/x?key=SECRET-query-666&model=fast"
+                              :content "{\"prompt\":\"SECRET-body-888\"}")))
+    (dolist (text (%printings req))
+      (is (null (%leaked text)) "~S in ~A" (%leaked text) text)
+      (is (search "https://<hidden>@api.example.com/v1/x?key=<hidden>&model=<hidden>" text) "~A" text)
+      (is (search "body: 28 characters" text) "the body's size, not the body: ~A" text)))
+  (is (search "body: 3 bytes" (prin1-to-string (http:make-request :url "https://x.example" :content (make-array 3 :element-type '(unsigned-byte 8))))))
+  (is (search "body: 2 fields" (prin1-to-string (http:make-request :url "https://x.example" :content '(("a" . "SECRET-body-888") ("b" . "2"))))))
+  (is (null (%leaked (prin1-to-string (http:make-request :url "https://x.example" :content '(("a" . "SECRET-body-888")))))))
+  (is (string= "#<AION/HTTP-CLIENT:REQUEST GET https://x.example>"
+               (let ((*package* (find-package :cl-user))) (prin1-to-string (http:make-request :url "https://x.example"))))
+      "the control: a request with nothing to hide prints its method and URL"))
+
+(defun %fail-holding (req)
+  "Signal while REQ is this frame's argument, as SEND-REQUEST's frames hold it while a request is
+sent."
+  (declare (optimize (debug 2)))
+  (when (http:request-p req)
+    (error "the transport failed"))
+  req)
+
+(test a-backtrace-through-a-frame-holding-a-request-shows-no-secret
+  "A debugger or a logged backtrace prints each frame's arguments; a request among them used to
+print with its headers."
+  (let ((trace (with-output-to-string (out)
+                 (handler-case
+                     (handler-bind ((error (lambda (c) (declare (ignore c))
+                                             (sb-debug:print-backtrace :stream out :count 30))))
+                       (%fail-holding (%secret-request :url "https://api.example.com/v1/x?key=SECRET-query-666")))
+                   (error () nil)))))
+    (is (search "%FAIL-HOLDING" trace) "the frame is in the backtrace")
+    (is (search "REQUEST POST" trace)
+        "precondition: the request is printed in it, so the next check is not vacuous: ~A"
+        (subseq trace 0 (min 600 (length trace))))
+    (is (null (%leaked trace)) "~S in the backtrace" (%leaked trace))))
+
+;;; --- a body of octets with a multipart type arrives as sent (#828) ---------------------
+
+(defun %multipart-octets (boundary)
+  "A multipart/form-data body with a text field and a binary file part, encoded by hand."
+  (flet ((text (control &rest args)
+           (sb-ext:string-to-octets (apply #'format nil control args) :external-format :utf-8)))
+    (let ((crlf (format nil "~C~C" #\Return #\Linefeed)))
+      (concatenate '(vector (unsigned-byte 8))
+                   (text "--~A~A" boundary crlf)
+                   (text "Content-Disposition: form-data; name=\"prompt\"~A~A" crlf crlf)
+                   (text "a red kite~A--~A~A" crlf boundary crlf)
+                   (text "Content-Disposition: form-data; name=\"image\"; filename=\"kite.png\"~A"
+                         crlf)
+                   (text "Content-Type: image/png~A~A" crlf crlf)
+                   (coerce '(137 80 78 71 13 10 26 10 0 255 254 1) '(vector (unsigned-byte 8)))
+                   (text "~A--~A--~A" crlf boundary crlf)))))
+
+(defun %send-and-capture (content content-type)
+  "Send CONTENT with CONTENT-TYPE through the real client to a local server; return the
+request the server read."
+  (aion/test-http:with-server
+      (server (lambda (request stream) (declare (ignore request))
+                (aion/test-http:write-response stream 200 '() "ok")))
+    (http:send-request (http:make-request :method :post
+                                          :url (aion/test-http:server-url server "/edits")
+                                          :headers (list (cons "Content-Type" content-type))
+                                          :content content :read-timeout 10)
+                       (list (http:ensure-2xx)))
+    (first (aion/test-http:server-requests server))))
+
+(test multipart-octets-arrive-as-sent
+  "A body the caller encoded as multipart/form-data reaches the server byte for byte, and its
+Content-Type value is the one given (#828). Dexador's usocket backend would otherwise rebuild the
+body from an alist and fail on these octets; this test is what notices if a dexador update
+changes that check. The control sends octets of another type, whose header is untouched."
+  (let* ((boundary "hermes-Kq7xV2-boundary")
+         (body (%multipart-octets boundary))
+         (type (format nil "multipart/form-data; boundary=~A" boundary))
+         (got (%send-and-capture body type))
+         (header (aion/test-http:request-header got "Content-Type")))
+    (is (equalp body (aion/test-http:request-body got)) "the body arrives byte for byte")
+    (is (string= type (string-trim " " header))
+        "the Content-Type value is the one given: ~S" header)
+    (is (search (format nil "boundary=~A" boundary) (aion/test-http:request-head got))
+        "with the caller's boundary, not one of dexador's"))
+  (let* ((body (coerce '(1 2 3 4) '(vector (unsigned-byte 8))))
+         (got (%send-and-capture body "application/octet-stream")))
+    (is (equalp body (aion/test-http:request-body got)))
+    (is (search (format nil "Content-Type: application/octet-stream~C" #\Return)
+                (aion/test-http:request-head got))
+        "the control: another type is sent exactly, with no added space")))
+
+(test the-multipart-workaround-applies-only-where-dexador-needs-it
+  (flet ((sent-type (content type)
+           (let ((req (http:make-request :url "https://x.example" :content content
+                                         :headers (list (cons "Content-Type" type)))))
+             (cdr (assoc "Content-Type" (http::%dex-headers req) :test #'string-equal)))))
+    (let ((octets (coerce '(1 2) '(vector (unsigned-byte 8))))
+          (form "multipart/form-data; boundary=x"))
+      #-os-windows
+      (progn
+        (is (string= (concatenate 'string " " form) (sent-type octets form)))
+        (is (string= " Multipart/Mixed; boundary=x"
+                     (sent-type octets "Multipart/Mixed; boundary=x"))
+            "in any case"))
+      #+os-windows
+      (is (string= form (sent-type octets form))
+          "WinHTTP sends octets as given, so Windows' header is unchanged")
+      (is (string= "application/json" (sent-type octets "application/json"))
+          "only a multipart type")
+      (is (string= "multipart/form-data" (sent-type "a string body" "multipart/form-data"))
+          "only a body of octets: dexador's own multipart handling of other bodies is left alone")
+      (is (string= "multipart/form-data"
+                   (sent-type '(("field" . "value")) "multipart/form-data"))))))
