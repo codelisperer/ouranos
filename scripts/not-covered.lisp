@@ -14,7 +14,7 @@
 
 (defpackage #:ouranos-not-covered
   (:use #:cl)
-  (:export #:print-not-covered #:missing-backend-reports))
+  (:export #:print-not-covered #:missing-backend-reports #:unattributed-backend-reports))
 
 (in-package #:ouranos-not-covered)
 
@@ -58,6 +58,16 @@ excused by OURANOS_ALLOW_NO_CREDENTIAL_STORE, is listed the same way (#357)."
         (format t "  off     ~a in ~a~34t~a~%" backend suite reason)
         (format t "          ~a excused it. Its ~a checks did not run and are NOT in the total below.~%"
                 variable backend)))))
+
+(defun unattributed-backend-reports (coverage)
+  "The problems with COVERAGE, an alist of (backend . value) from a suite's BACKEND-CHECKS
+lines, whose backend name is NIL: checks a per-backend counter recorded with no backend
+bound, one string for each. Such checks belong to no backend, so they are evidence for none,
+and they mean an assertion ran outside the macro that names the backend. mnemosyne/tests
+printed BACKEND-CHECKS NIL 2 for a SQLite-only test that used IS* outside WITH-EACH-BACKEND."
+  (loop for (backend . value) in coverage
+        when (string-equal backend "NIL")
+          collect (format nil "printed BACKEND-CHECKS NIL ~a: ~a checks were counted under no backend, so an assertion ran outside the form that names its backend" value value)))
 
 (defun missing-backend-reports (suite host coverage required)
   "The problems with SUITE, run on HOST, whose output gave COVERAGE (an alist of (backend . value)
