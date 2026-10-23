@@ -843,6 +843,40 @@ does not leave STOP waiting out the 45 ms in real time."
     (sb-thread:signal-semaphore gate)
     (is (eq :stopped (s:stop a :timeout 5)))))
 
+(test stop-passes-no-negative-timeout-when-its-deadline-passes-between-two-readings
+  "#882. STOP's drain loop checks that time is left, then takes the lock and reads the clock again
+for the wait's timeout. When the deadline passed between those two readings, the timeout was below
+zero and CONDITION-WAIT signalled a TYPE-ERROR; Windows CI saw -1.8e-5.
+
+*STOP-CLOCK* gives STOP its first two readings, the deadline and the loop's check, at the start
+time, and every later reading one internal time unit past the deadline, so the wait's timeout
+would be negative on every run and every platform, with no timing involved. No driver is started,
+so STOP reads the clock first in the loop. STOP must return :TIMED-OUT with the running job's key
+and signal nothing."
+  (let* ((store (make-instance 'gated-store)) (clock (s:make-manual-clock +t0+))
+         (gate (sb-thread:make-semaphore))
+         (a (s:make-scheduler store :clock clock :lease-seconds 300))
+         (start (get-internal-real-time))
+         (readings 0)
+         (stop-clock (lambda ()
+                       (if (<= (incf readings) 2)
+                           start
+                           (+ start (* 30 internal-time-units-per-second) 1)))))
+    (s:define-job a "slow" (lambda (ctx) (declare (ignore ctx))
+                             (sb-thread:wait-on-semaphore gate) nil)
+                  :schedule '(:every 600))
+    (s:clock-advance clock 600)
+    (s:tick a)
+    (multiple-value-bind (result keys)
+        (handler-case (let ((s::*stop-clock* stop-clock)) (s:stop a :timeout 30))
+          (error (e) (values e nil)))
+      (is (eq :timed-out result) "STOP returned ~S" result)
+      (is (equal '("slow") keys) "the running job is named: ~S" keys))
+    (is (> readings 2) "STOP read the clock past its deadline, so the case was reached: ~D readings"
+        readings)
+    (sb-thread:signal-semaphore gate)
+    (is (eq :stopped (s:stop a :timeout 5)))))
+
 (test stop-gives-up-on-a-lease-renewal-at-its-timeout
   (let* ((store (make-instance 'gated-store)) (clock (s:make-manual-clock +t0+))
          (gate (sb-thread:make-semaphore))
