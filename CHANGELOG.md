@@ -633,6 +633,27 @@ its tag.
   the total, and the state with its page clamped. `hyperion/http` gains `query-string-with`
   and `htmx-request-p`. See `hyperion/docs/list.md`.
 
+- **mnemosyne/query: LIKE and ILIKE take an escape character, and `like-contains` builds a search
+  pattern from user text** (#862). `(:like :name pattern :escape "\\")` (Lisp source, a
+  one-backslash string) renders `name LIKE ? ESCAPE ?`, with the escape character bound as a
+  parameter like the pattern, and `:ilike` takes `:escape` the same way. The escape must be
+  exactly one character, not `%` or `_` (which would make the escape itself a wildcard) and
+  not a control character, or the query signals `invalid-identifier`.
+  - `(mnemosyne/query:like-contains text)` returns `%`, the text with its `%`, `_` and escape
+    character escaped, and `%`.
+  - `like-escape` escapes without adding the `%`.
+  - Both take `:escape`, the backslash by default, and refuse the same escapes as the
+    operator.
+
+  Before, there was no way to write `ESCAPE`. SQLite has no default escape character, so a
+  user's `%` or `_` in a search term was always a wildcard there, while the same pattern on
+  Postgres, whose default is the backslash, was not. An app that searched with
+  `(format nil "%~A%" q)` can use `(:like col (like-contains q) :escape "\\")`, and `%`, `_`
+  and the escape character in `q` then match only themselves on both. Case still differs:
+  SQLite's LIKE ignores the case of ASCII letters and Postgres's does not. For the same
+  matches on both, compare `(:lower col)` with `(:lower (like-contains q))`, keeping in mind
+  that each backend's LOWER folds its own set of characters.
+
 - **hades/credentials: ask whether a credential store is available, and its name, without
   trying an operation** (#824). `hades/credentials:credential-store-available-p` (`&key
   service`) is true when this system has a usable store and NIL otherwise, with a reason as a

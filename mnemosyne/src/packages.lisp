@@ -218,7 +218,10 @@
   ;; taking a branch meant for the other.
   (:export #:sql #:fetch #:run #:parse #:*dialect*
            ;; identifiers and directions are checked before they are written into SQL (#860)
-           #:invalid-identifier #:invalid-identifier-text #:invalid-identifier-expected #:invalid-identifier-clause
+           #:invalid-identifier #:invalid-identifier-text #:invalid-identifier-expected
+           #:invalid-identifier-clause
+           ;; LIKE patterns that match a user's %, _ and backslash literally (#862)
+           #:like-escape #:like-contains
            #:+vector-distance-ops+ #:vector-distance-opclass
            #:*warn-unindexed-vector-distance* #:unindexed-vector-distance
            #:unindexed-vector-distance-operator #:unindexed-vector-distance-opclass))

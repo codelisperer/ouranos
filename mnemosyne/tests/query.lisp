@@ -468,3 +468,37 @@ EXISTS (SELECT 1 ...)."
     (is (eq :returning (clause-of '(:delete-from :t :returning ("a b")))))
     (is (search "in order-by" (handler-case (q:sql '(:select (:id) :from (:t) :order-by ("a b")))
                                 (q:invalid-identifier (e) (princ-to-string e)))))))
+
+;;; --- LIKE with ESCAPE (#862) -------------------------------------------------------
+
+(test like-and-ilike-render-an-escape-character
+  (is (equal '("SELECT id FROM t WHERE name LIKE ? ESCAPE ?" ("%a\\%b%" "\\"))
+             (gen '(:select (:id) :from (:t) :where (:like :name "%a\\%b%" :escape "\\")))))
+  (is (equal '("SELECT id FROM t WHERE name ILIKE ? ESCAPE ?" ("%a!%%" "!"))
+             (gen '(:select (:id) :from (:t) :where (:ilike :name "%a!%%" :escape #\!))
+                  :dialect :postgres)))
+  (is (equal '("SELECT id FROM t WHERE name LIKE ?" ("%a%"))
+             (gen '(:select (:id) :from (:t) :where (:like :name "%a%"))))
+      "control: without :escape, nothing is added"))
+
+(test an-escape-that-is-not-one-safe-character-is-refused
+  "% or _ as the escape would make the escape character a wildcard: like-contains of \"ab\"
+with :escape #\\% gave \"%ab%\", which Postgres refuses and SQLite does not match."
+  (dolist (escape (list "" "ab" "%" #\% "_" #\_ 5 (code-char 0) (string (code-char 7))))
+    (signals q:invalid-identifier
+      (q:sql `(:select (:id) :from (:t) :where (:like :name "%a%" :escape ,escape)))
+      "~S" escape)
+    (signals q:invalid-identifier (q:like-contains "ab" :escape escape) "like-contains ~S" escape))
+  ;; Bound, so a quote or a non-ASCII escape character needs no quoting and is accepted.
+  (dolist (escape (list "'" "é" #\!))
+    (finishes (q:sql `(:select (:id) :from (:t) :where (:like :name "%a%" :escape ,escape))))))
+
+(test like-with-escape-round-trips
+  (is (rt '(:select (:id) :from (:t) :where (:like :name "%a\\%b%" :escape "\\"))))
+  (is (rt '(:select (:id) :from (:t) :where (:and (:like :name "x%" :escape "!") (:= :id 1))))))
+
+(test like-escape-and-like-contains-escape-the-wildcards-and-the-escape
+  (is (string= "50\\%\\_off\\\\x" (q:like-escape "50%_off\\x")))
+  (is (string= "%50!%!_off!!%" (q:like-contains "50%_off!" :escape #\!)))
+  (is (string= "%plain%" (q:like-contains "plain")))
+  (is (string= "%%" (q:like-contains ""))))
