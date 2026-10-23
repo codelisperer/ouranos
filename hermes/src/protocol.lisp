@@ -22,6 +22,19 @@
 (defclass telegram-provider (provider) ()
   (:documentation "A provider that can deliver TELEGRAM-MESSAGEs (#778)."))
 
+(defclass facebook-provider (provider) ()
+  (:documentation "A provider that can deliver FACEBOOK-POSTs to Facebook Pages (#822)."))
+
+(defgeneric facebook-page-health (provider page)
+  (:documentation "Whether PROVIDER can post to the Facebook Page PAGE (its id), for an admin
+screen (#822). Returns two values: a status and the Page's name when Facebook gave it. STATUS is
+:CONNECTED, :RECONNECT (the Page token no longer works, or lacks pages_manage_posts: send an
+admin through the connect flow again), :NOT-PERMITTED (the token works but may not post to this
+Page), :WRONG-PAGE (the token stored for PAGE belongs to another Page), :NOT-FOUND (no such
+Page, or the token cannot see it), or :NOT-CONNECTED (no token is stored for PAGE). A PAGE that
+is not a Page id signals INVALID-MESSAGE; a rate limit or a network failure is signalled, not
+answered."))
+
 (defgeneric deliver (provider message)
   (:documentation "Deliver MESSAGE (an EMAIL or SMS) via PROVIDER. Returns a DELIVERY-RESULT
 on success; signals DELIVERY-FAILURE on a rejected/failed request, UNSUPPORTED-MESSAGE if the
@@ -78,6 +91,7 @@ bot has a webhook set."))
 ;;; HERMES_EMAIL_IMPL picks the email backend (default "sendgrid");
 ;;; HERMES_SMS_IMPL   picks the SMS backend  (default "twilio");
 ;;; HERMES_TELEGRAM_IMPL picks the Telegram backend (default "telegram");
+;;; HERMES_FACEBOOK_IMPL picks the Facebook Page backend (default "facebook");
 ;;; HERMES_TRANSPORT=dev|log forces the dev transport for every channel (local dev).
 ;;; A backend registers a no-arg constructor thunk under its name; adding a vendor is a new
 ;;; class + one REGISTER-IMPL, with the selection layer staying neutral.
@@ -89,7 +103,8 @@ bot has a webhook set."))
   (format nil "~(~A~)/~(~A~)" channel name))
 
 (defun register-impl (channel name constructor)
-  "Register CONSTRUCTOR (a thunk returning a fresh provider) for CHANNEL (:email, :sms or :telegram)
+  "Register CONSTRUCTOR (a thunk returning a fresh provider) for CHANNEL (:email, :sms, :telegram
+or :facebook)
 under NAME (a string). Returns NAME."
   (setf (gethash (%impl-key channel name) *impls*) constructor)
   name)
@@ -122,17 +137,26 @@ else DEFAULT-NAME."
   "The Telegram provider named by HERMES_TELEGRAM_IMPL (default \"telegram\"; \"dev\" under HERMES_TRANSPORT)."
   (%make-impl :telegram "telegram" "HERMES_TELEGRAM_IMPL"))
 
+(defun facebook-provider-from-env ()
+  "The Facebook Page provider named by HERMES_FACEBOOK_IMPL (default \"facebook\"; \"dev\" under
+HERMES_TRANSPORT) (#822)."
+  (%make-impl :facebook "facebook" "HERMES_FACEBOOK_IMPL"))
+
 (defun send (message)
   "Deliver MESSAGE via the env-configured provider for its channel (EMAIL -> email provider,
-SMS -> sms provider, TELEGRAM-MESSAGE -> Telegram provider). The everyday entry point: no
+SMS -> sms provider, TELEGRAM-MESSAGE -> Telegram provider, FACEBOOK-POST -> Facebook
+provider). The everyday entry point: no
 explicit provider needed. Logs the attempt at :debug and any DELIVERY-FAILURE at :error (quiet
 at default levels; see aion/log). The lines carry the channel, the provider, the status and the
 provider's message id, never the message's text or recipient."
-  (let* ((channel (etypecase message (email :email) (sms :sms) (telegram-message :telegram)))
+  (let* ((channel (etypecase message
+                    (email :email) (sms :sms) (telegram-message :telegram)
+                    (facebook-post :facebook)))
          (provider (ecase channel
                      (:email (email-provider-from-env))
                      (:sms (sms-provider-from-env))
-                     (:telegram (telegram-provider-from-env)))))
+                     (:telegram (telegram-provider-from-env))
+                     (:facebook (facebook-provider-from-env)))))
     (log:debug "hermes: sending" :channel channel :provider (class-name (class-of provider)))
     (handler-bind
         ((delivery-failure

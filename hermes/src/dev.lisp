@@ -9,13 +9,15 @@
 
 (cl:in-package #:hermes)
 
-(defclass dev-transport (email-provider sms-provider telegram-provider)
+(defclass dev-transport (email-provider sms-provider telegram-provider facebook-provider)
   ((stream :initarg :stream :initform *standard-output* :reader dev-stream)
    (last-email :initform nil :accessor dev-last-email)
-   (last-telegram :initform nil :accessor dev-last-telegram))
+   (last-telegram :initform nil :accessor dev-last-telegram)
+   (last-facebook :initform nil :accessor dev-last-facebook))
   (:documentation "A transport that RENDERS a message to a stream instead of sending it.
 DEV-LAST-EMAIL is the last EMAIL it was given, so a test can read what would have been sent,
-its attachments included (#366). DEV-LAST-TELEGRAM is the last TELEGRAM-MESSAGE (#778)."))
+its attachments included (#366). DEV-LAST-TELEGRAM is the last TELEGRAM-MESSAGE (#778), and
+DEV-LAST-FACEBOOK the last FACEBOOK-POST (#822)."))
 
 (defun make-dev-transport (&rest initargs &key stream)
   "A dev/log transport. STREAM defaults to *standard-output*."
@@ -112,6 +114,21 @@ TELEGRAM-MESSAGE sent, so it is recognised by its provider."
   (declare (ignore confirm))
   '())
 
+(defmethod deliver ((p dev-transport) (m facebook-post))
+  (setf (dev-last-facebook p) m)
+  (%dev-render (dev-stream p) "FACEBOOK POST"
+               (list "Page:" (facebook-post-page m)
+                     "Link:" (facebook-post-link m)
+                     "Image:" (facebook-post-image-url m)
+                     "Body:" (facebook-post-message m)))
+  (make-delivery-result :provider :dev :id (%dev-id) :status :logged
+                        :destination (facebook-post-page m) :raw m))
+
+(defmethod facebook-page-health ((p dev-transport) page)
+  "The dev transport posts nowhere, so every Page reads as connected."
+  (values :connected (format nil "dev Page ~A" page)))
+
 (register-impl :email "dev" (lambda () (make-dev-transport)))
 (register-impl :sms   "dev" (lambda () (make-dev-transport)))
 (register-impl :telegram "dev" (lambda () (make-dev-transport)))
+(register-impl :facebook "dev" (lambda () (make-dev-transport)))
