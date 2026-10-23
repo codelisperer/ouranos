@@ -218,10 +218,19 @@ none sets `OURANOS_ALLOW_NO_CREDENTIAL_STORE`. The `hades/credentials` live test
 Credential Manager, Keychain or Secret Service keyring of whoever runs them, so on a developer's
 machine they are opt-in (#357, [contributing.md](contributing.md)). On the Linux leg and the
 release-mode job, the gate runs through `scripts/with-secret-service.sh`, which starts a private
-session bus and a new GNOME Keyring unlocked with a random password that is never printed; the
-step before it installs `dbus`, `gnome-keyring` and `libsecret-1-0`. A runner's store is thrown away with the runner, so
-CI always opts in, and a leg where they were skipped fails the gate the way a skipped Postgres
-does.
+session bus and a new GNOME Keyring unlocked with a random password that is never printed. A
+runner's store is thrown away with the runner, so CI always opts in, and a leg where they were
+skipped fails the gate the way a skipped Postgres does.
+
+**The Linux jobs install their apt packages in one step with bounded waits** (#507). The
+"Linux packages" step runs `scripts/ci-apt-install.sh`, which installs the webview launcher's
+build tools (`g++`, `pkg-config`, and WebKitGTK 4.1, or 4.0 when the mirror lacks 4.1) and what
+`scripts/with-secret-service.sh` needs (`dbus`, `gnome-keyring`, `libsecret-1-0`). apt-get
+stalled on the Ubuntu mirror three times in about 26 hours, each time until the job's limit
+cancelled it. Now every apt-get has `Acquire::Retries`, connection timeouts and a lock timeout,
+runs under an outer `timeout`, and is retried up to three times. The step's `timeout-minutes:
+15` makes a stall fail that step, by name and with an error saying the mirror may be stalled,
+long before the job's limit. The step prints how long the installs took as a job notice.
 
 The port is **not** pinned to 55432 on the native legs. That number exists in
 `docker-compose.test.yml` to stop a developer's real server being shadowed or silently
