@@ -258,15 +258,41 @@ looked up, so a page cannot make this intern a symbol."
   "The first 1024 bytes of BYTES as Latin-1 text, for looking for a <meta charset>."
   (sb-ext:octets-to-string bytes :end (min 1024 (length bytes)) :external-format :latin-1))
 
+(defun %bom (bytes)
+  "The external format a byte order mark at the start of BYTES selects, and the mark's length,
+or NIL: EF BB BF is UTF-8, FE FF UTF-16BE and FF FE UTF-16LE (#823)."
+  (flet ((starts (&rest prefix)
+           (and (>= (length bytes) (length prefix))
+                (loop for b in prefix for i from 0 always (= b (aref bytes i))))))
+    (cond ((starts #xEF #xBB #xBF) (values :utf-8 3))
+          ((starts #xFE #xFF) (values :utf-16be 2))
+          ((starts #xFF #xFE) (values :utf-16le 2)))))
+
+(defun %ascii-compatible-p (format)
+  "True when FORMAT writes ASCII characters as the same single bytes ASCII does."
+  (let ((octets (ignore-errors (sb-ext:string-to-octets "<meta" :external-format format))))
+    (and octets (equalp octets (sb-ext:string-to-octets "<meta" :external-format :latin-1)))))
+
 (defun %decode (bytes headers html-p)
-  "BYTES as a string, in the charset Content-Type names, else, for HTML, the charset a <meta>
-in the first 1024 bytes names, else UTF-8 (#807). A byte the charset cannot decode becomes
-U+FFFD."
-  (let ((charset (or (let ((v (http:header-value headers "content-type")))
-                       (and (stringp v) (%charset-in v)))
-                     (and html-p (%charset-in (%head-text bytes))))))
-    (sb-ext:octets-to-string bytes :external-format (list (%external-format charset)
-                                                          :replacement #\Replacement_Character))))
+  "BYTES as a string. The charset is chosen as browsers choose it (the WHATWG encoding
+standard). A byte order mark at the start decides it, and is not part of the string (#823).
+Otherwise it is the charset Content-Type names, else, for HTML, the charset a <meta> in the first
+1024 bytes names, else UTF-8 (#807). A <meta> that names a charset in which ASCII is not one byte
+per character, such as UTF-16 or UTF-32, means UTF-8: the tag could not have been read to find it
+otherwise. A byte the charset cannot decode becomes U+FFFD."
+  (multiple-value-bind (bom-format bom-length) (%bom bytes)
+    (let ((format
+            (or bom-format
+                (let ((v (http:header-value headers "content-type")))
+                  (and (stringp v) (%charset-in v) (%external-format (%charset-in v))))
+                (let ((meta (and html-p (%charset-in (%head-text bytes)))))
+                  (and meta
+                       (let ((f (%external-format meta)))
+                         (if (%ascii-compatible-p f) f :utf-8))))
+                :utf-8)))
+      (sb-ext:octets-to-string bytes :start (or bom-length 0)
+                                     :external-format (list format
+                                                            :replacement #\Replacement_Character)))))
 
 (defun %sniffed-type (bytes)
   "For a response with no Content-Type: \"text/html\" or \"text/plain\" when its first 1024
