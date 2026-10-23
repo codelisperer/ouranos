@@ -694,6 +694,24 @@ its tag.
   `praxeon/llm` now exports `request-failure`, the #719 mapping of a failed HTTP request to
   `provider-request-failed`.
 
+- **praxeon/image: Google's Gemini API as a second image provider** (#758, part four).
+  `praxeon/image:register-google-image` takes the same arguments as `register-openai-image`;
+  `make-google-images` and `google-images-from-env` build the provider. The key is `:api-key`,
+  else `PRAXEON_GOOGLE_API_KEY`, then `GEMINI_API_KEY`; it never reads `PRAXEON_IMAGE_API_KEY`
+  or `PRAXEON_OPENAI_API_KEY`, so a key set up for OpenAI is not sent to Google. The default
+  model is `gemini-nano-banana-2.1` (`*google-image-model*`, or `PRAXEON_GOOGLE_IMAGE_MODEL`);
+  `gemini-3.1-flash-lite-image` is the low-cost model, 1K images only. Requests go to
+  `generateContent` at v1. A shape is sent as an aspect ratio and a quality as a resolution
+  (low 1K, medium 2K, high 4K), so `:qualities` also bounds resolution. Reference images are
+  sent inline, up to 14; Google takes no mask and makes one image per request, and a request
+  with a mask or `:count` above 1 is refused with `image-input-invalid`. A blocked prompt or an
+  image stopped for safety is `image-refused`; a reply with no image for another reason is the
+  new `praxeon/image:image-not-made` (`image-not-made-reason`), a `tool-error-result`.
+  `:image-usage` carries an estimated `:cost` from `*google-image-prices*` (four models, dated in
+  `upstream.sexp` as "Google image prices: MODEL") and the reply's token counts. New generic
+  functions `image-provider-max-references` and `image-provider-accepts-mask-p` say what a
+  provider takes.
+
 - **praxeon/image: edit an image, or make a variation of it, from reference images** (#758, part
   three). `praxeon/image:generate-image` takes `:references`, a list of up to 16
   `reference-image`s (`*max-references*`), and `:mask`. Make each with

@@ -193,6 +193,40 @@
  :reviewed "2026-10-20"
  :retires "2026-12-01")
 
+;;; praxeon/image's Google provider (#758). Its prices are per million tokens, from the paid
+;;; tier's Standard column on https://ai.google.dev/gemini-api/docs/pricing ("Last updated
+;;; 2026-10-22"), read on 2026-10-23.
+
+(:name "Google default image model" :category :api
+ :where ((:text "praxeon/src/image-google.lisp" "(defparameter *google-image-model* \"" "\""))
+ :upstream (:manual "https://ai.google.dev/gemini-api/docs/image-generation")
+ :reviewed "2026-10-23")
+
+(:name "Gemini API version" :category :api
+ :where ((:text "praxeon/src/image-google.lisp" "(defparameter *google-images-base-url* \"https://generativelanguage.googleapis.com/" "\""))
+ :upstream (:manual "https://ai.google.dev/gemini-api/docs/generate-content/image-generation")
+ :reviewed "2026-10-23")
+
+(:name "Google image prices: gemini-nano-banana-2.1" :category :api
+ :where ((:text "praxeon/src/image-google.lisp" "(\"gemini-nano-banana-2.1\" " ")"))
+ :upstream (:manual "https://ai.google.dev/gemini-api/docs/pricing")
+ :reviewed "2026-10-23")
+
+(:name "Google image prices: gemini-3.1-flash-image" :category :api
+ :where ((:text "praxeon/src/image-google.lisp" "(\"gemini-3.1-flash-image\" " ")"))
+ :upstream (:manual "https://ai.google.dev/gemini-api/docs/pricing")
+ :reviewed "2026-10-23")
+
+(:name "Google image prices: gemini-3.1-flash-lite-image" :category :api
+ :where ((:text "praxeon/src/image-google.lisp" "(\"gemini-3.1-flash-lite-image\" " ")"))
+ :upstream (:manual "https://ai.google.dev/gemini-api/docs/pricing")
+ :reviewed "2026-10-23")
+
+(:name "Google image prices: gemini-3-pro-image" :category :api
+ :where ((:text "praxeon/src/image-google.lisp" "(\"gemini-3-pro-image\" " ")"))
+ :upstream (:manual "https://ai.google.dev/gemini-api/docs/pricing")
+ :reviewed "2026-10-23")
+
 (:name "Twilio API version" :category :api
  :where ((:text "hermes/src/twilio.lisp" "https://api.twilio.com/" "/"))
  :upstream (:manual "https://www.twilio.com/docs/usage/api")

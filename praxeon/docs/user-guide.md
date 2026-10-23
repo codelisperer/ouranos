@@ -1213,6 +1213,48 @@ praxeon stops asking for more. Your function still reads each image it returns, 
 stored size first and return NIL for an image over 50 MB rather than reading it. Without
 `:resolve-reference` the model can only create images from a prompt, as before.
 
+**Google as the provider.** `register-google-image` takes the same arguments as
+`register-openai-image` and sends requests to Google's Gemini API:
+
+```lisp
+(praxeon/image:register-google-image
+ agent :on-image #'store-image!
+ :qualities '(:low :medium) :default-quality :low)
+```
+
+- **Key.** `:api-key`, else `PRAXEON_GOOGLE_API_KEY`, then `GEMINI_API_KEY`. The key is sent as
+  `x-goog-api-key`.
+- **Model.** The default is `gemini-nano-banana-2.1`, which Google recommends for new projects.
+  Pass `:model` or set `PRAXEON_GOOGLE_IMAGE_MODEL` for another. **`gemini-3.1-flash-lite-image`
+  is the low-cost choice**: its image output costs the same per token as the default's, its input
+  a sixth as much, and it makes 1K images only, so allow only `:low` with it.
+- **Shape and quality.** A shape is sent as an aspect ratio (square 1:1, portrait 2:3, landscape
+  3:2) and a quality as a resolution (low 1K, medium 2K, high 4K); `auto` sends neither, and
+  Google chooses. The qualities you allow therefore also bound the resolution, and with it the
+  cost. Some developers report Google ignoring the requested resolution, so check the size of
+  what arrives if it matters.
+- **What it does not take.** One image per request, up to 14 reference images (Google's page
+  allows fewer for some models), and no mask: describe in the prompt which part to change. A
+  request outside these is refused with `image-input-invalid` before anything is sent.
+- **Refusals and empty replies.** A prompt Google blocks, or an image it stops for safety, is
+  `image-refused`, with Google's reason as the code and `input` or `output` as the stage. A reply
+  with no image for another reason, such as Google's `NO_IMAGE`, is
+  `praxeon/image:image-not-made`, a `tool-error-result`, so the model is told and the turn goes
+  on.
+- **Cost.** `:image-usage` carries a `:cost` with `:estimated t`, from
+  `praxeon/image:*google-image-prices*` and the reply's token counts: image output at the image
+  rate, and text and thinking at the text rate. `upstream.sexp` dates each row
+  ("Google image prices: MODEL").
+- **Which API.** The provider uses `generateContent` at v1. Google calls that API's documentation
+  legacy and recommends its Interactions API, but only `generateContent` documents how refusals
+  arrive and how usage is split by modality.
+
+**Each provider reads only its own key variables.** The Google provider never reads
+`PRAXEON_IMAGE_API_KEY` or `PRAXEON_OPENAI_API_KEY`, so a key you set up for OpenAI is never
+sent to Google. The OpenAI provider reads `PRAXEON_IMAGE_API_KEY` and then
+`PRAXEON_OPENAI_API_KEY`; do not put a Google key in `PRAXEON_IMAGE_API_KEY`, because the OpenAI
+provider would send it to OpenAI.
+
 ## 15. Run the tests
 
 Network-free (uses a scripted provider, no API key needed):
