@@ -502,15 +502,59 @@ are that file's, read from the handle, not the replacement's."
 
 (test a-file-hard-linked-from-outside-the-root-is-served
   "On macOS, F_GETPATH on a file with two links can answer with the other one, outside the
-root. The file was opened through a path inside the root, so it is served."
+root. The file was opened through a path inside the root, so it is served. Controls: the file
+really has two links, and with the containment check refusing everything it is not served, so
+the answer comes from that check."
   #+os-windows (skip "hard links are tested on Linux and macOS")
   #-os-windows
   (with-static-root (root ("app.css" "inside"))
     (with-static-root (outside ("x.txt" "x"))
-      (let ((target (merge-pathnames "linked.css" outside)))
-        (uiop:run-program (list "ln" (sb-ext:native-namestring (merge-pathnames "app.css" root))
+      (let ((file (merge-pathnames "app.css" root))
+            (target (merge-pathnames "linked.css" outside))
+            (path-inside-p (fdefinition 'static::%path-inside-p)))
+        (uiop:run-program (list "ln" (sb-ext:native-namestring file)
                                 (sb-ext:native-namestring target)))
-        (is (%served-p root "/app.css"))))))
+        (is (= 2 (nth-value 4 (sb-unix:unix-stat (sb-ext:native-namestring file))))
+            "control: the file has two links")
+        (is (%served-p root "/app.css"))
+        (unwind-protect
+             (progn (setf (fdefinition 'static::%path-inside-p) (constantly nil))
+                    (is-false (%served-p root "/app.css")
+                              "control: refused when the containment check refuses"))
+          (setf (fdefinition 'static::%path-inside-p) path-inside-p))))))
+
+(test a-file-swapped-for-a-link-after-the-check-is-not-followed
+  "The requested file itself is replaced by a link to a file outside the root after the path
+was resolved, the final-component form of the #314 swap. On macOS the open refuses a link in
+the path (O_NOFOLLOW_ANY), and the hard-link fallback uses lstat, so neither follows it to the
+outside file (#870's review). Control: with the handle's containment check and the fallback
+made to accept anything, the same swap serves the outside file."
+  #+os-windows (skip "symbolic links need a privilege on Windows")
+  #-os-windows
+  (dolist (control '(nil t))
+    (with-static-root (root ("page.txt" "inside the root"))
+      (with-static-root (outside ("secret.txt" "outside the root"))
+        (let ((open-inside (fdefinition 'static::%open-inside))
+              (path-inside-p (fdefinition 'static::%path-inside-p))
+              (page (merge-pathnames "page.txt" root)))
+          (unwind-protect
+               (progn
+                 (setf (fdefinition 'static::%open-inside)
+                       (lambda (file root-real)
+                         (delete-file page)
+                         (uiop:run-program (list "ln" "-s" (sb-ext:native-namestring
+                                                            (merge-pathnames "secret.txt" outside))
+                                                 (sb-ext:native-namestring page)))
+                         (funcall open-inside file root-real)))
+                 (when control
+                   (setf (fdefinition 'static::%path-inside-p) (constantly t)))
+                 (let ((r (static:file-response root "/page.txt")))
+                   (if control
+                       (is (and r (string= "outside the root" (%body-text (third r))))
+                           "control: without the containment check the outside file is served")
+                       (is (null r) "the outside file was served: ~S" (and r (%body-text (third r)))))))
+            (setf (fdefinition 'static::%open-inside) open-inside
+                  (fdefinition 'static::%path-inside-p) path-inside-p)))))))
 
 (test windows-device-names-are-refused
   "Windows opens CON, NUL, COM1 and the rest as devices in any directory and with any extension."
@@ -518,6 +562,10 @@ root. The file was opened through a path inside the root, so it is served."
   (is (static::%windows-device-name-p "NUL.txt"))
   (is (static::%windows-device-name-p "con. "))
   (is (static::%windows-device-name-p "com1.css"))
+  (is (static::%windows-device-name-p "COM0"))
+  (is (static::%windows-device-name-p "lpt0.txt"))
+  (is (static::%windows-device-name-p (format nil "COM~C" (code-char #xB9))))
+  (is (static::%windows-device-name-p (format nil "lpt~C.txt" (code-char #xB3))))
   (is (not (static::%windows-device-name-p "console.css")))
   (is (not (static::%windows-device-name-p "app.css")))
   #+os-windows

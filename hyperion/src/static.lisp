@@ -133,7 +133,9 @@ device is refused before anything is opened."
   (unless (%windows-device-name-p (file-namestring file))
     (let ((mtime (ignore-errors (file-write-date file)))
           (size  (ignore-errors (with-open-file (s file :element-type '(unsigned-byte 8))
-                                  (file-length s)))))
+                                  ;; A handle that is not a file on disk measures nothing.
+                                  (and #+win32 (%win32-disk-file-p (sb-sys:fd-stream-fd s))
+                                       (file-length s))))))
       (when (and mtime size)
         (%etag-of mtime size)))))
 
@@ -309,13 +311,21 @@ no read permission (#687).")
   "O_NONBLOCK: opening a FIFO for reading returns at once instead of waiting for a writer.")
 
 #+(or linux darwin)
-(defun %set-blocking (fd)
-  "Clear O_NONBLOCK on FD (fcntl F_GETFL is 3 and F_SETFL is 4 on Linux and macOS)."
-  (let ((fcntl (sb-alien:extern-alien "fcntl" (function sb-alien:int sb-alien:int sb-alien:int
-                                                        sb-alien:int))))
-    (let ((flags (sb-alien:alien-funcall fcntl fd 3 0)))
-      (when (>= flags 0)
-        (sb-alien:alien-funcall fcntl fd 4 (logandc2 flags +o-nonblock+))))))
+(defconstant +o-cloexec+ #+linux #o2000000 #+darwin #x1000000
+  "O_CLOEXEC: the descriptor is not inherited by a program the server starts.")
+
+#+darwin
+(defconstant +o-nofollow-any+ #x20000000
+  "macOS's O_NOFOLLOW_ANY (macOS 11 and later): the open fails if any component of the path is
+a symbolic link. The path opened is a truename, so none of its components is a link unless one
+was swapped in after it was resolved.")
+
+;; O_NONBLOCK stays set on the read descriptor. It changes nothing for reads of a regular file,
+;; which is the only kind that is read, and clearing it would need fcntl, whose C prototype is
+;; variadic and so cannot be declared portably to SB-ALIEN (#870's review).
+
+(defvar *proc-missing-logged* nil
+  "Whether the absence of /proc/self/fd has been logged; it is logged once per process.")
 
 #+(or linux darwin)
 (defun %fd-stat (fd)
@@ -412,9 +422,14 @@ counts 100-nanosecond intervals since 1601-01-01, which is 9435484800 seconds be
       (- (floor ft 10000000) 9435484800))))
 
 (defparameter +windows-device-names+
-  '("CON" "PRN" "AUX" "NUL" "CONIN$" "CONOUT$"
-    "COM1" "COM2" "COM3" "COM4" "COM5" "COM6" "COM7" "COM8" "COM9"
-    "LPT1" "LPT2" "LPT3" "LPT4" "LPT5" "LPT6" "LPT7" "LPT8" "LPT9")
+  (append '("CON" "PRN" "AUX" "NUL" "CONIN$" "CONOUT$"
+            "COM0" "COM1" "COM2" "COM3" "COM4" "COM5" "COM6" "COM7" "COM8" "COM9"
+            "LPT0" "LPT1" "LPT2" "LPT3" "LPT4" "LPT5" "LPT6" "LPT7" "LPT8" "LPT9")
+          ;; COM and LPT followed by a superscript one, two or three, which Windows also opens
+          ;; as devices. Built from code points so the source file stays ASCII.
+          (loop for stem in '("COM" "LPT")
+                append (loop for code in '(#xB9 #xB2 #xB3)
+                             collect (format nil "~A~C" stem (code-char code)))))
   "Names Windows opens as a device in any directory and with any extension: nul.txt is NUL.")
 
 (defun %windows-device-name-p (name)
@@ -452,9 +467,11 @@ device file runs that device's open. So:
 - Linux opens the path with O_PATH, which does neither, checks with fstat that it is a regular
   file and with its handle that it is inside the root, and only then opens it for reading
   through /proc/self/fd, which reaches the same file and cannot be swapped.
-- macOS refuses a path that stat says is not a regular file before opening it, opens with
-  O_NONBLOCK so a FIFO swapped in at that moment does not block, and checks the handle with
-  fstat. A device swapped in between the stat and the open is still opened there.
+- macOS refuses a path that lstat says is not a regular file before opening it, and opens with
+  O_NOFOLLOW_ANY, so a link swapped into the path fails the open (ELOOP) instead of being
+  followed, and with O_NONBLOCK, so a FIFO swapped in does not block; fstat checks the handle.
+  What remains is a device node made inside the root between the lstat and the open, which
+  only the superuser can make.
 - Windows refuses a name it opens as a device (con, nul.txt, com1, ...) and a handle that
   GetFileType does not report as a file on disk.
 
@@ -462,7 +479,7 @@ THE SIZE AND TIME COME FROM THE HANDLE, so an ETag cannot pair the bytes that ar
 the time of a file that replaced them after the open."
   (let ((native (sb-ext:native-namestring file)))
     #+linux
-    (let ((pfd (sb-unix:unix-open native +o-path+ 0)))
+    (let ((pfd (sb-unix:unix-open native (logior +o-path+ +o-cloexec+) 0)))
       (when pfd
         (unwind-protect
              (multiple-value-bind (type size mtime dev ino) (%fd-stat pfd)
@@ -471,26 +488,38 @@ the time of a file that replaced them after the open."
                  (when (and real root-real (%path-inside-p real root-real))
                    (let ((fd (sb-unix:unix-open (format nil "/proc/self/fd/~D" pfd)
                                                 (logior sb-unix:o_rdonly +o-nonblock+
-                                                        sb-unix:o_noctty)
+                                                        sb-unix:o_noctty +o-cloexec+)
                                                 0)))
-                     (when fd
-                       (%finish-open fd real dev ino))))))
+                     (if fd
+                         (%finish-open fd real dev ino)
+                         (progn
+                           (unless (or *proc-missing-logged* (probe-file "/proc/self/fd/"))
+                             (setf *proc-missing-logged* t)
+                             (log:warn "static: /proc/self/fd is not available, so no static file can be served"))
+                           nil))))))
           (sb-unix:unix-close pfd))))
     #+darwin
-    (multiple-value-bind (ok sdev sino mode) (sb-unix:unix-stat native)
+    ;; LSTAT, and an open that refuses a link anywhere in the path: NATIVE is a truename, so a
+    ;; link in it was swapped in after the check, and following it is what #314 forbids.
+    (multiple-value-bind (ok sdev sino mode) (sb-unix:unix-lstat native)
       (declare (ignore sdev sino))
       (when (and ok (%regular-p (logand mode sb-unix:s-ifmt)))
-        (let ((fd (sb-unix:unix-open native (logior sb-unix:o_rdonly +o-nonblock+ sb-unix:o_noctty)
+        (let ((fd (sb-unix:unix-open native (logior sb-unix:o_rdonly +o-nonblock+ sb-unix:o_noctty
+                                                    +o-cloexec+ +o-nofollow-any+)
                                      0)))
           (when fd
-            (multiple-value-bind (type size mtime dev ino) (%fd-stat fd)
-              (declare (ignore size mtime))
-              (let ((real (and (%regular-p type) (ignore-errors (%fd-path fd)))))
-                (if (and real root-real
-                         (or (%path-inside-p real root-real)
-                             (%same-file-inside-p native dev ino root-real)))
-                    (%finish-open fd real dev ino)
-                    (progn (sb-unix:unix-close fd) nil))))))))
+            (let ((passed nil))
+              (unwind-protect
+                   (multiple-value-bind (type size mtime dev ino) (%fd-stat fd)
+                     (declare (ignore size mtime))
+                     (let ((real (and (%regular-p type) (ignore-errors (%fd-path fd)))))
+                       (when (and real root-real
+                                  (or (%path-inside-p real root-real)
+                                      (%same-file-inside-p native dev ino root-real)))
+                         (setf passed t)
+                         (%finish-open fd real dev ino))))
+                ;; %FINISH-OPEN owns FD once it is called; before that, FD is closed here.
+                (unless passed (sb-unix:unix-close fd))))))))
     #+win32
     (unless (%windows-device-name-p (file-namestring file))
       (let ((stream (ignore-errors
@@ -508,26 +537,34 @@ the time of a file that replaced them after the open."
 
 #+darwin
 (defun %same-file-inside-p (native dev ino root-real)
-  "Whether NATIVE, the in-root path that was opened, still names the file with DEV and INO.
-F_GETPATH on a file with several hard links can answer with another link's path, which may be
-outside the root (#687); the file is still the one reached by a path inside it."
-  (multiple-value-bind (ok sdev sino) (sb-unix:unix-stat native)
-    (and ok (eql sdev dev) (eql sino ino) (%path-inside-p native root-real))))
+  "Whether NATIVE, the in-root path that was opened, names the file with DEV and INO, which has
+more than one hard link. F_GETPATH on such a file can answer with another link's path, which may
+be outside the root (#687); the file is still the one reached by a path inside it. LSTAT, so a
+link swapped in for NATIVE is not followed to the same outside file (#870's review); the open
+already refused links, and this does not rely on that."
+  (multiple-value-bind (ok sdev sino mode nlink) (sb-unix:unix-lstat native)
+    (and ok (%regular-p (logand mode sb-unix:s-ifmt)) (> nlink 1)
+         (eql sdev dev) (eql sino ino) (%path-inside-p native root-real))))
 
 #+(or linux darwin)
 (defun %finish-open (fd real dev ino)
   "Make the stream for FD, which was opened for reading, once fstat confirms it is still the
 regular file DEV / INO. Returns the stream, REAL, and the size and time from fstat; NIL, with FD
 closed, otherwise."
-  (%set-blocking fd)
-  (when *after-open-hook* (funcall *after-open-hook*))
-  (multiple-value-bind (type size mtime fdev fino) (%fd-stat fd)
-    (if (and (%regular-p type) (eql fdev dev) (eql fino ino))
-        (values (sb-sys:make-fd-stream fd :input t :element-type '(unsigned-byte 8)
-                                          :buffering :full :auto-close t
-                                          :file real :pathname (sb-ext:parse-native-namestring real))
-                real size mtime)
-        (progn (sb-unix:unix-close fd) nil))))
+  (let ((handed-over nil))
+    (unwind-protect
+         (progn
+           (when *after-open-hook* (funcall *after-open-hook*))
+           (multiple-value-bind (type size mtime fdev fino) (%fd-stat fd)
+             (when (and (%regular-p type) (eql fdev dev) (eql fino ino))
+               (let ((stream (sb-sys:make-fd-stream fd :input t :element-type '(unsigned-byte 8)
+                                                       :buffering :full :auto-close t
+                                                       :file real
+                                                       :pathname (sb-ext:parse-native-namestring real))))
+                 (setf handed-over t)
+                 (values stream real size mtime)))))
+      ;; Until the stream owns FD, anything that unwinds closes it here.
+      (unless handed-over (sb-unix:unix-close fd)))))
 
 (defun %etag-of (mtime size)
   (format nil "\"~(~X~)-~(~X~)\"" mtime size))
