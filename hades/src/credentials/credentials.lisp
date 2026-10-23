@@ -240,6 +240,70 @@ FN returns."
   (defun %fetch (service account) (%unavailable service account :fetch))
   (defun %delete (service account) (%unavailable service account :delete)))
 
+;;; --- is there a store? (#824) ----------------------------------------------------------
+
+(defparameter *probe-service* "hades/credentials"
+  "The service of the item CREDENTIAL-STORE-AVAILABLE-P asks Windows for. It is only ever read,
+never written, so it does not exist unless an app stored one under the same name.")
+
+(defparameter *probe-account* "availability-probe")
+
+#+win32
+(progn
+  (defconstant +error-no-such-logon-session+ 1312
+    "Credential Manager's answer when the process's logon session has no credential set, as for
+some services and scheduled tasks.")
+
+  (defun %available ()
+    "Ask Credential Manager for an item that does not exist. Not found means the store answers;
+a missing logon session means it cannot be used. Nothing is written and nothing prompts."
+    (cffi:with-foreign-object (out :pointer)
+      (aion/windows:with-wide-string (target (%target *probe-service* *probe-account*))
+        (if (zerop (ffi:cred-read-w target ffi:+cred-type-generic+ 0 out))
+            (let ((code (aion/windows:last-error)))
+              (cond ((= code ffi:+error-not-found+) (values t nil))
+                    ((= code +error-no-such-logon-session+)
+                     (values nil "this logon session has no Windows credential store"))
+                    (t (values nil (format nil "Windows Credential Manager answered error ~D"
+                                           code)))))
+            (progn (ffi:cred-free (cffi:mem-ref out :pointer))
+                   (values t nil))))))
+
+  (defun %store-name () "Windows Credential Manager"))
+
+#+darwin
+(progn
+  (defun %available ()
+    ;; Not probed: a Keychain query can put up a dialog when the login keychain is locked, and
+    ;; this must never prompt. The backend is there; a locked keychain is reported when used.
+    (values t nil))
+  (defun %store-name () "macOS Keychain"))
+
+#-(or win32 darwin)
+(progn
+  (defun %available ()
+    (values nil "no credential store backend exists on this system yet; the Secret Service one is #357"))
+  (defun %store-name () nil))
+
+(defun credential-store-available-p (&key service)
+  "True when this system has a credential store an app can use, and NIL when it has none, so an
+app can say so instead of showing a field that can only fail. A second value, when the first is
+NIL, says why.
+
+It never prompts, never writes, and never creates an item. On Windows it asks Credential Manager
+for an item that does not exist, and is false when the logon session has no credential store; on
+macOS it is true wherever the Keychain backend is built, without asking the Keychain, because a
+query can prompt when the keychain is locked; elsewhere it is false until #357 adds the Secret
+Service backend, and is true from then on without a change here. SERVICE is accepted for a
+backend that answers per service and is not used yet."
+  (declare (ignore service))
+  (%available))
+
+(defun credential-store-name ()
+  "The name to show a user for this system's credential store: \"Windows Credential Manager\" or
+\"macOS Keychain\", or NIL where there is none yet (Linux, until #357)."
+  (%store-name))
+
 ;;; --- the facade ------------------------------------------------------------------------
 
 (defun store-credential (service account secret)
