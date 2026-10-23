@@ -79,7 +79,6 @@ its tag.
   A later `stop`, once the handler has returned, frees the kept loop. A `start` that fails
   partway logs a loop it cannot close, where it used to ignore the failure.
 
-
 - **hades/credentials: on Linux, `store-credential`, `fetch-credential` and `delete-credential`
   use the Secret Service instead of always signalling `credential-store-unavailable`** (#357).
   Items go into the default collection of whichever program provides the Secret Service on the
@@ -1934,7 +1933,6 @@ its tag.
   negative and `sb-thread:condition-wait` signalled a `TYPE-ERROR` instead of `stop` returning
   `:timed-out`. Windows CI hit it with 18 microseconds to spare. The time left is now never
   below zero. An app that caught `type-error` around `stop` can remove that handler.
-
 
 - **aion/http-client: a body of octets with a `multipart/` Content-Type reaches the server as
   given on Linux and macOS** (#828). This is a workaround placed once in the client, not a
