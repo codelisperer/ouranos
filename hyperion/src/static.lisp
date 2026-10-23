@@ -504,9 +504,7 @@ the time of a file that replaced them after the open."
     (multiple-value-bind (ok sdev sino mode) (sb-unix:unix-lstat native)
       (declare (ignore sdev sino))
       (when (and ok (%regular-p (logand mode sb-unix:s-ifmt)))
-        (let ((fd (sb-unix:unix-open native (logior sb-unix:o_rdonly +o-nonblock+ sb-unix:o_noctty
-                                                    +o-cloexec+ +o-nofollow-any+)
-                                     0)))
+        (let ((fd (sb-unix:unix-open native (%darwin-open-flags) 0)))
           (when fd
             (let ((passed nil))
               (unwind-protect
@@ -534,6 +532,12 @@ the time of a file that replaced them after the open."
                 (progn (close stream) nil))))))
     #-(or linux darwin win32)
     (progn native root-real nil)))
+
+#+darwin
+(defun %darwin-open-flags ()
+  "The flags macOS opens a static file with: read-only, O_NONBLOCK, O_NOCTTY, O_CLOEXEC and
+O_NOFOLLOW_ANY. A function so that a test can drop O_NOFOLLOW_ANY to show what it prevents."
+  (logior sb-unix:o_rdonly +o-nonblock+ sb-unix:o_noctty +o-cloexec+ +o-nofollow-any+))
 
 #+darwin
 (defun %same-file-inside-p (native dev ino root-real)

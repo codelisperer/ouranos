@@ -274,6 +274,26 @@ Control: a link to a file inside the root is served."
       (is-false (%served-p root "/leak.txt"))
       (is-true (%served-p root "/alias.css")))))
 
+(defvar *macos-open-flags* nil
+  "The real STATIC::%DARWIN-OPEN-FLAGS while a control has replaced it.")
+
+(defun %allow-links-on-macos ()
+  "For a link-swap control on macOS: open without O_NOFOLLOW_ANY, which on its own refuses the
+swapped-in link, so the control can show what the containment check prevents. Nothing on
+other systems."
+  #+darwin
+  (progn
+    (setf *macos-open-flags* (fdefinition 'static::%darwin-open-flags))
+    (let ((real *macos-open-flags*))
+      (setf (fdefinition 'static::%darwin-open-flags)
+            (lambda () (logandc2 (funcall real) static::+o-nofollow-any+))))))
+
+(defun %restore-macos-open-flags ()
+  #+darwin
+  (when *macos-open-flags*
+    (setf (fdefinition 'static::%darwin-open-flags) *macos-open-flags*
+          *macos-open-flags* nil)))
+
 (defun %backslash-sibling (root)
   "A new directory beside ROOT whose native name is ROOT's followed by a backslash and
 \"outside\", holding page.txt. On Linux and macOS a backslash is a filename character, so
@@ -321,16 +341,21 @@ closes."
                              (swap-then root outside)
                              (funcall open-inside file root-real)))
                      (when control
-                       (setf (fdefinition 'static::%path-inside-p) (constantly t)))
-                     (let ((r (static:file-response root "/sub/page.txt")))
+                       (setf (fdefinition 'static::%path-inside-p) (constantly t))
+                       (%allow-links-on-macos))
+                     ;; The body is read before asserting: IS evaluates both arguments of an
+                     ;; (AND A B) form, so a body read inside it would run on a NIL response.
+                     (let* ((r (static:file-response root "/sub/page.txt"))
+                            (text (and r (%body-text (third r)))))
                        (if control
-                           (is (and r (string= "outside the root" (%body-text (third r))))
+                           (is (equal "outside the root" text)
                                "control (~:[elsewhere~;backslash sibling~]): without the handle check the outside file is served"
                                sibling)
                            (is (null r) "a file outside the root (~:[elsewhere~;backslash sibling~]) was served: ~S"
-                               sibling (and r (%body-text (third r)))))))
+                               sibling text))))
                 (setf (fdefinition 'static::%open-inside) open-inside
                       (fdefinition 'static::%path-inside-p) path-inside-p)
+                (%restore-macos-open-flags)
                 (when sibling
                   (ignore-errors (delete-file (merge-pathnames "page.txt" outside)))
                   (ignore-errors (uiop:delete-empty-directory outside)))))))))))
@@ -475,7 +500,7 @@ which reads everything."
           (uiop:run-program (list "chmod" "0111" dir))
           (unwind-protect
                (let ((r (static:file-response root "/app.css")))
-                 (is (and r (= 200 (first r))) "a file in a search-only root was refused")
+                 (is (eql 200 (and r (first r))) "a file in a search-only root was refused")
                  (when (and r (streamp (third r))) (close (third r))))
             (uiop:run-program (list "chmod" "0755" dir)))))))
 
@@ -492,7 +517,7 @@ are that file's, read from the handle, not the replacement's."
       (let* ((old-time (file-write-date file))
              (static::*after-open-hook* (lambda () (rename-file new file)))
              (r (static:file-response root "/app.css")))
-        (is (and r (= 200 (first r))))
+        (is (eql 200 (and r (first r))))
         (when r
           (is (string= "AAAAAAAA" (%body-text (third r))) "the opened file's bytes are sent")
           (is (equal (static:http-date old-time) (%static-header r :last-modified))
@@ -547,14 +572,17 @@ made to accept anything, the same swap serves the outside file."
                                                  (sb-ext:native-namestring page)))
                          (funcall open-inside file root-real)))
                  (when control
-                   (setf (fdefinition 'static::%path-inside-p) (constantly t)))
-                 (let ((r (static:file-response root "/page.txt")))
+                   (setf (fdefinition 'static::%path-inside-p) (constantly t))
+                   (%allow-links-on-macos))
+                 (let* ((r (static:file-response root "/page.txt"))
+                        (text (and r (%body-text (third r)))))
                    (if control
-                       (is (and r (string= "outside the root" (%body-text (third r))))
+                       (is (equal "outside the root" text)
                            "control: without the containment check the outside file is served")
-                       (is (null r) "the outside file was served: ~S" (and r (%body-text (third r)))))))
+                       (is (null r) "the outside file was served: ~S" text))))
             (setf (fdefinition 'static::%open-inside) open-inside
-                  (fdefinition 'static::%path-inside-p) path-inside-p)))))))
+                  (fdefinition 'static::%path-inside-p) path-inside-p)
+            (%restore-macos-open-flags)))))))
 
 (test windows-device-names-are-refused
   "Windows opens CON, NUL, COM1 and the rest as devices in any directory and with any extension."
