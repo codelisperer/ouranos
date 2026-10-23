@@ -702,7 +702,7 @@ does not stop a model being priced. gpt-image-1's entry says it shuts down on 20
 ;;; fields model, prompt, n, size and quality, one image[] part per reference image, and a mask
 ;;; part. The test server keeps the body's octets, so each file part is compared byte for byte.
 
-(defun %octets (&rest parts)
+(defun %image-bytes (&rest parts)
   "One octet vector of PARTS, each a vector of bytes or a string encoded as ASCII."
   (let ((out (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
     (dolist (p parts (coerce out '(simple-array (unsigned-byte 8) (*))))
@@ -716,14 +716,14 @@ does not stop a model being priced. gpt-image-1's entry says it shuts down on 20
   "The start of a PNG file: its signature, an IHDR chunk for WIDTH x HEIGHT with COLOR-TYPE (6 is
 colour with alpha, 2 colour without), a tRNS chunk when TRNS, then an empty IDAT and an IEND. The
 checksums are zeros: the code reads the header, it does not decode the image."
-  (%octets #(137 80 78 71 13 10 26 10)
+  (%image-bytes #(137 80 78 71 13 10 26 10)
            (%be32 13) "IHDR" (%be32 width) (%be32 height) (vector 8 color-type 0 0 0) (%be32 0)
-           (if trns (%octets (%be32 2) "tRNS" #(0 0) (%be32 0)) #())
+           (if trns (%image-bytes (%be32 2) "tRNS" #(0 0) (%be32 0)) #())
            (%be32 0) "IDAT" (%be32 0)
            (%be32 0) "IEND" (%be32 0)))
 
-(defparameter +jpeg-octets+ (%octets #(255 216 255 224) "JFIF-marker-758" #(255 217)))
-(defparameter +webp-octets+ (%octets "RIFF" #(20 0 0 0) "WEBPVP8 " "marker-758"))
+(defparameter +jpeg-octets+ (%image-bytes #(255 216 255 224) "JFIF-marker-758" #(255 217)))
+(defparameter +webp-octets+ (%image-bytes "RIFF" #(20 0 0 0) "WEBPVP8 " "marker-758"))
 
 (defun %ref (octets &optional (name "image"))
   (praxeon/image:make-reference-image octets :name name))
@@ -732,7 +732,7 @@ checksums are zeros: the code reads the header, it does not decode the image."
   "The parts of the multipart/form-data body OCTETS, split at BOUNDARY, as a list of
 (HEADERS-TEXT . CONTENT-OCTETS)."
   (let ((marker (sb-ext:string-to-octets (format nil "--~A" boundary) :external-format :ascii))
-        (crlf2 (%octets (string #\Return) (string #\Newline) (string #\Return) (string #\Newline)))
+        (crlf2 (%image-bytes (string #\Return) (string #\Newline) (string #\Return) (string #\Newline)))
         (parts '()))
     (loop for start = (search marker octets) then next
           for next = (and start (search marker octets :start2 (+ start (length marker))))
@@ -767,7 +767,7 @@ checksums are zeros: the code reads the header, it does not decode the image."
   (flet ((refusal (fn)
            (handler-case (progn (funcall fn) nil)
              (praxeon/image:image-input-invalid (c) c))))
-    (let ((gif (refusal (lambda () (%ref (%octets "GIF89a" #(1 0 1 0)) "anim")))))
+    (let ((gif (refusal (lambda () (%ref (%image-bytes "GIF89a" #(1 0 1 0)) "anim")))))
       (is (typep gif 'cnd:tool-error-result))
       (is (eq :not-run (and gif (cnd:tool-error-result-outcome gif))))
       (is (search "not a PNG, JPEG or WebP" (and gif (cnd:tool-error-result-text gif)))))
@@ -991,7 +991,7 @@ the one praxeon set, and the prompt arrives whole."
 encoded with boundaries proposed in that order and then praxeon-clean-3. The body must use the
 third. Without the check on field values it would use the first, and the prompt could end its
 own part and start another."
-  (let* ((image (%ref (%octets (%png 2 2) "praxeon-clash-2")))
+  (let* ((image (%ref (%image-bytes (%png 2 2) "praxeon-clash-2")))
          (body (praxeon/image:openai-image-edit-body
                 (praxeon/image:make-openai-images :api-key "k")
                 (praxeon/image:make-image-request :prompt "draw --praxeon-clash-1 please"
@@ -1021,7 +1021,7 @@ without checking it; this does not."
                 (praxeon/image:make-image-request :prompt "p" :size :square :quality :low
                                                   :references (list (%ref png)))))
          (n (%crlf))
-         (expected (%octets
+         (expected (%image-bytes
                     "--BND-758" n "Content-Disposition: form-data; name=\"model\"" n n "m" n
                     "--BND-758" n "Content-Disposition: form-data; name=\"prompt\"" n n "p" n
                     "--BND-758" n "Content-Disposition: form-data; name=\"n\"" n n "1" n
@@ -1120,7 +1120,7 @@ cap, so the resolver is not asked for the third and no request is made."
 (test in-a-turn-a-resolved-file-that-is-not-an-image-is-refused-with-the-reason
   "The app's resolver returns a GIF, which MAKE-REFERENCE-IMAGE refuses; the model is told why."
   (let* ((ag (%references-agent (list "prompt" "x" "reference_images" (vector "anim"))
-                                (lambda (ref) (%ref (%octets "GIF89a" #(1 0)) ref))))
+                                (lambda (ref) (%ref (%image-bytes "GIF89a" #(1 0)) ref))))
          (events (nth-value 1 (%collecting-events (lambda () (actor:run-turn ag "x"))))))
     (let ((result (find :tool-result events :key #'evt:event-type)))
       (is (and result (eq :not-run (getf result :outcome))))
