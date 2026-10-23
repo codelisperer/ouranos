@@ -538,11 +538,26 @@ of passing without having ended it."
       ;; Both calls can time out before the server exits, so wait until its output has ended.
       (is-true (%wait-for (lambda () (praxeon/mcp::child-exited old))))
       ;; This finishes the old server, then starts the next one. The shell has not read yet.
-      (is (equal "after" (mcp:call-tool client echo (%text "after"))))
-      ;; The shell reads its stdin 6 seconds after it starts, and the writer would then finish
-      ;; without being ended. Under 5 seconds, the checks below are about the ending.
-      (let ((seconds (/ (- (get-internal-real-time) started) internal-time-units-per-second)))
-        (is (< seconds 5) "the old server was finished ~,1F seconds after the exit call" seconds))
+      ;; The clock stops when %FINISH-CHILD returns for the old server, inside this call. When
+      ;; the call returns, the next server, a new SBCL process, has also been started, which
+      ;; can take seconds by itself and once took the total past 5 (#836).
+      (let ((finished-at nil))
+        (sb-int:encapsulate 'praxeon/mcp::%finish-child 'finish-time
+                            (lambda (f client child)
+                              (multiple-value-prog1 (funcall f client child)
+                                (when (eq child old)
+                                  (setf finished-at (get-internal-real-time))))))
+        (unwind-protect
+             (is (equal "after" (mcp:call-tool client echo (%text "after"))))
+          (sb-int:unencapsulate 'praxeon/mcp::%finish-child 'finish-time))
+        ;; The shell reads its stdin 6 seconds after it starts, and the writer would then finish
+        ;; without being ended. Under 5 seconds, the checks below are about the ending.
+        (let ((seconds (and finished-at
+                            (/ (- finished-at started) internal-time-units-per-second))))
+          (is-true (and seconds (< seconds 5)) "~A"
+                   (if seconds
+                       (format nil "the old server was finished ~,1F seconds after the exit call" seconds)
+                       "the old server was not finished during the next call"))))
       (is-false (sb-thread:thread-alive-p (praxeon/mcp::child-writer old)))
       (is-false (open-stream-p in))
       (is (= 1 (praxeon/mcp::child-closes old)))
