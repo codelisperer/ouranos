@@ -99,3 +99,48 @@ backend, the credential store (#357), which is listed by its own name."
     (is-true memory-db)
     (is-true credentials)
     (is (and memory-db credentials (< memory-db credentials)))))
+
+;;; --- a suite that must report a backend and printed no line (#603's review) ------------------
+
+(defparameter +required-reports+
+  '((:hades/credentials/tests "credential-store" :hosts (:windows :darwin))
+    (:praxeon/results-db/tests "postgres"))
+  "A required-reports table shaped like verify-tree.lisp's +REQUIRED-BACKEND-REPORTS+.")
+
+(defun %missing (suite host coverage)
+  "What MISSING-BACKEND-REPORTS returns, called by name for the reason %NOT-COVERED gives."
+  (funcall (read-from-string "ouranos-not-covered:missing-backend-reports")
+           suite host coverage +required-reports+))
+
+(test a-required-backend-line-that-is-missing-is-a-problem
+  "In the fixture table, hades/credentials/tests must report the credential store on Windows and
+macOS. With no line for it, as when the reader guard around the live suite or the system's test-op changes, there is
+one problem naming the backend and the host; the gate prints it as a COVER failure."
+  (%load-not-covered)
+  (dolist (host '(:windows :darwin))
+    (let ((problems (%missing :hades/credentials/tests host '())))
+      (is (= 1 (length problems)) "~(~a~): ~S" host problems)
+      (is (search "credential-store" (first problems)) "~S" problems)
+      (is (search (string-downcase (symbol-name host)) (first problems)) "~S" problems))))
+
+(test a-required-backend-line-is-not-required-on-other-hosts
+  "A row with :HOSTS does not apply on a host it does not name. The fixture names Windows and
+macOS, so a missing line on Linux is not a problem here; verify-tree.lisp's own table names
+Linux too since #357's Secret Service backend."
+  (%load-not-covered)
+  (is (null (%missing :hades/credentials/tests :linux '()))))
+
+(test a-required-backend-line-that-is-there-is-not-a-problem
+  "A line that is present, SKIPPED or a count, is judged by +BACKEND-RULES+, not here."
+  (%load-not-covered)
+  (is (null (%missing :hades/credentials/tests :windows
+                      '(("credential-store" . "SKIPPED (not set)")))))
+  (is (null (%missing :hades/credentials/tests :darwin '(("credential-store" . "14"))))))
+
+(test a-postgres-suite-must-report-postgres-on-every-host
+  (%load-not-covered)
+  (dolist (host '(:windows :darwin :linux))
+    (is (= 1 (length (%missing :praxeon/results-db/tests host '()))) "~(~a~)" host))
+  (is (null (%missing :praxeon/results-db/tests :linux '(("postgres" . "0"))))
+      "a line that is there, even with zero checks, is the per-backend rules' to judge")
+  (is (null (%missing :praxeon/translate/tests :linux '())) "a suite not in the table needs no line"))
