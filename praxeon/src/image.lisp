@@ -626,7 +626,15 @@ multipart/form-data to /images/edits."
   (multiple-value-bind (content content-type path count)
       (if (edit-body-p body)
           (multiple-value-bind (octets type) (%multipart body)
-            (values octets type "/images/edits" (edit-body-count body)))
+            ;; One space before the value. Dexador's usocket backend, which serves Linux and
+            ;; macOS, takes any Content-Type that begins with "multipart/" as its own job: it
+            ;; expects the content as an alist, builds the body itself with a boundary of its
+            ;; own, and fails on these octets with a TYPE-ERROR (#817's first CI run). WinHTTP
+            ;; on Windows passes the octets through, so the test suite passed there. HTTP treats
+            ;; whitespace before a field value as not part of it (RFC 9110, section 5.5), so the
+            ;; server reads exactly TYPE, while dexador's prefix check no longer matches.
+            (values octets (concatenate 'string " " type) "/images/edits"
+                    (edit-body-count body)))
           (values (jzon:stringify body) "application/json" "/images/generations"
                   (gethash "n" body)))
     (%image-post p (concatenate 'string (openai-images-base-url p) path)
