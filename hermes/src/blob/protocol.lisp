@@ -97,8 +97,8 @@ When given, the read happens only if the blob still has that ETag, and otherwise
 BLOB-PRECONDITION-FAILED with nothing read. On S3 the check and the read are one request (the GET
 carries If-Match), so the bytes are the version named. Compare ETags as strings and never
 recompute one: S3's ETag is not a content hash for a multipart or KMS-encrypted object. On the
-filesystem store the ETag is the blob's SHA-256 checksum. Signals BLOB-NOT-FOUND if there is no
-such blob.
+filesystem store the ETag is the blob's SHA-256 checksum, and the check and the open are two
+steps, so that store's read is not atomic. Signals BLOB-NOT-FOUND if there is no such blob.
 
 This is a new generic rather than a keyword on GET-BLOB because GET-BLOB shipped with exactly
 three arguments: CLOS requires every method to accept every keyword its generic function

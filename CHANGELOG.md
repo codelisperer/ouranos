@@ -469,9 +469,10 @@ its tag.
   `with-blob-stream` takes `:if-match` and `:meta` (a variable bound to that `blob-meta`), and
   `read-blob-range` takes `:if-match`. A blob that no longer has the ETag signals the new
   `blob-precondition-failed` (a `blob-backend-error`, status 412) and nothing is read; on S3 the
-  GET carries `If-Match`, so the check and the read are one request. `blob-source-changed` is now
-  a subclass of `blob-precondition-failed`, so one handler catches a changed blob on a read and
-  on a copy. On S3, `blob-metadata` now fills `blob-meta-last-modified` from `Last-Modified`,
+  GET carries `If-Match`, so the check and the read are one request; on the filesystem store they
+  are two steps, so a blob replaced between them is read as the newer version.
+  `blob-source-changed` is now a subclass of `blob-precondition-failed`, so one handler catches a
+  changed blob on a read and on a copy. On S3, `blob-metadata` now fills `blob-meta-last-modified` from `Last-Modified`,
   where it was NIL. `get-blob` keeps its three arguments, because a keyword added to it would
   break an app's own store class; a store class without `open-blob` gets a default that checks
   the ETag through `blob-metadata` before `get-blob`, which is not atomic, and `with-blob-stream`

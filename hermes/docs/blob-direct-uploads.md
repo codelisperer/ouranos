@@ -212,7 +212,8 @@ with the same size and different content, after you checked it (#826).
   and a KMS-encrypted object's is neither. Compare ETags as strings, and never recompute one from
   the bytes. hermes's own checksum of the content is `blob-meta-checksum`, which S3 keeps only
   for blobs written with `put-blob` (#810). On the filesystem store the ETag is the blob's SHA-256
-  checksum.
+  checksum, and the check and the open are two steps, so it is not atomic either: a blob replaced
+  between them is read as the newer version. That store is for development and a single box.
 - **`get-blob` is unchanged.** It shipped with three arguments, and CLOS requires every method to
   accept every keyword its generic function declares, so a keyword added to it would break an
   app's own store class. `open-blob` is the read with `:if-match`. A store class that implements
