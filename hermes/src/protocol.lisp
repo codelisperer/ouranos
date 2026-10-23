@@ -30,8 +30,10 @@
 screen (#822). Returns two values: a status and the Page's name when Facebook gave it. STATUS is
 :CONNECTED, :RECONNECT (the Page token no longer works, or lacks pages_manage_posts: send an
 admin through the connect flow again), :NOT-PERMITTED (the token works but may not post to this
-Page), :NOT-FOUND (no such Page, or the token cannot see it), or :NOT-CONNECTED (no token is
-stored for PAGE). A rate limit or a network failure is signalled, not answered."))
+Page), :WRONG-PAGE (the token stored for PAGE belongs to another Page), :NOT-FOUND (no such
+Page, or the token cannot see it), or :NOT-CONNECTED (no token is stored for PAGE). A PAGE that
+is not a Page id signals INVALID-MESSAGE; a rate limit or a network failure is signalled, not
+answered."))
 
 (defgeneric deliver (provider message)
   (:documentation "Deliver MESSAGE (an EMAIL or SMS) via PROVIDER. Returns a DELIVERY-RESULT

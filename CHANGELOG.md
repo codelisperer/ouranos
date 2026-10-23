@@ -469,13 +469,18 @@ its tag.
   by `hermes:send` or `deliver` to a `hermes:facebook` provider (`make-facebook`: `:app-id`,
   `:app-secret`, `:page-tokens`). Page tokens are looked up per Page id, by default from
   `FACEBOOK_PAGE_TOKEN_<page-id>` then `FACEBOOK_PAGE_TOKEN`, and sent in the POST body; every
-  token and the app secret (`FACEBOOK_APP_SECRET`) is replaced by `<redacted>` in failure text.
+  token and the app secret (`FACEBOOK_APP_SECRET`) is replaced by `<redacted>` in failure text,
+  and reaches the code that signals a failure only as an `aion/secret` secret, so a logged
+  backtrace does not show it. Reads send the token in an `Authorization: OAuth` header. Calls
+  time out after 10 seconds to connect and 30 to answer; a post that timed out may still have
+  been made.
   Failures are `facebook-reconnect-required`, `facebook-not-permitted`,
   `facebook-page-not-found`, `facebook-link-not-public` (Facebook could not see the link) and
   `delivery-rate-limited` (Graph codes 4, 17, 32, 613 and 80001, with the wait from the
   `X-Business-Use-Case-Usage` header); a target that names a Facebook Group signals
   `facebook-groups-unsupported`. `facebook-page-health` answers `:connected`, `:reconnect`,
-  `:not-permitted`, `:not-found` or `:not-connected`. The connect flow is
+  `:not-permitted`, `:wrong-page` (the stored token is another Page's), `:not-found` or
+  `:not-connected`; a Page argument that is not a Page id signals `invalid-message`. The connect flow is
   `facebook-connect-state`, `facebook-connect-url` and `facebook-connect-pages`, which checks the
   state in constant time, exchanges the code server-side for a long-lived user token, and returns
   the admin's Pages as `facebook-page` values with their tokens; the app stores the chosen token.

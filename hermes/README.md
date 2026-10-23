@@ -135,14 +135,23 @@ photo with a caption.
 - **Page tokens are looked up per Page.** `make-facebook` takes `:page-tokens`, a function of a
   Page id returning its token (a string or an `aion/secret` secret) or NIL, or an alist of
   `(page-id . token)`. The default reads `FACEBOOK_PAGE_TOKEN_<page-id>`, then
-  `FACEBOOK_PAGE_TOKEN`. A Page with no token signals `configuration-error` naming it. The token
-  goes in the POST body, never the URL, and with `FACEBOOK_APP_SECRET` set every call carries
-  Meta's `appsecret_proof`. Tokens and the app secret are replaced by `<redacted>` in every
-  failure's text.
+  `FACEBOOK_PAGE_TOKEN`. A Page with no token signals `configuration-error` naming it, and
+  anything that is not a Page id signals `invalid-message`. A post sends the token in its POST
+  body; a read sends it in an `Authorization: OAuth` header. Only two calls put a secret in a
+  URL, because Meta documents them as query parameters: the connect flow's code exchanges
+  (`client_secret`, `code`, `fb_exchange_token`) and the health check's `debug_token`
+  (`input_token`). With `FACEBOOK_APP_SECRET` set, every call carries Meta's `appsecret_proof`.
+  Tokens and the app secret are replaced by `<redacted>` in every failure's text, and reach the
+  code that signals a failure only as `aion/secret` secrets, so a logged backtrace does not show
+  them.
+- **Timeouts.** A call waits 10 seconds to connect and 30 for the answer. A post whose answer
+  timed out may still have been made: check the Page before posting it again.
 - **Failures** are `delivery-failure` subclasses, chosen by the Graph error code:
   `facebook-reconnect-required` (190, 102, or a login subcode such as 492: send an admin through
   the connect flow again), `facebook-not-permitted` (10, 200 to 299), `facebook-page-not-found`
-  (100 with subcode 33, 803), `facebook-link-not-public`, and `delivery-rate-limited` (4, 17, 32,
+  (100 with subcode 33, 803), `facebook-link-not-public` (a code 100 whose message mentions the
+  link, on a post that has one: Meta documents no code or subcode for this, so the message is
+  the only signal), and `delivery-rate-limited` (4, 17, 32,
   613 and 80001, the code a Page token's limit uses). The wait is the
   `estimated_time_to_regain_access` in the `X-Business-Use-Case-Usage` header, in seconds, or NIL;
   as for Telegram, hermes does not wait or retry.
@@ -151,9 +160,11 @@ photo with a caption.
   when the post is made. A numeric Group id cannot be told from a Page id; Facebook refuses a post
   to one, which arrives as `facebook-not-permitted`.
 - **`facebook-page-health`** answers for an admin screen: `:connected` (and the Page's name),
-  `:reconnect`, `:not-permitted`, `:not-found`, or `:not-connected` when no token is stored. With
-  the app's id and secret it also asks Facebook's `debug_token` whether the token is valid and
-  still carries `pages_manage_posts`.
+  `:reconnect`, `:not-permitted`, `:wrong-page` (the token stored for this Page belongs to
+  another Page), `:not-found`, or `:not-connected` when no token is stored. It reads the token's
+  own Page (`/me`) and compares it with the Page asked about. With the app's id and secret it
+  also asks Facebook's `debug_token` whether the token is valid, belongs to this Page
+  (`profile_id`), and still carries `pages_manage_posts`.
 - `HERMES_FACEBOOK_IMPL` picks the backend (default `facebook`); `HERMES_TRANSPORT=dev` renders
   posts instead of making them, and `dev-last-facebook` reads the last one.
 
@@ -193,7 +204,8 @@ Page's token. hermes does the Facebook side; the app's routes and session do the
   on a desktop, read back through `:page-tokens`.
 - The `redirect_uri` must match one of the Meta app's Valid OAuth Redirect URIs exactly.
 
-**Meta's rules, checked against developers.facebook.com on 2026-10-23.**
+**Meta's rules, checked against developers.facebook.com on 2026-10-23.** Dates here and in the
+code are UTC, written YYYY-MM-DD.
 
 - *Who can connect without App Review.* Graph API "Access Levels": "Permissions with Standard
   Access can only be requested from app users who have a role on the requesting app", and "All

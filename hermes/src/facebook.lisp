@@ -4,7 +4,8 @@
 ;;;; connected, and runs the one-time connect flow that turns an admin's Facebook Login into a
 ;;;; Page access token.
 ;;;;
-;;;; WHAT META ALLOWS, from Meta's own docs on developers.facebook.com (checked 2026-10-23):
+;;;; WHAT META ALLOWS, from Meta's own docs on developers.facebook.com (checked 2026-10-23; dates
+;;;; in this file are UTC, YYYY-MM-DD):
 ;;;;   - Publishing is POST /{page-id}/feed with message and/or link, or /{page-id}/photos, with
 ;;;;     a Page access token carrying pages_manage_posts, pages_read_engagement and
 ;;;;     pages_show_list, from someone who can do the CREATE_CONTENT task on the Page
@@ -25,13 +26,14 @@
 ;;;;     80001 for a Page token, which is what posting uses. No error carries a wait; the
 ;;;;     X-Business-Use-Case-Usage header's estimated_time_to_regain_access, in minutes, does.
 ;;;;
-;;;; SECRETS. The app secret and every token are held as AION/SECRET:SECRET. A Page token goes in
-;;;; the POST body of a post, never the URL; the connect flow's GETs carry the app secret and a
-;;;; user token in the query string, as Meta documents them, so every failure from %FACEBOOK-CALL
-;;;; has each secret replaced by "<redacted>" before it is signalled, and every error raised
-;;;; while the request is made is caught there, so its frames (which hold the URL) are unwound
-;;;; before anything is signalled -- the same discipline as telegram.lisp. Nothing here logs a
-;;;; token, a URL or a message's text.
+;;;; SECRETS. The app secret and every token are held as AION/SECRET:SECRET. A post sends its
+;;;; token in the POST body and a read in an Authorization header; the connect flow's code
+;;;; exchanges and debug_token carry secrets in the query string, as Meta documents them. Secrets
+;;;; reach %FACEBOOK-CALL only as SECRETs, so no frame a logged backtrace prints holds one in
+;;;; plain text. Every failure from %FACEBOOK-CALL has each secret replaced by "<redacted>"
+;;;; before it is signalled, and every error raised while the request is made is caught there,
+;;;; so its frames (which hold the URL) are unwound before anything is signalled: the same
+;;;; discipline as telegram.lisp. Nothing here logs a token, a URL or a message's text.
 
 (cl:in-package #:hermes)
 
@@ -157,6 +159,10 @@ the call was a post with a link."
            'facebook-reconnect-required)
           ((or (eql code 10) (and (integerp code) (<= 200 code 299))) 'facebook-not-permitted)
           ((or (eql code 803) (and (eql code 100) (eql subcode 33))) 'facebook-page-not-found)
+          ;; Meta documents no code or subcode for a link it could not fetch (searched on
+          ;; developers.facebook.com, 2026-10-23), so its message is the only signal: a code
+          ;; 100 that mentions the link, on a post that has one. Anything else stays a plain
+          ;; DELIVERY-FAILURE with Facebook's text.
           ((and link-post (eql code 100) (or (search "link" m) (search "url" m)))
            'facebook-link-not-public)
           (t 'delivery-failure))))
@@ -198,30 +204,53 @@ The detail is Facebook's message with its code and subcode."
 
 ;;; --- one Graph call -----------------------------------------------------------
 
-(defun %facebook-call (p method path params &key secrets token link-post (base :graph))
-  "Call the Graph API: METHOD (:get or :post) on PATH (below the version) with PARAMS, an alist.
-TOKEN, a SECRET or string, is sent as access_token, with appsecret_proof when the app secret is
-known. SECRETS lists other plain strings to remove from any failure's text. Returns the answer's
-JSON object. On a refusal or a transport failure, signals the condition %FACEBOOK-REFUSAL
-chooses, with every secret removed from its text; every error raised while the request is made
-is caught here, so its frames are unwound first (see this file's header)."
+(defparameter +facebook-connect-timeout+ 10 "Seconds to wait for a connection to the Graph API.")
+(defparameter +facebook-read-timeout+ 30
+  "Seconds to wait for the Graph API's answer. A post whose answer times out may still have been
+made: check the Page before posting again.")
+
+(defun %plain (value)
+  "VALUE as the text sent: a SECRET revealed, anything else printed."
+  (if (secret:secretp value) (secret:reveal value) (princ-to-string value)))
+
+(defun %facebook-call (p method path params &key secrets token link-post)
+  "Call the Graph API: METHOD (:get or :post) on PATH (below the version) with PARAMS, an alist
+whose values are strings or AION/SECRET:SECRETs. TOKEN, a SECRET, is the access token: in the
+form body of a POST, in an Authorization header for a GET, with appsecret_proof when the app
+secret is known. SECRETS lists other SECRETs to remove from any failure's text. Returns the
+answer's JSON object. On a refusal or a transport failure, signals the condition
+%FACEBOOK-REFUSAL chooses, with every secret removed from its text.
+
+No argument of this function is a secret in plain text: a refusal is signalled from this frame,
+and a handler that logs a backtrace before unwinding prints each frame's arguments. Secrets are
+revealed only into this function's local variables, which a backtrace does not print, and every
+error raised while the request is made is caught here, so the frames that hold the request are
+unwound first (see this file's header)."
   (let* ((app-secret (%reveal (%facebook-app-secret p)))
          (token-text (%reveal token))
-         (all (append (when token-text
-                        (list (cons "access_token" token-text)))
-                      (when (and token-text app-secret)
-                        (list (cons "appsecret_proof" (%appsecret-proof app-secret token-text))))
-                      params))
-         (hidden (remove nil (list* app-secret token-text secrets)))
+         (sent (append (when (and token-text (eq method :post))
+                         (list (cons "access_token" token-text)))
+                       (when (and token-text app-secret)
+                         (list (cons "appsecret_proof" (%appsecret-proof app-secret token-text))))
+                       (loop for (k . v) in params collect (cons k (%plain v)))))
+         (hidden (remove nil (list* app-secret token-text
+                                    (mapcar #'%reveal
+                                            (append secrets
+                                                    (remove-if-not #'secret:secretp
+                                                                   (mapcar #'cdr params)))))))
          (redact (lambda (text) (%redact-all text hidden)))
-         (url (format nil "~A/~A/~A" (ecase base (:graph (facebook-graph-base p)))
-                      +facebook-graph-api-version+ path))
+         (url (format nil "~A/~A/~A" (facebook-graph-base p) +facebook-graph-api-version+ path))
          (req (if (eq method :get)
-                  (make-request :method :get :url (format nil "~A?~A" url (%query all))
+                  (make-request :method :get :url (format nil "~A?~A" url (%query sent))
+                                :headers (when token-text
+                                           (list (cons "Authorization"
+                                                       (format nil "OAuth ~A" token-text))))
+                                :connect-timeout +facebook-connect-timeout+
+                                :read-timeout +facebook-read-timeout+
                                 :max-body-bytes +facebook-max-response-bytes+)
-                  (make-request :method :post :url url
-                                :content (loop for (k . v) in all
-                                               collect (cons k (princ-to-string v)))
+                  (make-request :method :post :url url :content sent
+                                :connect-timeout +facebook-connect-timeout+
+                                :read-timeout +facebook-read-timeout+
                                 :max-body-bytes +facebook-max-response-bytes+)))
          (resp (handler-case
                    (apply #'send-request req '()
@@ -250,10 +279,19 @@ is caught here, so its frames are unwound first (see this file's header)."
 
 ;;; --- posting -----------------------------------------------------------------------
 
+(defun %check-page-id (page)
+  "PAGE as an id string, or INVALID-MESSAGE when it is not a Page id. The id goes into a Graph
+path and an environment variable's name, so nothing else may reach them."
+  (unless (%facebook-page-id-p page)
+    (error 'invalid-message
+           :problem "it needs a Facebook Page id (a positive integer or a string of digits)"))
+  (princ-to-string page))
+
 (defun %page-token (p page)
-  "The Page token for PAGE (an id string) as a SECRET, or CONFIGURATION-ERROR naming where it was
-looked for."
-  (let* ((found (funcall (%facebook-page-tokens p) page))
+  "The Page token for PAGE, a Page id, as a SECRET, or CONFIGURATION-ERROR naming where it was
+looked for. Signals INVALID-MESSAGE when PAGE is not a Page id."
+  (let* ((page (%check-page-id page))
+         (found (funcall (%facebook-page-tokens p) page))
          (token (cond ((secret:secretp found) found)
                       ((and (stringp found) (plusp (length found))) (secret:make-secret found)))))
     (or token
@@ -296,30 +334,37 @@ may be NIL when MESSAGE is given. Signals as MAKE-FACEBOOK-POST and DELIVER do."
 ;;; --- health ----------------------------------------------------------------------------
 
 (defmethod facebook-page-health ((p facebook) page)
-  (let* ((page (princ-to-string page))
+  (let* ((page (%check-page-id page))
          (token (handler-case (%page-token p page)
-                  (configuration-error () (return-from facebook-page-health :not-connected)))))
+                  (configuration-error () (return-from facebook-page-health :not-connected))))
+         (app-id (facebook-app-id p))
+         (app-secret (%facebook-app-secret p)))
     (handler-case
-        (let* ((info (%facebook-call p :get page (list (cons "fields" "id,name")) :token token))
-               (name (let ((n (gethash "name" info))) (and (stringp n) n)))
-               (app-id (facebook-app-id p))
-               (app-secret (%reveal (%facebook-app-secret p))))
-          ;; With the app's credentials, ask Facebook what the token may do: a Page token that
-          ;; reads the Page but lacks pages_manage_posts cannot post, and only debug_token says so.
-          (if (and app-id app-secret)
-              (let* ((debug (%facebook-call p :get "debug_token"
-                                            (list (cons "input_token" (%reveal token))
-                                                  (cons "access_token"
-                                                        (format nil "~A|~A" app-id app-secret)))
-                                            :secrets (list (%reveal token))))
-                     (data (gethash "data" debug))
-                     (scopes (and (hash-table-p data) (gethash "scopes" data))))
-                (cond ((not (and (hash-table-p data) (eq t (gethash "is_valid" data))))
-                       (values :reconnect name))
-                      ((not (and (vectorp scopes) (find "pages_manage_posts" scopes :test #'equal)))
-                       (values :reconnect name))
-                      (t (values :connected name))))
-              (values :connected name)))
+        ;; A Page token's /me is its own Page. Reading PAGE itself would succeed for any public
+        ;; Page, whichever Page the token belongs to, so the token's Page is compared with PAGE.
+        (let* ((me (%facebook-call p :get "me" (list (cons "fields" "id,name")) :token token))
+               (name (let ((n (gethash "name" me))) (and (stringp n) n))))
+          (cond ((not (equal page (gethash "id" me))) (values :wrong-page name))
+                ((and app-id (%reveal app-secret))
+                 ;; With the app's credentials, ask Facebook what the token may do: a Page token
+                 ;; that reads its Page but lacks pages_manage_posts cannot post, and only
+                 ;; debug_token says so. The app token is built as a SECRET, never as text.
+                 (let* ((app-token (secret:make-secret
+                                    (format nil "~A|~A" app-id (%reveal app-secret))))
+                        (debug (%facebook-call p :get "debug_token"
+                                               (list (cons "input_token" token))
+                                               :token app-token))
+                        (data (gethash "data" debug))
+                        (scopes (and (hash-table-p data) (gethash "scopes" data))))
+                   (cond ((not (and (hash-table-p data) (eq t (gethash "is_valid" data))))
+                          (values :reconnect name))
+                         ((not (equal page (gethash "profile_id" data)))
+                          (values :wrong-page name))
+                         ((not (and (vectorp scopes)
+                                    (find "pages_manage_posts" scopes :test #'equal)))
+                          (values :reconnect name))
+                         (t (values :connected name)))))
+                (t (values :connected name))))
       (facebook-reconnect-required () :reconnect)
       (facebook-not-permitted () :not-permitted)
       (facebook-page-not-found () :not-found))))
@@ -408,32 +453,41 @@ refuses the code. The user tokens are never returned or kept."
     (error 'facebook-connect-refused
            :reason :denied
            :detail (and (stringp refusal) (subseq refusal 0 (min 200 (length refusal))))))
+  (unless (%http-url-p redirect-uri)
+    (error 'invalid-message :problem "it needs the :redirect-uri FACEBOOK-CONNECT-URL was given"))
+  (%require (%reveal (%facebook-app-secret provider)) "FACEBOOK_APP_SECRET")
+  ;; Every secret travels as a SECRET: the app secret, the code, and each user token, which is
+  ;; made a SECRET as soon as it arrives. %FACEBOOK-CALL reveals them only into its locals.
   (let* ((app-id (%require (facebook-app-id provider) "FACEBOOK_APP_ID"))
-         (app-secret (%require (%reveal (%facebook-app-secret provider)) "FACEBOOK_APP_SECRET"))
-         (short (%connect-step
-                 (lambda ()
-                   (gethash "access_token"
-                            (%facebook-call provider :get "oauth/access_token"
-                                            (list (cons "client_id" app-id)
-                                                  (cons "redirect_uri" redirect-uri)
-                                                  (cons "client_secret" app-secret)
-                                                  (cons "code" code))
-                                            :secrets (list code))))))
+         (app-secret (%facebook-app-secret provider))
+         (code (secret:make-secret code))
+         (short (or (%connect-step
+                     (lambda ()
+                       (%token-from (%facebook-call provider :get "oauth/access_token"
+                                                    (list (cons "client_id" app-id)
+                                                          (cons "redirect_uri" redirect-uri)
+                                                          (cons "client_secret" app-secret)
+                                                          (cons "code" code))))))
+                    (error 'facebook-connect-refused :reason :code-rejected
+                                                     :detail "Facebook returned no access token")))
          (long (%connect-step
                 (lambda ()
-                  (gethash "access_token"
-                           (%facebook-call provider :get "oauth/access_token"
-                                           (list (cons "grant_type" "fb_exchange_token")
-                                                 (cons "client_id" app-id)
-                                                 (cons "client_secret" app-secret)
-                                                 (cons "fb_exchange_token" short))
-                                           :secrets (list short)))))))
-    (unless (and (stringp long) (plusp (length long)))
+                  (%token-from (%facebook-call provider :get "oauth/access_token"
+                                               (list (cons "grant_type" "fb_exchange_token")
+                                                     (cons "client_id" app-id)
+                                                     (cons "client_secret" app-secret)
+                                                     (cons "fb_exchange_token" short))))))))
+    (unless long
       (error 'facebook-connect-refused :reason :code-rejected
                                        :detail "Facebook returned no long-lived token"))
-    (let ((pages (%managed-pages provider (secret:make-secret long))))
+    (let ((pages (%managed-pages provider long)))
       (log:info "hermes: facebook pages listed for connecting" :pages (length pages))
       pages)))
+
+(defun %token-from (json)
+  "JSON's access_token as a SECRET, or NIL."
+  (let ((token (gethash "access_token" json)))
+    (and (stringp token) (plusp (length token)) (secret:make-secret token))))
 
 (defun %managed-pages (provider user-token)
   "Every Page the holder of USER-TOKEN manages, following the paging cursor, as FACEBOOK-PAGEs."

@@ -207,37 +207,110 @@ MAKE-FACEBOOK's, before the defaults."
 
 ;;; --- health ------------------------------------------------------------------------------
 
-(defun %health-handler (&key (page-status 200) (page-json "{\"id\":\"1234567890\",\"name\":\"My Page\"}")
-                             (debug-json "{\"data\":{\"is_valid\":true,\"scopes\":[\"pages_show_list\",\"pages_read_engagement\",\"pages_manage_posts\"]}}"))
+(defparameter +debug-ok+
+  "{\"data\":{\"is_valid\":true,\"profile_id\":\"1234567890\",\"scopes\":[\"pages_show_list\",\"pages_read_engagement\",\"pages_manage_posts\"]}}")
+
+(defun %health-handler (&key (me-status 200) (me-json "{\"id\":\"1234567890\",\"name\":\"My Page\"}")
+                             (debug-status 200) (debug-json +debug-ok+))
   (lambda (method path params stream)
     (declare (ignore method params))
     (if (search "debug_token" path)
-        (%fb-reply stream 200 debug-json)
-        (%fb-reply stream page-status page-json))))
+        (%fb-reply stream debug-status debug-json)
+        (%fb-reply stream me-status me-json))))
 
 (test facebook-page-health-answers-for-an-admin-screen
   (flet ((health (handler &rest args)
            (with-graph (server fb handler)
-                      (multiple-value-list (h:facebook-page-health fb (or (getf args :page) +page-id+))))))
+             (multiple-value-list (h:facebook-page-health fb (or (getf args :page) +page-id+))))))
     (is (equal '(:connected "My Page") (health (%health-handler))))
     (is (eq :reconnect (first (health (%health-handler :debug-json "{\"data\":{\"is_valid\":false}}")))))
-    (is (eq :reconnect (first (health (%health-handler :debug-json "{\"data\":{\"is_valid\":true,\"scopes\":[\"pages_show_list\"]}}"))))
+    (is (eq :reconnect (first (health (%health-handler :debug-json "{\"data\":{\"is_valid\":true,\"profile_id\":\"1234567890\",\"scopes\":[\"pages_show_list\"]}}"))))
         "a token without pages_manage_posts cannot post")
-    (is (eq :reconnect (first (health (%health-handler :page-status 400 :page-json (%fb-error 190 "expired"))))))
-    (is (eq :not-permitted (first (health (%health-handler :page-status 403 :page-json (%fb-error 10 "denied"))))))
-    (is (eq :not-found (first (health (%health-handler :page-status 400 :page-json (%fb-error 100 "missing" 33))))))
+    (is (eq :reconnect (first (health (%health-handler :me-status 400 :me-json (%fb-error 190 "expired"))))))
+    (is (eq :not-permitted (first (health (%health-handler :me-status 403 :me-json (%fb-error 10 "denied"))))))
+    (is (eq :not-found (first (health (%health-handler :me-status 400 :me-json (%fb-error 100 "missing" 33))))))
     (is (eq :not-connected (first (health (%health-handler) :page "999"))) "no token is stored for that Page")))
 
-(test facebook-page-health-sends-the-app-token-only-to-debug-token
+(test facebook-page-health-catches-a-token-for-another-page
+  "Reading a public Page works with any Page's token, so the check compares the token's own Page
+(its /me, and debug_token's profile_id) with the Page asked about."
+  (flet ((health (handler)
+           (with-graph (server fb handler)
+             (first (multiple-value-list (h:facebook-page-health fb +page-id+))))))
+    (is (eq :wrong-page (health (%health-handler :me-json "{\"id\":\"999\",\"name\":\"Another Page\"}"))))
+    (is (eq :wrong-page (health (%health-handler :debug-json "{\"data\":{\"is_valid\":true,\"profile_id\":\"999\",\"scopes\":[\"pages_manage_posts\"]}}"))))
+    (is (eq :connected (health (%health-handler))) "the control: the token's Page is this Page"))
+  (aion/test-http:with-server
+      (server (lambda (request stream) (declare (ignore request))
+                (%fb-reply stream 200 "{\"id\":\"999\",\"name\":\"Another Page\"}")))
+    (let ((fb (h:make-facebook :app-id nil :app-secret nil
+                               :page-tokens (list (cons +page-id+ +page-token+))
+                               :graph-base (aion/test-http:server-url server ""))))
+      (is (eq :wrong-page (h:facebook-page-health fb +page-id+)) "without app credentials too"))))
+
+(test facebook-page-health-refuses-what-is-not-a-page-id
+  (with-graph (server fb (%health-handler))
+    (dolist (bad '("me/accounts" "123?fields=access_token" "../x" "" "12 34"))
+      (signals h:invalid-message (h:facebook-page-health fb bad)))
+    (is (null (%fb-requests server)) "nothing was sent")))
+
+(test facebook-page-health-sends-tokens-in-headers-not-urls
   (with-graph (server fb (%health-handler))
     (h:facebook-page-health fb +page-id+)
-    (destructuring-bind ((m1 p1 q1) (m2 p2 q2)) (%fb-requests server)
-      (declare (ignore m1 m2))
-      (is (string= "/v26.0/1234567890" p1))
-      (is (string= +page-token+ (%param q1 "access_token")))
-      (is (string= "/v26.0/debug_token" p2))
-      (is (string= +page-token+ (%param q2 "input_token")))
-      (is (string= (format nil "111|~A" +app-secret+) (%param q2 "access_token"))))))
+    (let ((raw (reverse (aion/test-http:server-requests server))))
+      (destructuring-bind ((m1 p1 q1) (m2 p2 q2)) (%fb-requests server)
+        (declare (ignore m1 m2))
+        (is (string= "/v26.0/me" p1))
+        (is (null (%param q1 "access_token")) "the Page token is not in the query")
+        (is (string= (format nil "OAuth ~A" +page-token+) (aion/test-http:request-header (first raw) "Authorization")))
+        (is (string= "/v26.0/debug_token" p2))
+        (is (string= +page-token+ (%param q2 "input_token")) "debug_token takes the token it inspects as a parameter")
+        (is (null (%param q2 "access_token")))
+        (is (string= (format nil "OAuth 111|~A" +app-secret+) (aion/test-http:request-header (second raw) "Authorization"))))
+      (is (notany (lambda (r) (search +app-secret+ (aion/test-http:request-path r))) raw)
+          "the app secret is in no request line"))))
+
+(defun %secrets-in (text)
+  "Which of the test secrets TEXT shows."
+  (remove-if-not (lambda (s) (search s text)) (list +page-token+ +app-secret+ "the-code" "short-user-token" "long-user-token")))
+
+(test facebook-health-failures-log-no-secret-in-a-backtrace
+  "A refusal is signalled from %FACEBOOK-CALL's frame, and a request middleware logs the backtrace
+before unwinding, printing each frame's arguments. Neither the Page token nor the app secret may
+appear: they reach that frame only as SECRETs. Each answer here is one the health check does not
+turn into a status, so it is signalled through the handler."
+  (dolist (answer (list (list 500 "not json at all") (list 400 (%fb-error 4 "Application request limit reached"))
+                        (list 502 (%fb-error 1 "An unknown error occurred"))))
+    (with-graph (server fb (%health-handler :debug-status (first answer) :debug-json (second answer)))
+      (let ((log (%logged-exception (lambda () (h:facebook-page-health fb +page-id+)))))
+        (is (search "Backtrace" log) "a backtrace was logged for ~S: ~A" (first answer) (subseq log 0 (min 200 (length log))))
+        (is (null (%secrets-in log)) "~S: ~S in the log" (first answer) (%secrets-in log))))))
+
+(test facebook-connect-failures-log-no-secret-in-a-backtrace
+  "The same for the connect flow, whose second exchange carries the app secret and the short user
+token. %CONNECT-STEP's own handler unwinds %FACEBOOK-CALL's frame before an outer handler sees the
+condition, so this held before the secrets travelled as SECRETs too; it records that it holds."
+  (flet ((handler (status json)
+           (let ((connect (%connect-handler)))
+             (lambda (method path params stream)
+               (if (and (search "oauth/access_token" path) (%param params "fb_exchange_token"))
+                   (%fb-reply stream status json)
+                   (funcall connect method path params stream))))))
+    (dolist (answer (list (list 500 "not json") (list 400 (%fb-error 4 "Application request limit reached"))))
+      (with-graph (server fb (handler (first answer) (second answer)))
+        (let* ((state (h:facebook-connect-state))
+               (log (%logged-exception
+                     (lambda () (h:facebook-connect-pages fb :code "the-code" :state state :expected-state state
+                                                             :redirect-uri "https://app.example.com/cb")))))
+          (is (search "Backtrace" log) "a backtrace was logged for ~S" (first answer))
+          (is (subsetp (%secrets-in log) '("the-code") :test #'string=)
+              "~S: ~S in the log; only the caller's own code argument may show" (first answer) (%secrets-in log)))))))
+
+(test facebook-rate-limit-survives-a-malformed-business-use-case-header
+  (dolist (header '("not json" "{\"1234\":5}" "{\"1234\":[{\"estimated_time_to_regain_access\":\"soon\"}]}" "[]"))
+    (let ((c (%fb-refusal 400 (%fb-error 80001 "Too many calls") :headers (list (cons "X-Business-Use-Case-Usage" header)))))
+      (is (typep c 'h:delivery-rate-limited) "~S" header)
+      (is (null (h:delivery-rate-limited-retry-after c)) "~S gives no wait" header))))
 
 ;;; --- connecting ---------------------------------------------------------------------------
 
@@ -293,8 +366,20 @@ MAKE-FACEBOOK's, before the defaults."
         (is (string= "/v26.0/oauth/access_token" p2))
         (is (equal '("fb_exchange_token" "short-user-token") (list (%param q2 "grant_type") (%param q2 "fb_exchange_token"))))
         (is (string= "/v26.0/me/accounts" p3))
-        (is (string= "long-user-token" (%param q3 "access_token")) "the Pages are listed with the long-lived token")
+        (is (null (%param q3 "access_token")) "the user token is not in the query")
+        (is (string= "OAuth long-user-token"
+                     (aion/test-http:request-header (third (reverse (aion/test-http:server-requests server)))
+                                                    "Authorization"))
+            "the Pages are listed with the long-lived token")
         (is (string= "c1" (%param q4 "after")) "and the next page is asked for by its cursor")))))
+
+(test facebook-connect-pages-needs-the-redirect-uri
+  (with-graph (server fb (%connect-handler))
+    (let ((state (h:facebook-connect-state)))
+      (signals h:invalid-message (h:facebook-connect-pages fb :code "c" :state state :expected-state state))
+      (signals h:invalid-message (h:facebook-connect-pages fb :code "c" :state state :expected-state state
+                                                              :redirect-uri "/cb"))
+      (is (null (%fb-requests server)) "nothing was sent"))))
 
 (test facebook-connect-pages-checks-the-state-before-any-request
   (with-graph (server fb (%connect-handler))
