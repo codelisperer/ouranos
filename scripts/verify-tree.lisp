@@ -61,6 +61,14 @@
 ;;;; excusable: it means a server was named and did not answer, which is a broken
 ;;;; environment rather than a choice.
 ;;;;
+;;;; The same rule covers the operating system's credential store (#357), which
+;;;; hades/credentials/tests reports as `BACKEND-CHECKS credential-store ...'. Its live tests
+;;;; store, read and delete items in the real Credential Manager or Keychain of whoever runs
+;;;; them, so they run only when OURANOS_TEST_REAL_CREDENTIAL_STORE=1 is set. CI sets it, because
+;;;; a runner's store is thrown away with the runner. On a developer's machine the skip fails
+;;;; this gate unless OURANOS_ALLOW_NO_CREDENTIAL_STORE=1 excuses it, and NOT COVERED names it
+;;;; either way. +BACKEND-RULES+ holds both rules.
+;;;;
 ;;;; THE PLATFORM AXIS is the fourth thing, and the same idea one level further out (pre-publication issue 182).
 ;;;; A package that can only be compiled on ONE host is invisible to a total check count and
 ;;;; to per-backend coverage alike. Without an axis, a WINDOWS run that never loads
@@ -472,15 +480,16 @@ directly is what every other line of this file already does."
             (format t "checkout: ~a commit(s) BEHIND ~a -- this tree is not what ~a says now~%"
                     (or behind "?") upstream upstream))))))))
 
-(defvar *postgres-excused* '()
-  "(suite . reason) for each suite whose Postgres checks were skipped and excused by
-OURANOS_ALLOW_NO_PG. Filled while the suites run; REPORT-NOT-COVERED lists them.")
+(defvar *backends-excused* '()
+  "(suite backend reason excuse-variable) for each suite whose checks of a backend were
+skipped and excused by that backend's variable in +BACKEND-RULES+. Filled while the suites
+run; REPORT-NOT-COVERED lists them.")
 
 (defun report-not-covered ()
   "What this run could have covered and did not: this run's state, printed by
 OURANOS-NOT-COVERED:PRINT-NOT-COVERED (scripts/not-covered.lisp), whose docstring says what
 the section reports and why."
-  (ouranos-not-covered:print-not-covered (axes-declined) (reverse *postgres-excused*) (axes-tag)))
+  (ouranos-not-covered:print-not-covered (axes-declined) (reverse *backends-excused*) (axes-tag)))
 
 (defun report-tls-declined (name)
   "The tls axis is off. One cause only: the caller did not ask for it."
@@ -785,16 +794,29 @@ absence is reported as one rather than stepped over."
 
 ;;; --- backend coverage (pre-publication issue 176) ----------------------------------------------
 
-(defparameter +required-backends+ '("postgres")
-  "Backends that must actually execute checks when a suite reports per-backend coverage.
+(defparameter +backend-rules+
+  '(("postgres" :when ("sqlite" "postgres") :excuse "OURANOS_ALLOW_NO_PG"
+     :to-run "set MNEMOSYNE_TEST_PG_URL")
+    ("credential-store" :when ("credential-store") :excuse "OURANOS_ALLOW_NO_CREDENTIAL_STORE"
+     :to-run "set OURANOS_TEST_REAL_CREDENTIAL_STORE=1 to use this machine's real store"))
+  "Backends that must actually execute checks, each as (NAME :WHEN BACKENDS :EXCUSE VARIABLE
+:TO-RUN TEXT). A suite whose per-backend coverage mentions any of BACKENDS must report NAME
+as having run checks. A SKIPPED NAME fails the gate unless VARIABLE is set, and TO-RUN says
+how to run it instead.
 
-SQLite is not listed: it needs no server, so it cannot silently fail to run, and demanding
-it would only produce a rule that never fires. Postgres is the one that quietly does not
-run, which is the whole reason this exists.")
+SQLite is not a rule of its own: it needs no server, so it cannot silently fail to run, and
+demanding it would only produce a rule that never fires. Postgres is the one that quietly
+does not run, which is the whole reason this exists; it is required of every suite that
+reports a database backend. The credential store is the operating system's own, and its
+tests are opt-in on a developer's machine (#357); it is required of the suite that reports
+it, hades/credentials/tests on Windows and macOS.")
+
+(defun %env-true-p (name)
+  (let ((v (uiop:getenv name)))
+    (and v (member (string-trim " " v) '("1" "true" "yes") :test #'string-equal) t)))
 
 (defun allow-no-pg-p ()
-  (let ((v (uiop:getenv "OURANOS_ALLOW_NO_PG")))
-    (and v (member (string-trim " " v) '("1" "true" "yes") :test #'string-equal) t)))
+  (%env-true-p "OURANOS_ALLOW_NO_PG"))
 
 (defun backend-coverage (output)
   "Parse `BACKEND-CHECKS <name> <rest>` lines from OUTPUT into an alist of (name . rest).
@@ -824,27 +846,29 @@ storage engine and have nothing to say here."
 (defun coverage-problems (coverage)
   "The reasons COVERAGE is not acceptable, as a list of strings. Empty means fine."
   (let ((problems '()))
-    (dolist (want +required-backends+ (nreverse problems))
-      (let* ((cell (assoc want coverage :test #'string=))
-             (value (cdr cell)))
-        (cond
-          ;; A suite that reports coverage at all must account for every required backend.
-          ((null cell)
-           (push (format nil "~a reported per-backend coverage but never mentioned ~a"
-                         "the suite" want)
-                 problems))
-          ((uiop:string-prefix-p "UNREACHABLE" value)
-           (push (format nil "~a was configured but UNREACHABLE -- ~a" want value) problems))
-          ((uiop:string-prefix-p "SKIPPED" value)
-           (unless (allow-no-pg-p)
-             (push (format nil "~a did not run (~a); set MNEMOSYNE_TEST_PG_URL, or OURANOS_ALLOW_NO_PG=1 to excuse it"
-                           want value)
-                   problems)))
-          ((and (every #'digit-char-p value) (plusp (length value)))
-           (when (zerop (parse-integer value))
-             (push (format nil "~a executed ZERO checks" want) problems)))
-          (t (push (format nil "~a reported an unparseable coverage value ~s" want value)
-                   problems)))))))
+    (dolist (rule +backend-rules+ (nreverse problems))
+      (destructuring-bind (want &key when excuse to-run) rule
+        (when (some (lambda (backend) (assoc backend coverage :test #'string=)) when)
+          (let* ((cell (assoc want coverage :test #'string=))
+                 (value (cdr cell)))
+            (cond
+              ;; A suite that reports one of the rule's backends must account for this one.
+              ((null cell)
+               (push (format nil "~a reported per-backend coverage but never mentioned ~a"
+                             "the suite" want)
+                     problems))
+              ((uiop:string-prefix-p "UNREACHABLE" value)
+               (push (format nil "~a was configured but UNREACHABLE -- ~a" want value) problems))
+              ((uiop:string-prefix-p "SKIPPED" value)
+               (unless (%env-true-p excuse)
+                 (push (format nil "~a did not run (~a); ~a, or ~a=1 to excuse it"
+                               want value to-run excuse)
+                       problems)))
+              ((and (every #'digit-char-p value) (plusp (length value)))
+               (when (zerop (parse-integer value))
+                 (push (format nil "~a executed ZERO checks" want) problems)))
+              (t (push (format nil "~a reported an unparseable coverage value ~s" want value)
+                       problems)))))))))
 
 ;;; --- counting -------------------------------------------------------------
 
@@ -1183,9 +1207,11 @@ let this run claim `view' while the five assertions skipped."
                           "NOT REPORTED (the suite ran SQLite checks and printed no SQLITE-LIBRARY line)")))
             ;; An excused skip is not a problem for the verdict, but it is a gap in what the
             ;; run covered, so NOT COVERED names it (#171).
-            (let ((pg (assoc "postgres" coverage :test #'string=)))
-              (when (and pg (allow-no-pg-p) (uiop:string-prefix-p "SKIPPED" (cdr pg)))
-                (push (cons s (cdr pg)) *postgres-excused*)))
+            (dolist (rule +backend-rules+)
+              (destructuring-bind (want &key excuse &allow-other-keys) rule
+                (let ((cell (assoc want coverage :test #'string=)))
+                  (when (and cell (%env-true-p excuse) (uiop:string-prefix-p "SKIPPED" (cdr cell)))
+                    (push (list s want (cdr cell) excuse) *backends-excused*)))))
             (dolist (problem (coverage-problems coverage))
               (format t "  COVER   ~a -- ~a~%" s problem)
               (fail "~a: ~a" s problem))))
@@ -1326,6 +1352,8 @@ let this run claim `view' while the five assertions skipped."
               (if (null d) "none" (format nil "~{~a~^ ~}" (mapcar #'first d)))))
     (when (allow-no-pg-p)
       (format t "NOTE: OURANOS_ALLOW_NO_PG is set -- a skipped Postgres was EXCUSED, not passed.~%"))
+    (when (%env-true-p "OURANOS_ALLOW_NO_CREDENTIAL_STORE")
+      (format t "NOTE: OURANOS_ALLOW_NO_CREDENTIAL_STORE is set -- a skipped credential store was EXCUSED, not passed.~%"))
     ;; The checkers each run in their own child too, so they are in this count -- a
     ;; number that says how many images ran has to be about how many images ran.
     (format t "elapsed: ~,1F s across ~D isolated images~%"
