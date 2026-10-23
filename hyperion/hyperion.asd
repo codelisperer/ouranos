@@ -378,7 +378,9 @@
   :description "Run a Hyperion app as a native desktop window (out-of-process OS webview)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
-  :depends-on ("hyperion" "hyperion/sidecar" "aion/platform" "aion/log" (:require "sb-bsd-sockets"))
+  :depends-on ("hyperion" "hyperion/sidecar" "aion/platform" "aion/log" (:require "sb-bsd-sockets")
+               ;; ShellExecuteW for the :browser shell, so no URL passes through cmd (#851)
+               (:feature :win32 "aion/windows"))
   :serial t
   :components ((:file "src/desktop")))
 
@@ -679,6 +681,7 @@
                              ;; (%SRV-OK-APP).
                              (:file "same-origin-tests")
                              (:file "desktop-window-tests")
+                             (:file "browser-tests")   ; the :browser shell opens no shell (#851)
                              (:file "ratelimit-tests")
                              (:file "proxy-tests")   ; after ratelimit-tests, whose helpers it uses (#381)
                              (:file "entropy-tests")

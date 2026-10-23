@@ -1740,6 +1740,20 @@ its tag.
 
 ### Fixed
 
+- **hyperion/desktop: the `:browser` shell opens its URL with no shell on Windows, and opens
+  only http and https URLs** (#851). `run-app` with `:shell :browser` ran `cmd /c start "" URL`
+  on Windows. cmd reads the rest of its command line as a command of its own, and SBCL quotes
+  an argument only when it holds a space or a double quote, so in a URL such as
+  `http://127.0.0.1:8080/?a=1&b=2` the text after `&` ran as a second command. The URL now goes
+  to ShellExecuteW through `aion/windows:shell-open`, with no command line. On macOS and Linux it
+  was already one argument to `open` or `xdg-open`. On every platform the shell now refuses a
+  URL that is not http or https, or that holds a character RFC 3986 does not allow, such as a
+  space, `"`, `<`, `>`, `\`, `^`, `|`, `{`, `}` or the backtick, by signalling the new
+  `hyperion/desktop:unsupported-browser-url` (reader `unsupported-browser-url-url`), whose report
+  leaves the URL out. This is the rule `hades/open:open-url` uses. A browser that cannot be
+  started is logged as a warning, and the server keeps running. `hyperion/desktop` now declares
+  `aion/windows` on Windows, which it already loaded through `hyperion/sidecar`.
+
 - **aion/http-client: a body of octets with a `multipart/` Content-Type reaches the server as
   given on Linux and macOS** (#828). This is a workaround placed once in the client, not a
   native way to send a header unchanged, because dexador offers none. Dexador's usocket backend

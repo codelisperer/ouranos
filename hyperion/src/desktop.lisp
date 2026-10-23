@@ -25,7 +25,9 @@
            #:*launcher* #:default-launcher #:image-directory #:bundled-window-icon
            ;; is this a shipped build, and where is it installed (#416)
            #:shipped-image-p #:install-directory
-           #:launcher-not-found #:*remote-backend*))
+           #:launcher-not-found #:*remote-backend*
+           ;; the :browser shell opens http and https URLs only, with no shell (#851)
+           #:unsupported-browser-url #:unsupported-browser-url-url))
 
 (in-package #:hyperion/desktop)
 
@@ -208,12 +210,81 @@ front so a fresh machine fails with build instructions rather than after booting
 
 ;;; --- shells: native webview, or the default browser (dev) -------------------
 
+;;; The :browser shell used to run `cmd /c start "" URL` on Windows. cmd reads the rest of its
+;;; command line as a command line of its own, and SBCL quotes an argument only when it holds a
+;;; space or a double quote, so in a URL such as http://127.0.0.1:8080/?a=1&b=2 the text after
+;;; & ran as a second command (#851). On Windows the URL now goes to ShellExecuteW through
+;;; aion/windows:shell-open, which builds no command line; on macOS and Linux it was already one
+;;; argument to open or xdg-open, with no shell.
+;;;
+;;; Only http and https URLs made of the characters RFC 3986 allows are opened, the same rule
+;;; as hades/open:open-url (#820). ShellExecuteW, open and xdg-open all open a file: URL or a
+;;; custom scheme with whatever program is registered for it. hyperion cannot call hades, which
+;;; is a satellite, so the check is written here as well.
+
+(define-condition unsupported-browser-url (error)
+  ((url :initarg :url :reader unsupported-browser-url-url))
+  (:report (lambda (c s)
+             (declare (ignore c))
+             ;; The URL is not printed: it can carry a token in its query.
+             (write-string "the :browser shell opens only an http or https URL with the" s)
+             (write-string " characters RFC 3986 allows" s)))
+  (:documentation "Signalled by RUN-APP's :browser shell for a URL that is not http or https,
+or that holds a character RFC 3986 does not allow in a URL (#851)."))
+
+(defun %url-char-p (c)
+  "True for a character RFC 3986 allows in a URL: unreserved, reserved, or % for an escape."
+  (or (char<= #\a c #\z) (char<= #\A c #\Z) (char<= #\0 c #\9)
+      (find c "-._~:/?#[]@!$&'()*+,;=%")))
+
+(defun %browser-url-p (url)
+  "True for an http or https URL made only of characters RFC 3986 allows."
+  (and (stringp url)
+       (let ((lower (string-downcase url)))
+         (or (and (> (length lower) 7) (string= "http://" lower :end2 7))
+             (and (> (length lower) 8) (string= "https://" lower :end2 8))))
+       (every #'%url-char-p url)))
+
+(defun %browser-plan (url &key (os (cond ((uiop:os-windows-p) :windows)
+                                          ((uiop:os-macosx-p) :macos)
+                                          (t :linux))))
+  "What OPEN-IN-BROWSER does on OS, as data, without doing it: (:SHELL-OPEN URL) on Windows,
+or (:LAUNCH PROGRAM URL) elsewhere. Signals UNSUPPORTED-BROWSER-URL for a URL it will not open.
+Taking OS lets the tests check every platform's decision on every platform."
+  (unless (%browser-url-p url) (error 'unsupported-browser-url :url url))
+  (ecase os
+    (:windows (list :shell-open url))
+    (:macos (list :launch "open" url))
+    (:linux (list :launch "xdg-open" url))))
+
+(defun %shell-open (url)
+  "Windows: open URL with ShellExecuteW. (values OK CODE), as aion/windows:shell-open returns."
+  #+win32 (aion/windows:shell-open url)
+  #-win32 (progn url (values nil :not-windows)))
+
 (defun open-in-browser (url)
-  "Open URL in the OS default browser (the :browser dev shell). Detached -- returns
-immediately."
-  (cond ((uiop:os-windows-p) (uiop:launch-program (list "cmd" "/c" "start" "" url)))
-        ((uiop:os-macosx-p)  (uiop:launch-program (list "open" url)))
-        (t                   (uiop:launch-program (list "xdg-open" url)))))
+  "Open URL, an http or https URL, in the OS default browser (the :browser dev shell), with no
+shell, and do not wait for the browser. True when the browser was started or ShellExecuteW
+reported success. A failure is logged as a warning and returns NIL; RUN-APP keeps serving, and
+the URL is still printed for the developer to open. Signals UNSUPPORTED-BROWSER-URL for a URL
+%BROWSER-URL-P refuses."
+  (destructuring-bind (kind &rest details) (%browser-plan url)
+    (ecase kind
+      (:shell-open
+       (multiple-value-bind (ok code) (%shell-open (first details))
+         (unless ok
+           (log:warn "the :browser shell could not open the default browser"
+                     :reason "ShellExecuteW failed" :code code))
+         ok))
+      (:launch
+       (handler-case
+           (progn (uiop:launch-program (list (first details) (second details))
+                                       :input nil :output nil :error-output nil)
+                  t)
+         (error (e)
+           (log:warn "the :browser shell could not open the default browser"
+                     :program (first details) :error (type-of e))
+           nil))))))
 
 (defun %wait-for-interrupt ()
   "Block until Ctrl-C -- keeps an embedded server alive under the detached :browser shell."
