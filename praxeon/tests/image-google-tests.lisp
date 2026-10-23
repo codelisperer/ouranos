@@ -380,3 +380,14 @@ tokens: (12 x 3/2 + 1120 x 30) / 10^6 = 33618 / 10^6."
                                        (lambda (p) (praxeon/image:generate-image p "x")))))
     (is (eql 16809/500000 (praxeon/image:image-result-cost (first results)))
         "~S" (praxeon/image:image-result-cost (first results)))))
+
+(test google-means-requires-user-intent-by-default-and-an-app-can-turn-it-off
+  "As for the OpenAI provider (#827): each image costs money, so the means is registered with
+:REQUIRES-USER-INTENT unless the app passes NIL."
+  (flet ((intent (&rest args)
+           (let ((ag (actor:make-agent :name "a" :provider (make-instance 'scripted :script '()))))
+             (apply #'praxeon/image:register-google-image ag :api-key "k" :on-image #'identity args)
+             (actor:means-entry-requires-user-intent (gethash "generate-image"
+                                                              (actor:agent-means ag))))))
+    (is-true (intent) "the default")
+    (is-false (intent :requires-user-intent nil) "the app turned it off")))

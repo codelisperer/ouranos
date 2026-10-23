@@ -812,7 +812,9 @@ its tag.
   `:image-usage` carries an estimated `:cost` from `*google-image-prices*` (four models, dated in
   `upstream.sexp` as "Google image prices: MODEL") and the reply's token counts. New generic
   functions `image-provider-max-references` and `image-provider-accepts-mask-p` say what a
-  provider takes.
+  provider takes. Like `register-openai-image`, `register-google-image` takes
+  `:requires-user-intent`, which defaults to true (#827); pass NIL to allow an image after a
+  web page or search result was read in the turn.
 
 - **praxeon/image: edit an image, or make a variation of it, from reference images** (#758, part
   three). `praxeon/image:generate-image` takes `:references`, a list of up to 16

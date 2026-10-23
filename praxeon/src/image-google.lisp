@@ -319,15 +319,17 @@ approximation raises the estimate rather than lowering it."
                                          read-timeout (name "generate-image") capability source
                                          (qualities *qualities*) default-quality
                                          (default-size :auto) resolve-reference
-                                         (max-references 4))
+                                         (max-references 4) (requires-user-intent t))
   "Register the generate-image means on AGENT with Google's Gemini API, when there is a key.
 Returns NAME, or NIL when there is no key, in which case nothing is registered.
 
 The key is API-KEY when given, NIL included, and otherwise PRAXEON_GOOGLE_API_KEY, then
 GEMINI_API_KEY; PRAXEON_IMAGE_API_KEY, the OpenAI provider's, is not read. A given key of NIL or
 \"\" is no key, and an empty string is logged at warn. ON-IMAGE, QUALITIES, DEFAULT-QUALITY,
-DEFAULT-SIZE, RESOLVE-REFERENCE and MAX-REFERENCES are as for REGISTER; MAX-REFERENCES may be up
-to *GOOGLE-MAX-REFERENCES*. MODEL, BASE-URL and READ-TIMEOUT are as for MAKE-GOOGLE-IMAGES."
+DEFAULT-SIZE, RESOLVE-REFERENCE, MAX-REFERENCES and REQUIRES-USER-INTENT are as for REGISTER;
+MAX-REFERENCES may be up to *GOOGLE-MAX-REFERENCES*, and REQUIRES-USER-INTENT defaults to T, as
+it does there, because each image costs money (#827). MODEL, BASE-URL and READ-TIMEOUT are as for
+MAKE-GOOGLE-IMAGES."
   (when (and api-key-p (equal api-key ""))
     (log:warn "generate-image not registered: the :api-key given is the empty string"
               :name name :provider "google"))
@@ -342,4 +344,5 @@ to *GOOGLE-MAX-REFERENCES*. MODEL, BASE-URL and READ-TIMEOUT are as for MAKE-GOO
                                   :qualities qualities :default-quality default-quality
                                   :default-size default-size
                                   :resolve-reference resolve-reference
-                                  :max-references max-references))))
+                                  :max-references max-references
+                                  :requires-user-intent requires-user-intent))))
