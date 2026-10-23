@@ -2158,12 +2158,25 @@ is read from the wrong place, which is request smuggling."
         (progn (sleep slow-seconds) (list 200 +ok+ '("slow")))
         (list 200 +ok+ '("fast")))))
 
+(defparameter +connection-reset-errnos+ '(54 104 10054)
+  "ECONNRESET on macOS, Linux and Windows.")
+
 (defun connect-refused-p (port)
-  "Whether a new TCP connection to PORT is refused."
+  "Whether a new TCP connection to PORT is refused.
+
+A connect that is reset counts as refused. On macOS a connect that lands in the listen queue
+just as the listener closes is answered with a reset, and the listener is then gone, which is
+what a caller of this asks about. Raised as an error, it ended a run of the grace-period test
+below under load (#540)."
   (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
-    (handler-case (progn (sock:socket-connect s #(127 0 0 1) port) nil)
-      (sock:connection-refused-error () t)
-      (:no-error (&rest _) (declare (ignore _)) (ignore-errors (sock:socket-close s)) nil))))
+    (unwind-protect
+         (handler-case (progn (sock:socket-connect s #(127 0 0 1) port) nil)
+           (sock:connection-refused-error () t)
+           (sock:socket-error (e)
+             (if (member (sock::socket-error-errno e) +connection-reset-errnos+)
+                 t
+                 (error e))))
+      (ignore-errors (sock:socket-close s)))))
 
 (defun %elapsed-since (start)
   (/ (- (get-internal-real-time) start) internal-time-units-per-second))
@@ -2377,10 +2390,17 @@ REASON, the way the signal handler calls it. The installer is replaced, so no si
 ;;; default was enough for SIGTERM-DRAINS-A-SERVE-FOREVER-PROCESS-ON-FOUR-LOOPS to find the
 ;;; port still accepting after the grace period.
 
+(defparameter +grace-poll+ 1.2
+  "The poll interval the grace-period test runs SERVE-FOREVER with. It is long so that each
+half of #540's defect, when present, makes the listener close 0.6 s or more late, which is
+large next to how late a busy CI runner schedules a thread. A 0.4 s poll left the defect
+0.28 s late, and the fixed code once measured 0.16 s late on a macOS runner.")
+
 (defun %grace-refusal-time (offset)
-  "Run SERVE-FOREVER on :uv with a 1 s grace period and a 0.4 s poll, call its stop function
-the way the SIGTERM handler does OFFSET seconds after it is ready, and return how many seconds
-after that call new connections are first refused, or NIL if not within 4 s. No signal is sent."
+  "Run SERVE-FOREVER on :uv with a 1 s grace period and a +GRACE-POLL+ poll, call its stop
+function the way the SIGTERM handler does OFFSET seconds after it is ready, and return how many
+seconds after that call new connections are first refused, or NIL if not within 4 s. No signal
+is sent."
   (let* ((stop-fn nil)
          (port nil)
          (ready (sb-thread:make-semaphore))
@@ -2398,7 +2418,7 @@ after that call new connections are first refused, or NIL if not within 4 s. No 
                                                     (sb-thread:signal-semaphore ready))))
                   :name "grace test: serve-forever"
                   :initial-bindings `((hsrv:*install-signal-handlers* . ,hsrv:*install-signal-handlers*)
-                                      (hsrv::*shutdown-poll-interval* . 0.4)
+                                      (hsrv::*shutdown-poll-interval* . ,+grace-poll+)
                                       (*standard-output* . ,(make-broadcast-stream))))))
     (when (sb-thread:wait-on-semaphore ready :timeout 10)
       (sleep offset)
@@ -2411,14 +2431,17 @@ after that call new connections are first refused, or NIL if not within 4 s. No 
           (bt:join-thread runner))))))
 
 (test the-listener-closes-when-the-grace-period-ends-whatever-the-poll-interval
-  "Twice, so each half of the fix has a run it changes. 0.1 s into a 0.4 s poll, the stop is
-noticed 0.3 s late, which a grace period counted from the notice carries to the end. 0.35 s in,
-it is noticed 0.05 s late, and a grace period that ends on a poll ends 0.25 s late."
-  (dolist (offset '(0.1 0.35))
+  "With a 1.2 s poll (+GRACE-POLL+), the stop is requested 0.3 s and then 0.6 s into a poll, so
+the poll notices it 0.9 s or 0.6 s later, before the 1 s grace period has ended. With the fix
+new connections are refused 1 s after the request, and the accepted range is 0.95 s to 1.3 s.
+Each half of #540's defect alone makes both runs at least 0.6 s late. A grace period counted
+from the notice ends at 1.9 s and 1.6 s. A grace period whose sleep is a whole poll ends one
+poll after the notice, at 2.1 s and 1.8 s."
+  (dolist (offset '(0.3 0.6))
     (let ((refused (%grace-refusal-time offset)))
-      (is (and refused (<= 0.95 refused 1.15))
-          "stop requested ~,2Fs into a 0.4 s poll: new connections are refused 1 s after the request, give or take 0.15 s, not a poll later: ~@[~,2Fs~]"
-          offset refused))))
+      (is (and refused (<= 0.95 refused 1.3))
+          "stop ~,2Fs into a ~,1F s poll: ~:[not refused in 4 s~;~:*refused ~,2Fs after~]"
+          offset +grace-poll+ refused))))
 
 ;;; --- responses encoded on the worker (#430) --------------------------------------------
 ;;;
