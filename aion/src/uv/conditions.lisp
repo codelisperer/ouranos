@@ -67,6 +67,25 @@ during shutdown is the defect class this condition exists because of (pre-public
 the CALLER knows whether dropping that work is correct, so the caller has to say
 so. A teardown path that legitimately drops it handles this and says why."))
 
+(define-condition loop-thread-still-running (error)
+  ((loop :initarg :loop :reader loop-thread-still-running-loop)
+   (thread :initarg :thread :reader loop-thread-still-running-thread)
+   (timeout :initarg :timeout :reader loop-thread-still-running-timeout))
+  (:report
+   (lambda (c stream)
+     (format stream "The loop thread ~S did not exit within ~A seconds of being asked to stop; a callback on it is still running, so the loop was not freed."
+             (sb-thread:thread-name (loop-thread-still-running-thread c))
+             (loop-thread-still-running-timeout c))))
+  (:documentation
+   "STOP-LOOP-THREAD asked the loop thread to exit and it was still running when TIMEOUT
+ran out, because a callback on it had not returned (#694).
+
+Ours, not libuv's, so it is not a UV-ERROR. CLOSE-LOOP signals it rather than freeing the
+loop: freeing a uv_loop_t and its handles while a callback still runs on them makes libuv
+use freed memory when the callback returns, and the corruption appears later somewhere
+unrelated. CLOSE-LOOP offers two restarts, WAIT-FOR-LOOP-THREAD and LEAVE-LOOP-UNFREED, and a
+later CLOSE-LOOP finishes the teardown once the thread has exited."))
+
 (defparameter *error-classes*
   '(("ENOENT" . file-not-found)
     ("EACCES" . permission-denied)
