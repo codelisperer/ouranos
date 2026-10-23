@@ -488,6 +488,26 @@ its tag.
     CloudFront and Azure signatures), or one that cannot be parsed, is replaced by the site's
     fallback, with a warning, because crawlers cache a card longer than the URL lasts.
 
+- **hermes/blob: `copy-blob` and `move-blob` copy or move a blob inside a store without the
+  bytes passing through the app** (#804), so a verified upload leaves quarantine without being
+  downloaded and uploaded again. `(copy-blob store src-bucket src-key dst-bucket dst-key
+  &key content-type metadata if-match)` returns the destination's `blob-meta`; `move-blob` copies and
+  then deletes the source. On S3 a copy is CopyObject up to 5 GiB and a multipart copy
+  (UploadPartCopy) above it, every request conditional on the source's ETag, so a source
+  replaced during the copy signals the new condition `blob-source-changed`, a
+  `blob-backend-error` subclass. `:if-match` takes the ETag the app recorded when it checked the
+  blob, so the copy happens only if the source is still that object (part of #826). On the
+  filesystem store, `blob-meta-etag` is now the blob's SHA-256 checksum, where it was NIL, so
+  `:if-match` works there too. The content type, the app's metadata and the checksum are kept
+  unless `:content-type` or `:metadata` replace them. A copied object gets the bucket's default
+  ACL, or `x-amz-acl: private` on a store made with `:upload-acl :private`. A move is not atomic on S3:
+  if deleting the source fails, the destination exists and the delete's condition is
+  signalled, and a delete S3 refuses with 403 is found by checking the source afterwards and
+  signals `blob-backend-error` naming the source. A copy S3 refuses with 403, or a missing
+  destination bucket, is `blob-backend-error` naming the destination. On the filesystem store a move is a rename. A missing source is `blob-not-found`
+  naming it; a provider that cannot copy, or a store class that does not implement it, signals
+  `blob-unsupported`. See "Leaving quarantine" in `hermes/docs/blob-direct-uploads.md`.
+
 - **hermes: `telegram-added-chats` lists the chats a Telegram bot was recently added to**
   (#794), so an app can find the id of a group or channel that operators share as a `t.me/+`
   invite link. It returns `telegram-added-chat` structures (`-id`, `-type`, `-title`, `-status`,

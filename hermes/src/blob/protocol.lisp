@@ -32,7 +32,8 @@ PUT-BLOB, so it costs nothing extra and is available to store alongside the row.
   (last-modified nil :type (or null integer))
   ;; The provider's entity tag, without its quotes, where the backend has one: S3's ETag,
   ;; which is the MD5 of a single-part upload and not a content hash for a multipart one.
-  ;; NIL on the filesystem store. For checking a browser's upload after the fact (#770).
+  ;; On the filesystem store it is the SHA-256 checksum when the blob has a sidecar, and NIL
+  ;; when it has none (#826). For checking a browser's upload after the fact (#770).
   (etag nil :type (or null string)))
 
 (defstruct (upload-target (:constructor make-upload-target (url method headers expires-in
@@ -187,6 +188,51 @@ BLOB-METADATA and READ-BLOB-RANGE, as for a single upload."))
   (:documentation
    "The parts of UPLOAD-ID uploaded so far, as a list of (part-number etag size), in order, for
 resuming an upload: the client uploads only the parts that are missing."))
+
+(defgeneric copy-blob (store src-bucket src-key dst-bucket dst-key
+                       &key content-type metadata if-match)
+  (:documentation
+   "Copy the blob at SRC-BUCKET/SRC-KEY to DST-BUCKET/DST-KEY inside STORE, without the bytes
+passing through this process (#804). Returns the destination's BLOB-META. Overwrites an existing
+destination, as PUT-BLOB does.
+
+With neither CONTENT-TYPE nor METADATA, the copy keeps the source's content type, metadata and
+checksum. CONTENT-TYPE replaces the content type; METADATA replaces the app's metadata, and is
+checked as PUT-BLOB checks it (\"sha256\" is reserved). The checksum is kept either way.
+
+When source and destination are the same, a copy with no changes returns the blob's BLOB-META
+and copies nothing; with changes it rewrites the content type or metadata in place.
+
+IF-MATCH is the source's ETag as the app read it when it checked the blob (BLOB-META-ETAG, with or
+without its quotes). When given, the copy happens only if the source still has that ETag, and
+otherwise signals BLOB-SOURCE-CHANGED with nothing copied, so the bytes copied are the bytes the
+app checked (#826). On the filesystem store the ETag is the blob's SHA-256 checksum.
+
+A missing source signals BLOB-NOT-FOUND naming the source. On S3 a source that changes while it
+is being copied signals BLOB-SOURCE-CHANGED. A store that cannot copy server-side signals
+BLOB-UNSUPPORTED, and the caller copies through GET-BLOB and PUT-BLOB. On an S3 store made with
+:UPLOAD-ACL :PRIVATE the copy is sent with `x-amz-acl: private'; otherwise it gets the bucket's
+default ACL, because S3 never copies an object's ACL."))
+
+(defgeneric move-blob (store src-bucket src-key dst-bucket dst-key
+                       &key content-type metadata if-match)
+  (:documentation
+   "COPY-BLOB, then DELETE-BLOB on the source (#804). Returns the destination's BLOB-META.
+
+NOT ATOMIC on S3, which has no rename: if the copy succeeds and the delete fails, the
+destination holds the blob AND the source is still there, and the delete's own condition is
+signalled, normally BLOB-BACKEND-ERROR naming the source. A delete the store refuses (S3 answers
+403, which DELETE-BLOB cannot tell from a missing key) is found by checking that the source is
+gone afterwards, and signals BLOB-BACKEND-ERROR naming the source too. Retrying the move is safe,
+because a copy overwrites. A quarantine sweep must expect a source left behind this way. If the
+copy fails, nothing was deleted. On the filesystem store a move is a rename within one root.
+
+The delete is unconditional: if the source is replaced between the copy and the delete, the newer
+object is deleted and the older one is at the destination. That is harmless for a quarantine
+prefix nothing else writes to, but not for a key other writers use.
+
+When source and destination are the same, it returns the blob's BLOB-META and deletes nothing.
+IF-MATCH is checked as COPY-BLOB checks it, and a mismatch deletes nothing."))
 
 (defgeneric list-blobs (store bucket &key prefix)
   (:documentation
@@ -358,6 +404,50 @@ the same header, and \"sha256\" is reserved for the checksum the store records."
   (declare (ignore prefix))
   (%check-bucket bucket))
 
+(defun %etag= (a b)
+  "True if A and B are the same ETag, ignoring the quotes around either."
+  (and a b (string= (string-trim "\"" a) (string-trim "\"" b))))
+
+(defun %check-if-match (bucket key if-match etag)
+  "Signal BLOB-SOURCE-CHANGED for BUCKET/KEY when IF-MATCH is given and is not ETAG, the source's
+ETag now. A blob with no ETag matches nothing (#826)."
+  (when (and if-match (not (%etag= if-match etag)))
+    (error 'blob-source-changed :bucket bucket :key key)))
+
+(defun %check-copy (src-bucket src-key dst-bucket dst-key content-type metadata
+                    &optional if-match)
+  "The checks COPY-BLOB and MOVE-BLOB share: both locations, the content type as UPLOAD-URL checks
+it, and the metadata as PUT-BLOB checks it."
+  (%check-key src-bucket src-key)
+  (%check-key dst-bucket dst-key)
+  (when (and content-type
+             (not (and (stringp content-type)
+                       (plusp (length (string-trim " " content-type)))
+                       (notany #'%control-char-p content-type))))
+    (error 'blob-invalid-metadata
+           :bucket dst-bucket :key dst-key
+           :fault "the content type is empty, not a string, or holds a control character"))
+  (%check-metadata dst-bucket dst-key metadata)
+  ;; The ETag goes into a request header on S3.
+  (when (and if-match
+             (not (and (stringp if-match)
+                       (plusp (length (string-trim "\"" if-match)))
+                       (every (lambda (c) (<= 32 (char-code c) 126)) if-match))))
+    (error 'blob-invalid-metadata
+           :bucket src-bucket :key src-key :name "if-match"
+           :fault "if-match must be an ETag: a non-empty printable ASCII string")))
+
+(defmethod copy-blob :before ((s store) src-bucket src-key dst-bucket dst-key
+                              &key content-type metadata if-match)
+  (%check-copy src-bucket src-key dst-bucket dst-key content-type metadata if-match))
+
+(defmethod move-blob :before ((s store) src-bucket src-key dst-bucket dst-key
+                              &key content-type metadata if-match)
+  (%check-copy src-bucket src-key dst-bucket dst-key content-type metadata if-match))
+
+(defun %same-location-p (src-bucket src-key dst-bucket dst-key)
+  (and (string= src-bucket dst-bucket) (string= src-key dst-key)))
+
 ;;; --- streaming + digest, implemented once ----------------------------------
 
 (defconstant +copy-buffer-size+ 65536
@@ -400,6 +490,36 @@ bug at the call site. Prefer this."
 ;;;
 ;;; An app can define its own STORE subclass. Without these, calling UPLOAD-URL or
 ;;; READ-BLOB-RANGE on one signals NO-APPLICABLE-METHOD instead of what the docstrings promise.
+
+(defmethod copy-blob ((s store) src-bucket src-key dst-bucket dst-key
+                      &key content-type metadata if-match)
+  (declare (ignore src-key dst-bucket dst-key content-type metadata if-match))
+  (error 'blob-unsupported :bucket src-bucket
+                           :operation "server-side copy (copy through get-blob and put-blob)"))
+
+(defmethod move-blob ((s store) src-bucket src-key dst-bucket dst-key
+                      &key content-type metadata if-match)
+  ;; Any store that can copy can move: copy, then delete the source. The filesystem store
+  ;; overrides this with a rename. The order matters: the source is deleted only once the
+  ;; destination exists, so a failure leaves two copies, never none.
+  (if (%same-location-p src-bucket src-key dst-bucket dst-key)
+      (if (or content-type metadata)
+          (copy-blob s src-bucket src-key dst-bucket dst-key
+                     :content-type content-type :metadata metadata :if-match if-match)
+          (let ((meta (blob-metadata s src-bucket src-key)))
+            (%check-if-match src-bucket src-key if-match (blob-meta-etag meta))
+            meta))
+      (let ((meta (copy-blob s src-bucket src-key dst-bucket dst-key
+                             :content-type content-type :metadata metadata :if-match if-match)))
+        (delete-blob s src-bucket src-key)
+        ;; DELETE-BLOB is idempotent and folds S3's 403 into "already gone", so a role without
+        ;; s3:DeleteObject would make the move look done with the source left behind. Check.
+        (when (blob-exists-p s src-bucket src-key)
+          (error 'blob-backend-error
+                 :bucket src-bucket :key src-key
+                 :detail (concatenate 'string "the source was copied but not deleted: "
+                                      "the delete was refused, or the source was written again")))
+        meta)))
 
 (defmethod upload-url ((s store) bucket key &key expires-in content-type content-length max-bytes)
   (declare (ignore expires-in content-type content-length max-bytes))

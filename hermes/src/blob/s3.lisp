@@ -672,14 +672,21 @@ as S3 allows in AllowedOrigin and AllowedHeader?"
 (defun %body-text (body)
   (if (stringp body) body (sb-ext:octets-to-string body :external-format :utf-8)))
 
-(defmethod start-multipart-upload ((s s3-store) bucket key &key (content-type "application/octet-stream"))
+(defun %create-multipart-upload (s bucket key content-type &optional extra-headers)
+  "CreateMultipartUpload for BUCKET/KEY, returning the upload id. EXTRA-HEADERS carry the object's
+metadata and ACL when a multipart copy sets them (#804)."
   (let* ((text (%body-text (%s3-request s bucket key :post :query "uploads="
                                         :content (make-array 0 :element-type '(unsigned-byte 8))
                                         :content-type content-type
-                                        :payload-hash (%sha256-hex ""))))
+                                        :payload-hash (%sha256-hex "")
+                                        :extra-headers extra-headers)))
          (upload-id (first (%xml-values text "UploadId"))))
     (unless upload-id
       (error 'blob-backend-error :bucket bucket :key key :detail "CreateMultipartUpload returned no UploadId"))
+    upload-id))
+
+(defmethod start-multipart-upload ((s s3-store) bucket key &key (content-type "application/octet-stream"))
+  (let ((upload-id (%create-multipart-upload s bucket key content-type)))
     (log:info "multipart upload started" :backend "s3" :bucket bucket :key key)
     upload-id))
 
@@ -743,3 +750,174 @@ as S3 allows in AllowedOrigin and AllowedHeader?"
             (setf marker next)
             (return))))
     (sort (nreverse parts) #'< :key #'first)))
+
+;;; --- server-side copy (#804) ------------------------------------------------
+;;;
+;;; CopyObject up to 5 GiB, a multipart copy (UploadPartCopy) above it. Every request is
+;;; conditional on the source's ETag as read at the start, so a source replaced between the app's
+;;; verification and the copy, or partway through a multipart copy, fails with 412
+;;; (BLOB-SOURCE-CHANGED) rather than copying, or mixing in, a different object.
+
+(defvar *%copy-multipart-threshold* +max-single-put-bytes+
+  "TEST-ONLY. A source larger than this many bytes is copied in parts. It is S3's CopyObject
+limit; a test binds it lower to exercise the multipart path on a small object.")
+
+(defvar *%copy-part-size* (* 512 1024 1024)
+  "TEST-ONLY. The smallest part a multipart copy uses; parts grow so that no copy needs more
+than 10000. S3 requires 5 MiB to 5 GiB per part. A test binds it lower, never below 5 MiB on a
+real store.")
+
+(defun %copy-source (bucket key)
+  "The x-amz-copy-source value: /BUCKET/KEY, the key percent-encoded with its slashes kept."
+  (format nil "/~A/~A" bucket (%uri-encode key :encode-slash nil)))
+
+(defun %source-head (s bucket key)
+  "The source's (values size etag content-type user-metadata checksum) from one HEAD request.
+USER-METADATA is the app's x-amz-meta-* entries, without the store's own sha256."
+  (multiple-value-bind (body status headers) (%s3-request s bucket key :head)
+    (declare (ignore body status))
+    (flet ((hdr (name) (gethash name headers)))
+      (values (or (ignore-errors (parse-integer (or (hdr "content-length") "0"))) 0)
+              (hdr "etag")
+              (hdr "content-type")
+              (let ((user '()))
+                (maphash (lambda (name value)
+                           (when (and (> (length name) 11)
+                                      (string-equal "x-amz-meta-" name :end2 11)
+                                      (not (string-equal name "x-amz-meta-sha256")))
+                             (push (cons (subseq name 11) value) user)))
+                         headers)
+                (sort user #'string< :key #'car))
+              (hdr "x-amz-meta-sha256")))))
+
+(defun %object-headers (s user-metadata checksum)
+  "The x-amz-meta-* and x-amz-acl headers an object is created with by a copy that sets them."
+  (append (loop for (name . value) in user-metadata
+                collect (cons (format nil "x-amz-meta-~A" (string-downcase name)) value))
+          (when checksum (list (cons "x-amz-meta-sha256" checksum)))
+          (%upload-acl-headers s)))
+
+(defun %copy-request (s src-bucket src-key dst-bucket dst-key &rest args)
+  "%S3-REQUEST for a CopyObject or UploadPartCopy into DST-BUCKET/DST-KEY, with its failures read
+as a copy's: 412 is BLOB-SOURCE-CHANGED, 501 is BLOB-UNSUPPORTED, and a 404 names the source when
+the source is gone (else the destination, whose bucket is then missing). A 200 whose body is an
+<Error> document is a failure too. Returns the body as text."
+  (let ((text (handler-case (%body-text (apply #'%s3-request s dst-bucket dst-key :put args))
+                (blob-backend-error (e)
+                  (case (blob-backend-error-status e)
+                    (412 (error 'blob-source-changed :bucket src-bucket :key src-key))
+                    (501 (error 'blob-unsupported
+                                :bucket src-bucket :key src-key
+                                :operation "server-side copy (copy through get-blob and put-blob)"))
+                    (t (error e))))
+                (blob-not-found ()
+                  ;; %S3-REQUEST folds 403 into BLOB-NOT-FOUND. With the source still there, the
+                  ;; copy was refused (missing GetObject or PutObject, a KMS denial) or the
+                  ;; destination bucket is missing; reporting the destination as not found would
+                  ;; read as "the upload vanished" to a quarantine flow.
+                  (if (blob-exists-p s src-bucket src-key)
+                      (error 'blob-backend-error
+                             :bucket dst-bucket :key dst-key
+                             :detail "copy refused (403) or destination bucket missing")
+                      (error 'blob-not-found :bucket src-bucket :key src-key))))))
+    ;; CopyObject and UploadPartCopy can answer 200 with an <Error> document as the body.
+    (when (search "<Error>" text)
+      (let ((code (first (%xml-values text "Code"))))
+        (if (equal code "PreconditionFailed")
+            (error 'blob-source-changed :bucket src-bucket :key src-key :status 200)
+            (error 'blob-backend-error :bucket dst-bucket :key dst-key :status 200 :detail code))))
+    text))
+
+(defun %copy-part-ranges (size part-size)
+  "The inclusive byte ranges (first . last) a multipart copy of SIZE bytes uses: parts of at least
+PART-SIZE, grown so there are no more than 10000, the last one shorter."
+  (let ((part (max part-size (ceiling size 10000))))
+    (loop for first from 0 below size by part
+          collect (cons first (1- (min size (+ first part)))))))
+
+(defun %copy-single (s src-bucket src-key dst-bucket dst-key source replace
+                     new-type new-user checksum)
+  "CopyObject. COPY keeps the source's type, metadata and checksum as they are; REPLACE sends the
+new ones, with the source's checksum sent again."
+  (%copy-request s src-bucket src-key dst-bucket dst-key
+                 :content (make-array 0 :element-type '(unsigned-byte 8))
+                 :payload-hash (%sha256-hex "")
+                 :content-type (when replace new-type)
+                 :extra-headers
+                 (append source
+                         (list (cons "x-amz-metadata-directive" (if replace "REPLACE" "COPY")))
+                         (if replace
+                             (%object-headers s new-user checksum)
+                             (%upload-acl-headers s)))))
+
+(defun %copy-part (s src-bucket src-key dst-bucket dst-key source upload-id number range)
+  "UploadPartCopy of the source's bytes RANGE, (first . last), as part NUMBER. Returns its ETag."
+  (let ((text (%copy-request s src-bucket src-key dst-bucket dst-key
+                             :content (make-array 0 :element-type '(unsigned-byte 8))
+                             :payload-hash (%sha256-hex "")
+                             :query (%canonical-query
+                                     (list (cons "partNumber" (princ-to-string number))
+                                           (cons "uploadId" upload-id)))
+                             :extra-headers
+                             (append source
+                                     (list (cons "x-amz-copy-source-range"
+                                                 (format nil "bytes=~D-~D"
+                                                         (car range) (cdr range))))))))
+    (first (%xml-values text "ETag"))))
+
+(defun %copy-multipart (s src-bucket src-key dst-bucket dst-key source ranges
+                        new-type new-user checksum)
+  "A multipart copy of RANGES. It creates the object afresh, so it always sets the type,
+metadata, checksum and ACL itself, and it aborts the upload on any failure, so no parts are left
+behind to be billed."
+  (let ((upload-id (%create-multipart-upload s dst-bucket dst-key new-type
+                                             (%object-headers s new-user checksum)))
+        (completed nil))
+    (unwind-protect
+         (let ((parts (loop for range in ranges
+                            for number from 1
+                            collect (cons number (%copy-part s src-bucket src-key dst-bucket dst-key
+                                                             source upload-id number range)))))
+           (complete-multipart-upload s dst-bucket dst-key upload-id parts)
+           (setf completed t))
+      (unless completed
+        (ignore-errors (abort-multipart-upload s dst-bucket dst-key upload-id))))))
+
+(defmethod copy-blob ((s s3-store) src-bucket src-key dst-bucket dst-key
+                      &key content-type metadata if-match)
+  (let ((same (%same-location-p src-bucket src-key dst-bucket dst-key)))
+    (if (and same (not content-type) (not metadata))
+        ;; Nothing to copy and nothing to change: one HEAD, which also reports a missing blob.
+        (let ((meta (blob-metadata s src-bucket src-key)))
+          (%check-if-match src-bucket src-key if-match (blob-meta-etag meta))
+          meta)
+        (multiple-value-bind (size etag src-type src-user checksum)
+            (%source-head s src-bucket src-key)
+          ;; Every copy request is conditional on the source's ETag, so a store that answers the
+          ;; HEAD without one cannot be copied from safely; without this check the header would
+          ;; read "NIL" and every copy would fail as BLOB-SOURCE-CHANGED.
+          (unless (and etag (plusp (length etag)))
+            (error 'blob-backend-error
+                   :bucket src-bucket :key src-key
+                   :detail "the source has no ETag, so the copy cannot be made conditional on it"))
+          ;; The app's IF-MATCH is checked against the HEAD's ETag before anything is sent, and
+          ;; every copy request is conditional on that same ETag, so the copy is of the checked
+          ;; bytes.
+          (%check-if-match src-bucket src-key if-match etag)
+          (let* ((replace (or content-type metadata same))
+                 (new-type (or content-type src-type "application/octet-stream"))
+                 (new-user (or metadata src-user))
+                 (source (list (cons "x-amz-copy-source" (%copy-source src-bucket src-key))
+                               (cons "x-amz-copy-source-if-match" etag)))
+                 (ranges (when (> size *%copy-multipart-threshold*)
+                           (%copy-part-ranges size *%copy-part-size*))))
+            (if ranges
+                (%copy-multipart s src-bucket src-key dst-bucket dst-key source ranges
+                                 new-type new-user checksum)
+                (%copy-single s src-bucket src-key dst-bucket dst-key source replace
+                              new-type new-user checksum))
+            (log:info "blob copied" :backend "s3" :src-bucket src-bucket :dst-bucket dst-bucket
+                                    :bytes size :mode (if ranges :multipart :single)
+                                    :parts (if ranges (length ranges) 1)
+                                    :metadata-directive (if replace :replace :copy))
+            (blob-metadata s dst-bucket dst-key))))))
