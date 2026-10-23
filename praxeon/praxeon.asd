@@ -328,7 +328,9 @@
                              ;; #758: in the PRAXEON suite, after praxeon-tests, whose
                              ;; %SERVE-REPLIES and scripted provider it uses
                              (:file "image-tests")
-                             (:file "web-page-tests"))))
+                             (:file "web-page-tests")
+                             ;; #827: untrusted content in a turn, using the stub reader pattern
+                             (:file "reader-guard-tests"))))
   :perform (test-op (op c)
              (uiop:symbol-call :fiveam :run! (uiop:find-symbol* :praxeon :praxeon/tests))))
 

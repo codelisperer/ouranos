@@ -14,6 +14,19 @@ its tag.
 
 ### An app may have to act
 
+- **praxeon: `generate-image` is refused once a turn has read a web page or search results**
+  (#827). `praxeon/image:register` and `register-openai-image` now pass
+  `:requires-user-intent t` to `register-means`, because each image costs money. When the model
+  asks for an image after `read-web-page` or `web-search` returned in the same turn, the call is
+  not run and the model is told the user can ask for it in their next message. To keep the old
+  behaviour, pass `:requires-user-intent nil`.
+- **praxeon: `read-web-page` and `web-search` run at most 3 times in one turn by default**
+  (#827). Later calls in the turn are not run, and the model is told the limit. Pass
+  `:max-per-turn` to `praxeon/web-page:register`, `register-read-web-page` or
+  `praxeon/web-search:register` to change it, or `:max-per-turn nil` for no limit. Both means
+  are now registered with `:untrusted t`, so a means with `:requires-user-intent t` is refused
+  after either one has run in the turn.
+
 - **hermes/blob: `put-blob` refuses metadata named `sha256`, and malformed metadata, with the new
   condition `blob-invalid-metadata`** (#810). `sha256`, in any case, is reserved for the checksum
   the S3 store now records. Names and values become request headers on S3, so a name must be a
@@ -508,6 +521,18 @@ its tag.
   naming it; a provider that cannot copy, or a store class that does not implement it, signals
   `blob-unsupported`. See "Leaving quarantine" in `hermes/docs/blob-direct-uploads.md`.
 
+- **praxeon: a turn can refuse calls that content the agent read may have asked for** (#827).
+  `praxeon/actor:register-means` takes `:untrusted`, `:requires-user-intent`, `:allow` and
+  `:max-per-turn`. A means with `:requires-user-intent t` is refused for the rest of a turn once
+  a means with `:untrusted t` has run in it; a call whose `:allow` predicate returns false or
+  signals is refused; and calls past `:max-per-turn` in one turn are refused. A refused call is
+  not run, and the model is told why. `praxeon/web-page:user-or-search-urls` is a ready-made
+  `:allow` for `register-read-web-page`: it allows only hosts the user wrote in the
+  conversation, matched exactly with userinfo ignored, and URLs a web search returned in this
+  turn before anything untrusted was read. `praxeon/actor:user-texts`, `turn-untrusted-p`,
+  `turn-urls`, `note-turn-urls` and `mark-untrusted` let an app's own means and predicates use
+  the same guard. The praxeon README's section "Content the agent reads can carry
+  instructions" describes what this stops and what it does not.
 - **hermes: `telegram-added-chats` lists the chats a Telegram bot was recently added to**
   (#794), so an app can find the id of a group or channel that operators share as a `t.me/+`
   invite link. It returns `telegram-added-chat` structures (`-id`, `-type`, `-title`, `-status`,

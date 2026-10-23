@@ -315,6 +315,7 @@
 (defpackage #:praxeon/actor
   (:use #:cl)
   (:local-nicknames (#:px #:praxeon/praxeology)
+                    (#:log #:aion/log)
                     (#:boundary #:aion/boundary)
                     (#:cnd #:praxeon/conditions)
                     (#:ctx #:praxeon/context)
@@ -335,6 +336,10 @@
    #:agent-cache-system #:agent-system-parts #:agent-max-tokens
    #:request-messages
    #:means-entry #:means-entry-source #:register-means #:means-permitted-p #:agent-means-for
+   ;; untrusted content in a turn (#827)
+   #:means-entry-untrusted #:means-entry-requires-user-intent #:means-entry-allow
+   #:means-entry-max-per-turn
+   #:user-texts #:turn-untrusted-p #:turn-urls #:note-turn-urls #:mark-untrusted
    ;; The accessors of what AGENT-MEANS-FOR returns. NAME and DESCRIPTION were missing, so an
    ;; app could enumerate the means it may use and not read them -- which is the
    ;; knowable-blast-radius property of ADR-0002 being exported in a form nobody can consume.
