@@ -20,6 +20,16 @@ its tag.
   asks for an image after `read-web-page` or `web-search` returned in the same turn, the call is
   not run and the model is told the user can ask for it in their next message. To keep the old
   behaviour, pass `:requires-user-intent nil`.
+- **praxeon: a means registered with `:confirm` is refused, not held, once a turn has read a web
+  page or search results** (#827). `register-means`'s `:requires-user-intent` defaults to true
+  when `:confirm` is given, and that includes tools granted by `praxeon/mcp:grant-tools` with
+  `:confirm`. Such a call after `read-web-page` or `web-search` returned in the same turn no
+  longer reaches the app's `:on-hold` policy. Pass `:requires-user-intent nil` to
+  `register-means` to have it held as before. `grant-tools` has no such option, so a granted
+  tool with `:confirm` is always refused after a read.
+- **praxeon: registering `read-web-page` without `:allow` logs a warning** (#827), naming the
+  risk and `praxeon/web-page:user-or-search-urls`. Pass `:allow` to `register-read-web-page` or
+  `praxeon/web-page:register` to silence it.
 - **praxeon: `read-web-page` and `web-search` run at most 3 times in one turn by default**
   (#827). Later calls in the turn are not run, and the model is told the limit. Pass
   `:max-per-turn` to `praxeon/web-page:register`, `register-read-web-page` or

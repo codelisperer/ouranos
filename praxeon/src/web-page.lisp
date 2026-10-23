@@ -558,9 +558,13 @@ ACTOR:REGISTER-MEANS. Returns NAME. An app normally calls REGISTER-READ-WEB-PAGE
 A page is untrusted content (#827): once one has been read in a turn, a means registered with
 :REQUIRES-USER-INTENT is refused for the rest of it. ALLOW is NIL, or a function of the URL and
 the agent that must return true for the page to be read, such as USER-OR-SEARCH-URLS. A URL it
-refuses is not fetched, and the model is told the call was not run. MAX-PER-TURN, 3 by default
+refuses is not fetched, and the model is told the call was not run. Without ALLOW the model may
+open any public URL, and a warning saying so is logged. MAX-PER-TURN, 3 by default
 or NIL for no limit, bounds the pages read in one turn."
   (check-type reader page-reader)
+  (unless allow
+    (log:warn "read-web-page registered without :allow, so the model may open any public URL, including one a page it read told it to open; pass :allow #'praxeon/web-page:user-or-search-urls"
+              :name name))
   (actor:register-means
    agent name *description*
    (lambda (args)

@@ -151,8 +151,15 @@ troubleshooting — is in [`docs/user-guide.md`](docs/user-guide.md).
 `praxeon/web-page` gives an agent the `read-web-page` means. The model calls it with a URL and
 gets back the page's main text, its title and the URL it was read from after redirects.
 
+**Register it with `:allow #'user-or-search-urls`** unless the model must be free to open any
+public page. Without it, a page the model reads can tell it to open another address, and that
+address can carry what the conversation contains. Registering without `:allow` logs a warning
+that says so. See [Content the agent reads can carry
+instructions](#content-the-agent-reads-can-carry-instructions).
+
 ```lisp
-(praxeon/web-page:register-read-web-page agent)   ; => "read-web-page", or NIL
+(praxeon/web-page:register-read-web-page agent :allow #'praxeon/web-page:user-or-search-urls)
+;; => "read-web-page", or NIL
 ```
 
 - **Backend.** Tavily's `/extract` when `TAVILY_API_KEY` is set (or `:api-key` is given).
@@ -219,7 +226,10 @@ A refused call is not run, and the model is told why, so it can tell the user.
 - **`:requires-user-intent t`** marks a means that spends, writes or sends for the user. A call
   the model asks for after untrusted content entered the turn is refused for the rest of the
   turn. Calls the model asked for in the same step as the read, before it saw the result, are
-  judged on what it had seen, and run. `generate-image` sets it by default.
+  judged on what it had seen, and run. `generate-image` sets it by default, and so does every
+  means registered with `:confirm`, such as an MCP tool granted with `:confirm`, because a means
+  held for the user's confirmation is one that spends or writes. Pass
+  `:requires-user-intent nil` to have such a means held for confirmation instead of refused.
 - **`:allow`** is a function of the call's arguments and the agent, and the call runs only when
   it returns true. A predicate that signals refuses the call. `register` and
   `register-read-web-page` take `:allow` as a function of the URL and the agent.
@@ -250,8 +260,9 @@ another page on the same host, with data from the conversation in its address, a
 owner of that host sees the address in their logs. If the user names a host they do not
 trust, or a host that serves pages anyone can write, such as a forum or a wiki, treat its pages
 as able to receive what the conversation contains. The guard does not inspect the arguments
-of a call that it lets run, and `:allow` defaults to no restriction, so an app that reads pages
-should pass one.
+of a call that it lets run. `:allow` defaults to no restriction, so that an app whose model
+finds pages on its own keeps working; such an app accepts that a page can send the model to
+any public address.
 
 ## Status & license
 

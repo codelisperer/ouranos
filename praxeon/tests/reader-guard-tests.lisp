@@ -275,3 +275,68 @@ many times it ran."
   (let ((ag (actor:make-agent :name "p" :provider (make-instance 'scripted :script '()))))
     (signals error (actor:register-means ag "x" "x" #'identity :max-per-turn 0))
     (signals error (actor:register-means ag "x" "x" #'identity :allow "yes"))))
+
+;;; --- defaults: a confirmed means, and a reader without :allow -------------------------
+
+(defun %confirmed-spender (agent &rest keys)
+  "Register a means held for the user's confirmation on AGENT, with KEYS passed on to
+REGISTER-MEANS. Returns a function that answers how many times it ran."
+  (let ((runs 0))
+    (apply #'actor:register-means agent "pay" "Pay for something."
+           (lambda (args) (declare (ignore args)) (incf runs) "Paid.")
+           :confirm t keys)
+    (lambda () runs)))
+
+(defun %approving (agent input)
+  "Run a turn of AGENT on INPUT, approving every call held for confirmation. Returns how many
+calls were held."
+  (let ((held 0))
+    (actor:run-turn agent input :principal "u1"
+                                :on-hold (lambda (call) (declare (ignore call)) (incf held) :approve))
+    held))
+
+(test a-means-held-for-confirmation-is-refused-after-a-page-by-default
+  ;; An app that declared a spending means with :CONFIRM and did not pass
+  ;; :REQUIRES-USER-INTENT still gets the refusal.
+  (let* ((reader (make-instance '%stub-reader))
+         (ag (%guard-agent (%calls (list "read-web-page" (%args "url" "https://docs.example.com/")))
+                           (%calls (list "pay" (%args "item" "x")))))
+         (runs (%confirmed-spender ag)))
+    (wp:register ag reader)
+    (is-true (actor:means-entry-requires-user-intent (gethash "pay" (actor:agent-means ag))))
+    (is (= 0 (%approving ag "Read docs.example.com")) "The call was refused, not held.")
+    (is (= 0 (funcall runs)))))
+
+(test a-means-held-for-confirmation-is-held-after-a-page-when-the-app-opts-out
+  (let* ((reader (make-instance '%stub-reader))
+         (ag (%guard-agent (%calls (list "read-web-page" (%args "url" "https://docs.example.com/")))
+                           (%calls (list "pay" (%args "item" "x")))))
+         (runs (%confirmed-spender ag :requires-user-intent nil)))
+    (wp:register ag reader)
+    (is (= 1 (%approving ag "Read docs.example.com")))
+    (is (= 1 (funcall runs)))))
+
+(test a-means-without-confirm-does-not-require-user-intent-by-default
+  (let ((ag (actor:make-agent :name "p" :provider (make-instance 'scripted :script '()))))
+    (actor:register-means ag "look" "Look something up." #'identity)
+    (is-false (actor:means-entry-requires-user-intent (gethash "look" (actor:agent-means ag))))))
+
+(defun %registration-log (&rest keys)
+  "What registering read-web-page with KEYS logs at warn."
+  (let ((out (make-string-output-stream))
+        (ag (actor:make-agent :name "p" :provider (make-instance 'scripted :script '()))))
+    (unwind-protect
+         (progn (aion/log:setup :env :dev :level :warn :stream out)
+                (apply #'wp:register ag (make-instance '%stub-reader) keys))
+      (aion/log:setup :env :dev :level :warn :stream *standard-output*))
+    (get-output-stream-string out)))
+
+(test registering-a-reader-without-allow-warns-once
+  (let ((logged (%registration-log)))
+    (is (search "without :allow" logged))
+    (is (search "user-or-search-urls" logged))
+    (is (zerop (count #\Newline (string-trim '(#\Newline) logged)))
+        "One line: the warning alone.")))
+
+(test registering-a-reader-with-allow-does-not-warn
+  (is (string= "" (%registration-log :allow #'wp:user-or-search-urls))))

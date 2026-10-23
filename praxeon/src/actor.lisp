@@ -132,8 +132,9 @@ turn (#531).")
 (aion/dynamic:register-inheritable '*hold-allowed*)
 
 (defun register-means (agent name description fn &key schema capability source confirm
-                                                       untrusted requires-user-intent allow
-                                                       max-per-turn)
+                                                       untrusted
+                                                       (requires-user-intent nil requires-user-intent-p)
+                                                       allow max-per-turn)
   "Register a means under NAME: a human DESCRIPTION, the FN performing it (a
 function of one argument -- the tool arguments -- returning a string), an
 optional argument SCHEMA (a jzon-serializable JSON-schema value), and an optional
@@ -149,8 +150,12 @@ The rest guard a turn against instructions written into content the agent reads 
                         the turn counts as having read untrusted content.
   REQUIRES-USER-INTENT  true for a means that spends, writes or sends for the user. A call
                         the model makes after untrusted content entered the turn is refused,
-                        as not run, for the rest of the turn.
-  ALLOW                 NIL, or a function of the call's arguments and the agent. A call runs
+                        as not run, for the rest of the turn. It defaults to true when
+                        CONFIRM is given, because a means held for the user's confirmation is
+                        one that spends or writes, and an app that forgets this key must not
+                        leave a page able to ask for it. Pass NIL to have such a means held
+                        for confirmation after untrusted content instead of refused.
+  ALLOW                NIL, or a function of the call's arguments and the agent. A call runs
                         only when it returns true; otherwise, or when it signals, the call is
                         refused as not run.
   MAX-PER-TURN          NIL, or a positive integer: how many calls of this means may run in
@@ -165,7 +170,9 @@ Returns NAME."
         (make-means-entry :name name :description description
                           :schema schema :capability capability :fn fn :source source
                           :confirm confirm :untrusted (and untrusted t)
-                          :requires-user-intent (and requires-user-intent t)
+                          :requires-user-intent (if requires-user-intent-p
+                                                    (and requires-user-intent t)
+                                                    (and confirm t))
                           :allow allow :max-per-turn max-per-turn))
   name)
 
