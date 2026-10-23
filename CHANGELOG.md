@@ -27,6 +27,11 @@ its tag.
   longer reaches the app's `:on-hold` policy. Pass `:requires-user-intent nil` to
   `register-means` to have it held as before. `grant-tools` has no such option, so a granted
   tool with `:confirm` is always refused after a read.
+- **praxeon/mcp: a tool granted by `grant-tools` counts as untrusted content** (#827). After a
+  granted tool has run in a turn, a means registered with `:requires-user-intent t` or with
+  `:confirm`, including another granted tool held for confirmation, is refused for the rest of
+  the turn. For a server the app fully controls, pass the new `grant-tools` key
+  `:untrusted nil`.
 - **praxeon: registering `read-web-page` without `:allow` logs a warning** (#827), naming the
   risk and `praxeon/web-page:user-or-search-urls`. Pass `:allow` to `register-read-web-page` or
   `praxeon/web-page:register` to silence it.

@@ -218,7 +218,9 @@ A refused call is not run, and the model is told why, so it can tell the user.
 `register-means` takes four keys for this:
 
 - **`:untrusted t`** marks a means whose result comes from outside the conversation.
-  `read-web-page` and `web-search` set it. Once one has run, the turn counts as having read
+  `read-web-page`, `web-search` and every tool `praxeon/mcp:grant-tools` grants set it; for an
+  MCP server the app fully controls, pass `:untrusted nil` to `grant-tools`
+  ([`docs/mcp.md`](docs/mcp.md)). Once one has run, the turn counts as having read
   untrusted content until the user's next message. A sub-agent registered with
   `register-agent-as-means` that read untrusted content makes its coordinator's turn count too,
   and a sub-agent asked for something after the coordinator read untrusted content starts its

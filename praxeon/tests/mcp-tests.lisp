@@ -1154,6 +1154,40 @@ with client B, to another server: B sends its own token, not the one A's retry c
         (is (eq t (actor::means-entry-confirm (gethash "docs__spend" (actor:agent-means agent)))))
         (is (null (actor::means-entry-confirm (gethash "docs__look" (actor:agent-means agent)))))))))
 
+(defun %look-then-buy (grant-keys)
+  "Grant the server's \"look\" tool with GRANT-KEYS to an agent whose model calls it, then calls
+a local means that spends for the user. Returns how many times the purchase ran."
+  (let ((fake (make-fake :tools (%tools "look")))
+        (bought 0))
+    (with-fake (client fake)
+      (let* ((calls (loop for name in '("docs__look" "buy")
+                          for i from 1
+                          collect (llm:make-tool-call :id (format nil "c~D" i) :name name
+                                                      :arguments (make-hash-table :test #'equal))))
+             (agent (actor:make-agent
+                     :provider (make-instance
+                                'scripted
+                                :script (list (llm:make-completion :tool-calls (list (first calls))
+                                                                   :stop-reason :tool-use)
+                                              (llm:make-completion :tool-calls (list (second calls))
+                                                                   :stop-reason :tool-use)
+                                              (llm:make-completion :text "done" :stop-reason :end))))))
+        (apply #'mcp:grant-tools agent client :only :all grant-keys)
+        (actor:register-means agent "buy" "Buy something."
+                              (lambda (args) (declare (ignore args)) (incf bought) "Bought.")
+                              :requires-user-intent t)
+        (actor:run-turn agent "Look it up" :principal "u1")
+        bought))))
+
+(test a-granted-tools-result-is-untrusted-by-default
+  "A server's result may relay a web page, an email or a document, so after a granted tool ran,
+a means that spends for the user is refused for the rest of the turn (#827)."
+  (is (= 0 (%look-then-buy '()))))
+
+(test a-grant-marked-trusted-does-not-stop-a-later-purchase
+  "An app that fully controls the server passes :UNTRUSTED NIL for that grant."
+  (is (= 1 (%look-then-buy '(:untrusted nil)))))
+
 (test a-confirm-list-that-is-not-a-list-of-granted-tools-registers-nothing
   "A :CONFIRM value grant-tools cannot read, or a name that is not granted, would let a tool run
 without confirmation, so it is refused before anything is registered."
