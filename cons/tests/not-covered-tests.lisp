@@ -143,3 +143,21 @@ is not a problem."
   (is (null (%missing :praxeon/results-db/tests :linux '(("postgres" . "0"))))
       "a line that is there, even with zero checks, is the per-backend rules' to judge")
   (is (null (%missing :praxeon/translate/tests :linux '())) "a suite not in the table needs no line"))
+
+;;; --- checks counted under no backend --------------------------------------------------
+
+(defun %unattributed (coverage)
+  (funcall (read-from-string "ouranos-not-covered:unattributed-backend-reports") coverage))
+
+(test a-backend-checks-nil-line-is-a-problem
+  "mnemosyne/tests printed BACKEND-CHECKS NIL 2: two checks counted with no backend bound.
+They are evidence for no backend, so the gate fails on the line."
+  (%load-not-covered)
+  (let ((problems (%unattributed '(("NIL" . "2") ("sqlite" . "71")))))
+    (is (= 1 (length problems)) "~S" problems)
+    (is (search "NIL 2" (first problems)) "~S" problems)))
+
+(test named-backends-are-not-unattributed
+  (%load-not-covered)
+  (is (null (%unattributed '(("sqlite" . "71") ("postgres" . "SKIPPED (not set)")
+                             ("credential-store" . "18"))))))

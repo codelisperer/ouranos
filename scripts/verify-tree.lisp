@@ -1226,7 +1226,8 @@ let this run claim `view' while the five assertions skipped."
                 (let ((cell (assoc want coverage :test #'string=)))
                   (when (and cell (%env-true-p excuse) (uiop:string-prefix-p "SKIPPED" (cdr cell)))
                     (push (list s want (cdr cell) excuse) *backends-excused*)))))
-            (dolist (problem (coverage-problems coverage))
+            (dolist (problem (append (coverage-problems coverage)
+                                     (ouranos-not-covered:unattributed-backend-reports coverage)))
               (format t "  COVER   ~a -- ~a~%" s problem)
               (fail "~a: ~a" s problem)))
           ;; A suite that must report a backend and printed no line for it, coverage or not:

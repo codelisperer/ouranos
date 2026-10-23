@@ -364,7 +364,10 @@ from a backend, not from a connection."
   ;; transaction that reads, then writes. Begun deferred, its upgrade to a writer fails with BUSY
   ;; at once, without the busy timeout. Begun IMMEDIATE, it waits for the lock and succeeds.
   (let ((file (format nil "~Ammn-immediate-~36R.db" (namestring (uiop:temporary-directory))
-                      (random (expt 2 40) (make-random-state t)))))
+                      (random (expt 2 40) (make-random-state t))))
+        ;; SQLite only: a file database, so it runs outside WITH-EACH-POOL-BACKEND and names
+        ;; its backend itself. Before, its two checks were counted under NIL.
+        (*current-backend* "sqlite"))
     (unwind-protect
          (let ((backend (be:make-sqlite file)))
            (conn:with-connection (c backend) (conn:exec c "CREATE TABLE t (n INTEGER)"))
@@ -392,3 +395,9 @@ from a backend, not from a connection."
                   "begun IMMEDIATE, it waits for the writer and succeeds")))
       (dolist (suffix '("" "-journal" "-wal" "-shm"))
         (let ((f (probe-file (concatenate 'string file suffix)))) (when f (delete-file f)))))))
+
+(test a-backend-check-outside-a-named-backend-is-refused
+  "IS* counts each check under *CURRENT-BACKEND*. With none bound, the check would be counted
+under NIL, which is evidence for no backend, so IS* signals instead."
+  (let ((*current-backend* nil))
+    (signals error (is* t))))
