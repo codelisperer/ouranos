@@ -30,7 +30,7 @@
 ;;;;                ((:as (:select ...) :t)), in (:in col (:select ...)), or (:exists (:select ...)).
 ;;;;   RETURNING    :returning (:id :email) on insert/update/delete (PG/XTDB; SQLite >=3.35).
 ;;;;   Upsert       :on-conflict (:email) with :do-nothing t, or :do-update (:name (:excluded :name)).
-;;;;   LIKE         (:like col pattern :escape "\\") renders col LIKE ? ESCAPE '\', and the
+;;;;   LIKE         (:like col pattern :escape "\\") renders col LIKE ? ESCAPE ?, both bound, and the
 ;;;;                same for :ilike. LIKE-CONTAINS builds a pattern from user text with its %, _
 ;;;;                and escape character taken literally (#862).
 ;;;;
@@ -276,18 +276,23 @@ problem would be the worse trade.")
       (warn 'unindexed-vector-distance :operator sql :opclass opclass :measures measures))
     (format nil "~A ~A ~A" (%expr ctx (first args)) sql (%expr ctx (second args)))))
 
-(defun %escape-suffix (escape)
-  "\" ESCAPE 'c'\" for ESCAPE, a one-character string or a character, or \"\" when it is NIL.
-The character is written into the SQL, not bound, so it must be printable ASCII and not a
-quote; anything else signals INVALID-IDENTIFIER (#862)."
+(defun %escape-char (escape)
+  "ESCAPE as a character: a character, or a string of exactly one. It must not be % or _, which
+would make the escape character itself a wildcard, nor a control character. Anything else
+signals INVALID-IDENTIFIER (#862)."
+  (let ((c (cond ((characterp escape) escape)
+                 ((and (stringp escape) (= 1 (length escape))) (char escape 0)))))
+    (unless (and c (graphic-char-p c) (not (member c '(#\% #\_))))
+      (error 'invalid-identifier :text (princ-to-string escape) :clause :escape
+                                 :expected "a LIKE escape character (exactly one character, not % or _)"))
+    c))
+
+(defun %escape-suffix (ctx escape)
+  "\" ESCAPE ?\" with ESCAPE bound as a parameter, or \"\" when ESCAPE is NIL. Bound, like every
+value, so no quoting rule applies to it; Postgres and SQLite both accept a parameter there."
   (if (null escape)
       ""
-      (let ((c (cond ((characterp escape) escape)
-                     ((and (stringp escape) (= 1 (length escape))) (char escape 0)))))
-        (unless (and c (char<= #\! c #\~) (char/= c #\'))
-          (error 'invalid-identifier :text (princ-to-string escape)
-                                     :expected "a LIKE escape character (one printable ASCII character other than a quote)"))
-        (format nil " ESCAPE '~C'" c))))
+      (format nil " ESCAPE ~A" (%placeholder ctx (string (%escape-char escape))))))
 
 (defun like-escape (text &key (escape #\\))
   "TEXT with ESCAPE, %, and _ each preceded by ESCAPE, so that a LIKE or ILIKE pattern built
@@ -295,8 +300,10 @@ from it matches those characters literally. Use it with the same :escape on the 
 
   (:like :name (like-contains q) :escape \"\\\\\")
 
-ESCAPE is a character or a one-character string; the backslash by default."
-  (let ((e (if (stringp escape) (char escape 0) escape)))
+ESCAPE is a character or a one-character string, the backslash by default, and is checked as
+the operator checks it: % or _, more than one character, or a control character signals
+INVALID-IDENTIFIER rather than producing a pattern that matches something else."
+  (let ((e (%escape-char escape)))
     (with-output-to-string (out)
       (loop for c across text
             do (when (or (char= c e) (char= c #\%) (char= c #\_)) (write-char e out))
@@ -321,7 +328,7 @@ explicitly, for example with LOWER on both sides."
     (error "mnemosyne/query: :ilike renders as Postgres ILIKE, and the ~A backend has no operator with the same case rules. Use (:like (:lower col) (:lower pattern)) there, knowing which characters its LOWER folds."
            (%dialect-name ctx)))
   (destructuring-bind (subject pattern &key escape) args
-    (format nil "~A ILIKE ~A~A" (%expr ctx subject) (%expr ctx pattern) (%escape-suffix escape))))
+    (format nil "~A ILIKE ~A~A" (%expr ctx subject) (%expr ctx pattern) (%escape-suffix ctx escape))))
 
 (defun %op (ctx op args)
   "Compile an operator expression (OP . ARGS)."
@@ -337,7 +344,7 @@ explicitly, for example with LOWER on both sides."
       ((:or)  (format nil "(~{~A~^ OR ~})"  (mapcar #'e args)))
       ((:not) (format nil "NOT (~A)" (e (first args))))
       ((:like) (destructuring-bind (subject pattern &key escape) args
-                 (format nil "~A LIKE ~A~A" (e subject) (e pattern) (%escape-suffix escape))))
+                 (format nil "~A LIKE ~A~A" (e subject) (e pattern) (%escape-suffix ctx escape))))
       ((:ilike) (%ilike ctx args))
       ((:is-null)     (format nil "~A IS NULL"     (e (first args))))
       ((:is-not-null) (format nil "~A IS NOT NULL" (e (first args))))

@@ -472,9 +472,9 @@ EXISTS (SELECT 1 ...)."
 ;;; --- LIKE with ESCAPE (#862) -------------------------------------------------------
 
 (test like-and-ilike-render-an-escape-character
-  (is (equal '("SELECT id FROM t WHERE name LIKE ? ESCAPE '\\'" ("%a\\%b%"))
+  (is (equal '("SELECT id FROM t WHERE name LIKE ? ESCAPE ?" ("%a\\%b%" "\\"))
              (gen '(:select (:id) :from (:t) :where (:like :name "%a\\%b%" :escape "\\")))))
-  (is (equal '("SELECT id FROM t WHERE name ILIKE ? ESCAPE '!'" ("%a!%%"))
+  (is (equal '("SELECT id FROM t WHERE name ILIKE ? ESCAPE ?" ("%a!%%" "!"))
              (gen '(:select (:id) :from (:t) :where (:ilike :name "%a!%%" :escape #\!))
                   :dialect :postgres)))
   (is (equal '("SELECT id FROM t WHERE name LIKE ?" ("%a%"))
@@ -482,10 +482,16 @@ EXISTS (SELECT 1 ...)."
       "control: without :escape, nothing is added"))
 
 (test an-escape-that-is-not-one-safe-character-is-refused
-  (dolist (escape '("" "ab" "'" " " "é" 5))
+  "% or _ as the escape would make the escape character a wildcard: like-contains of \"ab\"
+with :escape #\\% gave \"%ab%\", which Postgres refuses and SQLite does not match."
+  (dolist (escape (list "" "ab" "%" #\% "_" #\_ 5 (code-char 0) (string (code-char 7))))
     (signals q:invalid-identifier
       (q:sql `(:select (:id) :from (:t) :where (:like :name "%a%" :escape ,escape)))
-      "~S" escape)))
+      "~S" escape)
+    (signals q:invalid-identifier (q:like-contains "ab" :escape escape) "like-contains ~S" escape))
+  ;; Bound, so a quote or a non-ASCII escape character needs no quoting and is accepted.
+  (dolist (escape (list "'" "é" #\!))
+    (finishes (q:sql `(:select (:id) :from (:t) :where (:like :name "%a%" :escape ,escape))))))
 
 (test like-with-escape-round-trips
   (is (rt '(:select (:id) :from (:t) :where (:like :name "%a\\%b%" :escape "\\"))))
