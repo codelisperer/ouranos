@@ -14,7 +14,7 @@
 
 (defpackage #:ouranos-not-covered
   (:use #:cl)
-  (:export #:print-not-covered))
+  (:export #:print-not-covered #:missing-backend-reports))
 
 (in-package #:ouranos-not-covered)
 
@@ -58,3 +58,20 @@ excused by OURANOS_ALLOW_NO_CREDENTIAL_STORE, is listed the same way (#357)."
         (format t "  off     ~a in ~a~34t~a~%" backend suite reason)
         (format t "          ~a excused it. Its ~a checks did not run and are NOT in the total below.~%"
                 variable backend)))))
+
+(defun missing-backend-reports (suite host coverage required)
+  "The problems with SUITE, run on HOST, whose output gave COVERAGE (an alist of (backend . value)
+from its BACKEND-CHECKS lines): one string for each backend REQUIRED says this suite must report
+on this host and COVERAGE does not mention. REQUIRED is a list of (SUITE BACKEND &key HOSTS),
+where HOSTS is a list of HOST values, such as :WINDOWS and :DARWIN, or absent for every host.
+
+The per-backend rules judge a BACKEND-CHECKS line that is there. This catches the line that is
+not: a suite that stops printing it, because a reader guard or its test-op changed, would
+otherwise pass with none of that backend's checks run, and nothing would say so (#603)."
+  (loop for (want-suite backend . options) in required
+        for hosts = (getf options :hosts)
+        when (and (eq suite want-suite)
+                  (or (null hosts) (member host hosts))
+                  (not (assoc backend coverage :test #'string=)))
+          collect (format nil "printed no BACKEND-CHECKS ~a line, which it must on ~(~a~)"
+                          backend (or host "this host"))))

@@ -811,6 +811,20 @@ reports a database backend. The credential store is the operating system's own, 
 tests are opt-in on a developer's machine (#357); it is required of the suite that reports
 it, hades/credentials/tests on Windows and macOS.")
 
+(defparameter +required-backend-reports+
+  '((:hades/credentials/tests "credential-store" :hosts (:windows :darwin))
+    (:mnemosyne/tests "postgres")
+    (:mnemosyne/jobs/tests "postgres")
+    (:praxeon/memory-db/tests "postgres")
+    (:praxeon/results-db/tests "postgres")
+    (:praxeon/retrieval/tests "postgres"))
+  "Each suite that must print a BACKEND-CHECKS line for a backend, as (SUITE BACKEND &key HOSTS),
+on every host or only on HOSTS (values of OURANOS-PLATFORM:HOST-OS). +BACKEND-RULES+ judges a
+line that is there; a missing line passed silently, so a suite that stopped printing it, because
+a reader guard or its test-op changed, went green with none of that backend's checks run (the
+hub's review of #603). Checked by OURANOS-NOT-COVERED:MISSING-BACKEND-REPORTS. hades/credentials
+reports the credential store only where there is a backend, Windows and macOS, until #357.")
+
 (defun %env-true-p (name)
   (let ((v (uiop:getenv name)))
     (and v (member (string-trim " " v) '("1" "true" "yes") :test #'string-equal) t)))
@@ -1214,7 +1228,13 @@ let this run claim `view' while the five assertions skipped."
                     (push (list s want (cdr cell) excuse) *backends-excused*)))))
             (dolist (problem (coverage-problems coverage))
               (format t "  COVER   ~a -- ~a~%" s problem)
-              (fail "~a: ~a" s problem))))
+              (fail "~a: ~a" s problem)))
+          ;; A suite that must report a backend and printed no line for it, coverage or not:
+          ;; the rules above judge a line that is there, and this the one that is missing.
+          (dolist (problem (ouranos-not-covered:missing-backend-reports
+                            s (ouranos-platform:host-os) coverage +required-backend-reports+))
+            (format t "  COVER   ~a -- ~a~%" s problem)
+            (fail "~a: ~a" s problem)))
         (report-caught-errors (format nil "suite ~(~a~)" s) text)))
 
     ;; --- the platform axis (pre-publication issue 182) ------------------------------------------
