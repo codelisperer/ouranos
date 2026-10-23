@@ -656,7 +656,11 @@ uses the store, even when no run is left. Runs
 still going keep their leases, which expire once the process has gone, and another instance
 then runs them again."
   (let ((deadline (+ (funcall *stop-clock*) (* timeout internal-time-units-per-second))))
-    (flet ((left () (/ (- deadline (funcall *stop-clock*)) internal-time-units-per-second))
+    ;; LEFT is never below zero. It is read again for each wait's timeout after a check that
+    ;; time was left, and the deadline can pass in between; a negative timeout makes
+    ;; CONDITION-WAIT and JOIN-THREAD signal a TYPE-ERROR, and a zero one makes them return at
+    ;; once (#882).
+    (flet ((left () (max 0 (/ (- deadline (funcall *stop-clock*)) internal-time-units-per-second)))
            (running-keys ()
              (%with-lock (scheduler)
                (loop for k being the hash-keys of (%running scheduler) collect k))))

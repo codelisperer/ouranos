@@ -1817,6 +1817,13 @@ its tag.
 
 ### Fixed
 
+- **aion/schedule: `stop` no longer signals a `TYPE-ERROR` when its timeout runs out while it is
+  waiting for runs to finish** (#882). Its drain loop checked that time was left, then read the
+  clock again for the wait's timeout. When the deadline passed in between, the timeout was
+  negative and `sb-thread:condition-wait` signalled a `TYPE-ERROR` instead of `stop` returning
+  `:timed-out`. Windows CI hit it with 18 microseconds to spare. The time left is now never
+  below zero. An app that caught `type-error` around `stop` can remove that handler.
+
 - **aion/http-client: a body of octets with a `multipart/` Content-Type reaches the server as
   given on Linux and macOS** (#828). This is a workaround placed once in the client, not a
   native way to send a header unchanged, because dexador offers none. Dexador's usocket backend
