@@ -19,7 +19,7 @@
   "Stop LOOP's thread, wait for it to end however long that takes, then close LOOP. Only for a
 loop whose thread has nothing long left to do: closing frees the memory a callback still running
 on the thread would use, so the loop is never closed before the thread has ended (#694)."
-  (uv:stop-loop-thread loop :timeout 0)
+  (uv:stop-loop-thread loop :wait nil)
   (sb-thread:join-thread thread :default nil)
   (uv:close-loop loop))
 
@@ -91,7 +91,7 @@ timer."
                  ;; database call, and the loop is closed only once the thread has ended, because
                  ;; closing frees the memory the thread's timer callback would use. Until then the
                  ;; loop is kept, and a later S:STOP waits for the thread again.
-                 (uv:stop-loop-thread loop :timeout 0)
+                 (uv:stop-loop-thread loop :wait nil)
                  (sb-thread:join-thread thread :timeout seconds :default nil)
                  (unless (sb-thread:thread-alive-p thread)
                    (uv:close-loop loop)

@@ -14,6 +14,29 @@ its tag.
 
 ### An app may have to act
 
+- **aion/uv: `close-loop` no longer frees a loop whose thread is still running a callback, and
+  `stop-loop-thread` signals when the thread does not exit in time** (#694). Before,
+  `stop-loop-thread` timed out its wait silently, forgot the thread and returned. `close-loop`
+  then freed the loop and its handles while the callback was still running, and libuv used
+  the freed memory when the callback returned. Now:
+  - `stop-loop-thread` (`:timeout`, 5 seconds by default; `nil` waits without a limit) returns
+    `t` once the thread has exited. If the thread is still alive, it signals the new
+    `aion/uv:loop-thread-still-running` (`loop-thread-still-running-loop`, `-thread`,
+    `-timeout`) and keeps the thread recorded;
+  - `(stop-loop-thread loop :wait nil)` only asks the thread to stop and returns `nil` at once.
+    A caller that used `:timeout 0` for that should use this instead, because `:timeout 0` now
+    signals whenever the thread has not already exited;
+  - `close-loop` (new `:timeout`) refuses submissions from its first call. It frees the loop
+    only after the thread has exited. Until then it signals `loop-thread-still-running` with
+    two restarts: `aion/uv:wait-for-loop-thread`, which waits without a limit and then frees,
+    and `aion/uv:leave-loop-unfreed`, which returns `nil` and leaves the loop unfreed. A later
+    `close-loop` finishes the teardown, and `aion/uv:loop-freed-p` says whether it has;
+  - `close-loop` called from a callback on the loop's own thread signals instead of freeing
+    the loop it is running on.
+
+  An app that wraps `close-loop` in `ignore-errors` now leaks a loop whose callback is still
+  running, instead of corrupting memory.
+
 - **hades/credentials: on Linux, `store-credential`, `fetch-credential` and `delete-credential`
   use the Secret Service instead of always signalling `credential-store-unavailable`** (#357).
   Items go into the default collection of whichever program provides the Secret Service on the
