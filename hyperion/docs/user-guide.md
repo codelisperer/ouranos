@@ -614,6 +614,53 @@ Do not trust a proxy you do not run or pay for. A hop count is right only when e
 reaches the app through that many proxies. If the app can also be reached directly, use
 `:cidrs`, so that a direct request's forwarded headers are ignored.
 
+## Link previews (`hyperion/page-meta`, #821)
+
+A link pasted into a chat or a social network shows a preview card only when the page's
+`<head>` carries Open Graph and Twitter-card tags with absolute URLs. Set the site once at
+startup, then call `meta-tags` in the layout's head:
+
+```lisp
+(setf hyperion/page-meta:*site*
+      (hyperion/page-meta:make-site :name "Example News"
+                                    :origin "https://example.com" ; or HYPERION_PUBLIC_ORIGIN
+                                    :image "/static/card.png" :image-width 1200 :image-height 630
+                                    :image-alt "The Example News logo"
+                                    :twitter "@examplenews"))
+
+(defun layout (meta body)
+  (spin:with-html-string
+    (:html (:head (:title (getf meta :title))
+                  (apply #'hyperion/page-meta:meta-tags meta))
+           (:body (:raw body)))))
+
+(layout (list :title "Rates rise" :description "The bank raised its rate today."
+              :url "/news/rates" :type :article :image "/img/rates.jpg" :visibility :public
+              :locale locale :published-time (get-universal-time) :author "A. Writer")
+        body)
+```
+
+- Every URL is made absolute from the site's origin, never from the request's Host header,
+  which the client chooses. A path starting with `/` is joined to the origin. An absolute URL
+  must be https; anything else signals `page-meta-error`.
+- The canonical `:url` must be on the site's own origin, and its query and fragment are
+  dropped, because a query often carries a token such as a reset link's. Pass
+  `:keep-query t` for a page whose query is part of its identity. An image may be on another
+  https host, such as a CDN.
+- The description is plain text: markup is not removed, so pass the page's summary as text,
+  not its HTML. It is cut to 200 characters on a word boundary. `:locale` takes what
+  `i18n:resolve-locale` returns, and becomes `og:locale` (`:en-gb` is `en_GB`).
+- A page with no image uses the site's fallback image. An image URL presigned with an
+  expiry is replaced by the fallback too, because a crawler keeps the card longer than the
+  URL lasts; serve card images from a stable public URL.
+- `:visibility` is required, so a layout cannot forget to say that a page is private. A
+  public page passes `:visibility :public`. A page that needs sign-in passes
+  `:visibility :private`, and one kept out of search
+  engines passes `:noindex`. Either gets `robots noindex` and the site's name and fallback
+  image, and nothing from its own title, description, URL, image or `:site-name`.
+- `page-meta` returns the tags as a list of `(kind name value)` for a test or a layout that
+  writes its own markup.
+
 ## Static files + HTTP caching (`hyperion/static`)
 
 `file-response` maps a URL path onto a file under a root directory, refusing `..`

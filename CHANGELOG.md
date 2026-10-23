@@ -463,6 +463,31 @@ its tag.
 
 ### Added
 
+- **hyperion: a shared link to an app's page can show a preview card**, through the new
+  `hyperion/page-meta` (#821). A layout calls `meta-tags` inside its `(:head ...)` with the
+  page's `:title`, `:description`, `:image` (with `:image-alt`, `:image-width`,
+  `:image-height`), `:url` (canonical), `:type` (`:website` or `:article`), `:locale` and, for
+  an article, `:published-time`, `:modified-time`, `:author` and `:section`, and a required
+  `:visibility` (`:public`, `:noindex` or `:private`). It writes the
+  Open Graph `og:*` tags, `twitter:card` (`summary_large_image` when there is an image) and
+  `twitter:*`, `<meta name="description">` and `<link rel="canonical">`. `page-meta` returns
+  the same tags as a list, and `meta-tags-string` returns them as a string.
+  - The site's name, public origin, fallback image and Twitter account come from a `site`
+    made with `make-site` and set in `*site*`. The origin defaults to the new environment
+    variable `HYPERION_PUBLIC_ORIGIN`, and must be a bare https origin. Every URL is made
+    absolute from it, never from the request's Host header, and an http URL signals
+    `page-meta-error`. The canonical URL must be on the site's own origin, and its query and
+    fragment are dropped unless the page passes `:keep-query t`.
+  - Descriptions are plain text. Their whitespace, Unicode's included, is collapsed, and
+    they are cut to 200 characters on a word boundary. An article time is a universal time
+    or an ISO 8601 string. `og:locale` takes a locale as `hyperion/i18n` names it (`:en-gb` becomes
+    `en_GB`).
+  - `:visibility :private` (the page needs sign-in) or `:noindex` emits `robots noindex`
+    and the site's name and fallback image only. A page's own `:site-name` is not used there.
+  - An image URL presigned with an expiry (`expiring-url-p`: S3, Google Cloud Storage,
+    CloudFront and Azure signatures), or one that cannot be parsed, is replaced by the site's
+    fallback, with a warning, because crawlers cache a card longer than the URL lasts.
+
 - **hermes: `telegram-added-chats` lists the chats a Telegram bot was recently added to**
   (#794), so an app can find the id of a group or channel that operators share as a `t.me/+`
   invite link. It returns `telegram-added-chat` structures (`-id`, `-type`, `-title`, `-status`,
