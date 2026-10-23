@@ -118,15 +118,18 @@
                              (:file "conditions") ; the failure protocol (CL)
                              (:file "protocol")   ; the store seam, streaming, sweep (CL)
                              (:file "filesystem") ; local disk -- the zero-config default (CL)
-                             (:file "s3"))))      ; any S3-compatible provider (CL)
+                             (:file "s3")         ; any S3-compatible provider (CL)
+                             (:file "public-image")))) ; a public copy for a link preview (CL, #830)
   :in-order-to ((test-op (test-op "hermes/blob/tests"))))
 
 (defsystem "hermes/blob/tests"
   :description "Test suite for the blob store."
-  :depends-on ("aion/fs" "hermes/blob" "aion/clock" "aion/log" "fiveam")  ; blob.lisp calls both directly
+  :depends-on ("aion/fs" "hermes/blob" "aion/clock" "aion/log" "fiveam"  ; blob.lisp calls both directly
+               "ironclad")  ; public-image.lisp builds PNG fixtures with their CRCs
   :serial t
   :components ((:module "blob-tests"
                 :pathname "tests"
                 :serial t
-                :components ((:file "blob"))))
+                :components ((:file "blob")
+                             (:file "public-image"))))  ; #830
   :perform (test-op (o c) (uiop:symbol-call :hermes/blob/tests :run-tests)))

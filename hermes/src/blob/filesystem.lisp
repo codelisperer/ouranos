@@ -106,7 +106,9 @@ impossible ONLY as long as two files agree. It costs one string compare per oper
 
 ;;; --- operations ------------------------------------------------------------
 
-(defmethod put-blob ((s filesystem-store) bucket key stream &key content-type metadata)
+(defmethod put-blob ((s filesystem-store) bucket key stream &key content-type metadata cache-control)
+  ;; CACHE-CONTROL is for whatever serves this directory to set; it has nowhere to go here.
+  (declare (ignore cache-control))
   (let* ((final (%blob-path s bucket key "objects"))
          (meta-path (%blob-path s bucket key "meta"))
          (tmp (merge-pathnames (format nil "~A" (clock:new-id)) (%bucket-dir s bucket ".tmp")))

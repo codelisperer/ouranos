@@ -70,7 +70,7 @@ A presigned URL is a credential. Do not log it or store it."
 (defgeneric store-name (store)
   (:documentation "A short backend name, for logs and errors."))
 
-(defgeneric put-blob (store bucket key stream &key content-type metadata)
+(defgeneric put-blob (store bucket key stream &key content-type metadata cache-control)
   (:documentation
    "Stream the bytes of STREAM (an octet input stream) into STORE at BUCKET/KEY.
 
@@ -78,6 +78,11 @@ Returns a BLOB-META describing what was written. Overwrites an existing blob. ME
 an alist of string->string carried alongside the object where the backend supports it. The
 name \"sha256\", in any case, is reserved for the checksum the store records, and a malformed
 entry signals BLOB-INVALID-METADATA (#810).
+
+CACHE-CONTROL, a string such as \"public, max-age=86400\", is the Cache-Control header the
+object is served with (#830). The S3 store stores it with the object. The filesystem store
+ignores it, because whatever serves its directory sets its own headers. A value with a control
+character signals BLOB-INVALID-METADATA.
 
 The stream is consumed but NOT closed -- the caller opened it and owns it."))
 
@@ -298,10 +303,16 @@ the same header, and \"sha256\" is reserved for the checksum the store records."
                  (refuse "a value must be printable ASCII")))
           (push name seen))))))
 
-(defmethod put-blob :before ((s store) bucket key stream &key content-type metadata)
+(defmethod put-blob :before ((s store) bucket key stream &key content-type metadata cache-control)
   (declare (ignore stream content-type))
   (%check-key bucket key)
-  (%check-metadata bucket key metadata))
+  (%check-metadata bucket key metadata)
+  ;; A header value: a CR or LF in it would start another header (#830).
+  (unless (or (null cache-control)
+              (and (stringp cache-control) (plusp (length cache-control))
+                   (notany #'%control-char-p cache-control)))
+    (error 'blob-invalid-metadata :bucket bucket :key key :name "Cache-Control"
+                                  :fault "Cache-Control must be a non-empty string without control characters")))
 
 (defmethod get-blob :before ((s store) bucket key) (%check-key bucket key))
 (defmethod delete-blob :before ((s store) bucket key) (%check-key bucket key))

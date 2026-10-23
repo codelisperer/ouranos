@@ -64,6 +64,10 @@
    #:list-blobs #:with-blob-stream
    ;; server-side copy (#804)
    #:copy-blob #:move-blob
+   ;; a public copy of an image for a link-preview card (#830)
+   #:public-image-url #:delete-public-images #:strip-image-metadata
+   #:blob-image-refused #:blob-image-refused-reason #:blob-image-refused-size
+   #:blob-image-refused-limit #:*public-image-cache-control*
    ;; direct uploads from a client (#770)
    #:upload-url #:read-blob-range
    #:upload-target #:make-upload-target #:upload-target-p #:upload-target-url
