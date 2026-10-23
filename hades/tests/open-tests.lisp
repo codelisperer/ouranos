@@ -149,7 +149,8 @@ Returns the plans in order."
                (o::%url-plan "https://example.com/" :platform :linux :getenv display
                                                     :find-program (programs "xdg-open"))))
     (is (equal '(:not-available :no-program)
-               (o::%url-plan "https://example.com/" :platform :linux :getenv display))))
+               (o::%url-plan "https://example.com/" :platform :linux :getenv display
+                                                    :find-program (programs)))))
   (is (equal '(:not-available :no-display)
              (o::%reveal-plan "/home/u/x" "/home/u/" t :platform :linux :getenv (env :display "")
                                                        :find-program (programs "dbus-send" "xdg-open"))))

@@ -99,7 +99,8 @@
 
 (defsystem "hades/notify/tests"
   :description "Tests for hades/notify: every platform's decision, the standard-error path and the argument checks, with no window shown."
-  :depends-on ("hades/notify" "fiveam")
+  ;; hades/program for the find-program tests, which live here since #820 moved it there.
+  :depends-on ("hades/notify" "hades/program" "fiveam")
   :serial t
   :components ((:module "tests"
                 :serial t
