@@ -14,6 +14,25 @@ its tag.
 
 ### An app may have to act
 
+- **hyperion/static serves only regular files, and serves some it used to refuse** (#687).
+  `file-response` and `make-static-handler` now:
+  - **refuse a FIFO, a device or a socket under the static root** with a 404, without reading
+    from it. Before, a request for a FIFO blocked until something wrote to it, which under
+    `server-uv` stopped the event loop, and a request for a device file ran the device's open.
+    On Windows the names Windows opens as devices in any directory (`con`, `nul.txt`, `com1`,
+    and the rest) are refused the same way;
+  - **serve files from a root the server can search but not read** (mode `0111`). Before, every
+    file there was refused;
+  - **serve files from a Windows root reached through a junction, a `subst` drive or a mapped
+    drive**, and on macOS a file that is also hard-linked from outside the root. Before, both
+    were refused with a 404;
+  - **take `ETag` and `Last-Modified` from the file that is sent**, read from its open handle.
+    Before, a file replaced with one of the same size just after the open could be sent with
+    the replacement's time, so a later request could get a 304 for bytes it never had.
+
+  `hyperion/static:file-etag` returns NIL for a file that is not a regular file, and on Linux
+  and macOS it reads the size and time with `stat` instead of opening the file.
+
 - **hades/credentials: on Linux, `store-credential`, `fetch-credential` and `delete-credential`
   use the Secret Service instead of always signalling `credential-store-unavailable`** (#357).
   Items go into the default collection of whichever program provides the Secret Service on the

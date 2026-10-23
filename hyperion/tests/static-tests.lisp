@@ -394,3 +394,148 @@ shim, Hunchentoot sends its bytes with the Content-Length measured from the stre
   (loop with start = 0
         for at = (search needle haystack :start2 start)
         while at count t do (setf start (1+ at))))
+
+;;; --- only regular files are opened, and their metadata comes from the handle (#687) ------
+
+(defun %response-within (seconds thunk)
+  "THUNK's result, or :BLOCKED when it has not returned within SECONDS. THUNK runs in its own
+thread, which is left behind when it blocks; the caller unblocks it."
+  (let* ((result :blocked)
+         (thread (sb-thread:make-thread (lambda () (setf result (funcall thunk)))
+                                        :name "static-test-response")))
+    (loop repeat (* 10 seconds) while (sb-thread:thread-alive-p thread) do (sleep 1/10))
+    (values result thread)))
+
+(test a-fifo-under-the-root-is-refused-without-blocking
+  "Opening a FIFO for reading waits for a writer, and under server-uv's inline dispatcher that
+stops the loop. The FIFO is refused at once. Control: with the regular-file check made to accept
+anything, the FIFO is no longer refused."
+  #+os-windows (skip "Windows has no FIFOs in the file system")
+  #-os-windows
+  (dolist (control '(nil t))
+    (with-static-root (root ("app.css" "body{}"))
+      (let ((fifo (merge-pathnames "pipe.txt" root))
+            (regular-p (fdefinition 'static::%regular-p)))
+        (uiop:run-program (list "mkfifo" (sb-ext:native-namestring fifo)))
+        (unwind-protect
+             (progn
+               (when control (setf (fdefinition 'static::%regular-p) (constantly t)))
+               (multiple-value-bind (r thread)
+                   (%response-within 5 (lambda () (static:file-response root "/pipe.txt")))
+                 (when (eq r :blocked)
+                   ;; Open the write end so the blocked reader returns, then reap it.
+                   (with-open-file (w fifo :direction :output :if-exists :append))
+                   (sb-thread:join-thread thread :default nil))
+                 (if control
+                     (is (not (null r)) "control: without the type check the FIFO was not refused")
+                     (progn (is (not (eq r :blocked)) "the request blocked on the FIFO")
+                            (is (null r) "the FIFO was answered: ~S" r)))))
+          (setf (fdefinition 'static::%regular-p) regular-p))
+        (is (%served-p root "/app.css") "control: a regular file beside it is served")))))
+
+(test a-device-is-not-opened-for-reading
+  "Opening a device file runs that device's open. %OPEN-INSIDE refuses a character device even
+when it is inside the root it is given. Control: with the type check made to accept anything,
+the same device is opened."
+  #+os-windows (skip "the Windows device names are tested separately")
+  #-os-windows
+  (let ((regular-p (fdefinition 'static::%regular-p)))
+    (is (null (static::%open-inside #p"/dev/null" "/")) "/dev/null was opened")
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'static::%regular-p) (constantly t))
+           (let ((stream (static::%open-inside #p"/dev/null" "/")))
+             (is (streamp stream) "control: without the type check /dev/null is opened")
+             (when (streamp stream) (close stream))))
+      (setf (fdefinition 'static::%regular-p) regular-p))))
+
+(test a-socket-under-the-root-is-refused
+  #+os-windows (skip "a Unix socket file needs AF_UNIX support this test does not arrange")
+  #-os-windows
+  (with-static-root (root ("app.css" "body{}"))
+    (let ((path (sb-ext:native-namestring (merge-pathnames "sock.txt" root)))
+          (socket (make-instance 'sb-bsd-sockets:local-socket :type :stream)))
+      (unwind-protect
+           (progn
+             (sb-bsd-sockets:socket-bind socket path)
+             (is (probe-file path) "the socket file exists")
+             (is-false (%served-p root "/sock.txt")))
+        (sb-bsd-sockets:socket-close socket)))))
+
+(test a-root-that-can-be-searched-but-not-read-serves-its-files
+  "Serving a known file needs only search permission on the root. A root at mode 0111 used to
+refuse every file, because the root itself was opened for reading. The test cannot run as root,
+which reads everything."
+  #+os-windows (skip "Unix permissions")
+  #-os-windows
+  (if (string= "0" (string-trim '(#\Newline) (uiop:run-program '("id" "-u") :output :string)))
+      (skip "running as root, which can read any directory")
+      (with-static-root (root ("app.css" "body{}"))
+        (let ((dir (sb-ext:native-namestring root)))
+          (uiop:run-program (list "chmod" "0111" dir))
+          (unwind-protect
+               (let ((r (static:file-response root "/app.css")))
+                 (is (and r (= 200 (first r))) "a file in a search-only root was refused")
+                 (when (and r (streamp (third r))) (close (third r))))
+            (uiop:run-program (list "chmod" "0755" dir)))))))
+
+(test the-etag-describes-the-bytes-that-are-sent
+  "The file is replaced, with different bytes of the same size and a different time, right
+after it is opened. The response sends the opened file's bytes, and its Last-Modified and ETag
+are that file's, read from the handle, not the replacement's."
+  #+os-windows (skip "a file that is open cannot be replaced by rename on Windows")
+  #-os-windows
+  (with-static-root (root ("app.css" "AAAAAAAA") ("new.css" "BBBBBBBB"))
+    (let ((file (merge-pathnames "app.css" root))
+          (new (merge-pathnames "new.css" root)))
+      (uiop:run-program (list "touch" "-t" "200001010000" (sb-ext:native-namestring file)))
+      (let* ((old-time (file-write-date file))
+             (static::*after-open-hook* (lambda () (rename-file new file)))
+             (r (static:file-response root "/app.css")))
+        (is (and r (= 200 (first r))))
+        (when r
+          (is (string= "AAAAAAAA" (%body-text (third r))) "the opened file's bytes are sent")
+          (is (equal (static:http-date old-time) (%static-header r :last-modified))
+              "Last-Modified is the opened file's: ~S" (%static-header r :last-modified))
+          (is (equal (static::%etag-of old-time 8) (%static-header r :etag))))
+        (is (/= old-time (file-write-date file)) "control: the replacement has another time")))))
+
+(test a-file-hard-linked-from-outside-the-root-is-served
+  "On macOS, F_GETPATH on a file with two links can answer with the other one, outside the
+root. The file was opened through a path inside the root, so it is served."
+  #+os-windows (skip "hard links are tested on Linux and macOS")
+  #-os-windows
+  (with-static-root (root ("app.css" "inside"))
+    (with-static-root (outside ("x.txt" "x"))
+      (let ((target (merge-pathnames "linked.css" outside)))
+        (uiop:run-program (list "ln" (sb-ext:native-namestring (merge-pathnames "app.css" root))
+                                (sb-ext:native-namestring target)))
+        (is (%served-p root "/app.css"))))))
+
+(test windows-device-names-are-refused
+  "Windows opens CON, NUL, COM1 and the rest as devices in any directory and with any extension."
+  (is (static::%windows-device-name-p "nul"))
+  (is (static::%windows-device-name-p "NUL.txt"))
+  (is (static::%windows-device-name-p "con. "))
+  (is (static::%windows-device-name-p "com1.css"))
+  (is (not (static::%windows-device-name-p "console.css")))
+  (is (not (static::%windows-device-name-p "app.css")))
+  #+os-windows
+  (with-static-root (root ("app.css" "body{}"))
+    (dolist (name '("/nul" "/nul.txt" "/con.css" "/com1"))
+      (is-false (%served-p root name) "~A" name))
+    (is (%served-p root "/app.css") "control")))
+
+(test a-windows-root-reached-through-a-junction-serves-its-files
+  "The root is resolved through its own handle, as the opened file is. Compared by name, a root
+reached through a junction, a subst drive or a mapped drive refused every file."
+  #-os-windows (skip "junctions are Windows")
+  #+os-windows
+  (with-static-root (real ("app.css" "body{}"))
+    (let ((link (merge-pathnames (format nil "junction-~36R/" (random (expt 36 8) (make-random-state t)))
+                                 (uiop:temporary-directory))))
+      (unwind-protect
+           (progn
+             (aion/fs:make-directory-link link real)
+             (is (%served-p link "/app.css") "a file under a junction root was refused"))
+        (ignore-errors (aion/fs:delete-link link))))))
