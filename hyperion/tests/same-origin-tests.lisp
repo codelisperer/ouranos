@@ -179,7 +179,7 @@ name and value; Host included only if listed) and return the status code."
   (let ((s (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp))
         (crlf (coerce '(#\Return #\Linefeed) 'string)))
     (unwind-protect
-         (sb-ext:with-timeout 10
+         (ports:with-deadline (10 (format nil "~A ~A on port ~D" method path port))
            (sb-bsd-sockets:socket-connect s #(127 0 0 1) port)
            (let ((st (sb-bsd-sockets:socket-make-stream s :input t :output t
                                                           :element-type 'character

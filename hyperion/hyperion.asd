@@ -257,6 +257,7 @@
   ;; precisely the seam BETWEEN them -- hyperion/server:start choosing and starting this
   ;; backend. A suite that could not load both could not test the join.
   :depends-on ("hyperion/server-uv" "hyperion" "aion/pool" "aion/uv"  ; server-uv-tests.lisp calls pool: and uv:
+               "hyperion/test-ports"                                  ; and its deadline (#456)
                "aion/boundary"                                        ; and names its condition (#110)
                "aion/log"                                             ; and the log line #475's test reads
                "hyperion/http1"                                       ; and the encoder it names (#110)

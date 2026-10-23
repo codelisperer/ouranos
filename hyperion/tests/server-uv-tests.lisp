@@ -23,7 +23,8 @@
                     (#:bt   #:bordeaux-threads)
                     (#:pool #:aion/pool)
                     (#:uv   #:aion/uv)
-                    (#:static #:hyperion/static))
+                    (#:static #:hyperion/static)
+                    (#:ports #:hyperion/test-ports))  ; WITH-DEADLINE (#456)
   (:export #:run-tests))
 
 (in-package #:hyperion/server-uv/tests)
@@ -68,6 +69,11 @@ Generous for a loopback request that should finish in microseconds, and the only
 is not tighter is that a loaded CI box is slow in ways a hang is not. What matters is that
 it is FINITE: the failure this suite most wants to catch is a request that never gets an
 answer, and without a deadline that failure looks like a stuck test run.")
+
+(defun %what (request port)
+  "How a request is named when it goes unanswered: the first line of REQUEST, and PORT."
+  (format nil "~A on port ~D"
+          (subseq request 0 (or (position #\Return request) (length request))) port))
 
 (defun %wait-until (predicate &key (seconds +io-timeout+))
   "Call PREDICATE every 5 ms until it returns true or SECONDS have passed. Returns its last value.
@@ -178,7 +184,7 @@ distinction the mid-stream failure path exists to produce."
   "One request on its own connection, read as a chunked response."
   (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
     (unwind-protect
-         (sb-ext:with-timeout +io-timeout+
+         (ports:with-deadline (+io-timeout+ (%what (first lines) port))
            (sock:socket-connect s #(127 0 0 1) port)
            (let ((stream (sock:socket-make-stream s :input t :output t
                                                     :element-type '(unsigned-byte 8))))
@@ -201,7 +207,7 @@ PIECES rather than one string so a test can split a request ACROSS TCP WRITES --
 boundary is not a message boundary, and that is precisely what a server gets wrong."
   (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
     (unwind-protect
-         (sb-ext:with-timeout +io-timeout+
+         (ports:with-deadline (+io-timeout+ (%what (first pieces) port))
            (sock:socket-connect s #(127 0 0 1) port)
            (let ((stream (sock:socket-make-stream s :input t :output t
                                                     :element-type '(unsigned-byte 8))))
@@ -448,7 +454,7 @@ an empty piece and a nested list handled like any other."
 latin-1 text. For responses a framed read would misjudge, such as one to HEAD."
   (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
     (unwind-protect
-         (sb-ext:with-timeout +io-timeout+
+         (ports:with-deadline (+io-timeout+ (%what text port))
            (sock:socket-connect s #(127 0 0 1) port)
            (let ((stream (sock:socket-make-stream s :input t :output t
                                                     :element-type '(unsigned-byte 8))))
@@ -602,7 +608,7 @@ pipelining, which writes them all before reading anything. The two exercise diff
 of the drain loop and only one of them is what real clients mostly do."
   (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
     (unwind-protect
-         (sb-ext:with-timeout +io-timeout+
+         (ports:with-deadline (+io-timeout+ (%what (first requests) port))
            (sock:socket-connect s #(127 0 0 1) port)
            (let ((stream (sock:socket-make-stream s :input t :output t
                                                     :element-type '(unsigned-byte 8))))
@@ -1227,7 +1233,7 @@ response into this one, closing early truncates a stream that was fine."
     ;; desynchronised one, which is the only thing this test is for.
     (let ((sock (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
       (unwind-protect
-           (sb-ext:with-timeout +io-timeout+
+           (ports:with-deadline (+io-timeout+ (%what "GET /stream, then GET /" port))
              (sock:socket-connect sock #(127 0 0 1) port)
              (let ((st (sock:socket-make-stream sock :input t :output t
                                                      :element-type '(unsigned-byte 8))))
@@ -1336,7 +1342,7 @@ if two of them disagree about who writes what."
                                  :render (lambda (p) (format nil "~A=~A" (car p) (cdr p))))))
              (let ((sock (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
                (unwind-protect
-                    (sb-ext:with-timeout +io-timeout+
+                    (ports:with-deadline (+io-timeout+ (%what "GET /events" port))
                       (sock:socket-connect sock #(127 0 0 1) port)
                       (let ((st (sock:socket-make-stream sock :input t :output t
                                                               :element-type '(unsigned-byte 8))))
@@ -1609,7 +1615,7 @@ complete one -- the defect this file's own client comment warns about, in the on
 is about exactly that difference."
   (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
     (unwind-protect
-         (sb-ext:with-timeout +io-timeout+
+         (ports:with-deadline (+io-timeout+ (%what request port))
            (sock:socket-connect s #(127 0 0 1) port)
            (let ((stream (sock:socket-make-stream s :input t :output t
                                                     :element-type '(unsigned-byte 8))))
@@ -1854,7 +1860,7 @@ platform this test has no way to count them on (Windows)."
                     send a reset rather than an orderly close, on every platform we run on."
   (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
     (unwind-protect
-         (sb-ext:with-timeout +io-timeout+
+         (ports:with-deadline (+io-timeout+ (%what "GET /" port))
            (sock:socket-connect s #(127 0 0 1) port)
            (let ((stream (sock:socket-make-stream s :input t :output t
                                                     :element-type '(unsigned-byte 8))))
@@ -1911,7 +1917,8 @@ platform this test has no way to count them on (Windows)."
         ;; The idle timeout: a keep-alive connection the client leaves open and silent.
         (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
           (unwind-protect
-               (sb-ext:with-timeout +io-timeout+
+               (ports:with-deadline (+io-timeout+
+                                     (%what "GET / (left open for the idle timeout)" port))
                  (sock:socket-connect s #(127 0 0 1) port)
                  (let ((stream (sock:socket-make-stream s :input t :output t
                                                           :element-type '(unsigned-byte 8))))
@@ -1933,7 +1940,8 @@ platform this test has no way to count them on (Windows)."
          (s (make-instance 'sock:inet-socket :type :stream :protocol :tcp))
          (closed '()))
     (unwind-protect
-         (sb-ext:with-timeout +io-timeout+
+         (ports:with-deadline (+io-timeout+ (%what "GET / (left open while the server stops)"
+                                                 (srv:server-port server)))
            (sock:socket-connect s #(127 0 0 1) (srv:server-port server))
            (let ((stream (sock:socket-make-stream s :input t :output t
                                                     :element-type '(unsigned-byte 8))))
@@ -2583,7 +2591,7 @@ and PORT, and always stop it."
 each one on before this returns. The caller closes them."
   (loop repeat n
         collect (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
-                  (sb-ext:with-timeout +io-timeout+
+                  (ports:with-deadline (+io-timeout+ (%what "GET /" port))
                     (sock:socket-connect s #(127 0 0 1) port)
                     (let ((stream (sock:socket-make-stream s :input t :output t
                                                              :element-type '(unsigned-byte 8))))
@@ -2891,3 +2899,64 @@ kernel lists as allowed in /proc/self/status, a second reading of the same mask.
 which current coreutils also limits by the cgroup quota and by OMP_ variables."
   (is (eql (%cpus-allowed-list-count) (srv::%affinity-count)))
   (is (<= (srv::%affinity-count) (srv::%online-cores))))
+
+;;; --- a request nobody answers (#456) -----------------------------------------
+;;;
+;;; The server here is a socket that listens and never accepts: the kernel completes the
+;;; connection and takes the request, and no response ever comes. That is what a server
+;;; regression that stops answering looks like to this suite's client.
+
+(defun %silent-listener ()
+  "A listening loopback socket that nothing accepts on, and its port."
+  (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
+    (setf (sock:sockopt-reuse-address s) t)
+    (sock:socket-bind s #(127 0 0 1) 0)
+    (sock:socket-listen s 8)
+    (values s (nth-value 1 (sock:socket-name s)))))
+
+(defvar *silent-port* nil
+  "The port A-REQUEST-NOBODY-ANSWERS sends to, bound by the test that runs it.")
+
+(def-suite unanswered-fixture
+  :description "Not in SERVER-UV. Run only by the test below, which counts its results.")
+
+(test (a-request-nobody-answers :suite unanswered-fixture)
+  (get* *silent-port* "GET /never HTTP/1.1" "Host: x")
+  (pass "never reached: nothing answers"))
+
+(test an-unanswered-request-fails-its-own-test-and-the-run-goes-on
+  "#456. A request whose response never arrives used to signal SB-EXT:TIMEOUT, which is not an
+ERROR, so FiveAM did not catch it and the image quit, ending the run at that test. Now it is
+an ERROR naming the request, recorded as that test's failure.
+
+The inner test runs with the deadline at 1 s instead of +IO-TIMEOUT+. The checks: the inner
+run returns, with exactly one result, a failure; its message names the request and the port;
+no thread was left running; and the client's socket was closed, which the listener sees as
+the end of the stream once it accepts the connection the client left in its queue."
+  (multiple-value-bind (listener port) (%silent-listener)
+    (unwind-protect
+         (let* ((before (sb-thread:list-all-threads))
+                (results (let ((*silent-port* port)
+                               (+io-timeout+ 1)
+                               (*test-dribble* (make-broadcast-stream)))
+                           (run 'a-request-nobody-answers)))
+                (failures (remove-if-not (lambda (r) (typep r 'fiveam::test-failure)) results)))
+           (is (= 1 (length results) (length failures))
+               "expected one failed result from the inner run, got ~S" results)
+           (when failures
+             (let ((reason (fiveam::reason (first failures))))
+               (is (search (format nil "no response to GET /never HTTP/1.1 on port ~D" port)
+                           reason)
+                   "the failure should name the request and the port: ~S" reason)))
+           (is (null (set-difference (sb-thread:list-all-threads) before))
+               "a thread was left running: ~S"
+               (set-difference (sb-thread:list-all-threads) before))
+           (let ((server-side (sock:socket-accept listener)))
+             (unwind-protect
+                  (let ((st (sock:socket-make-stream
+                             server-side :input t :element-type '(unsigned-byte 8))))
+                    (ports:with-deadline (+io-timeout+ "the client's end of the connection")
+                      (loop while (read-byte st nil nil)))
+                    (pass "the client closed its socket"))
+               (ignore-errors (sock:socket-close server-side)))))
+      (ignore-errors (sock:socket-close listener)))))
