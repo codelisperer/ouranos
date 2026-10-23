@@ -46,10 +46,11 @@
   "Run the tests that touch no store, then, on Windows and macOS, the live tests if
 +LIVE-VARIABLE+ allows them, and print a BACKEND-CHECKS credential-store line saying which.
 
-Signals an error when any of those suites had a failure, after all of them have run. This
-prints up to three FiveAM reports, and the gate takes a report of \"Fail: 0\" anywhere in a
-suite's output, with the child exiting 0, as a pass; so a failure in one report followed by a
-passing one would read as green unless the child exits non-zero (Copilot's review of #603)."
+Signals an error when any of those suites had a failure, after all of them have run, so the
+child exits non-zero (Copilot's review of #603). This prints up to three FiveAM reports. Since
+#605 the gate passes a suite only when every report in its output says \"Fail: 0\", so a failed
+report is caught there too; the non-zero exit makes the failure visible to anything else that
+runs this system, such as ASDF:TEST-SYSTEM in a shell."
   (let ((passed (fiveam:run! 'all)))
     #+(or win32 darwin)
     (if (%live-p)
