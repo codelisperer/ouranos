@@ -3,8 +3,8 @@
 ;;;; Every item uses a service name unique to the run and is deleted afterwards. The value is a
 ;;;; marker unique to the run, so a search of any text for it can only find a leak.
 ;;;;
-;;;; THE LIVE TESTS USE THE REAL STORE. On Windows and macOS they store, read and delete items in
-;;;; the Credential Manager or login Keychain of whoever runs them, so they run only when
+;;;; THE LIVE TESTS USE THE REAL STORE. They store, read and delete items in the Credential
+;;;; Manager, login Keychain or Secret Service keyring of whoever runs them, so they run only when
 ;;;; OURANOS_TEST_REAL_CREDENTIAL_STORE=1 is set. CI sets it, because a runner's store is thrown
 ;;;; away with the runner. On a developer's machine the maintainer decides whether to set it.
 ;;;; RUN-TESTS reports which happened as a BACKEND-CHECKS credential-store line, and
@@ -21,6 +21,7 @@
 (defpackage #:hades/credentials/tests
   (:use #:cl #:fiveam)
   (:local-nicknames (#:cred #:hades/credentials) (#:sec #:aion/secret))
+  #+linux (:local-nicknames (#:libsecret #:aion/libsecret) (#:ffi #:aion/libsecret/ffi))
   (:export #:run-tests))
 
 (in-package #:hades/credentials/tests)
@@ -43,7 +44,7 @@
   "(service . account) for every item whose cleanup delete signalled an error in this run.")
 
 (defun run-tests ()
-  "Run the tests that touch no store, then, on Windows and macOS, the live tests if
+  "Run the tests that touch no store, then, on Windows, macOS and Linux, the live tests if
 +LIVE-VARIABLE+ allows them, and print a BACKEND-CHECKS credential-store line saying which.
 
 Signals an error when any of those suites had a failure, after all of them have run, so the
@@ -52,7 +53,7 @@ child exits non-zero (Copilot's review of #603). This prints up to three FiveAM 
 report is caught there too; the non-zero exit makes the failure visible to anything else that
 runs this system, such as ASDF:TEST-SYSTEM in a shell."
   (let ((passed (fiveam:run! 'all)))
-    #+(or win32 darwin)
+    #+(or win32 darwin linux)
     (if (%live-p)
         (let ((results (fiveam:run 'live)))
           (fiveam:explain! results)
@@ -104,9 +105,20 @@ recorded in *UNDELETED*, rather than ignored."
 
 ;;; --- live: this machine's real store -------------------------------------------------------
 
-#+(or win32 darwin)
+#+(or win32 darwin linux)
 (progn
   (in-suite live)
+
+  (test a-value-with-a-nul-character-round-trips-whole
+    "The value is stored as bytes with a length on every backend, so it is not cut at a NUL. On
+Linux this is why the backend uses libsecret's _binary_ calls rather than the text ones."
+    (let* ((service (%item (%service) "user"))
+           (value (concatenate 'string (%marker) (string (code-char 0)) (%marker))))
+      (unwind-protect
+           (progn
+             (cred:store-credential service "user" (sec:make-secret value))
+             (is (string= value (sec:reveal (cred:fetch-credential service "user")))))
+        (%cleanup service "user"))))
 
   (test a-credential-round-trips-and-is-deleted
     (let ((service (%item (%service) "user")) (value (%marker)) (second (%marker)))
@@ -160,6 +172,40 @@ recorded in *UNDELETED*, rather than ignored."
              (is (search value (format nil "~A" (sec:reveal (sec:make-secret value))))))
         (%cleanup service "user"))))
 
+  #+linux
+  (test an-item-another-program-stored-with-the-same-names-is-not-touched
+    "Lookups and deletes match the schema org.codelisperer.hades.Credential as well as the two
+attributes, so an item another program stored under its own schema with the same service and
+account is neither returned nor deleted."
+    (let ((service (%item (%service) "user")) (value (%marker)))
+      (flet ((other (fn)
+               (libsecret:with-libsecret-lock ()
+                 (libsecret:with-schema (schema "org.codelisperer.hades.tests.OtherProgram"
+                                                '("service" "account"))
+                   (libsecret:with-attributes (attributes (list (cons "service" service)
+                                                                (cons "account" "user")))
+                     (libsecret:with-gerror (err "the other program's call")
+                       (funcall fn schema attributes err)))))))
+        (unwind-protect
+             (progn
+               (let ((v (libsecret:make-secret-value
+                         (sb-ext:string-to-octets value :external-format :utf-8))))
+                 (unwind-protect
+                      (other (lambda (schema attributes err)
+                               (ffi:secret-password-storev-binary-sync
+                                schema attributes "default" "hades test: another program's item"
+                                v (cffi:null-pointer) err)))
+                   (ffi:secret-value-unref v)))
+               (signals cred:credential-not-found (cred:fetch-credential service "user"))
+               (is (null (cred:delete-credential service "user")))
+               (let ((found (other (lambda (schema attributes err)
+                                     (ffi:secret-password-lookupv-binary-sync
+                                      schema attributes (cffi:null-pointer) err)))))
+                 (is (not (cffi:null-pointer-p found)) "the other program's item must remain")
+                 (unless (cffi:null-pointer-p found) (ffi:secret-value-unref found))))
+          (other (lambda (schema attributes err)
+                   (ffi:secret-password-clearv-sync schema attributes (cffi:null-pointer) err)))))))
+
   (in-suite leftovers)
 
   (test every-item-the-live-tests-created-is-gone
@@ -174,7 +220,7 @@ fetches by name only the items this run created."
 
 (in-suite all)
 
-#-(or win32 darwin)
+#-(or win32 darwin linux)
 (test with-no-backend-every-call-signals-and-nothing-is-stored
   ;; No file fallback: the store refuses, and a fetch afterwards does not find anything either.
   (let ((service (%service)))
@@ -182,6 +228,133 @@ fetches by name only the items this run created."
       (cred:store-credential service "user" (sec:make-secret (%marker))))
     (signals cred:credential-store-unavailable (cred:fetch-credential service "user"))
     (signals cred:credential-store-unavailable (cred:delete-credential service "user"))))
+
+;;; --- Linux: each reason the Secret Service cannot be used ----------------------------------
+;;;
+;;; GIO keeps the first session-bus connection a process makes, and libsecret the first service,
+;;; so each case runs in a fresh SBCL with its own environment. The child loads this tree's
+;;; hades/credentials, tries each operation, and prints one line per operation.
+
+#+linux
+(progn
+  (defun %tree ()
+    (uiop:native-namestring
+     (uiop:pathname-parent-directory-pathname
+      (asdf:system-source-directory "hades/credentials"))))
+
+  (defun %fresh-directory ()
+    (ensure-directories-exist
+     (merge-pathnames (format nil "hades-cred-~A/" (%token)) (uiop:temporary-directory))))
+
+  (defun %child-results (environment prelude value)
+    "Run a child SBCL with ENVIRONMENT, a list of \"NAME=VALUE\" strings replacing those
+variables, evaluate the form PRELUDE, then store VALUE and fetch and delete it. Returns the
+child's whole output as a string, and the lines of the form OPERATION OUTCOME REASON."
+    (let* ((names (mapcar (lambda (e) (subseq e 0 (1+ (position #\= e)))) environment))
+           (env (append environment
+                        (remove-if (lambda (e) (some (lambda (n) (uiop:string-prefix-p n e)) names))
+                                   (sb-ext:posix-environ))))
+           (setup (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))
+           (form
+             ;; Printed from the keyword package, so every symbol is written with its package,
+             ;; and the child, which has no test package, reads the same form back.
+             (let ((*package* (find-package :keyword)))
+               (prin1-to-string
+                `(progn
+                   ,prelude
+                   (dolist (cl-user::op (list (cons "STORE"
+                                           (lambda ()
+                                             (cred:store-credential
+                                              "ouranos-test-hades-credentials/child" "user"
+                                              (sec:make-secret ,value))))
+                                     (cons "FETCH"
+                                           (lambda ()
+                                             (cred:fetch-credential
+                                              "ouranos-test-hades-credentials/child" "user")))
+                                     (cons "DELETE"
+                                           (lambda ()
+                                             (cred:delete-credential
+                                              "ouranos-test-hades-credentials/child" "user")))))
+                     (format t "~&~A ~A~%" (car cl-user::op)
+                             (handler-case (progn (funcall (cdr cl-user::op)) "RETURNED")
+                               (cred:credential-store-unavailable (cl-user::e)
+                                 (format nil "UNAVAILABLE ~A"
+                                         (cred:credential-store-unavailable-reason cl-user::e)))
+                               (error (cl-user::e) (format nil "OTHER ~A" cl-user::e)))))))))
+           (process (sb-ext:run-program
+                     sb-ext:*runtime-pathname*
+                     (list "--noinform" "--no-userinit" "--no-sysinit" "--non-interactive"
+                           "--eval" "(require :asdf)"
+                           "--eval" (format nil "(load ~S)" (uiop:native-namestring setup))
+                           "--eval" (format nil "(asdf:initialize-source-registry '(:source-registry (:tree ~S) :inherit-configuration))" (%tree))
+                           "--eval" "(let ((*standard-output* (make-broadcast-stream)) (*error-output* (make-broadcast-stream))) (asdf:load-system \"hades/credentials\"))"
+                           "--eval" form)
+                     :environment env :output :stream :error :output :wait nil))
+           (text (with-output-to-string (out)
+                   (loop for line = (read-line (sb-ext:process-output process) nil)
+                         while line do (write-line line out)))))
+      (sb-ext:process-wait process)
+      (sb-ext:process-close process)
+      (values text
+              (remove-if-not (lambda (line)
+                               (some (lambda (op) (uiop:string-prefix-p op line))
+                                     '("STORE " "FETCH " "DELETE ")))
+                             (uiop:split-string text :separator '(#\Newline))))))
+
+  (defun %check-unavailable (environment prelude expected)
+    "Every operation in the child signals CREDENTIAL-STORE-UNAVAILABLE with a reason that
+contains EXPECTED, and the value never appears in the child's output."
+    (let ((value (%marker)))
+      (multiple-value-bind (text lines) (%child-results environment prelude value)
+        (is (= 3 (length lines)) "the child must report three operations:~%~A" text)
+        (dolist (line lines)
+          (is (search "UNAVAILABLE" line) "expected UNAVAILABLE: ~A" line)
+          (is (search expected line) "the reason must say ~S: ~A" expected line))
+        (is (not (search value text)) "the value appeared in the child's output"))))
+
+  (test without-libsecret-every-call-says-it-is-not-installed
+    ;; The library is renamed to one no system has, before anything loads it.
+    (%check-unavailable
+     '() '(cffi:define-foreign-library aion/libsecret/ffi:libsecret
+           (:linux "libsecret-not-installed-hades-test.so.0"))
+     "libsecret is not installed"))
+
+  (test without-a-session-bus-every-call-says-so
+    ;; A socket path in a directory that does not exist, so nothing can be listening there.
+    (%check-unavailable
+     (list (format nil "DBUS_SESSION_BUS_ADDRESS=unix:path=~Ahades-cred-~A/no-bus-here"
+                   (uiop:native-namestring (uiop:temporary-directory)) (%token)))
+     nil "there is no D-Bus session bus"))
+
+  (test on-a-bus-with-no-secret-service-every-call-says-so
+    "A private session bus whose configuration names no service directories, so nothing can be
+started on it to provide org.freedesktop.secrets."
+    (let ((daemon (ignore-errors (uiop:native-namestring
+                                  (uiop:run-program '("sh" "-c" "command -v dbus-daemon")
+                                                    :output '(:string :stripped t))))))
+      (if (or (null daemon) (string= "" daemon))
+          (skip "dbus-daemon is not installed, so a private bus cannot be started")
+          (let* ((dir (%fresh-directory))
+                 (config (merge-pathnames "bus.conf" dir))
+                 (socket (uiop:native-namestring (merge-pathnames "bus" dir))))
+            (with-open-file (out config :direction :output)
+              (format out "<!DOCTYPE busconfig PUBLIC \"-//freedesktop//DTD D-BUS Bus Configuration 1.0//EN\" \"http://www.freedesktop.org/standards/dbus/1.0/busconfig.dtd\">~%<busconfig><type>session</type><listen>unix:path=~A</listen><auth>EXTERNAL</auth><policy context=\"default\"><allow send_destination=\"*\" eavesdrop=\"true\"/><allow eavesdrop=\"true\"/><allow own=\"*\"/></policy></busconfig>~%"
+                      socket))
+            (let ((bus (sb-ext:run-program daemon
+                                           (list "--nofork" "--print-address"
+                                                 (format nil "--config-file=~A"
+                                                         (uiop:native-namestring config)))
+                                           :output :stream :error nil :wait nil)))
+              (unwind-protect
+                   (let ((address (read-line (sb-ext:process-output bus) nil "")))
+                     (is (search "unix:path=" address) "the private bus did not start: ~S" address)
+                     (%check-unavailable (list (concatenate 'string "DBUS_SESSION_BUS_ADDRESS="
+                                                            address))
+                                         nil "no program provides the Secret Service"))
+                (sb-ext:process-kill bus 15)
+                (sb-ext:process-wait bus)
+                (sb-ext:process-close bus)
+                (uiop:delete-directory-tree dir :validate t))))))))
 
 (test empty-names-are-refused
   ;; Refused before any store is reached, so this runs without the live variable.

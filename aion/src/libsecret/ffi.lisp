@@ -111,7 +111,8 @@ NULL, so a schema has at most 31 attributes.")
 
 ;;; --- GLib: hash tables and errors ----------------------------------------------------------
 
-(define-call g-hash-table-new "g_hash_table_new" :pointer (hash-func :pointer) (equal-func :pointer))
+(define-call g-hash-table-new "g_hash_table_new" :pointer
+  (hash-func :pointer) (equal-func :pointer))
 (define-call g-hash-table-insert "g_hash_table_insert" :int
   (table :pointer) (key :pointer) (value :pointer))
 (define-call g-hash-table-unref "g_hash_table_unref" :void (table :pointer))

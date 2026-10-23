@@ -1,4 +1,4 @@
-;;;; libsecret-tests.lisp --- aion/libsecret's layouts and values, without the Secret Service (#357).
+;;;; libsecret-tests.lisp --- aion/libsecret without the Secret Service (#357).
 ;;;;
 ;;;; Nothing here talks to D-Bus. GIO keeps the first session-bus connection a process makes, so a
 ;;;; test of a missing bus or a missing service has to run in a fresh process; those are in

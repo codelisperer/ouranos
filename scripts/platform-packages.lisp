@@ -76,6 +76,11 @@
      (:system "hades/darwin"  :status :planned :issue "pre-publication issue 180"))
     (:linux
      (:system "hades/linux"   :status :planned :issue "pre-publication issue 180")
+     (:system "aion/libsecret" :status :required :issue "#357"
+      :note "the binding hades/credentials uses for the Secret Service: libsecret's schema,
+             attribute table, secret value and password calls, and GError as a condition. It
+             loads libsecret-1.so.0 on first use, so it loads where libsecret is missing; its
+             suite needs the library and never talks to D-Bus.")
      (:system "hyperion/woo"  :status :required :issue "#372"
       :note "hyperion served by Woo; its suite is the only one that runs a real Woo server.
              Woo binds libev at load and has no Windows build. It also runs on macOS, but a
