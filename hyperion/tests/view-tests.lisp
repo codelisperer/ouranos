@@ -57,7 +57,8 @@ resolution moves, this suite must move with it or say so."
 It runs with HYPERION_VIEW_NO_WINDOW=1, so a call that would create a window exits 3 instead
 (#521). None of these calls is meant to create one, and on a developer's machine a test that
 did would open a window on their screen. The real-window tests use %REPORT-PLACEMENT, which
-clears the variable and runs only on CI."
+clears the variable and runs only on CI, or on macOS %RUN-SHOWN-LAUNCHER, which runs only when
+GITHUB_ACTIONS is set."
   (let ((out (make-string-output-stream))
         (err (make-string-output-stream))
         (previous (uiop:getenv "HYPERION_VIEW_NO_WINDOW")))
@@ -181,6 +182,19 @@ code when it did not exit 0."
     ;; Too wide and too tall on a small screen.
     (is (equal '(0 0 1366 728) (%placement 0 0 1366 728 1920 1080 96 16 39)))))
 
+(test a-window-on-a-mac-screen-is-placed-in-its-visible-frame
+  ;; The numbers macOS's place_window passes (#485): points at DPI 96, which leaves them
+  ;; unscaled, and y measured upwards, so the work area is the visible frame's left, bottom,
+  ;; right and top. A 1512x982 screen with a 33-point menu bar and a 70-point Dock has the
+  ;; visible frame 0,70 to 1512,949. webview_set_size makes the frame, title bar included,
+  ;; WIDTH x HEIGHT, so a 1200x800 window has a 1200x772 client and a 28-point title bar.
+  (with-launcher
+    (is (equal '(156 109 1200 800) (%placement 0 70 1512 949 1200 772 96 0 28))
+        "a window that fits is centred between the Dock and the menu bar")
+    ;; 1000 points high, in 879: cut to 879 and put on the Dock.
+    (is (equal '(116 70 1280 879) (%placement 0 70 1512 949 1280 972 96 0 28))
+        "a window taller than the visible frame is cut to it")))
+
 (test placement-refuses-what-is-not-nine-integers
   (with-launcher
     (is (eql 2 (%placement 0 0 2560 1528 1280 860 144 16)) "eight numbers")
@@ -301,6 +315,67 @@ and Windows reports that rectangle."
                   (destructuring-bind (l tp r b) window
                     (is (and (<= wl l) (<= wt tp) (<= r wr) (<= b wb))
                         "and inside the work area: ~S" line))))))))))
+
+;;; --- the same on a real macOS window, on a GitHub runner only (#485) ----------------------
+;;;
+;;; On macOS webview.h shows the window and activates the app as soon as it is created, and
+;;; there is no hidden start, so this test shows a window. It runs only when GITHUB_ACTIONS is
+;;; set. CI is not enough: agents set CI=1 when they run suites on a developer's machine, and
+;;; that must not open a window there (#885).
+
+(defun %run-shown-launcher (seconds &rest args)
+  "Run `hyperion-view ARGS' with HYPERION_VIEW_NO_WINDOW cleared, so it creates a window, which
+macOS shows. Returns (values EXIT-CODE OUTPUT), or :TIMEOUT when it is still running after
+SECONDS; then that process, and nothing else, is killed."
+  (let ((previous (uiop:getenv "HYPERION_VIEW_NO_WINDOW"))
+        (deadline (+ (get-internal-real-time) (* seconds internal-time-units-per-second))))
+    (setf (uiop:getenv "HYPERION_VIEW_NO_WINDOW") "")
+    (unwind-protect
+         (let ((p (uiop:launch-program (cons (uiop:native-namestring (launcher)) args)
+                                       :output :stream :error-output nil)))
+           (unwind-protect
+                (progn
+                  (loop while (and (uiop:process-alive-p p) (< (get-internal-real-time) deadline))
+                        do (sleep 0.1))
+                  (if (uiop:process-alive-p p)
+                      (progn (uiop:terminate-process p :urgent t)
+                             (uiop:wait-process p)
+                             (values :timeout ""))
+                      (let ((out (uiop:slurp-stream-string (uiop:process-info-output p))))
+                        (values (uiop:wait-process p) out))))
+             (uiop:close-streams p)))
+      (setf (uiop:getenv "HYPERION_VIEW_NO_WINDOW") (or previous "")))))
+
+(test the-window-is-placed-in-the-visible-frame-on-a-real-mac-window
+  "On a GitHub macOS runner, a real window is placed where --placement says, inside the screen's
+visible frame, and a window taller than the screen is shrunk to the visible frame's height."
+  #-darwin (skip "The macOS placement calls run on macOS only")
+  #+darwin
+  (with-launcher
+    (if (null (uiop:getenvp "GITHUB_ACTIONS"))
+        (skip "Runs only on a GitHub runner (GITHUB_ACTIONS is not set here): it shows a window")
+        ;; webview_set_size makes the frame, title bar included, WIDTH x HEIGHT; the client is
+        ;; that less the frame the report gives.
+        (dolist (height '(860 5000))
+          (multiple-value-bind (code out)
+              (%run-shown-launcher 60 "--report-placement" "1280" (princ-to-string height))
+            (is (eql 0 code) "--report-placement 1280 ~D exited ~S: ~A" height code out)
+            ;; The work area (4), the DPI, the frame (2), the placement (4) and the window (4).
+            (let* ((line (%report-line out "work "))
+                   (n (and line (%report-numbers line))))
+              (is (eql 15 (length n)) "it printed a report: ~S" out)
+              (when (eql 15 (length n))
+                (destructuring-bind (wl wb wr wt dpi fw fh x y w h l b r tp) n
+                  (is (equal (list x y w h)
+                             (%placement wl wb wr wt (- 1280 fw) (- height fh) dpi fw fh))
+                      "the real calls computed what --placement computes: ~S" out)
+                  (is (equal (list l b r tp) (list x y (+ x w) (+ y h)))
+                      "macOS reports the window at the placement: ~S" out)
+                  (is (and (<= wl l) (<= wb b) (<= r wr) (<= tp wt))
+                      "and inside the visible frame: ~S" out)
+                  (when (eql height 5000)
+                    (is (eql h (- wt wb)) "a 5000-point window is cut to the visible frame: ~S"
+                        out))))))))))
 
 (defun %fresh-dir ()
   (let ((dir (uiop:ensure-directory-pathname

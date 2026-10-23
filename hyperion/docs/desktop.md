@@ -187,8 +187,11 @@ with `scripts/build-desktop-app.lisp --window-icon <file>`, giving the format th
 `.exe`'s own icon in Explorer, and from `build-dmg.sh --icon`, which sets the `.app`'s icon in
 Finder.
 
-**Where the window opens (#485).** On Windows, hyperion-view opens the window centred in the
-work area of its monitor, shrunk to fit when the requested size is larger. `run-app
+**Where the window opens (#485).** On Windows and macOS, hyperion-view opens the window centred
+in the work area of its monitor, shrunk to fit when the requested size is larger. On macOS the
+work area is the screen's visible frame, which leaves out the menu bar and the Dock, and the
+requested size includes the title bar. On Linux the window manager places the window. On
+Windows, `run-app
 :placement-file PATH` also keeps the window's last position, size and maximised state in PATH,
 one line written by hyperion-view when a move or resize made by dragging ends, when the window
 is maximised or restored, and when it is closed. It opens the window there next time if that

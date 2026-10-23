@@ -17,6 +17,7 @@
 #include <cerrno>
 #include <climits>
 #include <cstdio>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <string>
@@ -182,6 +183,19 @@ static void install_main_menu(const char *app_name) {
       app, sel_registerName("setMainMenu:"), main_menu);
 }
 
+// The CGRect that SELECTOR returns from OBJECT. On x86_64 a CGRect is returned through
+// objc_msgSend_stret; on arm64 objc_msgSend returns it, and the _stret form does not exist.
+static CGRect rect_of(id object, const char *selector) {
+#if defined(__x86_64__)
+  CGRect r;
+  reinterpret_cast<void (*)(CGRect *, id, SEL)>(objc_msgSend_stret)(&r, object,
+                                                                     sel_registerName(selector));
+  return r;
+#else
+  return reinterpret_cast<CGRect (*)(id, SEL)>(objc_msgSend)(object, sel_registerName(selector));
+#endif
+}
+
 #else
 static void set_app_name(const char *) {}
 static void install_main_menu(const char *) {}
@@ -270,13 +284,15 @@ static void set_window_icon(webview_t w, const char *path) {
 // It is printed here, before webview_create, because everything after that point needs a
 // window server. A --help that requires a display is not a --help.
 // Put the window in the work area of the monitor it opened on: centred, and shrunk to fit
-// when it is larger (window-placement.h, #485). Windows only. On macOS webview_set_size
-// already centres the window ([NSWindow center]); on Linux the window manager places it.
+// when it is larger (window-placement.h, #485). Windows and macOS; on Linux the window
+// manager places it.
 //
 // With REPORT, it also prints one line there: the work area, the DPI, what the frame adds, the
-// placement computed, and the window's rectangle as Windows reports it after SetWindowPos --
-// for --report-placement, which is how a test sees the real calls (review of train 20). A
-// step that fails is reported as "placement-failed STEP" and nothing is moved.
+// placement computed, and the window's rectangle as the system reports it after placing it --
+// for --report-placement, which is how a test sees the real calls (review of train 20). On
+// macOS the rectangles are in points, measured upwards from the bottom of the main screen, so
+// each is printed as left, bottom, right, top. A step that fails is reported as
+// "placement-failed STEP" and nothing is moved.
 static bool place_window(webview_t w, int width, int height, std::FILE *report = nullptr) {
 #if defined(_WIN32)
   auto failed = [report](const char *step) {
@@ -313,6 +329,60 @@ static bool place_window(webview_t w, int width, int height, std::FILE *report =
                  frame_width, frame_height, p.x, p.y, p.width, p.height,
                  static_cast<long>(placed.left), static_cast<long>(placed.top),
                  static_cast<long>(placed.right), static_cast<long>(placed.bottom));
+  }
+  return true;
+#elif defined(__APPLE__)
+  // webview_set_size has set the frame, title bar included, to WIDTH x HEIGHT points and
+  // centred it with [NSWindow center], which does not shrink a window taller than the screen.
+  // So the window gets the same arithmetic as on Windows, in points: the visible frame (the
+  // screen less the menu bar and the Dock) is the work area, the content view's size is the
+  // client size at 96 "dpi", which leaves it unscaled, and the frame adds the title bar. Cocoa
+  // measures y upwards from the bottom of the main screen; centring is the same either way.
+  (void)width;
+  (void)height;
+  auto failed = [report](const char *step) {
+    if (report != nullptr) std::fprintf(report, "placement-failed %s\n", step);
+    return false;
+  };
+  id window = static_cast<id>(webview_get_window(w));
+  if (window == nullptr) return failed("webview_get_window");
+  id screen = reinterpret_cast<id (*)(id, SEL)>(objc_msgSend)(window, sel_registerName("screen"));
+  if (screen == nullptr)
+    screen = reinterpret_cast<id (*)(id, SEL)>(objc_msgSend)(
+        reinterpret_cast<id>(objc_getClass("NSScreen")), sel_registerName("mainScreen"));
+  if (screen == nullptr) return failed("NSScreen");
+  id view = reinterpret_cast<id (*)(id, SEL)>(objc_msgSend)(window,
+                                                            sel_registerName("contentView"));
+  if (view == nullptr) return failed("contentView");
+  CGRect visible = rect_of(screen, "visibleFrame");
+  CGRect outer = rect_of(window, "frame");
+  CGRect client = rect_of(view, "frame");
+  long work_left = std::lround(visible.origin.x);
+  long work_top = std::lround(visible.origin.y);
+  long work_right = std::lround(visible.origin.x + visible.size.width);
+  long work_bottom = std::lround(visible.origin.y + visible.size.height);
+  long client_width = std::lround(client.size.width);
+  long client_height = std::lround(client.size.height);
+  long frame_width = std::lround(outer.size.width) - client_width;
+  long frame_height = std::lround(outer.size.height) - client_height;
+  if (!placement_inputs_in_range(work_left, work_top, work_right, work_bottom, client_width,
+                                 client_height, 96, frame_width, frame_height))
+    return failed("out-of-range");
+  window_placement p = place_in_work_area(work_left, work_top, work_right, work_bottom,
+                                          client_width, client_height, 96, frame_width,
+                                          frame_height);
+  reinterpret_cast<void (*)(id, SEL, CGRect, BOOL)>(objc_msgSend)(
+      window, sel_registerName("setFrame:display:"), CGRectMake(p.x, p.y, p.width, p.height),
+      YES);
+  if (report != nullptr) {
+    CGRect placed = rect_of(window, "frame");
+    long left = std::lround(placed.origin.x), bottom = std::lround(placed.origin.y);
+    std::fprintf(report,
+                 "work %ld %ld %ld %ld dpi 96 frame %ld %ld placement %ld %ld %ld %ld "
+                 "window %ld %ld %ld %ld\n",
+                 work_left, work_top, work_right, work_bottom, frame_width, frame_height, p.x,
+                 p.y, p.width, p.height, left, bottom,
+                 left + std::lround(placed.size.width), bottom + std::lround(placed.size.height));
   }
   return true;
 #else
@@ -738,10 +808,12 @@ static void print_usage(std::FILE *out) {
                "               CW x CH logical pixels, at DPI, with a frame adding FW x FH, is\n"
                "               put in the work area WL,WT-WR,WB; then exit (#485)\n"
                "  --report-placement WIDTH HEIGHT [PLACEMENT-FILE]\n"
-               "               Windows: create the window, size and place it as a launch does,\n"
-               "               print the work area, DPI, frame, placement and the window's\n"
-               "               rectangle, then exit without running it. Start it hidden. With\n"
-               "               PLACEMENT-FILE, restore from it first and save to it after.\n"
+               "               Windows and macOS: create the window, size and place it as a\n"
+               "               launch does, print the work area, DPI, frame, placement and the\n"
+               "               window's rectangle, then exit without running it. On Windows,\n"
+               "               start it hidden; on macOS the window is shown. With\n"
+               "               PLACEMENT-FILE (Windows), restore from it first and save to it\n"
+               "               after.\n"
                "  --saved-placement PATH WL WT WR WB [BL BT BR BB [FROM TO]]\n"
                "               print \"use L T R B MAXIMIZED\" if the placement saved at PATH would\n"
                "               be restored into the work area WL,WT-WR,WB, else \"ignore REASON\".\n"
