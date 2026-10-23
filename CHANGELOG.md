@@ -14,6 +14,84 @@ its tag.
 
 ### An app may have to act
 
+- **hades/credentials: on Linux, `store-credential`, `fetch-credential` and `delete-credential`
+  use the Secret Service instead of always signalling `credential-store-unavailable`** (#357).
+  Items go into the default collection of whichever program provides the Secret Service on the
+  D-Bus session bus (GNOME Keyring, KeePassXC), under the libsecret schema
+  `org.codelisperer.hades.Credential` with the attributes `service` and `account`, labelled
+  "SERVICE (ACCOUNT)". It needs `libsecret-1.so.0` at run time (`libsecret-1-0` on Debian and
+  Ubuntu); where that is missing, where there is no session bus, or where nothing provides the
+  Secret Service, every call still signals `credential-store-unavailable`, and
+  `credential-store-unavailable-reason` says which. When the keyring is locked, an operation on a
+  desktop may ask the user to unlock it, as on macOS, and waits for the answer. Without a display
+  (neither `DISPLAY` nor `WAYLAND_DISPLAY` set) it asks nothing and signals
+  `credential-store-unavailable`. When the request is dismissed it also signals that, never
+  `credential-not-found`. A stored value that is not UTF-8 text, which only another program can
+  write, signals `credential-error` without its bytes. `credential-store-available-p` answers
+  the first three without trying an operation and without prompting, and `credential-store-name`
+  is "Secret Service". An app
+  that treated Linux as having no store, for example by catching that condition to hide a
+  setting, will now store the secret on a Linux desktop. An app shipped as an AppImage or other
+  bundle should not bundle libsecret: the one the desktop installs is the one that talks to its
+  keyring. A value is limited to 2560 UTF-8 bytes, as on Windows and macOS.
+
+- **hades/credentials: the live tests use the real credential store only when
+  `OURANOS_TEST_REAL_CREDENTIAL_STORE=1` is set, and `scripts/verify-tree.lisp` on Windows, macOS
+  and Linux fails unless that or `OURANOS_ALLOW_NO_CREDENTIAL_STORE=1` is set** (#357, #603). The
+  live tests store, read and delete items in the Credential Manager or login Keychain of whoever
+  runs them, or in the Secret Service keyring on Linux. CI sets the first variable, because a
+  runner's store is discarded with the runner. Without it, `hades/credentials/tests` prints
+  `BACKEND-CHECKS credential-store SKIPPED`, and the gate fails that skip unless
+  `OURANOS_ALLOW_NO_CREDENTIAL_STORE=1` excuses it, the same way `OURANOS_ALLOW_NO_PG` excuses a
+  skipped Postgres. An excused skip is listed under NOT COVERED and its checks are not in the
+  total. On a developer's machine, set the first variable to run the live tests against your own
+  store, or the second to skip them. The live tests touch only items whose service starts with
+  `ouranos-test-hades-credentials/` and delete each one; a `leftovers` suite fails if any remains.
+  On Linux, `scripts/with-secret-service.sh` runs them against a throwaway GNOME Keyring instead
+  of your own (see the Secret Service entry above). The gate also now fails a suite that prints no
+  `BACKEND-CHECKS` line for a backend it must report (`+required-backend-reports+`):
+  `credential-store` for `hades/credentials/tests` on Windows, macOS and Linux, and `postgres` for
+  the mnemosyne and praxeon database suites on every host. Before, a missing line passed, so a
+  suite whose reporting broke went green with none of those checks run.
+
+- **praxeon/image: `PRAXEON_IMAGE_API_KEY` is deprecated; set `PRAXEON_OPENAI_API_KEY`** (#758,
+  part four). Its name does not say which vendor the key is for, and with a second image
+  provider a Google key put there would be sent to OpenAI. The OpenAI image provider
+  (`make-openai-images`, `openai-images-from-env`, `register-openai-image`) now reads
+  `:api-key`, then `PRAXEON_OPENAI_API_KEY`, then `PRAXEON_IMAGE_API_KEY`. That last one still
+  works and logs one warning naming `PRAXEON_OPENAI_API_KEY`. It will be removed in a later
+  release. The order changed: before, `PRAXEON_IMAGE_API_KEY` was read first, so an app that
+  sets both to different keys now uses the one in `PRAXEON_OPENAI_API_KEY`. The Google provider
+  reads neither.
+
+- **praxeon: `generate-image` is refused once a turn has read a web page or search results**
+  (#827). `praxeon/image:register` and `register-openai-image` now pass
+  `:requires-user-intent t` to `register-means`, because each image costs money. When the model
+  asks for an image after `read-web-page` or `web-search` returned in the same turn, the call is
+  not run and the model is told the user can ask for it in their next message. To keep the old
+  behaviour, pass `:requires-user-intent nil`.
+- **praxeon: a means registered with `:confirm` is refused, not held, once a turn has read a web
+  page or search results** (#827). `register-means`'s `:requires-user-intent` defaults to true
+  when `:confirm` is given, and that includes tools granted by `praxeon/mcp:grant-tools` with
+  `:confirm`. Such a call after `read-web-page` or `web-search` returned in the same turn no
+  longer reaches the app's `:on-hold` policy. Pass `:requires-user-intent nil` to
+  `register-means` to have it held as before. `grant-tools` has no such option, so a granted
+  tool with `:confirm` is always refused after a read.
+- **praxeon/mcp: a tool granted by `grant-tools` counts as untrusted content** (#827). After a
+  granted tool has run in a turn, a means registered with `:requires-user-intent t` or with
+  `:confirm`, including another granted tool held for confirmation, is refused for the rest of
+  the turn. For a server the app fully controls, pass the new `grant-tools` key
+  `:untrusted nil`.
+- **praxeon: registering `read-web-page` without `:allow` logs a warning** (#827), naming the
+  risk and `praxeon/web-page:user-or-search-urls`. Pass `:allow` to `register-read-web-page` or
+  `praxeon/web-page:register` to silence it.
+- **praxeon: `read-web-page` and `web-search` run at most 3 times in one turn by default**
+  (#827). Later calls in the turn are not run, and the model is told the limit. Pass
+  `:max-per-turn` to `praxeon/web-page:register`, `register-read-web-page` or
+  `praxeon/web-search:register` to change it, or `:max-per-turn nil` for no limit. Both means
+  are now registered with `:untrusted t`, so a means with `:requires-user-intent t` is refused
+  after either one has run in the turn.
+
 - **hermes/blob: `put-blob` refuses metadata named `sha256`, and malformed metadata, with the new
   condition `blob-invalid-metadata`** (#810). `sha256`, in any case, is reserved for the checksum
   the S3 store now records. Names and values become request headers on S3, so a name must be a
@@ -484,6 +562,90 @@ its tag.
   through `ShellExecuteW` and the `open` verb, with no command line and no shell, and returns `t`
   when it started. It does not check the target; `hades/open:open-url` does. `aion/windows` now
   loads `shell32.dll`.
+- **aion/libsecret: a Linux-only binding of libsecret for the Secret Service** (#357). The raw
+  calls are in `aion/libsecret/ffi`; `aion/libsecret` has `load-libsecret` (T, or NIL and the
+  reason), `with-libsecret-lock`, `with-schema`, `with-attributes`, `make-secret-value`,
+  `secret-value-octets`, `check-session-bus`, `check-secret-service`,
+  `default-collection-locked-p`, and the condition `libsecret-error` (domain, code, message) with
+  `with-gerror`, `locked-error-p` and `service-missing-error-p`. It depends only on `cffi` and
+  loads `libsecret-1.so.0` on first use, so it loads on a system without libsecret.
+  hades/credentials uses it; an app normally does not.
+
+- **`scripts/with-secret-service.sh COMMAND` runs COMMAND with a new GNOME Keyring on a private
+  D-Bus session bus**, unlocked with a random password that is never printed, and deletes the
+  keyring afterwards (#357). CI runs the Linux gate through it so the `hades/credentials` live
+  tests have a store; a developer can run them the same way without their own keyring being
+  touched.
+
+- **hades/credentials: ask whether a credential store is available, and its name, without
+  trying an operation** (#824). `hades/credentials:credential-store-available-p` (`&key
+  service`) is true when this system has a usable store and NIL otherwise, with a reason as a
+  second value. It never prompts, never writes and never creates an item: on Windows it reads an
+  item that does not exist and is false when the logon session has no credential store; on macOS
+  it is true wherever the Keychain backend is built, without querying the Keychain, which can
+  prompt when locked; on Linux it checks that libsecret is installed, that there is a D-Bus
+  session bus and that a program provides the Secret Service, without unlocking anything (#357).
+  `hades/credentials:credential-store-name` is "Windows Credential Manager", "macOS Keychain",
+  "Secret Service", or NIL on a system with no backend. An app that probed with a `fetch-credential` of a dummy
+  account and caught `credential-store-unavailable` can call these instead. `service` is
+  accepted and not used yet.
+
+- **aion/fs: make a directory link or a file link without a shell** (#825).
+  `aion/fs:make-directory-link` (`link target`) makes a junction on Windows, which needs no
+  administrator rights and no Developer Mode, and a symbolic link on macOS and Linux.
+  `aion/fs:make-file-link` (`link target`) makes a symbolic link; on Windows that needs Developer
+  Mode or the symbolic-link privilege, and without either it signals
+  `aion/fs:link-not-permitted`. Both return the link as an absolute pathname, which `link-p` sees
+  and `delete-link` removes without touching the target. A relative path is taken against the
+  current directory; on Windows `.` and `..` are resolved and a leading `\\?\` is taken off, and a
+  UNC target is refused (`:target-unc`). A target that is a link is followed to check what it
+  reaches. A failure signals `aion/fs:link-error` (`link-error-target`, `link-error-operation`,
+  `link-error-code`) and leaves nothing at the link's path: when the link already exists
+  (`:exists`), when the target is missing (`:target-missing`) or of the wrong kind
+  (`:target-not-a-directory`, `:target-not-a-file`), or when the operating system refuses (its own
+  error code). An app's tests that made links with `cmd /c mklink /J` or `ln -s` can call these
+  instead.
+
+- **hermes/blob: reads return the blob's ETag and take `:if-match`, so the bytes served are the
+  version checked** (#826). The new generic `open-blob` (`store bucket key &key if-match`) returns
+  the stream and the blob's `blob-meta` (ETag, size, content type, `Last-Modified`, checksum);
+  `with-blob-stream` takes `:if-match` and `:meta` (a variable bound to that `blob-meta`), and
+  `read-blob-range` takes `:if-match`. A blob that no longer has the ETag signals the new
+  `blob-precondition-failed` (a `blob-backend-error`, status 412) and nothing is read; on S3 the
+  GET carries `If-Match`, so the check and the read are one request; on the filesystem store they
+  are two steps, so a blob replaced between them is read as the newer version.
+  `blob-source-changed` is now a subclass of `blob-precondition-failed`, so one handler catches a
+  changed blob on a read and on a copy. On S3, `blob-metadata` now fills `blob-meta-last-modified`
+  from `Last-Modified`, where it was NIL. `get-blob` keeps its three arguments, because a keyword
+  added to it would break an app's own store class; a store class without `open-blob` gets a
+  default that checks the ETag through `blob-metadata` before `get-blob`, which is not atomic, and
+  `with-blob-stream` without `:if-match` or `:meta` still calls `get-blob`. An ETag is not a
+  content hash for a multipart or KMS-encrypted object: compare it, never recompute it. See
+  "Reading the version you checked" in `hermes/docs/blob-direct-uploads.md`.
+
+- **hermes/blob: `public-image-url` gives an image in a private bucket a permanent public URL for
+  a link-preview card** (#830), with its metadata removed. `(public-image-url store bucket key
+  public-store public-bucket)` copies the image into a store the app configured as public
+  (`:public-base-url`, or `:base-url` on the filesystem store) and returns `(values url width
+  height content-type)`, for `hyperion/page-meta`'s `:image`, `:image-width` and
+  `:image-height`. The copy keeps the pixel data byte for byte, the colour profile, and the EXIF
+  Orientation field in a new EXIF block; EXIF (GPS, camera serial, thumbnail), XMP, IPTC,
+  comments, PNG text chunks and data after the image are removed, with no image library
+  (`strip-image-metadata` does this to an octet vector). Only JPEG, PNG and WebP up to 5 MiB
+  (`:max-bytes`) are accepted; SVG, GIF, HEIC and unparseable files signal the new
+  `blob-image-refused`, a `blob-unsupported` with `blob-image-refused-reason` `:unsupported-format`,
+  `:too-large` or `:malformed`. The copy's key is derived from hashes of the source's bucket, key
+  and ETag, so a second call writes nothing and a changed original gets a new copy, with the old
+  ones deleted. `delete-public-images` removes an image's copies: call it when the image is
+  deleted or its post stops being public. `put-blob` takes a new `:cache-control`, which the S3
+  store sends and the filesystem store accepts and does not use; a public copy is written with
+  `*public-image-cache-control*`, `public, max-age=86400`. The `put-blob` generic now ends in
+  `&allow-other-keys`, so a store class an app defined against v0.1.7, with a method taking only
+  `:content-type` and `:metadata`, still loads and works with `public-image-url`; such a store
+  drops `:cache-control`, and its objects have no Cache-Control header until its method passes
+  the argument on. See "A public copy for a
+  link-preview card" in `hermes/docs/blob-direct-uploads.md`.
+
 - **hades: `notify-user` shows a modal notice with one OK button before an app has a window**
   (#819), for example to say "already running" when `hades/single-instance` refuses a second
   launch. `(hades/notify:notify-user title message :level :warning)` uses `MessageBoxW` on
@@ -494,6 +656,7 @@ its tag.
   `:stderr`, with the reason for `:stderr` as a second value. Bind
   `hades/notify:*notify-backend*` to `:stderr` under `--self-test`. A new system,
   `hades/notify`, which `hades` now loads.
+
 - **hyperion: a shared link to an app's page can show a preview card**, through the new
   `hyperion/page-meta` (#821). A layout calls `meta-tags` inside its `(:head ...)` with the
   page's `:title`, `:description`, `:image` (with `:image-alt`, `:image-width`,
@@ -538,6 +701,52 @@ its tag.
   destination bucket, is `blob-backend-error` naming the destination. On the filesystem store a move is a rename. A missing source is `blob-not-found`
   naming it; a provider that cannot copy, or a store class that does not implement it, signals
   `blob-unsupported`. See "Leaving quarantine" in `hermes/docs/blob-direct-uploads.md`.
+
+- **hermes: post to a Facebook Page the app's admins manage, through the Graph API, with a
+  one-time connect flow** (#822). `hermes:post-to-page` (`page link &key message image-url
+  provider`) returns the post id; a `hermes:facebook-post` from `make-facebook-post` is also sent
+  by `hermes:send` or `deliver` to a `hermes:facebook` provider (`make-facebook`: `:app-id`,
+  `:app-secret`, `:page-tokens`). Page tokens are looked up per Page id, by default from
+  `FACEBOOK_PAGE_TOKEN_<page-id>` then `FACEBOOK_PAGE_TOKEN`, and sent in the POST body; every
+  token and the app secret (`FACEBOOK_APP_SECRET`) is replaced by `<redacted>` in failure text,
+  and reaches the code that signals a failure only as an `aion/secret` secret, so a logged
+  backtrace does not show it. Reads send the token in an `Authorization: OAuth` header. Calls
+  time out after 10 seconds to connect and 30 to answer; a post that timed out may still have
+  been made.
+  Failures are `facebook-reconnect-required`, `facebook-not-permitted`,
+  `facebook-page-not-found`, `facebook-link-not-public` (Facebook could not see the link) and
+  `delivery-rate-limited` (Graph codes 4, 17, 32, 613 and 80001, with the wait from the
+  `X-Business-Use-Case-Usage` header); a target that names a Facebook Group signals
+  `facebook-groups-unsupported`. `facebook-page-health` answers `:connected`, `:reconnect`,
+  `:not-permitted`, `:wrong-page` (the stored token is another Page's), `:not-found` or
+  `:not-connected`; a Page argument that is not a Page id signals `invalid-message`. The connect flow is
+  `facebook-connect-state`, `facebook-connect-url` and `facebook-connect-pages`, which checks the
+  state in constant time, exchanges the code server-side for a long-lived user token, and returns
+  the admin's Pages as `facebook-page` values with their tokens; the app stores the chosen token.
+  `HERMES_FACEBOOK_IMPL` picks the backend, default `facebook`; `HERMES_TRANSPORT=dev` renders
+  posts, and `dev-last-facebook` reads the last one. Core `hermes` now loads `aion/random`.
+  Meta's access rules and the one-time app setup are in `hermes/README.md`; upstream.sexp records
+  Graph API v26.0.
+
+- **praxeon: a turn can refuse calls that content the agent read may have asked for** (#827).
+  `praxeon/actor:register-means` takes `:untrusted`, `:requires-user-intent`, `:allow` and
+  `:max-per-turn`. A means with `:requires-user-intent t` is refused for the rest of a turn once
+  a means with `:untrusted t` has run in it; a call whose `:allow` predicate returns false or
+  signals is refused; and calls past `:max-per-turn` in one turn are refused. A refused call is
+  not run, and the model is told why. `praxeon/web-page:user-or-search-urls` is a ready-made
+  `:allow` for `register-read-web-page`: it allows only hosts the user wrote in the
+  conversation, matched exactly with userinfo ignored, and URLs a web search returned in this
+  turn before anything untrusted was read. `praxeon/actor:user-texts`, `turn-untrusted-p`,
+  `turn-urls`, `note-turn-urls` and `mark-untrusted` let an app's own means and predicates use
+  the same guard. `read-result` makes the turn untrusted when the stored result it reads came
+  from an untrusted means. A task a coordinator delegates through `register-agent-as-means`
+  never counts in the sub-agent's `user-texts`; the coordinator's user texts count instead, and
+  the delegation means is `:untrusted` when the sub-agent has an untrusted means. A bare host
+  ending in a file extension (`main.rs`, `README.md`) counts in `user-or-search-urls` only after
+  `www.` or before a path. The new agent slot `taint-scope` (`agent-taint-scope`), `:turn` by
+  default, can be set to `:conversation` to start every later turn untrusted while untrusted
+  results remain in the history. The praxeon README's section "Content the agent reads can
+  carry instructions" describes what this stops and what it does not.
 
 - **hermes: `telegram-added-chats` lists the chats a Telegram bot was recently added to**
   (#794), so an app can find the id of a group or channel that operators share as a `t.me/+`
@@ -703,7 +912,8 @@ its tag.
   `image-result-revised-prompt`, `image-result-size`, `image-result-quality`,
   `image-result-cost`) and returns a reference the model may see. It returns NIL and registers
   nothing when there is no key; the key is `:api-key` when given, otherwise
-  `PRAXEON_IMAGE_API_KEY`, then `PRAXEON_OPENAI_API_KEY`; an `:api-key` of `""` is no key and is
+  `PRAXEON_OPENAI_API_KEY`, then the deprecated `PRAXEON_IMAGE_API_KEY` (see "An app may have to
+  act"); an `:api-key` of `""` is no key and is
   logged at warn. `:qualities` (for example `'(:low :medium)`), `:default-quality` and
   `:default-size` bound what an image can cost: the tool schema offers only the allowed qualities,
   and a call asking for another is refused before any request. A 429, a 5xx, or no answer within
@@ -724,6 +934,26 @@ its tag.
   request emits no `:image-usage`. `generate-image` calls a provider outside a turn.
   `praxeon/llm` now exports `request-failure`, the #719 mapping of a failed HTTP request to
   `provider-request-failed`.
+
+- **praxeon/image: Google's Gemini API as a second image provider** (#758, part four).
+  `praxeon/image:register-google-image` takes the same arguments as `register-openai-image`;
+  `make-google-images` and `google-images-from-env` build the provider. The key is `:api-key`,
+  else `PRAXEON_GOOGLE_API_KEY`, then `GEMINI_API_KEY`; it never reads `PRAXEON_IMAGE_API_KEY`
+  or `PRAXEON_OPENAI_API_KEY`, so a key set up for OpenAI is not sent to Google. The default
+  model is `gemini-nano-banana-2.1` (`*google-image-model*`, or `PRAXEON_GOOGLE_IMAGE_MODEL`);
+  `gemini-3.1-flash-lite-image` is the low-cost model, 1K images only. Requests go to
+  `generateContent` at v1. A shape is sent as an aspect ratio and a quality as a resolution
+  (low 1K, medium 2K, high 4K), so `:qualities` also bounds resolution. Reference images are
+  sent inline, up to 14; Google takes no mask and makes one image per request, and a request
+  with a mask or `:count` above 1 is refused with `image-input-invalid`. A blocked prompt or an
+  image stopped for safety is `image-refused`; a reply with no image for another reason is the
+  new `praxeon/image:image-not-made` (`image-not-made-reason`), a `tool-error-result`.
+  `:image-usage` carries an estimated `:cost` from `*google-image-prices*` (four models, dated in
+  `upstream.sexp` as "Google image prices: MODEL") and the reply's token counts. New generic
+  functions `image-provider-max-references` and `image-provider-accepts-mask-p` say what a
+  provider takes. Like `register-openai-image`, `register-google-image` takes
+  `:requires-user-intent`, which defaults to true (#827); pass NIL to allow an image after a
+  web page or search result was read in the turn.
 
 - **praxeon/image: edit an image, or make a variation of it, from reference images** (#758, part
   three). `praxeon/image:generate-image` takes `:references`, a list of up to 16
@@ -1509,6 +1739,36 @@ its tag.
   "Long-running calls".
 
 ### Fixed
+
+- **aion/http-client: a body of octets with a `multipart/` Content-Type reaches the server as
+  given on Linux and macOS** (#828). This is a workaround placed once in the client, not a
+  native way to send a header unchanged, because dexador offers none. Dexador's usocket backend
+  takes any Content-Type starting with `multipart/` as its own job, builds the body itself from an
+  alist with a boundary of its own, and failed on octets the caller had encoded with a TYPE-ERROR,
+  reported as an `http-error`. For such a request the client now gives dexador the Content-Type
+  with one leading space, which dexador's check does not match. HTTP does not count that space as
+  part of the value (RFC 9110, section 5.5), so the server reads the type and boundary exactly;
+  only the whitespace on the wire differs. On Windows, where dexador uses WinHTTP and already sent
+  the octets as given, nothing changes. A string or alist body is left to dexador as before.
+  `praxeon/image` drops the leading space it added itself for OpenAI's `/images/edits`; an app
+  that added one for the same reason can drop it. A test sends such a body to a local server and
+  compares what arrives, so a dexador update that checks the prefix another way fails it.
+
+- **praxeon/web-page: a byte order mark decides a page's charset, and a `<meta>` naming UTF-16
+  or UTF-32 means UTF-8** (#823), as browsers decide. A page that starts with the UTF-8 mark
+  (EF BB BF) is read as UTF-8 even when its `Content-Type` names Latin-1, and FE FF or FF FE
+  select UTF-16BE or UTF-16LE. The mark is no longer part of the page's text, so no U+FEFF
+  leads it. A `<meta>` charset in which ASCII is not one byte per character, such as utf-16le
+  or utf-32le, is read as UTF-8, because the tag could not have been found otherwise; a charset
+  named in `Content-Type` keeps its meaning.
+
+- **aion/http-client: a `request` prints without its secrets** (#844). It printed every slot, so a
+  backtrace or a debugger that showed a request on the stack showed its headers, an
+  `authorization` or `x-goog-api-key` value among them, and its body. It now prints its method,
+  its URL with each query value and any user and password replaced by `<hidden>`, each header's
+  name with its value replaced by `<hidden>`, and the body's size. Every header value is hidden,
+  not only known ones. Code that read a request's printed form for its headers should read
+  `request-headers` instead.
 
 - **hermes: six corrections to the Telegram backend** (#788, follow-ups to #778).
   - A refusal whose `description` is not a string is reported with its class and the response

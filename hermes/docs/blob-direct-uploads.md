@@ -30,13 +30,17 @@ for it. Smaller files can still go through `put-blob`.
 4. **The client tells the app the upload finished.** The app then checks it:
 
    ```lisp
-   (let ((meta (hermes/blob:blob-metadata store "media" key)))
-     (blob-meta-size meta) (blob-meta-content-type meta) (blob-meta-etag meta))
-   (hermes/blob:read-blob-range store "media" key :start 0 :length 16)  ; the magic bytes
+   (let* ((meta (hermes/blob:blob-metadata store "media" key))
+          (etag (blob-meta-etag meta)))
+     (blob-meta-size meta) (blob-meta-content-type meta)
+     (hermes/blob:read-blob-range store "media" key :start 0 :length 16   ; the magic bytes,
+                                  :if-match etag)                         ; of this version
+     ...)
    ```
 
    If the size or the real file type is not what was asked for, delete it with `delete-blob`.
-   Otherwise move it out of quarantine with `move-blob` (below) and record it.
+   Otherwise move it out of quarantine with `move-blob :if-match etag` (below) and record it, so
+   the object moved is the one checked (see "Reading the version you checked").
 
 ## What is enforced, and where
 
@@ -181,6 +185,100 @@ leaves the source where it is. Both return the destination's `blob-meta`.
   `blob-unsupported`; the app then copies through
   `get-blob` and `put-blob`. A store class an app defines itself gets `blob-unsupported` too,
   until it implements `copy-blob`.
+
+## Reading the version you checked: ETags and if-match
+
+The checks in step 4 are only worth something if the bytes you later serve or move are the bytes
+you checked. A presigned PUT URL stays valid until it expires, so the client can upload again,
+with the same size and different content, after you checked it (#826).
+
+- **Record the ETag when you check.** `blob-metadata` returns it as `blob-meta-etag`, and so does
+  `open-blob`, which returns the stream and the blob's `blob-meta` together (its size, content
+  type, `Last-Modified` time and checksum as well).
+- **Pass it back as `:if-match`.** `open-blob`, `with-blob-stream` (`:if-match`, and `:meta` to
+  bind the metadata), `read-blob-range`, `copy-blob` and `move-blob` all take it. A blob that no
+  longer has that ETag signals `blob-precondition-failed` (status 412) and nothing is read;
+  `blob-source-changed`, the same failure for a copy or move, is a subclass of it, so one handler
+  catches both. On S3 the check and the read are one request (the GET carries `If-Match`).
+
+  ```lisp
+  (let ((etag (blob-meta-etag (hermes/blob:blob-metadata store "media" key))))
+    ;; ... check the first bytes, record ETAG with the row ...
+    (hermes/blob:with-blob-stream (in store "media" key :if-match etag)
+      (serve in)))
+  ```
+- **An ETag is not a content hash.** S3's ETag is the MD5 of the bytes only for a single-part,
+  unencrypted upload; a multipart upload's ETag is a hash of the parts' hashes with `-N` after it,
+  and a KMS-encrypted object's is neither. Compare ETags as strings, and never recompute one from
+  the bytes. hermes's own checksum of the content is `blob-meta-checksum`, which S3 keeps only
+  for blobs written with `put-blob` (#810). On the filesystem store the ETag is the blob's SHA-256
+  checksum, and the check and the open are two steps, so it is not atomic either: a blob replaced
+  between them is read as the newer version. That store is for development and a single box.
+- **`get-blob` is unchanged.** It shipped with three arguments, and CLOS requires every method to
+  accept every keyword its generic function declares, so a keyword added to it would break an
+  app's own store class. `open-blob` is the read with `:if-match`. A store class that implements
+  `get-blob` and `blob-metadata` but not `open-blob` gets a default `open-blob` that checks the
+  ETag with `blob-metadata` and then opens the stream with `get-blob`. That is not atomic: a blob
+  replaced between the two calls is read as the newer version. `with-blob-stream` without
+  `:if-match` or `:meta` still calls `get-blob`, so such a store class needs nothing new.
+
+## A public copy for a link-preview card
+
+A page's `og:image` has to be a URL a crawler can fetch without cookies and that does not
+expire, and `hyperion/page-meta` uses the site's fallback image instead of a presigned URL.
+`public-image-url` makes such a URL for an image in a private bucket (#830):
+
+```lisp
+(multiple-value-bind (url width height)
+    (hermes/blob:public-image-url store "media" final-key public-store "cards")
+  ;; Keep URL, WIDTH and HEIGHT in the post's row, and pass them to page-meta as
+  ;; :image, :image-width and :image-height.
+  ...)
+```
+
+- **Where the copy goes.** `public-store` is a second store whose objects anyone may read: an S3
+  store made with `:public-base-url`, or a filesystem store with `:base-url`. Give its bucket a
+  policy that allows `s3:GetObject` and not `s3:ListBucket`, so the copies cannot be listed. Do
+  not open a prefix of the private bucket instead: one mistake in that policy makes members'
+  private images public. For a filesystem public store, the web server that serves its directory
+  must have directory listing turned off (`autoindex off` in nginx, `Options -Indexes` in Apache),
+  for the same reason.
+- **Only for public content.** The copy can be read by anyone who has its URL. Call
+  `public-image-url` only for an image shown on a page whose `:visibility` is `:public`. Call
+  `(hermes/blob:delete-public-images "media" final-key public-store "cards")` when the image is
+  deleted, and also when its post goes from public to private or unlisted. A crawler that already
+  fetched the image keeps its own copy, and a CDN can serve a deleted copy until its Cache-Control
+  max-age runs out.
+- **When to call it.** When the image is uploaded or replaced, not on every page view. A call
+  reads the original's metadata and lists one directory of the public bucket. If a copy of this
+  version is already there, it returns that copy's URL and reads and writes nothing else.
+- **What is removed.** Everything but the pixels and what is needed to show them: EXIF (the GPS
+  position, the camera's serial number, and a thumbnail that can show the uncropped original), XMP,
+  IPTC, comments, PNG text chunks, and any data after the end of the image, where some phones
+  append a second image or a video. The colour profile is kept. The EXIF Orientation field is kept
+  in a new EXIF block that holds nothing else, so a phone photo is not shown sideways, and the
+  width and height returned are as the image is shown. `strip-image-metadata` does this to an
+  octet vector, for an app that wants it elsewhere.
+- **What is refused.** Only JPEG, PNG and WebP are accepted, judged from the file's bytes. SVG,
+  GIF, HEIC, an image over `:max-bytes` (5 MiB by default) and a file whose structure does not
+  parse signal `blob-image-refused`, a `blob-unsupported` whose `blob-image-refused-reason` is
+  `:unsupported-format`, `:too-large` or `:malformed`, and nothing is written. Fall back to the
+  site's image. HEIC is what an iPhone saves by default, so an app that wants preview cards for
+  iPhone photos has to convert them to JPEG at upload; that needs an image library, as resizing
+  the copy to 1200 by 630 does, and both wait on the maintainer's decision in #846.
+- **Keys and versions.** A copy's key is `og/<SHA-256 of bucket/key>/<SHA-256 of the original's
+  ETag>-<width>x<height>.<ext>`, so it does not show the private key. When the original changes,
+  its ETag changes, the next call writes a new copy under a new key, and deletes the older copies
+  of that image. The hash is not keyed with a secret, so anyone who can guess an original's bucket
+  and key can compute its directory and check whether a public copy exists. If the app's keys can
+  be guessed, for example `avatars/<member id>.jpg`, that tells an outsider which members have a
+  public image; give each original's key a random part, such as a UUID, to prevent it.
+- **Cache-Control.** The copy is written with `public, max-age=86400` (the variable
+  `*public-image-cache-control*`, or the `:cache-control` argument). `put-blob` takes
+  `:cache-control` for any object: the S3 store sends it, and the filesystem store accepts it
+  and does nothing with it, because whatever serves that directory sets its own headers. A store
+  class the app wrote itself receives `:cache-control` and drops it unless its `put-blob` method
+  names the argument and passes it on.
 
 ## On the filesystem store
 

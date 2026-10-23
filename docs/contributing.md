@@ -108,6 +108,28 @@ Writing a backend-parameterised test: wrap the body in `with-each-backend`, use 
 than `is` so the per-backend count is real, and take the dialect from `*current-dialect*`
 rather than hardcoding one. See [`mnemosyne/tests/backends.lisp`](../mnemosyne/tests/backends.lisp).
 
+### The credential-store tests use your real Credential Manager, Keychain or keyring
+
+`hades/credentials` stores an app's secrets in the operating system's own store (#357). Its live
+tests store, read and delete items in the real Credential Manager (Windows), login Keychain
+(macOS) or Secret Service keyring (Linux) of whoever runs them, so they run only when
+`OURANOS_TEST_REAL_CREDENTIAL_STORE=1` is set.
+Every item they touch has a service name starting with `ouranos-test-hades-credentials/` and a
+random suffix, each is deleted when its test ends, and a final check fails the suite if any of
+them can still be fetched. On Linux, `scripts/with-secret-service.sh COMMAND` runs COMMAND
+against a new GNOME Keyring on a private session bus, which is how CI runs them, so you can run
+the live tests without your own keyring being touched. It needs the packages `dbus`,
+`gnome-keyring` and `libsecret-1-0`.
+
+| state | suite | `scripts/verify-tree.lisp` |
+|---|---|---|
+| `OURANOS_TEST_REAL_CREDENTIAL_STORE=1` | runs the live tests against your store | passes |
+| unset | only the tests that touch no store; `SKIPPED` said loudly | **fails**, unless `OURANOS_ALLOW_NO_CREDENTIAL_STORE=1` |
+
+Setting the first variable is your decision about your own store. Setting the second says you
+chose not to, and the summary and NOT COVERED both name the skipped checks. CI sets the first on
+every leg, because a runner's store is thrown away with the runner.
+
 ### When your control passes, suspect the control
 
 A control run is how you check that a test can detect the defect it was written for: break

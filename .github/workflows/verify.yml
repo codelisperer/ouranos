@@ -74,6 +74,15 @@ jobs:
     # 35 to 40 minutes, and one was cancelled at the limit with every suite it had run passing.
     timeout-minutes: 60
 
+    # The credential-store tests (hades/credentials, #357) store, read and delete items in the
+    # real Credential Manager, Keychain or Secret Service keyring of whoever runs them, so they
+    # run only when this is set. A runner's store is thrown away with the runner, so every leg
+    # sets it. On Linux the store is a GNOME Keyring the gate step starts for itself (see
+    # "Secret Service (Linux)" below). A leg where they were skipped fails the gate
+    # (+BACKEND-RULES+ in scripts/verify-tree.lisp).
+    env:
+      OURANOS_TEST_REAL_CREDENTIAL_STORE: "1"
+
     strategy:
       # One OS failing must never hide the other two. The whole value of a matrix is
       # knowing WHICH platform broke, and fail-fast throws that away.
@@ -304,6 +313,21 @@ jobs:
           ./hyperion/hyperion-view/build.sh
           echo "::notice::pre-publication issue 276 hyperion-view compile: $(( $(date +%s) - t0 ))s"
 
+      # --- a Secret Service (Linux) -----------------------------------------------------
+      #
+      # hades/credentials stores secrets in the Secret Service on Linux, through libsecret
+      # (#357). A runner has neither a session bus nor a keyring, so the gate runs through
+      # scripts/with-secret-service.sh, which starts a private session bus and a new GNOME
+      # Keyring unlocked with a random password that is never printed. This step only installs
+      # the programs it needs. Do not add `set -x` to the gate step.
+      - name: Secret Service (Linux) -- install GNOME Keyring and libsecret
+        id: secret-service-linux
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get install -y --no-install-recommends dbus gnome-keyring libsecret-1-0
+          command -v dbus-run-session gnome-keyring-daemon
+
       # --- a real Postgres ----------------------------------------------------------
       #
       # NO LEG SETS OURANOS_ALLOW_NO_PG. Every check mnemosyne had ever reported green ran
@@ -474,7 +498,10 @@ jobs:
           OURANOS_WITH_LIBGIT: "1"
         run: |
           set -o pipefail
-          sbcl --dynamic-space-size 4096 --script scripts/verify-tree.lisp \
+          # On Linux the gate runs with a throwaway Secret Service (the step above).
+          wrap=()
+          if [ "$RUNNER_OS" = "Linux" ]; then wrap=(scripts/with-secret-service.sh); fi
+          "${wrap[@]}" sbcl --dynamic-space-size 4096 --script scripts/verify-tree.lisp \
             2>&1 | tee verify.log
 
       # --- the README's numbers, against the run that just happened -------------------
@@ -618,6 +645,15 @@ jobs:
           ./hyperion/hyperion-view/build.sh
           echo "::notice::pre-publication issue 276 hyperion-view compile: $(( $(date +%s) - t0 ))s"
 
+      # The programs scripts/with-secret-service.sh needs, as in the matrix leg's
+      # "Secret Service (Linux)" step.
+      - name: Secret Service -- install GNOME Keyring and libsecret
+        id: secret-service
+        shell: bash
+        run: |
+          sudo apt-get install -y --no-install-recommends dbus gnome-keyring libsecret-1-0
+          command -v dbus-run-session gnome-keyring-daemon
+
       - name: Postgres -- the repo's own script
         id: postgres-the-repo-s-own-script
         run: |
@@ -638,9 +674,13 @@ jobs:
           OURANOS_WITH_UV: "1"
           OURANOS_WITH_TLS: "1"
           OURANOS_WITH_LIBGIT: "1"
+          # The same credential-store tests as the matrix leg, against the same kind of
+          # throwaway keyring, so this gate is not a smaller tree than the one it is compared to.
+          OURANOS_TEST_REAL_CREDENTIAL_STORE: "1"
         run: |
           set -o pipefail
-          sbcl --dynamic-space-size 4096 --script scripts/with-mode.lisp release scripts/verify-tree.lisp \
+          scripts/with-secret-service.sh \
+            sbcl --dynamic-space-size 4096 --script scripts/with-mode.lisp release scripts/verify-tree.lisp \
             2>&1 | tee verify.log
 
       # Not a gate -- a record. The numbers land in the job log with their mode attached,

@@ -259,7 +259,8 @@
                "cl-base64"            ; the provider sends each image as base64
                "aion/random")         ; the multipart boundary of an edit, from the OS generator
   :serial t
-  :components ((:file "src/image")))
+  :components ((:file "src/image")
+               (:file "src/image-google")))  ; Google's Gemini API as a second provider (#758)
 
 ;;; A general one-shot translation capability (any agent): translate text between
 ;;; languages via a possibly-different, translation-tuned model. Elise uses it to
@@ -328,7 +329,11 @@
                              ;; #758: in the PRAXEON suite, after praxeon-tests, whose
                              ;; %SERVE-REPLIES and scripted provider it uses
                              (:file "image-tests")
-                             (:file "web-page-tests"))))
+                             ;; #758: the Google provider, after image-tests, whose image helpers it uses
+                             (:file "image-google-tests")
+                             (:file "web-page-tests")
+                             ;; #827: untrusted content in a turn, using the stub reader pattern
+                             (:file "reader-guard-tests"))))
   :perform (test-op (op c)
              (uiop:symbol-call :fiveam :run! (uiop:find-symbol* :praxeon :praxeon/tests))))
 

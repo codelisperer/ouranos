@@ -70,7 +70,7 @@ A presigned URL is a credential. Do not log it or store it."
 (defgeneric store-name (store)
   (:documentation "A short backend name, for logs and errors."))
 
-(defgeneric put-blob (store bucket key stream &key content-type metadata)
+(defgeneric put-blob (store bucket key stream &key content-type metadata &allow-other-keys)
   (:documentation
    "Stream the bytes of STREAM (an octet input stream) into STORE at BUCKET/KEY.
 
@@ -79,12 +79,40 @@ an alist of string->string carried alongside the object where the backend suppor
 name \"sha256\", in any case, is reserved for the checksum the store records, and a malformed
 entry signals BLOB-INVALID-METADATA (#810).
 
+CACHE-CONTROL, a string such as \"public, max-age=86400\", is the Cache-Control header the
+object is served with (#830). The S3 store stores it with the object. The filesystem store
+accepts it and does nothing with it, because whatever serves its directory sets its own
+headers. A value with a control character signals BLOB-INVALID-METADATA.
+
+The generic takes &ALLOW-OTHER-KEYS so that a store class an app wrote against v0.1.7, whose
+method accepts only CONTENT-TYPE and METADATA, still loads (CLHS 7.6.4) and can be called with
+:CACHE-CONTROL. Such a method receives the argument and drops it; the object is stored without a
+Cache-Control header until the method names CACHE-CONTROL and passes it on.
+
 The stream is consumed but NOT closed -- the caller opened it and owns it."))
 
 (defgeneric get-blob (store bucket key)
   (:documentation
    "An octet input stream over the blob at BUCKET/KEY. The CALLER MUST CLOSE IT; prefer
-WITH-BLOB-STREAM, which cannot leak it. Signals BLOB-NOT-FOUND if there is no such blob."))
+WITH-BLOB-STREAM, which cannot leak it. Signals BLOB-NOT-FOUND if there is no such blob.
+OPEN-BLOB is the same read with the blob's metadata, and an :IF-MATCH condition (#826)."))
+
+(defgeneric open-blob (store bucket key &key if-match)
+  (:documentation
+   "An octet input stream over the blob at BUCKET/KEY, and its BLOB-META, as two values (#826).
+The CALLER MUST CLOSE the stream; prefer WITH-BLOB-STREAM with :IF-MATCH or :META.
+
+IF-MATCH is an ETag the caller recorded earlier, from BLOB-META-ETAG, with or without its quotes.
+When given, the read happens only if the blob still has that ETag, and otherwise signals
+BLOB-PRECONDITION-FAILED with nothing read. On S3 the check and the read are one request (the GET
+carries If-Match), so the bytes are the version named. Compare ETags as strings and never
+recompute one: S3's ETag is not a content hash for a multipart or KMS-encrypted object. On the
+filesystem store the ETag is the blob's SHA-256 checksum, and the check and the open are two
+steps, so that store's read is not atomic. Signals BLOB-NOT-FOUND if there is no such blob.
+
+This is a new generic rather than a keyword on GET-BLOB because GET-BLOB shipped with exactly
+three arguments: CLOS requires every method to accept every keyword its generic function
+declares, so a keyword added there would make an app's own GET-BLOB methods an error."))
 
 (defgeneric delete-blob (store bucket key)
   (:documentation
@@ -126,12 +154,13 @@ KEY should be chosen by the server, never taken from the client, and one URL sho
 upload. Check the result with BLOB-METADATA and READ-BLOB-RANGE before trusting it.
 A store that cannot presign signals BLOB-UNSUPPORTED, and the caller proxies with PUT-BLOB."))
 
-(defgeneric read-blob-range (store bucket key &key start length)
+(defgeneric read-blob-range (store bucket key &key start length if-match)
   (:documentation
    "An octet vector of at most LENGTH bytes (default 512) of the blob at BUCKET/KEY, from byte
 START (default 0). Shorter when the blob ends sooner; empty when START is at or past its end.
 For checking what a client uploaded by its first bytes, without fetching the whole object
-(#770). Signals BLOB-NOT-FOUND."))
+(#770). IF-MATCH is as for OPEN-BLOB: the range is read only from the version with that ETag,
+and otherwise BLOB-PRECONDITION-FAILED is signalled (#826). Signals BLOB-NOT-FOUND."))
 
 (defgeneric put-bucket-cors (store bucket &key origins methods allowed-headers max-age-seconds expose-headers)
   (:documentation
@@ -298,10 +327,16 @@ the same header, and \"sha256\" is reserved for the checksum the store records."
                  (refuse "a value must be printable ASCII")))
           (push name seen))))))
 
-(defmethod put-blob :before ((s store) bucket key stream &key content-type metadata)
+(defmethod put-blob :before ((s store) bucket key stream &key content-type metadata cache-control)
   (declare (ignore stream content-type))
   (%check-key bucket key)
-  (%check-metadata bucket key metadata))
+  (%check-metadata bucket key metadata)
+  ;; A header value: a CR or LF in it would start another header (#830).
+  (unless (or (null cache-control)
+              (and (stringp cache-control) (plusp (length cache-control))
+                   (notany #'%control-char-p cache-control)))
+    (error 'blob-invalid-metadata :bucket bucket :key key :name "Cache-Control"
+                                  :fault "Cache-Control must be a non-empty string without control characters")))
 
 (defmethod get-blob :before ((s store) bucket key) (%check-key bucket key))
 (defmethod delete-blob :before ((s store) bucket key) (%check-key bucket key))
@@ -343,8 +378,24 @@ the same header, and \"sha256\" is reserved for the checksum the store records."
            (error 'blob-upload-refused :bucket bucket :key key :reason :too-large
                                        :size content-length :limit max-bytes)))))
 
-(defmethod read-blob-range :before ((s store) bucket key &key (start 0) (length 512))
+(defun %check-if-match-value (bucket key if-match)
+  "Signal BLOB-INVALID-METADATA unless IF-MATCH is NIL or an ETag: a non-empty printable ASCII
+string, which goes into a request header on S3."
+  (when (and if-match
+             (not (and (stringp if-match)
+                       (plusp (length (string-trim "\"" if-match)))
+                       (every (lambda (c) (<= 32 (char-code c) 126)) if-match))))
+    (error 'blob-invalid-metadata
+           :bucket bucket :key key :name "if-match"
+           :fault "if-match must be an ETag: a non-empty printable ASCII string")))
+
+(defmethod open-blob :before ((s store) bucket key &key if-match)
   (%check-key bucket key)
+  (%check-if-match-value bucket key if-match))
+
+(defmethod read-blob-range :before ((s store) bucket key &key (start 0) (length 512) if-match)
+  (%check-key bucket key)
+  (%check-if-match-value bucket key if-match)
   (unless (and (integerp start) (>= start 0) (integerp length) (>= length 0))
     (error 'type-error :datum (list start length) :expected-type '(integer 0))))
 
@@ -408,11 +459,12 @@ the same header, and \"sha256\" is reserved for the checksum the store records."
   "True if A and B are the same ETag, ignoring the quotes around either."
   (and a b (string= (string-trim "\"" a) (string-trim "\"" b))))
 
-(defun %check-if-match (bucket key if-match etag)
-  "Signal BLOB-SOURCE-CHANGED for BUCKET/KEY when IF-MATCH is given and is not ETAG, the source's
-ETag now. A blob with no ETag matches nothing (#826)."
+(defun %check-if-match (bucket key if-match etag &optional (condition 'blob-source-changed))
+  "Signal CONDITION (BLOB-SOURCE-CHANGED for a copy, BLOB-PRECONDITION-FAILED for a read) for
+BUCKET/KEY when IF-MATCH is given and is not ETAG, the blob's ETag now. A blob with no ETag
+matches nothing (#826)."
   (when (and if-match (not (%etag= if-match etag)))
-    (error 'blob-source-changed :bucket bucket :key key)))
+    (error condition :bucket bucket :key key)))
 
 (defun %check-copy (src-bucket src-key dst-bucket dst-key content-type metadata
                     &optional if-match)
@@ -474,17 +526,27 @@ READ-SEQUENCE-the-whole-thing version."
     (values total (ironclad:byte-array-to-hex-string
                    (ironclad:produce-digest digest)))))
 
-(defmacro with-blob-stream ((var store bucket key) &body body)
+(defmacro with-blob-stream ((var store bucket key &key (if-match nil if-match-p) meta) &body body)
   "Bind VAR to an octet input stream over BUCKET/KEY for the duration of BODY, closing it
 however BODY leaves.
 
 GET-BLOB hands back a live stream, and an app that forgets to close it leaks a file
 descriptor per view -- which shows up as a server that dies under load rather than as a
-bug at the call site. Prefer this."
-  (let ((s (gensym "STREAM")))
-    `(let ((,s (get-blob ,store ,bucket ,key)))
-       (unwind-protect (let ((,var ,s)) ,@body)
-         (close ,s)))))
+bug at the call site. Prefer this.
+
+With IF-MATCH (an ETag form) or META (a variable to bind to the blob's BLOB-META), the stream
+comes from OPEN-BLOB, and a blob that no longer has the ETag signals BLOB-PRECONDITION-FAILED
+before BODY runs (#826). Without either, it comes from GET-BLOB exactly as before, so an app's
+own store class that implements only GET-BLOB keeps working."
+  (let ((s (gensym "STREAM")) (m (gensym "META")))
+    (if (or if-match-p meta)
+        `(multiple-value-bind (,s ,m) (open-blob ,store ,bucket ,key :if-match ,if-match)
+           (declare (ignorable ,m))
+           (unwind-protect (let ((,var ,s) ,@(when meta `((,meta ,m)))) ,@body)
+             (close ,s)))
+        `(let ((,s (get-blob ,store ,bucket ,key)))
+           (unwind-protect (let ((,var ,s)) ,@body)
+             (close ,s))))))
 
 ;;; --- defaults for a store that does not implement an operation --------------
 ;;;
@@ -539,10 +601,27 @@ bounded chunks and then reads only LENGTH, so a long stream is never held in mem
       ;; READ-SEQUENCE's count is what arrived, so a blob that ends sooner gives fewer bytes.
       (subseq buffer 0 (read-sequence buffer in)))))
 
-(defmethod read-blob-range ((s store) bucket key &key (start 0) (length 512))
-  ;; Reads through GET-BLOB.
-  (with-blob-stream (in s bucket key)
-    (%read-range in start length)))
+(defmethod read-blob-range ((s store) bucket key &key (start 0) (length 512) if-match)
+  ;; Reads through GET-BLOB, or OPEN-BLOB when IF-MATCH is given.
+  (if if-match
+      (with-blob-stream (in s bucket key :if-match if-match)
+        (%read-range in start length))
+      (with-blob-stream (in s bucket key)
+        (%read-range in start length))))
+
+(defmethod open-blob ((s store) bucket key &key if-match)
+  "The default, for a store class that implements GET-BLOB but not OPEN-BLOB.
+
+NOT ATOMIC: with IF-MATCH it reads the blob's metadata, checks the ETag, and only then opens the
+stream with GET-BLOB, so a blob replaced between those two calls is read as the newer version.
+A store class whose provider can make the read conditional should implement OPEN-BLOB itself, as
+the S3 and filesystem stores do. A mismatch signals BLOB-PRECONDITION-FAILED, as there. Without
+IF-MATCH the metadata is not read, and the second value is NIL."
+  (if if-match
+      (let ((meta (blob-metadata s bucket key)))
+        (%check-if-match bucket key if-match (blob-meta-etag meta) 'blob-precondition-failed)
+        (values (get-blob s bucket key) meta))
+      (values (get-blob s bucket key) nil)))
 
 ;;; --- the registry + environment selection ----------------------------------
 ;;;

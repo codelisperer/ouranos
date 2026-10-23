@@ -18,7 +18,8 @@
                "cl-base64"         ; Twilio Basic auth + inbound-signature encoding
                "ironclad"          ; HMAC-SHA1 for X-Twilio-Signature verification
                "aion/log"          ; framework logging facade (send attempts/failures)
-               "aion/secret")      ; the Telegram bot token, held so it cannot be printed (#778)
+               "aion/secret"       ; the Telegram bot token, held so it cannot be printed (#778)
+               "aion/random")      ; the Facebook connect flow's state (#822)
   :serial t
   :components ((:module "src"
                 :serial t
@@ -30,6 +31,7 @@
                              (:file "sendgrid")   ; SendGrid email backend
                              (:file "twilio")     ; Twilio SMS backend (outbound)
                              (:file "telegram")   ; Telegram Bot API backend (#778)
+                             (:file "facebook")   ; Facebook Page backend, Graph API (#822)
                              (:file "inbound")    ; inbound SMS: neutral event + Twilio webhook
                              (:file "hermes"))))
   :in-order-to ((test-op (test-op "hermes/tests"))))
@@ -42,7 +44,7 @@
   :components ((:module "tests"
                 :serial t
                 :components ((:file "hermes")
-                             (:file "telegram"))))
+                             (:file "telegram") (:file "facebook"))))
   :perform (test-op (o c) (uiop:symbol-call :hermes/tests :run-tests)))
 
 ;;; The blob store. Bytes belong in object storage; a row holds a key and metadata, never
@@ -118,15 +120,18 @@
                              (:file "conditions") ; the failure protocol (CL)
                              (:file "protocol")   ; the store seam, streaming, sweep (CL)
                              (:file "filesystem") ; local disk -- the zero-config default (CL)
-                             (:file "s3"))))      ; any S3-compatible provider (CL)
+                             (:file "s3")         ; any S3-compatible provider (CL)
+                             (:file "public-image")))) ; a public copy for a link preview (CL, #830)
   :in-order-to ((test-op (test-op "hermes/blob/tests"))))
 
 (defsystem "hermes/blob/tests"
   :description "Test suite for the blob store."
-  :depends-on ("aion/fs" "hermes/blob" "aion/clock" "aion/log" "fiveam")  ; blob.lisp calls both directly
+  :depends-on ("aion/fs" "hermes/blob" "aion/clock" "aion/log" "fiveam"  ; blob.lisp calls both directly
+               "ironclad")  ; public-image.lisp builds PNG fixtures with their CRCs
   :serial t
   :components ((:module "blob-tests"
                 :pathname "tests"
                 :serial t
-                :components ((:file "blob"))))
+                :components ((:file "blob")
+                             (:file "public-image"))))  ; #830
   :perform (test-op (o c) (uiop:symbol-call :hermes/blob/tests :run-tests)))

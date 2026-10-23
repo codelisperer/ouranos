@@ -109,7 +109,20 @@ constructed, not at first use, so a misconfigured deploy fails at boot."))
 :BAD-CONTENT-TYPE, :BAD-EXPIRY, :BAD-PART-NUMBER, :BAD-UPLOAD-ID or :BAD-PARTS, so a caller
 branches on the reason and not on the message."))
 
-(define-condition blob-source-changed (blob-backend-error)
+(define-condition blob-precondition-failed (blob-backend-error)
+  ()
+  (:default-initargs :status 412)
+  (:report (lambda (c s)
+             (format s "the blob ~A/~A is no longer the version the caller named with if-match"
+                     (or (blob-error-bucket c) "?") (or (blob-error-key c) "?"))))
+  (:documentation
+   "A read made with :IF-MATCH found that the blob no longer has that ETag (#826): it was
+replaced after the caller recorded the ETag, so nothing was read. S3 answers such a read with
+412. BUCKET and KEY name the blob. The caller checks the blob again before trusting it. It is a
+BLOB-BACKEND-ERROR subclass, so a handler for that still catches it; BLOB-SOURCE-CHANGED, the
+same failure for a copy or move, is a subclass of this one."))
+
+(define-condition blob-source-changed (blob-precondition-failed)
   ()
   (:default-initargs :status 412)
   (:report (lambda (c s)
@@ -119,8 +132,9 @@ branches on the reason and not on the message."))
    "COPY-BLOB or MOVE-BLOB found that the source is no longer the object it read at the start
 (#804): the provider refused the copy with 412 because the source's ETag changed. BUCKET and KEY
 name the SOURCE. Nothing was copied, and a move deleted nothing. For a quarantine flow this
-means \"verify the object again\", which a transient BLOB-BACKEND-ERROR does not; it is a
-BLOB-BACKEND-ERROR subclass, so a handler for that still catches it."))
+means \"verify the object again\", which a transient BLOB-BACKEND-ERROR does not. It is a
+subclass of BLOB-PRECONDITION-FAILED (#826), so one handler catches a changed blob on a read and
+on a copy, and of BLOB-BACKEND-ERROR, so a handler for that still catches it."))
 
 (define-condition blob-unsupported (blob-error)
   ((operation :initarg :operation :initform nil :reader blob-unsupported-operation))

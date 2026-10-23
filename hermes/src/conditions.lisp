@@ -74,6 +74,63 @@ old one (#778)."))
 be used together (#794). TELEGRAM-ADDED-CHATS signals it. The bot's updates, my_chat_member
 included, then arrive at the webhook instead. hermes never deletes a webhook."))
 
+;;; --- Facebook Pages (#822) ---------------------------------------------------
+;;;
+;;; The Graph API answers a refusal with {"error": {"message", "type", "code", "error_subcode",
+;;; "fbtrace_id"}}. The classes below follow Meta's error-handling guide: the code, and for an
+;;; expired or revoked token the subcode, decide which one is signalled.
+
+(define-condition facebook-reconnect-required (delivery-failure)
+  ()
+  (:documentation "Facebook refused the call because the Page access token no longer works:
+Graph error 190 (the token expired, was revoked, or the admin changed their password or removed
+the app), 102, or a login subcode such as 492 (the admin no longer has a role on the Page). The
+app shows \"reconnect\" and sends an admin through the connect flow again (#822)."))
+
+(define-condition facebook-not-permitted (delivery-failure)
+  ()
+  (:documentation "Facebook refused the call because a permission is missing or was removed:
+Graph error 10 or 200 to 299. The connected admin did not grant pages_manage_posts, or cannot
+perform the CREATE_CONTENT task on the Page, or the target is not a Page this app may post to
+(a numeric Group id arrives here) (#822)."))
+
+(define-condition facebook-page-not-found (delivery-failure)
+  ()
+  (:documentation "Facebook refused the call because the Page does not exist, or this token
+cannot see it: Graph error 100 with subcode 33, or 803 (#822)."))
+
+(define-condition facebook-link-not-public (delivery-failure)
+  ()
+  (:documentation "Facebook refused the post because it could not use its link. Meta's Page Feed
+reference says \"If the viewer or app cannot see the url of link, the post will fail\": a page
+behind a sign-in, a private URL, or one Facebook cannot fetch. The app can say \"this post isn't
+public yet\" (#822). Signalled for a Graph error 100 that mentions the link, on a post that has
+one; the detail keeps Facebook's own text."))
+
+(define-condition facebook-groups-unsupported (hermes-error)
+  ((page :initarg :page :initform nil :reader facebook-groups-unsupported-page))
+  (:report (lambda (c stream)
+             (declare (ignore c))
+             (write-string (concatenate 'string "hermes cannot post to a Facebook Group: "
+                                        "Meta removed the Groups API for every app on 2024-04-22.")
+                           stream)))
+  (:documentation "Signalled by MAKE-FACEBOOK-POST for a target that names a Facebook Group. The
+Graph API v19.0 changelog deprecated publish_to_groups, groups_access_member_info and the Groups
+API, and removed them from every version on 2024-04-22, so no app can post to a Group (#822)."))
+
+(define-condition facebook-connect-refused (hermes-error)
+  ((reason :initarg :reason :reader facebook-connect-refused-reason)
+   (detail :initarg :detail :initform nil :reader facebook-connect-refused-detail))
+  (:report (lambda (c stream)
+             (format stream "Connecting a Facebook Page failed: ~(~A~)~@[: ~A~]."
+                     (facebook-connect-refused-reason c) (facebook-connect-refused-detail c))))
+  (:documentation "FACEBOOK-CONNECT-PAGES refused to finish connecting (#822). REASON is
+:STATE-MISMATCH (the state returned is not the one this admin's session holds: a forged or
+replayed callback), :DENIED (the admin cancelled or refused the permissions, and Facebook
+returned an error instead of a code), or :CODE-REJECTED (Facebook refused to exchange the code:
+it was used already, expired, or the redirect URI differs). DETAIL is Facebook's text, with any
+secret removed."))
+
 (define-condition unsupported-message (hermes-error)
   ((provider :initarg :provider :reader unsupported-message-provider)
    (message :initarg :message :reader unsupported-message-message))

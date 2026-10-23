@@ -184,6 +184,51 @@ what matter; this accessor's job is to always produce something printable."
             (sb-ext:octets-to-string (response-bytes response)
                                      :external-format '(:utf-8 :replacement #\ufffd)))))
 
+(defun %printable-url (url)
+  "URL as a request prints it (#844): the scheme, host and path as given, a user and password
+before the host replaced by <hidden>, and each query parameter's value replaced by <hidden>, its
+name kept. A query value is often a key (?key=...), and a user part is a password."
+  (if (not (stringp url))
+      (princ-to-string url)
+      (let* ((query-at (position #\? url))
+             (base (subseq url 0 (or query-at (length url))))
+             (scheme-end (search "://" base))
+             (authority-start (if scheme-end (+ scheme-end 3) 0))
+             (authority-end (or (position #\/ base :start authority-start) (length base)))
+             (at (position #\@ base :start authority-start :end authority-end :from-end t))
+             (base (if at
+                       (concatenate 'string (subseq base 0 authority-start)
+                                    "<hidden>" (subseq base at))
+                       base)))
+        (if (null query-at)
+            base
+            (format nil "~A?~{~A~^&~}" base
+                    (loop for pair in (uiop:split-string (subseq url (1+ query-at)) :separator "&")
+                          for eq = (position #\= pair)
+                          when (plusp (length pair))
+                            collect (if eq (format nil "~A=<hidden>" (subseq pair 0 eq)) pair)))))))
+
+(defmethod print-object ((r request) stream)
+  "The method, the URL with its secrets hidden, the header names with every value replaced by
+<hidden>, and the body's size -- never a header value or the body (#844).
+
+A request is on the stack while it is sent, so a backtrace or a debugger prints it whenever a
+condition escapes then. Its headers carry credentials (authorization, x-goog-api-key, x-api-key,
+cookie) and its body can hold one or the user's data, so the default structure printer put them
+in every such backtrace. Every header's value is hidden, not a list of known names: a provider's
+own key header is not on any list."
+  (print-unreadable-object (r stream :type t)
+    (format stream "~A ~A" (request-method r) (%printable-url (request-url r)))
+    (when (request-headers r)
+      (format stream " headers: ~{~A=<hidden>~^, ~}"
+              (mapcar (lambda (h) (if (consp h) (car h) "?")) (request-headers r))))
+    (let ((content (request-content r)))
+      (cond ((null content))
+            ((stringp content) (format stream " body: ~D character~:P" (length content)))
+            ((vectorp content) (format stream " body: ~D byte~:P" (length content)))
+            ((listp content) (format stream " body: ~D field~:P" (length content)))
+            (t (format stream " body: a ~(~A~)" (type-of content)))))))
+
 (defmethod print-object ((r response) stream)
   "Status and a byte COUNT -- never the body.
 
@@ -290,10 +335,48 @@ Signals RESPONSE-TOO-LARGE when there is more than LIMIT."
           (when (> (length octets) limit) (too-large))
           octets))))
 
+(defun %multipart-octets-header-p (header)
+  "Is HEADER, a (name . value) pair, a Content-Type whose value begins with \"multipart/\"?"
+  (and (consp header)
+       (string-equal (string (car header)) "content-type")
+       (stringp (cdr header))
+       (>= (length (cdr header)) 10)
+       (string-equal "multipart/" (cdr header) :end2 10)))
+
+(defun %dex-headers (req)
+  "REQ's headers as dexador is given them.
+
+A CENTRALIZED WORKAROUND, NOT A NATIVE SEND (#828). Dexador's usocket backend, which serves
+Linux and macOS, sets MULTIPART-P when the Content-Type value's first ten characters are
+string= \"multipart/\". It then writes its own Content-Type with a boundary of its own, and
+builds the body from an alist of fields, failing with a TYPE-ERROR on a body of octets the caller
+encoded itself (dexador-20260101, src/backend/usocket.lisp, lines 494-506 and 569-575). Its
+loop over the caller's other headers skips content-type (lines 610-615), so there is no other
+way to send the header. For a body of octets with a multipart/ type, the value is given here
+with one leading space: dexador's check no longer matches, and it writes the header and the
+octets as given. HTTP does not count whitespace before a field value as part of the value
+(RFC 9110, section 5.5), so a server reads the type, boundary included, byte for byte. Nothing
+is lost: dexador's multipart branch needs an alist, so it could never send these octets.
+
+WinHTTP, dexador's Windows backend, sends the octets and the header as given, so this applies
+only off Windows. The test MULTIPART-OCTETS-ARRIVE-AS-SENT sends such a body through the real
+client to a local server and compares what arrives, so a dexador that checks the prefix another
+way fails CI, not a provider call; upstream.sexp's Quicklisp entry points here too."
+  (let ((headers (request-headers req)))
+    #+os-windows headers
+    #-os-windows
+    (if (typep (request-content req) '(array (unsigned-byte 8) (*)))
+        (mapcar (lambda (h)
+                  (if (%multipart-octets-header-p h)
+                      (cons (car h) (concatenate 'string " " (cdr h)))
+                      h))
+                headers)
+        headers)))
+
 (defun %dex-args (req)
   "The dexador keyword arguments REQ implies, apart from the URL and the stream."
   (append (list :method (request-method req)
-                :headers (request-headers req)
+                :headers (%dex-headers req)
                 :content (request-content req)
                 ;; ALWAYS binary (pre-publication issue 223). Left to itself dexador decides by
                 ;; content-type and hands back a string for anything it considers text -- at
