@@ -1434,6 +1434,13 @@ its tag.
 
 ### Fixed
 
+- **praxeon/web-page: a byte order mark decides a page's charset, and a `<meta>` naming UTF-16
+  or UTF-32 means UTF-8** (#823), as browsers decide. A page that starts with the UTF-8 mark
+  (EF BB BF) is read as UTF-8 even when its `Content-Type` names Latin-1, and FE FF or FF FE
+  select UTF-16BE or UTF-16LE. The mark is no longer part of the page's text, so no U+FEFF
+  leads it. A `<meta>` charset in which ASCII is not one byte per character, such as utf-16le
+  or utf-32le, is read as UTF-8, because the tag could not have been found otherwise; a charset
+  named in `Content-Type` keeps its meaning.
 - **hermes: six corrections to the Telegram backend** (#788, follow-ups to #778).
   - A refusal whose `description` is not a string is reported with its class and the response
     body as detail. Before, it signalled a `type-error`.
