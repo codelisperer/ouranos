@@ -108,7 +108,16 @@ takes an invite link, so the chat id comes from the bot's own updates (#794):
 - Telegram keeps an update for 24 hours, so the bot has to have been added within that time.
 - By default the updates are read and left pending, so another program reading the same bot's
   updates still gets them; only the first 100 pending updates are read. `:confirm t` reads all of
-  them and confirms them, and Telegram then drops them for every reader.
+  them and confirms them, and Telegram then drops them for every reader. If a page arrives whose
+  updates carry no `update_id`, or none newer than the ones already confirmed, the read stops
+  there: the chats read so far are returned, and the updates on that page stay pending.
+- If the app's own long poll on `getUpdates` is running at the same moment, Telegram ends one of
+  the two requests with 409 "Conflict: terminated by other getUpdates request". Here that is a
+  plain `delivery-failure`; call again once the app's poll has returned.
+- Telegram stores the `allowed_updates` list the app last passed to `getUpdates` or `setWebhook`
+  and applies it to every reader. If that list leaves out `my_chat_member`, these updates are
+  never delivered, and `telegram-added-chats` returns an empty list with no error. hermes does
+  not send `allowed_updates`, so it does not change that list.
 - A bot with a webhook set cannot read its updates this way: Telegram refuses, and hermes signals
   `telegram-webhook-active`. The `my_chat_member` update is then delivered to the webhook, and
   its `chat.id` is the id. hermes does not delete the webhook.
