@@ -11,8 +11,10 @@
 #
 # CI runs the gate through this on Linux so that hades/credentials's live tests have a store to
 # use. On a developer's machine it runs those tests without touching the keyring you log in with:
-# XDG_RUNTIME_DIR, XDG_DATA_HOME and XDG_CONFIG_HOME all point into the temporary directory, so
-# the daemon started here cannot find or unlock the one your desktop runs.
+# the daemon started here runs with XDG_RUNTIME_DIR, XDG_DATA_HOME and XDG_CONFIG_HOME pointing
+# into the temporary directory, so it cannot find or unlock the one your desktop runs. COMMAND
+# itself keeps the caller's XDG directories, so it finds the same ASDF configuration (under
+# XDG_CONFIG_HOME) as it would without this script.
 #
 #   OURANOS_TEST_REAL_CREDENTIAL_STORE=1 scripts/with-secret-service.sh \
 #     sbcl --dynamic-space-size 4096 --script scripts/verify-tree.lisp
@@ -42,16 +44,17 @@ if [ "${1:-}" != "$inside" ]; then
   trap 'rm -rf "$dir"' EXIT
   mkdir -m 700 "$dir/runtime" "$dir/data" "$dir/config"
   status=0
-  env -u GNOME_KEYRING_CONTROL \
-    XDG_RUNTIME_DIR="$dir/runtime" XDG_DATA_HOME="$dir/data" XDG_CONFIG_HOME="$dir/config" \
-    dbus-run-session -- "$0" "$inside" "$@" || status=$?
+  env -u GNOME_KEYRING_CONTROL dbus-run-session -- "$0" "$inside" "$dir" "$@" || status=$?
   exit "$status"
 fi
-shift
+dir=$2
+shift 2
 
 # Inside the private session. --unlock reads the password from standard input until it ends, and
 # with no login keyring yet it creates one with that password and makes it the default.
+# Only the daemon gets the temporary XDG directories; COMMAND reaches it over the private bus.
 unset GNOME_KEYRING_CONTROL
 head -c 32 /dev/urandom | base64 | tr -d '\n' \
-  | gnome-keyring-daemon --unlock --components=secrets >/dev/null
+  | XDG_RUNTIME_DIR="$dir/runtime" XDG_DATA_HOME="$dir/data" XDG_CONFIG_HOME="$dir/config" \
+    gnome-keyring-daemon --unlock --components=secrets >/dev/null
 exec "$@"
