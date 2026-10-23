@@ -307,12 +307,39 @@ jobs:
       # outer timeout per attempt, and this step's timeout-minutes makes the worst case fail
       # here, by name, long before the job's limit. It installs this step's packages and the
       # keyring's below in one update.
+      # THE DOWNLOADED APT PACKAGES ARE CACHED (#889). A mirror serving 30-60 KB/s failed a run:
+      # 61 MB did not finish in three attempts. The key names the runner image, because the
+      # image decides what is already installed and so which packages get downloaded, and the
+      # script, because it holds the package list. A new image restores the previous one's
+      # files through restore-keys; apt checks each against the index and downloads only what
+      # changed. A miss or a failed restore means a full download, never a failed step, which
+      # is why this step continues on error and its restore is limited to two minutes.
+      - name: Name the runner image for the apt cache key
+        id: name-the-runner-image
+        if: runner.os == 'Linux'
+        shell: bash
+        run: echo "image=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the downloaded apt packages
+        id: cache-the-downloaded-apt-packages
+        if: runner.os == 'Linux'
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/cache@v6
+        env:
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: "2"
+        with:
+          path: ~/.cache/ci-apt-archives
+          key: apt-${{ steps.name-the-runner-image.outputs.image }}-${{ hashFiles('scripts/ci-apt-install.sh') }}
+          restore-keys: |
+            apt-
+
       - name: Linux packages -- launcher build tools and the keyring, with bounded waits
         id: linux-packages
         if: runner.os == 'Linux'
         timeout-minutes: 15
         shell: bash
-        run: ./scripts/ci-apt-install.sh
+        run: CI_APT_ARCHIVE_CACHE=~/.cache/ci-apt-archives ./scripts/ci-apt-install.sh
 
       - name: Build the native webview launcher (Linux)
         id: build-the-native-webview-launcher-linux
@@ -637,11 +664,36 @@ jobs:
       # copy of this step; see the long comment there.
       # The apt packages for the launcher and for scripts/with-secret-service.sh, with bounded
       # waits, as in the matrix leg's "Linux packages" step (#507).
+      # THE DOWNLOADED APT PACKAGES ARE CACHED (#889). A mirror serving 30-60 KB/s failed a run:
+      # 61 MB did not finish in three attempts. The key names the runner image, because the
+      # image decides what is already installed and so which packages get downloaded, and the
+      # script, because it holds the package list. A new image restores the previous one's
+      # files through restore-keys; apt checks each against the index and downloads only what
+      # changed. A miss or a failed restore means a full download, never a failed step, which
+      # is why this step continues on error and its restore is limited to two minutes.
+      - name: Name the runner image for the apt cache key
+        id: name-the-runner-image
+        shell: bash
+        run: echo "image=${ImageOS:-unknown}-${ImageVersion:-unknown}" >> "$GITHUB_OUTPUT"
+
+      - name: Cache the downloaded apt packages
+        id: cache-the-downloaded-apt-packages
+        continue-on-error: true
+        timeout-minutes: 3
+        uses: actions/cache@v6
+        env:
+          SEGMENT_DOWNLOAD_TIMEOUT_MINS: "2"
+        with:
+          path: ~/.cache/ci-apt-archives
+          key: apt-${{ steps.name-the-runner-image.outputs.image }}-${{ hashFiles('scripts/ci-apt-install.sh') }}
+          restore-keys: |
+            apt-
+
       - name: Linux packages -- launcher build tools and the keyring, with bounded waits
         id: linux-packages
         timeout-minutes: 15
         shell: bash
-        run: ./scripts/ci-apt-install.sh
+        run: CI_APT_ARCHIVE_CACHE=~/.cache/ci-apt-archives ./scripts/ci-apt-install.sh
 
       - name: Build the native webview launcher
         id: build-the-native-webview-launcher

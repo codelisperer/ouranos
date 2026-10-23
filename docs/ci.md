@@ -232,6 +232,22 @@ runs under an outer `timeout`, and is retried up to three times. The step's `tim
 15` makes a stall fail that step, by name and with an error saying the mirror may be stalled,
 long before the job's limit. The step prints how long the installs took as a job notice.
 
+A slow mirror fails the step the same way (#889). On one run the mirror served about 30-60 KB/s
+and 61 MB did not finish in three attempts. The script now prints, before each download attempt,
+how many MB are still to fetch, so the log shows whether the mirror was slow (the figure falls
+between attempts) or unreachable (it does not). The error names all three cases.
+
+**The downloaded `.deb` files are cached** (#889). The "Cache the downloaded apt packages" step
+restores `~/.cache/ci-apt-archives`, keyed on the runner image (`ImageOS` and `ImageVersion`)
+and on `scripts/ci-apt-install.sh`, which holds the package list. The script copies those files
+into `/var/cache/apt/archives` before downloading. apt checks each one against the package
+index, so it downloads only what is missing or changed and never installs a stale file. After
+the download, the script replaces the directory's contents with the files this run used. A new
+runner image restores the previous image's files through `restore-keys`. The cache step continues
+on error and limits its restore to two minutes, so a miss or a failed restore means a full
+download, not a failed job. The job notice reports how many MB were downloaded and how many came
+from the cache.
+
 The port is **not** pinned to 55432 on the native legs. That number exists in
 `docker-compose.test.yml` to stop a developer's real server being shadowed or silently
 `CREATE TABLE`'d into; a runner has nothing to protect, and forcing a preinstalled service
