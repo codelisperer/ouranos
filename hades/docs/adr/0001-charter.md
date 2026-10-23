@@ -199,3 +199,15 @@ forbids, done to a secret.
 
 The Windows backend came first. Until the Keychain and Secret Service backends exist, macOS and
 Linux signal the same condition.
+
+## Addendum, 2026-10-23: a modal notice before a window exists (#819)
+
+Section 2 found notifications platform-scoped, because their preconditions differ and a missing
+notification is silent. `hades/notify:notify-user` is not that capability. It is a blocking,
+modal notice with one OK button, which every supported OS can show without an app window:
+Windows with `MessageBoxW`, macOS with `osascript`'s `display alert`, and a Linux desktop with
+`zenity` or `kdialog`. Where none can be shown (CI, SSH, Windows session 0, Linux with no display
+or neither program), it writes the notice to standard error and returns `:stderr` with the
+reason, never `:native`. That is the contract the Consequences section asks of any notification
+facade: a call that can say the notice was not shown, rather than one that returns normally
+having done nothing. So it is a **facade**. Toast-style notifications remain platform-scoped.

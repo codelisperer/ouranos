@@ -281,7 +281,7 @@ body that cannot be read becomes a DETAIL saying so (#796)."
 
 ;;; --- operations ------------------------------------------------------------
 
-(defmethod put-blob ((s s3-store) bucket key stream &key content-type metadata)
+(defmethod put-blob ((s s3-store) bucket key stream &key content-type metadata cache-control)
   ;; Spool to a temp file first. S3 needs Content-Length and (for a signed payload) the
   ;; body's SHA-256 BEFORE the first byte goes out, and neither is knowable from a stream
   ;; without reading it. Spooling is how we get both while still never holding the object
@@ -308,10 +308,12 @@ body that cannot be read becomes a DETAIL saying so (#796)."
                             ;; it later. Before #810 it was only sent as the payload hash, and
                             ;; BLOB-METADATA returned NIL for every blob. "sha256" is reserved, so
                             ;; the app's METADATA cannot send a second one.
-                            (cons (cons "x-amz-meta-sha256" checksum)
-                                  (loop for (mk . mv) in metadata
-                                        collect (cons (format nil "x-amz-meta-~A" (string-downcase mk))
-                                                      mv))))
+                            (append
+                             (list (cons "x-amz-meta-sha256" checksum))
+                             (when cache-control (list (cons "cache-control" cache-control)))
+                             (loop for (mk . mv) in metadata
+                                   collect (cons (format nil "x-amz-meta-~A" (string-downcase mk))
+                                                 mv))))
                (log:debug "blob put" :backend "s3" :bucket bucket :bytes size)
                (make-blob-meta key size content-type checksum (get-universal-time)))
           (uiop:delete-file-if-exists tmp))))))

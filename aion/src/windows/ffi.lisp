@@ -454,6 +454,32 @@
   (h-process :pointer)
   (lp-exit-code :pointer))
 
+;;; --- a message box before any window exists (#819) --------------------------
+;;;
+;;; hades/notify shows a modal notice with MessageBoxW. Session 0 is where services run and
+;;; has no desktop a user can see, so a message box there waits for a click that cannot
+;;; happen; hades/notify asks ProcessIdToSessionId first.
+
+(defconstant +mb-ok+ #x00000000)
+(defconstant +mb-iconerror+ #x00000010)
+(defconstant +mb-iconwarning+ #x00000030)
+(defconstant +mb-iconinformation+ #x00000040)
+(defconstant +mb-setforeground+ #x00010000)
+(defconstant +mb-topmost+ #x00040000)
+
+;;; Returns the button pressed (IDOK = 1 here), or 0 on failure.
+(cffi:defcfun ("MessageBoxW" message-box-w) :int32
+  (h-wnd hwnd)
+  (lp-text :pointer)
+  (lp-caption :pointer)
+  (u-type :uint32))
+
+(cffi:defcfun ("GetCurrentProcessId" get-current-process-id) dword)
+
+(cffi:defcfun ("ProcessIdToSessionId" process-id-to-session-id) :int32
+  (dw-process-id dword)
+  (p-session-id :pointer))
+
 ;;; --- the layout gate --------------------------------------------------------
 ;;;
 ;;; Run at LOAD, and deliberately fatal. ADR-0003 s4: "built in from the first commit". A

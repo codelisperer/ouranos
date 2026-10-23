@@ -222,6 +222,64 @@ with the same size and different content, after you checked it (#826).
   replaced between the two calls is read as the newer version. `with-blob-stream` without
   `:if-match` or `:meta` still calls `get-blob`, so such a store class needs nothing new.
 
+## A public copy for a link-preview card
+
+A page's `og:image` has to be a URL a crawler can fetch without cookies and that does not
+expire, and `hyperion/page-meta` uses the site's fallback image instead of a presigned URL.
+`public-image-url` makes such a URL for an image in a private bucket (#830):
+
+```lisp
+(multiple-value-bind (url width height)
+    (hermes/blob:public-image-url store "media" final-key public-store "cards")
+  ;; Keep URL, WIDTH and HEIGHT in the post's row, and pass them to page-meta as
+  ;; :image, :image-width and :image-height.
+  ...)
+```
+
+- **Where the copy goes.** `public-store` is a second store whose objects anyone may read: an S3
+  store made with `:public-base-url`, or a filesystem store with `:base-url`. Give its bucket a
+  policy that allows `s3:GetObject` and not `s3:ListBucket`, so the copies cannot be listed. Do
+  not open a prefix of the private bucket instead: one mistake in that policy makes members'
+  private images public. For a filesystem public store, the web server that serves its directory
+  must have directory listing turned off (`autoindex off` in nginx, `Options -Indexes` in Apache),
+  for the same reason.
+- **Only for public content.** The copy can be read by anyone who has its URL. Call
+  `public-image-url` only for an image shown on a page whose `:visibility` is `:public`. Call
+  `(hermes/blob:delete-public-images "media" final-key public-store "cards")` when the image is
+  deleted, and also when its post goes from public to private or unlisted. A crawler that already
+  fetched the image keeps its own copy, and a CDN can serve a deleted copy until its Cache-Control
+  max-age runs out.
+- **When to call it.** When the image is uploaded or replaced, not on every page view. A call
+  reads the original's metadata and lists one directory of the public bucket. If a copy of this
+  version is already there, it returns that copy's URL and reads and writes nothing else.
+- **What is removed.** Everything but the pixels and what is needed to show them: EXIF (the GPS
+  position, the camera's serial number, and a thumbnail that can show the uncropped original), XMP,
+  IPTC, comments, PNG text chunks, and any data after the end of the image, where some phones
+  append a second image or a video. The colour profile is kept. The EXIF Orientation field is kept
+  in a new EXIF block that holds nothing else, so a phone photo is not shown sideways, and the
+  width and height returned are as the image is shown. `strip-image-metadata` does this to an
+  octet vector, for an app that wants it elsewhere.
+- **What is refused.** Only JPEG, PNG and WebP are accepted, judged from the file's bytes. SVG,
+  GIF, HEIC, an image over `:max-bytes` (5 MiB by default) and a file whose structure does not
+  parse signal `blob-image-refused`, a `blob-unsupported` whose `blob-image-refused-reason` is
+  `:unsupported-format`, `:too-large` or `:malformed`, and nothing is written. Fall back to the
+  site's image. HEIC is what an iPhone saves by default, so an app that wants preview cards for
+  iPhone photos has to convert them to JPEG at upload; that needs an image library, as resizing
+  the copy to 1200 by 630 does, and both wait on the maintainer's decision in #846.
+- **Keys and versions.** A copy's key is `og/<SHA-256 of bucket/key>/<SHA-256 of the original's
+  ETag>-<width>x<height>.<ext>`, so it does not show the private key. When the original changes,
+  its ETag changes, the next call writes a new copy under a new key, and deletes the older copies
+  of that image. The hash is not keyed with a secret, so anyone who can guess an original's bucket
+  and key can compute its directory and check whether a public copy exists. If the app's keys can
+  be guessed, for example `avatars/<member id>.jpg`, that tells an outsider which members have a
+  public image; give each original's key a random part, such as a UUID, to prevent it.
+- **Cache-Control.** The copy is written with `public, max-age=86400` (the variable
+  `*public-image-cache-control*`, or the `:cache-control` argument). `put-blob` takes
+  `:cache-control` for any object: the S3 store sends it, and the filesystem store accepts it
+  and does nothing with it, because whatever serves that directory sets its own headers. A store
+  class the app wrote itself receives `:cache-control` and drops it unless its `put-blob` method
+  names the argument and passes it on.
+
 ## On the filesystem store
 
 The filesystem store cannot check a signature, so `upload-url` and the multipart calls signal

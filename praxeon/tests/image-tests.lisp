@@ -249,7 +249,7 @@ for the prompt, the revised prompt and the image's base64. The log must still sh
 ;;; --- keys and registration ----------------------------------------------------------------
 
 (test an-explicit-key-is-used-and-an-explicit-nil-is-no-key
-  (with-emb-env (("PRAXEON_IMAGE_API_KEY" "from-the-environment"))
+  (with-emb-env (("PRAXEON_IMAGE_API_KEY" "from-the-environment") ("PRAXEON_OPENAI_API_KEY" nil))
     (is (equal "given" (praxeon/image::openai-images-api-key
                         (praxeon/image:make-openai-images :api-key "given"))))
     (signals cnd:missing-provider-key (praxeon/image:make-openai-images :api-key nil))
@@ -608,6 +608,51 @@ well before the server lets go after 9, so the elapsed time shows the timeout wa
         (is (member :principal usage) "a :principal key, as on :tool-result: ~S" usage)))))
 
 ;;; --- an empty key is no key ---------------------------------------------------------------
+
+;;; --- the OpenAI key's three sources, and the deprecated PRAXEON_IMAGE_API_KEY ---------------
+
+(defun %openai-key-and-log (fn)
+  "Call FN, a function of no arguments that makes an OpenAI provider, with the deprecation warning
+not yet given and the log captured. Returns the provider's key and the log's text."
+  (let ((out (make-string-output-stream))
+        (praxeon/image::*warned-of-image-api-key* nil)
+        (key nil))
+    (unwind-protect
+         (progn (aion/log:setup :env :dev :level :warn :stream out)
+                (setf key (praxeon/image::openai-images-api-key (funcall fn))))
+      (aion/log:setup :env :dev :level :warn :stream *standard-output*))
+    (values key (get-output-stream-string out))))
+
+(test an-explicit-openai-key-comes-before-both-variables
+  (with-emb-env (("PRAXEON_OPENAI_API_KEY" "openai-var") ("PRAXEON_IMAGE_API_KEY" "image-var"))
+    (multiple-value-bind (key log)
+        (%openai-key-and-log (lambda () (praxeon/image:make-openai-images :api-key "given")))
+      (is (equal "given" key))
+      (is-false (search "deprecated" log) "~A" log))))
+
+(test praxeon-openai-api-key-comes-before-the-deprecated-variable
+  "With both set, the OpenAI provider uses PRAXEON_OPENAI_API_KEY and does not warn. Before the
+change it used PRAXEON_IMAGE_API_KEY first."
+  (with-emb-env (("PRAXEON_OPENAI_API_KEY" "openai-var") ("PRAXEON_IMAGE_API_KEY" "image-var"))
+    (multiple-value-bind (key log)
+        (%openai-key-and-log (lambda () (praxeon/image:make-openai-images)))
+      (is (equal "openai-var" key))
+      (is-false (search "deprecated" log) "~A" log))))
+
+(test the-deprecated-praxeon-image-api-key-still-works-and-warns-once
+  (with-emb-env (("PRAXEON_OPENAI_API_KEY" nil) ("PRAXEON_IMAGE_API_KEY" "image-var"))
+    (multiple-value-bind (key log)
+        (%openai-key-and-log (lambda ()
+                               (praxeon/image:make-openai-images)
+                               (praxeon/image:make-openai-images)))
+      (is (equal "image-var" key) "the fallback still supplies the key")
+      (is (search "set PRAXEON_OPENAI_API_KEY instead" log) "the warning names the replacement: ~A" log)
+      (is (= 1 (%count-occurrences "PRAXEON_IMAGE_API_KEY is deprecated" log))
+          "one warning for two providers: ~A" log))))
+
+(defun %count-occurrences (needle haystack)
+  (loop for start = (search needle haystack) then (search needle haystack :start2 (1+ start))
+        while start count t))
 
 (test an-empty-api-key-is-no-key
   (with-emb-env (("PRAXEON_IMAGE_API_KEY" "from-the-environment"))

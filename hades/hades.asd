@@ -11,8 +11,9 @@
   :version "0.0.0"
   ;; The facades that exist so far. ASDF also needs this primary system before it resolves a
   ;; secondary one such as hades/single-instance.
-  :depends-on ("hades/single-instance" "hades/credentials")
-  :in-order-to ((test-op (test-op "hades/single-instance/tests" "hades/credentials/tests"))))
+  :depends-on ("hades/single-instance" "hades/credentials" "hades/notify")
+  :in-order-to ((test-op (test-op "hades/single-instance/tests" "hades/credentials/tests"
+                                  "hades/notify/tests"))))
 
 (defsystem "hades/single-instance"
   :description "A per-user, per-directory single-instance lock held by the operating system, released when the process ends (#305)."
@@ -68,3 +69,29 @@
                 :serial t
                 :components ((:file "credentials-tests"))))
   :perform (test-op (o c) (uiop:symbol-call :hades/credentials/tests :run-tests)))
+
+(defsystem "hades/notify"
+  :description "A modal notice with one OK button that works before an app has a window, written to standard error where none can be shown (#819)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; Windows: MessageBoxW and ProcessIdToSessionId, bound in aion/windows (hades ADR-0001).
+  ;; macOS: /usr/bin/osascript. Linux: zenity or kdialog, found on PATH with sb-posix.
+  :depends-on ((:feature :win32 "aion/windows")
+               (:feature :win32 "cffi")
+               (:feature :unix (:require :sb-posix)))
+  :serial t
+  :components ((:module "src/notify"
+                :serial t
+                :components ((:file "packages")
+                             (:file "notify"))))
+  :in-order-to ((test-op (test-op "hades/notify/tests"))))
+
+(defsystem "hades/notify/tests"
+  :description "Tests for hades/notify: every platform's decision, the standard-error path and the argument checks, with no window shown."
+  :depends-on ("hades/notify" "fiveam")
+  :serial t
+  :components ((:module "tests"
+                :serial t
+                :components ((:file "notify-tests"))))
+  :perform (test-op (o c) (uiop:symbol-call :hades/notify/tests :run-tests)))

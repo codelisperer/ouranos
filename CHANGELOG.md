@@ -14,6 +14,16 @@ its tag.
 
 ### An app may have to act
 
+- **praxeon/image: `PRAXEON_IMAGE_API_KEY` is deprecated; set `PRAXEON_OPENAI_API_KEY`** (#758,
+  part four). Its name does not say which vendor the key is for, and with a second image
+  provider a Google key put there would be sent to OpenAI. The OpenAI image provider
+  (`make-openai-images`, `openai-images-from-env`, `register-openai-image`) now reads
+  `:api-key`, then `PRAXEON_OPENAI_API_KEY`, then `PRAXEON_IMAGE_API_KEY`. That last one still
+  works and logs one warning naming `PRAXEON_OPENAI_API_KEY`. It will be removed in a later
+  release. The order changed: before, `PRAXEON_IMAGE_API_KEY` was read first, so an app that
+  sets both to different keys now uses the one in `PRAXEON_OPENAI_API_KEY`. The Google provider
+  reads neither.
+
 - **praxeon: `generate-image` is refused once a turn has read a web page or search results**
   (#827). `praxeon/image:register` and `register-openai-image` now pass
   `:requires-user-intent t` to `register-means`, because each image costs money. When the model
@@ -508,6 +518,40 @@ its tag.
   content hash for a multipart or KMS-encrypted object: compare it, never recompute it. See
   "Reading the version you checked" in `hermes/docs/blob-direct-uploads.md`.
 
+- **hermes/blob: `public-image-url` gives an image in a private bucket a permanent public URL for
+  a link-preview card** (#830), with its metadata removed. `(public-image-url store bucket key
+  public-store public-bucket)` copies the image into a store the app configured as public
+  (`:public-base-url`, or `:base-url` on the filesystem store) and returns `(values url width
+  height content-type)`, for `hyperion/page-meta`'s `:image`, `:image-width` and
+  `:image-height`. The copy keeps the pixel data byte for byte, the colour profile, and the EXIF
+  Orientation field in a new EXIF block; EXIF (GPS, camera serial, thumbnail), XMP, IPTC,
+  comments, PNG text chunks and data after the image are removed, with no image library
+  (`strip-image-metadata` does this to an octet vector). Only JPEG, PNG and WebP up to 5 MiB
+  (`:max-bytes`) are accepted; SVG, GIF, HEIC and unparseable files signal the new
+  `blob-image-refused`, a `blob-unsupported` with `blob-image-refused-reason` `:unsupported-format`,
+  `:too-large` or `:malformed`. The copy's key is derived from hashes of the source's bucket, key
+  and ETag, so a second call writes nothing and a changed original gets a new copy, with the old
+  ones deleted. `delete-public-images` removes an image's copies: call it when the image is
+  deleted or its post stops being public. `put-blob` takes a new `:cache-control`, which the S3
+  store sends and the filesystem store accepts and does not use; a public copy is written with
+  `*public-image-cache-control*`, `public, max-age=86400`. The `put-blob` generic now ends in
+  `&allow-other-keys`, so a store class an app defined against v0.1.7, with a method taking only
+  `:content-type` and `:metadata`, still loads and works with `public-image-url`; such a store
+  drops `:cache-control`, and its objects have no Cache-Control header until its method passes
+  the argument on. See "A public copy for a
+  link-preview card" in `hermes/docs/blob-direct-uploads.md`.
+
+- **hades: `notify-user` shows a modal notice with one OK button before an app has a window**
+  (#819), for example to say "already running" when `hades/single-instance` refuses a second
+  launch. `(hades/notify:notify-user title message :level :warning)` uses `MessageBoxW` on
+  Windows, `osascript`'s `display alert` on macOS (no permission prompt), and `zenity` or
+  `kdialog` on Linux. Where no notice can be shown, in CI, an SSH session, Windows session 0,
+  Linux with no display or neither program, or when the native notice fails, it writes
+  `title (level): message` to standard error and does not wait. It returns `:native` or
+  `:stderr`, with the reason for `:stderr` as a second value. Bind
+  `hades/notify:*notify-backend*` to `:stderr` under `--self-test`. A new system,
+  `hades/notify`, which `hades` now loads.
+
 - **hyperion: a shared link to an app's page can show a preview card**, through the new
   `hyperion/page-meta` (#821). A layout calls `meta-tags` inside its `(:head ...)` with the
   page's `:title`, `:description`, `:image` (with `:image-alt`, `:image-width`,
@@ -763,7 +807,8 @@ its tag.
   `image-result-revised-prompt`, `image-result-size`, `image-result-quality`,
   `image-result-cost`) and returns a reference the model may see. It returns NIL and registers
   nothing when there is no key; the key is `:api-key` when given, otherwise
-  `PRAXEON_IMAGE_API_KEY`, then `PRAXEON_OPENAI_API_KEY`; an `:api-key` of `""` is no key and is
+  `PRAXEON_OPENAI_API_KEY`, then the deprecated `PRAXEON_IMAGE_API_KEY` (see "An app may have to
+  act"); an `:api-key` of `""` is no key and is
   logged at warn. `:qualities` (for example `'(:low :medium)`), `:default-quality` and
   `:default-size` bound what an image can cost: the tool schema offers only the allowed qualities,
   and a call asking for another is refused before any request. A 429, a 5xx, or no answer within
@@ -784,6 +829,26 @@ its tag.
   request emits no `:image-usage`. `generate-image` calls a provider outside a turn.
   `praxeon/llm` now exports `request-failure`, the #719 mapping of a failed HTTP request to
   `provider-request-failed`.
+
+- **praxeon/image: Google's Gemini API as a second image provider** (#758, part four).
+  `praxeon/image:register-google-image` takes the same arguments as `register-openai-image`;
+  `make-google-images` and `google-images-from-env` build the provider. The key is `:api-key`,
+  else `PRAXEON_GOOGLE_API_KEY`, then `GEMINI_API_KEY`; it never reads `PRAXEON_IMAGE_API_KEY`
+  or `PRAXEON_OPENAI_API_KEY`, so a key set up for OpenAI is not sent to Google. The default
+  model is `gemini-nano-banana-2.1` (`*google-image-model*`, or `PRAXEON_GOOGLE_IMAGE_MODEL`);
+  `gemini-3.1-flash-lite-image` is the low-cost model, 1K images only. Requests go to
+  `generateContent` at v1. A shape is sent as an aspect ratio and a quality as a resolution
+  (low 1K, medium 2K, high 4K), so `:qualities` also bounds resolution. Reference images are
+  sent inline, up to 14; Google takes no mask and makes one image per request, and a request
+  with a mask or `:count` above 1 is refused with `image-input-invalid`. A blocked prompt or an
+  image stopped for safety is `image-refused`; a reply with no image for another reason is the
+  new `praxeon/image:image-not-made` (`image-not-made-reason`), a `tool-error-result`.
+  `:image-usage` carries an estimated `:cost` from `*google-image-prices*` (four models, dated in
+  `upstream.sexp` as "Google image prices: MODEL") and the reply's token counts. New generic
+  functions `image-provider-max-references` and `image-provider-accepts-mask-p` say what a
+  provider takes. Like `register-openai-image`, `register-google-image` takes
+  `:requires-user-intent`, which defaults to true (#827); pass NIL to allow an image after a
+  web page or search result was read in the turn.
 
 - **praxeon/image: edit an image, or make a variation of it, from reference images** (#758, part
   three). `praxeon/image:generate-image` takes `:references`, a list of up to 16
@@ -1577,6 +1642,15 @@ its tag.
   leads it. A `<meta>` charset in which ASCII is not one byte per character, such as utf-16le
   or utf-32le, is read as UTF-8, because the tag could not have been found otherwise; a charset
   named in `Content-Type` keeps its meaning.
+
+- **aion/http-client: a `request` prints without its secrets** (#844). It printed every slot, so a
+  backtrace or a debugger that showed a request on the stack showed its headers, an
+  `authorization` or `x-goog-api-key` value among them, and its body. It now prints its method,
+  its URL with each query value and any user and password replaced by `<hidden>`, each header's
+  name with its value replaced by `<hidden>`, and the body's size. Every header value is hidden,
+  not only known ones. Code that read a request's printed form for its headers should read
+  `request-headers` instead.
+
 - **hermes: six corrections to the Telegram backend** (#788, follow-ups to #778).
   - A refusal whose `description` is not a string is reported with its class and the response
     body as detail. Before, it signalled a `type-error`.

@@ -6,10 +6,12 @@ Lisp, and porting between platforms a non-event — over the raw bindings aion p
 *Hades, who rules a realm nobody visits willingly and everybody eventually needs.* Windows is
 first, being furthest from POSIX; macOS and Linux are peers, not afterthoughts.
 
-> **Status: one facade.** The charter is [ADR-0001](docs/adr/0001-charter.md).
-> `hades/single-instance` (#305) is the first code: a per-user, per-directory lock that the
-> operating system holds and releases when the process ends. The service lifecycle facade is
-> still blocked on `aion/windows/service`, which does not exist yet.
+> **Status: three facades.** The charter is [ADR-0001](docs/adr/0001-charter.md).
+> `hades/single-instance` (#305) is a per-user, per-directory lock that the operating system
+> holds and releases when the process ends; `hades/credentials` (#357) keeps secrets in the
+> operating system's store; `hades/notify` (#819) shows a modal notice before an app has a
+> window. The service lifecycle facade is still blocked on `aion/windows/service`, which does
+> not exist yet.
 
 ## The two contracts, kept distinct
 
@@ -82,3 +84,36 @@ operating system's own store, never in a file:
 Windows the store is Credential Manager, per user and encrypted by DPAPI. The macOS Keychain and
 the Linux Secret Service backends are not written yet, and there every call signals
 `credential-store-unavailable` rather than storing anywhere else (#357).
+
+## A notice before the app has a window
+
+`hades/notify:notify-user` shows a blocking, modal notice with one OK button, and needs no window
+of the app's own. The case it was written for is a second launch, which on macOS and on a Linux
+desktop has no console, so a message on standard error reaches nobody:
+
+```lisp
+(hades/single-instance:with-single-instance
+    ("wordcrafter" :on-busy (lambda ()
+                              (hades/notify:notify-user "Wordcrafter" "Wordcrafter is already running.")
+                              (uiop:quit 0)))
+  (hyperion/desktop:run-app app ...))
+```
+
+| | shows the notice with | writes to standard error instead when |
+|---|---|---|
+| Windows | `MessageBoxW` | the process is in session 0, where services run |
+| macOS | `/usr/bin/osascript` and `display alert`; no permission prompt | |
+| Linux | `zenity`, else `kdialog`, from `PATH` | neither `DISPLAY` nor `WAYLAND_DISPLAY` is set, or neither program is installed |
+
+On every system it also writes to standard error when `CI` is set, in an SSH session
+(`SSH_CONNECTION` or `SSH_TTY`), when the native notice fails, and when
+`hades/notify:*notify-backend*` is `:stderr`, which an app binds under `--self-test`. In none of
+those cases does it wait. It returns `:native` or `:stderr`, with the reason for `:stderr` as a
+second value (`:requested`, `:ci`, `:ssh`, `:session-0`, `:no-display`, `:no-program` or
+`:failed`), so the caller can tell that nobody saw a dialog. The text is passed to `osascript`,
+`zenity` and `kdialog` as program arguments, never through a shell or into a script; `zenity` gets
+`--no-markup`. `kdialog` shows text that looks like HTML as rich text.
+
+The tests check each platform's decision on every platform without showing a window.
+`(hades/notify/tests:run-native-tests)` shows one real notice per level, by hand at a screen
+(#819).
