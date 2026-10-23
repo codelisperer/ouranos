@@ -317,9 +317,11 @@ jobs:
         if: runner.os == 'macOS'
         run: ./scripts/verify-bundle-macos.sh --seconds 20 --require-carried libuv "dist/Coalton REPL.app"
 
-      # The app needs Homebrew's OpenSSL to start (#191), and the image's default OpenSSL
-      # can change between images (#763). This prints which OpenSSL formulas the image has;
-      # verify-bundle-macos.sh prints the libssl and libcrypto the app actually loaded.
+      # The app loads no OpenSSL of its own (#783), and verify-bundle-macos.sh above fails a
+      # bundle in which any process loaded a libssl or libcrypto the bundle does not carry,
+      # except Apple's copy that WebKit loads in hyperion-view. This prints which OpenSSL
+      # formulas the image has, so that such a failure can be read against them; the image's
+      # default OpenSSL can change between images (#763).
       - name: Report Homebrew's OpenSSL (macOS)
         if: runner.os == 'macOS'
         run: |
@@ -561,7 +563,7 @@ jobs:
             "" \
             "A platform not listed has no download here, and installed copies on it are not offered this version." \
             "" \
-            "macOS (macos-arm64): this release carries the update payload that installed copies download (.app.tar.gz). The drag-to-install .dmg is built but not attached here. The macOS build needs Homebrew's OpenSSL to start, and a Mac without it cannot run the app (#191).")
+            "macOS (macos-arm64): this release carries the update payload that installed copies download (.app.tar.gz). The drag-to-install .dmg is built but not attached here. The macOS build does not need Homebrew's OpenSSL: the release check fails a build that loads an OpenSSL it does not carry (#783).")
           # --latest=false: this repository's "Latest release" is the framework's, and an app's
           # release must not take it over. Installed copies never read it; they poll the
           # channel pointer below.

@@ -33,6 +33,21 @@ its tag.
   `hyperion/static:file-etag` returns NIL for a file that is not a regular file, and on Linux
   and macOS it reads the size and time with `stat` instead of opening the file.
 
+- **`scripts/verify-bundle-macos.sh` fails a bundle in which a process loaded a libssl or
+  libcrypto that the bundle does not carry** (#783). Before, it printed the OpenSSL libraries it
+  saw as information only, and it counted every library whose path dyld printed as loaded. On
+  current macOS dyld prints the path of Apple's `/usr/lib/libssl.48.dylib` and
+  `/usr/lib/libcrypto.46.dylib` even for a process that never uses them, followed by
+  `move loaded to delayed`. The script now judges each library by its last dyld state, through
+  the new `scripts/check-dyld-log.lisp`, and names the process that loaded it. Apple's
+  `/usr/lib` copy in `hyperion-view` passes, because WebKit loads it. An app whose image loads
+  cl+ssl, for example through `aion/http-client`, reopens the build machine's OpenSSL at startup
+  (#191), and its macOS bundle now fails this check until it carries libssl and libcrypto
+  (`scripts/carry-natives.lisp`, `--carry`). The Coalton REPL example loads no OpenSSL, and the
+  release note `desktop-release.yml` writes no longer says the macOS build needs Homebrew's
+  OpenSSL.
+
+
 - **hades/credentials: on Linux, `store-credential`, `fetch-credential` and `delete-credential`
   use the Secret Service instead of always signalling `credential-store-unavailable`** (#357).
   Items go into the default collection of whichever program provides the Secret Service on the

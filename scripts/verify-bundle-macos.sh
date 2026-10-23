@@ -240,14 +240,23 @@ if ! grep -q "dyld" "$LOG"; then
   FAILED=1
 fi
 
+# WHICH LIBRARIES WERE LOADED is each library's LAST dyld state, not whether dyld printed its
+# path (#783). On current macOS dyld prints a path line for libraries in its shared cache that
+# the process never uses, Apple's libssl among them, and then `move loaded to delayed'.
+# check-dyld-log.lisp reads both and prints one line per library still loaded: pid, process
+# and path, separated by tabs.
+DYLD_CHECK="$(cd "$(dirname "$0")" && pwd)/check-dyld-log.lisp"
+LOADED=$(sbcl --script "$DYLD_CHECK" loaded "$LOG")
+TAB=$(printf '\t')
+
 # Every carried .dylib must have been loaded FROM THE BUNDLE. This is the check that a bare
 # exit code cannot make: without it a pass may mean the app silently used Homebrew's copy.
 for lib in $CARRIED; do
-  if grep -q "$DIR/$lib" "$LOG"; then
+  if echo "$LOADED" | grep -qF "$TAB$DIR/$lib"; then
     echo "  ok -- $lib loaded from the bundle"
-  elif grep -q "$lib" "$LOG"; then
+  elif echo "$LOADED" | grep -qF "/$lib"; then
     echo "  FAIL -- $lib was loaded from OUTSIDE the bundle:"
-    grep "$lib" "$LOG" | grep dyld | head -2 | sed 's/^/         /'
+    echo "$LOADED" | grep -F "/$lib" | head -2 | sed 's/^/         /'
     FAILED=1
   else
     if is_required "$lib"; then
@@ -259,15 +268,12 @@ for lib in $CARRIED; do
   fi
 done
 
-# Which OpenSSL the app loaded, for the record. It comes from Homebrew, not the bundle (#191),
-# and its major version can change with the build image (#763). Not a pass or fail.
-SSL=$(grep -E 'libssl\.|libcrypto\.' "$LOG" | grep dyld | sed 's/^.*dyld[^/]*//' | grep -v '^ *$' | sort -u || true)
-if [ -n "$SSL" ]; then
-  echo "  info -- OpenSSL loaded from:"
-  echo "$SSL" | sed 's/^/         /'
-else
-  echo "  info -- no libssl or libcrypto was loaded on this run"
-fi
+# No process the bundle starts may have a libssl or libcrypto loaded that the bundle does not
+# carry (#783). The app's Lisp image loads OpenSSL only through cl+ssl, and a bundle that does
+# so reopens the build machine's copy at startup, which a Mac without it does not have (#191).
+# The one exception is Apple's /usr/lib copy in hyperion-view: WebKit loads it through Apple's
+# libcurl, and the app has no say in that.
+sbcl --script "$DYLD_CHECK" openssl "$LOG" "$DIR" || FAILED=1
 
 # --- check 3: the control, for linked libraries only -----------------------------------
 # Decisive on any machine: @executable_path has no fallback. Skipped for dlopen'd libraries,
