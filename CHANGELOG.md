@@ -501,6 +501,18 @@ its tag.
 
 ### Added
 
+- **hades/credentials: ask whether a credential store is available, and its name, without
+  trying an operation** (#824). `hades/credentials:credential-store-available-p` (`&key
+  service`) is true when this system has a usable store and NIL otherwise, with a reason as a
+  second value. It never prompts, never writes and never creates an item: on Windows it reads an
+  item that does not exist and is false when the logon session has no credential store; on macOS
+  it is true wherever the Keychain backend is built, without querying the Keychain, which can
+  prompt when locked; on Linux it is false until #357 adds the Secret Service backend.
+  `hades/credentials:credential-store-name` is "Windows Credential Manager", "macOS Keychain",
+  or NIL where there is no store. An app that probed with a `fetch-credential` of a dummy
+  account and caught `credential-store-unavailable` can call these instead. `service` is
+  accepted and not used yet.
+
 - **hermes/blob: reads return the blob's ETag and take `:if-match`, so the bytes served are the
   version checked** (#826). The new generic `open-blob` (`store bucket key &key if-match`) returns
   the stream and the blob's `blob-meta` (ETag, size, content type, `Last-Modified`, checksum);
