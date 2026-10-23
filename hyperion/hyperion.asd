@@ -106,6 +106,7 @@
                               :components ((:file "cldr-plurals")))  ; GENERATED, pinned
                              (:file "plural")   ; CLDR operand model + rule evaluator
                              (:file "i18n")     ; locale dictionaries + negotiation
+                             (:file "page-meta") ; Open Graph + Twitter-card tags (#821); after i18n
                              (:file "consent")  ; cookie/tracking consent (GDPR/ePrivacy)
                              (:file "static")   ; static asset serving
                              (:file "markdown") ; Markdown -> HTML (safe by default)
@@ -688,5 +689,6 @@
                              (:file "logging-tests")
                              (:file "import-tests")
                              (:file "markdown-tests")
-                             (:file "html-attributes-tests"))))
+                             (:file "html-attributes-tests")
+                             (:file "page-meta-tests"))))  ; after i18n-tests, whose %ATTR-P it uses
   :perform (test-op (op c) (uiop:symbol-call :hyperion/tests :run-tests)))
