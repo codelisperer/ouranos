@@ -14,7 +14,7 @@
 
 (defpackage #:ouranos-not-covered
   (:use #:cl)
-  (:export #:print-not-covered))
+  (:export #:print-not-covered #:missing-backend-reports))
 
 (in-package #:ouranos-not-covered)
 
@@ -24,9 +24,10 @@
 DECLINED is the list of optional-axis entries this run did not include, each
 (name predicate disclose). DISCLOSE is called with NAME and prints that axis's own line or
 lines, because each axis states its own cause (see +OPTIONAL-AXES+ in verify-tree.lisp).
-EXCUSED is a list of (suite . reason), in the order the suites ran, for each suite whose
-Postgres checks were skipped and excused by OURANOS_ALLOW_NO_PG. TAG is the axis
-coordinate, such as \"base+uv+view\".
+EXCUSED is a list of (suite backend reason variable), in the order the suites ran, for each
+suite whose checks of BACKEND were skipped and excused by VARIABLE: Postgres by
+OURANOS_ALLOW_NO_PG, the credential store by OURANOS_ALLOW_NO_CREDENTIAL_STORE (#357). TAG is
+the axis coordinate, such as \"base+uv+view\".
 
 Printed ALWAYS, including when nothing was declined -- on the PLATFORM block's principle.
 A block that appears only when there is bad news teaches readers that its absence means
@@ -40,17 +41,37 @@ that named the cause was fine while there was one cause. Each entry now says its
 A SKIPPED POSTGRES IS LISTED HERE TOO, when OURANOS_ALLOW_NO_PG excused it (#171). Without
 the excuse the run fails, so this only happens on a run that passed. Until this was added,
 such a run printed \"nothing declined\" here while suites that need Postgres had skipped
-their checks, and the only sign was one NOTE line in the summary."
+their checks, and the only sign was one NOTE line in the summary. A skipped credential store,
+excused by OURANOS_ALLOW_NO_CREDENTIAL_STORE, is listed the same way (#357)."
   (let ((*standard-output* stream))
     (format t "~%========== NOT COVERED ==========~%")
     (if (null declined)
         (if excused
-            (format t "  every optional axis ran (~a), but Postgres did not:~%" tag)
+            (format t "  every optional axis ran (~a), but some backends did not:~%" tag)
             (format t "  nothing declined -- every optional axis ran (~a)~%" tag))
         (dolist (entry declined)
           (destructuring-bind (name pred disclose) entry
             (declare (ignore pred))
             (funcall disclose name))))
-    (dolist (cell excused)
-      (format t "  off     postgres in ~a~34t~a~%" (car cell) (cdr cell))
-      (format t "          OURANOS_ALLOW_NO_PG excused it. Its Postgres checks did not run and are NOT in the total below.~%"))))
+    (dolist (entry excused)
+      (destructuring-bind (suite backend reason variable) entry
+        (format t "  off     ~a in ~a~34t~a~%" backend suite reason)
+        (format t "          ~a excused it. Its ~a checks did not run and are NOT in the total below.~%"
+                variable backend)))))
+
+(defun missing-backend-reports (suite host coverage required)
+  "The problems with SUITE, run on HOST, whose output gave COVERAGE (an alist of (backend . value)
+from its BACKEND-CHECKS lines): one string for each backend REQUIRED says this suite must report
+on this host and COVERAGE does not mention. REQUIRED is a list of (SUITE BACKEND &key HOSTS),
+where HOSTS is a list of HOST values, such as :WINDOWS and :DARWIN, or absent for every host.
+
+The per-backend rules judge a BACKEND-CHECKS line that is there. This catches the line that is
+not: a suite that stops printing it, because a reader guard or its test-op changed, would
+otherwise pass with none of that backend's checks run, and nothing would say so (#603)."
+  (loop for (want-suite backend . options) in required
+        for hosts = (getf options :hosts)
+        when (and (eq suite want-suite)
+                  (or (null hosts) (member host hosts))
+                  (not (assoc backend coverage :test #'string=)))
+          collect (format nil "printed no BACKEND-CHECKS ~a line, which it must on ~(~a~)"
+                          backend (or host "this host"))))

@@ -14,6 +14,23 @@ its tag.
 
 ### An app may have to act
 
+- **hades/credentials: the live tests use the real credential store only when
+  `OURANOS_TEST_REAL_CREDENTIAL_STORE=1` is set, and `scripts/verify-tree.lisp` on Windows and
+  macOS fails unless that or `OURANOS_ALLOW_NO_CREDENTIAL_STORE=1` is set** (#357, #603). The
+  live tests store, read and delete items in the Credential Manager or login Keychain of whoever
+  runs them. CI sets the first variable, because a runner's store is discarded with the runner.
+  Without it, `hades/credentials/tests` prints `BACKEND-CHECKS credential-store SKIPPED`, and the
+  gate fails that skip unless `OURANOS_ALLOW_NO_CREDENTIAL_STORE=1` excuses it, the same way
+  `OURANOS_ALLOW_NO_PG` excuses a skipped Postgres. An excused skip is listed under NOT COVERED and
+  its checks are not in the total. On a developer's machine, set the first variable to run the
+  live tests against your own store, or the second to skip them. The live tests touch only items
+  whose service starts with `ouranos-test-hades-credentials/` and delete each one; a `leftovers`
+  suite fails if any remains. Linux is unaffected until #357's Linux backend lands. The gate also
+  now fails a suite that prints no `BACKEND-CHECKS` line for a backend it must report
+  (`+required-backend-reports+`): `credential-store` for `hades/credentials/tests` on Windows and
+  macOS, and `postgres` for the mnemosyne and praxeon database suites on every host. Before, a
+  missing line passed, so a suite whose reporting broke went green with none of those checks run.
+
 - **praxeon/image: `PRAXEON_IMAGE_API_KEY` is deprecated; set `PRAXEON_OPENAI_API_KEY`** (#758,
   part four). Its name does not say which vendor the key is for, and with a second image
   provider a Google key put there would be sent to OpenAI. The OpenAI image provider
