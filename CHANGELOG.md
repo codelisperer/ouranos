@@ -501,6 +501,19 @@ its tag.
 
 ### Added
 
+- **aion/fs: make a directory link or a file link without a shell** (#825).
+  `aion/fs:make-directory-link` (`link target`) makes a junction on Windows, which needs no
+  administrator rights and no Developer Mode, and a symbolic link on macOS and Linux.
+  `aion/fs:make-file-link` (`link target`) makes a symbolic link; on Windows that needs Developer
+  Mode or the symbolic-link privilege, and without either it signals
+  `aion/fs:link-not-permitted`. Both return the link, which `link-p` sees and `delete-link`
+  removes without touching the target. A failure signals `aion/fs:link-error`
+  (`link-error-target`, `link-error-operation`, `link-error-code`) and leaves nothing at the
+  link's path: when the link already exists (`:exists`), when the target is missing
+  (`:target-missing`) or of the wrong kind (`:target-not-a-directory`, `:target-not-a-file`), or
+  when the operating system refuses (its own error code). An app's tests that made links with
+  `cmd /c mklink /J` or `ln -s` can call these instead.
+
 - **hermes/blob: reads return the blob's ETag and take `:if-match`, so the bytes served are the
   version checked** (#826). The new generic `open-blob` (`store bucket key &key if-match`) returns
   the stream and the blob's `blob-meta` (ETag, size, content type, `Last-Modified`, checksum);
