@@ -236,8 +236,11 @@ many times it ran."
          (coordinator (%guard-agent (%calls (list "researcher" (%args "task" "read docs.example.com")))
                                     (%calls (list "buy" (%args "item" "x")))))
          (runs (%spender coordinator)))
-    (wp:register sub reader)
+    ;; The reader is registered after the delegation means, so that means is not marked
+    ;; untrusted and the refusal comes from what the sub-agent's turn read.
     (actor:register-agent-as-means coordinator sub :name "researcher")
+    (wp:register sub reader)
+    (is-false (actor:means-entry-untrusted (gethash "researcher" (actor:agent-means coordinator))))
     (actor:run-turn coordinator "Look into docs.example.com")
     (is (= 1 (length (stub-reader-read reader))))
     (is (= 0 (funcall runs)))))
@@ -340,3 +343,165 @@ calls were held."
 
 (test registering-a-reader-with-allow-does-not-warn
   (is (string= "" (%registration-log :allow #'wp:user-or-search-urls))))
+
+;;; --- review of #838: read-result, taint scope, delegation, file names, IDN ------------
+
+(defun %offloading-agent (&rest steps)
+  "A %GUARD-AGENT for STEPS that keeps every tool result in a memory store. Returns the agent
+and its provider, so a test can queue the next turn's completions once it knows a handle."
+  (let ((ag (apply #'%guard-agent steps)))
+    (actor:offload-tool-results ag (res:make-memory-result-store) :threshold 1)
+    (values ag (actor:agent-provider ag))))
+
+(defun %stored-handles (fn)
+  "Run FN. Returns the handles of the results it stored, oldest first."
+  (let ((handles '()))
+    (evt:with-observer ((lambda (e) (when (eq :result-stored (evt:event-type e))
+                                      (push (evt:event-get e :handle) handles))))
+      (funcall fn))
+    (reverse handles)))
+
+(defun %read-back-then-pay (provider handle)
+  "Queue on PROVIDER a turn that reads HANDLE back with read-result, then pays."
+  (setf (scripted-script provider)
+        (list (%calls (list "read-result" (%args "handle" handle)))
+              (%calls (list "pay" (%args "item" "x")))
+              (llm:make-completion :text "Done." :stop-reason :end))))
+
+(test reading-back-a-stored-page-in-a-later-turn-makes-that-turn-untrusted
+  (let ((reader (make-instance '%stub-reader)))
+    (multiple-value-bind (ag provider)
+        (%offloading-agent (%calls (list "read-web-page" (%args "url" "https://docs.example.com/"))))
+      (wp:register ag reader)
+      (let ((runs (%confirmed-spender ag))
+            (handle (first (%stored-handles (lambda () (%approving ag "Read docs.example.com"))))))
+        (is-true (stringp handle) "The page was stored.")
+        (%read-back-then-pay provider handle)
+        (is (= 0 (%approving ag "Thanks")) "The payment was refused, not held.")
+        (is (= 0 (funcall runs)))
+        (is-true (actor:turn-untrusted-p ag))))))
+
+(test reading-back-a-trusted-result-leaves-the-turn-trusted
+  ;; The control for the test above: read-result passes on its source's mark, and does not
+  ;; mark every read.
+  (multiple-value-bind (ag provider)
+      (%offloading-agent (%calls (list "look" (%args "q" "x"))))
+    (actor:register-means ag "look" "Look something up." (lambda (args) (declare (ignore args)) "Found."))
+    (let ((runs (%confirmed-spender ag))
+          (handle (first (%stored-handles (lambda () (%approving ag "Look up x"))))))
+      (is-true (stringp handle))
+      (%read-back-then-pay provider handle)
+      (is (= 1 (%approving ag "Now pay")))
+      (is (= 1 (funcall runs))))))
+
+(test a-rebuilt-guard-counts-read-result-as-untrusted
+  (multiple-value-bind (ag provider)
+      (%offloading-agent (%calls (list "look" (%args "q" "x"))))
+    (actor:register-means ag "look" "Look something up." (lambda (args) (declare (ignore args)) "Found."))
+    (let ((handle (first (%stored-handles (lambda () (actor:run-turn ag "Look up x"))))))
+      (setf (scripted-script provider)
+            (list (%calls (list "read-result" (%args "handle" handle)))
+                  (llm:make-completion :text "Done." :stop-reason :end)))
+      (actor:run-turn ag "Show it")
+      (setf (actor::agent-guard ag) nil)
+      (is-true (actor:turn-untrusted-p ag) "Its source cannot be told from the history."))))
+
+(defun %read-then-pay-agent (scope)
+  "An agent with taint scope SCOPE that reads a page in its first turn and pays in its second."
+  (let ((ag (%guard-agent (%calls (list "read-web-page" (%args "url" "https://docs.example.com/")))
+                          (llm:make-completion :text "Read it." :stop-reason :end)
+                          (%calls (list "pay" (%args "item" "x"))))))
+    (setf (actor:agent-taint-scope ag) scope)
+    (wp:register ag (make-instance '%stub-reader))
+    ag))
+
+(test with-conversation-taint-scope-a-later-turn-starts-untrusted
+  (let* ((ag (%read-then-pay-agent :conversation))
+         (runs (%confirmed-spender ag)))
+    (%approving ag "Read docs.example.com")
+    (is (= 0 (%approving ag "Now pay")) "The payment was refused, not held.")
+    (is (= 0 (funcall runs)))
+    (is-true (actor:turn-untrusted-p ag))
+    (setf (actor::agent-guard ag) nil)
+    (is-true (actor:turn-untrusted-p ag) "A rebuilt guard keeps the conversation's taint.")))
+
+(test with-turn-taint-scope-a-later-turn-starts-trusted
+  (let* ((ag (%read-then-pay-agent :turn))
+         (runs (%confirmed-spender ag)))
+    (is (eq :turn (actor:agent-taint-scope (actor:make-agent :name "d"))) "The default.")
+    (%approving ag "Read docs.example.com")
+    (is (= 1 (%approving ag "Now pay")))
+    (is (= 1 (funcall runs)))))
+
+(test an-unknown-taint-scope-is-refused
+  (let ((ag (%guard-agent)))
+    (setf (actor:agent-taint-scope ag) :forever)
+    (signals error (actor:run-turn ag "Hello"))))
+
+(test a-steered-coordinator-cannot-grow-a-sub-agents-allow-list
+  ;; Turn 1 reads a page. Turn 2 starts clean (the default scope), and the page still in the
+  ;; history steers the coordinator to delegate a read of the attacker's URL. The task names
+  ;; that URL, but it is the coordinator's text, so the sub-agent may open only what the user
+  ;; named.
+  (let* ((page-reader (make-instance '%stub-reader))
+         (sub-reader (make-instance '%stub-reader))
+         (sub (%guard-agent (%calls (list "read-web-page" (%args "url" "https://attacker.example/x")))
+                            (llm:make-completion :text "Could not." :stop-reason :end)
+                            (%calls (list "read-web-page" (%args "url" "https://docs.example.com/guide")))))
+         (coordinator (%guard-agent
+                       (%calls (list "read-web-page" (%args "url" "https://docs.example.com/")))
+                       (llm:make-completion :text "Read it." :stop-reason :end)
+                       (%calls (list "researcher" (%args "task" "read https://attacker.example/x")))
+                       (%calls (list "researcher" (%args "task" "read the guide"))))))
+    (wp:register coordinator page-reader)
+    (wp:register sub sub-reader :allow #'wp:user-or-search-urls)
+    (actor:register-agent-as-means coordinator sub :name "researcher")
+    (actor:run-turn coordinator "Read docs.example.com")
+    (actor:run-turn coordinator "Thanks")
+    (is (equal '("https://docs.example.com/guide") (stub-reader-read sub-reader))
+        "The attacker's URL was refused; the host the user named was opened.")
+    (is (null (actor:user-texts sub)) "Neither task counts as the user's text.")))
+
+(test a-sub-agent-that-can-read-pages-is-an-untrusted-means
+  (let ((sub (%guard-agent))
+        (plain (%guard-agent))
+        (coordinator (%guard-agent)))
+    (wp:register sub (make-instance '%stub-reader))
+    (actor:register-agent-as-means coordinator sub :name "researcher")
+    (actor:register-agent-as-means coordinator plain :name "helper")
+    (is-true (actor:means-entry-untrusted (gethash "researcher" (actor:agent-means coordinator))))
+    (is-false (actor:means-entry-untrusted (gethash "helper" (actor:agent-means coordinator))))))
+
+(test a-guard-rebuilt-after-a-delegated-read-is-untrusted
+  (let* ((sub (%guard-agent (%calls (list "read-web-page" (%args "url" "https://docs.example.com/")))))
+         (coordinator (%guard-agent (%calls (list "researcher" (%args "task" "read docs.example.com"))))))
+    (wp:register sub (make-instance '%stub-reader))
+    (actor:register-agent-as-means coordinator sub :name "researcher")
+    (actor:run-turn coordinator "Look into docs.example.com")
+    (setf (actor::agent-guard coordinator) nil)
+    (is-true (actor:turn-untrusted-p coordinator))))
+
+(defun %allowed-by (text url)
+  "Whether USER-OR-SEARCH-URLS allows URL for an agent whose user wrote TEXT."
+  (let ((ag (actor:make-agent :name "p" :provider (make-instance 'scripted :script '()))))
+    (setf (actor:agent-history ag) (list (llm:msg "user" text)))
+    (wp:user-or-search-urls url ag)))
+
+(test a-file-name-in-the-users-text-is-not-a-host
+  (is-false (%allowed-by "Fix the bug in main.rs" "https://main.rs/"))
+  (is-false (%allowed-by "See README.md, then setup.py" "https://readme.md/"))
+  (is-false (%allowed-by "See README.md, then setup.py" "https://setup.py/"))
+  (is-true (%allowed-by "Read allegro.pl/oferty" "https://allegro.pl/") "A path follows the host.")
+  (is-true (%allowed-by "Read www.example.md" "https://www.example.md/") "It starts with www.")
+  (is-true (%allowed-by "Read https://main.rs/" "https://main.rs/") "A URL with a scheme.")
+  (is-true (%allowed-by "Read example.com" "https://example.com/") "A TLD that is no file extension."))
+
+(test an-internationalised-host-is-compared-in-its-xn-form
+  ;; quri turns a non-ASCII host in a URL into its xn-- form, so a URL written either way names
+  ;; one host. A bare host in non-ASCII letters is not taken as a host at all: it fails closed.
+  (is-false (%allowed-by "Read bücher.example" "https://xn--bcher-kva.example/"))
+  (is-false (%allowed-by "Read bücher.example" "https://bücher.example/"))
+  (is-true (%allowed-by "Read https://bücher.example/" "https://xn--bcher-kva.example/a"))
+  (is-true (%allowed-by "Read xn--bcher-kva.example" "https://bücher.example/"))
+  (is-false (%allowed-by "Read xn--bcher-kva.example" "https://xn--bcher-kvb.example/")
+            "One letter apart in the xn-- form is another host."))

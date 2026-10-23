@@ -490,22 +490,38 @@ instructions.")
             (and port (/= port (if (equal "https" (quri:uri-scheme uri)) 443 80)) port))
           (or (quri:uri-path uri) "/") (quri:uri-query uri)))
 
+(defparameter *file-extension-tlds*
+  '("c" "cfg" "cpp" "css" "csv" "doc" "docx" "exe" "gif" "go" "gz" "h" "htm" "html" "ini"
+    "java" "jpeg" "jpg" "js" "json" "lisp" "lock" "log" "md" "mov" "mp3" "mp4" "pdf" "php"
+    "pl" "png" "py" "rb" "rs" "sh" "sql" "svg" "tar" "toml" "ts" "txt" "xls" "xlsx" "xml"
+    "yaml" "yml" "zip")
+  "File extensions that are also, or could become, top-level domains. A bare word ending in
+one, such as main.rs or README.md, is far more often a file name than a host, so %BARE-HOST
+takes it as a host only when it starts with www. or a path follows the host.")
+
 (defun %bare-host (token)
   "TOKEN, a word from the user's text such as example.com or docs.example.com/guide, as a
-lowercase host when it looks like one: at least two dot-separated labels of letters, digits
-and hyphens, the last of two or more letters. NIL otherwise."
+lowercase host when it looks like one: at least two dot-separated labels of ASCII letters,
+digits and hyphens, the last of two or more letters. When the last label is a file extension
+in *FILE-EXTENSION-TLDS*, TOKEN must also start with www. or have a / after the host. NIL
+otherwise, which includes a host written in non-ASCII letters: the user names that one with
+its xn-- form or a full URL."
   (let* ((end (or (position-if (lambda (c) (member c '(#\/ #\: #\? #\#))) token)
                   (length token)))
          (host (string-right-trim "." (string-downcase (subseq token 0 end))))
-         (parts (uiop:split-string host :separator ".")))
+         (parts (uiop:split-string host :separator "."))
+         (tld (car (last parts))))
     (when (and (>= (length parts) 2)
                (every (lambda (l)
                         (and (plusp (length l))
                              (every (lambda (c) (or (char<= #\a c #\z) (digit-char-p c) (char= c #\-)))
                                     l)))
                       parts)
-               (let ((tld (car (last parts))))
-                 (and (>= (length tld) 2) (every #'alpha-char-p tld))))
+               (>= (length tld) 2)
+               (every (lambda (c) (char<= #\a c #\z)) tld)
+               (or (not (member tld *file-extension-tlds* :test #'string=))
+                   (string= "www" (first parts))
+                   (find #\/ token :start end)))
       host)))
 
 (defun %user-hosts (texts)

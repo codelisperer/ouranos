@@ -340,6 +340,7 @@
    #:means-entry-untrusted #:means-entry-requires-user-intent #:means-entry-allow
    #:means-entry-max-per-turn
    #:user-texts #:turn-untrusted-p #:turn-urls #:note-turn-urls #:mark-untrusted
+   #:agent-taint-scope
    ;; The accessors of what AGENT-MEANS-FOR returns. NAME and DESCRIPTION were missing, so an
    ;; app could enumerate the means it may use and not read them -- which is the
    ;; knowable-blast-radius property of ADR-0002 being exported in a form nobody can consume.

@@ -546,8 +546,15 @@ its tag.
   conversation, matched exactly with userinfo ignored, and URLs a web search returned in this
   turn before anything untrusted was read. `praxeon/actor:user-texts`, `turn-untrusted-p`,
   `turn-urls`, `note-turn-urls` and `mark-untrusted` let an app's own means and predicates use
-  the same guard. The praxeon README's section "Content the agent reads can carry
-  instructions" describes what this stops and what it does not.
+  the same guard. `read-result` makes the turn untrusted when the stored result it reads came
+  from an untrusted means. A task a coordinator delegates through `register-agent-as-means`
+  never counts in the sub-agent's `user-texts`; the coordinator's user texts count instead, and
+  the delegation means is `:untrusted` when the sub-agent has an untrusted means. A bare host
+  ending in a file extension (`main.rs`, `README.md`) counts in `user-or-search-urls` only after
+  `www.` or before a path. The new agent slot `taint-scope` (`agent-taint-scope`), `:turn` by
+  default, can be set to `:conversation` to start every later turn untrusted while untrusted
+  results remain in the history. The praxeon README's section "Content the agent reads can
+  carry instructions" describes what this stops and what it does not.
 - **hermes: `telegram-added-chats` lists the chats a Telegram bot was recently added to**
   (#794), so an app can find the id of a group or channel that operators share as a `t.me/+`
   invite link. It returns `telegram-added-chat` structures (`-id`, `-type`, `-title`, `-status`,
