@@ -218,7 +218,7 @@
   ;; taking a branch meant for the other.
   (:export #:sql #:fetch #:run #:parse #:*dialect*
            ;; identifiers and directions are checked before they are written into SQL (#860)
-           #:invalid-identifier #:invalid-identifier-text #:invalid-identifier-expected
+           #:invalid-identifier #:invalid-identifier-text #:invalid-identifier-expected #:invalid-identifier-clause
            #:+vector-distance-ops+ #:vector-distance-opclass
            #:*warn-unindexed-vector-distance* #:unindexed-vector-distance
            #:unindexed-vector-distance-operator #:unindexed-vector-distance-opclass))
