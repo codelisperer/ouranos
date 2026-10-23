@@ -15,6 +15,13 @@
 #     retried instead of waited on;
 #   - DPkg::Lock::Timeout, so a lock held by the runner's own apt does not hang the step;
 #   - an outer `timeout` per attempt, and up to three attempts with a pause between them.
+# Only the network part runs under that outer timeout. Packages are downloaded first, with
+# --download-only, which is safe to cut off and resumes from apt's cache on the next attempt.
+# They are then installed from the cache with --no-download, with no outer timeout: that part does
+# no network I/O, and cutting off dpkg while it unpacks or configures can leave packages
+# half-configured. A slow mirror on #880's first run hit the 240 s limit twice during an install.
+# `apt-get update` runs with --error-on=any: without it, update exits 0 even when every index
+# fails to download, so a stalled mirror was only noticed at the install.
 # The calling step also has its own timeout-minutes, so the worst case fails this step, with a
 # message, well inside the job's limit.
 #
@@ -44,7 +51,7 @@ with_retries() {
 
 start=$(date +%s)
 
-with_retries sudo apt-get "${apt_opts[@]}" update
+with_retries sudo apt-get "${apt_opts[@]}" update --error-on=any
 
 # The webkit package is chosen by asking apt, not by letting an install fail, so a missing 4.1
 # does not spend three attempts before 4.0 is tried.
@@ -54,9 +61,17 @@ else
   webkit=libwebkit2gtk-4.0-dev
 fi
 
-with_retries sudo apt-get "${apt_opts[@]}" install -y g++ pkg-config "$webkit"
-with_retries sudo apt-get "${apt_opts[@]}" install -y --no-install-recommends \
-  dbus gnome-keyring libsecret-1-0
+launcher=(g++ pkg-config "$webkit")
+keyring=(dbus gnome-keyring libsecret-1-0)
+
+# Network: download only, under the outer timeout and the retries.
+with_retries sudo apt-get "${apt_opts[@]}" install -y --download-only "${launcher[@]}"
+with_retries sudo apt-get "${apt_opts[@]}" install -y --download-only --no-install-recommends \
+  "${keyring[@]}"
+
+# Local: install what was downloaded, with no outer timeout (see the header).
+sudo apt-get "${apt_opts[@]}" install -y --no-download "${launcher[@]}"
+sudo apt-get "${apt_opts[@]}" install -y --no-download --no-install-recommends "${keyring[@]}"
 
 command -v dbus-run-session gnome-keyring-daemon g++ pkg-config >/dev/null
 
