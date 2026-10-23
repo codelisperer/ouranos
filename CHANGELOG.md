@@ -14,6 +14,20 @@ its tag.
 
 ### An app may have to act
 
+- **hades/credentials: on Linux, `store-credential`, `fetch-credential` and `delete-credential`
+  use the Secret Service instead of always signalling `credential-store-unavailable`** (#357).
+  Items go into the default collection of whichever program provides the Secret Service on the
+  D-Bus session bus (GNOME Keyring, KeePassXC), under the libsecret schema
+  `org.codelisperer.hades.Credential` with the attributes `service` and `account`, labelled
+  "SERVICE (ACCOUNT)". It needs `libsecret-1.so.0` at run time (`libsecret-1-0` on Debian and
+  Ubuntu); where that is missing, where there is no session bus, where nothing provides the
+  Secret Service, or where the keyring is locked, every call still signals
+  `credential-store-unavailable`, and `credential-store-unavailable-reason` says which. An app
+  that treated Linux as having no store, for example by catching that condition to hide a
+  setting, will now store the secret on a Linux desktop. An app shipped as an AppImage or other
+  bundle should not bundle libsecret: the one the desktop installs is the one that talks to its
+  keyring. A value is limited to 2560 UTF-8 bytes, as on Windows and macOS.
+
 - **praxeon/image: `PRAXEON_IMAGE_API_KEY` is deprecated; set `PRAXEON_OPENAI_API_KEY`** (#758,
   part four). Its name does not say which vendor the key is for, and with a second image
   provider a Google key put there would be sent to OpenAI. The OpenAI image provider
@@ -500,6 +514,20 @@ its tag.
   `claude-opus-5-5` where they named `claude-opus-4-8`.
 
 ### Added
+
+- **aion/libsecret: a Linux-only binding of libsecret for the Secret Service** (#357). The raw
+  calls are in `aion/libsecret/ffi`; `aion/libsecret` has `load-libsecret` (T, or NIL and the
+  reason), `with-libsecret-lock`, `with-schema`, `with-attributes`, `make-secret-value`,
+  `secret-value-octets`, `check-session-bus`, `check-secret-service`, and the condition
+  `libsecret-error` (domain, code, message) with `with-gerror` and `locked-error-p`. It depends
+  only on `cffi` and loads `libsecret-1.so.0` on first use, so it loads on a system without
+  libsecret. hades/credentials uses it; an app normally does not.
+
+- **`scripts/with-secret-service.sh COMMAND` runs COMMAND with a new GNOME Keyring on a private
+  D-Bus session bus**, unlocked with a random password that is never printed, and deletes the
+  keyring afterwards (#357). CI runs the Linux gate through it so the `hades/credentials` live
+  tests have a store; a developer can run them the same way without their own keyring being
+  touched.
 
 - **hermes/blob: reads return the blob's ETag and take `:if-match`, so the bytes served are the
   version checked** (#826). The new generic `open-blob` (`store bucket key &key if-match`) returns

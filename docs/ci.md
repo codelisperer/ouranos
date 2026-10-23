@@ -215,8 +215,11 @@ the leg.
 
 **Every leg sets `OURANOS_TEST_REAL_CREDENTIAL_STORE=1`**, in `verify.yml`'s job environment, and
 none sets `OURANOS_ALLOW_NO_CREDENTIAL_STORE`. The `hades/credentials` live tests use the real
-Credential Manager or Keychain of whoever runs them, so on a developer's machine they are opt-in
-(#357, [contributing.md](contributing.md)). A runner's store is thrown away with the runner, so
+Credential Manager, Keychain or Secret Service keyring of whoever runs them, so on a developer's
+machine they are opt-in (#357, [contributing.md](contributing.md)). On the Linux leg and the
+release-mode job, the gate runs through `scripts/with-secret-service.sh`, which starts a private
+session bus and a new GNOME Keyring unlocked with a random password that is never printed; the
+step before it installs `dbus`, `gnome-keyring` and `libsecret-1-0`. A runner's store is thrown away with the runner, so
 CI always opts in, and a leg where they were skipped fails the gate the way a skipped Postgres
 does.
 
