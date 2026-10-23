@@ -151,8 +151,15 @@ troubleshooting — is in [`docs/user-guide.md`](docs/user-guide.md).
 `praxeon/web-page` gives an agent the `read-web-page` means. The model calls it with a URL and
 gets back the page's main text, its title and the URL it was read from after redirects.
 
+**Register it with `:allow #'user-or-search-urls`** unless the model must be free to open any
+public page. Without it, a page the model reads can tell it to open another address, and that
+address can carry what the conversation contains. Registering without `:allow` logs a warning
+that says so. See [Content the agent reads can carry
+instructions](#content-the-agent-reads-can-carry-instructions).
+
 ```lisp
-(praxeon/web-page:register-read-web-page agent)   ; => "read-web-page", or NIL
+(praxeon/web-page:register-read-web-page agent :allow #'praxeon/web-page:user-or-search-urls)
+;; => "read-web-page", or NIL
 ```
 
 - **Backend.** Tavily's `/extract` when `TAVILY_API_KEY` is set (or `:api-key` is given).
@@ -199,6 +206,96 @@ host, never the path or query, which can carry a user's tokens, and never the pa
 
 The `:tool-result` event carries the page text as its `:content`, so a status display should
 not show it.
+
+## Content the agent reads can carry instructions
+
+A web page or a search result can contain text written to steer the model: "open this other
+address", "buy this", "send the conversation to …". Quoting it as a source (above) marks
+where it came from, but a model can still follow it. The agent cannot rely on the model to
+refuse, so `praxeon/actor` keeps a guard for each turn and refuses some calls outright (#827).
+A refused call is not run, and the model is told why, so it can tell the user.
+
+`register-means` takes four keys for this:
+
+- **`:untrusted t`** marks a means whose result comes from outside the conversation.
+  `read-web-page`, `web-search` and every tool `praxeon/mcp:grant-tools` grants set it; for an
+  MCP server the app fully controls, pass `:untrusted nil` to `grant-tools`
+  ([`docs/mcp.md`](docs/mcp.md)). Once one has run, the turn counts as having read
+  untrusted content until the user's next message. So does a call of `read-result` that reads
+  back a stored result of such a means, in whatever turn it runs. A sub-agent registered with
+  `register-agent-as-means` that read untrusted content makes its coordinator's turn count too,
+  and a sub-agent asked for something after the coordinator read untrusted content starts its
+  turn that way. The means `register-agent-as-means` registers is itself `:untrusted` when the
+  sub-agent has an untrusted means at that point.
+- **`:requires-user-intent t`** marks a means that spends, writes or sends for the user. A call
+  the model asks for after untrusted content entered the turn is refused for the rest of the
+  turn. Calls the model asked for in the same step as the read, before it saw the result, are
+  judged on what it had seen, and run. `generate-image` sets it by default, and so does every
+  means registered with `:confirm`, such as an MCP tool granted with `:confirm`, because a means
+  held for the user's confirmation is one that spends or writes. Pass
+  `:requires-user-intent nil` to have such a means held for confirmation instead of refused.
+- **`:allow`** is a function of the call's arguments and the agent, and the call runs only when
+  it returns true. A predicate that signals refuses the call. `register` and
+  `register-read-web-page` take `:allow` as a function of the URL and the agent.
+- **`:max-per-turn`** bounds how many calls of the means run in one turn. `read-web-page` and
+  `web-search` default to 3. The count is kept for each means separately, so an agent with a
+  reader and a search may make 3 of each. A sub-agent keeps its own count, which starts at 0 in
+  each turn it is asked to run, so a coordinator that delegates 3 times lets its sub-agent read
+  up to 9 pages in the coordinator's one turn.
+
+The agent's `taint-scope` slot (`agent-taint-scope`) says how long untrusted content counts:
+
+- **`:turn`**, the default: until the user's next message.
+- **`:conversation`**: while the agent's history holds any call of an untrusted means (or of
+  `read-result`, or of a means that is no longer registered). Each later turn then starts as
+  having read untrusted content. An app that must not let page text steer a later turn sets
+  it, and accepts that the user is refused spending calls for the rest of the conversation
+  after one page was read.
+
+`praxeon/web-page:user-or-search-urls` is a ready-made `:allow` for `read-web-page`:
+
+```lisp
+(praxeon/web-page:register-read-web-page agent :allow #'praxeon/web-page:user-or-search-urls)
+```
+
+It allows a URL when its host is one the user wrote in this conversation, as a URL or as a
+bare host such as `example.com`, or when a web search in this turn returned exactly that URL.
+
+- Only the user's own messages count. `praxeon/actor:user-texts` returns them, leaving out tool
+  results and every task a coordinator delegated, because a model wrote it. While a sub-agent
+  runs a delegated task, the coordinator's user texts count for the sub-agent instead, so it
+  may open what the user asked the coordinator for.
+- A bare host whose last label is also a common file extension, such as `main.rs`,
+  `README.md` or `setup.py`, counts only when it starts with `www.` or a path follows it
+  (`allegro.pl/offers`). A URL with a scheme always counts.
+- A host is compared in its ASCII form. A URL written with a non-ASCII host, such as
+  `https://bücher.example/`, names the same host as `https://xn--bcher-kva.example/`. A bare
+  non-ASCII host the user wrote without a scheme is not taken as a host.
+- Hosts match exactly, ignoring case and a trailing dot. `example.com` does not allow
+  `www.example.com` or `evil-example.com`.
+- Userinfo is ignored: in `https://example.com@evil.example/` the host is `evil.example`.
+- Only the URLs a search returned count, never its snippets, and only from a search the model
+  asked for before anything untrusted was read in the turn. Otherwise a page could tell the
+  model to search for a phrase that only the attacker's page ranks for, and that page's address
+  would then be allowed.
+
+**What this does not stop.** A page on a host the user named can still tell the model to open
+another page on the same host, with data from the conversation in its address, and the
+owner of that host sees the address in their logs. If the user names a host they do not
+trust, or a host that serves pages anyone can write, such as a forum or a wiki, treat its pages
+as able to receive what the conversation contains. The guard does not inspect the arguments
+of a call that it lets run. `:allow` defaults to no restriction, so that an app whose model
+finds pages on its own keeps working; such an app accepts that a page can send the model to
+any public address.
+
+With the default `taint-scope` of `:turn`, the next message the user writes starts a turn
+that counts as not having read untrusted content, but the text of the pages read in earlier
+turns is still in the history the model is sent. A page read in turn 1 can therefore steer a
+spending call in turn 2, after the user writes something as short as "thanks". Set
+`taint-scope` to `:conversation` to refuse such calls while that text is in the history.
+
+The guard is one slot on the agent, as the history is: run one turn at a time on an agent,
+and use one agent for each conversation.
 
 ## Status & license
 

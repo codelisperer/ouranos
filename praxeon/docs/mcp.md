@@ -10,6 +10,7 @@ context, and gets a server's prompts (see "Resources and prompts" below).
   - for a server that requires a sign-in, `oauth-token-source`, which gives each user the token from their `aion/oauth` sign-in ([`aion/docs/oauth.md`](../../aion/docs/oauth.md)) and refreshes it. It does not sign anyone in: when a user has no usable token, the call fails with `sign-in-needed`, and the app starts the sign-in (see "Tokens from an OAuth sign-in" below).
 - **Long-running calls.** On a connection made with `:tasks t`, a server may answer a tool call with a task that finishes later. The app polls it with `poll-tasks` (see "Long-running calls" below, #532).
 - **Confirmation.** `grant-tools :confirm` names the tools whose calls need the user's confirmation. The turn's `:on-hold` decides how the user is asked; with no `:on-hold`, such a call is not run ([`confirm.md`](confirm.md), #531).
+- **A server's result is untrusted.** A server is often run by someone else and can relay web pages, email or documents, so `grant-tools` registers every tool it grants with `:untrusted t` (#827). Once a granted tool has run in a turn, a means that spends or writes for the user, including one granted with `:confirm`, is refused for the rest of that turn, as after reading a web page ([Content the agent reads can carry instructions](../README.md#content-the-agent-reads-can-carry-instructions)). For a server the app fully controls, pass `:untrusted nil` to that `grant-tools` call.
 
 This is parts 1, 2, 4 and 5 of #527.
 

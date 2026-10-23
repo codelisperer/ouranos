@@ -18,7 +18,8 @@
                "cl-base64"         ; Twilio Basic auth + inbound-signature encoding
                "ironclad"          ; HMAC-SHA1 for X-Twilio-Signature verification
                "aion/log"          ; framework logging facade (send attempts/failures)
-               "aion/secret")      ; the Telegram bot token, held so it cannot be printed (#778)
+               "aion/secret"       ; the Telegram bot token, held so it cannot be printed (#778)
+               "aion/random")      ; the Facebook connect flow's state (#822)
   :serial t
   :components ((:module "src"
                 :serial t
@@ -30,6 +31,7 @@
                              (:file "sendgrid")   ; SendGrid email backend
                              (:file "twilio")     ; Twilio SMS backend (outbound)
                              (:file "telegram")   ; Telegram Bot API backend (#778)
+                             (:file "facebook")   ; Facebook Page backend, Graph API (#822)
                              (:file "inbound")    ; inbound SMS: neutral event + Twilio webhook
                              (:file "hermes"))))
   :in-order-to ((test-op (test-op "hermes/tests"))))
@@ -42,7 +44,7 @@
   :components ((:module "tests"
                 :serial t
                 :components ((:file "hermes")
-                             (:file "telegram"))))
+                             (:file "telegram") (:file "facebook"))))
   :perform (test-op (o c) (uiop:symbol-call :hermes/tests :run-tests)))
 
 ;;; The blob store. Bytes belong in object storage; a row holds a key and metadata, never

@@ -14,6 +14,34 @@ its tag.
 
 ### An app may have to act
 
+- **praxeon: `generate-image` is refused once a turn has read a web page or search results**
+  (#827). `praxeon/image:register` and `register-openai-image` now pass
+  `:requires-user-intent t` to `register-means`, because each image costs money. When the model
+  asks for an image after `read-web-page` or `web-search` returned in the same turn, the call is
+  not run and the model is told the user can ask for it in their next message. To keep the old
+  behaviour, pass `:requires-user-intent nil`.
+- **praxeon: a means registered with `:confirm` is refused, not held, once a turn has read a web
+  page or search results** (#827). `register-means`'s `:requires-user-intent` defaults to true
+  when `:confirm` is given, and that includes tools granted by `praxeon/mcp:grant-tools` with
+  `:confirm`. Such a call after `read-web-page` or `web-search` returned in the same turn no
+  longer reaches the app's `:on-hold` policy. Pass `:requires-user-intent nil` to
+  `register-means` to have it held as before. `grant-tools` has no such option, so a granted
+  tool with `:confirm` is always refused after a read.
+- **praxeon/mcp: a tool granted by `grant-tools` counts as untrusted content** (#827). After a
+  granted tool has run in a turn, a means registered with `:requires-user-intent t` or with
+  `:confirm`, including another granted tool held for confirmation, is refused for the rest of
+  the turn. For a server the app fully controls, pass the new `grant-tools` key
+  `:untrusted nil`.
+- **praxeon: registering `read-web-page` without `:allow` logs a warning** (#827), naming the
+  risk and `praxeon/web-page:user-or-search-urls`. Pass `:allow` to `register-read-web-page` or
+  `praxeon/web-page:register` to silence it.
+- **praxeon: `read-web-page` and `web-search` run at most 3 times in one turn by default**
+  (#827). Later calls in the turn are not run, and the model is told the limit. Pass
+  `:max-per-turn` to `praxeon/web-page:register`, `register-read-web-page` or
+  `praxeon/web-search:register` to change it, or `:max-per-turn nil` for no limit. Both means
+  are now registered with `:untrusted t`, so a means with `:requires-user-intent t` is refused
+  after either one has run in the turn.
+
 - **hermes/blob: `put-blob` refuses metadata named `sha256`, and malformed metadata, with the new
   condition `blob-invalid-metadata`** (#810). `sha256`, in any case, is reserved for the checksum
   the S3 store now records. Names and values become request headers on S3, so a name must be a
@@ -463,6 +491,23 @@ its tag.
 
 ### Added
 
+- **hermes/blob: reads return the blob's ETag and take `:if-match`, so the bytes served are the
+  version checked** (#826). The new generic `open-blob` (`store bucket key &key if-match`) returns
+  the stream and the blob's `blob-meta` (ETag, size, content type, `Last-Modified`, checksum);
+  `with-blob-stream` takes `:if-match` and `:meta` (a variable bound to that `blob-meta`), and
+  `read-blob-range` takes `:if-match`. A blob that no longer has the ETag signals the new
+  `blob-precondition-failed` (a `blob-backend-error`, status 412) and nothing is read; on S3 the
+  GET carries `If-Match`, so the check and the read are one request; on the filesystem store they
+  are two steps, so a blob replaced between them is read as the newer version.
+  `blob-source-changed` is now a subclass of `blob-precondition-failed`, so one handler catches a
+  changed blob on a read and on a copy. On S3, `blob-metadata` now fills `blob-meta-last-modified`
+  from `Last-Modified`, where it was NIL. `get-blob` keeps its three arguments, because a keyword
+  added to it would break an app's own store class; a store class without `open-blob` gets a
+  default that checks the ETag through `blob-metadata` before `get-blob`, which is not atomic, and
+  `with-blob-stream` without `:if-match` or `:meta` still calls `get-blob`. An ETag is not a
+  content hash for a multipart or KMS-encrypted object: compare it, never recompute it. See
+  "Reading the version you checked" in `hermes/docs/blob-direct-uploads.md`.
+
 - **hyperion: a shared link to an app's page can show a preview card**, through the new
   `hyperion/page-meta` (#821). A layout calls `meta-tags` inside its `(:head ...)` with the
   page's `:title`, `:description`, `:image` (with `:image-alt`, `:image-width`,
@@ -507,6 +552,52 @@ its tag.
   destination bucket, is `blob-backend-error` naming the destination. On the filesystem store a move is a rename. A missing source is `blob-not-found`
   naming it; a provider that cannot copy, or a store class that does not implement it, signals
   `blob-unsupported`. See "Leaving quarantine" in `hermes/docs/blob-direct-uploads.md`.
+
+- **hermes: post to a Facebook Page the app's admins manage, through the Graph API, with a
+  one-time connect flow** (#822). `hermes:post-to-page` (`page link &key message image-url
+  provider`) returns the post id; a `hermes:facebook-post` from `make-facebook-post` is also sent
+  by `hermes:send` or `deliver` to a `hermes:facebook` provider (`make-facebook`: `:app-id`,
+  `:app-secret`, `:page-tokens`). Page tokens are looked up per Page id, by default from
+  `FACEBOOK_PAGE_TOKEN_<page-id>` then `FACEBOOK_PAGE_TOKEN`, and sent in the POST body; every
+  token and the app secret (`FACEBOOK_APP_SECRET`) is replaced by `<redacted>` in failure text,
+  and reaches the code that signals a failure only as an `aion/secret` secret, so a logged
+  backtrace does not show it. Reads send the token in an `Authorization: OAuth` header. Calls
+  time out after 10 seconds to connect and 30 to answer; a post that timed out may still have
+  been made.
+  Failures are `facebook-reconnect-required`, `facebook-not-permitted`,
+  `facebook-page-not-found`, `facebook-link-not-public` (Facebook could not see the link) and
+  `delivery-rate-limited` (Graph codes 4, 17, 32, 613 and 80001, with the wait from the
+  `X-Business-Use-Case-Usage` header); a target that names a Facebook Group signals
+  `facebook-groups-unsupported`. `facebook-page-health` answers `:connected`, `:reconnect`,
+  `:not-permitted`, `:wrong-page` (the stored token is another Page's), `:not-found` or
+  `:not-connected`; a Page argument that is not a Page id signals `invalid-message`. The connect flow is
+  `facebook-connect-state`, `facebook-connect-url` and `facebook-connect-pages`, which checks the
+  state in constant time, exchanges the code server-side for a long-lived user token, and returns
+  the admin's Pages as `facebook-page` values with their tokens; the app stores the chosen token.
+  `HERMES_FACEBOOK_IMPL` picks the backend, default `facebook`; `HERMES_TRANSPORT=dev` renders
+  posts, and `dev-last-facebook` reads the last one. Core `hermes` now loads `aion/random`.
+  Meta's access rules and the one-time app setup are in `hermes/README.md`; upstream.sexp records
+  Graph API v26.0.
+
+- **praxeon: a turn can refuse calls that content the agent read may have asked for** (#827).
+  `praxeon/actor:register-means` takes `:untrusted`, `:requires-user-intent`, `:allow` and
+  `:max-per-turn`. A means with `:requires-user-intent t` is refused for the rest of a turn once
+  a means with `:untrusted t` has run in it; a call whose `:allow` predicate returns false or
+  signals is refused; and calls past `:max-per-turn` in one turn are refused. A refused call is
+  not run, and the model is told why. `praxeon/web-page:user-or-search-urls` is a ready-made
+  `:allow` for `register-read-web-page`: it allows only hosts the user wrote in the
+  conversation, matched exactly with userinfo ignored, and URLs a web search returned in this
+  turn before anything untrusted was read. `praxeon/actor:user-texts`, `turn-untrusted-p`,
+  `turn-urls`, `note-turn-urls` and `mark-untrusted` let an app's own means and predicates use
+  the same guard. `read-result` makes the turn untrusted when the stored result it reads came
+  from an untrusted means. A task a coordinator delegates through `register-agent-as-means`
+  never counts in the sub-agent's `user-texts`; the coordinator's user texts count instead, and
+  the delegation means is `:untrusted` when the sub-agent has an untrusted means. A bare host
+  ending in a file extension (`main.rs`, `README.md`) counts in `user-or-search-urls` only after
+  `www.` or before a path. The new agent slot `taint-scope` (`agent-taint-scope`), `:turn` by
+  default, can be set to `:conversation` to start every later turn untrusted while untrusted
+  results remain in the history. The praxeon README's section "Content the agent reads can
+  carry instructions" describes what this stops and what it does not.
 
 - **hermes: `telegram-added-chats` lists the chats a Telegram bot was recently added to**
   (#794), so an app can find the id of a group or channel that operators share as a `t.me/+`
@@ -1479,6 +1570,13 @@ its tag.
 
 ### Fixed
 
+- **praxeon/web-page: a byte order mark decides a page's charset, and a `<meta>` naming UTF-16
+  or UTF-32 means UTF-8** (#823), as browsers decide. A page that starts with the UTF-8 mark
+  (EF BB BF) is read as UTF-8 even when its `Content-Type` names Latin-1, and FE FF or FF FE
+  select UTF-16BE or UTF-16LE. The mark is no longer part of the page's text, so no U+FEFF
+  leads it. A `<meta>` charset in which ASCII is not one byte per character, such as utf-16le
+  or utf-32le, is read as UTF-8, because the tag could not have been found otherwise; a charset
+  named in `Content-Type` keeps its meaning.
 - **hermes: six corrections to the Telegram backend** (#788, follow-ups to #778).
   - A refusal whose `description` is not a string is reported with its class and the response
     body as detail. Before, it signalled a `type-error`.

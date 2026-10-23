@@ -240,6 +240,48 @@ used, the server would have been reached."
                   (wp:page-text (nth-value 1 (wp:read-web-page (%fetcher) (%site s "/meta-1252")))))
           "the charset in a <meta>, when Content-Type names none"))))
 
+;;; #823: the charset rules browsers follow, checked on %DECODE so they run on every platform.
+
+(defun %decoded (octets &key content-type (html t))
+  "OCTETS decoded as a page served with CONTENT-TYPE, or with none."
+  (let ((headers (make-hash-table :test #'equal)))
+    (when content-type (setf (gethash "content-type" headers) content-type))
+    (wp::%decode octets headers html)))
+
+(defun %utf-16 (string &key big-endian bom)
+  "STRING as UTF-16 octets, little-endian unless BIG-ENDIAN, after a byte order mark when BOM."
+  (let ((body (sb-ext:string-to-octets string :external-format (if big-endian :utf-16be :utf-16le))))
+    (concatenate '(vector (unsigned-byte 8))
+                 (cond ((not bom) #()) (big-endian #(#xFE #xFF)) (t #(#xFF #xFE)))
+                 body)))
+
+(test a-utf-8-byte-order-mark-wins-over-the-content-type-and-is-dropped
+  (let ((cafe (format nil "Caf~C" (code-char 233)))
+        (page (%octets #xEF #xBB #xBF "<p>Caf" #xC3 #xA9 "</p>")))
+    (is (string= (format nil "<p>~A</p>" cafe) (%decoded page :content-type "text/html; charset=ISO-8859-1"))
+        "decoded as UTF-8, although Content-Type names Latin-1")
+    (is (string= (format nil "<p>~A</p>" cafe) (%decoded page :content-type "text/html"))
+        "no U+FEFF leads the text when no charset is named")))
+
+(test a-utf-16-byte-order-mark-selects-its-byte-order-and-is-dropped
+  (let ((text (format nil "<p>Caf~C ~C</p>" (code-char 233) (code-char #x4E2D))))
+    (is (string= text (%decoded (%utf-16 text :bom t) :content-type "text/html; charset=utf-8"))
+        "FF FE is UTF-16LE")
+    (is (string= text (%decoded (%utf-16 text :big-endian t :bom t) :content-type "text/html"))
+        "FE FF is UTF-16BE")))
+
+(test a-meta-that-names-utf-16-or-utf-32-means-utf-8
+  (dolist (label '("utf-16" "utf-16le" "utf-16be" "UTF-16LE" "utf-32le"))
+    (is (string= (format nil "<meta charset=\"~A\"><p>Caf~C</p>" label (code-char 233))
+                 (%decoded (%octets "<meta charset=\"" label "\"><p>Caf" #xC3 #xA9 "</p>")
+                           :content-type "text/html"))
+        "a <meta> naming ~A" label)))
+
+(test a-content-type-that-names-utf-16-keeps-its-meaning
+  (let ((text (format nil "<p>Caf~C</p>" (code-char 233))))
+    (is (string= text (%decoded (%utf-16 text) :content-type "text/html; charset=utf-16le")))
+    (is (string= text (%decoded (%utf-16 text :big-endian t) :content-type "text/html; charset=utf-16be")))))
+
 (test a-page-with-no-content-type-is-read-when-it-is-text
   (%skip-on-windows "PUBLIC-FETCH pins its connections, which Windows does not support here"
     (%with-pages (s)

