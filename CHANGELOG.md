@@ -14,6 +14,23 @@ its tag.
 
 ### An app may have to act
 
+- **hades/credentials: the live tests use the real credential store only when
+  `OURANOS_TEST_REAL_CREDENTIAL_STORE=1` is set, and `scripts/verify-tree.lisp` on Windows and
+  macOS fails unless that or `OURANOS_ALLOW_NO_CREDENTIAL_STORE=1` is set** (#357, #603). The
+  live tests store, read and delete items in the Credential Manager or login Keychain of whoever
+  runs them. CI sets the first variable, because a runner's store is discarded with the runner.
+  Without it, `hades/credentials/tests` prints `BACKEND-CHECKS credential-store SKIPPED`, and the
+  gate fails that skip unless `OURANOS_ALLOW_NO_CREDENTIAL_STORE=1` excuses it, the same way
+  `OURANOS_ALLOW_NO_PG` excuses a skipped Postgres. An excused skip is listed under NOT COVERED and
+  its checks are not in the total. On a developer's machine, set the first variable to run the
+  live tests against your own store, or the second to skip them. The live tests touch only items
+  whose service starts with `ouranos-test-hades-credentials/` and delete each one; a `leftovers`
+  suite fails if any remains. Linux is unaffected until #357's Linux backend lands. The gate also
+  now fails a suite that prints no `BACKEND-CHECKS` line for a backend it must report
+  (`+required-backend-reports+`): `credential-store` for `hades/credentials/tests` on Windows and
+  macOS, and `postgres` for the mnemosyne and praxeon database suites on every host. Before, a
+  missing line passed, so a suite whose reporting broke went green with none of those checks run.
+
 - **praxeon/image: `PRAXEON_IMAGE_API_KEY` is deprecated; set `PRAXEON_OPENAI_API_KEY`** (#758,
   part four). Its name does not say which vendor the key is for, and with a second image
   provider a Google key put there would be sent to OpenAI. The OpenAI image provider
@@ -500,6 +517,34 @@ its tag.
   `claude-opus-5-5` where they named `claude-opus-4-8`.
 
 ### Added
+
+- **hades/credentials: ask whether a credential store is available, and its name, without
+  trying an operation** (#824). `hades/credentials:credential-store-available-p` (`&key
+  service`) is true when this system has a usable store and NIL otherwise, with a reason as a
+  second value. It never prompts, never writes and never creates an item: on Windows it reads an
+  item that does not exist and is false when the logon session has no credential store; on macOS
+  it is true wherever the Keychain backend is built, without querying the Keychain, which can
+  prompt when locked; on Linux it is false until #357 adds the Secret Service backend.
+  `hades/credentials:credential-store-name` is "Windows Credential Manager", "macOS Keychain",
+  or NIL where there is no store. An app that probed with a `fetch-credential` of a dummy
+  account and caught `credential-store-unavailable` can call these instead. `service` is
+  accepted and not used yet.
+
+- **aion/fs: make a directory link or a file link without a shell** (#825).
+  `aion/fs:make-directory-link` (`link target`) makes a junction on Windows, which needs no
+  administrator rights and no Developer Mode, and a symbolic link on macOS and Linux.
+  `aion/fs:make-file-link` (`link target`) makes a symbolic link; on Windows that needs Developer
+  Mode or the symbolic-link privilege, and without either it signals
+  `aion/fs:link-not-permitted`. Both return the link as an absolute pathname, which `link-p` sees
+  and `delete-link` removes without touching the target. A relative path is taken against the
+  current directory; on Windows `.` and `..` are resolved and a leading `\\?\` is taken off, and a
+  UNC target is refused (`:target-unc`). A target that is a link is followed to check what it
+  reaches. A failure signals `aion/fs:link-error` (`link-error-target`, `link-error-operation`,
+  `link-error-code`) and leaves nothing at the link's path: when the link already exists
+  (`:exists`), when the target is missing (`:target-missing`) or of the wrong kind
+  (`:target-not-a-directory`, `:target-not-a-file`), or when the operating system refuses (its own
+  error code). An app's tests that made links with `cmd /c mklink /J` or `ln -s` can call these
+  instead.
 
 - **hermes/blob: reads return the blob's ETag and take `:if-match`, so the bytes served are the
   version checked** (#826). The new generic `open-blob` (`store bucket key &key if-match`) returns
@@ -1634,6 +1679,20 @@ its tag.
   "Long-running calls".
 
 ### Fixed
+
+- **aion/http-client: a body of octets with a `multipart/` Content-Type reaches the server as
+  given on Linux and macOS** (#828). This is a workaround placed once in the client, not a
+  native way to send a header unchanged, because dexador offers none. Dexador's usocket backend
+  takes any Content-Type starting with `multipart/` as its own job, builds the body itself from an
+  alist with a boundary of its own, and failed on octets the caller had encoded with a TYPE-ERROR,
+  reported as an `http-error`. For such a request the client now gives dexador the Content-Type
+  with one leading space, which dexador's check does not match. HTTP does not count that space as
+  part of the value (RFC 9110, section 5.5), so the server reads the type and boundary exactly;
+  only the whitespace on the wire differs. On Windows, where dexador uses WinHTTP and already sent
+  the octets as given, nothing changes. A string or alist body is left to dexador as before.
+  `praxeon/image` drops the leading space it added itself for OpenAI's `/images/edits`; an app
+  that added one for the same reason can drop it. A test sends such a body to a local server and
+  compares what arrives, so a dexador update that checks the prefix another way fails it.
 
 - **praxeon/web-page: a byte order mark decides a page's charset, and a `<meta>` naming UTF-16
   or UTF-32 means UTF-8** (#823), as browsers decide. A page that starts with the UTF-8 mark
