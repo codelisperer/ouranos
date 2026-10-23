@@ -113,6 +113,115 @@ takes an invite link, so the chat id comes from the bot's own updates (#794):
   `telegram-webhook-active`. The `my_chat_member` update is then delivered to the webhook, and
   its `chat.id` is the id. hermes does not delete the webhook.
 
+## Post to a Facebook Page
+
+A `facebook-post` goes to a Facebook Page the app's admins manage, through the Graph API, and
+appears as the Page (#822). It is a `link` with an optional `message`, or a `message` alone, or a
+photo with a caption.
+
+```lisp
+(hermes:post-to-page "1234567890" "https://example.com/posts/42"
+                     :message "New post: the spring schedule")      ; returns the post id
+(hermes:send (hermes:make-facebook-post :page "1234567890" :message "Look"
+                                        :image-url "https://example.com/cover.jpg"
+                                        :link "https://example.com/posts/42"))
+```
+
+- **The link card** comes from the target page's Open Graph tags (`og:title`, `og:image`, ...).
+  Facebook fetches the link when the post is made, and "if the viewer or app cannot see the url
+  of link, the post will fail" (Meta's Page Feed reference): a page behind a sign-in, or not yet
+  public, is refused, and hermes signals `facebook-link-not-public`, which the app can explain as
+  "this post isn't public yet".
+- **Page tokens are looked up per Page.** `make-facebook` takes `:page-tokens`, a function of a
+  Page id returning its token (a string or an `aion/secret` secret) or NIL, or an alist of
+  `(page-id . token)`. The default reads `FACEBOOK_PAGE_TOKEN_<page-id>`, then
+  `FACEBOOK_PAGE_TOKEN`. A Page with no token signals `configuration-error` naming it. The token
+  goes in the POST body, never the URL, and with `FACEBOOK_APP_SECRET` set every call carries
+  Meta's `appsecret_proof`. Tokens and the app secret are replaced by `<redacted>` in every
+  failure's text.
+- **Failures** are `delivery-failure` subclasses, chosen by the Graph error code:
+  `facebook-reconnect-required` (190, 102, or a login subcode such as 492: send an admin through
+  the connect flow again), `facebook-not-permitted` (10, 200 to 299), `facebook-page-not-found`
+  (100 with subcode 33, 803), `facebook-link-not-public`, and `delivery-rate-limited` (4, 17, 32,
+  613 and 80001, the code a Page token's limit uses). The wait is the
+  `estimated_time_to_regain_access` in the `X-Business-Use-Case-Usage` header, in seconds, or NIL;
+  as for Telegram, hermes does not wait or retry.
+- **Groups are refused.** Meta removed the Groups API for every app on 2024-04-22, so a target
+  that names a Group (a `/groups/` URL, or `"group:..."`) signals `facebook-groups-unsupported`
+  when the post is made. A numeric Group id cannot be told from a Page id; Facebook refuses a post
+  to one, which arrives as `facebook-not-permitted`.
+- **`facebook-page-health`** answers for an admin screen: `:connected` (and the Page's name),
+  `:reconnect`, `:not-permitted`, `:not-found`, or `:not-connected` when no token is stored. With
+  the app's id and secret it also asks Facebook's `debug_token` whether the token is valid and
+  still carries `pages_manage_posts`.
+- `HERMES_FACEBOOK_IMPL` picks the backend (default `facebook`); `HERMES_TRANSPORT=dev` renders
+  posts instead of making them, and `dev-last-facebook` reads the last one.
+
+**Connecting a Page, once.** An admin signs in with Facebook and picks a Page; the app keeps that
+Page's token. hermes does the Facebook side; the app's routes and session do the rest:
+
+```lisp
+;; GET /admin/facebook/connect
+(let ((state (hermes:facebook-connect-state)))       ; 256 random bits
+  (setf (session-value :facebook-state) state)        ; bound to this admin's session
+  (redirect (hermes:facebook-connect-url provider :state state
+              :redirect-uri "https://app.example.com/admin/facebook/callback")))
+
+;; GET /admin/facebook/callback?code=...&state=...  (or ?error=...)
+(let ((expected (session-value :facebook-state)))
+  (setf (session-value :facebook-state) nil)          ; single use: delete before checking
+  (dolist (page (hermes:facebook-connect-pages provider
+                  :code code :state state :error error :expected-state expected
+                  :redirect-uri "https://app.example.com/admin/facebook/callback"))
+    ;; show (facebook-page-name page) and let the admin choose; store the chosen one's
+    ;; (facebook-page-token page), an aion/secret secret, keyed by (facebook-page-id page)
+    ...))
+```
+
+- `facebook-connect-pages` checks the returned state against the session's, in constant time,
+  before anything is sent; a mismatch is `facebook-connect-refused` with reason
+  `:state-mismatch`. An `error` from Facebook is `:denied`, and a code Facebook will not exchange
+  (used already, expired, or a different `redirect_uri`) is `:code-rejected`.
+- The code is exchanged for a user token, and that for a long-lived one, on the server with the
+  app secret, as Meta requires ("Make this call from your server, not a client"). The URL the
+  browser sees carries the app id and the state, never the secret.
+- It returns the Pages the admin manages as `facebook-page` values, each with its Page token
+  (an `aion/secret` secret) and the admin's tasks; `facebook-page-can-post-p` is true when they
+  include `CREATE_CONTENT`. The user tokens are never returned or kept.
+- Store the chosen token in the app's secret store, keyed by the Page id: an environment
+  variable `FACEBOOK_PAGE_TOKEN_<page-id>` on a server, or `hades/credentials:store-credential`
+  on a desktop, read back through `:page-tokens`.
+- The `redirect_uri` must match one of the Meta app's Valid OAuth Redirect URIs exactly.
+
+**Meta's rules, checked against developers.facebook.com on 2026-10-23.**
+
+- *Who can connect without App Review.* Graph API "Access Levels": "Permissions with Standard
+  Access can only be requested from app users who have a role on the requesting app", and "All
+  Business, Consumer, and Gaming apps are automatically approved for Standard Access for all
+  permissions and features." So an admin who has a role on the Meta app (administrator,
+  developer or tester) can connect their own Page with no App Review. Connecting the Pages of
+  people without a role needs Advanced Access: "Business Verification is required to get Advanced
+  Access", and it "must be approved on an individual permission and feature basis through the App
+  Review process." This transport is built for the first case; nothing in it is tied to one Page.
+- *The one-time Meta app setup:* create a Business app; add Facebook Login with the callback in
+  Valid OAuth Redirect URIs; give each admin who will connect a Page a role on the app; keep the
+  app in Development mode unless people without a role must use it. Set `FACEBOOK_APP_ID` and
+  `FACEBOOK_APP_SECRET` on the server.
+- *Publishing* (Page Feed reference, v26.0): `POST /{page-id}/feed` with `message` and/or `link`,
+  a Page token with `pages_manage_posts`, `pages_read_engagement` and `pages_show_list`, from
+  someone who can perform the `CREATE_CONTENT` task on the Page; "The response will be the
+  post_id."
+- *Token lifetimes* ("Get Long-Lived Tokens"): a long-lived user token "generally lasts about 60
+  days"; a Page token taken with it "do[es] not have an expiration date", but stops working when,
+  for example, the admin changes their password, loses their role on the Page, or removes the
+  app. `facebook-page-health` then answers `:reconnect`.
+- *Groups* (Graph API v19.0 changelog): `publish_to_groups`, `groups_access_member_info` and the
+  Groups API were deprecated, and "removed April 22, 2024" for every version.
+- *Rate limits* ("Rate Limiting"): 4 is the app's limit, 17 the user's, 32 a Pages call made with
+  a User token, 613 a custom limit, and 80001 a call made with a Page token. No error body carries
+  a wait; the `X-Business-Use-Case-Usage` header's `estimated_time_to_regain_access` does, in
+  minutes.
+
 ## Receive (inbound SMS) — `hermes/inbound`
 
 Two-way SMS: an app **subscribes** to a neutral inbound event, and mounts the **Twilio

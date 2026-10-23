@@ -463,6 +463,27 @@ its tag.
 
 ### Added
 
+- **hermes: post to a Facebook Page the app's admins manage, through the Graph API, with a
+  one-time connect flow** (#822). `hermes:post-to-page` (`page link &key message image-url
+  provider`) returns the post id; a `hermes:facebook-post` from `make-facebook-post` is also sent
+  by `hermes:send` or `deliver` to a `hermes:facebook` provider (`make-facebook`: `:app-id`,
+  `:app-secret`, `:page-tokens`). Page tokens are looked up per Page id, by default from
+  `FACEBOOK_PAGE_TOKEN_<page-id>` then `FACEBOOK_PAGE_TOKEN`, and sent in the POST body; every
+  token and the app secret (`FACEBOOK_APP_SECRET`) is replaced by `<redacted>` in failure text.
+  Failures are `facebook-reconnect-required`, `facebook-not-permitted`,
+  `facebook-page-not-found`, `facebook-link-not-public` (Facebook could not see the link) and
+  `delivery-rate-limited` (Graph codes 4, 17, 32, 613 and 80001, with the wait from the
+  `X-Business-Use-Case-Usage` header); a target that names a Facebook Group signals
+  `facebook-groups-unsupported`. `facebook-page-health` answers `:connected`, `:reconnect`,
+  `:not-permitted`, `:not-found` or `:not-connected`. The connect flow is
+  `facebook-connect-state`, `facebook-connect-url` and `facebook-connect-pages`, which checks the
+  state in constant time, exchanges the code server-side for a long-lived user token, and returns
+  the admin's Pages as `facebook-page` values with their tokens; the app stores the chosen token.
+  `HERMES_FACEBOOK_IMPL` picks the backend, default `facebook`; `HERMES_TRANSPORT=dev` renders
+  posts, and `dev-last-facebook` reads the last one. Core `hermes` now loads `aion/random`.
+  Meta's access rules and the one-time app setup are in `hermes/README.md`; upstream.sexp records
+  Graph API v26.0.
+
 - **hermes: `telegram-added-chats` lists the chats a Telegram bot was recently added to**
   (#794), so an app can find the id of a group or channel that operators share as a `t.me/+`
   invite link. It returns `telegram-added-chat` structures (`-id`, `-type`, `-title`, `-status`,

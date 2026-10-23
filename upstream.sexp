@@ -208,6 +208,11 @@
  :upstream (:manual "https://core.telegram.org/bots/api-changelog")
  :reviewed "2026-10-18")
 
+(:name "Facebook Graph API" :category :api
+ :where ((:text "hermes/src/facebook.lisp" "(defparameter +facebook-graph-api-version+ \"" "\""))
+ :upstream (:manual "https://developers.facebook.com/docs/graph-api/changelog/versions/")
+ :reviewed "2026-10-23")
+
 (:name "Stripe API version" :category :api
  :where ((:text "hermes/src/payments/stripe.lisp" "(defparameter +stripe-api-version+ \"" "\""))
  :upstream (:manual "https://docs.stripe.com/upgrades")
