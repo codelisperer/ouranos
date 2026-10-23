@@ -466,11 +466,14 @@ its tag.
 - **hermes/blob: `copy-blob` and `move-blob` copy or move a blob inside a store without the
   bytes passing through the app** (#804), so a verified upload leaves quarantine without being
   downloaded and uploaded again. `(copy-blob store src-bucket src-key dst-bucket dst-key
-  &key content-type metadata)` returns the destination's `blob-meta`; `move-blob` copies and
+  &key content-type metadata if-match)` returns the destination's `blob-meta`; `move-blob` copies and
   then deletes the source. On S3 a copy is CopyObject up to 5 GiB and a multipart copy
   (UploadPartCopy) above it, every request conditional on the source's ETag, so a source
   replaced during the copy signals the new condition `blob-source-changed`, a
-  `blob-backend-error` subclass. The content type, the app's metadata and the checksum are kept
+  `blob-backend-error` subclass. `:if-match` takes the ETag the app recorded when it checked the
+  blob, so the copy happens only if the source is still that object (part of #826). On the
+  filesystem store, `blob-meta-etag` is now the blob's SHA-256 checksum, where it was NIL, so
+  `:if-match` works there too. The content type, the app's metadata and the checksum are kept
   unless `:content-type` or `:metadata` replace them. A copied object gets the bucket's default
   ACL, or `x-amz-acl: private` on a store made with `:upload-acl :private`. A move is not atomic on S3:
   if deleting the source fails, the destination exists and the delete's condition is

@@ -1971,3 +1971,73 @@ GET-BLOB and PUT-BLOB, and a move deletes nothing."
       (signals b:blob-unsupported (b:copy-blob store "media" "a.txt" "media" "b.txt"))
       (signals b:blob-unsupported (b:move-blob store "media" "a.txt" "media" "b.txt"))
       (is (b:blob-exists-p inner "media" "a.txt") "the move deleted nothing"))))
+
+;;; --- :if-match on copy and move (#826) ------------------------------------------
+
+(test s3-copy-blob-if-match-copies-only-the-checked-object
+  "With the ETag the app checked, the copy goes ahead and stays conditional on it. With another
+ETag nothing is copied: one HEAD, then BLOB-SOURCE-CHANGED naming the source."
+  (dolist (given '("src-etag" "\"src-etag\""))
+    (multiple-value-bind (meta calls)
+        (call-with-scripted-s3 (copy-answer)
+                               (lambda () (b:copy-blob (test-s3-store) "media" "src.txt" "media" "dst.txt"
+                                                       :if-match given)))
+      (is (equal "dst.txt" (b:blob-meta-key meta)) "~S is accepted, with or without quotes" given)
+      (is (equal "\"src-etag\"" (extra (first (calls-of calls :put)) "x-amz-copy-source-if-match")))))
+  (multiple-value-bind (c calls)
+      (call-with-scripted-s3 (copy-answer)
+                             (lambda () (handler-case (b:copy-blob (test-s3-store) "media" "src.txt" "media" "dst.txt"
+                                                                   :if-match "other-etag")
+                                          (b:blob-source-changed (c) c))))
+    (is (typep c 'b:blob-source-changed))
+    (is (equal "src.txt" (and c (b:blob-error-key c))))
+    (is (equal '(:head) (mapcar (lambda (c) (getf c :method)) calls)) "no copy was sent")))
+
+(test s3-if-match-on-the-same-location-and-on-a-move
+  (multiple-value-bind (c calls)
+      (call-with-scripted-s3 (copy-answer)
+                             (lambda () (handler-case (b:move-blob (test-s3-store) "media" "src.txt" "media" "dst.txt"
+                                                                   :if-match "other-etag")
+                                          (b:blob-source-changed (c) c))))
+    (is (typep c 'b:blob-source-changed))
+    (is (null (calls-of calls :put)) "a move whose source changed copies nothing")
+    (is (null (calls-of calls :delete)) "and deletes nothing"))
+  (let ((same-headers (header-table "content-length" "10" "etag" "\"src-etag\"")))
+    (flet ((same (if-match)
+             (call-with-scripted-s3 (lambda (method key query)
+                                      (declare (ignore method key query))
+                                      (list "" 200 same-headers))
+                                    (lambda () (handler-case (b:copy-blob (test-s3-store) "media" "src.txt" "media" "src.txt"
+                                                                          :if-match if-match)
+                                                 (b:blob-source-changed () :changed))))))
+      (is (typep (same "src-etag") 'b:blob-meta) "the control: the same location with the right ETag")
+      (is (eq :changed (same "other-etag"))))))
+
+(test filesystem-etag-is-the-checksum-and-if-match-uses-it
+  "The filesystem store has no ETag of its own, so it reports the content's SHA-256 as one, and
+:IF-MATCH on copy and move compares against that (#826)."
+  (with-temp-store (store)
+    (let* ((put (put-string store "media" "q/a.txt" "hello"))
+           (sum (b:blob-meta-checksum put)))
+      (is (equal sum (b:blob-meta-etag put)) "PUT-BLOB returns it")
+      (is (equal sum (b:blob-meta-etag (b:blob-metadata store "media" "q/a.txt"))) "and BLOB-METADATA reads it")
+      (signals b:blob-source-changed (b:copy-blob store "media" "q/a.txt" "final" "a.txt" :if-match "stale"))
+      (is (not (b:blob-exists-p store "final" "a.txt")) "nothing was copied")
+      (signals b:blob-source-changed (b:move-blob store "media" "q/a.txt" "final" "a.txt" :if-match "stale"))
+      (is (b:blob-exists-p store "media" "q/a.txt") "nothing was moved")
+      (b:copy-blob store "media" "q/a.txt" "final" "c.txt" :if-match sum)
+      (is (string= "hello" (get-string store "final" "c.txt")) "the control: the right ETag copies")
+      (b:move-blob store "media" "q/a.txt" "final" "m.txt" :if-match (format nil "\"~A\"" sum))
+      (is (string= "hello" (get-string store "final" "m.txt")) "and moves, quoted or not")
+      (is (not (b:blob-exists-p store "media" "q/a.txt"))))))
+
+(test copy-refuses-a-malformed-if-match-before-any-request
+  (with-temp-store (fs)
+    (dolist (store (list fs (test-s3-store)))
+      (dolist (bad (list "" "\"\"" (format nil "e~Ctag" #\Linefeed) 42))
+        (multiple-value-bind (result calls)
+            (call-with-scripted-s3 (copy-answer)
+                                   (lambda () (handler-case (b:copy-blob store "media" "src.txt" "media" "dst.txt" :if-match bad)
+                                                (b:blob-invalid-metadata (c) (b:blob-invalid-metadata-name c)))))
+          (is (equal "if-match" result) "~S on ~A" bad (b:store-name store))
+          (is (null calls)))))))

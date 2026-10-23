@@ -139,10 +139,16 @@ leaves the source where it is. Both return the destination's `blob-meta`.
 - **The ACL.** S3 never copies an object's ACL. A copied object gets the bucket's default ACL,
   unless the store is made with `:upload-acl :private`, in which case the copy is sent with
   `x-amz-acl: private`.
-- **Only the object that was verified is copied.** Every copy request is conditional on the
-  source's ETag as read at the start of the copy. If the source is replaced in the meantime,
-  the copy fails with `blob-source-changed` (a `blob-backend-error` with status 412, naming the
-  source), nothing is copied and a move deletes nothing. Verify the object again before retrying.
+- **Only the object that was verified is copied.** Record `blob-meta-etag` from the
+  `blob-metadata` you check, and pass it as `:if-match` to `move-blob` or `copy-blob` (#826). The
+  copy then happens only if the source still has that ETag; otherwise it fails with
+  `blob-source-changed` (a `blob-backend-error` with status 412, naming the source), nothing is
+  copied, and a move deletes nothing. Without `:if-match`, every copy request is still conditional
+  on the ETag read at the start of the copy, so a source replaced partway through a copy is caught
+  as well. Verify the object again before retrying. Compare ETags as strings and never recompute
+  one: S3's ETag is not a content hash for a multipart or KMS-encrypted object. On the filesystem
+  store the ETag is the blob's SHA-256 checksum, and a blob stored without a sidecar has none, so
+  any `:if-match` fails for it.
 - **Large objects.** Above 5 GiB, the most a single S3 copy can carry, the copy is made in parts
   of at least 512 MiB. A part that fails aborts the copy, so no parts are left to be billed.
   Whether DigitalOcean Spaces supports this part copy (UploadPartCopy) has not been measured
