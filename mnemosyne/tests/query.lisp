@@ -411,6 +411,64 @@ A guard that only one of the two spellings can reach is not a guard."
     (is (search "identifier" (q:invalid-identifier-expected e)))
     (is (search "(:raw" (princ-to-string e)))))
 
+;;; --- expressions where a name or an expression may stand, :quoted, and the clause (#860) ---
+
+(test raw-and-expressions-work-in-group-by-on-conflict-and-returning
+  (is (string= "SELECT count(*) FROM t GROUP BY date_trunc('day', at)"
+               (q:sql '(:select ((:raw "count(*)")) :from (:t)
+                        :group-by ((:raw "date_trunc('day', at)"))))))
+  (is (string= "SELECT n FROM t GROUP BY LOWER(name)"
+               (q:sql '(:select (:n) :from (:t) :group-by ((:lower :name))))))
+  (is (string= "INSERT INTO t (email) VALUES (?) ON CONFLICT (lower(email)) DO NOTHING"
+               (q:sql '(:insert-into :t :values ((:email "a@x"))
+                        :on-conflict ((:raw "lower(email)")) :do-nothing t))))
+  (is (string= "INSERT INTO t (a) VALUES (?) RETURNING id, now() AS at"
+               (q:sql '(:insert-into :t :values ((:a 1)) :returning (:id (:raw "now() AS at")))))))
+
+(test a-quoted-name-is-double-quoted-with-its-quotes-doubled
+  (is (string= "SELECT \"Name\" FROM \"public\".\"MyTable\" ORDER BY \"Name\" DESC"
+               (q:sql '(:select ((:quoted "Name")) :from ((:quoted "public" "MyTable"))
+                        :order-by (((:quoted "Name") :desc))))))
+  (is (string= "SELECT id FROM \"we\"\"ird\"" (q:sql '(:select (:id) :from ((:quoted "we\"ird"))))))
+  (is (string= "SELECT id FROM \"order\" AS o" (q:sql '(:select (:id) :from ((:as (:quoted "order") :o))))))
+  (dolist (bad '((:quoted) (:quoted "") (:quoted "a" 5)))
+    (signals q:invalid-identifier (q:sql `(:select (:id) :from (,bad))) "~S" bad))
+  (signals q:invalid-identifier
+    (q:sql (list :select '(:id) :from (list (list :quoted (format nil "a~Cb" (code-char 0))))))))
+
+(test names-quoted-by-hand-and-other-unsafe-names-are-refused
+  (dolist (q '((:select (:id) :from ("\"MyTable\""))
+               (:select (:id) :from ("a$b"))
+               (:select (:|a b|) :from (:t))
+               (:insert-into :t :values ((:a 1)) :on-conflict ("a) DO NOTHING; --") :do-nothing t)
+               (:insert-into :t :values ((:a 1)) :on-conflict (:a) :do-update (("b = 1, c" 2)))
+               (:insert-into :t :values ((:a 1)) :on-conflict (:a) :do-update (:b (:excluded "b; --")))))
+    (signals q:invalid-identifier (q:sql q) "~S" q)))
+
+(test an-integer-is-accepted-only-where-sql-gives-it-a-meaning
+  "A positive ORDER BY or GROUP BY position, and a non-negative SELECT constant such as the 1 in
+EXISTS (SELECT 1 ...)."
+  (is (string= "SELECT a FROM t GROUP BY 1 ORDER BY 2 DESC, 1"
+               (q:sql '(:select (:a) :from (:t) :group-by (1) :order-by ((2 :desc) 1)))))
+  (is (string= "SELECT 1 FROM t" (q:sql '(:select (1) :from (:t)))))
+  (dolist (pos '(0 -1 1.5))
+    (signals q:invalid-identifier (q:sql `(:select (:a) :from (:t) :order-by (,pos))) "~S" pos)
+    (signals q:invalid-identifier (q:sql `(:select (:a) :from (:t) :group-by (,pos))) "~S" pos))
+  (dolist (q '((:select (-1) :from (:t)) (:select (:a) :from (1))
+               (:insert-into :t :values ((:a 1)) :returning (1)) (:delete-from 1)))
+    (signals q:invalid-identifier (q:sql q) "~S" q)))
+
+(test the-condition-names-the-clause
+  (flet ((clause-of (q) (handler-case (progn (q:sql q) :no-error)
+                          (q:invalid-identifier (e) (q:invalid-identifier-clause e)))))
+    (is (eq :order-by (clause-of '(:select (:id) :from (:t) :order-by ("a b")))))
+    (is (eq :order-by (clause-of '(:select (:id) :from (:t) :order-by ((:id :up))))))
+    (is (eq :from (clause-of '(:select (:id) :from ("a b")))))
+    (is (eq :group-by (clause-of '(:select (:id) :from (:t) :group-by ("a b")))))
+    (is (eq :returning (clause-of '(:delete-from :t :returning ("a b")))))
+    (is (search "in order-by" (handler-case (q:sql '(:select (:id) :from (:t) :order-by ("a b")))
+                                (q:invalid-identifier (e) (princ-to-string e)))))))
+
 ;;; --- LIKE with ESCAPE (#862) -------------------------------------------------------
 
 (test like-and-ilike-render-an-escape-character

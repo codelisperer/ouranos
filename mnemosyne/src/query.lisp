@@ -89,10 +89,12 @@ inline (for round-trip / display; never execute inlined SQL with untrusted value
 
 (define-condition invalid-identifier (error)
   ((text :initarg :text :reader invalid-identifier-text)
-   (expected :initarg :expected :reader invalid-identifier-expected))
+   (expected :initarg :expected :reader invalid-identifier-expected)
+   (clause :initarg :clause :initform nil :reader invalid-identifier-clause))
   (:report (lambda (c s)
-             (format s "mnemosyne/query: ~S is not ~A. Identifiers are written into the SQL, not bound, so only safe names are accepted; write SQL text with (:raw \"...\") where it is meant."
-                     (invalid-identifier-text c) (invalid-identifier-expected c))))
+             (format s "mnemosyne/query: ~S~@[ in ~(~A~)~] is not ~A. Identifiers are written into the SQL, not bound, so only safe names are accepted; write SQL text with (:raw \"...\") where it is meant, or a name that needs quoting with (:quoted \"...\")."
+                     (invalid-identifier-text c) (invalid-identifier-clause c)
+                     (invalid-identifier-expected c))))
   (:documentation "A table, column, alias or function name, or an ORDER BY direction, that
 mnemosyne will not write into SQL (#860). Raised when the query is compiled, before any SQL
 reaches a connection."))
@@ -117,25 +119,58 @@ or ends in .* (u.*), or is * alone."
                      (%identifier-part-p part)
                      (or (%identifier-part-p part) (string= part "*"))))))
 
-(defun %ident (x)
-  "Render X as a SQL identifier: a keyword or symbol by its downcased name, a string as it is.
-Dotted names pass through (:u.email -> \"u.email\"), and \"*\" stays \"*\". A non-negative
-integer renders as itself, for a positional ORDER BY.
+(defun %quoted (parts clause)
+  "PARTS, one or more strings, as a double-quoted SQL identifier: \"schema\".\"MyTable\".
+Each part is quoted and an embedded double quote is doubled, which is how Postgres, SQLite and
+XTDB all read a quoted name. A part must be a non-empty string without a NUL (#860)."
+  (unless (and parts (every (lambda (p) (and (stringp p) (plusp (length p))
+                                              (not (find (code-char 0) p))))
+                            parts))
+    (error 'invalid-identifier :text (princ-to-string parts) :clause clause
+                               :expected "a (:quoted ...) name: one or more non-empty strings without a NUL"))
+  (format nil "~{~A~^.~}"
+          (mapcar (lambda (p)
+                    (with-output-to-string (o)
+                      (write-char #\" o)
+                      (loop for c across p do (when (char= c #\") (write-char #\" o)) (write-char c o))
+                      (write-char #\" o)))
+                  parts)))
+
+(defun %ident (x &optional clause)
+  "Render X as a SQL identifier in CLAUSE (a keyword naming where it stands, for the error): a
+keyword or symbol by its downcased name, a string as it is, or (:quoted \"part\" ...) as a
+double-quoted name. Dotted names pass through (:u.email -> \"u.email\"), and \"*\" stays \"*\".
+An integer renders as itself only where SQL gives it a meaning: a positive one in ORDER BY and
+GROUP BY, a column position, and a non-negative one as a SELECT item, a constant such as the 1
+in EXISTS (SELECT 1 ...). Anywhere else, and as a negative number or a float, it is refused.
 
 THE NAME IS WRITTEN INTO THE SQL, NOT BOUND (#860), so it is checked: each dot-separated part
 must be an ASCII letter or underscore followed by letters, digits and underscores, and the last
-part may be *. Anything else signals INVALID-IDENTIFIER. Before #860 a string went into the SQL
-as it was, so a caller that put request text in an identifier position had SQL injection.
-(:raw \"...\") is the one way to write SQL text, and is visible at the call site."
+part may be *. Anything else signals INVALID-IDENTIFIER naming CLAUSE. Before #860 a string
+went into the SQL as it was, so a caller that put request text in an identifier position had
+SQL injection. A mixed-case or reserved name is written with (:quoted ...); SQL text is written
+with (:raw \"...\"), the one way to do so, visible at the call site."
+  (when (and (consp x) (eq (car x) :quoted))
+    (return-from %ident (%quoted (rest x) clause)))
+  (when (or (and (member clause '(:order-by :group-by)) (typep x '(integer 1)))
+            (and (eq clause :select) (typep x '(integer 0))))
+    (return-from %ident (princ-to-string x)))
   (let ((name (typecase x
                 (string x)
                 (symbol (string-downcase (symbol-name x)))
-                ((integer 0) (return-from %ident (princ-to-string x)))
                 (t (princ-to-string x)))))
     (unless (%safe-identifier-p name)
-      (error 'invalid-identifier :text name
+      (error 'invalid-identifier :text name :clause clause
                                  :expected "a safe SQL identifier (letters, digits and underscores, dot-separated)"))
     name))
+
+(defun %item (ctx x clause)
+  "A name or an expression in CLAUSE: GROUP BY, ON CONFLICT and RETURNING take either. A list
+other than (:quoted ...) is an expression, so (:raw \"...\"), a function call or an operator
+work there; anything else is a name, checked by %IDENT."
+  (if (and (consp x) (not (eq (car x) :quoted)))
+      (%expr ctx x)
+      (%ident x clause)))
 
 (defun %direction (x)
   "ASC or DESC for X, which is :asc or :desc, or the string asc or desc in any case. Anything
@@ -143,7 +178,7 @@ else signals INVALID-IDENTIFIER: the direction is written into the SQL, not boun
   (let ((name (and (or (stringp x) (symbolp x)) (string-downcase (string x)))))
     (cond ((equal name "asc") "ASC")
           ((equal name "desc") "DESC")
-          (t (error 'invalid-identifier :text (if (stringp x) x (princ-to-string x))
+          (t (error 'invalid-identifier :text (if (stringp x) x (princ-to-string x)) :clause :order-by
                                         :expected "an ORDER BY direction (:asc or :desc)")))))
 
 (defun %subquery-p (e)
@@ -157,7 +192,7 @@ anything else => a bound value."
   (cond
     ((%subquery-p e) (format nil "(~A)" (%select ctx e)))
     ((and (consp e) (keywordp (car e))) (%op ctx (car e) (cdr e)))
-    ((symbolp e) (%ident e))
+    ((symbolp e) (%ident e :expression))
     (t (%placeholder ctx e))))
 
 ;; Function/aggregate operators rendered as NAME(arg, ...).
@@ -318,8 +353,9 @@ explicitly, for example with LOWER on both sides."
                           (%placeholder ctx (third args))))
       ((:exists) (format nil "EXISTS ~A" (e (first args))))
       ((:distinct) (format nil "DISTINCT ~A" (e (first args))))
-      ((:excluded) (format nil "EXCLUDED.~A" (%ident (first args))))
-      ((:call) (format nil "~A(~{~A~^, ~})" (%ident (first args)) (mapcar #'e (rest args))))
+      ((:excluded) (format nil "EXCLUDED.~A" (%ident (first args) :excluded)))
+      ((:call) (format nil "~A(~{~A~^, ~})" (%ident (first args) :call) (mapcar #'e (rest args))))
+      ((:quoted) (%quoted args :expression))
       ((:raw) (first args))
       ((:<-> :<=> :<#>) (%vector-distance ctx op args))
       (t (if (member op +fn-ops+)
@@ -351,26 +387,26 @@ which was invisible while it only ever rendered identifiers."
                                (%expr ctx (first spec))
                                (and (second spec) (%direction (second spec)))))
                       ((consp spec)
-                       (format nil "~A ~A" (%ident (first spec)) (%direction (second spec))))
-                      (t (%ident spec))))
+                       (format nil "~A ~A" (%ident (first spec) :order-by) (%direction (second spec))))
+                      (t (%ident spec :order-by))))
                   specs)))
 
 (defun %source (ctx x)
   "A FROM/JOIN source: a table identifier or a parenthesized subquery."
-  (if (%subquery-p x) (format nil "(~A)" (%select ctx x)) (%ident x)))
+  (if (%subquery-p x) (format nil "(~A)" (%select ctx x)) (%ident x :from)))
 
 (defun %from-item (ctx f)
   "A FROM/JOIN item: a source, or (:as source alias) rendered \"source AS alias\"."
   (if (and (consp f) (eq (car f) :as))
-      (format nil "~A AS ~A" (%source ctx (second f)) (%ident (third f)))
+      (format nil "~A AS ~A" (%source ctx (second f)) (%ident (third f) :as))
       (%source ctx f)))
 
 (defun %select-item (ctx item)
   "A SELECT projection: a column, a function/operator expr, or (:as expr alias)."
   (cond ((and (consp item) (eq (car item) :as))
-         (format nil "~A AS ~A" (%expr ctx (second item)) (%ident (third item))))
+         (format nil "~A AS ~A" (%expr ctx (second item)) (%ident (third item) :as)))
         ((consp item) (%expr ctx item))
-        (t (%ident item))))
+        (t (%ident item :select))))
 
 (defun %joins (ctx specs)
   "Compile an ordered list of JOIN specs (KIND SOURCE &optional ON-EXPR)."
@@ -383,8 +419,8 @@ which was invisible while it only ever rendered identifiers."
                 (%from-item ctx source))
         (when on (format o " ON ~A" (%expr ctx on)))))))
 
-(defun %returning (cols)
-  (format nil " RETURNING ~{~A~^, ~}" (mapcar #'%ident cols)))
+(defun %returning (ctx cols)
+  (format nil " RETURNING ~{~A~^, ~}" (mapcar (lambda (c) (%item ctx c :returning)) cols)))
 
 (defun %check-xtdb (ctx q)
   "Signal on DML constructs XTDB 2 does not support, before we emit invalid SQL. XTDB 2 is
@@ -404,7 +440,7 @@ so ON CONFLICT is meaningless; and its DML has no RETURNING (read the value back
                                  (mapcar (lambda (f) (%from-item ctx f)) (getf q :from))))
     (when (getf q :join)     (write-string (%joins ctx (getf q :join)) s))
     (when (getf q :where)    (format s " WHERE ~A" (%expr ctx (getf q :where))))
-    (when (getf q :group-by) (format s " GROUP BY ~{~A~^, ~}" (mapcar #'%ident (getf q :group-by))))
+    (when (getf q :group-by) (format s " GROUP BY ~{~A~^, ~}" (mapcar (lambda (g) (%item ctx g :group-by)) (getf q :group-by))))
     (when (getf q :having)   (format s " HAVING ~A" (%expr ctx (getf q :having))))
     (when (getf q :order-by) (format s " ORDER BY ~A" (%order ctx (getf q :order-by))))
     (when (getf q :limit)    (format s " LIMIT ~A"  (%placeholder ctx (getf q :limit))))
@@ -414,12 +450,12 @@ so ON CONFLICT is meaningless; and its DML has no RETURNING (read the value back
   "Emit the ON CONFLICT (...) DO NOTHING|UPDATE tail of an upsert, if present."
   (let ((tgt (getf q :on-conflict)))
     (when tgt
-      (format s " ON CONFLICT (~{~A~^, ~})" (mapcar #'%ident tgt))
+      (format s " ON CONFLICT (~{~A~^, ~})" (mapcar (lambda (x) (%item ctx x :on-conflict)) tgt))
       (cond ((getf q :do-nothing) (write-string " DO NOTHING" s))
             ((getf q :do-update)
              (format s " DO UPDATE SET ~{~A~^, ~}"
                      (loop for (k v) on (getf q :do-update) by #'cddr
-                           collect (format nil "~A = ~A" (%ident k) (%expr ctx v)))))))))
+                           collect (format nil "~A = ~A" (%ident k :do-update) (%expr ctx v)))))))))
 
 (defun %insert (ctx q)
   (%check-xtdb ctx q)
@@ -427,30 +463,31 @@ so ON CONFLICT is meaningless; and its DML has no RETURNING (read the value back
          (cols (loop for (k) on (first rows) by #'cddr collect k)))
     (with-output-to-string (s)
       (format s "INSERT INTO ~A (~{~A~^, ~}) VALUES ~{~A~^, ~}"
-              (%ident (getf q :insert-into)) (mapcar #'%ident cols)
+              (%ident (getf q :insert-into) :insert-into)
+              (mapcar (lambda (c) (%ident c :insert-into)) cols)
               (mapcar (lambda (row)
                         (format nil "(~{~A~^, ~})"
                                 (mapcar (lambda (c) (%placeholder ctx (getf row c))) cols)))
                       rows))
       (%on-conflict ctx q s)
-      (when (getf q :returning) (write-string (%returning (getf q :returning)) s)))))
+      (when (getf q :returning) (write-string (%returning ctx (getf q :returning)) s)))))
 
 (defun %update (ctx q)
   (%check-xtdb ctx q)
   (with-output-to-string (s)
     (format s "UPDATE ~A SET ~{~A~^, ~}"
-            (%ident (getf q :update))
+            (%ident (getf q :update) :update)
             (loop for (k v) on (getf q :set) by #'cddr
-                  collect (format nil "~A = ~A" (%ident k) (%placeholder ctx v))))
+                  collect (format nil "~A = ~A" (%ident k :set) (%placeholder ctx v))))
     (when (getf q :where) (format s " WHERE ~A" (%expr ctx (getf q :where))))
-    (when (getf q :returning) (write-string (%returning (getf q :returning)) s))))
+    (when (getf q :returning) (write-string (%returning ctx (getf q :returning)) s))))
 
 (defun %delete (ctx q)
   (%check-xtdb ctx q)
   (with-output-to-string (s)
-    (format s "DELETE FROM ~A" (%ident (getf q :delete-from)))
+    (format s "DELETE FROM ~A" (%ident (getf q :delete-from) :delete-from))
     (when (getf q :where) (format s " WHERE ~A" (%expr ctx (getf q :where))))
-    (when (getf q :returning) (write-string (%returning (getf q :returning)) s))))
+    (when (getf q :returning) (write-string (%returning ctx (getf q :returning)) s))))
 
 (defun %check-dialect (dialect)
   "Normalise DIALECT through the one tree-wide normaliser and return the typed value.
