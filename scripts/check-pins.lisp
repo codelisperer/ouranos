@@ -26,6 +26,7 @@
 
 (require :uiop)
 (load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
+(load (merge-pathnames "pin-files.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))    ; which *.pin files are read (#808)
 
 (defparameter *root* (uiop:pathname-parent-directory-pathname
                       (uiop:pathname-directory-pathname *load-truename*)))
@@ -49,27 +50,31 @@ SHA256 and URL are NOT required here: coalton.pin names a git commit, which is i
 integrity check. Requiring them would fail a pin that is already stronger.")
 
 (defun pin-files ()
-  "Every *.pin file in the tree, outside .git. Before #735 this looked only at the repository
-root, so hyperion/assets/vendor/ASSETS.pin and hyperion/src/vendor/PLURALS.pin were never
-checked."
-  (sort (remove-if (lambda (p) (search "/.git/" (namestring p)))
-                   (directory (merge-pathnames "**/*.pin" *root*)))
-        #'string< :key #'namestring))
+  "Every *.pin file in the tree that a checker reads; see pin-files.lisp for what is left out.
+Before #735 this looked only at the repository root, so hyperion/assets/vendor/ASSETS.pin and
+hyperion/src/vendor/PLURALS.pin were never checked."
+  (pin-files:pin-files *root*))
 
 (defun asset-line-p (line)
-  "Is LINE an asset's first line in an ASSETS.pin-style file: `NAME VERSION sha256 HASH',
-starting in the first column?"
+  "Is LINE an asset's first line in an ASSETS.pin-style file: `NAME VERSION sha256 HASH' (or
+sha384), starting in the first column?"
   (and (plusp (length line))
        (not (member (char line 0) '(#\Space #\Tab #\#)))
        (let ((w (remove "" (uiop:split-string (string-right-trim '(#\Return) line)
                                               :separator '(#\Space #\Tab))
                         :test #'string=)))
-         (and (= 4 (length w)) (string= "sha256" (third w)) w))))
+         (and (= 4 (length w)) (member (third w) '("sha256" "sha384") :test #'string=) w))))
 
 (defun pin-blocks (path)
   "The pins PATH holds, as (label . fields). A file of `name value' fields is one pin. A file of
 asset blocks, each starting with an ASSET-LINE-P line and continued by indented fields, is one
-pin per asset, and each asset must carry the required fields itself (#735)."
+pin per asset, and each asset must carry the required fields itself (#735).
+
+In a file of asset blocks, a line in the first column that is not an asset's first line, and
+an indented line before the first asset, become a block of their own whose fields hold
+(:malformed . reason), which MAIN reports as a failure. Before #808 such a line was skipped,
+and the indented fields after it were added to the previous asset, so that asset was never
+checked and nothing said so."
   (let ((lines (with-open-file (in path :if-does-not-exist nil)
                  (unless in (error "cannot open ~A" (human-path:human-path path)))
                  (loop for line = (read-line in nil nil) while line collect line))))
@@ -83,7 +88,17 @@ pin per asset, and each asset must carry the required fields itself (#735)."
                      (push (list (format nil "~A ~A" (enough-namestring path *root*) (first head))
                                  (cons "version" (second head)))
                            blocks))
-                    ((or (zerop (length trimmed)) (char= #\# (char trimmed 0)) (null blocks)))
+                    ((or (zerop (length trimmed)) (char= #\# (char trimmed 0))))
+                    ((or (null blocks) (not (member (char line 0) '(#\Space #\Tab))))
+                     ;; Not a header, and not a field of the block above: a block of its own,
+                     ;; which fails, so any fields after it are not credited to another asset.
+                     (push (list (format nil "~A line ~D" (enough-namestring path *root*)
+                                         (1+ (position line lines :test #'eq)))
+                                 (cons :malformed
+                                       (if (member (char line 0) '(#\Space #\Tab))
+                                           "an indented field before the first asset"
+                                           "not an asset's first line `NAME VERSION sha256 HASH'")))
+                           blocks))
                     ((member (char line 0) '(#\Space #\Tab))
                      (let ((sp (position-if (lambda (c) (member c '(#\Space #\Tab))) trimmed)))
                        (push (if sp
@@ -108,6 +123,8 @@ pin per asset, and each asset must carry the required fields itself (#735)."
 (defun days-since (iso)
   "Whole days from ISO (YYYY-MM-DD) to today, or NIL if it does not parse."
   (when (and (stringp iso) (= 10 (length iso)))
+    ;; Counted from midnight UTC of the review date, so a pin reviewed today is 0 days old all
+    ;; day. Before #735 it counted from noon UTC (#808).
     (let ((y (parse-integer iso :start 0 :end 4 :junk-allowed t))
           (m (parse-integer iso :start 5 :end 7 :junk-allowed t))
           (d (parse-integer iso :start 8 :end 10 :junk-allowed t)))
@@ -132,12 +149,16 @@ pin per asset, and each asset must carry the required fields itself (#735)."
     (dolist (block pins)
       (let* ((name (car block))
              (fields (cdr block))
+             (malformed (cdr (assoc :malformed fields)))
              (missing (append
                        (unless (some (lambda (f) (assoc f fields :test #'string=))
                                      *identity-fields*)
                          (list (format nil "one of ~{~A~^/~}" *identity-fields*)))
                        (remove-if (lambda (f) (assoc f fields :test #'string=)) *required*))))
         (cond
+          (malformed
+           (incf bad)
+           (format t "  FAIL  ~40A ~A~%" name malformed))
           (missing
            (incf bad)
            (format t "  FAIL  ~40A missing: ~{~A~^, ~}~%" name missing))

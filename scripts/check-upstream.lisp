@@ -29,6 +29,7 @@
 
 (require :uiop)
 (load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
+(load (merge-pathnames "pin-files.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))    ; which *.pin files are read (#808)
 
 (defparameter *root* (uiop:pathname-parent-directory-pathname
                       (uiop:pathname-directory-pathname *load-truename*)))
@@ -205,10 +206,9 @@ says why the place could not be read at all."
   (enough-namestring path *root*))
 
 (defun pin-files ()
-  "Every *.pin file in the tree, outside .git."
-  (sort (remove-if (lambda (p) (search "/.git/" (namestring p)))
-                   (directory (merge-pathnames "**/*.pin" *root*)))
-        #'string< :key #'namestring))
+  "Every *.pin file in the tree that a checker reads, the same files check-pins.lisp reads; see
+pin-files.lisp for what is left out (#808)."
+  (pin-files:pin-files *root*))
 
 (defun pinned-items ()
   "Every pin the tree has, as (kind file key): an identity line of a *.pin file, a version key

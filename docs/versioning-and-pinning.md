@@ -139,9 +139,17 @@ reviewed   2026-09-15
   two states are identical, and only one of them is fine. **Bump it when you look, even —
   especially — when the answer is "nothing to do".**
 
-`scripts/check-pins.lisp` enforces the fields' presence in every `*.pin` file in the tree, not only those at the root, and in each asset's block of an `ASSETS.pin`-style file, where every asset is a pin of its own (#735). It is wired into CI. No pin is
-exempt: Coalton carries them too, not because it is dangerous but because a pin that opts
-out is a pin nobody reviews, and an exemption outlives the reasoning that justified it.
+`scripts/check-pins.lisp` enforces the fields' presence in every `*.pin` file in the tree,
+not only those at the root, and in each asset's block of an `ASSETS.pin`-style file, where
+every asset is a pin of its own (#735). In such a file, a line in the first column that is not
+an asset's first line (`NAME VERSION sha256 HASH`, or `sha384`) fails the check, so an asset
+whose first line is malformed is reported instead of being merged into the asset above it
+(#808). It and `scripts/check-upstream.lisp` read the same files, chosen by
+`scripts/pin-files.lisp`: everything except `.git`, the top-level build output `.gitignore`
+names (`vendor/`, `dist/`, `dist-*/`) and a checkout nested inside the tree. It is wired into
+CI. No pin is exempt: Coalton carries them too, not because it is dangerous but because a pin
+that opts out is a pin nobody reviews, and an exemption outlives the reasoning that justified
+it.
 
 ### What is checked mechanically, and what deliberately is not
 
