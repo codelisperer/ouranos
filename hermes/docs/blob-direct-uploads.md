@@ -154,15 +154,31 @@ leaves the source where it is. Both return the destination's `blob-meta`.
   Whether DigitalOcean Spaces supports this part copy (UploadPartCopy) has not been measured
   yet; it works on MinIO.
 - **A move is not atomic on S3.** If the copy succeeds and deleting the source fails, the
-  delete's own condition is signalled, normally `blob-backend-error` naming the source. The
-  destination then exists and holds the blob, and the source is still there. Retrying the move
-  is safe, because a copy overwrites. A sweep of the quarantine prefix should expect a source
-  left behind this way.
+  delete's own condition is signalled, normally `blob-backend-error` naming the source. A delete
+  S3 refuses with 403, as for a role without `s3:DeleteObject`, cannot be told from a missing key
+  by the delete itself, so the move checks afterwards that the source is gone and otherwise
+  signals `blob-backend-error` naming the source. Either way the destination exists and holds the
+  blob, and the source is still there. Retrying the move is safe, because a copy overwrites. A
+  sweep of the quarantine prefix should expect a source left behind this way.
+- **The delete is unconditional.** If the source is replaced between the copy and the delete,
+  the newer object is deleted and the older one is at the destination. That is harmless for a
+  quarantine prefix only the app writes to, but use `copy-blob` and your own delete for a key
+  other writers use.
+- **What a copy does not carry.** A copy with the COPY directive keeps the object as it is. A
+  copy with `:content-type` or `:metadata` (S3's REPLACE directive), and a multipart copy, set
+  only the content type, the app's metadata, the checksum and the ACL setting: Cache-Control,
+  Content-Disposition, Content-Encoding, the storage class, server-side encryption settings and
+  tags are not carried over.
 - **The same location.** A move whose source and destination are the same deletes nothing and
   returns the blob's metadata. A copy to the same location with no changes does the same; with
   `:content-type` or `:metadata` it rewrites them in place.
-- **Errors.** A missing source is `blob-not-found` naming the source. A provider that cannot
-  copy server-side answers 501, which is `blob-unsupported`; the app then copies through
+- **Errors.** A missing source is `blob-not-found` naming the source. A copy S3 refuses with 403
+  (a role without `s3:GetObject` or `s3:PutObject`, or a KMS key it may not use), or a missing
+  destination bucket, is `blob-backend-error` naming the destination with the detail "copy
+  refused (403) or destination bucket missing", because S3 answers both the same way. A source
+  that S3 reports without an ETag is `blob-backend-error` naming the source, since the copy could
+  not be made conditional on it. A provider that cannot copy server-side answers 501, which is
+  `blob-unsupported`; the app then copies through
   `get-blob` and `put-blob`. A store class an app defines itself gets `blob-unsupported` too,
   until it implements `copy-blob`.
 

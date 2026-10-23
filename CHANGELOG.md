@@ -477,7 +477,9 @@ its tag.
   unless `:content-type` or `:metadata` replace them. A copied object gets the bucket's default
   ACL, or `x-amz-acl: private` on a store made with `:upload-acl :private`. A move is not atomic on S3:
   if deleting the source fails, the destination exists and the delete's condition is
-  signalled. On the filesystem store a move is a rename. A missing source is `blob-not-found`
+  signalled, and a delete S3 refuses with 403 is found by checking the source afterwards and
+  signals `blob-backend-error` naming the source. A copy S3 refuses with 403, or a missing
+  destination bucket, is `blob-backend-error` naming the destination. On the filesystem store a move is a rename. A missing source is `blob-not-found`
   naming it; a provider that cannot copy, or a store class that does not implement it, signals
   `blob-unsupported`. See "Leaving quarantine" in `hermes/docs/blob-direct-uploads.md`.
 

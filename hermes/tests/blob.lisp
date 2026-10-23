@@ -1677,17 +1677,24 @@ at the very end decodes as written, without scanning to the end once per `&'."
            (values (funcall fn) (nreverse calls)))
       (setf (fdefinition 'b::%s3-request) original))))
 
-(defun copy-answer (&key (put '("<CopyObjectResult><ETag>\"new\"</ETag></CopyObjectResult>" 200)))
+(defun copy-answer (&key (put '("<CopyObjectResult><ETag>\"new\"</ETag></CopyObjectResult>" 200))
+                          (delete-takes-effect t) (source-headers +copy-source-headers+))
   "An ANSWER for a single-part copy of src.txt: the source and destination HEADs, and PUT answering
-PUT (a list, or a function to call)."
-  (lambda (method key query)
-    (declare (ignore query))
-    (case method
-      (:head (if (equal key "src.txt")
-                 (list "" 200 +copy-source-headers+)
-                 (list "" 200 (header-table "content-length" "10" "content-type" "text/plain"))))
-      (:put (if (functionp put) (funcall put) put))
-      (t (list "" 200 (header-table))))))
+PUT (a list, or a function to call). A DELETE of src.txt answers 204, and afterwards a HEAD of it
+is not found, unless DELETE-TAKES-EFFECT is NIL: a delete S3 refused with 403, which DELETE-BLOB
+reports as success."
+  (let ((deleted nil))
+    (lambda (method key query)
+      (declare (ignore query))
+      (case method
+        (:head (cond ((not (equal key "src.txt"))
+                      (list "" 200 (header-table "content-length" "10" "content-type" "text/plain")))
+                     (deleted (error 'b:blob-not-found :bucket "media" :key key))
+                     (t (list "" 200 source-headers))))
+        (:put (if (functionp put) (funcall put) put))
+        (:delete (when (and delete-takes-effect (equal key "src.txt")) (setf deleted t))
+                 (list "" 204 (header-table)))
+        (t (list "" 200 (header-table)))))))
 
 (defun extra (call name) (cdr (assoc name (getf call :extra-headers) :test #'string-equal)))
 (defun calls-of (calls method) (remove method calls :key (lambda (c) (getf c :method)) :test-not #'eq))
@@ -1827,8 +1834,13 @@ names the source if it has gone since, and otherwise the destination, whose buck
       (is (equal "src.txt" (b:blob-error-key (handler-case (call-with-scripted-s3 (answer nil) (lambda () (b:copy-blob (test-s3-store) "media" "src.txt" "other" "dst.txt")))
                                                 (b:blob-not-found (c) c)))))
       (setf heads 0)
-      (is (equal "dst.txt" (b:blob-error-key (handler-case (call-with-scripted-s3 (answer t) (lambda () (b:copy-blob (test-s3-store) "media" "src.txt" "other" "dst.txt")))
-                                                (b:blob-not-found (c) c))))))))
+      (let ((c (handler-case (call-with-scripted-s3 (answer t) (lambda () (b:copy-blob (test-s3-store) "media" "src.txt" "other" "dst.txt")))
+                 (error (c) c))))
+        (is (and (typep c 'b:blob-backend-error) (not (typep c 'b:blob-not-found)))
+            "with the source still there, a 403 or 404 on the copy is not BLOB-NOT-FOUND: ~S" c)
+        (is (equal "dst.txt" (and (typep c 'b:blob-error) (b:blob-error-key c))) "it names the destination")
+        (is (equal "copy refused (403) or destination bucket missing"
+                   (and (typep c 'b:blob-backend-error) (b:blob-backend-error-detail c))))))))
 
 (test s3-copy-part-ranges-cover-the-object
   (is (equal '((0 . 3) (4 . 7) (8 . 9)) (b::%copy-part-ranges 10 4)))
@@ -1899,8 +1911,9 @@ names the source if it has gone since, and otherwise the destination, whose buck
       (call-with-scripted-s3 (copy-answer)
                              (lambda () (b:move-blob (test-s3-store) "media" "src.txt" "media" "dst.txt")))
     (is (equal "dst.txt" (b:blob-meta-key meta)))
-    (is (equal '(:head :put :head :delete) (mapcar (lambda (c) (getf c :method)) calls)))
-    (is (equal "src.txt" (getf (car (last calls)) :key)) "the source is deleted, last"))
+    (is (equal '(:head :put :head :delete :head) (mapcar (lambda (c) (getf c :method)) calls))
+        "HEAD source, copy, HEAD copy, delete source, and a HEAD that finds the source gone")
+    (is (equal "src.txt" (getf (fourth calls) :key)) "the source is the one deleted"))
   (multiple-value-bind (meta calls)
       (call-with-scripted-s3 (copy-answer)
                              (lambda () (b:move-blob (test-s3-store) "media" "src.txt" "media" "src.txt")))
@@ -2041,3 +2054,30 @@ ETag nothing is copied: one HEAD, then BLOB-SOURCE-CHANGED naming the source."
                                                 (b:blob-invalid-metadata (c) (b:blob-invalid-metadata-name c)))))
           (is (equal "if-match" result) "~S on ~A" bad (b:store-name store))
           (is (null calls)))))))
+
+(test s3-move-blob-signals-when-the-delete-was-refused
+  "S3 answers a DELETE refused for want of s3:DeleteObject with 403, which DELETE-BLOB folds into
+\"already gone\". The move checks that the source is gone, and signals BLOB-BACKEND-ERROR naming
+it when it is not. S3-MOVE-BLOB-COPIES-THEN-DELETES-THE-SOURCE is the control: there the delete
+takes effect."
+  (multiple-value-bind (c calls)
+      (call-with-scripted-s3 (copy-answer :delete-takes-effect nil)
+                             (lambda () (handler-case (b:move-blob (test-s3-store) "media" "src.txt" "media" "dst.txt")
+                                          (b:blob-backend-error (c) c))))
+    (is (typep c 'b:blob-backend-error) "~S" c)
+    (is (equal "src.txt" (and (typep c 'b:blob-error) (b:blob-error-key c))) "naming the source")
+    (is (search "not deleted" (or (and (typep c 'b:blob-backend-error) (b:blob-backend-error-detail c)) "")))
+    (is (calls-of calls :put) "the copy had been made")))
+
+(test s3-copy-blob-refuses-a-source-without-an-etag
+  "Every copy request is conditional on the source's ETag. A HEAD with none would put \"NIL\" in
+the header and fail every copy as BLOB-SOURCE-CHANGED; it is a BLOB-BACKEND-ERROR naming the
+source instead, before any copy is sent."
+  (multiple-value-bind (c calls)
+      (call-with-scripted-s3 (copy-answer :source-headers (header-table "content-length" "10"
+                                                                        "content-type" "text/plain"))
+                             (lambda () (handler-case (b:copy-blob (test-s3-store) "media" "src.txt" "media" "dst.txt")
+                                          (error (c) c))))
+    (is (and (typep c 'b:blob-backend-error) (not (typep c 'b:blob-source-changed))) "~S" c)
+    (is (equal "src.txt" (and (typep c 'b:blob-error) (b:blob-error-key c))))
+    (is (null (calls-of calls :put)) "no copy was sent")))

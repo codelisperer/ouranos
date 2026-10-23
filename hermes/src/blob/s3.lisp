@@ -810,9 +810,15 @@ the source is gone (else the destination, whose bucket is then missing). A 200 w
                                 :bucket src-bucket :key src-key
                                 :operation "server-side copy (copy through get-blob and put-blob)"))
                     (t (error e))))
-                (blob-not-found (e)
+                (blob-not-found ()
+                  ;; %S3-REQUEST folds 403 into BLOB-NOT-FOUND. With the source still there, the
+                  ;; copy was refused (missing GetObject or PutObject, a KMS denial) or the
+                  ;; destination bucket is missing; reporting the destination as not found would
+                  ;; read as "the upload vanished" to a quarantine flow.
                   (if (blob-exists-p s src-bucket src-key)
-                      (error e)
+                      (error 'blob-backend-error
+                             :bucket dst-bucket :key dst-key
+                             :detail "copy refused (403) or destination bucket missing")
                       (error 'blob-not-found :bucket src-bucket :key src-key))))))
     ;; CopyObject and UploadPartCopy can answer 200 with an <Error> document as the body.
     (when (search "<Error>" text)
@@ -887,6 +893,13 @@ behind to be billed."
           meta)
         (multiple-value-bind (size etag src-type src-user checksum)
             (%source-head s src-bucket src-key)
+          ;; Every copy request is conditional on the source's ETag, so a store that answers the
+          ;; HEAD without one cannot be copied from safely; without this check the header would
+          ;; read "NIL" and every copy would fail as BLOB-SOURCE-CHANGED.
+          (unless (and etag (plusp (length etag)))
+            (error 'blob-backend-error
+                   :bucket src-bucket :key src-key
+                   :detail "the source has no ETag, so the copy cannot be made conditional on it"))
           ;; The app's IF-MATCH is checked against the HEAD's ETag before anything is sent, and
           ;; every copy request is conditional on that same ETag, so the copy is of the checked
           ;; bytes.

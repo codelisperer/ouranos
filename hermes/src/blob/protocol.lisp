@@ -32,7 +32,8 @@ PUT-BLOB, so it costs nothing extra and is available to store alongside the row.
   (last-modified nil :type (or null integer))
   ;; The provider's entity tag, without its quotes, where the backend has one: S3's ETag,
   ;; which is the MD5 of a single-part upload and not a content hash for a multipart one.
-  ;; NIL on the filesystem store. For checking a browser's upload after the fact (#770).
+  ;; On the filesystem store it is the SHA-256 checksum when the blob has a sidecar, and NIL
+  ;; when it has none (#826). For checking a browser's upload after the fact (#770).
   (etag nil :type (or null string)))
 
 (defstruct (upload-target (:constructor make-upload-target (url method headers expires-in
@@ -220,9 +221,15 @@ default ACL, because S3 never copies an object's ACL."))
 
 NOT ATOMIC on S3, which has no rename: if the copy succeeds and the delete fails, the
 destination holds the blob AND the source is still there, and the delete's own condition is
-signalled, normally BLOB-BACKEND-ERROR naming the source. Retrying the move is safe, because a
-copy overwrites. A quarantine sweep must expect a source left behind this way. If the copy
-fails, nothing was deleted. On the filesystem store a move is a rename within one root.
+signalled, normally BLOB-BACKEND-ERROR naming the source. A delete the store refuses (S3 answers
+403, which DELETE-BLOB cannot tell from a missing key) is found by checking that the source is
+gone afterwards, and signals BLOB-BACKEND-ERROR naming the source too. Retrying the move is safe,
+because a copy overwrites. A quarantine sweep must expect a source left behind this way. If the
+copy fails, nothing was deleted. On the filesystem store a move is a rename within one root.
+
+The delete is unconditional: if the source is replaced between the copy and the delete, the newer
+object is deleted and the older one is at the destination. That is harmless for a quarantine
+prefix nothing else writes to, but not for a key other writers use.
 
 When source and destination are the same, it returns the blob's BLOB-META and deletes nothing.
 IF-MATCH is checked as COPY-BLOB checks it, and a mismatch deletes nothing."))
@@ -505,6 +512,13 @@ bug at the call site. Prefer this."
       (let ((meta (copy-blob s src-bucket src-key dst-bucket dst-key
                              :content-type content-type :metadata metadata :if-match if-match)))
         (delete-blob s src-bucket src-key)
+        ;; DELETE-BLOB is idempotent and folds S3's 403 into "already gone", so a role without
+        ;; s3:DeleteObject would make the move look done with the source left behind. Check.
+        (when (blob-exists-p s src-bucket src-key)
+          (error 'blob-backend-error
+                 :bucket src-bucket :key src-key
+                 :detail (concatenate 'string "the source was copied but not deleted: "
+                                      "the delete was refused, or the source was written again")))
         meta)))
 
 (defmethod upload-url ((s store) bucket key &key expires-in content-type content-length max-bytes)
