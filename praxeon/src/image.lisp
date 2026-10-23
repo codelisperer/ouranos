@@ -464,10 +464,25 @@ filling the heap.")
   (let ((v (uiop:getenv name)))
     (and v (plusp (length v)) v)))
 
+(defvar *warned-of-image-api-key* nil
+  "True once the deprecated PRAXEON_IMAGE_API_KEY has been read and warned of, so the warning is
+logged once per image, not on every request.")
+
 (defun %env-key ()
-  "The OpenAI image key from the environment: PRAXEON_IMAGE_API_KEY, then PRAXEON_OPENAI_API_KEY.
-NIL when neither is set."
-  (or (%getenv "PRAXEON_IMAGE_API_KEY") (%getenv "PRAXEON_OPENAI_API_KEY")))
+  "The OpenAI image key from the environment: PRAXEON_OPENAI_API_KEY, then the deprecated
+PRAXEON_IMAGE_API_KEY. NIL when neither is set.
+
+PRAXEON_IMAGE_API_KEY does not say which vendor it is for, so a key meant for another provider
+could be put there and sent to OpenAI. It is still read, after PRAXEON_OPENAI_API_KEY, and the
+first time it supplies the key a warning names PRAXEON_OPENAI_API_KEY as its replacement. It
+goes away in a later release."
+  (or (%getenv "PRAXEON_OPENAI_API_KEY")
+      (let ((key (%getenv "PRAXEON_IMAGE_API_KEY")))
+        (when (and key (not *warned-of-image-api-key*))
+          (setf *warned-of-image-api-key* t)
+          (log:warn "PRAXEON_IMAGE_API_KEY is deprecated and will be removed; set PRAXEON_OPENAI_API_KEY instead"
+                    :provider "openai"))
+        key)))
 
 (defun %key (api-key api-key-p &optional (env-key #'%env-key))
   "The key to use: API-KEY when given, otherwise what ENV-KEY, a function of no arguments, finds
@@ -479,8 +494,8 @@ never falls back to the environment, because the app chose it."
 
 (defun make-openai-images (&key (api-key nil api-key-p) model base-url read-timeout)
   "An OPENAI-IMAGES provider. An API-KEY that is given is used, NIL included; the environment
-is read only when none is given (PRAXEON_IMAGE_API_KEY, then PRAXEON_OPENAI_API_KEY). A given
-key of NIL or \"\" is no key. MODEL defaults to PRAXEON_IMAGE_MODEL, then *OPENAI-IMAGE-MODEL*;
+is read only when none is given (PRAXEON_OPENAI_API_KEY, then the deprecated
+PRAXEON_IMAGE_API_KEY, which logs a warning once). A given key of NIL or \"\" is no key. MODEL defaults to PRAXEON_IMAGE_MODEL, then *OPENAI-IMAGE-MODEL*;
 BASE-URL to PRAXEON_IMAGE_BASE_URL, then *OPENAI-IMAGES-BASE-URL*; READ-TIMEOUT, in seconds, to
 *OPENAI-IMAGES-READ-TIMEOUT*. Signals MISSING-PROVIDER-KEY when there is no key, because every
 request would fail."
@@ -490,7 +505,7 @@ request would fail."
              :impl "openai images"
              :variables (if api-key-p
                             '(":API-KEY")
-                            '("PRAXEON_IMAGE_API_KEY" "PRAXEON_OPENAI_API_KEY"))))
+                            '("PRAXEON_OPENAI_API_KEY" "PRAXEON_IMAGE_API_KEY"))))
     (make-instance 'openai-images
                    :api-key key
                    :model (or model (%getenv "PRAXEON_IMAGE_MODEL") *openai-image-model*)
@@ -1101,8 +1116,8 @@ An app normally calls REGISTER-OPENAI-IMAGE, which registers nothing when there 
 Returns NAME, or NIL when there is no key, in which case nothing is registered. This is the way
 to register it: a means without a key could only fail.
 
-The key is API-KEY when given, NIL included, and otherwise PRAXEON_IMAGE_API_KEY, then
-PRAXEON_OPENAI_API_KEY. A given key of NIL or \"\" is no key, and nothing is registered; an
+The key is API-KEY when given, NIL included, and otherwise PRAXEON_OPENAI_API_KEY, then the
+deprecated PRAXEON_IMAGE_API_KEY. A given key of NIL or \"\" is no key, and nothing is registered; an
 empty string is logged at warn, because it usually means the app's key setting is blank.
 ON-IMAGE, QUALITIES, DEFAULT-QUALITY, DEFAULT-SIZE, RESOLVE-REFERENCE and MAX-REFERENCES are as
 for REGISTER. MODEL, BASE-URL and READ-TIMEOUT are as for MAKE-OPENAI-IMAGES."

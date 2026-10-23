@@ -1072,8 +1072,9 @@ and the bytes are yours to store and serve. Praxeon keeps nothing.
 
 `register-openai-image` returns the means' name, or NIL when there is no key, in which case it
 registers nothing. Use it rather than `register`, so an agent never has a means that can only
-fail. With no `:api-key` it reads `PRAXEON_IMAGE_API_KEY`, then `PRAXEON_OPENAI_API_KEY`; an
-`:api-key` you pass is used even when it is NIL. An `:api-key` of `""` is no key either: nothing
+fail. With no `:api-key` it reads `PRAXEON_OPENAI_API_KEY`, then the deprecated
+`PRAXEON_IMAGE_API_KEY`, which logs a warning the first time it supplies the key; an `:api-key`
+you pass is used even when it is NIL. An `:api-key` of `""` is no key either: nothing
 is registered, and a warning is logged, because it usually means the app's key setting is blank.
 `PRAXEON_IMAGE_MODEL` and `PRAXEON_IMAGE_BASE_URL` override the model (default
 `gpt-image-2.5-flare`) and the endpoint.
@@ -1251,9 +1252,10 @@ stored size first and return NIL for an image over 50 MB rather than reading it.
 
 **Each provider reads only its own key variables.** The Google provider never reads
 `PRAXEON_IMAGE_API_KEY` or `PRAXEON_OPENAI_API_KEY`, so a key you set up for OpenAI is never
-sent to Google. The OpenAI provider reads `PRAXEON_IMAGE_API_KEY` and then
-`PRAXEON_OPENAI_API_KEY`; do not put a Google key in `PRAXEON_IMAGE_API_KEY`, because the OpenAI
-provider would send it to OpenAI.
+sent to Google. The OpenAI provider reads `PRAXEON_OPENAI_API_KEY`, and then
+`PRAXEON_IMAGE_API_KEY`, which is deprecated because its name does not say which vendor it is
+for: a Google key put there would be sent to OpenAI. It still works, logs a warning once, and
+will be removed in a later release; move its value to `PRAXEON_OPENAI_API_KEY`.
 
 ## 15. Run the tests
 

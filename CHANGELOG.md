@@ -14,6 +14,16 @@ its tag.
 
 ### An app may have to act
 
+- **praxeon/image: `PRAXEON_IMAGE_API_KEY` is deprecated; set `PRAXEON_OPENAI_API_KEY`** (#758,
+  part four). Its name does not say which vendor the key is for, and with a second image
+  provider a Google key put there would be sent to OpenAI. The OpenAI image provider
+  (`make-openai-images`, `openai-images-from-env`, `register-openai-image`) now reads
+  `:api-key`, then `PRAXEON_OPENAI_API_KEY`, then `PRAXEON_IMAGE_API_KEY`. That last one still
+  works and logs one warning naming `PRAXEON_OPENAI_API_KEY`. It will be removed in a later
+  release. The order changed: before, `PRAXEON_IMAGE_API_KEY` was read first, so an app that
+  sets both to different keys now uses the one in `PRAXEON_OPENAI_API_KEY`. The Google provider
+  reads neither.
+
 - **hermes/blob: `put-blob` refuses metadata named `sha256`, and malformed metadata, with the new
   condition `blob-invalid-metadata`** (#810). `sha256`, in any case, is reserved for the checksum
   the S3 store now records. Names and values become request headers on S3, so a name must be a
@@ -672,7 +682,8 @@ its tag.
   `image-result-revised-prompt`, `image-result-size`, `image-result-quality`,
   `image-result-cost`) and returns a reference the model may see. It returns NIL and registers
   nothing when there is no key; the key is `:api-key` when given, otherwise
-  `PRAXEON_IMAGE_API_KEY`, then `PRAXEON_OPENAI_API_KEY`; an `:api-key` of `""` is no key and is
+  `PRAXEON_OPENAI_API_KEY`, then the deprecated `PRAXEON_IMAGE_API_KEY` (see "An app may have to
+  act"); an `:api-key` of `""` is no key and is
   logged at warn. `:qualities` (for example `'(:low :medium)`), `:default-quality` and
   `:default-size` bound what an image can cost: the tool schema offers only the allowed qualities,
   and a call asking for another is refused before any request. A 429, a 5xx, or no answer within
