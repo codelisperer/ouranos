@@ -132,16 +132,21 @@ The tests check each platform's decision on every platform without showing a win
 
 | | `reveal-path` | `reveal-path :select t` | `open-url` |
 |---|---|---|---|
-| Windows | `explorer.exe <directory>` | `explorer.exe /select,<path>` | `rundll32.exe url.dll,FileProtocolHandler <url>` |
-| macOS | `open <directory>` | `open -R <path>` | `open <url>` |
+| Windows | `ShellExecuteW` on the directory | `explorer.exe /select,"<path>"` | `ShellExecuteW` on the URL |
+| macOS | `open -R <path>` | `open -R <path>` | `open <url>` |
 | Linux | `xdg-open <directory>` | `ShowItems` over D-Bus with `dbus-send`, else `xdg-open <directory>` | `xdg-open <url>` |
 
-Each program gets the path or URL as one argument, with no shell, and `explorer.exe` and
-`rundll32.exe` are run from the Windows directory, not from `PATH`. The path is made absolute
-first. Neither function waits for the file manager or the browser. Both return `:opened`, or
+No shell is involved. On macOS and Linux each program gets the path or URL as one argument.
+`explorer.exe` reads its command line by its own rules and splits `/select` at commas, so
+`reveal-path` writes that command line itself, with the path in double quotes; Windows does not
+allow `"` in a file name. `explorer.exe` is run from the Windows directory that
+`GetSystemWindowsDirectoryW` reports, not from `PATH` or `SystemRoot`. On macOS `open -R` is used
+with and without `:select`, because `open` on a directory that is an app bundle launches the app.
+A string path is read as a native file name, and the path is made absolute first. Neither function waits for the file manager or the browser. Both return `:opened`, or
 `:not-available` with the reason as a second value: `:no-display` (Linux with neither `DISPLAY`
 nor `WAYLAND_DISPLAY`), `:no-program` (Linux without `xdg-open`) or `:failed` (the program did
 not start). `reveal-path` signals `path-not-found` when nothing exists at the path. `open-url`
 signals `unsupported-url` for anything but an http or https URL, because the same programs open
-`file:` URLs and custom schemes, which start other programs; the condition's report does not
-print the URL, which can carry a token (#820).
+`file:` URLs and custom schemes, which start other programs, and for a URL with a character
+RFC 3986 does not allow, such as a space, `"`, `<`, `>`, `\`, `^`, `|`, `{`, `}` or the backtick.
+The condition's report does not print the URL, which can carry a token (#820).

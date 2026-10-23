@@ -110,9 +110,11 @@
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
-  ;; explorer.exe and rundll32.exe on Windows, /usr/bin/open on macOS, xdg-open and dbus-send
-  ;; on Linux, all run as programs; hades/program finds the Linux ones on PATH.
-  :depends-on ("hades/program")
+  ;; Windows: explorer.exe, and ShellExecuteW and the Windows directory bound in aion/windows.
+  ;; /usr/bin/open on macOS, xdg-open and dbus-send on Linux, all run as programs;
+  ;; hades/program finds the Linux ones on PATH.
+  :depends-on ("hades/program"
+               (:feature :win32 "aion/windows"))
   :serial t
   :components ((:module "src/open"
                 :serial t

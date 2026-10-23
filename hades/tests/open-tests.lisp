@@ -65,6 +65,16 @@ Returns the plans in order."
   (is-true (o::%url-p "HTTPS://example.com/a?b=c") "An upper-case scheme is accepted.")
   (is-true (o::%url-p "http://localhost:8080/")))
 
+(test only-the-characters-rfc-3986-allows-are-accepted-in-a-url
+  (dolist (c (list #\" #\< #\> #\\ #\^ #\| #\{ #\} #\` #\Tab (code-char 127) (code-char #xE9)))
+    (let ((url (format nil "https://example.com/a~Cb" c)))
+      (is (null (recording-plans (lambda () (signals o:unsupported-url (o:open-url url)))))
+          "~S" url)))
+  (dolist (url '("https://example.com/a-b._~c?d=e&f=g+h;i=j,k#l"
+                 "http://[::1]:8080/p@q/!$'()*=%20"
+                 "https://user@example.com:8443/a/b/"))
+    (is-true (o::%url-p url) "~S" url)))
+
 (test an-unsupported-url-is-not-printed
   (let ((text (handler-case (progn (o:open-url "https://example.com/?token=SECRET x") "")
                 (o:unsupported-url (c) (princ-to-string c)))))
@@ -73,24 +83,39 @@ Returns the plans in order."
 
 ;;; --- every platform's command ---------------------------------------------------------
 
-(test windows-uses-explorer-from-the-windows-directory
-  (let ((getenv (env :|SystemRoot| "D:\\Win")))
-    (is (equal '(:launch "D:\\Win\\explorer.exe" ("/select,C:\\Users\\a b\\c.txt"))
-               (o::%reveal-plan "C:\\Users\\a b\\c.txt" "C:\\Users\\a b\\" t :platform :windows :getenv getenv)))
-    (is (equal '(:launch "D:\\Win\\explorer.exe" ("C:\\Users\\a b\\"))
-               (o::%reveal-plan "C:\\Users\\a b\\c.txt" "C:\\Users\\a b\\" nil :platform :windows :getenv getenv)))
-    (is (equal '(:launch "D:\\Win\\System32\\rundll32.exe" ("url.dll,FileProtocolHandler" "https://example.com/?a=1&b=2"))
+(test windows-selects-with-explorer-and-opens-with-shell-execute
+  (let ((windows-directory (constantly "D:\\Win"))
+        (getenv (env :|SystemRoot| "bin")))
+    (is (equal '(:launch-raw "D:\\Win\\explorer.exe" "/select,\"C:\\Users\\a b,c\\d.txt\"")
+               (o::%reveal-plan "C:\\Users\\a b,c\\d.txt" "C:\\Users\\a b,c\\" t
+                                :platform :windows :getenv getenv :windows-directory windows-directory))
+        "explorer.exe's command line is written here, with the path in quotes, so a space or a comma in it is part of the path.")
+    (is (equal '(:shell-open "C:\\Users\\a b,c\\")
+               (o::%reveal-plan "C:\\Users\\a b,c\\d.txt" "C:\\Users\\a b,c\\" nil
+                                :platform :windows :getenv getenv :windows-directory windows-directory)))
+    (is (equal '(:shell-open "https://example.com/?a=1&b=2")
                (o::%url-plan "https://example.com/?a=1&b=2" :platform :windows :getenv getenv))
-        "The URL is one argument, so & is not a command separator."))
-  (is (equal "C:\\Windows\\explorer.exe"
-             (second (o::%reveal-plan "C:\\a" "C:\\" nil :platform :windows :getenv (env))))
-      "Without SystemRoot, the usual Windows directory."))
+        "The URL goes to ShellExecuteW, so & is not a command separator.")
+    (signals o:path-not-found
+      (o::%reveal-plan "C:\\a\"b" "C:\\" t :platform :windows :windows-directory windows-directory))))
 
-(test macos-uses-open-with-r-to-select
+(test the-windows-directory-does-not-come-from-systemroot
+  ;; On Windows the default is GetSystemWindowsDirectoryW; elsewhere a fixed C:\Windows, used
+  ;; only by tests like this one.
+  (let ((plan (o::%reveal-plan "C:\\a" "C:\\" t :platform :windows :getenv (env :|SystemRoot| "."))))
+    (is (eq :launch-raw (first plan)))
+    (is (uiop:string-suffix-p (second plan) "\\explorer.exe"))
+    (is (and (> (length (second plan)) 3) (char= #\: (char (second plan) 1)))
+        "An absolute path: ~S" (second plan))))
+
+(test macos-always-uses-open-with-r
   (is (equal '(:launch "/usr/bin/open" ("-R" "/Users/a/b c.txt"))
              (o::%reveal-plan "/Users/a/b c.txt" "/Users/a/" t :platform :macos)))
-  (is (equal '(:launch "/usr/bin/open" ("/Users/a/"))
+  (is (equal '(:launch "/usr/bin/open" ("-R" "/Users/a/b c.txt"))
              (o::%reveal-plan "/Users/a/b c.txt" "/Users/a/" nil :platform :macos)))
+  (is (equal '(:launch "/usr/bin/open" ("-R" "/Applications/Example.app"))
+             (o::%reveal-plan "/Applications/Example.app" "/Applications/Example.app/" nil :platform :macos))
+      "A directory is never given to open without -R, which would launch an app bundle.")
   (is (equal '(:launch "/usr/bin/open" ("https://example.com/"))
              (o::%url-plan "https://example.com/" :platform :macos))))
 
@@ -153,19 +178,68 @@ Returns the plans in order."
           #+darwin
           (progn
             (is (equal (list "-R" (concatenate 'string root "a file.txt")) (args (first plans))))
-            (is (equal (list root) (args (second plans))) "A file without :SELECT opens its directory.")
+            (is (equal (list "-R" (concatenate 'string root "a file.txt")) (args (second plans))))
             (is (equal (list "-R" (string-right-trim "/" root)) (args (third plans)))
                 "A directory is selected by its name, with no trailing separator.")
-            (is (equal (list root) (args (fourth plans))) "A directory named without a separator."))
+            (is (equal (list "-R" (string-right-trim "/" root)) (args (fourth plans)))
+                "A directory named without a separator."))
           #+win32
           (progn
-            (is (equal (list (concatenate 'string "/select," root "a file.txt")) (args (first plans))))
-            (is (equal (list root) (args (second plans))))
-            (is (equal (list (concatenate 'string "/select," (string-right-trim "\\" root))) (args (third plans))))
-            (is (equal (list root) (args (fourth plans)))))
+            (is (equal (format nil "/select,\"~Aa file.txt\"" root) (args (first plans))))
+            (is (equal (list :shell-open root) (second plans)) "A file without :SELECT opens its directory.")
+            (is (equal (format nil "/select,\"~A\"" (string-right-trim "\\" root)) (args (third plans))))
+            (is (equal (list :shell-open root) (fourth plans)) "A directory named without a separator."))
           #-(or darwin win32)
           (dolist (plan plans)
             (is (member (first plan) '(:not-available :try :launch)) "~S" plan)))))))
+
+(test reveal-path-gives-the-plan-the-item-and-the-directory-to-open
+  (with-temp-dir (dir)
+    (let* ((file (merge-pathnames "a file.txt" dir))
+           (root (uiop:native-namestring (truename dir)))
+           (item (string-right-trim "/\\" root))
+           (calls '()))
+      (with-open-file (s file :direction :output) (write-line "x" s))
+      (sb-int:encapsulate 'o::%reveal-plan 'record
+                          (lambda (f native directory select &rest keys)
+                            (declare (ignore f keys))
+                            (push (list native directory select) calls)
+                            '(:not-available :recorded)))
+      (unwind-protect
+           (progn (o:reveal-path file :select t)
+                  (o:reveal-path file)
+                  (o:reveal-path dir))
+        (sb-int:unencapsulate 'o::%reveal-plan 'record))
+      (is (equal (list (list (concatenate 'string root "a file.txt") root t)
+                       (list (concatenate 'string root "a file.txt") root nil)
+                       (list item root nil))
+                 (reverse calls))
+          "A file's directory is the one holding it; a directory is its own."))))
+
+;;; A string is a native file name, so [ ] * ? are not wildcards and \\ on Unix is a character.
+(test a-string-path-is-read-as-a-native-file-name
+  (with-temp-dir (dir)
+    (let ((names (list "report[1].pdf" #-win32 "a*b" #-win32 "a?b" #-win32 "a\\b"))
+          (root (uiop:native-namestring (truename dir))))
+      (dolist (name names)
+        (with-open-file (s (uiop:parse-native-namestring (concatenate 'string root name))
+                           :direction :output)
+          (write-line "x" s)))
+      (let ((plans (recording-plans
+                    (lambda ()
+                      (dolist (name names)
+                        (o:reveal-path (concatenate 'string root name) :select t))))))
+        (is (= (length names) (length plans)))
+        (loop for name in names
+              for plan in plans
+              for item = (concatenate 'string root name)
+              do #+darwin (is (equal (list "-R" item) (car (last plan))) "~S" name)
+                 #+win32 (is (equal (format nil "/select,\"~A\"" item) (car (last plan))) "~S" name)
+                 #-(or darwin win32) (is (member (first plan) '(:not-available :try :launch)) "~S" plan))
+        (is (null (recording-plans
+                   (lambda ()
+                     (signals o:path-not-found
+                       (o:reveal-path (concatenate 'string root "report[2].pdf")))))))))))
 
 ;;; --- starting programs, with SBCL standing in -------------------------------------------
 
@@ -185,6 +259,17 @@ Returns the plans in order."
       "The first failed, the second started.")
   (is (equal '(:not-available :failed) (perform (list :try (sbcl-exiting 4) nil))))
   (is (equal '(:not-available :failed) (perform (list :try (sbcl-exiting 4) (list "/no/such/program-820" '()))))))
+
+#-win32
+(test the-windows-only-steps-report-failure-elsewhere
+  (is (equal '(:not-available :failed) (perform (list :launch-raw "/no/such/program-820" "--version"))))
+  (is (equal '(:not-available :failed) (perform (list :shell-open "https://example.com/")))))
+
+#+win32
+(test launch-raw-starts-the-program-with-the-command-line-as-written
+  (is (equal '(:opened nil)
+             (perform (list :launch-raw (uiop:native-namestring sb-ext:*runtime-pathname*) "--version"))))
+  (is (equal '(:not-available :failed) (perform (list :launch-raw "C:\\no\\such\\program-820.exe" "")))))
 
 (test launch-reports-whether-the-program-started
   (is (equal '(:opened nil) (perform (cons :launch (sbcl "--version")))))

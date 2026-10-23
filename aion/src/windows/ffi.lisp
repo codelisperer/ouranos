@@ -480,6 +480,41 @@
   (dw-process-id dword)
   (p-session-id :pointer))
 
+;;; --- the Windows directory, and opening a URL with its registered program (#820) --------
+;;;
+;;; hades/open runs explorer.exe from the Windows directory, and opens a browser with
+;;; ShellExecuteW. GetSystemWindowsDirectoryW and not GetWindowsDirectoryW: on a terminal
+;;; server, GetWindowsDirectoryW can return a per-user directory, and explorer.exe is not in it.
+;;; ShellExecuteW may start a shell extension through COM, which is why ole32's CoInitializeEx is
+;;; bound here as well as in aion/windows/com: SHELL-OPEN calls it on a thread of its own.
+
+;;; Returns the length written, without the terminating NUL; when the buffer is too small, the
+;;; size needed, with it; 0 on failure.
+(cffi:defcfun ("GetSystemWindowsDirectoryW" get-system-windows-directory-w) :uint32
+  (lp-buffer :pointer)
+  (u-size :uint32))
+
+(defconstant +sw-shownormal+ 1)
+
+;;; Returns an HINSTANCE that is not a handle: a value above 32 means success, and 32 or below
+;;; is an error code (SE_ERR_*).
+(cffi:defcfun ("ShellExecuteW" shell-execute-w) :pointer
+  (h-wnd hwnd)
+  (lp-operation :pointer)
+  (lp-file :pointer)
+  (lp-parameters :pointer)
+  (lp-directory :pointer)
+  (n-show-cmd :int32))
+
+(defconstant +coinit-apartmentthreaded+ #x2)
+(defconstant +coinit-disable-ole1dde+ #x4)
+
+(cffi:defcfun ("CoInitializeEx" co-initialize-ex) hresult
+  (pv-reserved :pointer)
+  (dw-co-init dword))
+
+(cffi:defcfun ("CoUninitialize" co-uninitialize) :void)
+
 ;;; --- the layout gate --------------------------------------------------------
 ;;;
 ;;; Run at LOAD, and deliberately fatal. ADR-0003 s4: "built in from the first commit". A

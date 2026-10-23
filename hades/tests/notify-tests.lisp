@@ -165,7 +165,7 @@ what it wrote to standard error, and what it wrote to standard output."
 ;;; --- finding the program on PATH ----------------------------------------------------
 
 #-win32
-(test find-program-takes-only-an-executable-regular-file
+(test find-program-takes-only-an-executable-regular-file-in-an-absolute-directory
   (let ((dir (uiop:ensure-directory-pathname
               (merge-pathnames (format nil "hades-notify-~36R/" (random (expt 36 8) (make-random-state t)))
                                (uiop:temporary-directory)))))
@@ -182,7 +182,18 @@ what it wrote to standard error, and what it wrote to standard output."
            (is (equal (concatenate 'string path "/tool")
                       (hades/program:find-program "tool" (concatenate 'string "/no/such/dir::" path)))
                "An empty or missing directory on PATH is passed over.")
-           (is (null (hades/program:find-program "tool" ""))))
+           (is (null (hades/program:find-program "tool" "")))
+           ;; The same executable file, named by directories relative to the current one.
+           (ensure-directories-exist (merge-pathnames "bin/" dir))
+           (with-open-file (s (merge-pathnames "bin/tool" dir) :direction :output) (write-line "x" s))
+           (sb-posix:chmod (uiop:native-namestring (merge-pathnames "bin/tool" dir)) #o755)
+           (uiop:with-current-directory (dir)
+             (is (null (hades/program:find-program "tool" ".")) "\".\" is not searched.")
+             (is (null (hades/program:find-program "tool" "bin")) "\"bin\" is not searched.")
+             (is (null (hades/program:find-program "tool" "./bin:bin")))
+             (is (equal (concatenate 'string path "/bin/tool")
+                        (hades/program:find-program "tool" (concatenate 'string ".:" path "/bin")))
+                 "An absolute directory after a relative one is still searched.")))
       (uiop:delete-directory-tree dir :validate t))))
 
 ;;; --- by hand only ------------------------------------------------------------------------

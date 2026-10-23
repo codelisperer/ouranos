@@ -11,10 +11,12 @@ zenity, kdialog, dbus-send and xdg-open on Linux.")
 #-win32
 (defun find-program (name &optional (path (uiop:getenv "PATH")))
   "The first regular, executable file called NAME in the directories of PATH, as a native
-namestring, or NIL. An empty directory in PATH is passed over, never read as the current one."
+namestring, or NIL. Only absolute directories are searched: an empty entry, \".\" or \"bin\"
+would name a directory relative to the current one, where a file called NAME could be anyone's."
   (loop for dir in (uiop:split-string (or path "") :separator ":")
         for file = (concatenate 'string dir "/" name)
         when (and (plusp (length dir))
+                  (char= #\/ (char dir 0))
                   (handler-case
                       (and (sb-posix:s-isreg (sb-posix:stat-mode (sb-posix:stat file)))
                            (progn (sb-posix:access file sb-posix:x-ok) t))
