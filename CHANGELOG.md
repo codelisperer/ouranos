@@ -14,22 +14,45 @@ its tag.
 
 ### An app may have to act
 
+- **hades/credentials: on Linux, `store-credential`, `fetch-credential` and `delete-credential`
+  use the Secret Service instead of always signalling `credential-store-unavailable`** (#357).
+  Items go into the default collection of whichever program provides the Secret Service on the
+  D-Bus session bus (GNOME Keyring, KeePassXC), under the libsecret schema
+  `org.codelisperer.hades.Credential` with the attributes `service` and `account`, labelled
+  "SERVICE (ACCOUNT)". It needs `libsecret-1.so.0` at run time (`libsecret-1-0` on Debian and
+  Ubuntu); where that is missing, where there is no session bus, or where nothing provides the
+  Secret Service, every call still signals `credential-store-unavailable`, and
+  `credential-store-unavailable-reason` says which. When the keyring is locked, an operation on a
+  desktop may ask the user to unlock it, as on macOS, and waits for the answer. Without a display
+  (neither `DISPLAY` nor `WAYLAND_DISPLAY` set) it asks nothing and signals
+  `credential-store-unavailable`. When the request is dismissed it also signals that, never
+  `credential-not-found`. A stored value that is not UTF-8 text, which only another program can
+  write, signals `credential-error` without its bytes. `credential-store-available-p` answers
+  the first three without trying an operation and without prompting, and `credential-store-name`
+  is "Secret Service". An app
+  that treated Linux as having no store, for example by catching that condition to hide a
+  setting, will now store the secret on a Linux desktop. An app shipped as an AppImage or other
+  bundle should not bundle libsecret: the one the desktop installs is the one that talks to its
+  keyring. A value is limited to 2560 UTF-8 bytes, as on Windows and macOS.
+
 - **hades/credentials: the live tests use the real credential store only when
-  `OURANOS_TEST_REAL_CREDENTIAL_STORE=1` is set, and `scripts/verify-tree.lisp` on Windows and
-  macOS fails unless that or `OURANOS_ALLOW_NO_CREDENTIAL_STORE=1` is set** (#357, #603). The
+  `OURANOS_TEST_REAL_CREDENTIAL_STORE=1` is set, and `scripts/verify-tree.lisp` on Windows, macOS
+  and Linux fails unless that or `OURANOS_ALLOW_NO_CREDENTIAL_STORE=1` is set** (#357, #603). The
   live tests store, read and delete items in the Credential Manager or login Keychain of whoever
-  runs them. CI sets the first variable, because a runner's store is discarded with the runner.
-  Without it, `hades/credentials/tests` prints `BACKEND-CHECKS credential-store SKIPPED`, and the
-  gate fails that skip unless `OURANOS_ALLOW_NO_CREDENTIAL_STORE=1` excuses it, the same way
-  `OURANOS_ALLOW_NO_PG` excuses a skipped Postgres. An excused skip is listed under NOT COVERED and
-  its checks are not in the total. On a developer's machine, set the first variable to run the
-  live tests against your own store, or the second to skip them. The live tests touch only items
-  whose service starts with `ouranos-test-hades-credentials/` and delete each one; a `leftovers`
-  suite fails if any remains. Linux is unaffected until #357's Linux backend lands. The gate also
-  now fails a suite that prints no `BACKEND-CHECKS` line for a backend it must report
-  (`+required-backend-reports+`): `credential-store` for `hades/credentials/tests` on Windows and
-  macOS, and `postgres` for the mnemosyne and praxeon database suites on every host. Before, a
-  missing line passed, so a suite whose reporting broke went green with none of those checks run.
+  runs them, or in the Secret Service keyring on Linux. CI sets the first variable, because a
+  runner's store is discarded with the runner. Without it, `hades/credentials/tests` prints
+  `BACKEND-CHECKS credential-store SKIPPED`, and the gate fails that skip unless
+  `OURANOS_ALLOW_NO_CREDENTIAL_STORE=1` excuses it, the same way `OURANOS_ALLOW_NO_PG` excuses a
+  skipped Postgres. An excused skip is listed under NOT COVERED and its checks are not in the
+  total. On a developer's machine, set the first variable to run the live tests against your own
+  store, or the second to skip them. The live tests touch only items whose service starts with
+  `ouranos-test-hades-credentials/` and delete each one; a `leftovers` suite fails if any remains.
+  On Linux, `scripts/with-secret-service.sh` runs them against a throwaway GNOME Keyring instead
+  of your own (see the Secret Service entry above). The gate also now fails a suite that prints no
+  `BACKEND-CHECKS` line for a backend it must report (`+required-backend-reports+`):
+  `credential-store` for `hades/credentials/tests` on Windows, macOS and Linux, and `postgres` for
+  the mnemosyne and praxeon database suites on every host. Before, a missing line passed, so a
+  suite whose reporting broke went green with none of those checks run.
 
 - **praxeon/image: `PRAXEON_IMAGE_API_KEY` is deprecated; set `PRAXEON_OPENAI_API_KEY`** (#758,
   part four). Its name does not say which vendor the key is for, and with a second image
@@ -518,15 +541,31 @@ its tag.
 
 ### Added
 
+- **aion/libsecret: a Linux-only binding of libsecret for the Secret Service** (#357). The raw
+  calls are in `aion/libsecret/ffi`; `aion/libsecret` has `load-libsecret` (T, or NIL and the
+  reason), `with-libsecret-lock`, `with-schema`, `with-attributes`, `make-secret-value`,
+  `secret-value-octets`, `check-session-bus`, `check-secret-service`,
+  `default-collection-locked-p`, and the condition `libsecret-error` (domain, code, message) with
+  `with-gerror`, `locked-error-p` and `service-missing-error-p`. It depends only on `cffi` and
+  loads `libsecret-1.so.0` on first use, so it loads on a system without libsecret.
+  hades/credentials uses it; an app normally does not.
+
+- **`scripts/with-secret-service.sh COMMAND` runs COMMAND with a new GNOME Keyring on a private
+  D-Bus session bus**, unlocked with a random password that is never printed, and deletes the
+  keyring afterwards (#357). CI runs the Linux gate through it so the `hades/credentials` live
+  tests have a store; a developer can run them the same way without their own keyring being
+  touched.
+
 - **hades/credentials: ask whether a credential store is available, and its name, without
   trying an operation** (#824). `hades/credentials:credential-store-available-p` (`&key
   service`) is true when this system has a usable store and NIL otherwise, with a reason as a
   second value. It never prompts, never writes and never creates an item: on Windows it reads an
   item that does not exist and is false when the logon session has no credential store; on macOS
   it is true wherever the Keychain backend is built, without querying the Keychain, which can
-  prompt when locked; on Linux it is false until #357 adds the Secret Service backend.
+  prompt when locked; on Linux it checks that libsecret is installed, that there is a D-Bus
+  session bus and that a program provides the Secret Service, without unlocking anything (#357).
   `hades/credentials:credential-store-name` is "Windows Credential Manager", "macOS Keychain",
-  or NIL where there is no store. An app that probed with a `fetch-credential` of a dummy
+  "Secret Service", or NIL on a system with no backend. An app that probed with a `fetch-credential` of a dummy
   account and caught `credential-store-unavailable` can call these instead. `service` is
   accepted and not used yet.
 

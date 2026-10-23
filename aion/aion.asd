@@ -411,6 +411,31 @@
                 :components ((:file "cf-tests"))))
   :perform (test-op (o c) (uiop:symbol-call :aion/darwin/tests '#:run-tests)))
 
+(defsystem "aion/libsecret"
+  :description "The Secret Service client library, libsecret, bound for hades/credentials: schemas, attribute tables, secret values, the store, lookup and clear calls, one lock, and GError as a condition. Linux-only (#357)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; cffi only: libsecret is the distribution's shared library, loaded on first use and never
+  ;; built or carried here, so a machine without it still loads this system.
+  :depends-on ("cffi")
+  :serial t
+  :components ((:module "src/libsecret"
+                :serial t
+                :components ((:file "packages")
+                             (:file "ffi")
+                             (:file "libsecret"))))
+  :in-order-to ((test-op (test-op "aion/libsecret/tests"))))
+
+(defsystem "aion/libsecret/tests"
+  :description "Tests for aion/libsecret: the schema layout, attribute tables, secret values and GError. Linux-only; they never store an item."
+  :depends-on ("aion/libsecret" "cffi" "fiveam")
+  :serial t
+  :components ((:module "tests/libsecret"
+                :serial t
+                :components ((:file "libsecret-tests"))))
+  :perform (test-op (o c) (uiop:symbol-call :aion/libsecret/tests '#:run-tests)))
+
 (defsystem "aion/windows"
   :description "The Windows-specific API surface: UTF-16 marshalling, GetLastError/HRESULT as conditions, handle lifetime, and struct layouts asserted at load. Windows-only (ADR-0003)."
   :author "Bob <eternal.recursion@proton.me>"

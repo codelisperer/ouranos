@@ -148,3 +148,29 @@ same function applied to the host, or the tested path is not the shipped one."
   (is (equal (%pf entries-for (%pf host-os))
              (%pf entries-here))
       "ENTRIES-HERE must be ENTRIES-FOR of HOST-OS"))
+
+;;; --- which OS owns a system (#283) ---------------------------------------------------------
+
+(test every-entry-is-owned-by-its-own-os
+  "SYSTEM-OWNER answers from the same registry, so each entry's own system, and a subsystem of
+it, is owned by the OS whose bucket holds it."
+  (%load-platform-registry)
+  (dolist (bucket (symbol-value (find-symbol "*PLATFORM-PACKAGES*" "OURANOS-PLATFORM")))
+    (dolist (entry (cdr bucket))
+      (let ((system (getf entry :system)))
+        (is (eq (car bucket) (%pf system-owner system)) "~A" system)
+        (is (eq (car bucket) (%pf system-owner (concatenate 'string system "/tests")))
+            "~A/tests" system)))))
+
+(test system-owner-matches-whole-names-only
+  "aion/windows owns its subsystems and nothing that only starts with the same letters. A
+system in no platform package has no owner, which is what lets check-compile check it."
+  (%load-platform-registry)
+  (is (eq :windows (%pf system-owner "aion/windows/com/tests")))
+  (is (eq :windows (%pf system-owner "AION/WINDOWS/REGISTRY")) "case is ignored, as in ASDF")
+  (is (eq :darwin (%pf system-owner "aion/darwin/tests")))
+  (is (eq :linux (%pf system-owner "hyperion/woo/tests")))
+  (is (null (%pf system-owner "aion/windowsx")))
+  (is (null (%pf system-owner "aion")))
+  (is (null (%pf system-owner "aion/fs")))
+  (is (null (%pf system-owner "hyperion"))))
