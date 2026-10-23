@@ -32,13 +32,15 @@ and have the same write date."
 
 (defvar *wait-for-a-later-second* t
   "When true, a compile of a source file written in the current second waits until the clock has
-passed that second, so the fasl it writes is dated after its source. Bound to NIL only by the
-test that shows what happens without the wait.")
+passed that second, so the fasl it writes is dated after its source. With NIL, such a fasl can
+have its source's date, and the method below then compiles the file again on the next load.")
 
 (defun %wait-past (date)
   "Return once the clock has passed DATE, a universal time, when DATE is the current second or
-the next one. A source dated further in the future, from clock skew or an archive, is not
-waited for: the wait would be as long as the skew."
+the next one, so that a fasl written afterwards is dated after DATE. That takes up to about one
+second when DATE is the current second, and up to about two when it is the next one. A source
+dated further in the future, from clock skew or an archive, is not waited for: the wait would be
+as long as the skew."
   (when (<= 0 (- date (get-universal-time)) 1)
     (loop while (<= (get-universal-time) date)
           do (sleep 0.05))))

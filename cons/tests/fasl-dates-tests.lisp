@@ -145,17 +145,17 @@ by reading the tree, so a builder added later is checked without anyone adding i
 
 ;;; --- the fasl a compile writes is dated after its source ------------------------------------
 
-(defun %same-second-child (dir wait)
-  "In a fresh SBCL, start at the beginning of a second, write DIR/sys2/a.lisp, load the system
-s573b with cons/fasl-dates loaded and *WAIT-FOR-A-LATER-SECOND* set to WAIT, and return the
-source's and the fasl's write dates, as two integers, or a string saying what went wrong."
+(defun %same-second-child (dir &key (write-source t))
+  "In a fresh SBCL with cons/fasl-dates loaded, load the system s573b from DIR/sys2/, and return
+the source's and the fasl's write dates, as two integers, or a string saying what went wrong.
+With WRITE-SOURCE, first start at the beginning of a second and write DIR/sys2/a.lisp, so the
+compile falls in the source's second; without it, load what is there."
   (let* ((source (merge-pathnames "sys2/a.lisp" dir))
-         (form (format nil "(progn (asdf:initialize-output-translations '(:output-translations (t (~S :**/ :*.*.*)) :ignore-inherited-configuration)) (asdf:initialize-source-registry '(:source-registry (:directory ~S) (:directory ~S) :ignore-inherited-configuration)) (asdf:load-system \"cons/fasl-dates\") (setf (symbol-value (find-symbol \"*WAIT-FOR-A-LATER-SECOND*\" \"CONS/FASL-DATES\")) ~:[nil~;t~]) (let ((s (get-universal-time))) (loop while (= s (get-universal-time)) do (sleep 0.01))) (with-open-file (o ~S :direction :output :if-exists :supersede) (write-line \"(defpackage :s573b (:use :cl)) (in-package :s573b) (defun says () 1)\" o)) (asdf:load-system \"s573b\") (format t \"~~&DATES ~~D ~~D~~%\" (file-write-date ~S) (file-write-date (first (asdf:output-files 'asdf:compile-op (asdf:find-component \"s573b\" \"a\"))))))"
+         (form (format nil "(progn (asdf:initialize-output-translations '(:output-translations (t (~S :**/ :*.*.*)) :ignore-inherited-configuration)) (asdf:initialize-source-registry '(:source-registry (:directory ~S) (:directory ~S) :ignore-inherited-configuration)) (asdf:load-system \"cons/fasl-dates\") ~:[~;(let ((s (get-universal-time))) (loop while (= s (get-universal-time)) do (sleep 0.01))) (with-open-file (o ~S :direction :output :if-exists :supersede) (write-line \"(defpackage :s573b (:use :cl)) (in-package :s573b) (defun says () 1)\" o)) ~](asdf:load-system \"s573b\") (format t \"~~&DATES ~~D ~~D~~%\" (file-write-date ~S) (file-write-date (first (asdf:output-files 'asdf:compile-op (asdf:find-component \"s573b\" \"a\"))))))"
                        (namestring (merge-pathnames "cache2/" dir))
                        (namestring (merge-pathnames "sys2/" dir))
                        (namestring (merge-pathnames "cons/" (%tree-root)))
-                       wait
-                       (namestring source) (namestring source))))
+                       write-source (namestring source) (namestring source))))
     (multiple-value-bind (out err code)
         (uiop:run-program (list (namestring sb-ext:*runtime-pathname*)
                                 "--noinform" "--no-userinit" "--no-sysinit" "--non-interactive"
@@ -169,17 +169,30 @@ source's and the fasl's write dates, as two integers, or a string saying what we
             (format nil "the child exited ~A:~%~A" code out))))))
 
 (test a-fasl-compiled-in-its-sources-second-is-dated-after-it
-  "Copilot's review of #657: without the wait, a source written and compiled in one second gives
-a fasl with the source's date, and every load in that second compiles it again. With the wait,
-the fasl is dated later, so the file is compiled at most once more."
+  "Copilot's review of #657 and the hub's review of it. A source written and compiled in one
+second would give a fasl with the source's date, and the method would then compile the file again
+on every load in that second. The wait dates the fasl after its source instead. Without depending
+on how long a compile takes: the fasl is given the source's date by hand, which is the state a
+compile in the source's second leaves, and the next load must compile once more and date the new
+fasl after the source, and the load after it must not compile at all."
   (tempdir:with-temporary-directory (dir "fasl-dates")
     (ensure-directories-exist (merge-pathnames "sys2/" dir))
     (with-open-file (o (merge-pathnames "sys2/s573b.asd" dir) :direction :output)
       (write-line "(defsystem \"s573b\" :components ((:file \"a\")))" o))
-    ;; The control: no wait, so the compile in the source's second gives the fasl that date.
-    (let ((dates (%same-second-child dir nil)))
-      (is (and (consp dates) (= (first dates) (second dates)))
-          "without the wait the dates were ~S" dates))
-    (let ((dates (%same-second-child dir t)))
+    (let ((dates (%same-second-child dir)))
       (is (and (consp dates) (> (second dates) (first dates)))
-          "with the wait the dates were ~S" dates))))
+          "compiled in the source's second, with the wait, the dates were ~S" dates))
+    (let ((source (merge-pathnames "sys2/a.lisp" dir))
+          (fasl (first (directory (merge-pathnames "cache2/**/a.fasl" dir)))))
+      (is-true fasl "the first load wrote no fasl under ~A" dir)
+      (when fasl
+        (%copy-write-date source fasl)
+        (is (= (file-write-date source) (file-write-date fasl)) "the dates were not made equal")
+        (let ((dates (%same-second-child dir :write-source nil)))
+          (is (and (consp dates) (> (second dates) (first dates)))
+              "a fasl with its source's date was not compiled again, or not dated after it: ~S"
+              dates)
+          (when (consp dates)
+            (let ((again (%same-second-child dir :write-source nil)))
+              (is (equal dates again) "the next load compiled once more: ~S, then ~S"
+                  dates again))))))))
