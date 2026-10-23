@@ -545,6 +545,22 @@ its tag.
 
 ### Added
 
+- **mnemosyne/query: LIKE and ILIKE take an escape character, and `like-contains` builds a search
+  pattern from user text** (#862). `(:like :name pattern :escape "\\")` (Lisp source, a
+  one-backslash string) renders `name LIKE ? ESCAPE '\'`, and `:ilike` takes `:escape` the same
+  way. The escape must be one printable ASCII character other than a quote, or the query signals
+  `invalid-identifier`.
+  - `(mnemosyne/query:like-contains text)` returns `%`, the text with its `%`, `_` and escape
+    character escaped, and `%`.
+  - `like-escape` escapes without adding the `%`.
+  - Both take `:escape`, the backslash by default.
+
+  Before, there was no way to write `ESCAPE`. SQLite has no default escape character, so a
+  user's `%` or `_` in a search term was always a wildcard there, while the same pattern on
+  Postgres, whose default is the backslash, was not. An app that searched with
+  `(format nil "%~A%" q)` can use `(:like col (like-contains q) :escape "\\")`, which matches
+  the same rows on both.
+
 - **hades/credentials: ask whether a credential store is available, and its name, without
   trying an operation** (#824). `hades/credentials:credential-store-available-p` (`&key
   service`) is true when this system has a usable store and NIL otherwise, with a reason as a

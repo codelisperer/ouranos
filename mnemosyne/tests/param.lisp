@@ -643,3 +643,54 @@ this code did not create. Stated at the call site rather than by weakening the d
     (is (eq :gone (mnemosyne/param:row-value row :nope :if-missing :gone)))
     (is (string= "hi" (mnemosyne/param:row-value row :content :if-missing :gone))
         "and it must not change the found case")))
+
+;;; --- LIKE with ESCAPE on each backend (#862) ---------------------------------------
+;;;
+;;; SQLite has no default LIKE escape character and Postgres's is the backslash, so the
+;;; same pattern used to match differently. With :escape and LIKE-CONTAINS, a term's own %, _
+;;; and backslash match only themselves on both.
+
+(defun %fresh-like-table (conn)
+  (mnemosyne/conn:exec conn "DROP TABLE IF EXISTS like_t")
+  (mnemosyne/conn:exec conn "CREATE TABLE like_t (id INTEGER PRIMARY KEY, name TEXT)")
+  (mnemosyne/query:run conn (list :insert-into "like_t"
+                                  :values (list (list :id 1 :name "50% off")
+                                                (list :id 2 :name "500 off")
+                                                (list :id 3 :name "a_b")
+                                                (list :id 4 :name "axb")
+                                                (list :id 5 :name "C:\\dir")
+                                                (list :id 6 :name "C:dir")))
+                       :dialect *current-dialect*))
+
+(defun %matching (conn term &key (escape #\\))
+  "The ids of like_t rows whose name contains TERM literally."
+  (sort (mapcar #'second
+                (mnemosyne/query:fetch
+                 conn (list :select '(:id) :from '(:like_t)
+                            :where (list :like :name (mnemosyne/query:like-contains term :escape escape)
+                                         :escape (string escape)))
+                 :dialect *current-dialect*))
+        #'<))
+
+(test a-like-search-matches-a-terms-wildcards-and-backslash-literally
+  (with-each-backend (c)
+    (%fresh-like-table c)
+    (is* (equal '(1) (%matching c "50%")) "a percent sign matches only itself")
+    (is* (equal '(3) (%matching c "_")) "an underscore matches only itself")
+    (is* (equal '(5) (%matching c "\\")) "a backslash matches only itself")
+    (is* (equal '(5) (%matching c ":\\d")) "a backslash inside a term")
+    (is* (equal '(2) (%matching c "0 off" :escape #\!)) "another escape character")
+    (is* (equal '(1) (%matching c "0% off" :escape #\!)) "another escape character, with %")
+    ;; The control: the same terms as raw patterns, without :escape, are wildcards.
+    (is* (equal '(1 2) (sort (mapcar #'second
+                                     (mnemosyne/query:fetch
+                                      c '(:select (:id) :from (:like_t) :where (:like :name "%50%"))
+                                      :dialect *current-dialect*))
+                             #'<))
+         "control: an unescaped pattern built the old way")
+    (is* (equal '(1 2 3 4 5 6) (sort (mapcar #'second
+                                             (mnemosyne/query:fetch
+                                              c '(:select (:id) :from (:like_t) :where (:like :name "%_%"))
+                                              :dialect *current-dialect*))
+                                     #'<))
+         "control: an unescaped _ matches every row")))

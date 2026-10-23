@@ -30,6 +30,9 @@
 ;;;;                ((:as (:select ...) :t)), in (:in col (:select ...)), or (:exists (:select ...)).
 ;;;;   RETURNING    :returning (:id :email) on insert/update/delete (PG/XTDB; SQLite >=3.35).
 ;;;;   Upsert       :on-conflict (:email) with :do-nothing t, or :do-update (:name (:excluded :name)).
+;;;;   LIKE         (:like col pattern :escape "\\") renders col LIKE ? ESCAPE '\', and the
+;;;;                same for :ilike. LIKE-CONTAINS builds a pattern from user text with its %, _
+;;;;                and escape character taken literally (#862).
 ;;;;
 ;;;; DIALECTS. :sqlite / :postgres emit "?" (CL-DBI binds them; verified on both). :xtdb
 ;;;; is the seam for XTDB 2 -- which is PG-wire but a DISTINCT dialect: **no DDL**
@@ -238,6 +241,39 @@ problem would be the worse trade.")
       (warn 'unindexed-vector-distance :operator sql :opclass opclass :measures measures))
     (format nil "~A ~A ~A" (%expr ctx (first args)) sql (%expr ctx (second args)))))
 
+(defun %escape-suffix (escape)
+  "\" ESCAPE 'c'\" for ESCAPE, a one-character string or a character, or \"\" when it is NIL.
+The character is written into the SQL, not bound, so it must be printable ASCII and not a
+quote; anything else signals INVALID-IDENTIFIER (#862)."
+  (if (null escape)
+      ""
+      (let ((c (cond ((characterp escape) escape)
+                     ((and (stringp escape) (= 1 (length escape))) (char escape 0)))))
+        (unless (and c (char<= #\! c #\~) (char/= c #\'))
+          (error 'invalid-identifier :text (princ-to-string escape)
+                                     :expected "a LIKE escape character (one printable ASCII character other than a quote)"))
+        (format nil " ESCAPE '~C'" c))))
+
+(defun like-escape (text &key (escape #\\))
+  "TEXT with ESCAPE, %, and _ each preceded by ESCAPE, so that a LIKE or ILIKE pattern built
+from it matches those characters literally. Use it with the same :escape on the operator:
+
+  (:like :name (like-contains q) :escape \"\\\\\")
+
+ESCAPE is a character or a one-character string; the backslash by default."
+  (let ((e (if (stringp escape) (char escape 0) escape)))
+    (with-output-to-string (out)
+      (loop for c across text
+            do (when (or (char= c e) (char= c #\%) (char= c #\_)) (write-char e out))
+               (write-char c out)))))
+
+(defun like-contains (text &key (escape #\\))
+  "A LIKE pattern that matches TEXT anywhere, with TEXT's own %, _ and ESCAPE taken literally:
+\"%\", (LIKE-ESCAPE TEXT), \"%\". Pair it with the same :escape on :like or :ilike, which is
+what makes the escaping mean the same thing on SQLite, which has no default escape character,
+and Postgres, whose default is the backslash (#862)."
+  (concatenate 'string "%" (like-escape text :escape escape) "%"))
+
 (defun %ilike (ctx args)
   "Compile a case-insensitive match. Postgres only (#138).
 
@@ -249,7 +285,8 @@ explicitly, for example with LOWER on both sides."
   (unless (%postgres-p ctx)
     (error "mnemosyne/query: :ilike renders as Postgres ILIKE, and the ~A backend has no operator with the same case rules. Use (:like (:lower col) (:lower pattern)) there, knowing which characters its LOWER folds."
            (%dialect-name ctx)))
-  (format nil "~A ILIKE ~A" (%expr ctx (first args)) (%expr ctx (second args))))
+  (destructuring-bind (subject pattern &key escape) args
+    (format nil "~A ILIKE ~A~A" (%expr ctx subject) (%expr ctx pattern) (%escape-suffix escape))))
 
 (defun %op (ctx op args)
   "Compile an operator expression (OP . ARGS)."
@@ -264,7 +301,8 @@ explicitly, for example with LOWER on both sides."
       ((:and) (format nil "(~{~A~^ AND ~})" (mapcar #'e args)))
       ((:or)  (format nil "(~{~A~^ OR ~})"  (mapcar #'e args)))
       ((:not) (format nil "NOT (~A)" (e (first args))))
-      ((:like) (format nil "~A LIKE ~A" (e (first args)) (e (second args))))
+      ((:like) (destructuring-bind (subject pattern &key escape) args
+                 (format nil "~A LIKE ~A~A" (e subject) (e pattern) (%escape-suffix escape))))
       ((:ilike) (%ilike ctx args))
       ((:is-null)     (format nil "~A IS NULL"     (e (first args))))
       ((:is-not-null) (format nil "~A IS NOT NULL" (e (first args))))

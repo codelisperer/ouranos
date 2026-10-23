@@ -410,3 +410,31 @@ A guard that only one of the two spellings can reach is not a guard."
     (is (equal "a b" (q:invalid-identifier-text e)))
     (is (search "identifier" (q:invalid-identifier-expected e)))
     (is (search "(:raw" (princ-to-string e)))))
+
+;;; --- LIKE with ESCAPE (#862) -------------------------------------------------------
+
+(test like-and-ilike-render-an-escape-character
+  (is (equal '("SELECT id FROM t WHERE name LIKE ? ESCAPE '\\'" ("%a\\%b%"))
+             (gen '(:select (:id) :from (:t) :where (:like :name "%a\\%b%" :escape "\\")))))
+  (is (equal '("SELECT id FROM t WHERE name ILIKE ? ESCAPE '!'" ("%a!%%"))
+             (gen '(:select (:id) :from (:t) :where (:ilike :name "%a!%%" :escape #\!))
+                  :dialect :postgres)))
+  (is (equal '("SELECT id FROM t WHERE name LIKE ?" ("%a%"))
+             (gen '(:select (:id) :from (:t) :where (:like :name "%a%"))))
+      "control: without :escape, nothing is added"))
+
+(test an-escape-that-is-not-one-safe-character-is-refused
+  (dolist (escape '("" "ab" "'" " " "é" 5))
+    (signals q:invalid-identifier
+      (q:sql `(:select (:id) :from (:t) :where (:like :name "%a%" :escape ,escape)))
+      "~S" escape)))
+
+(test like-with-escape-round-trips
+  (is (rt '(:select (:id) :from (:t) :where (:like :name "%a\\%b%" :escape "\\"))))
+  (is (rt '(:select (:id) :from (:t) :where (:and (:like :name "x%" :escape "!") (:= :id 1))))))
+
+(test like-escape-and-like-contains-escape-the-wildcards-and-the-escape
+  (is (string= "50\\%\\_off\\\\x" (q:like-escape "50%_off\\x")))
+  (is (string= "%50!%!_off!!%" (q:like-contains "50%_off!" :escape #\!)))
+  (is (string= "%plain%" (q:like-contains "plain")))
+  (is (string= "%%" (q:like-contains ""))))
