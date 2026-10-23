@@ -77,6 +77,13 @@
    #:retry-action #:substitute-result #:abandon-action
    #:retry-with-max-tokens #:accept-truncated #:abandon-turn))
 
+(defpackage #:praxeon/source
+  (:use #:cl)
+  (:documentation
+   "Text from outside a conversation -- a fetched page, a retrieved document -- marked for a
+    model as quoted source material, between markers it cannot forge (#757).")
+  (:export #:quote-source))
+
 (defpackage #:praxeon/context
   (:use #:cl)
   (:local-nicknames (#:a #:alexandria))

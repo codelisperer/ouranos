@@ -135,6 +135,8 @@ troubleshooting — is in [`docs/user-guide.md`](docs/user-guide.md).
   `GET /api/progress`), rendering the same event stream the CLI does.
 - **`praxeon/web-search`** — web search as a registered *means*, over the same
   provider-neutral protocol as the LLM layer.
+- **`praxeon/web-page`** — the `read-web-page` means: the model opens a URL the user gave
+  and reads the page's main text (#757). See [Reading a web page](#reading-a-web-page).
 - **`praxeon/translate`** — the translator agent (English pivot), which is how Elise
   converses in the user's locale.
 - **`praxeon/elise`** — the reflective-companion example. Demoware, with prominent
@@ -143,6 +145,55 @@ troubleshooting — is in [`docs/user-guide.md`](docs/user-guide.md).
   requirement, conversed and disambiguated into a Cause-Effect Graph, then handed down to
   [`elenchon`](../elenchon) for the minimal test set. It lives here rather than in elenchon
   because the NL step is agentic and the DAG forbids elenchon depending rightward.
+
+## Reading a web page
+
+`praxeon/web-page` gives an agent the `read-web-page` means. The model calls it with a URL and
+gets back the page's main text, its title and the URL it was read from after redirects.
+
+```lisp
+(praxeon/web-page:register-read-web-page agent)   ; => "read-web-page", or NIL
+```
+
+- **Backend.** Tavily's `/extract` when `TAVILY_API_KEY` is set (or `:api-key` is given).
+  Otherwise the page is fetched from this machine with `aion/http-client`'s `fetch-public`, and
+  its text is extracted with plump: the `<main>` or `<article>` element, else `<body>`, without
+  scripts, styles, navigation, headers, footers and forms.
+  - Tavily reports no title, so a page read through Tavily has none.
+  - **On Windows, without a Tavily key, nothing is registered**, and the reason is logged at
+    warn. `fetch-public` pins each connection to the address it checked, which
+    `aion/http-client` cannot do on Windows.
+- **Addresses.** A URL whose host resolves to a private, loopback, link-local or other
+  internal address is refused before any request. `fetch-public` checks every redirect
+  again. For Tavily the check runs here too, so an internal URL is never sent to Tavily.
+- **Limits.** `fetch-public` reads at most 2 MiB (`*max-page-bytes*`) and follows at most 5
+  redirects, with a 10-second connect timeout and a 15-second read timeout on each hop. Only
+  HTML, XHTML and plain text are read. The model is given at most 12000 characters
+  (`*budget*`, or `register`'s `:budget`), followed by a line saying how many were left out.
+- **Quoted source.** The text reaches the model through `praxeon/source:quote-source`. It is
+  placed between `<<<SOURCE n>>>` and `<<<END SOURCE n>>>`, where `n` is a random nonce, after a
+  sentence saying that the text is quoted material and not instructions. A page cannot end the
+  block early, because it would have to guess the nonce. This does not make a model immune to
+  instructions written into a page; it marks clearly which text came from the page.
+  `praxeon/retrieval` can use the same helper for retrieved reference text.
+- **Failures** are `web-page-unreadable`, a `tool-error-result`, so the model is told why the
+  page could not be read and the turn goes on. The reasons are `:invalid-url`, `:not-public`,
+  `:unresolvable`, `:too-large`, `:too-many-redirects`, `:status`, `:not-text`, `:empty`,
+  `:unavailable` and `:provider`.
+
+**A one-line status.** Every means call emits `:tool-call` and `:tool-result` events through
+`praxeon/event`. `status-line` turns the `read-web-page` call into a status for the user. It shows the
+host, never the path or query, which can carry a user's tokens, and never the page:
+
+```lisp
+(praxeon/event:with-observer ((lambda (event)
+                                (let ((status (praxeon/web-page:status-line event)))
+                                  (when status (show-status status)))))   ; "Reading example.com…"
+  (praxeon/actor:run-turn agent "What do the terms at https://example.com/terms say?"))
+```
+
+The `:tool-result` event carries the page text as its `:content`, so a status display should
+not show it.
 
 ## Status & license
 

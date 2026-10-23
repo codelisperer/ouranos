@@ -21,23 +21,30 @@
 # the binary because they cannot be embedded; small text assets can, and should.
 #
 # UPDATING: fetch the new version, verify the sha256 below, replace the file and the
-# licence, and bump the version here. `scripts/check-assets.lisp` verifies the files on
-# disk still match these hashes.
+# licence, and bump the version here. Read the advisories page and bump `reviewed` in the
+# same change; scripts/check-pins.lisp requires both fields in every asset's block (#735).
+# `scripts/check-assets.lisp` verifies the files on disk still match these hashes.
 
 htmx        2.0.11   sha256 d6fdc75f204e6bdefa99b69bf1e6d4ac69b8a364f77929f45c13476b4000f717
             file     htmx.min.js
             url      https://unpkg.com/htmx.org@2.0.11/dist/htmx.min.js
             licence  Zero-Clause BSD (htmx.LICENSE)
+            advisories https://github.com/bigskysoftware/htmx/security/advisories
+            reviewed   2026-10-17
 
 alpinejs    3.17.4   sha256 232519394c6c8fdba6f362b1d9da16106db513cdbf899011f00daab4051df31c
             file     alpine.min.js
             url      https://unpkg.com/alpinejs@3.17.4/dist/cdn.min.js
             licence  MIT (alpine.LICENSE)
+            advisories https://github.com/alpinejs/alpine/security/advisories
+            reviewed   2026-10-17
 
 bulma       1.0.4    sha256 67fa26df1ca9e95d8f2adc7c04fa1b15fa3d24257470ebc10cc68b9aab914bee
             file     bulma.min.css
             url      https://cdn.jsdelivr.net/npm/bulma@1.0.4/css/bulma.min.css
             licence  MIT (bulma.LICENSE)
+            advisories https://github.com/jgthms/bulma/security/advisories
+            reviewed   2026-10-17
 
 # BULMA WAS UPGRADED 0.9.4 → 1.0.4, and the reason is theming, not currency.
 #

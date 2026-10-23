@@ -1588,7 +1588,69 @@ BLOB-METADATA reports NIL for its checksum rather than signalling."
                     (is (= 5 (b:blob-meta-size meta)) "the rest of the metadata is still read")))
         (setf (fdefinition 'b::%s3-request) original)))))
 
-;;; === 16. server-side copy and move (#804) ====================================
+;;; === 16. XML numeric character references ======================================
+
+(test s3-xml-decode-reads-numeric-references-in-one-pass
+  "MinIO writes an ETag's quotes as &#34; (measured on MinIO 2025-04-22). Read without decoding
+it, a part's ETag is not the ETag, and completing the upload fails with 400."
+  (is (string= "\"abc\"" (b::%xml-decode "&#34;abc&#34;")))
+  (is (string= "\"abc\"" (b::%xml-decode "&#x22;abc&#x22;")))
+  (is (string= "<>\"'&" (b::%xml-decode "&lt;&gt;&quot;&apos;&amp;")))
+  (is (string= "&#34;" (b::%xml-decode "&amp;#34;"))
+      "one pass: an escaped reference is decoded once")
+  (is (string= "a & b &unknown; &#zz;" (b::%xml-decode "a & b &unknown; &#zz;"))
+      "anything else is kept")
+  (is (string= "plain" (b::%xml-decode "plain"))))
+
+(test s3-xml-decode-keeps-anything-that-is-not-exactly-a-reference
+  "Only `#' and decimal digits, or `#x' and hex digits, between `&' and `;'. A sign, a space,
+trailing junk, or no `;' near enough keeps the text as written, so a key that holds such text is
+listed as it is (#813). Each case sits beside the control it differs from."
+  (dolist (pair `(("&#34;" . "\"")
+                  ("&#-1;" . "&#-1;") ("&#x-1;" . "&#x-1;") ("&#+34;" . "&#+34;")
+                  ("&# 34;" . "&# 34;")
+                  ("&#34abc;" . "&#34abc;") ("&#x22zz;" . "&#x22zz;")
+                  ("&#34 abc; tail" . "&#34 abc; tail")
+                  ("&#;" . "&#;") ("&#x;" . "&#x;")
+                  ("&#x22;" . "\"") ("&#X22;" . "&#X22;") ("&#xAB;" . ,(string (code-char #xAB)))))
+    (is (string= (cdr pair) (b::%xml-decode (car pair))) "~S" (car pair))))
+
+(test s3-xml-decode-reads-only-ascii-digits
+  "On SBCL DIGIT-CHAR-P and PARSE-INTEGER accept any Unicode decimal digit, so Arabic-Indic or
+fullwidth digits for 3 and 4 would read as 34, a quote (#813). XML allows only ASCII digits, so
+such text is kept as written. The ASCII form beside it is the control."
+  (let ((arabic (format nil "&#~C~C;" (code-char #x0663) (code-char #x0664)))
+        (fullwidth (format nil "&#~C~C;" (code-char #xFF13) (code-char #xFF14))))
+    (is (string= arabic (b::%xml-decode arabic)))
+    (is (string= fullwidth (b::%xml-decode fullwidth)))
+    (is (string= "\"" (b::%xml-decode "&#34;")) "the control")))
+
+(test s3-xml-decode-keeps-code-points-xml-does-not-allow
+  "0 and the surrogates D800-DFFF are kept as written: XML allows neither, a surrogate has no
+UTF-8 encoding, and a NUL in a key would break the request that names it (#813). The code points
+on either side of the surrogate range are the controls."
+  (dolist (kept '("&#0;" "&#x0;" "&#xD800;" "&#xDFFF;" "&#55296;" "&#x110000;"))
+    (is (string= kept (b::%xml-decode kept)) "~S" kept))
+  (is (equal (string (code-char #xD7FF)) (b::%xml-decode "&#xD7FF;")))
+  (is (equal (string (code-char #xE000)) (b::%xml-decode "&#xE000;")))
+  (is (equal (string (code-char 1)) (b::%xml-decode "&#1;"))))
+
+(test s3-xml-decode-is-linear-in-ampersands-without-semicolons
+  "The `;' is looked for only a few characters after each `&', so a long string of `&' with a `;'
+at the very end decodes as written, without scanning to the end once per `&'."
+  (let ((input (concatenate 'string (make-string 200000 :initial-element #\&) ";")))
+    (is (string= input (b::%xml-decode input)))))
+
+(test s3-list-multipart-parts-reads-minio-etags
+  (is (equal '((1 "\"e1\"" 5242880))
+             (call-with-recorded-s3
+              (octets (concatenate 'string
+                                   "<ListPartsResult><Part><PartNumber>1</PartNumber>"
+                                   "<ETag>&#34;e1&#34;</ETag><Size>5242880</Size></Part>"
+                                   "<IsTruncated>false</IsTruncated></ListPartsResult>"))
+              (lambda () (b:list-multipart-parts (test-s3-store) "media" "big.bin" "u-1"))))))
+
+;;; === 17. server-side copy and move (#804) ====================================
 
 (defun header-table (&rest pairs)
   (let ((h (make-hash-table :test #'equal)))
@@ -1909,65 +1971,3 @@ GET-BLOB and PUT-BLOB, and a move deletes nothing."
       (signals b:blob-unsupported (b:copy-blob store "media" "a.txt" "media" "b.txt"))
       (signals b:blob-unsupported (b:move-blob store "media" "a.txt" "media" "b.txt"))
       (is (b:blob-exists-p inner "media" "a.txt") "the move deleted nothing"))))
-
-;;; === 17. XML numeric character references ======================================
-
-(test s3-xml-decode-reads-numeric-references-in-one-pass
-  "MinIO writes an ETag's quotes as &#34; (measured on MinIO 2025-04-22). Read without decoding
-it, a part's ETag is not the ETag, and completing the upload fails with 400."
-  (is (string= "\"abc\"" (b::%xml-decode "&#34;abc&#34;")))
-  (is (string= "\"abc\"" (b::%xml-decode "&#x22;abc&#x22;")))
-  (is (string= "<>\"'&" (b::%xml-decode "&lt;&gt;&quot;&apos;&amp;")))
-  (is (string= "&#34;" (b::%xml-decode "&amp;#34;"))
-      "one pass: an escaped reference is decoded once")
-  (is (string= "a & b &unknown; &#zz;" (b::%xml-decode "a & b &unknown; &#zz;"))
-      "anything else is kept")
-  (is (string= "plain" (b::%xml-decode "plain"))))
-
-(test s3-xml-decode-keeps-anything-that-is-not-exactly-a-reference
-  "Only `#' and decimal digits, or `#x' and hex digits, between `&' and `;'. A sign, a space,
-trailing junk, or no `;' near enough keeps the text as written, so a key that holds such text is
-listed as it is (#813). Each case sits beside the control it differs from."
-  (dolist (pair `(("&#34;" . "\"")
-                  ("&#-1;" . "&#-1;") ("&#x-1;" . "&#x-1;") ("&#+34;" . "&#+34;")
-                  ("&# 34;" . "&# 34;")
-                  ("&#34abc;" . "&#34abc;") ("&#x22zz;" . "&#x22zz;")
-                  ("&#34 abc; tail" . "&#34 abc; tail")
-                  ("&#;" . "&#;") ("&#x;" . "&#x;")
-                  ("&#x22;" . "\"") ("&#X22;" . "&#X22;") ("&#xAB;" . ,(string (code-char #xAB)))))
-    (is (string= (cdr pair) (b::%xml-decode (car pair))) "~S" (car pair))))
-
-(test s3-xml-decode-reads-only-ascii-digits
-  "On SBCL DIGIT-CHAR-P and PARSE-INTEGER accept any Unicode decimal digit, so Arabic-Indic or
-fullwidth digits for 3 and 4 would read as 34, a quote (#813). XML allows only ASCII digits, so
-such text is kept as written. The ASCII form beside it is the control."
-  (let ((arabic (format nil "&#~C~C;" (code-char #x0663) (code-char #x0664)))
-        (fullwidth (format nil "&#~C~C;" (code-char #xFF13) (code-char #xFF14))))
-    (is (string= arabic (b::%xml-decode arabic)))
-    (is (string= fullwidth (b::%xml-decode fullwidth)))
-    (is (string= "\"" (b::%xml-decode "&#34;")) "the control")))
-
-(test s3-xml-decode-keeps-code-points-xml-does-not-allow
-  "0 and the surrogates D800-DFFF are kept as written: XML allows neither, a surrogate has no
-UTF-8 encoding, and a NUL in a key would break the request that names it (#813). The code points
-on either side of the surrogate range are the controls."
-  (dolist (kept '("&#0;" "&#x0;" "&#xD800;" "&#xDFFF;" "&#55296;" "&#x110000;"))
-    (is (string= kept (b::%xml-decode kept)) "~S" kept))
-  (is (equal (string (code-char #xD7FF)) (b::%xml-decode "&#xD7FF;")))
-  (is (equal (string (code-char #xE000)) (b::%xml-decode "&#xE000;")))
-  (is (equal (string (code-char 1)) (b::%xml-decode "&#1;"))))
-
-(test s3-xml-decode-is-linear-in-ampersands-without-semicolons
-  "The `;' is looked for only a few characters after each `&', so a long string of `&' with a `;'
-at the very end decodes as written, without scanning to the end once per `&'."
-  (let ((input (concatenate 'string (make-string 200000 :initial-element #\&) ";")))
-    (is (string= input (b::%xml-decode input)))))
-
-(test s3-list-multipart-parts-reads-minio-etags
-  (is (equal '((1 "\"e1\"" 5242880))
-             (call-with-recorded-s3
-              (octets (concatenate 'string
-                                   "<ListPartsResult><Part><PartNumber>1</PartNumber>"
-                                   "<ETag>&#34;e1&#34;</ETag><Size>5242880</Size></Part>"
-                                   "<IsTruncated>false</IsTruncated></ListPartsResult>"))
-              (lambda () (b:list-multipart-parts (test-s3-store) "media" "big.bin" "u-1"))))))

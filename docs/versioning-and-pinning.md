@@ -139,7 +139,7 @@ reviewed   2026-09-15
   two states are identical, and only one of them is fine. **Bump it when you look, even —
   especially — when the answer is "nothing to do".**
 
-`scripts/check-pins.lisp` enforces the fields' presence and is wired into CI. No pin is
+`scripts/check-pins.lisp` enforces the fields' presence in every `*.pin` file in the tree, not only those at the root, and in each asset's block of an `ASSETS.pin`-style file, where every asset is a pin of its own (#735). It is wired into CI. No pin is
 exempt: Coalton carries them too, not because it is dangerous but because a pin that opts
 out is a pin nobody reviews, and an exemption outlives the reasoning that justified it.
 

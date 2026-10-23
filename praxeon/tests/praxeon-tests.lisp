@@ -19,6 +19,8 @@
                     (#:wf #:praxeon/workflow)
                     (#:bt #:bordeaux-threads)   ; pre-publication issue 418: fan-out is really concurrent now
                     (#:web-search #:praxeon/web-search)
+                    (#:wp #:praxeon/web-page)          ; #757, web-page-tests.lisp
+                    (#:source #:praxeon/source)
                     (#:mem #:praxeon/memory)
                     (#:dst #:praxeon/distil)
                     (#:obs #:praxeon/observe))

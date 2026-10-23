@@ -71,7 +71,8 @@ administrator allowed to post in a channel.
   counted after it has parsed the markup out, so it refuses a longer message with a
   `delivery-failure`.
 - **`(hermes:telegram-can-post provider chat)`** answers `:yes`, `:not-member` or
-  `:not-permitted`, for a settings screen.
+  `:not-permitted`, for a settings screen. For a group that became a supergroup it signals
+  `telegram-chat-migrated` instead of answering, so the app can store the new chat id.
 - `HERMES_TELEGRAM_IMPL` picks the backend (default `telegram`); `HERMES_TRANSPORT=dev` renders
   Telegram messages instead of sending them, like email and SMS.
 
@@ -92,6 +93,25 @@ the job's arguments are stored, so they are the message's fields rather than the
                 (or (hermes:delivery-rate-limited-retry-after c) 60))
          :args (list chat text))))))
 ```
+
+**A chat shared as a `t.me/+` invite link has no id the app can look up.** No Bot API method
+takes an invite link, so the chat id comes from the bot's own updates (#794):
+
+1. An operator adds the bot to the group or channel through the link (in a channel, as an
+   administrator who may post).
+2. The app calls `(hermes:telegram-added-chats provider)`. It returns one `telegram-added-chat`
+   per chat the bot was recently added to or removed from, with `telegram-added-chat-id`,
+   `-type` (`:group`, `:supergroup`, `:channel`), `-title`, `-status` (the bot's membership, for
+   example `:administrator` or `:left`) and `-date`.
+3. The operator picks the chat by its title, and the app stores its id.
+
+- Telegram keeps an update for 24 hours, so the bot has to have been added within that time.
+- By default the updates are read and left pending, so another program reading the same bot's
+  updates still gets them; only the first 100 pending updates are read. `:confirm t` reads all of
+  them and confirms them, and Telegram then drops them for every reader.
+- A bot with a webhook set cannot read its updates this way: Telegram refuses, and hermes signals
+  `telegram-webhook-active`. The `my_chat_member` update is then delivered to the webhook, and
+  its `chat.id` is the id. hermes does not delete the webhook.
 
 ## Receive (inbound SMS) — `hermes/inbound`
 

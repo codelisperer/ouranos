@@ -348,6 +348,62 @@ than about the checker rejecting every fixture it is handed."
         (%run (%install-checker tree "check-pins.lisp"))
       (is (= 0 code) "a complete pin must pass; exit was ~D~%~A" code output))))
 
+(defparameter +good-assets-pin+
+  "# Vendored browser assets.
+
+htmx        2.0.11   sha256 d6fdc75f204e6bdefa99b69bf1e6d4ac69b8a364f77929f45c13476b4000f717
+            file     htmx.min.js
+            url      https://unpkg.com/htmx.org@2.0.11/dist/htmx.min.js
+            licence  Zero-Clause BSD (htmx.LICENSE)
+            advisories https://github.com/bigskysoftware/htmx/security/advisories
+            reviewed   2026-10-17
+
+bulma       1.0.4    sha256 67fa26df1ca9e95d8f2adc7c04fa1b15fa3d24257470ebc10cc68b9aab914bee
+            file     bulma.min.css
+            url      https://cdn.jsdelivr.net/npm/bulma@1.0.4/css/bulma.min.css
+            licence  MIT (bulma.LICENSE)
+            advisories https://github.com/jgthms/bulma/security/advisories
+            reviewed   2026-10-17
+")
+
+(test pins-detects-a-pin-below-the-root-with-no-advisory-source
+  "Before #735 only the repository root was read, so a pin in a subdirectory, like
+hyperion/src/vendor/PLURALS.pin, was never checked at all."
+  (let ((tree (%fresh-tree)))
+    (%write (merge-pathnames "hyperion/src/vendor/PLURALS.pin" tree) (%without-line +good-pin+ "advisories"))
+    (multiple-value-bind (code output)
+        (%run (%install-checker tree "check-pins.lisp"))
+      (is (/= 0 code) "a pin below the root missing `advisories' must fail; exit was ~D~%~A" code output)
+      (is (search "hyperion/src/vendor/PLURALS.pin" output) "and the failure names it: ~A" output))))
+
+(test pins-detects-an-asset-block-with-no-review-date
+  "Each asset in an ASSETS.pin-style file is a pin of its own, so one block missing `reviewed'
+fails even when its neighbour has the field (#735)."
+  (let ((tree (%fresh-tree))
+        (pin (let ((at (search "            reviewed   2026-10-17
+" +good-assets-pin+ :from-end t)))
+               (concatenate 'string (subseq +good-assets-pin+ 0 at)
+                            (subseq +good-assets-pin+ (+ at (length "            reviewed   2026-10-17
+")))))))
+    (is (= 1 (loop with start = 0 for at = (search "reviewed" pin :start2 start)
+                   while at count t do (setf start (1+ at))))
+        "precondition: the fixture has one `reviewed' line, the htmx block's")
+    (%write (merge-pathnames "hyperion/assets/vendor/ASSETS.pin" tree) pin)
+    (multiple-value-bind (code output)
+        (%run (%install-checker tree "check-pins.lisp"))
+      (is (/= 0 code) "the bulma block has no `reviewed'; exit was ~D~%~A" code output)
+      (is (search "ASSETS.pin bulma" output) "the failure names the asset: ~A" output)
+      (is (search "ASSETS.pin htmx" output) "and the complete block is still checked: ~A" output))))
+
+(test pins-passes-complete-asset-blocks
+  "The control for the test above."
+  (let ((tree (%fresh-tree)))
+    (%write (merge-pathnames "hyperion/assets/vendor/ASSETS.pin" tree) +good-assets-pin+)
+    (multiple-value-bind (code output)
+        (%run (%install-checker tree "check-pins.lisp"))
+      (is (= 0 code) "complete asset blocks must pass; exit was ~D~%~A" code output)
+      (is (search "All 2 pins" output) "two assets are two pins: ~A" output))))
+
 ;;; --- check-upstream (#716) -----------------------------------------------------
 ;;;
 ;;; What it exists to detect: a pin in the tree with no entry in upstream.sexp, and an entry
@@ -559,6 +615,46 @@ Returns (values port stop-function). A path no route matches gets a 404."
              (is (search "held: a | b (#734)" output) "the manual row shows its hold: ~A" output)
              (is (search "held: a \\| b (#734)" report) "and the table escapes its |: ~A" report))
         (funcall stop)))))
+
+(test upstream-fails-on-a-retires-that-is-not-a-date
+  (multiple-value-bind (code output)
+      (%run-upstream (%upstream-tree :inventory (format nil "~A(:name \"a model\" :category :api :where ((:env \"scripts/versions.env\" \"SBCL_VERSION\")) :upstream (:manual \"https://example.com\") :reviewed \"2026-10-20\" :retires \"next week\")~%" +upstream-inventory+)))
+    (is (= 1 code) "exit ~D~%~A" code output)
+    (is (search "a model: :retires needs a date YYYY-MM-DD" output) "~A" output)))
+
+(test upstream-online-lists-an-entry-past-its-shutdown-date
+  "Two :manual entries, one retiring on the fixed day and one later. On that day --online lists
+the first under \"Past its shutdown date\" and the second as checked by hand, and still exits 0:
+a shutdown is something to act on, not a broken build. The GitHub entries point at a port where
+nothing listens, so they are unknown and need no server."
+  (let* ((tree (%upstream-tree
+                :inventory (format nil "~A(:name \"old model\" :category :api :where ((:env \"scripts/versions.env\" \"SBCL_VERSION\")) :upstream (:manual \"https://example.com\") :reviewed \"2026-10-20\" :retires \"2026-10-23\")~%(:name \"new model\" :category :api :where ((:env \"scripts/versions.env\" \"SBCL_VERSION\")) :upstream (:manual \"https://example.com\") :reviewed \"2026-10-20\" :retires \"2026-12-01\")~%" +upstream-inventory+)))
+         (script (%install-checker tree "check-upstream.lisp"))
+         (markdown (merge-pathnames "report.md" tree))
+         (out (make-string-output-stream))
+         (code (nth-value 2 (uiop:run-program
+                             (list (namestring sb-ext:*runtime-pathname*) "--script" (namestring script)
+                                   "--online" "--markdown" (namestring markdown))
+                             :output out :error-output out :ignore-error-status t
+                             :environment (append (list (%source-registry-variable)
+                                                        "CHECK_UPSTREAM_GITHUB_API=http://127.0.0.1:9"
+                                                        "CHECK_UPSTREAM_TODAY=2026-10-23")
+                                                  (remove-if (lambda (v) (or (search "CL_SOURCE_REGISTRY=" v)
+                                                                             (search "CHECK_UPSTREAM_" v)
+                                                                             (search "GITHUB_TOKEN=" v)))
+                                                             (sb-ext:posix-environ))))))
+         (output (get-output-stream-string out))
+         (report (or (ignore-errors (uiop:read-file-string markdown)) "")))
+    (is (= 0 code) "exit ~D~%~A" code output)
+    (is (search "1 retired, 3 unknown, 1 manual" output) "~A" output)
+    (is (search "shut down on 2026-10-23: remove this entry" output) "~A" output)
+    (let ((retired (search "## Past its shutdown date (1)" report))
+          (by-hand (search "## Checked by hand (1)" report)))
+      (is-true retired "~A" report)
+      (is-true by-hand "~A" report)
+      (when (and retired by-hand)
+        (is (< retired (search "| old model |" report) by-hand) "old model is in the first group: ~A" report)
+        (is (< by-hand (search "| new model |" report)) "new model is checked by hand: ~A" report)))))
 
 (test upstream-self-test-holds
   "The comparison rules: a major tag v7 is current against v7.0.1, a pg18 image is compared only
