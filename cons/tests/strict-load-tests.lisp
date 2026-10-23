@@ -142,6 +142,13 @@ NAME/tests holding it, named by NAME's test-op. Returns DIR."
   ;; --strict') recompiles and does.
   (%with-strict-project (dir name "warm" *strict-warning-source*)
     (handler-bind ((warning #'muffle-warning)) (asdf:load-system name))
+    ;; The source was written in the second the fasl was compiled in, and a fasl with its
+    ;; source's write date is compiled again (#573). Compiled once more a second later, the
+    ;; fasl is dated after its source, as one is that is genuinely current. The fasl is deleted
+    ;; rather than the load forced, because ASDF refuses :FORCE in a call nested in TEST-SYSTEM.
+    (sleep 1.1)
+    (mapc #'delete-file (asdf:output-files 'asdf:compile-op (asdf:find-component name "a")))
+    (handler-bind ((warning #'muffle-warning)) (asdf:load-system name))
     (is (null (%strict-load name dir))
         "without FORCE-OWN the current fasl is loaded and nothing is compiled")
     (is (typep (%strict-load name dir :force-own t) 'error)

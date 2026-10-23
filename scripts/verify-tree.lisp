@@ -677,6 +677,9 @@ undeclared dependency to look declared."
                           "--noinform" "--no-userinit" "--no-sysinit" "--non-interactive"
                           "--eval" "(require :asdf)"
                           "--eval" (format nil "(load ~S)" (namestring *quicklisp*))
+                          ;; As every entry point that builds an app does, so the gate compiles
+                          ;; what an app's build compiles (#573).
+                          "--eval" "(asdf:load-system \"cons/fasl-dates\")"
                           "--eval" form-string)
                     :output out :error-output out
                     :environment (child-environment)

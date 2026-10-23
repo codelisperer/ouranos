@@ -89,6 +89,9 @@
 
 ;;; External deps (clingon, alexandria, ...) come from Quicklisp for now.
 (load (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))
+;; First, so that this image, which becomes bin/cons, compiles a source file again when its fasl
+;; has the same write date, and so does everything bin/cons builds (#573).
+(funcall (read-from-string "ql:quickload") :cons/fasl-dates)
 (funcall (read-from-string "ql:quickload") :cons/cli)
 
 ;;; Warm the stack: compile every framework NOW so the first `cons build` / editor
@@ -109,6 +112,7 @@
                        "--eval" "(require :asdf)"
                        "--load" (namestring (merge-pathnames "quicklisp/setup.lisp"
                                                              (user-homedir-pathname)))
+                       "--eval" "(ql:quickload :cons/fasl-dates)"   ; #573
                        "--eval" "(ql:quickload '(:aion :cons :mnemosyne :elenchon :hyperion :praxeon :hermes))"
                        "--eval" "(uiop:quit 0)")
                  :output :interactive :error-output :interactive :input :interactive
@@ -189,6 +193,7 @@
                                  ;; resolves the system itself from the TREE -- it is in
                                  ;; no Quicklisp dist -- and installs only what it
                                  ;; depends on.
+                                 "--eval" "(ql:quickload :cons/fasl-dates)"   ; #573
                                  "--eval" (format nil "(ql:quickload ~S)" system)
                                  "--eval" "(uiop:quit 0)")
                            :output :interactive :error-output :interactive :input :interactive

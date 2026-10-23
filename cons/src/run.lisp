@@ -212,6 +212,10 @@ both upcased for the standard readtable."
                                                   (and with-tests (test-systems sys))))
                                  (let ((n (dep-name d))) (when n (visit n)))))
                               (t (push name others))))))))
+         ;; Before anything is compiled: a fasl with the same write date as its source is
+         ;; compiled again rather than loaded (#573). Already loaded in bin/cons; this is for
+         ;; the --fresh child, which runs this form in a bare SBCL.
+         (asdf :load-system "cons/fasl-dates")
          (visit system)
          (dolist (name (reverse others)) (quiet name))
          (own-load system)
