@@ -14,9 +14,10 @@
 ;;;; allows also bound the resolution, and with it the cost. Google's edit takes no mask, and one
 ;;;; request makes one image.
 ;;;;
-;;;; THE REPLY. The image is the inline data of the first candidate's parts that are not marked
-;;;; thought: a thinking model can produce interim images, which are marked thought, and the last
-;;;; one is not the result. A blocked prompt or a candidate stopped for safety is IMAGE-REFUSED;
+;;;; THE REPLY. The image is the last inline-data part of the first candidate's parts that is not
+;;;; marked thought: a thinking model can produce interim images, which are marked thought, and
+;;;; Google's guide says the last image is the result. One request makes one image, so only that
+;;;; one is returned. A blocked prompt or a candidate stopped for safety is IMAGE-REFUSED;
 ;;;; a reply with no image for any other reason is IMAGE-NOT-MADE.
 ;;;;
 ;;;; KEYS. This provider reads only its own variables, PRAXEON_GOOGLE_API_KEY and then
@@ -53,9 +54,11 @@ A string size of the form \"W:H\" is sent as given.")
 string quality, such as \"2K\", is sent as given.")
 
 (defparameter *google-refusal-reasons*
-  '("SAFETY" "BLOCKLIST" "PROHIBITED_CONTENT" "SPII" "IMAGE_SAFETY" "IMAGE_PROHIBITED_CONTENT")
+  '("SAFETY" "BLOCKLIST" "PROHIBITED_CONTENT" "SPII" "IMAGE_SAFETY" "IMAGE_PROHIBITED_CONTENT"
+    "RECITATION" "IMAGE_RECITATION")
   "The finish reasons with which Google stops a candidate under its policies, as its
-generateContent reference lists them. A blocked prompt (promptFeedback.blockReason) is a refusal
+generateContent reference lists them. RECITATION and IMAGE_RECITATION stop output that repeats
+existing material. A blocked prompt (promptFeedback.blockReason) is a refusal
 whatever its reason.")
 
 (defclass google-images (image-provider)
@@ -193,21 +196,26 @@ reaches a condition or a log."
                           :text (%refusal-text "google" reason stage categories))))
 
 (defun %google-images (parts)
-  "The images among PARTS, the first candidate's content parts: each inline-data part not marked
-thought, as (OCTETS . MEDIA-TYPE)."
-  (loop for part across (if (and (vectorp parts) (not (stringp parts))) parts #())
-        for data = (and (hash-table-p part) (not (eq t (%field part "thought")))
-                        (%field part "inlineData" "inline_data"))
-        when (hash-table-p data)
-          collect (let* ((encoded (%field data "data"))
-                         (octets (if (stringp encoded)
-                                     (%decode-image encoded)
-                                     (error (%unexpected-reply "has image data that is not a string"
-                                                               "google images")))))
-                    (cons octets (or (%sniff-media-type octets)
-                                     (let ((type (%field data "mimeType" "mime_type")))
-                                       (and (stringp type) (%short* type)))
-                                     "application/octet-stream")))))
+  "The image among PARTS, the first candidate's content parts, as a list of at most one
+(OCTETS . MEDIA-TYPE): the last inline-data part not marked thought. One request makes one
+image; Google's guide says the last image is the result, so an earlier one is never returned,
+passed to the app, counted or charged."
+  (let ((data (loop with last = nil
+                    for part across (if (and (vectorp parts) (not (stringp parts))) parts #())
+                    for inline = (and (hash-table-p part) (not (eq t (%field part "thought")))
+                                      (%field part "inlineData" "inline_data"))
+                    when (hash-table-p inline) do (setf last inline)
+                    finally (return last))))
+    (when data
+      (let* ((encoded (%field data "data"))
+             (octets (if (stringp encoded)
+                         (%decode-image encoded "google images")
+                         (error (%unexpected-reply "has image data that is not a string"
+                                                   "google images")))))
+        (list (cons octets (or (%sniff-media-type octets)
+                               (let ((type (%field data "mimeType" "mime_type")))
+                                 (and (stringp type) (%short* type)))
+                               "application/octet-stream")))))))
 
 (defun %short* (type)
   "TYPE when it looks like a media type, such as image/png, otherwise NIL."
@@ -222,7 +230,8 @@ and, when Google splits the candidates' tokens by modality, :OUTPUT-IMAGE-TOKENS
 not an integer is left out."
   (let* ((prompt (%field usage "promptTokenCount"))
          (candidates (%field usage "candidatesTokenCount"))
-         (thoughts (or (%field usage "thoughtsTokenCount") 0))
+         ;; Absent, or JSON null (which parses as a symbol), means no thinking tokens.
+         (thoughts (let ((v (%field usage "thoughtsTokenCount"))) (if (integerp v) v 0)))
          (details (%field usage "candidatesTokensDetails"))
          (image (and (vectorp details) (not (stringp details))
                      (loop for d across details

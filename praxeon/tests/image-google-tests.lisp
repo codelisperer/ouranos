@@ -301,3 +301,82 @@ returned, its bytes untouched, with the media type read from the bytes."
                          (progn (is (= 1 (length received)))
                                 (is (and result (not (getf result :is-error)))))))))
             (aion/test-threads:join server :timeout 10)))))))
+
+;;; --- the edges of a reply (the hub's review of #843) ----------------------------------------
+
+(test google-two-final-images-return-only-the-last
+  "A reply can carry text, an image, text and another image, none marked thought. A request makes
+one image, so only the last is returned, the usage counts one image, and the cost is not split."
+  (let ((second (%image-bytes (%png 3 3) "second-final-image")))
+    (multiple-value-bind (results events)
+        (%collecting-events
+         (lambda ()
+           (%with-google-server
+            (list (%google-reply :parts (list (%google-hash "text" "First:")
+                                              (%google-image-part +google-image+)
+                                              (%google-hash "text" "Second:")
+                                              (%google-image-part second))))
+            (lambda (p) (praxeon/image:generate-image p "x")))))
+      (is (= 1 (length results)))
+      (is (equalp second (praxeon/image:image-result-octets (first results))) "the last image")
+      (is (eql 17559/500000 (praxeon/image:image-result-cost (first results)))
+          "the whole cost, not half of it")
+      (is (eql 1 (getf (find :image-usage events :key #'evt:event-type) :count))))))
+
+(test google-a-reply-with-no-candidate-or-no-parts-is-image-not-made
+  (dolist (reply (list "{\"candidates\":[]}"
+                       "{\"usageMetadata\":{\"promptTokenCount\":3}}"
+                       "{\"candidates\":[{\"content\":{\"role\":\"model\"},\"finishReason\":\"STOP\"}]}"))
+    (let ((c (%google-condition reply)))
+      (is (typep c 'praxeon/image:image-not-made) "~A gave ~S" reply c))))
+
+(test google-reads-snake-case-inline-data
+  "Google's examples show inline_data and mime_type as well as the camelCase its replies use."
+  (let ((results (%with-google-server
+                  (list (jzon:stringify
+                         (%google-hash "candidates"
+                                       (vector (%google-hash
+                                                "content"
+                                                (%google-hash
+                                                 "parts"
+                                                 (vector (%google-hash
+                                                          "inline_data"
+                                                          (%google-hash "mime_type" "image/png"
+                                                                        "data" (cl-base64:usb8-array-to-base64-string
+                                                                                +google-image+)))))
+                                                "finishReason" "STOP")))))
+                  (lambda (p) (praxeon/image:generate-image p "x")))))
+    (is (equalp +google-image+ (praxeon/image:image-result-octets (first results))))))
+
+(test google-bad-base64-is-provider-request-failed-labelled-google
+  (let ((c (%google-condition
+            "{\"candidates\":[{\"content\":{\"parts\":[{\"inlineData\":{\"mimeType\":\"image/png\",\"data\":\"%%% not base64 %%%\"}}]},\"finishReason\":\"STOP\"}]}")))
+    (is (typep c 'cnd:provider-request-failed) "~S" c)
+    (is (search "google images" (princ-to-string c)) "~A" c)
+    (is-false (search "openai" (princ-to-string c)) "~A" c)))
+
+(test google-an-unpriced-model-has-no-cost
+  (let ((events (nth-value 1 (%collecting-events
+                              (lambda ()
+                                (%with-google-server (list (%google-reply))
+                                                     (lambda (p) (praxeon/image:generate-image p "x"))
+                                                     :model "gemini-unpriced-image"))))))
+    (let ((e (find :image-usage events :key #'evt:event-type)))
+      (is-true e)
+      (is-false (member :cost e) "~S" e)
+      (is-false (member :estimated e) "~S" e))))
+
+(test google-recitation-is-a-refusal
+  (dolist (reason '("RECITATION" "IMAGE_RECITATION"))
+    (let ((c (%google-condition (%google-reply :parts '() :finish-reason reason))))
+      (is (typep c 'praxeon/image:image-refused) "~A gave ~S" reason c))))
+
+(test google-a-null-thinking-count-is-zero-not-a-lost-cost
+  "JSON null parses as a symbol, not a number; the cost must still be computed, with no thinking
+tokens: (12 x 3/2 + 1120 x 30) / 10^6 = 33618 / 10^6."
+  (let* ((reply (format nil "{\"candidates\":[{\"content\":{\"parts\":[{\"inlineData\":{\"mimeType\":\"image/png\",\"data\":\"~A\"}}]},\"finishReason\":\"STOP\"}],\"usageMetadata\":{\"promptTokenCount\":12,\"candidatesTokenCount\":1120,\"thoughtsTokenCount\":null,\"candidatesTokensDetails\":[{\"modality\":\"IMAGE\",\"tokenCount\":1120}]}}"
+                        (cl-base64:usb8-array-to-base64-string +google-image+)))
+         (results (%with-google-server (list reply)
+                                       (lambda (p) (praxeon/image:generate-image p "x")))))
+    (is (eql 16809/500000 (praxeon/image:image-result-cost (first results)))
+        "~S" (praxeon/image:image-result-cost (first results)))))

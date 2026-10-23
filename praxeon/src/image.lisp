@@ -760,11 +760,11 @@ refusal, otherwise NIL."
   (let ((v (gethash key parsed)))
     (and (stringp v) v)))
 
-(defun %decode-image (encoded)
+(defun %decode-image (encoded &optional (label "openai images"))
   "The octets ENCODED, a base64 string, stands for, or PROVIDER-REQUEST-FAILED when it is not
-base64."
+base64. LABEL names the provider in the report."
   (handler-case (b64:base64-string-to-usb8-array encoded)
-    (error () (error (%unexpected-reply "has an image that is not valid base64")))))
+    (error () (error (%unexpected-reply "has an image that is not valid base64" label)))))
 
 (defparameter *openai-image-prices*
   ;; US dollars per million tokens, from https://developers.openai.com/api/docs/pricing, table
