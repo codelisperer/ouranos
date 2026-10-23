@@ -638,11 +638,13 @@ default on loopback, and HYPERION/DESKTOP:RUN-APP always has."
 ;;;            Ouranos Claude (macOS) on #188).
 
 (defstruct (clack-server (:constructor %make-clack-server) (:copier nil))
-  "What START returns for a Clack backend. STOP takes it."
+  "What START returns for a Clack backend. STOP takes it. STOPPING is set by the first STOP,
+so that only that one terminates THREAD (#502)."
   (thread nil)
   (server nil)
   (host nil)
-  (port nil))
+  (port nil)
+  (stopping nil))
 
 (defparameter +address-taken-errnos+
   #+linux '(98) #+darwin '(48)
@@ -950,6 +952,20 @@ on the way out. Waiting for the thread is what makes the socket closed when STOP
     (ignore-errors (sb-thread:terminate-thread thread))
     (ignore-errors (sb-thread:join-thread thread :timeout 10 :default nil))))
 
+(defun %stop-clack-handler (handler)
+  "Stop HANDLER, a CLACK-SERVER, when STOP may be called for it more than once at a time.
+
+Only the first call terminates the thread; a later call waits for it to end. Terminating it
+again would interrupt the backend's cleanup while it runs. Under Hunchentoot that cleanup is
+HUNCHENTOOT:STOP, and interrupted before it sets the acceptor's shutdown flag, it leaves the
+listener thread accepting on the port with nothing left to stop it. hyperion/dev reaches this:
+SERVE with :BLOCK calls UNWATCH when its wait ends, which is right after an UNWATCH from another
+thread, and both stop the same server (#502)."
+  (let ((thread (clack-server-thread handler)))
+    (if (null (sb-ext:compare-and-swap (clack-server-stopping handler) nil t))
+        (%stop-clack-server thread)
+        (ignore-errors (sb-thread:join-thread thread :timeout 10 :default nil)))))
+
 (defun stop (handler &key (drain-timeout 0))
   "Stop a server started by START -- either kind.
 
@@ -957,13 +973,16 @@ DRAIN-TIMEOUT, in seconds, is passed to the native :uv server, which then stops 
 waits that long for requests in flight to finish (#388). The Clack backends stop as they always
 have, whatever it says: they have no drain to wait for.
 
+On a Clack backend STOP may be called more than once, from more than one thread at the same
+time: the first call stops the server, and the others wait for that to finish (#502).
+
 Dispatches on the HANDLER, not on a remembered backend name, because the handler is what
 callers actually hold: SERVE-FOREVER keeps it in a session, apps keep it in a variable, and
 a STOP that also needed the name would be a second value to thread through every one of
 them."
   (cond
     ((%uv-server-p handler) (%uv-call "STOP" handler :drain-timeout drain-timeout))
-    ((clack-server-p handler) (%stop-clack-server (clack-server-thread handler)) t)
+    ((clack-server-p handler) (%stop-clack-handler handler) t)
     (t (clack:stop handler))))
 
 (defun handler-port (handler)
