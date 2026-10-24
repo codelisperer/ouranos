@@ -670,3 +670,85 @@ loop lock only while the loop is not being freed. Repeated, because the window i
         (dolist (c closers) (sb-thread:join-thread c :default nil :timeout 30))
         (is (null errors) "round ~D: ~S" i errors)
         (is (eq :freed (uv:loop-freed-p l)) "round ~D" i)))))
+
+;;; --- uv_loop_close and handles CLOSE-LOOP does not know about (#877) -----------
+
+(defun %init-unowned-timer (l)
+  "A timer handle on L that is not on LOOP-OWNED, so CLOSE-LOOP's own list does not close it.
+The caller frees the memory, after the loop is closed."
+  (let ((handle (cffi:foreign-alloc :char :count (aion/uv/ffi:uv-handle-size aion/uv/ffi:+uv-timer+))))
+    (is (zerop (aion/uv/ffi:uv-timer-init (aion/uv::loop-pointer l) handle)))
+    handle))
+
+(test close-loop-closes-a-handle-it-does-not-own-and-frees-the-loop
+  "A handle created without going through LOOP-OWNED makes uv_loop_close return UV_EBUSY.
+CLOSE-LOOP finds it with uv_walk, closes it, and frees the loop once uv_loop_close succeeds,
+without a LOOP-LEFT-UNFREED warning."
+  (let* ((l (uv:make-loop))
+         (handle (%init-unowned-timer l))
+         (warnings '()))
+    (handler-bind ((uv:loop-left-unfreed (lambda (w) (push w warnings) (muffle-warning w))))
+      (uv:close-loop l))
+    (is (null warnings) "~{~A~^; ~}" warnings)
+    (is (eq :freed (uv:loop-freed-p l)))
+    (is (plusp (aion/uv/ffi:uv-is-closing handle)) "the walk closed the unowned handle")
+    (cffi:foreign-free handle)))
+
+(test without-the-walk-an-unowned-handle-leaves-the-loop-unfreed
+  "The control for the test above. With the walk's closing step removed, uv_loop_close keeps
+returning UV_EBUSY, so CLOSE-LOOP leaves the loop unfreed and warns, naming the timer. Before
+#877 it freed the loop here. Once the walk works again, a later CLOSE-LOOP frees it."
+  (let* ((l (uv:make-loop))
+         (handle (%init-unowned-timer l))
+         (warnings '())
+         (walk (fdefinition 'aion/uv::%close-open-handles)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'aion/uv::%close-open-handles)
+                 (lambda (loop) (declare (ignore loop)) nil))
+           (handler-bind ((uv:loop-left-unfreed (lambda (w) (push w warnings) (muffle-warning w))))
+             (is (null (uv:close-loop l)))))
+      (setf (fdefinition 'aion/uv::%close-open-handles) walk))
+    (is (= 1 (length warnings)))
+    (let ((w (first warnings)))
+      (when w
+        (is (equal "EBUSY" (aion/uv/ffi:uv-err-name (uv:loop-left-unfreed-code w))))
+        (is (member :timer (uv:loop-left-unfreed-handles w)))))
+    (is (null (uv:loop-freed-p l)) "the loop must not be freed while uv_loop_close fails")
+    (is (zerop (aion/uv/ffi:uv-is-closing handle)) "nothing closed the unowned handle")
+    (uv:close-loop l)
+    (is (eq :freed (uv:loop-freed-p l)) "a later close-loop frees it")
+    (cffi:foreign-free handle)))
+
+;;; --- #541: a loop thread started while an interrupt to the starter is deferred -----
+
+(test a-loop-thread-started-while-an-interrupt-is-deferred-can-be-interrupted
+  "START-LOOP-THREAD called inside a step while an interrupt to its caller is deferred, as
+hyperion/clack-handler-uv's RUN can call it through server-uv (#541). The loop thread unblocks
+interrupts first, so an INTERRUPT-THREAD reaches it while it waits in uv_run. Without that, it
+never did.
+
+Skipped on a :SB-SAFEPOINT build (SBCL for Windows). There a new thread does not inherit the
+mask, so the defect does not occur; and an interrupt is delivered only when a thread leaves
+foreign code, so it does not reach a loop thread waiting in uv_run until an event wakes it, mask
+or no mask. Measured on #897's Windows leg, where the plain-start control in
+hyperion/clack-handler-uv's tests failed the same way."
+  #+sb-safepoint
+  (skip "interrupts reach a thread in uv_run only when it returns, on a :sb-safepoint build")
+  #-sb-safepoint
+  (let ((l (uv:make-loop)))
+    (unwind-protect
+         (progn
+           (sb-sys:without-interrupts
+             (let ((me sb-thread:*current-thread*))
+               (sb-thread:join-thread
+                (sb-thread:make-thread (lambda () (sb-thread:interrupt-thread me (lambda () nil)))
+                                       :name "uv-test interrupter"))
+               (sleep 0.2))
+             (uv:start-loop-thread l))
+           (let ((ran (sb-thread:make-semaphore)))
+             (sb-thread:interrupt-thread (aion/uv::loop-thread l)
+                                         (lambda () (sb-thread:signal-semaphore ran)))
+             (is-true (sb-thread:wait-on-semaphore ran :timeout 2)
+                      "an interrupt did not reach the loop thread")))
+      (uv:close-loop l))))

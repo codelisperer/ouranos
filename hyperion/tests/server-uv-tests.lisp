@@ -3080,3 +3080,42 @@ the end of the stream once it accepts the connection the client left in its queu
                     (pass "the client closed its socket"))
                (ignore-errors (sock:socket-close server-side)))))
       (ignore-errors (sock:socket-close listener)))))
+
+;;; --- #877: STOP when uv_loop_close still reports a shard's loop busy ----------------
+
+(test stop-logs-a-loop-left-unfreed-and-keeps-that-loop
+  "A shard loop that uv_loop_close still reports busy after its handles are closed. CLOSE-LOOP
+warns with LOOP-LEFT-UNFREED; %CLOSE-SHARD-LOOP logs and muffles it, so the warning does not
+reach STOP's caller, and STOP keeps the unfreed loop. Once the loop can close, a later STOP frees
+it. The busy state is made with a timer handle nothing owns and with CLOSE-LOOP's closing step
+stubbed out, as in aion/uv's control for #877."
+  (let* ((server (srv:start (const-app 200 +ok+ (list "x")) :port 0))
+         (loop (srv::server-loop server))
+         (handle (cffi:foreign-alloc :char :count (aion/uv/ffi:uv-handle-size aion/uv/ffi:+uv-timer+)))
+         (done (sb-thread:make-semaphore))
+         (escaped '())
+         (out (make-string-output-stream))
+         (close-step (fdefinition 'aion/uv::%close-open-handles)))
+    (uv:submit loop (lambda ()
+                      (aion/uv/ffi:uv-timer-init (uv:loop-pointer loop) handle)
+                      (sb-thread:signal-semaphore done)))
+    (is (sb-thread:wait-on-semaphore done :timeout 10) "control: the timer was created on the loop")
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'aion/uv::%close-open-handles)
+                 (lambda (l) (declare (ignore l)) nil))
+           (aion/log:setup :env :prod :level :info :stream out)
+           (handler-bind ((uv:loop-left-unfreed (lambda (w) (push w escaped))))
+             (finishes (srv:stop server))))
+      (setf (fdefinition 'aion/uv::%close-open-handles) close-step)
+      (aion/log:setup :env :dev :level :warn :stream *standard-output*))
+    (is (null escaped) "the warning was handled inside STOP; ~D reached the caller" (length escaped))
+    (let ((log (get-output-stream-string out)))
+      (is (search "still reports the loop busy" log) "no log line for the unfreed loop in ~S" log)
+      (is (search "\"open-handles\":1" log) "the log line counts the timer: ~S" log))
+    (is (null (uv:loop-freed-p loop)) "the busy loop was not freed")
+    (is (srv::server-shards server) "the busy shard is kept for a later STOP")
+    (finishes (srv:stop server))
+    (is (eq :freed (uv:loop-freed-p loop)) "a later STOP frees it")
+    (is (null (srv::server-shards server)))
+    (cffi:foreign-free handle)))

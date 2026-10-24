@@ -26,6 +26,12 @@ framework they need.
 - No `FORMAT ~<newline>` continuations — a CRLF checkout makes them an illegal directive.
 - Logging is `aion/log`, CL shell only: structured fields, counts/ids/durations, never
   payloads; correlation id bound once at the outermost seam. [`docs/logging.md`](docs/logging.md).
+- A thread that a framework creates calls `(aion/dynamic:unblock-interrupts)` as the first form
+  of its body. A new thread starts with its creator's signal mask, so a thread made while an
+  interrupt to its creator was deferred inside `sb-sys:without-interrupts` can never be
+  interrupted, stopped by `interrupt-thread`, or timed out by `with-timeout` (#541). A site that
+  does not call it says why in an `INTERRUPTS:` comment above the spawn; a sweep in
+  `aion/dynamic`'s tests fails on a spawn site that does neither.
 
 ## Writing
 

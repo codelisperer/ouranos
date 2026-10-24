@@ -1953,14 +1953,25 @@ before it closes the loops regardless.")
   "Close SHARD's loop, waiting up to *STOP-WAIT-SECONDS* for its thread. Returns T when the loop
 was freed. When the thread is still in a callback, the loop is left closed but unfreed (#694):
 this logs a warning naming the shard and the thread, and returns NIL. Freeing it then would let
-the callback use freed memory when it returns."
+the callback use freed memory when it returns.
+
+The same applies when uv_loop_close still reports the loop busy after its handles were closed
+(#877): CLOSE-LOOP warns with LOOP-LEFT-UNFREED, and this logs that warning in place of the
+default printout and returns NIL."
   (handler-bind ((uv:loop-thread-still-running
                    (lambda (c)
                      (log:warn "server-uv: a loop thread is still in a callback, so its loop is left unfreed"
                                :shard index
                                :thread (sb-thread:thread-name (uv:loop-thread-still-running-thread c))
                                :timeout-seconds *stop-wait-seconds*)
-                     (invoke-restart 'uv:leave-loop-unfreed))))
+                     (invoke-restart 'uv:leave-loop-unfreed)))
+                 (uv:loop-left-unfreed
+                   (lambda (w)
+                     (log:warn "server-uv: libuv still reports the loop busy after its handles were closed, so it is left unfreed"
+                               :shard index
+                               :code (uv:loop-left-unfreed-code w)
+                               :open-handles (length (uv:loop-left-unfreed-handles w)))
+                     (muffle-warning w))))
     (uv:close-loop (shard-loop shard) :timeout *stop-wait-seconds*))
   (and (uv:loop-freed-p (shard-loop shard)) t))
 
@@ -2128,6 +2139,7 @@ a thread of its own, and STOP stops waiting for it after *STOP-WAIT-SECONDS* and
          ;; THREAD-LIFETIME: independent -- normally joined within *STOP-WAIT-SECONDS*; left
          ;; running, and logged, only when a handler never returns.
          (stopper (sb-thread:make-thread (lambda ()
+                                           (aion/dynamic:unblock-interrupts)
                                            (unwind-protect (pool:stop-pool workers)
                                              (sb-thread:signal-semaphore done)))
                                          :name "server-uv-stop-workers")))

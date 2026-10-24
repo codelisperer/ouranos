@@ -139,9 +139,9 @@ suites, and a window would then open on that screen.
 
 In `hyperion/tests/view-tests.lisp`:
 - A real-window test checks `%real-window-allowed-p` before it does anything else.
-- `%run-hidden-launcher`, the only helper that lets the launcher create a window, signals an error
-  when `GITHUB_ACTIONS` is not set, so a test that forgets the check fails instead of opening a
-  window.
+- `%run-hidden-launcher` (Windows) and `%run-shown-launcher` (macOS), the only helpers that let the
+  launcher create a window, signal an error when `GITHUB_ACTIONS` is not set, so a test that
+  forgets the check fails instead of opening a window.
 - Every other run of `hyperion-view` in the tests sets `HYPERION_VIEW_NO_WINDOW=1`, which makes a
   call that would create a window exit 3 instead.
 

@@ -116,7 +116,7 @@ real.
 | `aion/interceptor` | coalton | **Real.** A typed, protocol-agnostic interceptor pipeline (pre-publication issue 177). Not owned by a framework: the shape is request-response, not web, and the tree had reimplemented it twice before it moved here. |
 | `aion/http-client` | dexador | **Real.** An interceptor-shaped client for one outbound call (pre-publication issue 202): enter stages, one round-trip, leave stages. The response carries the bytes that arrived; the string is derived (pre-publication issue 223). |
 | `aion/platform` | *nothing* | **Real.** The host-platform registry (pre-publication issue 182). |
-| `aion/uv`, `/net`, `/process` | cffi + a built libuv | **Real, opt-in.** The native boundary. Excluded from the default gate because they need a C toolchain — build with `scripts/build-libuv.lisp`, then `OURANOS_WITH_UV=1`. |
+| `aion/uv`, `/net`, `/process` | cffi + a built libuv | **Real, opt-in.** The native boundary. Excluded from the default gate because they need a C toolchain — build with `scripts/build-libuv.lisp`, then `OURANOS_WITH_UV=1`. To wake a loop thread, use `submit` or `stop-loop-thread`, which go through the loop's async handle: on Windows, SBCL delivers `interrupt-thread` and `with-timeout` to a loop thread only when `uv_run` returns to Lisp, which on an idle loop may be never (#541). |
 | `aion/windows`, `/com` | cffi | **Real, Windows-only** (ADR-0003). UTF-16 marshalling, `GetLastError`/HRESULT as conditions, handle lifetime, struct layouts asserted at load. |
 
 What else exists: the founding docs (above all the gap analysis, which is the design

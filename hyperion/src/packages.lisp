@@ -579,6 +579,8 @@
            ;; #730: the most files watched, and what is signalled past it
            #:*watch-file-limit* #:watch-too-large #:watch-too-large-root
            #:watch-too-large-count #:watch-too-large-limit
+           ;; #658: how recently a file must have been written to be hashed as well as dated
+           #:*recent-seconds*
            #:watch #:unwatch #:reload! #:dev-error
            #:serve #:wrap-dev
            ;; pre-publication issue 235: the guard is only useful if a caller can name what it signals.

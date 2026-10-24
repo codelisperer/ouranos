@@ -443,6 +443,7 @@ as DEX:*DEFAULT-PROXY*, apply here only when they are set globally."
                     ;; THREAD-LIFETIME: continuation -- it performs this request for the
                     ;; caller, so it carries the caller's log context and nothing else.
                     (lambda ()
+                      (aion/dynamic:unblock-interrupts)
                       (let ((log:*context* context)
                             (outcome (list :ended)))
                         (unwind-protect

@@ -542,15 +542,15 @@ stale. Runs on the supervisor thread. Returns how it ended, or NIL when there wa
               ;; ends, which it does once the process and anything holding the pipe have ended;
               ;; %RELEASE joins them.
               (list (sb-thread:make-thread
-                     (lambda () (%read-lines s (%output process) :stdout generation))
+                     (lambda () (aion/dynamic:unblock-interrupts) (%read-lines s (%output process) :stdout generation))
                      :name "hyperion/sidecar stdout")
                     ;; THREAD-LIFETIME: scoped -- the same, for standard error.
                     (sb-thread:make-thread
-                     (lambda () (%read-lines s (%error-stream process) :stderr generation))
+                     (lambda () (aion/dynamic:unblock-interrupts) (%read-lines s (%error-stream process) :stderr generation))
                      :name "hyperion/sidecar stderr"))
               (sidecar-watcher s)
               ;; THREAD-LIFETIME: scoped -- it ends when this process has exited; %RELEASE joins it.
-              (sb-thread:make-thread (lambda () (%watch s process generation))
+              (sb-thread:make-thread (lambda () (aion/dynamic:unblock-interrupts) (%watch s process generation))
                                      :name "hyperion/sidecar watcher"))
         :started))))
 
@@ -710,6 +710,7 @@ of these is signalled, every sidecar this call started is stopped."
             ;; sidecar's parent-death signal is tied to the thread that started it; STOP-SIDECARS
             ;; ends and joins it.
             (sb-thread:make-thread (lambda ()
+                                     (aion/dynamic:unblock-interrupts)
                                      (let ((*state-directory* state-directory)
                                            (*stop-seconds* stop-seconds)
                                            #+win32 (*job-function* job-function)

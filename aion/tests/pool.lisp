@@ -546,3 +546,36 @@ have run; before #520 it returned at once, and they started afterwards."
                                           :name "pool outside stopper")))
       (is (eql 3 (aion/test-threads:join stopper :timeout 10))
           "STOP-POOL from outside returned before the queued jobs had run"))))
+
+;;; --- #541: workers made while an interrupt to the maker is deferred ----------------
+
+(defun %in-a-step-with-a-deferred-interrupt (thunk)
+  "Call THUNK inside SB-SYS:WITHOUT-INTERRUPTS after another thread has interrupted this one and
+the interrupt has had 0.2 s to arrive and be deferred, so threads THUNK makes would inherit a
+blocked signal mask. Returns THUNK's value after the step ends."
+  (let ((value nil))
+    (sb-sys:without-interrupts
+      (let ((me sb-thread:*current-thread*))
+        (sb-thread:join-thread
+         (sb-thread:make-thread (lambda () (sb-thread:interrupt-thread me (lambda () nil)))
+                                :name "pool-test interrupter"))
+        (sleep 0.2))
+      (setf value (funcall thunk)))
+    value))
+
+(defun %interrupt-arrives-p (thread &optional (timeout 2))
+  (let ((ran (sb-thread:make-semaphore)))
+    (sb-thread:interrupt-thread thread (lambda () (sb-thread:signal-semaphore ran)))
+    (and (sb-thread:wait-on-semaphore ran :timeout timeout) t)))
+
+(test workers-made-while-an-interrupt-is-deferred-can-be-interrupted
+  "MAKE-POOL called inside a step while an interrupt to its caller is deferred, as
+hyperion/clack-handler-uv's RUN can call it through server-uv (#541). Each worker unblocks
+interrupts first, so an INTERRUPT-THREAD reaches it. Without that, none did."
+  (let ((p (%in-a-step-with-a-deferred-interrupt (lambda () (pool:make-pool :size 2 :name "pool-541")))))
+    (unwind-protect
+         (let ((threads (aion/pool::pool-threads p)))
+           (is (= 2 (length threads)))
+           (is (every #'%interrupt-arrives-p threads)
+               "an interrupt did not reach ~S" (mapcar #'sb-thread:thread-name (remove-if #'%interrupt-arrives-p threads))))
+      (pool:stop-pool p))))

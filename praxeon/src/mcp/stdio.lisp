@@ -353,7 +353,7 @@ environment for :INHERIT."
             (setf (child-job-watcher child)
                   ;; THREAD-LIFETIME: scoped -- it polls this child's process and ends once the
                   ;; process has exited or the job is closed; %FINISH-CHILD joins it.
-                  (sb-thread:make-thread (lambda () (%watch-job child))
+                  (sb-thread:make-thread (lambda () (aion/dynamic:unblock-interrupts) (%watch-job child))
                                          :name "praxeon/mcp stdio job watcher"))
           (error (e)
             ;; The server is in its job, which %FINISH-CHILD and the image's exit still close.
@@ -363,6 +363,7 @@ environment for :INHERIT."
           ;; THREAD-LIFETIME: scoped -- it reads this child's stdout until the stream ends,
           ;; needs none of the caller's bindings, and %FINISH-CHILD joins it.
           (sb-thread:make-thread (lambda ()
+                                   (aion/dynamic:unblock-interrupts)
                                    ;; Released however the thread ends, as the writer's is.
                                    (sb-sys:without-interrupts
                                      (unwind-protect
@@ -374,6 +375,7 @@ environment for :INHERIT."
           ;; THREAD-LIFETIME: scoped -- it writes this child's queued lines until :CLOSE, needs
           ;; none of the caller's bindings, and %FINISH-CHILD joins it.
           (sb-thread:make-thread (lambda ()
+                                   (aion/dynamic:unblock-interrupts)
                                    ;; Interrupts are allowed in the loop and not in the release,
                                    ;; because an interrupt, such as %FINISH-CHILD's
                                    ;; TERMINATE-THREAD, that arrives during a cleanup form can

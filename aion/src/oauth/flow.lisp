@@ -154,6 +154,7 @@ HOST is refused without being sent. This follows PRAXEON/MCP's %SEND-WITHIN."
                     ;; THREAD-LIFETIME: continuation -- it performs this request for the
                     ;; caller, so it carries the caller's log context and nothing else.
                     (lambda ()
+                      (aion/dynamic:unblock-interrupts)
                       (let ((log:*context* context)
                             (outcome (list :ended)))
                         (unwind-protect

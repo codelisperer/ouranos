@@ -13,6 +13,7 @@
                "spinneret"
                "aion/fs"         ; export.lisp empties the directory without following links (#347)
                "aion/log"        ; watch.lisp logs each reload and what refused it (#353)
+               "aion/dynamic"    ; watch.lisp's thread unblocks interrupts first (#541)
                "com.inuoe.jzon") ; listing.lisp writes the search index as JSON (#353)
   :serial t
   :components ((:module "src"

@@ -54,6 +54,51 @@ its tag.
   `make-nearest`, `nearest-offer` and `nearest-items` for keeping the k nearest during a scan.
   `praxeon/retrieval` now uses `praxeon/llm`'s `cosine-distance` and no longer keeps its own copy.
 
+- **aion/uv: `close-loop` frees a loop only when `uv_loop_close` succeeds** (#877). Before, it
+  ignored `uv_loop_close`'s result and freed the loop even when libuv returned `UV_EBUSY`
+  because a handle or request was still open on it, and libuv then used the freed memory. A
+  handle opens a loop this way when it was created without being added to `loop-owned`. Now:
+  - on `UV_EBUSY`, `close-loop` closes every handle `uv_walk` finds that is not already closing,
+    runs the loop so their close callbacks fire, and calls `uv_loop_close` again, up to
+    `aion/uv::*loop-close-attempts*` (4) calls in all. A handle closed this way gets no close
+    callback, so its memory is not freed;
+  - if the loop is still busy after that, `close-loop` leaves it unfreed, signals the new
+    warning `aion/uv:loop-left-unfreed` (`loop-left-unfreed-loop`, `-code`, `-handles`, the
+    last naming each remaining handle's kind), and returns `nil`. `aion/uv:loop-freed-p` stays
+    `nil`, and a later `close-loop` tries again.
+
+  An unhandled `loop-left-unfreed` prints as an ordinary Lisp warning on `*error-output*`. An
+  app that logs can handle it and pass it to `aion/log`. `hyperion/server-uv:stop` (and
+  `hyperion/server:stop` on `:uv`) does this: it logs a warning naming the shard, the libuv
+  error code and the number of open handles, does not let the warning reach its caller, and
+  keeps the unfreed loop for a later `stop`, as it does for a loop thread still in a handler.
+
+- **Threads the frameworks create can be interrupted even when they were started while an
+  interrupt was deferred** (#541). A new thread starts with its creator's signal mask. When an
+  interrupt reached a thread inside `sb-sys:without-interrupts`, SBCL blocked the deferrable
+  signals there until the step ended, and every thread made in that interval could never be
+  interrupted: no `interrupt-thread`, no `destroy-thread`, and no `sb-ext:with-timeout` inside
+  it. `hyperion/clack-handler-uv`'s `run` starts server-uv inside such a step (#444), so a
+  Clack stop, a timer or Ctrl-C during the start left every server-uv worker and loop thread
+  in that state for the server's life, and a handler's own `with-timeout` never fired. Now:
+  - the new `aion/dynamic:unblock-interrupts` unblocks them, and is the first form of the
+    threads that `aion/uv` (`start-loop-thread`), `aion/pool` (`make-pool`'s workers),
+    `aion/schedule`, `aion/oauth`, `hyperion/server-uv`, `hyperion/server`,
+    `hyperion/sidecar`, hyperion's dev watcher, `hyperion/clack-handler-uv`, `klio`'s
+    watcher, `praxeon`'s observer, MCP client and stdio threads, Claude Code hook, web turn
+    and workflow children create;
+  - `aion/uv` now depends on `aion/dynamic`, which has no dependencies of its own.
+
+  SBCL for Windows (a `:sb-safepoint` build) does not give a new thread its creator's signal
+  mask, so the defect did not occur there; the call changes nothing on Windows. There,
+  `interrupt-thread` and `with-timeout` reach an `aion/uv` loop thread only when `uv_run`
+  returns to Lisp, so wake a loop with `aion/uv:submit` or `stop-loop-thread` instead.
+
+  An app that starts its own threads from inside `sb-sys:without-interrupts`, or from code a
+  caller may run inside it, can call `(aion/dynamic:unblock-interrupts)` first in each thread
+  for the same reason. Five sites in `aion/windows`, `cons` and `hades` do not call it yet
+  (#896).
+
 - **hyperion/static serves only regular files, and serves some it used to refuse** (#687).
   `file-response` and `make-static-handler` now:
   - **refuse a FIFO, a device or a socket under the static root** with a 404, without reading
@@ -1943,6 +1988,18 @@ its tag.
 
 ### Fixed
 
+- **hyperion/dev: a file saved in the same second as the reloader's last poll is reloaded** (#658).
+  The reloader compared write dates only, and a write date has a resolution of one second, so
+  such a save kept its date and was not reloaded until the file was saved again. For a file
+  written in the last two seconds, each poll now also compares its size and a hash of its
+  contents. The window is `hyperion/dev:*recent-seconds*`; raise it for files on a network share
+  whose clock runs ahead of this machine's. A poll does not open other files:
+  - an older file is only dated;
+  - a recent file is stat'ed first, and only a regular file is read, so a FIFO under a watched
+    root cannot block the reloader;
+  - a regular file over 1 MiB is not hashed, and with the same date and size counts as
+    unchanged.
+
 - **hyperion/desktop: the `:browser` shell opens its URL with no shell on Windows, and opens
   only http and https URLs** (#851). `run-app` with `:shell :browser` ran `cmd /c start "" URL`
   on Windows. cmd reads the rest of its command line as a command of its own, and SBCL quotes
@@ -1982,6 +2039,14 @@ its tag.
   to about 0.2 s longer than asked. A platform that stops routing to an instance after that
   many seconds could still have a connection accepted. The readiness path still starts
   answering 503 when the wait loop notices the signal.
+
+- **hyperion-view: on macOS, a window taller or wider than the screen is shrunk to fit the
+  screen's visible frame and centred in it** (#485). The visible frame leaves out the menu bar
+  and the Dock. Before, `webview_set_size` centred the window but kept its size, so with
+  `run-app`'s `:width` and `:height` larger than the screen, the bottom of the window opened
+  off-screen. A window that fits is centred exactly between the Dock and the menu bar, where
+  `[NSWindow center]` put it somewhat above the centre. `hyperion-view --report-placement` now
+  works on macOS, and shows a window.
 
 - **aion/http-client: a body of octets with a `multipart/` Content-Type reaches the server as
   given on Linux and macOS** (#828). This is a workaround placed once in the client, not a
