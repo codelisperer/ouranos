@@ -662,15 +662,18 @@ nothing."
 ;; (#899): cl-sqlite opens it at load time, so it is closed before the dump and reopened from
 ;; the bundle at startup, as a --carry is. The step closes each one it carries, so the step
 ;; after it does not also list them as system libraries that are left out.
+(defparameter *tree-carried* 0
+  "How many of this tree's libraries the step below carried, for the summary line (#912).")
 (handler-case
     (multiple-value-bind (tree-carries note) (ouranos-carry:tree-sqlite-carry *vendor* *carry*)
       (when note (format t "~&  ~A~%" note))
       (ouranos-carry:carry-declared-libraries *carry* *bundle* :vendor *vendor*
-                                                               :tree-carries tree-carries))
+                                                               :tree-carries tree-carries)
+      (setf *tree-carried* (length tree-carries)))
   (ouranos-carry:carry-refused (e)
     (format *error-output* "~&build-desktop-app: ~A~%" e)
     (sb-ext:exit :code 3)))
-(ouranos-tree-natives:carry-native-libraries)
+(ouranos-tree-natives:carry-native-libraries :already-carried *tree-carried*)
 (carry-runtime-linked-libraries)
 
 ;;; VERSION is what a fresh install reports before the app has ever run, and what the

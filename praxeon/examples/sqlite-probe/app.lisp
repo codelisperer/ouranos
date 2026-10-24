@@ -191,10 +191,13 @@ Windows, whose file system does."
       (report "FAIL" (format nil "the library is SQLite ~A, and the pin is ~A" version
                              *pinned-version*))
       (incf failures))
-    (let ((here (uiop:pathname-directory-pathname sb-ext:*runtime-pathname*)))
+    ;; PATH is the operating system's file name, so it is parsed as one: read as a Lisp
+    ;; namestring, a bundle directory named with [ or * would be a wild pathname.
+    (let ((here (uiop:pathname-directory-pathname sb-ext:*runtime-pathname*))
+          (file (and path (uiop:parse-native-namestring path))))
       (report "executable-directory" (uiop:native-namestring here))
-      (unless (and path (probe-file path)
-                   (%same-directory-p (uiop:pathname-directory-pathname (truename path)) here))
+      (unless (and file (probe-file file)
+                   (%same-directory-p (uiop:pathname-directory-pathname (truename file)) here))
         (report "FAIL" "the library is not the copy beside the executable")
         (incf failures)))
     (let ((dir (%fresh-directory)))

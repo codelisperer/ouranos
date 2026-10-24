@@ -20,16 +20,20 @@ its tag.
   `vendor/sqlite/lib/libsqlite3.dylib` (macOS), `libsqlite3.so.0` (Linux) or `sqlite3.dll`
   (Windows), with `LICENSES/libsqlite3-LICENSE` (the name follows the file), and opens it from
   beside the executable at startup instead of the machine's copy. Before building such a
-  bundle, run `sbcl --script scripts/build-sqlite.lisp` once per checkout; without it the
-  bundle build exits 3 and prints that command. The build is from the tarball the new root file
+  bundle, run `sbcl --script scripts/build-sqlite.lisp` once per checkout, and again after
+  `sqlite.pin` changes; without it the bundle build exits 3 and prints that command. The build
+  writes `vendor/sqlite/BUILT-FROM` with the version and sha256 it used, and both scripts
+  compare it with `sqlite.pin`. The build is from the tarball the new root file
   `sqlite.pin` names, with `SQLITE_THREADSAFE=1`, `SQLITE_ENABLE_MATH_FUNCTIONS` and
   `SQLITE_OMIT_LOAD_EXTENSION`, and without FTS5; an app that calls
   `sqlite3_load_extension` or uses FTS5 inside a bundle needs to carry its own SQLite. An app
   that already passes its own `libsqlite3`/`sqlite3.dll` to `--carry` keeps it, and the tree's
   build is not carried. The tree's suites and REPLs still use the system copy. Recorded as
   ADR-0013's 2026-10-24 amendment, which is Proposed. `scripts/carry-natives.lisp` exports
-  `tree-sqlite-carry` and `sqlite-file-name`, and `carry-declared-libraries` takes
-  `:tree-carries`.
+  `tree-sqlite-carry` and `sqlite-file-name`, and
+  `carry-declared-libraries` takes `:tree-carries`. The build log's summary line counts the
+  carried SQLite among the tree's libraries (`tree-natives.lisp`'s `carry-native-libraries`
+  takes `:already-carried`, #912).
 
 - **The Windows toolchain's SQLite DLL moves from 3.50.4 to 3.54.1** (#765).
   `scripts/versions.env`'s `SQLITE_VERSION`, `SQLITE_YEAR` and the two zip sha256 values

@@ -32,9 +32,10 @@ url     https://sqlite.org/2026/sqlite-autoconf-3540100.tar.gz
 #   1. download the sqlite-autoconf tarball from https://sqlite.org/download.html (the URL's
 #      year directory is the release year);
 #   2. compare `openssl dgst -sha3-256` with the page, then take `shasum -a 256`;
-#   3. update the three lines above and the SHA3-256 in this comment, delete vendor/sqlite/,
-#      rebuild, and run the desktop-release dry run, whose sqlite-probe job checks the
-#      version a built bundle loads;
+#   3. update the three lines above and the SHA3-256 in this comment, run build-sqlite.lisp
+#      (it rebuilds, because vendor/sqlite/BUILT-FROM no longer matches this file, and until it
+#      does build-desktop-app.lisp refuses to carry the old build), and run the desktop-release
+#      dry run, whose sqlite-probe job checks the version a built bundle loads;
 #   4. move scripts/versions.env's SQLITE_* lines (the Windows toolchain DLL) to the same
 #      version.
 

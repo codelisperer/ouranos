@@ -41,7 +41,7 @@
            #:carry-arguments
            #:carry-declared-libraries
            #:carry-refused
-           #:open-carried-libraries
+           #:open-carried-libraries #:runtime-directory
            #:sqlite-file-name
            #:tree-sqlite-carry))
 
@@ -355,6 +355,32 @@ one of these names is the app carrying its own SQLite.")
          (loaded-p (%cffi "FOREIGN-LIBRARY-LOADED-P")))
     (and lib loaded-p (ignore-errors (funcall loaded-p lib)) t)))
 
+;;; build-sqlite.lisp writes vendor/sqlite/BUILT-FROM with the version and sha256 it built
+;;; from, in this form. A library whose stamp does not match sqlite.pin was built from another
+;;; release, for example before a pin bump, and is not carried.
+
+(defun %pin-field (pin name)
+  "The value of NAME in the pin file PIN (`name value' lines, # comments), or NIL."
+  (with-open-file (in pin :if-does-not-exist nil)
+    (when in
+      (loop for line = (read-line in nil nil)
+            while line
+            for tr = (string-trim '(#\Space #\Tab #\Return) line)
+            unless (or (zerop (length tr)) (char= #\# (char tr 0)))
+              do (let ((sp (position-if (lambda (c) (member c '(#\Space #\Tab))) tr)))
+                   (when (and sp (string= name (subseq tr 0 sp)))
+                     (return (string-trim '(#\Space #\Tab) (subseq tr sp)))))))))
+
+(defun %sqlite-built-from-pin-p (sqlite-dir root)
+  "Whether SQLITE-DIR/BUILT-FROM names the version and sha256 in ROOT/sqlite.pin."
+  (let* ((pin (merge-pathnames "sqlite.pin" root))
+         (version (%pin-field pin "version"))
+         (sha (%pin-field pin "sha256"))
+         (stamp (probe-file (merge-pathnames "BUILT-FROM" sqlite-dir))))
+    (and version sha stamp
+         (string= (uiop:read-file-string stamp)
+                  (format nil "version ~A~%sha256 ~A~%" version (string-downcase sha))))))
+
 (defun tree-sqlite-carry (vendor carries &key (loaded (%sqlite-loaded-p)) platform)
   "What build-desktop-app.lisp carries for SQLite, as (values TREE-CARRIES NOTE).
 
@@ -368,8 +394,9 @@ PLATFORM (:macos, :linux or :windows) is for tests; it defaults to this machine'
 - CARRIES, the app's own --carry list, has a file cl-sqlite asks for: nothing, and a note
   saying the app carries its own SQLite. That was the way to ship SQLite before #899, and an
   app that does it keeps working.
-- Otherwise the tree's build, which must exist. When the library or its LICENSE is missing,
-  signals CARRY-REFUSED naming the command that builds them. Not carrying would let the
+- Otherwise the tree's build, which must exist and must have been built from the release
+  sqlite.pin names. When the library or its LICENSE is missing, or vendor/sqlite/BUILT-FROM
+  does not match the pin, signals CARRY-REFUSED naming the command that builds them. Not carrying would let the
   image reopen SQLite by bare name on the user's machine, which is what #899's probe exists to
   catch."
   (unless loaded (return-from tree-sqlite-carry (values nil nil)))
@@ -388,23 +415,37 @@ PLATFORM (:macos, :linux or :windows) is for tests; it defaults to this machine'
                                                     (sqlite-file-name)))
                                    dir))
          (license (merge-pathnames "LICENSE" dir))
+         (root (uiop:pathname-parent-directory-pathname (uiop:ensure-directory-pathname vendor)))
+         (command (format nil "sbcl --script \"~A\""
+                          (uiop:native-namestring
+                           (merge-pathnames "scripts/build-sqlite.lisp" root))))
          (missing (find-if-not #'probe-file (list library license))))
     (when missing
       (error 'carry-refused
              :path missing
-             :reason (format nil "the app loads cl-sqlite, and the tree's pinned SQLite has not been built, so the bundle would use whatever SQLite the user's machine has. Build it, then build the bundle again:~%  sbcl --script \"~A\""
-                             (uiop:native-namestring
-                              (merge-pathnames "scripts/build-sqlite.lisp"
-                                               (uiop:pathname-parent-directory-pathname
-                                                (uiop:ensure-directory-pathname vendor)))))))
+             :reason (format nil "the app loads cl-sqlite, and the tree's pinned SQLite has not been built, so the bundle would use whatever SQLite the user's machine has. Build it, then build the bundle again:~%  ~A"
+                             command)))
+    (unless (%sqlite-built-from-pin-p dir root)
+      (error 'carry-refused
+             :path library
+             :reason (format nil "the app loads cl-sqlite, and the SQLite in vendor/sqlite was not built from the release sqlite.pin names (its BUILT-FROM stamp is missing or names another), so the bundle would carry another version. Rebuild it, then build the bundle again:~%  ~A"
+                             command)))
     (values (list (list (uiop:native-namestring library) (uiop:native-namestring license)))
             nil)))
+
+(defun runtime-directory (&optional (runtime sb-ext:*runtime-pathname*))
+  "The directory of RUNTIME, the running executable. SBCL makes `sb-ext:*runtime-pathname*' a
+pathname with SB-EXT:NATIVE-PATHNAME, so a directory named with [ or * in it is not wild, and
+it is used as it is. A string is read the same way, as a native file name, never as a Lisp
+namestring, which would make such a directory wild."
+  (uiop:pathname-directory-pathname
+   (if (stringp runtime) (uiop:parse-native-namestring runtime) runtime)))
 
 (defun open-carried-libraries (names)
   "Open each file in NAMES from the directory of the running executable. Run from
 `sb-ext:*init-hooks*' when a dumped app starts. A library that does not open ends the app
 with exit code 3 and a message naming the file, because the app cannot run without it."
-  (let ((dir (uiop:pathname-directory-pathname sb-ext:*runtime-pathname*))
+  (let ((dir (runtime-directory))
         (load-lib (%cffi "LOAD-FOREIGN-LIBRARY")))
     (dolist (name names)
       (let ((path (merge-pathnames name dir)))

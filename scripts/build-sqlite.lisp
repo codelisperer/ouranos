@@ -203,8 +203,10 @@ unpacks into."
       (let ((fetcher (which "curl" "wget")))
         (unless fetcher (error "Need curl or wget to fetch the SQLite source."))
         (if (string= fetcher "curl")
-            (run "curl" (list "-sSL" "--fail" "-o" (namestring tarball) url))
-            (run "wget" (list "-q" "-O" (namestring tarball) url)))))
+            ;; https only, redirects included; the sha256 below is the real check.
+            (run "curl" (list "-sSL" "--fail" "--proto" "=https" "--proto-redir" "=https"
+                              "-o" (uiop:native-namestring tarball) url))
+            (run "wget" (list "-q" "--https-only" "-O" (uiop:native-namestring tarball) url)))))
     ;; Verified every time, including a tarball already here.
     (let ((actual (sha256-of tarball)))
       (unless (string-equal actual expected-sha)
@@ -311,18 +313,19 @@ where the compile runs, so none needs quoting."
 
 (defun %exported-symbols (library)
   "The names LIBRARY exports, undecorated, or NIL if the platform's tool is unavailable."
-  (flet ((lines (cmd)
+  (flet ((lines (argv)
+           ;; An argument list, not a shell command, so a path with spaces or a ";" in it is
+           ;; one argument.
            (let ((out (ignore-errors
-                       (%run-bounded (list "sh" "-c" cmd)
-                                     :capture t :ignore-error-status t :timeout 120))))
+                       (%run-bounded argv :capture t :ignore-error-status t :timeout 120))))
              (when out (uiop:split-string out :separator '(#\Newline))))))
     (ecase (platform)
       (:linux
-       (loop for l in (lines (format nil "nm -D --defined-only ~A" (uiop:native-namestring library)))
+       (loop for l in (lines (list "nm" "-D" "--defined-only" (uiop:native-namestring library)))
              for name = (car (last (uiop:split-string (string-trim '(#\Space #\Tab #\Return) l))))
              when (and name (plusp (length name))) collect name))
       (:macos
-       (loop for l in (lines (format nil "nm -gU ~A" (uiop:native-namestring library)))
+       (loop for l in (lines (list "nm" "-gU" (uiop:native-namestring library)))
              for name = (car (last (uiop:split-string (string-trim '(#\Space #\Tab #\Return) l))))
              when (and name (plusp (length name)))
                collect (if (char= #\_ (char name 0)) (subseq name 1) name)))
@@ -348,14 +351,17 @@ dependency on the VC++ runtime."
     (when (< size 500000)
       (error "The built library is implausibly small (~:D bytes)." size)))
   (when (eq (platform) :linux)
-    (let ((soname (ignore-errors
-                   (%run-bounded (list "sh" "-c" (format nil "readelf -d ~A | grep -i soname"
-                                                         (uiop:native-namestring library)))
-                                 :capture t :ignore-error-status t :timeout 60))))
-      (when (and soname (plusp (length soname)))
-        (format t "  ~A~%" (string-trim '(#\Space #\Tab) soname))
-        (unless (search (output-name) soname)
-          (error "SONAME does not name ~A." (output-name))))))
+    (let* ((dynamic (ignore-errors
+                     (%run-bounded (list "readelf" "-d" (uiop:native-namestring library))
+                                   :capture t :ignore-error-status t :timeout 60)))
+           (soname (and dynamic
+                        (find-if (lambda (l) (search "SONAME" (string-upcase l)))
+                                 (uiop:split-string dynamic :separator '(#\Newline))))))
+      (unless soname
+        (error "readelf found no SONAME in ~A." (file-namestring library)))
+      (format t "  ~A~%" (string-trim '(#\Space #\Tab) soname))
+      (unless (search (output-name) soname)
+        (error "SONAME does not name ~A." (output-name)))))
   (let ((exports (%exported-symbols library)))
     (when (null exports)
       (error "Could not read any exported symbol from ~A." (file-namestring library)))
@@ -415,6 +421,26 @@ carry-natives.lisp) and where tree-natives.lisp's LICENSE-FILES would find it."
       (format out "~%See https://sqlite.org/copyright.html.~%"))
     (format t "  licence: ~A~%" (human-path:human-path dst))))
 
+;;; ------------------------------------------------------------------- the stamp
+;;;
+;;; vendor/sqlite/BUILT-FROM records the version and tarball sha256 a build used. A library
+;;; already in vendor/ is reused only when its stamp names the pin's current version and sha256,
+;;; so after a pin bump a checkout that still holds the old build rebuilds it instead of
+;;; carrying the old version into bundles.
+
+(defun stamp-path () (merge-pathnames "BUILT-FROM" *vendor*))
+
+(defun stamp-text (version sha)
+  (format nil "version ~A~%sha256 ~A~%" version (string-downcase sha)))
+
+(defun write-stamp (version sha)
+  (with-open-file (out (stamp-path) :direction :output :if-exists :supersede)
+    (write-string (stamp-text version sha) out)))
+
+(defun stamp-matches-p (version sha)
+  (let ((path (probe-file (stamp-path))))
+    (and path (string= (uiop:read-file-string path) (stamp-text version sha)))))
+
 ;;; ------------------------------------------------------------------------- main
 
 (defun main ()
@@ -434,11 +460,14 @@ carry-natives.lisp) and where tree-natives.lisp's LICENSE-FILES would find it."
         (format *error-output* "build-sqlite: sqlite.pin is missing version, url or sha256.~%")
         (uiop:quit 1))
       (format t "~&SQLite ~A (~A) -> ~A~%" version (platform) (human-path:human-path *vendor*))
-      ;; An existing library is verified, not trusted: it passes VERIFY-BUILT, and its
-      ;; licence is there, or it is rebuilt.
+      ;; An existing library is verified, not trusted: its stamp names this pin, it passes
+      ;; VERIFY-BUILT, and its licence is there, or it is rebuilt.
       (when (and (probe-file (library-path)) (not force))
         (handler-case
-            (progn (verify-built (library-path))
+            (progn (unless (stamp-matches-p version sha)
+                     (error "vendor/sqlite/BUILT-FROM does not name SQLite ~A with sqlite.pin's sha256, so the library there was built from another release."
+                            version))
+                   (verify-built (library-path))
                    (unless (probe-file (merge-pathnames "LICENSE" *vendor*))
                      (error "vendor/sqlite/LICENSE is missing."))
                    (format t "~&  already built: ~A~%  (--force to rebuild)~%"
@@ -453,6 +482,7 @@ carry-natives.lisp) and where tree-natives.lisp's LICENSE-FILES would find it."
               (verify-source srcdir version)
               (verify-built (compile-library srcdir))
               (install-licence srcdir version)
+              (write-stamp version sha)
               (format t "~&~%Built vendor/sqlite/lib/~A~%" (output-name))
               (uiop:quit 0)))
         (error (e)

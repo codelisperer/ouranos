@@ -298,13 +298,22 @@ bundle directory, which must be empty when it refuses."
                   (values carries note nil))
     (error (e) (values nil nil e))))
 
-(defun %build-fake-sqlite (vendor platform &key (license t))
-  "Write vendor/sqlite/lib/<the platform's name>, and vendor/sqlite/LICENSE when LICENSE."
+(defun %build-fake-sqlite (vendor platform &key (license t) (stamp "9.9.9"))
+  "Write vendor/sqlite/lib/<the platform's name>, vendor/sqlite/LICENSE when LICENSE, a
+sqlite.pin for version 9.9.9 in the directory above VENDOR, and vendor/sqlite/BUILT-FROM naming
+version STAMP with the pin's sha256 when STAMP is a string. The stamp's form is the one
+build-sqlite.lisp writes."
   (let ((lib (merge-pathnames (concatenate 'string "sqlite/lib/"
                                            (funcall (%carry-fn "SQLITE-FILE-NAME") platform))
-                              vendor)))
+                              vendor))
+        (built-from (merge-pathnames "sqlite/BUILT-FROM" vendor)))
     (%write lib "not really sqlite")
     (when license (%write (merge-pathnames "sqlite/LICENSE" vendor) "public domain"))
+    (%write (merge-pathnames "sqlite.pin" (uiop:pathname-parent-directory-pathname vendor))
+            (format nil "# a test pin~%version 9.9.9~%sha256  ABCD~%"))
+    (if stamp
+        (%write built-from (format nil "version ~A~%sha256 abcd~%" stamp))
+        (uiop:delete-file-if-exists built-from))
     lib))
 
 (test the-tree-sqlite-is-carried-only-when-the-app-loads-cl-sqlite
@@ -348,7 +357,15 @@ bundle directory, which must be empty when it refuses."
     (let ((e (nth-value 2 (%tree-sqlite-carry vendor '() :loaded t :platform :linux))))
       (is (typep e (find-symbol "CARRY-REFUSED" "OURANOS-CARRY")) "got ~A" e)
       (is (search "LICENSE" (princ-to-string e)) "~A" e))
-    ;; The control: once both are there, it is carried.
+    ;; Built from another release than the pin names, or with no stamp: refused, with the
+    ;; command, which rebuilds it.
+    (dolist (stamp '("9.9.8" nil))
+      (%build-fake-sqlite vendor :linux :stamp stamp)
+      (let ((e (nth-value 2 (%tree-sqlite-carry vendor '() :loaded t :platform :linux))))
+        (is (typep e (find-symbol "CARRY-REFUSED" "OURANOS-CARRY")) "stamp ~A: got ~A" stamp e)
+        (is (search "not built from the release sqlite.pin names" (princ-to-string e)) "~A" e)
+        (is (search "build-sqlite.lisp" (princ-to-string e)) "~A" e)))
+    ;; The control: once both are there, built from the pin's release, it is carried.
     (%build-fake-sqlite vendor :linux)
     (multiple-value-bind (carries note e) (%tree-sqlite-carry vendor '() :loaded t :platform :linux)
       (declare (ignore note))
@@ -481,3 +498,28 @@ was found some other way."
         (multiple-value-bind (out code) (%carry-pair-then-load :relink nil)
           (is (not (search "FIXA 43" (or out ""))) "A loaded without the relink:~%~A" out)
           (is (search "Library not loaded" (or out "")) "expected dyld's refusal (exit ~A):~%~A" code out)))))
+
+;;; --- the bundle directory is read as a native file name ---------------------------------
+
+(test the-runtime-directory-of-a-path-with-brackets-is-not-wild
+  "OPEN-CARRIED-LIBRARIES opens each carried library from RUNTIME-DIRECTORY. A directory named
+with [ or * in it is an ordinary directory, and must not become a wild pathname, or no carried
+library would open and the app would exit 3. Since #899 every app that loads cl-sqlite carries
+SQLite, so this applies to all of them. SBCL gives the running executable's path as a pathname
+made by SB-EXT:NATIVE-PATHNAME, which is what this passes (measured on macOS with SBCL 2.6.9:
+a runtime in a directory named `br [x]*' has a *RUNTIME-PATHNAME* that is not wild)."
+  (let* ((exe (sb-ext:native-pathname
+               (if (uiop:os-windows-p) "C:\\Apps\\My [Beta]*\\app.exe" "/opt/My [Beta]*/app")))
+         (want (if (uiop:os-windows-p) "C:\\Apps\\My [Beta]*\\" "/opt/My [Beta]*/"))
+         (dir (funcall (%carry-fn "RUNTIME-DIRECTORY") exe)))
+    (is (equal (funcall (%carry-fn "RUNTIME-DIRECTORY") (sb-ext:native-namestring exe)) dir)
+        "the path as a string gives another directory than as a pathname")
+    (is (pathnamep sb-ext:*runtime-pathname*)
+        "sb-ext:*runtime-pathname* is a ~S here, which RUNTIME-DIRECTORY was not written for"
+        (type-of sb-ext:*runtime-pathname*))
+    (is-false (wild-pathname-p dir) "~S parsed as a wild pathname" exe)
+    (is (string= want (uiop:native-namestring dir)) "~S gave the directory ~S"
+        exe (uiop:native-namestring dir))
+    (is (string= (concatenate 'string want "libsqlite3.dylib")
+                 (uiop:native-namestring (merge-pathnames "libsqlite3.dylib" dir)))
+        "a carried file name merged into it is not the file beside the executable")))

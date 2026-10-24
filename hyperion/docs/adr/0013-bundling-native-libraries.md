@@ -208,13 +208,18 @@ library is open in the image. If it is, the bundle carries `vendor/sqlite/lib/<n
 the dump, whichever copy the build machine had opened, and an `sb-ext:*init-hooks*` entry
 opens the carried copy by absolute path from the directory of `sb-ext:*runtime-pathname*`,
 exiting with code 3 if it is missing. Linux carries it too, so every OS runs one SQLite
-version, as libuv does under ADR-0011. The maintainer's hub ruled this on #899.
+version, as libuv does under ADR-0011. Recommended in #899's design note and approved by the
+acting hub (ouranos-products-pm) on 2026-10-24; pending the maintainer.
 
 **5. The bundle build fails when the app loads cl-sqlite and the pinned build is missing.**
 It stops with exit code 3 and prints the command, `sbcl --script scripts/build-sqlite.lisp`.
+It does the same when `vendor/sqlite/BUILT-FROM`, which the build script writes with the version
+and sha256 it built from, does not match `sqlite.pin`, so a checkout that still holds a build
+from before a pin change does not carry the old version. The build script itself rebuilds in
+that case rather than reporting the library as already built.
 It does not fall back to the build machine's copy and does not carry nothing, because either
 would ship a bundle that uses whatever SQLite the user's machine has, which is the case this
-amendment exists to remove. Ruled on #899 with point 4.
+amendment exists to remove. Recommended and approved with point 4, on the same terms.
 
 **6. An app's own SQLite takes precedence.** An app that passes a library with one of
 cl-sqlite's file names to `--carry` keeps it, and the tree's build is not carried. The build
