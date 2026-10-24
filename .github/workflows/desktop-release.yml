@@ -74,6 +74,8 @@ jobs:
           # found`. So the floor for OUR binaries is set by whatever glibc the SBCL we can
           # actually run needs. 24.04 (glibc 2.39) it is; widening that floor means building
           # SBCL from source on an older base, or building in a container. Tracked.
+          # HELD on 24.04 while verify.yml tests on ubuntu-26.04: a build on 26.04 would need
+          # glibc 2.43 on the user's machine, and Ubuntu 24.04 desktops have 2.39 (#766).
           - os: ubuntu-24.04
             platform: linux-x86-64
             cache: ~/.cache/common-lisp
