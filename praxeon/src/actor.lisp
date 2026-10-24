@@ -109,6 +109,11 @@ client rendering `agent-history' still shows the whole conversation."
   ;; trims what is sent), so a later turn starts untrusted too.
   (guard nil)
   (untrusted-inputs '() :type list)
+  ;; The ids of the calls whose result was untrusted when it ran, by the means's registration or
+  ;; because the call marked its turn untrusted, such as a delegated agent that read a page or was
+  ;; given an untrusted memory item (#906's review). %UNTRUSTED-CALL-P reads it, so a judgement
+  ;; made later from the history, such as an observer's, sees what was decided at run time.
+  (untrusted-calls (make-hash-table :test #'equal))
   (taint-scope :turn)
   (history '() :type list))               ; list of praxeon/llm messages
 
@@ -197,6 +202,9 @@ Returns NAME."
 
 (defvar *current-guard* nil
   "The guard of the turn whose call is running, or NIL outside a call.")
+(defvar *call-taint* nil
+  "A box, (NIL) or (T), for the call that is running: MARK-UNTRUSTED sets it, so the call's
+result is recorded as untrusted (AGENT-UNTRUSTED-CALLS). NIL outside a call.")
 (defvar *decided-after-untrusted* nil
   "True while a call runs that the model decided after untrusted content entered its turn. A
 sub-turn started inside such a call, such as a delegated agent's, starts with untrusted
@@ -252,12 +260,14 @@ predicate uses this to tell what the user asked for from what a page, a tool or 
 
 (defun %untrusted-call-p (agent part)
   "True when PART, a :TOOL-USE part in AGENT's history, called a means whose result may be
-untrusted: one registered :UNTRUSTED, READ-RESULT, which can return any stored result, or one
-no longer registered, whose result cannot be judged."
+untrusted: one registered :UNTRUSTED, READ-RESULT, which can return any stored result, one no
+longer registered, whose result cannot be judged, or one recorded as untrusted when it ran
+(AGENT-UNTRUSTED-CALLS), such as a delegated agent whose turn read untrusted content."
   (let ((entry (gethash (getf part :name) (agent-means agent))))
     (or (null entry)
         (means-entry-untrusted entry)
-        (equal (getf part :name) *read-result-means*))))
+        (equal (getf part :name) *read-result-means*)
+        (and (getf part :id) (gethash (getf part :id) (agent-untrusted-calls agent)) t))))
 
 (defun %tool-uses (messages)
   "The :TOOL-USE parts of the assistant messages in MESSAGES, oldest first."
@@ -285,6 +295,28 @@ holds a call whose result may be untrusted: that content is still sent to the mo
          (some (lambda (p) (%untrusted-call-p agent p))
                (%tool-uses (ldiff (agent-history agent)
                                   (member before (agent-history agent) :test #'eq)))))))
+
+(defun untrusted-window-predicate (agent)
+  "A function of a list of messages from AGENT's history, true when they hold content from
+outside the conversation: a call to a means whose result may be untrusted (%UNTRUSTED-CALL-P),
+or a user message a coordinator delegated rather than the user wrote; and, under the
+:CONVERSATION taint scope, any untrusted call earlier in AGENT's history. A call counts as
+untrusted by its means's registration or by what it did when it ran (AGENT-UNTRUSTED-CALLS). What
+an app passes as a PRAXEON/OBSERVE observer's :UNTRUSTED-P, so a window's observations are marked
+as AGENT would judge the window (#317's taint ruling).
+
+AN OBSERVER OF A SUB-AGENT needs this predicate, built from the sub-agent: the observer's default
+looks only for tool calls, and a delegated task message is the coordinating model's text, not
+the user's, so the default takes it as trusted."
+  (lambda (messages)
+    (or (some (lambda (p) (%untrusted-call-p agent p)) (%tool-uses messages))
+        (some (lambda (m) (member m (agent-untrusted-inputs agent) :test #'eq)) messages)
+        ;; Under :CONVERSATION, untrusted content earlier in the history keeps every later turn
+        ;; untrusted, so it keeps every later window untrusted too (#906's review).
+        (and (eq (agent-taint-scope agent) :conversation)
+             (let ((at (member (first messages) (agent-history agent) :test #'eq)))
+               (and at (some (lambda (p) (%untrusted-call-p agent p))
+                             (%tool-uses (ldiff (agent-history agent) at)))))))))
 
 (defun %turn-guard (agent)
   "AGENT's guard for its current turn, rebuilt from the history when the stored one belongs
@@ -321,7 +353,9 @@ Outside a call, does nothing."
 result is untrusted only sometimes, such as a delegated agent that read a page. Outside a
 call, does nothing."
   (when *current-guard*
-    (setf (turn-guard-untrusted *current-guard*) t)))
+    (setf (turn-guard-untrusted *current-guard*) t))
+  (when *call-taint*
+    (setf (car *call-taint*) t)))
 
 (defun means-permitted-p (entry permit)
   "May a caller described by PERMIT use ENTRY?
@@ -632,16 +666,25 @@ Not `agent-history', and the difference is the whole of pre-publication issue 40
     retrieved facts that fit ITS budget -- and placed AFTER that prefix, because
     facts change every turn and caching them would invalidate the cache each time.
 
-Nothing is mutated: the agent's history is the record, this is the request, and the
-facts are never written back into the conversation (which would make them
-permanent, and pay for them on every later turn)."
+Nothing in the history is mutated: the agent's history is the record, this is the request, and
+the facts are never written back into the conversation (which would make them permanent, and pay
+for them on every later turn). The one change is to the turn's guard: when an assembled item is
+untrusted, the turn becomes untrusted (#317's taint ruling)."
   (let* ((history (%clear-batch agent (%with-cleared agent (agent-history agent))))
          (trimmed (prompt:trim-history history (agent-history-budget agent)))
-         (facts (prompt:render-items (ctx:assemble (agent-context agent))))
-         (messages (if facts
-                       (prompt:attach-context trimmed facts)
-                       trimmed)))
-    (values messages (prompt:messages-tokens messages))))
+         (assembled (ctx:assemble (agent-context agent)))
+         (facts (prompt:render-items assembled)))
+    ;; AN UNTRUSTED ITEM IN THE PROMPT MAKES THE TURN UNTRUSTED, under either taint scope
+    ;; (#317's taint ruling). Stricter than the rule for a raw untrusted result, which :TURN stops
+    ;; counting after the user's next message: an item such as a condensed observation is a
+    ;; model's summary of untrusted content, and it can make an injected instruction read like
+    ;; the member's own wish, so its source is harder to see than the original's.
+    (when (some #'ctx:ctx-item-untrusted assembled)
+      (setf (turn-guard-untrusted (%turn-guard agent)) t))
+    (let ((messages (if facts
+                        (prompt:attach-context trimmed facts)
+                        trimmed)))
+      (values messages (prompt:messages-tokens messages)))))
 
 (defun agent-system-parts (agent)
   "The agent's system prompt as PRAXEON/LLM wants it: a plain string, or -- when

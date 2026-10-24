@@ -97,6 +97,9 @@ Underscores rather than hyphens: a field name becomes a SQL identifier unquoted,
     (:source_through :integer)
     ;; The ids a condensed observation replaces, comma-separated (#317, step B).
     (:condensed_from :text)
+    ;; True when the observation came from untrusted content (#317's taint ruling). NULL, read as
+    ;; false, on every row written before the column existed and on every trusted one.
+    (:untrusted :boolean)
     ;; On SQLite, which has no vector type, single floats in a BLOB (#425). A table made before
     ;; #425 declares the column TEXT; SQLite keeps a BLOB in it as it is, so it is not altered.
     ,(if (eq dialect :sqlite)
@@ -313,10 +316,11 @@ installed in CONNECTION's database. Reads pg_extension and never creates it (#13
                                                          "SELECT current_database() AS db"))
                                       :db))))
 
-(defparameter +added-columns+ '((:thread . :string) (:source_through . :integer) (:condensed_from . :text))
+(defparameter +added-columns+ '((:thread . :string) (:source_through . :integer) (:condensed_from . :text)
+                                (:untrusted . :boolean))
   "Columns added after a table may already exist, with their schema field types: the thread scope,
-the window's last turn, and the ids an observation was condensed from (#317). ENSURE-SCHEMA adds
-  each one a table lacks.")
+the window's last turn, the ids an observation was condensed from, and whether it came from
+untrusted content (#317). ENSURE-SCHEMA adds each one a table lacks.")
 
 (defun %add-column-sql (store name type)
   "The ALTER TABLE statement adding column NAME of field TYPE to STORE's table, in mnemosyne's
@@ -337,11 +341,26 @@ starting at the same moment."
   (mapcar (lambda (row) (string-downcase (param:row-value row :name)))
           (conn:query (store-connection store) (format nil "PRAGMA table_info(~A)" (store-table store)))))
 
-(defun ensure-schema (store)
+(defun %has-column-p (store column)
+  "Whether STORE's table exists and has COLUMN (a lowercase name)."
+  (if (eq (store-dialect store) :sqlite)
+      (and (member column (%sqlite-columns store) :test #'string=) t)
+      (and (conn:query (store-connection store)
+                       "SELECT 1 AS one FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?"
+                       (string-downcase (store-table store)) column)
+           t)))
+
+(defun ensure-schema (store &key legacy-untrusted)
   "Create the table, its index and the observer's progress table (#317) if they are not there,
 and add the columns +ADDED-COLUMNS+ names to a table made before them. Returns STORE. On Postgres the `vector' extension must
 already be installed; see CHECK-VECTOR-EXTENSION. On SQLite, embeddings still in the text form are
 re-encoded as single floats (#425).
+
+LEGACY-UNTRUSTED, for a table made before observations recorded whether they came from untrusted
+content: when this call is the one that adds the UNTRUSTED column, every thread observation
+already in the table is marked untrusted, since nothing recorded which of them were. Facts about
+the subject (THREAD NULL) are left as they are. Without it, those rows read as trusted. It does
+nothing once the column exists, so later calls cannot mark new trusted rows (#906's review).
 
 EVERY READ NEEDS THOSE COLUMNS, not only a thread's: a read of the subject's facts selects them
 and filters on THREAD IS NULL. So an app must run this at start, or add the columns in its own
@@ -349,6 +368,7 @@ migration, before it reads from a table made before #317."
   (%with-store (store :exclusive t)
     (when (eq (store-dialect store) :postgres)
       (check-vector-extension (store-connection store)))
+    (let ((backfill (and legacy-untrusted (not (%has-column-p store "untrusted")))))
     (dolist (statement (store-ddl store))
       (conn:exec (store-connection store) statement))
     (let ((have (and (eq (store-dialect store) :sqlite) (%sqlite-columns store))))
@@ -366,7 +386,13 @@ migration, before it reads from a table made before #317."
                        (unless (and (eq (store-dialect store) :sqlite)
                                     (member (string-downcase (symbol-name name))
                                             (%sqlite-columns store) :test #'string=))
-                         (error e))))))))
+                         (error e)))))))
+      ;; THE BACK-FILL, only on the call that added the column (LEGACY-UNTRUSTED above).
+      (when backfill
+        (q:run (store-connection store)
+               (list :update (store-table store) :set (list :untrusted t)
+                     :where (list :is-not-null :thread))
+               :dialect (store-dialect store)))))
   ;; OUTSIDE THE EXCLUSIVE BLOCK: on SQLite over a pool that block is one IMMEDIATE transaction,
   ;; and the re-encode commits batch by batch so the write lock is never held for the whole table
   ;; (#425's review). A non-exclusive hold borrows a connection and opens no transaction.
@@ -423,12 +449,16 @@ the next ENSURE-SCHEMA finishes the job."
    :provenance (mem:make-provenance (or (param:row-value row :source_conversation) "")
                                     (or (param:row-value row :source_turn) 0)
                                     :at (param:row-value row :source_at)
-                                    :through (param:row-value row :source_through))))
+                                    :through (param:row-value row :source_through)
+                                    ;; Postgres returns T or NIL, SQLite 1, 0 or NIL.
+                                    :untrusted (let ((u (param:row-value row :untrusted)))
+                                                 (and u (not (eql u 0)) t)))))
 
 (defparameter +columns+
   '(:id :subject :content :kind :value :tokens :valid_from :recorded_at
     :supersedes :superseded_by :superseded_at
-    :source_conversation :source_turn :source_at :thread :source_through :condensed_from)
+    :source_conversation :source_turn :source_at :thread :source_through :condensed_from
+    :untrusted)
   "What a read selects. NOT the embedding: it is large, it is never shown to anyone, and
 selecting it would pull a megabyte of floats through every recall to be discarded.")
 
@@ -522,14 +552,18 @@ STORE's embedder, except those already prepared for STORE."
                                                        embedding))
                                   (when at (list :source_at at))
                                   (when through (list :source_through through))
-                                  (when thread (list :thread thread)))
+                                  (when thread (list :thread thread))
+                                  ;; Written only when true, as THREAD and SOURCE_THROUGH are only
+                                  ;; when present; an absent value is NULL, which reads as false.
+                                  (when (mem:provenance-untrusted provenance) (list :untrusted t)))
                                  (append
                                   '(:id :subject :content :kind :value :tokens
                                     :valid_from :recorded_at :embedding
                                     :source_conversation :source_turn)
                                   (when at '(:source_at))
                                   (when through '(:source_through))
-                                  (when thread '(:thread))))))
+                                  (when thread '(:thread))
+                                  (when (mem:provenance-untrusted provenance) '(:untrusted))))))
         (cs:insert! changeset (store-connection store) :dialect (store-dialect store))))
     observation))
 
@@ -610,7 +644,7 @@ STORE's embedder, except those already prepared for STORE."
                                    (mem:observation-id o)))))
         (let ((new (mem:remember store (mem:observation-subject first) content
                                  :thread (mem:observation-thread first)
-                                 :provenance provenance
+                                 :provenance (mem:inherit-taint provenance sources)
                                  :kind (or kind (mem:condensed-kind sources))
                                  :value (or value (mem:condensed-value sources))
                                  :tokens tokens :valid-from valid-from))

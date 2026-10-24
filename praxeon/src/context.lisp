@@ -39,7 +39,11 @@
   ;; item -- so a memory item without a citation cannot be built. That is deliberate: a
   ;; slot where NIL means two things is the absent-versus-NULL defect (pre-publication issue 489, pre-publication issue 444, #150)
   ;; rebuilt in a struct.
-  (source nil))
+  (source nil)
+  ;; Whether the item came from content outside the conversation, such as an observation
+  ;; distilled from a web page (#317's taint ruling). PRAXEON/PROMPT:RENDER-ITEMS labels it, and
+  ;; an agent whose assembled context holds one treats its turn as untrusted.
+  (untrusted nil))
 
 (defstruct (context (:constructor make-context))
   "A budgeted collection of context items."

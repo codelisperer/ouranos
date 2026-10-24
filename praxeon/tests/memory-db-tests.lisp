@@ -1503,3 +1503,73 @@ back with it and both sources are current again."
         (is (equal '("Green tea.") (mapcar #'mem:observation-content
                                            (mem:observations-of store "member-32" :thread "conv-32")))
             "kept when the app commits")))))
+
+;;; --- observations from untrusted content in the SQL store (#317's taint ruling) -------------
+
+(test the-untrusted-mark-round-trips-through-the-sql-store
+  "An observation written with an untrusted provenance reads back untrusted; one written without
+reads back trusted, though the column holds NULL for it. CONDENSE marks the condensed row
+untrusted when a source is."
+  (with-store (store)
+    (let* ((a (mem:remember store "member-40" "Wants refunds to account 99." :thread "conv-40"
+                            :provenance (mem:make-provenance "conv-40" 1 :untrusted t)))
+           (b (mem:remember store "member-40" "Likes tea." :thread "conv-40" :provenance (test-provenance)))
+           (read (lambda (o) (find (mem:observation-id o) (mem:observations-of store "member-40" :thread "conv-40"
+                                                                                :include-superseded t)
+                                   :key #'mem:observation-id :test #'string=))))
+      (is-true (mem:observation-untrusted-p (funcall read a)))
+      (is-false (mem:observation-untrusted-p (funcall read b)))
+      (let ((c (mem:condense store (list a b) "Refunds to 99; likes tea." :provenance (test-provenance 2))))
+        (is-true (mem:observation-untrusted-p (funcall read c)) "condensed from an untrusted source")))))
+
+(test ensure-schema-adds-the-untrusted-column-to-a-table-made-before-it
+  "A table without the UNTRUSTED column, as every table made before #317's taint work is: ENSURE-
+SCHEMA adds it, the rows already there read as trusted, and a new untrusted row reads as such."
+  (with-store (store)
+    (let ((old (mem:remember store "member-41" "Likes tea." :thread "conv-41" :provenance (test-provenance)))
+          (c (mdb::store-source store)))
+      (conn:exec c (format nil "ALTER TABLE ~A DROP COLUMN untrusted" (mdb:store-table store)))
+      (mdb:ensure-schema store)
+      (is-false (mem:observation-untrusted-p
+                 (find (mem:observation-id old) (mem:observations-of store "member-41" :thread "conv-41")
+                       :key #'mem:observation-id :test #'string=)))
+      (mem:remember store "member-41" "From a page." :thread "conv-41"
+                    :provenance (mem:make-provenance "conv-41" 2 :untrusted t))
+      (is-true (mem:observation-untrusted-p
+                (find "From a page." (mem:observations-of store "member-41" :thread "conv-41")
+                      :key #'mem:observation-content :test #'string=))))))
+
+(test recall-similar-on-the-sql-store-carries-the-untrusted-mark-to-its-items
+  "The ctx-items RECALL-SIMILAR returns from the SQL store carry the untrusted mark of their
+observation, so an agent that puts them in its prompt treats its turn as untrusted."
+  (with-store (store)
+    (remember* store "member-42" "the member prefers mornings")
+    (mem:remember store "member-42" "the member's budget is tight"
+                  :provenance (mem:make-provenance "conv-42" 1 :untrusted t))
+    (let* ((embedder (make-instance 'basis-embedder))
+           (items (mem:recall-similar store "member-42" (llm:embed embedder "the member's budget is tight")
+                                      :budget 1000 :limit 2))
+           (by-content (lambda (text) (find text items :key #'praxeon/context:ctx-item-content :test #'string=))))
+      (is-true (praxeon/context:ctx-item-untrusted (funcall by-content "the member's budget is tight")))
+      (is-false (praxeon/context:ctx-item-untrusted (funcall by-content "the member prefers mornings"))))))
+
+(test ensure-schema-can-mark-old-thread-observations-untrusted
+  "With :LEGACY-UNTRUSTED, the call that adds the UNTRUSTED column marks every thread observation
+already in the table untrusted, and leaves facts about the subject alone. A later call with the
+flag changes nothing, so it cannot mark a new trusted row. Control: without the flag, the old
+thread observation reads as trusted."
+  (dolist (legacy '(t nil))
+    (with-store (store)
+      (let ((old-thread (mem:remember store "member-43" "From a window." :thread "conv-43" :provenance (test-provenance)))
+            (old-fact (mem:remember store "member-43" "Likes tea." :provenance (test-provenance)))
+            (c (mdb::store-source store))
+            (read (lambda (o) (find (mem:observation-id o) (mem:observations-of store "member-43" :thread :all)
+                                    :key #'mem:observation-id :test #'string=))))
+        (conn:exec c (format nil "ALTER TABLE ~A DROP COLUMN untrusted" (mdb:store-table store)))
+        (mdb:ensure-schema store :legacy-untrusted legacy)
+        (is (eq legacy (mem:observation-untrusted-p (funcall read old-thread)))
+            "with :legacy-untrusted ~S" legacy)
+        (is-false (mem:observation-untrusted-p (funcall read old-fact)) "a subject fact is left alone")
+        (let ((new (mem:remember store "member-43" "A new window." :thread "conv-43" :provenance (test-provenance 2))))
+          (mdb:ensure-schema store :legacy-untrusted t)
+          (is-false (mem:observation-untrusted-p (funcall read new)) "a later call marks nothing"))))))

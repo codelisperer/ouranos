@@ -285,8 +285,16 @@ calls held so far are written as not run."
                  (when (means-entry-untrusted entry)
                    (setf (turn-guard-untrusted guard) t))))
              (let ((*current-guard* guard)
-                   (*decided-after-untrusted* after-untrusted))
-               (push (%run-part agent id name args permit) parts))))
+                   (*decided-after-untrusted* after-untrusted)
+                   (*call-taint* (list nil)))
+               (push (%run-part agent id name args permit) parts)
+               ;; RECORD WHETHER THIS CALL'S RESULT WAS UNTRUSTED (#906's review), by the means's
+               ;; registration or because it marked its turn while it ran, so a later judgement
+               ;; from the history sees it.
+               (when (or (let ((entry (gethash name (agent-means agent))))
+                           (and entry (means-entry-untrusted entry)))
+                         (car *call-taint*))
+                 (setf (gethash id (agent-untrusted-calls agent)) t)))))
       (unwind-protect
            (progn
              (dolist (call calls)

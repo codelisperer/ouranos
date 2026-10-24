@@ -54,6 +54,53 @@ its tag.
   `make-nearest`, `nearest-offer` and `nearest-items` for keeping the k nearest during a scan.
   `praxeon/retrieval` now uses `praxeon/llm`'s `cosine-distance` and no longer keeps its own copy.
 
+- **Observations derived from untrusted content are marked, taint the turn when they are in the
+  prompt, and are not promoted by default** (#317, after #827). An observation distilled from a
+  window that read a web page, or another means that returns outside content, could be carried
+  into later prompts and into other conversations with nothing marking where it came from, and a
+  model's summary can make an injected instruction read like the member's own wish. Now:
+  - `praxeon/memory:provenance` has `untrusted` (`make-provenance … :untrusted t`), read by
+    `observation-untrusted-p`. `condense` marks the condensed observation untrusted when any
+    source is, in every store (`inherit-taint`).
+  - `praxeon/observe:make-observer` takes `:untrusted-p`, a function of a window's messages.
+    **By default any window holding a tool call or result is taken as untrusted**
+    (`window-holds-a-tool-call-p`), since the observer cannot tell which tools return outside
+    content; an app with an agent passes `(praxeon/actor:untrusted-window-predicate agent)`,
+    which judges each call as the agent does (#827's `:untrusted` means), counts a call whose
+    result became untrusted while it ran (a delegated agent that read a page or was given an
+    untrusted item), and under `:taint-scope :conversation` takes every window after an
+    untrusted read as untrusted.
+  - **With the default predicate, nearly every observation of an agent that uses tools is
+    untrusted, so once recalled into its context they hold or refuse its `:requires-user-intent`
+    means on every turn.** The remedy is to pass `(praxeon/actor:untrusted-window-predicate
+    agent)` as `:untrusted-p`. An observer of a sub-agent must pass the sub-agent's predicate:
+    the default does not count a delegated task, which is the coordinating model's text, as
+    untrusted. An app that wants untrusted observations out of a prompt altogether filters what
+    it recalls with `observation-untrusted-p`; `recall` has no option for it, since that would
+    change every store's protocol.
+  - **A later window cannot launder an untrusted observation.** A proposal that replaces an
+    untrusted observation, or repeats one word for word, is untrusted whatever its window
+    (`apply-distillation`), and the observations the distiller is shown as already known are
+    labelled when they came from untrusted content. A paraphrase is not caught; the label is what
+    tells the model. A promoted fact carries its observation's mark.
+  - **An untrusted observation is promoted to a fact about the subject only when the new
+    `:promote-untrusted` allows it, on top of `:promote`**; it refuses by default. An app that
+    promotes from conversations with tool calls gets no new subject facts from them until it
+    passes one of the two functions.
+  - `praxeon/context:ctx-item` has `untrusted`, set by `observation->ctx-item`.
+    `praxeon/prompt:render-items` labels such an item `[note, from untrusted content]`.
+  - **An agent whose assembled context holds an untrusted item treats its turn as untrusted**,
+    under both taint scopes, so means declared `:requires-user-intent` are refused or held, as
+    after a web read. This is stricter than the rule for a raw untrusted result, which `:turn`
+    stops counting at the user's next message, on purpose: the item is a summary that hides its
+    source.
+  - `praxeon/memory-db` stores it in a new `untrusted` column (BOOLEAN), which `ensure-schema`
+    adds to an existing table. **Rows written before read as trusted**, though nothing recorded
+    whether they were. `(praxeon/memory-db:ensure-schema store :legacy-untrusted t)` marks every
+    thread observation already in the table untrusted on the call that adds the column, and
+    leaves facts about the subject alone; for a table that already has the column, the same is
+    `UPDATE <table> SET untrusted = TRUE WHERE thread IS NOT NULL` (`= 1` on SQLite), run once.
+
 - **aion/uv: `close-loop` frees a loop only when `uv_loop_close` succeeds** (#877). Before, it
   ignored `uv_loop_close`'s result and freed the loop even when libuv returned `UV_EBUSY`
   because a handle or request was still open on it, and libuv then used the freed memory. A
