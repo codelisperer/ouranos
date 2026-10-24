@@ -369,30 +369,30 @@ migration, before it reads from a table made before #317."
     (when (eq (store-dialect store) :postgres)
       (check-vector-extension (store-connection store)))
     (let ((backfill (and legacy-untrusted (not (%has-column-p store "untrusted")))))
-    (dolist (statement (store-ddl store))
-      (conn:exec (store-connection store) statement))
-    (let ((have (and (eq (store-dialect store) :sqlite) (%sqlite-columns store))))
-      (loop for (name . type) in +added-columns+
-            unless (member (string-downcase (symbol-name name)) have :test #'string=)
-              ;; Postgres answers an existing column with a notice, which the driver signals as
-              ;; a warning; it is the expected case on every start after the first.
-              do (handler-bind ((warning #'muffle-warning))
-                   (handler-case (conn:exec (store-connection store)
-                                            (%add-column-sql store name type))
-                     ;; ON SQLITE, ANOTHER PROCESS MAY ADD THE COLUMN between the read of the
-                     ;; columns above and this statement; SQLite has no IF NOT EXISTS for it. A
-                     ;; failure is accepted only when the column is there afterwards.
-                     (error (e)
-                       (unless (and (eq (store-dialect store) :sqlite)
-                                    (member (string-downcase (symbol-name name))
-                                            (%sqlite-columns store) :test #'string=))
-                         (error e)))))))
-      ;; THE BACK-FILL, only on the call that added the column (LEGACY-UNTRUSTED above).
-      (when backfill
-        (q:run (store-connection store)
-               (list :update (store-table store) :set (list :untrusted t)
-                     :where (list :is-not-null :thread))
-               :dialect (store-dialect store)))))
+      (dolist (statement (store-ddl store))
+        (conn:exec (store-connection store) statement))
+      (let ((have (and (eq (store-dialect store) :sqlite) (%sqlite-columns store))))
+        (loop for (name . type) in +added-columns+
+              unless (member (string-downcase (symbol-name name)) have :test #'string=)
+                ;; Postgres answers an existing column with a notice, which the driver signals as
+                ;; a warning; it is the expected case on every start after the first.
+                do (handler-bind ((warning #'muffle-warning))
+                     (handler-case (conn:exec (store-connection store)
+                                              (%add-column-sql store name type))
+                       ;; ON SQLITE, ANOTHER PROCESS MAY ADD THE COLUMN between the read of the
+                       ;; columns above and this statement; SQLite has no IF NOT EXISTS for it. A
+                       ;; failure is accepted only when the column is there afterwards.
+                       (error (e)
+                         (unless (and (eq (store-dialect store) :sqlite)
+                                      (member (string-downcase (symbol-name name))
+                                              (%sqlite-columns store) :test #'string=))
+                           (error e)))))))
+        ;; THE BACK-FILL, only on the call that added the column (LEGACY-UNTRUSTED above).
+        (when backfill
+          (q:run (store-connection store)
+                 (list :update (store-table store) :set (list :untrusted t)
+                       :where (list :is-not-null :thread))
+                 :dialect (store-dialect store)))))
   ;; OUTSIDE THE EXCLUSIVE BLOCK: on SQLite over a pool that block is one IMMEDIATE transaction,
   ;; and the re-encode commits batch by batch so the write lock is never held for the whole table
   ;; (#425's review). A non-exclusive hold borrows a connection and opens no transaction.
@@ -401,10 +401,11 @@ migration, before it reads from a table made before #317."
   store)
 
 (defun %reencode-sqlite-embeddings (store)
-  "Rewrite STORE's embeddings that are still text into BLOBs of single floats (#425), in one
-transaction, idempotently: see MNEMOSYNE/MIGRATE:REWRITE-SQLITE-TEXT-VALUES. A store half
-re-encoded when a process stopped opens as before, because RECALL-SIMILAR reads both forms, and
-the next ENSURE-SCHEMA finishes the job."
+  "Rewrite STORE's embeddings that are still text into BLOBs of single floats (#425),
+idempotently, one transaction per batch so SQLite's write lock is held for one batch at a time:
+see MNEMOSYNE/MIGRATE:REWRITE-SQLITE-TEXT-VALUES. A store half re-encoded when a process stopped
+opens as before, because RECALL-SIMILAR reads both forms, and the next ENSURE-SCHEMA finishes the
+job."
   (multiple-value-bind (rewritten left)
       (mig:rewrite-sqlite-text-values (store-connection store) (store-table store) "id" "embedding"
                                       #'llm:vector-text-octets)
