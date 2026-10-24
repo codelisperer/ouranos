@@ -839,7 +839,7 @@ static bool save_placement(id window) {
 
 // The observer's methods: each notification's object is the window.
 static void on_moved_or_resized(id, SEL, id note) {
-  if (!g_in_size_move) save_placement(msg_id(note, "object"));
+  save_placement(msg_id(note, "object"));
 }
 static void on_live_resize_started(id, SEL, id) { g_in_size_move = true; }
 static void on_live_resize_ended(id, SEL, id note) {
