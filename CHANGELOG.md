@@ -14,6 +14,25 @@ its tag.
 
 ### An app may have to act
 
+- **MCP resources and retrieval passages are untrusted by default, so in a prompt they refuse
+  `:requires-user-intent` means for the turn** (#907, after #906). `praxeon/mcp:add-resource` and
+  `praxeon/retrieval:passage->ctx-item` put outside content into an agent's context with nothing
+  marking it, so text in a resource or a document could steer a spending or writing means. Now:
+  - `add-resource` takes `:untrusted`, default T, and sets the context item's `untrusted`. For a
+    server the app fully controls, pass `:untrusted nil`, as to `grant-tools`.
+  - `make-corpus` takes `:untrusted`, default T, read by `corpus-untrusted`. Every passage a
+    retrieve function returns (`retrieve`, `retrieve-similar`, `retrieve-hybrid`,
+    `retrieve-exact`, `retrieve-keyword`, `retrieve-whole`) has `passage-untrusted`, copied from
+    its corpus, and `passage->ctx-item` copies it to the item. `passage->ctx-item` takes
+    `:untrusted` to override it.
+  - `register-corpus-search` registers its means with `:untrusted` set to the corpus's
+    `corpus-untrusted`, so after a search of an untrusted corpus a `:requires-user-intent` means
+    is refused for the rest of the turn.
+  - **An app whose agent has `:requires-user-intent` means and uses resources or corpora of its
+    own documents** passes `:untrusted nil` to `add-resource` or `make-corpus` for those, or its
+    spending and writing means are refused once such an item is in the prompt or the agent has
+    searched.
+
 - **praxeon/retrieval and praxeon/memory-db on SQLite: similarity search works at real corpus
   sizes, and the stored embeddings change form** (#425). A SQLite store kept each embedding as
   text and parsed every one on every search, so at width 1024 `retrieve-similar` took about a

@@ -52,7 +52,7 @@
    #:retrieve-whole #:corpus-size #:corpus-effective-strategy #:start-backfill #:corpora-table
    #:*whole-limit* #:corpus-strategy #:corpus-whole-limit #:corpus-expected-tokens
    #:corpus-contextualizer #:corpus-backfill #:sync-report-size #:sync-report-strategy
-   #:passage-context
+   #:passage-context #:passage-untrusted #:corpus-untrusted
    ;; keyword retrieval, BM25 (#316)
    #:tokenize #:term-counts #:register-stop-words #:*stop-words* #:+tokenizer-id+
    #:terms-table #:index-pending #:retrieve-keyword #:*bm25-k1* #:*bm25-b* #:passage-score
@@ -101,7 +101,7 @@
    #:retrieve-whole #:corpus-size #:corpus-effective-strategy #:start-backfill #:corpora-table
    #:*whole-limit* #:corpus-strategy #:corpus-whole-limit #:corpus-expected-tokens
    #:corpus-contextualizer #:corpus-backfill #:sync-report-size #:sync-report-strategy
-   #:passage-context
+   #:passage-context #:passage-untrusted #:corpus-untrusted
    #:tokenize #:term-counts #:register-stop-words #:*stop-words* #:+tokenizer-id+
    #:terms-table #:index-pending #:retrieve-keyword #:*bm25-k1* #:*bm25-b* #:passage-score
    #:retrieval-error #:invalid-section #:invalid-section-section #:invalid-section-problem
@@ -164,7 +164,7 @@ argument.")
    #:retrieve-whole #:corpus-size #:corpus-effective-strategy #:start-backfill #:corpora-table
    #:*whole-limit* #:corpus-strategy #:corpus-whole-limit #:corpus-expected-tokens
    #:corpus-contextualizer #:corpus-backfill #:sync-report-size #:sync-report-strategy
-   #:passage-context
+   #:passage-context #:passage-untrusted #:corpus-untrusted
    #:tokenize #:term-counts #:register-stop-words #:*stop-words* #:+tokenizer-id+
    #:terms-table #:index-pending #:retrieve-keyword #:*bm25-k1* #:*bm25-b* #:passage-score
    #:retrieval-error #:invalid-section #:invalid-section-section #:invalid-section-problem

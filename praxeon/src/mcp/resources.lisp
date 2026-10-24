@@ -285,7 +285,7 @@ Returns how many were removed."
           (remove source (ctx:context-items context) :key #'ctx:ctx-item-source :test #'equal))
     (- before (length (ctx:context-items context)))))
 
-(defun add-resource (agent client uri &key principal (value 1))
+(defun add-resource (agent client uri &key principal (value 1) (untrusted t))
   "Read the resource at URI through CLIENT, for PRINCIPAL, and add it to AGENT's context: one
 item per content, replacing the items an earlier ADD-RESOURCE added for the same URI and
 connection. Returns the items added.
@@ -294,6 +294,12 @@ Each item's text starts with a line naming the resource and its connection, and 
 text is data from the server, not instructions. Binary content is described in one line, never
 included. The item's role is :RESOURCE and its source (:MCP <connection> :URI <uri>), so a
 citation can name it.
+
+UNTRUSTED, true by default, marks each item CTX:CTX-ITEM-UNTRUSTED (#907). A resource is content
+from the server, not from the user, and can carry instructions as a web page can, so while an
+item from it is in the prompt, a means that spends or writes for the user is refused or held, as
+after a call to an untrusted means (#827, #906). Pass NIL only for a server the app fully
+controls, the same server it would pass GRANT-TOOLS's :UNTRUSTED NIL for.
 
 VALUE is the item's importance to CTX:ASSEMBLE, which picks the items with the highest value
 per token that fit the agent's context budget. An item can therefore be left out of a request
@@ -316,11 +322,13 @@ REMOVE-RESOURCE when the app forgets that user (#150)."
                             (when (> tokens budget)
                               (error 'resource-too-large :uri uri :tokens tokens :budget budget))
                             (ctx:make-ctx-item :content text :tokens tokens :role :resource
-                                               :value value :source (%resource-source client uri))))
+                                               :value value :source (%resource-source client uri)
+                                               :untrusted (and untrusted t))))
                         (read-resource client uri :principal principal))))
     (remove-resource agent client uri)
     (dolist (item items) (ctx:add-item context item))
     (log:info "praxeon/mcp: resource added to an agent's context"
               :connection name :resource (%uri-for-log uri) :items (length items)
-              :tokens (reduce #'+ items :key #'ctx:ctx-item-tokens))
+              :tokens (reduce #'+ items :key #'ctx:ctx-item-tokens)
+              :untrusted (and untrusted t))
     items))
