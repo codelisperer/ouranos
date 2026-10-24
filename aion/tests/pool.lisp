@@ -563,19 +563,36 @@ blocked signal mask. Returns THUNK's value after the step ends."
       (setf value (funcall thunk)))
     value))
 
-(defun %interrupt-arrives-p (thread &optional (timeout 2))
-  (let ((ran (sb-thread:make-semaphore)))
+(defun %interrupt-arrival-time (thread &optional (timeout 10))
+  "Interrupt THREAD once, and return the seconds the interrupt took to run in it, or NIL when it
+had not run after TIMEOUT seconds.
+
+TIMEOUT IS 10 S because the property under test is that the interrupt arrives at all. With 2 s,
+the Windows leg of one CI run failed once (#925), while on a Windows machine 7,800 interrupts to
+new workers, with the CPU twice oversubscribed, took at most 0.1 s each. The time is returned so
+that a failure says whether an interrupt came late or never."
+  (let ((ran (sb-thread:make-semaphore))
+        (start (get-internal-real-time)))
     (sb-thread:interrupt-thread thread (lambda () (sb-thread:signal-semaphore ran)))
-    (and (sb-thread:wait-on-semaphore ran :timeout timeout) t)))
+    (and (sb-thread:wait-on-semaphore ran :timeout timeout)
+         (/ (- (get-internal-real-time) start) (float internal-time-units-per-second)))))
 
 (test workers-made-while-an-interrupt-is-deferred-can-be-interrupted
   "MAKE-POOL called inside a step while an interrupt to its caller is deferred, as
 hyperion/clack-handler-uv's RUN can call it through server-uv (#541). Each worker unblocks
-interrupts first, so an INTERRUPT-THREAD reaches it. Without that, none did."
+interrupts first, so an INTERRUPT-THREAD reaches it. Without that, none did.
+
+Each worker is interrupted once, and a failure reports every worker's arrival time in seconds,
+NIL for an interrupt that had not arrived after 10 s (#925)."
   (let ((p (%in-a-step-with-a-deferred-interrupt (lambda () (pool:make-pool :size 2 :name "pool-541")))))
     (unwind-protect
-         (let ((threads (aion/pool::pool-threads p)))
+         (let* ((threads (aion/pool::pool-threads p))
+                (times (mapcar (lambda (thread)
+                                 (cons (sb-thread:thread-name thread)
+                                       (%interrupt-arrival-time thread)))
+                               threads)))
            (is (= 2 (length threads)))
-           (is (every #'%interrupt-arrives-p threads)
-               "an interrupt did not reach ~S" (mapcar #'sb-thread:thread-name (remove-if #'%interrupt-arrives-p threads))))
+           (is (every #'cdr times)
+               "an interrupt did not arrive within 10 s at every worker; seconds per worker: ~S"
+               times))
       (pool:stop-pool p))))
