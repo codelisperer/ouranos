@@ -250,12 +250,12 @@ code when it did not exit 0."
 
 (test exercise-placement-takes-one-path
   ;; Refused before webview_create, so no window is made on any OS. With one path it would make
-  ;; a window, so under HYPERION_VIEW_NO_WINDOW=1 it exits 3 on Windows; elsewhere the mode is
-  ;; not supported and exits 1 before making one.
+  ;; a window, so under HYPERION_VIEW_NO_WINDOW=1 it exits 3 on Windows and macOS; on Linux the
+  ;; mode is not supported and exits 1 before making one.
   (with-launcher
     (is (eql 2 (run-launcher "--exercise-placement")) "no path")
     (is (eql 2 (run-launcher "--exercise-placement" "a" "b")) "two paths")
-    (is (eql #+win32 3 #-win32 1 (run-launcher "--exercise-placement" "a"))
+    (is (eql #+(or win32 darwin) 3 #-(or win32 darwin) 1 (run-launcher "--exercise-placement" "a"))
         "one path: no window here")))
 
 ;;; --- the placement on a real window, on CI only (review of train 20) ----------------------
@@ -625,6 +625,108 @@ when it did not exit 0."
                  "a frame width over 1000 is refused"))
         (aion/fs:delete-tree dir)))))
 
+;;; --restore-placement prints where macOS puts a saved frame back, given the screens' visible
+;;; frames, with no window, so the rule is checked here on every OS (#485). The frames are in
+;;; Cocoa's coordinates, measured upwards, each as left, bottom, right, top. The visible frame
+;;; 0 70 1512 949 is a 1512-point-wide screen less a Dock of 70 points and the menu bar.
+
+(defun %restore-placement (path &rest screens)
+  "What `hyperion-view --restore-placement PATH SCREENS' prints, trimmed, or the exit code when
+it did not exit 0."
+  (multiple-value-bind (code out)
+      (apply #'run-launcher "--restore-placement" (uiop:native-namestring path)
+             (mapcar #'princ-to-string screens))
+    (if (eql code 0) (string-trim '(#\Newline #\Return #\Space) out) code)))
+
+(test a-mac-restore-moves-the-frame-into-the-screen-it-overlaps-most
+  (with-launcher
+    (let ((dir (%fresh-dir)))
+      (unwind-protect
+           (flet ((restore (frame &rest screens)
+                    (apply #'%restore-placement
+                           (%write-placement dir "placement"
+                                             (format nil "hyperion-view-placement 1 ~A~%" frame))
+                           screens)))
+             (is (equal "use 100 200 1300 900 0 screen 0"
+                        (restore "100 200 1300 900 0" 0 70 1512 949))
+                 "a frame inside the visible frame is used as it is")
+             (is (equal "use 100 200 1300 900 1 screen 0"
+                        (restore "100 200 1300 900 1" 0 70 1512 949))
+                 "with its zoomed state")
+             (is (equal "use 0 70 1512 949 0 screen 0"
+                        (restore "-50 0 2000 1200 0" 0 70 1512 949))
+                 "a frame larger than the screen is shrunk to the visible frame")
+             (is (equal "use 712 200 1512 800 0 screen 0"
+                        (restore "1000 200 1800 800 0" 0 70 1512 949))
+                 "a frame partly off the right edge is moved left, by the least distance")
+             (is (equal "use 0 200 800 800 0 screen 0"
+                        (restore "-300 200 500 800 0" 0 70 1512 949))
+                 "a frame partly off the left edge is moved right")
+             (is (equal "use 100 70 900 570 0 screen 0"
+                        (restore "100 0 900 500 0" 0 70 1512 949))
+                 "a frame partly behind the Dock is moved up")
+             (is (equal "use 100 349 900 949 0 screen 0"
+                        (restore "100 400 900 1000 0" 0 70 1512 949))
+                 "a frame partly behind the menu bar is moved down")
+             (is (equal "use 1512 300 2512 900 0 screen 1"
+                        (restore "1200 300 2200 900 0" 0 70 1512 949 1512 0 3432 1055))
+                 "a frame across two screens goes to the one it overlaps most")
+             (is (equal "use 600 100 1000 500 0 screen 0"
+                        (restore "800 100 1200 500 0" 0 0 1000 800 1000 0 2000 800))
+                 "when it overlaps two screens equally, the first is chosen")
+             (is (equal "ignore off-screen"
+                        (restore "2000 300 2800 900 0" 0 70 1512 949))
+                 "a frame on a screen that is no longer there is ignored")
+             (is (equal "ignore off-screen"
+                        (restore "1512 200 2000 800 0" 0 70 1512 949))
+                 "and so is one that only touches a screen's edge")
+             (is (equal "use -1800 100 -600 900 0 screen 1"
+                        (restore "-1800 100 -600 900 0" 0 70 1512 949 -1920 0 0 1055))
+                 "on a screen to the left of the main screen, with negative x")
+             (is (equal "use 100 -600 900 0 0 screen 1"
+                        (restore "100 -300 900 300 0" 0 70 1512 949 -200 -1080 1720 0))
+                 "on a screen below the main screen, with negative y, moved down into it")
+             (is (equal "use 100 200 1300 900 0 screen 1"
+                        (restore "100 200 1300 900 0" 0 0 0 0 0 70 1512 949))
+                 "a screen with no area is passed over")
+             (is (equal "ignore too-small"
+                        (restore "100 200 299 400 0" 0 70 1512 949))
+                 "a frame narrower than 200 is ignored")
+             (is (equal "ignore too-small"
+                        (restore "100 200 400 349 0" 0 70 1512 949))
+                 "and one lower than 150")
+             (is (equal "use 100 200 300 350 0 screen 0"
+                        (restore "100 200 300 350 0" 0 70 1512 949))
+                 "200 by 150 is large enough")
+             (is (equal "ignore malformed"
+                        (apply #'%restore-placement
+                               (%write-placement dir "placement" "hyperion-view-placement 1 100 200")
+                               '(0 70 1512 949)))
+                 "a malformed line is ignored, as on Windows")
+             (is (equal "ignore unreadable"
+                        (%restore-placement (merge-pathnames "absent" dir) 0 70 1512 949))
+                 "and so is a file that is not there")
+             (let ((file (uiop:native-namestring
+                          (%write-placement dir "valid" "hyperion-view-placement 1 100 200 1300 900 0"))))
+               (is (eql 2 (run-launcher "--restore-placement" file)) "no screen is refused")
+               (is (eql 2 (run-launcher "--restore-placement" file "0" "70" "1512"))
+                   "three numbers are refused")
+               (is (eql 2 (run-launcher "--restore-placement" file "0" "70" "1512" "949" "0"))
+                   "five numbers are refused")
+               (is (eql 2 (run-launcher "--restore-placement" file "0" "70" "1512" "x"))
+                   "a word in place of a number is refused")
+               (is (eql 2 (run-launcher "--restore-placement" file "0" "70" "1512" "1000001"))
+                   "a coordinate over a million is refused")
+               (is (eql 2 (apply #'run-launcher "--restore-placement" file
+                                 (loop repeat 17 append (list "0" "70" "1512" "949"))))
+                   "seventeen screens are refused")
+               (is (equal "use 100 200 1300 900 0 screen 15"
+                          (apply #'%restore-placement (merge-pathnames "valid" dir)
+                                 (append (loop repeat 15 append (list 5000 5000 6000 6000))
+                                         (list 0 70 1512 949))))
+                   "and sixteen are taken")))
+        (aion/fs:delete-tree dir)))))
+
 (test placement-arguments-name-the-file-and-create-its-directory
   ;; %PLACEMENT-ARGUMENTS builds what run-app passes the launcher. This does not call run-app.
   (is (null (hyperion/desktop::%placement-arguments nil)) "no file, no arguments")
@@ -757,6 +859,148 @@ the file as it was. A start from a file that says MAXIMIZED 1 opens maximised (r
                    (is-true (%report-line out "restored ") "the saved placement was restored: ~S" out)
                    (is (equal "start-zoomed 1" (%report-line out "start-zoomed"))
                        "and a file saying MAXIMIZED 1 opened maximised: ~S" out)))
+            (aion/fs:delete-tree dir))))))
+
+;;; --- the last placement on a real macOS window, on a GitHub runner only (#485) -------------
+;;;
+;;; These show a window, as the macOS placement test above does, so they run only when
+;;; GITHUB_ACTIONS is set (#885). The visible frame is read from a launch without a placement
+;;; file, whose report starts with it.
+
+(defun %mac-visible-frame ()
+  "The visible frame of the screen a window opens on, as left, bottom, right, top, from
+`--report-placement 1280 860' on a real window; or NIL."
+  (multiple-value-bind (code out) (%run-shown-launcher 60 "--report-placement" "1280" "860")
+    (let ((line (and (eql code 0) (%report-line out "work "))))
+      (and line (subseq (%report-numbers line) 0 4)))))
+
+(defun %placement-line (frame zoomed)
+  (format nil "hyperion-view-placement 1 ~{~D~^ ~} ~D~%" frame zoomed))
+
+(test a-real-mac-window-is-restored-into-the-visible-frame-and-saves-it
+  "On a GitHub macOS runner: a saved frame inside the visible frame is restored as it is; one
+partly off the screen is moved into it, where --restore-placement says; each is saved back; and
+a frame on no screen is ignored, and the window is placed and saved as without a file."
+  #-darwin (skip "The macOS placement calls run on macOS only")
+  #+darwin
+  (with-launcher
+    (if (not (%real-window-allowed-p))
+        (skip "Runs only on GitHub Actions (GITHUB_ACTIONS is not set here): it shows a window")
+        (let ((dir (%fresh-dir))
+              (work (%mac-visible-frame)))
+          (unwind-protect
+               (progn
+                 (is-true work "the visible frame was reported")
+                 (when work
+                   (destructuring-bind (wl wb wr wt) work
+                     (declare (ignore wt))
+                     (let ((file (merge-pathnames "window-placement" dir)))
+                       (flet ((restored (frame expected)
+                                (%write-placement dir "window-placement" (%placement-line frame 0))
+                                (multiple-value-bind (code out)
+                                    (%run-shown-launcher 60 "--report-placement" "1280" "860"
+                                                         (uiop:native-namestring file))
+                                  (is (eql 0 code) "--report-placement with a file exited ~S: ~A"
+                                      code out)
+                                  (let ((line (%report-line out "restored ")))
+                                    (is-true line "the saved frame was restored: ~S" out)
+                                    (when line
+                                      (is (equal (append expected (list 0) expected)
+                                                 (%report-numbers line))
+                                          "at ~S, and macOS reports the window there: ~S"
+                                          expected line)))
+                                  (is-true (%report-line out "saved") "and it was saved: ~S" out))
+                                (is (equal (%placement-line expected 0)
+                                           (uiop:read-file-string file))
+                                    "the file holds the restored frame")))
+                         (let ((inside (list (+ wl 40) (+ wb 30) (+ wl 940) (+ wb 630))))
+                           (restored inside inside))
+                         ;; Partly off the right edge: where --restore-placement puts it on this
+                         ;; screen.
+                         (let* ((off (list (- wr 300) (+ wb 30) (+ wr 600) (+ wb 630)))
+                                (decision (apply #'%restore-placement
+                                                 (%write-placement dir "decision"
+                                                                   (%placement-line off 0))
+                                                 work))
+                                (expected (subseq (%report-numbers decision) 0 4)))
+                           (is (not (equal off expected)) "the decision moved it: ~S" decision)
+                           (restored off expected)))
+                       (%write-placement dir "window-placement"
+                                         (%placement-line '(-100000 -100000 -99000 -99300) 0))
+                       (multiple-value-bind (code out)
+                           (%run-shown-launcher 60 "--report-placement" "1280" "860"
+                                                (uiop:native-namestring file))
+                         (is (eql 0 code) "--report-placement exited ~S: ~A" code out)
+                         (is-true (%report-line out "restore-ignored off-screen")
+                                  "a frame on no screen is ignored: ~S" out)
+                         (let ((line (%report-line out "work ")))
+                           (is-true line "and the window is placed as without a file: ~S" out)
+                           (when line
+                             (is (equal (%placement-line (subseq (%report-numbers line) 11 15) 0)
+                                        (uiop:read-file-string file))
+                                 "and that frame is saved: ~S" line))))))))
+            (aion/fs:delete-tree dir))))))
+
+(test the-placement-is-saved-while-a-real-mac-window-is-open-and-a-zoomed-start-is-zoomed
+  "On a GitHub macOS runner, through --exercise-placement, which installs the observer a launch
+installs: a resize made between the live-resize notifications is saved once, when the live
+resize ends; zooming saves the same frame with ZOOMED 1; unzooming saves ZOOMED 0; closing leaves
+the file as it was. A start from a file that says ZOOMED 1 opens zoomed."
+  #-darwin (skip "The macOS placement calls run on macOS only")
+  #+darwin
+  (with-launcher
+    (if (not (%real-window-allowed-p))
+        (skip "Runs only on GitHub Actions (GITHUB_ACTIONS is not set here): it shows a window")
+        (let ((dir (%fresh-dir))
+              (work (%mac-visible-frame)))
+          (unwind-protect
+               (progn
+                 (is-true work "the visible frame was reported")
+                 (when work
+                   (let* ((file (merge-pathnames "window-placement" dir))
+                          (start (list (+ (first work) 50) (+ (second work) 50)
+                                       (+ (first work) 650) (+ (second work) 500))))
+                     (%write-placement dir "window-placement" (%placement-line start 0))
+                     (multiple-value-bind (code out)
+                         (%run-shown-launcher 60 "--exercise-placement" (uiop:native-namestring file))
+                       (is (eql 0 code) "--exercise-placement exited ~S: ~A" code out)
+                       (is (equal "start-zoomed 0" (%report-line out "start-zoomed"))
+                           "it started unzoomed: ~S" out)
+                       (let* ((line (%report-line out "moved "))
+                              (moved (and line (%report-numbers line))))
+                         (is (= 4 (length moved)) "it reported where the resize put the window: ~S"
+                             out)
+                         (when (= 4 (length moved))
+                           (is (not (equal moved start)) "and the resize changed the frame: ~S"
+                               moved)
+                           ;; Two frame changes between the live-resize notifications. Saving on
+                           ;; each resize would write the same final frame, so only the count of
+                           ;; writes tells the two apart, as on Windows.
+                           (is (equal "move-saves 1" (%report-line out "move-saves"))
+                               "the resize wrote the file once, when the live resize ended: ~S" out)
+                           (is (equal "zoomed 1" (%report-line out "zoomed "))
+                               "zoom: zoomed the window: ~S" out)
+                           (flet ((saved (zoomed)
+                                    (string-right-trim '(#\Newline) (%placement-line moved zoomed)))
+                                  (after (step)
+                                    (let ((l (%report-line out (format nil "~A " step))))
+                                      (and l (subseq l (1+ (length step)))))))
+                             (is (equal (saved 0) (after "after-move"))
+                                 "the resize was saved when the live resize ended: ~S" out)
+                             (is (equal (saved 1) (after "after-maximize"))
+                                 "zooming saved the same frame, zoomed: ~S" out)
+                             (is (equal (saved 0) (after "after-restore"))
+                                 "unzooming saved it unzoomed: ~S" out)
+                             (is (equal (saved 0) (after "after-close"))
+                                 "closing left the file as it was: ~S" out)))))
+                     (%write-placement dir "window-placement" (%placement-line start 1))
+                     (multiple-value-bind (code out)
+                         (%run-shown-launcher 60 "--exercise-placement" (uiop:native-namestring file))
+                       (is (eql 0 code) "--exercise-placement exited ~S: ~A" code out)
+                       (is-true (%report-line out "restored ") "the saved frame was restored: ~S"
+                                out)
+                       (is (equal "start-zoomed 1" (%report-line out "start-zoomed"))
+                           "and a file saying ZOOMED 1 opened zoomed: ~S" out)))))
             (aion/fs:delete-tree dir))))))
 
 (defun run-tests ()
