@@ -113,7 +113,8 @@
   :license "MIT"
   :version "0.0.0"
   :depends-on ("cffi" "coalton"
-               "aion/platform")   ; *search-source-tree*: a bundle does not search vendor/ (#472)
+               "aion/platform"    ; *search-source-tree*: a bundle does not search vendor/ (#472)
+               "aion/dynamic")    ; unblock-interrupts, first in the loop thread (#541)
   :serial t
   :components ((:module "src/uv"
                 :serial t
@@ -555,7 +556,8 @@
   ;; says nothing, nothing anywhere does. That is the doctrine this file's own header
   ;; states: consumers that want logging depend on aion/log.
   ;; sb-concurrency, an SBCL contrib, for the lock-free queue the submit path uses (#466).
-  :depends-on ("aion/log" (:require "sb-concurrency"))
+  :depends-on ("aion/log" (:require "sb-concurrency")
+               "aion/dynamic")   ; unblock-interrupts, first in each worker (#541)
   :pathname "src/pool"
   :serial t
   :components ((:file "packages")
@@ -579,7 +581,8 @@
   ;; aion/tz for local-time schedules across daylight-saving changes; aion/pool to run jobs
   ;; off the driver thread; aion/clock for run ids; aion/log for start, finish and failure.
   ;; The store is a protocol: the in-memory store is here, the database one is mnemosyne/jobs.
-  :depends-on ("aion/tz" "aion/pool" "aion/clock" "aion/log")
+  :depends-on ("aion/tz" "aion/pool" "aion/clock" "aion/log"
+               "aion/dynamic")   ; unblock-interrupts, first in its threads (#541)
   :serial t
   :components ((:module "src/schedule"
                 :serial t
@@ -754,7 +757,8 @@
   ;; In aion so that hermes can use it as well as praxeon. Every dependency is already in the
   ;; tree: ironclad for the PKCE digest, cl-base64 for its encoding, jzon for the metadata.
   :depends-on ("aion/http-client" "aion/random" "aion/secret" "aion/log" "ironclad" "cl-base64"
-               "com.inuoe.jzon" "quri")
+               "com.inuoe.jzon" "quri"
+               "aion/dynamic")   ; unblock-interrupts, first in the request thread (#541)
   :serial t
   :components ((:module "src/oauth"
                 :serial t

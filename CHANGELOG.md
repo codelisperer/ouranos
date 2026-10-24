@@ -33,6 +33,32 @@ its tag.
   error code and the number of open handles, does not let the warning reach its caller, and
   keeps the unfreed loop for a later `stop`, as it does for a loop thread still in a handler.
 
+- **Threads the frameworks create can be interrupted even when they were started while an
+  interrupt was deferred** (#541). A new thread starts with its creator's signal mask. When an
+  interrupt reached a thread inside `sb-sys:without-interrupts`, SBCL blocked the deferrable
+  signals there until the step ended, and every thread made in that interval could never be
+  interrupted: no `interrupt-thread`, no `destroy-thread`, and no `sb-ext:with-timeout` inside
+  it. `hyperion/clack-handler-uv`'s `run` starts server-uv inside such a step (#444), so a
+  Clack stop, a timer or Ctrl-C during the start left every server-uv worker and loop thread
+  in that state for the server's life, and a handler's own `with-timeout` never fired. Now:
+  - the new `aion/dynamic:unblock-interrupts` unblocks them, and is the first form of the
+    threads that `aion/uv` (`start-loop-thread`), `aion/pool` (`make-pool`'s workers),
+    `aion/schedule`, `aion/oauth`, `hyperion/server-uv`, `hyperion/server`,
+    `hyperion/sidecar`, hyperion's dev watcher, `hyperion/clack-handler-uv`, `klio`'s
+    watcher, `praxeon`'s observer, MCP client and stdio threads, Claude Code hook, web turn
+    and workflow children create;
+  - `aion/uv` now depends on `aion/dynamic`, which has no dependencies of its own.
+
+  SBCL for Windows (a `:sb-safepoint` build) does not give a new thread its creator's signal
+  mask, so the defect did not occur there; the call changes nothing on Windows. There,
+  `interrupt-thread` and `with-timeout` reach an `aion/uv` loop thread only when `uv_run`
+  returns to Lisp, so wake a loop with `aion/uv:submit` or `stop-loop-thread` instead.
+
+  An app that starts its own threads from inside `sb-sys:without-interrupts`, or from code a
+  caller may run inside it, can call `(aion/dynamic:unblock-interrupts)` first in each thread
+  for the same reason. Five sites in `aion/windows`, `cons` and `hades` do not call it yet
+  (#896).
+
 - **hyperion/static serves only regular files, and serves some it used to refuse** (#687).
   `file-response` and `make-static-handler` now:
   - **refuse a FIFO, a device or a socket under the static root** with a 404, without reading

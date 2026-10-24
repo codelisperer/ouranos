@@ -214,7 +214,8 @@
   :license "MIT"
   :depends-on ("hyperion/http1" "aion/uv/net" "aion/log" "aion/pool"
                "aion/uv"    ; server-uv.lisp calls uv: directly, not only through uv/net
-               "aion/boundary") ; the header list is checked before it enters the encoder (#110)
+               "aion/boundary"  ; the header list is checked before it enters the encoder (#110)
+               "aion/dynamic")  ; unblock-interrupts, first in the worker-stopping thread (#541)
   :serial t
   :components ((:file "src/server-uv"))
   :in-order-to ((test-op (test-op "hyperion/server-uv/tests"))))
@@ -352,7 +353,8 @@
   :license "MIT"
   ;; aion/windows on Windows starts each sidecar suspended in a kill-on-close job object with no
   ;; console window (#700). Nothing here depends on hyperion, so hyperion can depend on this.
-  :depends-on ("aion/log" "aion/secret" (:feature :win32 "aion/windows"))
+  :depends-on ("aion/log" "aion/secret" (:feature :win32 "aion/windows")
+               "aion/dynamic")   ; unblock-interrupts, first in each sidecar thread (#541)
   :components ((:file "src/sidecar"))
   :in-order-to ((test-op (test-op "hyperion/sidecar/tests"))))
 
