@@ -25,8 +25,8 @@ Made with:
 
 `pinned-test-ec.crt` and `pinned-test-ec.key` are the same certificate with an EC P-256 key, for
 the test server on Windows, which serves TLS through aion/tls (#536). mbedTLS 4.1.1's
-`mbedtls_pk_check_pair` refuses the RSA `pinned-test` pair above with `PSA_ERROR_INVALID_ARGUMENT`, so
-`aion/tls:make-server-config` cannot present it. Made with:
+`mbedtls_pk_check_pair` refuses the RSA `pinned-test` pair above with
+`PSA_ERROR_INVALID_ARGUMENT`, so `aion/tls:make-server-config` cannot present it. Made with:
 
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
       -keyout pinned-test-ec.key -out pinned-test-ec.crt \
