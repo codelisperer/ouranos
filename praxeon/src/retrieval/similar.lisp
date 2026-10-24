@@ -166,24 +166,27 @@ chunk written before the re-encode, still in the text form, is read too
   (let* ((query (llm:stored-vector query-octets))
          (buffer (make-array (length query) :element-type 'double-float))
          (nearest (llm:make-nearest limit))
+         (skipped 0)
          (store (corpus-store corpus)))
     (rc::with-db (store)
       (q:map-fetch (store-connection store)
                    (lambda (row)
-                     (let ((stored (param:row-value row :embedding)))
-                       (llm:nearest-offer nearest
-                                          (llm:cosine-distance
-                                           query (llm:stored-vector
-                                                  stored (and (typep stored '(simple-array (unsigned-byte 8) (*)))
-                                                              buffer)))
-                                          (param:row-value row :id)
-                                          (param:row-value row :id))))
+                     ;; A row that cannot be compared -- another width, malformed, or a distance
+                     ;; that is not finite -- is skipped and counted, not allowed to fail the
+                     ;; search or to take a place among the nearest (#425's review).
+                     (let ((d (llm:stored-distance query (param:row-value row :embedding) buffer)))
+                       (if d
+                           (llm:nearest-offer nearest d (param:row-value row :id) (param:row-value row :id))
+                           (incf skipped))))
                    (list :select '(:id :embedding)
                          :from (list (store-table store))
                          :where (corpus-where corpus
                                               (list := :embedding_deriver deriver)
                                               (list :is-not-null :embedding)))
                    :dialect :sqlite))
+    (when (plusp skipped)
+      (log:warn "praxeon/retrieval: chunks whose stored embedding could not be compared were left out"
+                :table (store-table store) :skipped skipped))
     (let* ((kept (llm:nearest-items nearest))   ; (distance . id), nearest first
            (ids (mapcar #'cdr kept))
            (rows (and ids

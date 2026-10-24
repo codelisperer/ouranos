@@ -810,13 +810,18 @@ the same, with these differences:
 - There is no extension to install and no width check on the table. The embedding is stored as
   single floats in a BLOB, the precision pgvector stores, and a vector of the wrong width is
   refused when it is written. A store written before #425 kept it as text; `ensure-schema`
-  re-encodes those rows in place, in one transaction, keeping every chunk's fingerprints, so
+  re-encodes those rows in place, 500 to a transaction, keeping every chunk's fingerprints, so
   nothing is embedded again. Until it has run, the text form is still read.
 - Similarity is computed in Lisp: the store reads every chunk of the corpus that the current
   model embedded, one at a time, computes each cosine distance, and keeps the nearest. That is
   the same exact scan the Postgres store does, done outside the database. Measured at width 1024
-  on one Linux laptop (#425): a median of 24 ms a query at 2,400 chunks a corpus, 88 ms at
-  10,000 and 524 ms at 50,000, where Postgres took 8 ms and 32 ms at the first two (#306).
+  on one Linux laptop (#425): a median of 20 ms a query at 2,400 chunks a corpus, 84 ms at
+  10,000 and 424 ms at 50,000, where Postgres took 8 ms and 32 ms at the first two (#306). A
+  chunk whose stored embedding cannot be compared (corrupt, or a distance that is not finite) is
+  left out and counted in a warning.
+- The distances are summed in double precision in Lisp, not as pgvector sums them, so two chunks
+  whose distances differ by about 1e-7 or less can come back in either order on the two
+  backends. Re-encoding a store's text embeddings as single floats can move such a pair too.
 - BM25 scores are computed in Lisp from the numbers the database returns, because SQLite has a
   logarithm only in builds that include its math functions.
 - `retrieve-exact` matches case-insensitively for the ASCII letters A to Z only. SQLite's

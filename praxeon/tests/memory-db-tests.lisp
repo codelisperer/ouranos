@@ -1321,3 +1321,27 @@ again with ENSURE, which re-encodes every row as single floats."
                                                                :table table :dialect :sqlite :ensure t)))
             (is (= 3 (%observation-embedding-count connection table "blob")) "every row is single floats")
             (is (equal '("the member's budget is tight") (funcall nearest reopened)))))))))
+
+(test on-sqlite-an-observation-of-another-width-is-left-out-of-recall
+  "#425's review. An embedder change can leave observations of another width in a SQLite table,
+which has no width check on the column. RECALL-SIMILAR leaves such a row out, whichever form it is
+stored in, instead of failing the whole recall (the BLOB form) or comparing it over the shorter
+length (the text form), and still returns the rest."
+  (if (not (%sqlite-p))
+      (skip "SQLite only: a Postgres vector column refuses another width when it is written")
+      (with-store (store)
+        (remember* store "member-3" "the member prefers mornings")
+        (remember* store "member-3" "the member's budget is tight")
+        (remember* store "member-3" "the member dislikes phone calls")
+        (let ((connection (mdb::store-source store))
+              (table (mdb:store-table store)))
+          (conn:exec connection (format nil "UPDATE ~A SET embedding = ? WHERE content = ?" table)
+                     (llm:vector-octets #(1 0)) "the member prefers mornings")
+          (conn:exec connection (format nil "UPDATE ~A SET embedding = ? WHERE content = ?" table)
+                     (llm:vector-text #(0 1 0)) "the member dislikes phone calls"))
+        (let ((recalled (mapcar #'praxeon/context:ctx-item-content
+                                (mem:recall-similar store "member-3"
+                                                    (llm:embed (make-instance 'basis-embedder) "the member prefers mornings")
+                                                    :budget 1000 :limit 3))))
+          (is (equal '("the member's budget is tight") recalled)
+              "only the observation of the store's width is compared: ~S" recalled)))))

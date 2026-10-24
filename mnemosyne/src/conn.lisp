@@ -252,22 +252,50 @@ a single list.)"
 
 (defun map-query (connection function sql &rest params)
   "Run a SELECT SQL with positional PARAMS and call FUNCTION on each row, a plist as QUERY
-returns them, one at a time as the driver reads it. Returns the number of rows.
+returns them. Returns the number of rows.
 
-QUERY reads every row before it returns, so a scan over a large table holds the whole result in
-memory at once. This holds one row (#425: a SQLite similarity scan over 10,000 embeddings ran out
-of heap through QUERY). FUNCTION must not run another statement on CONNECTION while the scan is
-open; collect what it needs and act after MAP-QUERY returns."
+ON SQLITE THE ROWS ARE READ ONE AT A TIME, as SQLite steps the statement, so a scan over a large
+table holds one row (#425). cl-dbi's SQLite driver reads every row into a list at EXECUTE unless
+the query is prepared with :STORE NIL, so it is prepared that way here, and its statement is
+finalized however this returns, because an unfinalized statement keeps its read snapshot open.
+FUNCTION must not run another statement on CONNECTION while the scan is open.
+
+ON POSTGRES THE DRIVER READS EVERY ROW AT EXECUTE, as QUERY does, and this then calls FUNCTION
+on each: the same memory as QUERY. Nothing in the tree scans a large Postgres table through
+this; a caller that needs it should use a cursor.
+
+A caution that applies to every query through cl-dbi on SQLite: its driver treats an error from
+sqlite3_step as the end of the rows, so a scan that fails part-way returns the rows read so far
+without signalling."
   (%wrapping-db-errors "map-query"
     (let* ((start (get-internal-real-time))
            (driver (dbi:connection-driver-type connection))
            (params (param:to-driver-params params driver))
-           (result (dbi:execute (dbi:prepare connection sql) params))
+           (query (if (eq driver :sqlite3)
+                      (dbi:prepare connection sql :store nil)
+                      (dbi:prepare connection sql)))
            (n 0))
-      (loop for row = (dbi:fetch result)
-            while row
-            do (incf n)
-               (funcall function (param:from-driver-row row driver)))
+      (unwind-protect
+           (let ((result (dbi:execute query params)))
+             (if (eq driver :sqlite3)
+                 ;; DBI:FETCH reads the query's field names after every fetch, and an unbuffered
+                 ;; query that returns no rows never sets them, so FETCH signals there. The row's
+                 ;; values are taken from the driver and named here, once a row exists.
+                 (let ((keys nil))
+                   (loop for values = (dbi.driver:fetch-using-connection
+                                       (dbi.driver:query-connection result) result)
+                         while values
+                         do (unless keys
+                              (setf keys (mapcar (lambda (field) (intern field :keyword))
+                                                 (dbi.driver:query-fields result))))
+                            (incf n)
+                            (funcall function (loop for k in keys for v in values collect k collect v))))
+                 (loop for row = (dbi:fetch result)
+                       while row
+                       do (incf n)
+                          (funcall function (param:from-driver-row row driver)))))
+        (when (eq driver :sqlite3)
+          (dbi:free-query-resources query)))
       (log:debug "db map-query" :sql sql :params (length params) :rows n :ms (%ms-since start))
       n)))
 

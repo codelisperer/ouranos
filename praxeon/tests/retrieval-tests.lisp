@@ -1806,3 +1806,29 @@ fingerprints and deriver so no chunk becomes pending, and ranks exactly as befor
               (is (equal ranking (%similar-ranking corpus embedder "which item" 10)))
               (rt:make-chunk-store c :table table :dimensions 16 :ensure t)
               (is (= 40 (%column-count reopened "typeof(embedding) = 'blob'")) "opening again changes nothing")))))))
+
+(test on-sqlite-a-chunk-whose-embedding-cannot-be-read-is-left-out
+  "#425's review. A corrupt embedding, here every number NaN, gives no finite distance. The chunk is
+left out of RETRIEVE-SIMILAR's ranking, and the others come back as they would without it, instead
+of a floating-point trap failing the search or the NaN keeping a place among the nearest. The
+corrupt chunk is the first the scan reads (section s000, the first row), so it arrives while the
+list of nearest still has room: a NaN compares false with everything, so once it held a place no
+later chunk could be found nearer than it."
+  (if (not (%sqlite-p))
+      (skip "SQLite only: a Postgres vector column cannot hold NaN")
+      (with-store (store :dimensions 16)
+        (let* ((corpus (rt:make-corpus store "corrupt"))
+               (embedder (make-instance 'seeded-embedder))
+               (corrupt-text (rt:section-text (first (%numbered-sections 1)))))
+          (rt:sync-corpus corpus (%numbered-sections 12))
+          (rt:embed-pending corpus embedder)
+          (let ((expected (subseq (remove corrupt-text (%similar-ranking corpus embedder "which item" 12)
+                                          :key #'car :test #'string=)
+                                  0 3))
+                (nan (make-array 64 :element-type '(unsigned-byte 8))))
+            (dotimes (i 16) (setf (aref nan (+ 2 (* 4 i))) #xC0 (aref nan (+ 3 (* 4 i))) #x7F))
+            (is (= 1 (conn:exec (rt:store-connection store)
+                                (format nil "UPDATE ~A SET embedding = ? WHERE text = ?" (rt:store-table store))
+                                nan corrupt-text)))
+            (let ((after (%similar-ranking corpus embedder "which item" 3)))
+              (is (equal expected after) "expected ~S, got ~S" expected after)))))))

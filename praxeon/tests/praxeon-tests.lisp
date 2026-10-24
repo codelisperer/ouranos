@@ -2722,6 +2722,52 @@ direction 2, whatever the lengths. A zero vector has no direction and is taken a
   (is (< (abs (- (- 1d0 (/ 1d0 (sqrt 2d0))) (llm:cosine-distance #(1d0 0d0) #(1d0 1d0)))) 1d-12))
   (is (= 1d0 (llm:cosine-distance #(0d0 0d0) #(1d0 0d0)))))
 
+(defun %nan-octets (n)
+  "N single floats, all a quiet NaN (#x7FC00000), as a BLOB a corrupt store could hold."
+  (let ((o (make-array (* 4 n) :element-type '(unsigned-byte 8))))
+    (dotimes (i n o)
+      (setf (aref o (* 4 i)) 0 (aref o (+ 1 (* 4 i))) 0 (aref o (+ 2 (* 4 i))) #xC0 (aref o (+ 3 (* 4 i))) #x7F))))
+
+(test a-vector-a-single-float-cannot-hold-is-refused-not-trapped
+  "#425's review: converting a number above MOST-POSITIVE-SINGLE-FLOAT to a single float signals
+SBCL's floating-point overflow, which no store expects. VECTOR-OCTETS refuses it with
+DELIBERATION-FAILURE, as it does NaN and the infinities, and VECTOR-TEXT-OCTETS, what a re-encode
+calls on each row, returns NIL for such a row so it stays as text instead of stopping the store
+from opening."
+  (signals cnd:deliberation-failure (llm:vector-octets (vector 1d0 1d39)))
+  (signals cnd:deliberation-failure (llm:vector-octets (vector 1d0 (expt 10 400))))
+  (sb-int:with-float-traps-masked (:invalid :overflow :divide-by-zero)
+    (signals cnd:deliberation-failure (llm:vector-octets (vector 1d0 (/ 0d0 0d0))))
+    (signals cnd:deliberation-failure (llm:vector-octets (vector 1d0 (/ 1d0 0d0)))))
+  (is (null (llm:vector-text-octets "[1.0,1.0e39]")))
+  (is (null (llm:vector-text-octets (format nil "[1,~D]" (expt 10 400)))) "an integer too large for a double")
+  (is (typep (llm:vector-octets (vector most-positive-single-float 0)) '(simple-array (unsigned-byte 8) (8)))
+      "the largest single float is accepted"))
+
+(test a-stored-value-that-cannot-be-compared-gives-no-distance
+  "#425's review: STORED-DISTANCE is NIL for a stored value of another width, in either form, for
+a BLOB that is not whole single floats, and for one whose distance is not finite, here all NaN,
+so a scan skips the row instead of failing or ranking it."
+  (let ((query (llm:stored-vector (llm:vector-octets #(1 0 0)))))
+    (is (< (abs (llm:stored-distance query (llm:vector-octets #(2 0 0)))) 1d-12) "the same direction")
+    (is (< (abs (llm:stored-distance query (llm:vector-text #(2 0 0)))) 1d-12) "the text form")
+    (is (null (llm:stored-distance query (llm:vector-octets #(1 0)))) "a BLOB of another width")
+    (is (null (llm:stored-distance query (llm:vector-text #(1 0 0 0)))) "text of another width")
+    (is (null (llm:stored-distance query (make-array 11 :element-type '(unsigned-byte 8) :initial-element 0))))
+    (is (null (llm:stored-distance query (%nan-octets 3))) "NaN gives no distance")
+    (is (null (llm:stored-distance query "[1,x,0]")) "malformed text")))
+
+(test a-nan-distance-cannot-hold-a-place-among-the-nearest
+  "#425's review: a NaN compares false with everything, so in the last place of a full list it
+would make every later candidate look no nearer. NEAREST-OFFER takes it as the farthest."
+  (let ((nearest (llm:make-nearest 2)))
+    (sb-int:with-float-traps-masked (:invalid)
+      (llm:nearest-offer nearest 0.5d0 "a" :a)
+      (llm:nearest-offer nearest (- (/ 0d0 0d0)) "b" :b))
+    (llm:nearest-offer nearest 0.7d0 "c" :c)
+    (llm:nearest-offer nearest 0.1d0 "d" :d)
+    (is (equal '(:d :a) (mapcar #'cdr (llm:nearest-items nearest))))))
+
 (test a-batch-is-paired-back-by-index-not-by-arrival
   "THE `index' FIELD EXISTS BECAUSE THE ARRAY ORDER IS NOT PROMISED.
 

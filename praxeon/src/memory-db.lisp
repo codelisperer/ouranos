@@ -363,9 +363,12 @@ migration, before it reads from a table made before #317."
                        (unless (and (eq (store-dialect store) :sqlite)
                                     (member (string-downcase (symbol-name name))
                                             (%sqlite-columns store) :test #'string=))
-                         (error e)))))))
-    (when (eq (store-dialect store) :sqlite)
-      (%reencode-sqlite-embeddings store)))
+                         (error e))))))))
+  ;; OUTSIDE THE EXCLUSIVE BLOCK: on SQLite over a pool that block is one IMMEDIATE transaction,
+  ;; and the re-encode commits batch by batch so the write lock is never held for the whole table
+  ;; (#425's review). A non-exclusive hold borrows a connection and opens no transaction.
+  (when (eq (store-dialect store) :sqlite)
+    (%with-store (store) (%reencode-sqlite-embeddings store)))
   store)
 
 (defun %reencode-sqlite-embeddings (store)
@@ -778,28 +781,33 @@ time with their embeddings, the LIMIT nearest EMBEDDING by cosine distance kept 
 nearest first, ties by id. The query vector is checked for width as a stored one is. An
 observation with no embedding sorts after every other, as NULL does in Postgres's ascending ORDER
 BY. REMEMBER always writes one, so that case needs a row written some other way. An embedding
-still in the text form of a store written before #425's re-encode is read too."
+still in the text form of a store written before #425's re-encode is read too. One of another
+width than the query, or one that cannot be read, is left out and counted in a warning."
   (let* ((query (llm:stored-vector (%vector-text store embedding)))
          (buffer (make-array (length query) :element-type 'double-float))
-         (nearest (llm:make-nearest limit)))
+         (nearest (llm:make-nearest limit))
+         (skipped 0))
     (%with-store (store)
       (q:map-fetch (store-connection store)
                    (lambda (row)
                      (let ((stored (param:row-value row :embedding)))
-                       (llm:nearest-offer
-                        nearest
-                        (if stored
-                            (llm:cosine-distance
-                             query (llm:stored-vector
-                                    stored (and (typep stored '(simple-array (unsigned-byte 8) (*)))
-                                                buffer)))
-                            most-positive-double-float)
-                        (param:row-value row :id)
-                        row)))
+                       (if (null stored)
+                           (llm:nearest-offer nearest most-positive-double-float (param:row-value row :id) row)
+                           ;; A row of another width (an embedder changed), malformed, or with a
+                           ;; distance that is not finite is skipped and counted, in either form,
+                           ;; not compared over a shorter length or allowed to fail the recall
+                           ;; (#425's review).
+                           (let ((d (llm:stored-distance query stored buffer)))
+                             (if d
+                                 (llm:nearest-offer nearest d (param:row-value row :id) row)
+                                 (incf skipped))))))
                    (list :select (append +columns+ '(:embedding))
                          :from (list (store-table store))
                          :where (%where-current subject as-of nil thread))
                    :dialect :sqlite))
+    (when (plusp skipped)
+      (log:warn "praxeon/memory-db: observations whose stored embedding could not be compared were left out"
+                :table (store-table store) :skipped skipped))
     (mapcar #'cdr (llm:nearest-items nearest))))
 
 (defmethod mem:forget ((store db-memory-store) observation)

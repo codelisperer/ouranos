@@ -259,14 +259,29 @@ loop with no generic arithmetic; a SQLite store computes this for every candidat
 ;;; copy, not a parse. STORED-VECTOR still reads the text form, so a store written before the
 ;;; change keeps working while it is re-encoded.
 
+(defun %single-representable-p (x)
+  "Whether X is a real that a single float holds: not NaN or infinite, and no larger in magnitude
+than MOST-POSITIVE-SINGLE-FLOAT. Checked before conversion, because converting a larger number
+signals SBCL's floating-point overflow, which is not a condition a store expects (#425's review)."
+  (and (realp x)
+       (not (and (floatp x) (or (sb-ext:float-nan-p x) (sb-ext:float-infinity-p x))))
+       (<= (abs x) most-positive-single-float)))
+
 (defun vector-octets (vector &optional dimensions)
   "VECTOR, a sequence of reals, as a BLOB value: each number as a little-endian IEEE single
 float, 4 bytes, in a (SIMPLE-ARRAY (UNSIGNED-BYTE 8) (*)). With DIMENSIONS, signals
-PRAXEON/CONDITIONS:DELIBERATION-FAILURE unless VECTOR has that many numbers, as VECTOR-TEXT does."
+PRAXEON/CONDITIONS:DELIBERATION-FAILURE unless VECTOR has that many numbers, as VECTOR-TEXT does.
+Signals it too for a number a single float cannot hold: NaN, an infinity, or a magnitude above
+MOST-POSITIVE-SINGLE-FLOAT."
   (when (and dimensions (/= (length vector) dimensions))
     (error 'praxeon/conditions:deliberation-failure
            :detail (format nil "embedding rejected: ~D numbers where the store holds ~D"
                            (length vector) dimensions)))
+  (let ((bad (position-if-not #'%single-representable-p vector)))
+    (when bad
+      (error 'praxeon/conditions:deliberation-failure
+             :detail (format nil "embedding rejected: number ~D is not a finite value a single float holds"
+                             bad))))
   (let ((octets (make-array (* 4 (length vector)) :element-type '(unsigned-byte 8))))
     (let ((i 0))
       (map nil (lambda (x)
@@ -331,8 +346,36 @@ host assembles the bytes."
 when TEXT is not that form. What a SQLite store's re-encode passes to
 MNEMOSYNE/MIGRATE:REWRITE-SQLITE-TEXT-VALUES (#425): a malformed value is left as it was, and its
 reader reports it as before."
+  ;; ANY ERROR, not only DELIBERATION-FAILURE: a re-encode runs on every open, and one value it
+  ;; cannot convert must leave that row as text, not stop the store from opening (#425's review).
   (handler-case (vector-octets (parse-vector-text text))
-    (praxeon/conditions:deliberation-failure () nil)))
+    (error () nil)))
+
+(defun stored-distance (query value &optional buffer)
+  "The cosine distance between QUERY, a (SIMPLE-ARRAY DOUBLE-FLOAT (*)), and VALUE, an embedding
+as a store keeps it (a BLOB from VECTOR-OCTETS or the text form of VECTOR-TEXT), or NIL when VALUE
+cannot be compared with QUERY: it has another number of dimensions, it is malformed, or the
+distance is not finite. BUFFER, an array of QUERY's length, is reused to decode a BLOB.
+
+What a scan over stored rows calls for each one, so that one row a store cannot read is skipped
+and counted by the caller instead of failing the search or, with a NaN, taking a place among the
+nearest (#425's review). Float traps are masked while it runs, so a corrupt value gives NIL
+instead of a floating-point trap."
+  (handler-case
+      (sb-int:with-float-traps-masked (:invalid :overflow :divide-by-zero)
+        (let ((stored (etypecase value
+                        ((simple-array (unsigned-byte 8) (*))
+                         (and (= (length value) (* 4 (length query)))
+                              (decode-vector-octets value (and buffer (= (length buffer) (length query))
+                                                               buffer))))
+                        (string
+                         (let ((numbers (parse-vector-text value)))
+                           (and (= (length numbers) (length query))
+                                (coerce numbers '(simple-array double-float (*)))))))))
+          (when stored
+            (let ((d (cosine-distance query stored)))
+              (and (not (sb-ext:float-nan-p d)) (not (sb-ext:float-infinity-p d)) d)))))
+    (error () nil)))
 
 (defun stored-vector (value &optional into)
   "A stored embedding as a (SIMPLE-ARRAY DOUBLE-FLOAT (*)), whichever form it was stored in: a
@@ -361,7 +404,13 @@ re-encode. INTO is as for DECODE-VECTOR-OCTETS, and is used only for a BLOB."
 
 (defun nearest-offer (nearest distance id item)
   "Offer ITEM, at DISTANCE, with ID (a string, for ties) to NEAREST. Keeps it if it is among the
-LIMIT nearest so far. Returns NEAREST."
+LIMIT nearest so far. Returns NEAREST. A DISTANCE that is NaN or infinite is taken as
+MOST-POSITIVE-DOUBLE-FLOAT, the farthest, so it cannot hold a place among the nearest: a NaN
+compares false with everything, and in the last place it would make every later candidate look
+no nearer."
+  (when (or (not (realp distance))
+            (and (floatp distance) (or (sb-ext:float-nan-p distance) (sb-ext:float-infinity-p distance))))
+    (setf distance most-positive-double-float))
   (let* ((entries (nearest-entries nearest))
          (n (length entries))
          (limit (nearest-limit nearest)))
