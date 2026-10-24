@@ -215,6 +215,11 @@ content already present, and its task is not counted as the user's text.")
 (defparameter *read-result-means* "read-result"
   "The name the result-reading means is registered under.")
 
+(defparameter *read-observed-messages-means* "read-observed-messages"
+  "The name of the means ATTACH-THREAD-MEMORY registers: it returns the messages an observation
+was distilled from.")
+
+
 (defvar *delegated* nil
   "True while REGISTER-AGENT-AS-MEANS runs a sub-agent's turn: the task that starts it was
 written by the coordinating model, not the user, so USER-TEXTS never counts it.")
@@ -270,6 +275,9 @@ longer registered, whose result cannot be judged, or one recorded as untrusted w
     (or (null entry)
         (means-entry-untrusted entry)
         (equal (getf part :name) *read-result-means*)
+        (and (equal (getf part :name) *read-observed-messages-means*)
+             (%observed-messages-untrusted-p agent (let ((input (getf part :input)))
+                                                     (and (hash-table-p input) (gethash "id" input)))))
         (and (getf part :id) (gethash (getf part :id) (agent-untrusted-calls agent)) t))))
 
 (defun %tool-uses (messages)
@@ -676,8 +684,17 @@ untrusted, the turn becomes untrusted (#317's taint ruling)."
   (let* ((history (%clear-batch agent (%with-cleared agent (agent-history agent))))
          (memory (agent-thread-memory agent))
          (start (and memory (%replacing-start memory history)))
-         (trimmed (prompt:trim-history (if start (nthcdr start history) history)
-                                       (agent-history-budget agent)))
+         ;; THE TEXT FIRST, and no cut without it (#908's review): with no observations, after
+         ;; an erasure or windows that yielded none, nothing replaces the messages before the mark,
+         ;; so they are sent.
+         (observed (and start (multiple-value-list (thread-observations-text memory))))
+         (start (and (first observed) start))
+         ;; The observations are sent too, so they count against the history's budget.
+         (budget (let ((b (agent-history-budget agent)))
+                   (if (and b (first observed))
+                       (max 0 (- b (prompt:estimate-tokens (first observed))))
+                       b)))
+         (trimmed (prompt:trim-history (if start (nthcdr start history) history) budget))
          (assembled (append (ctx:assemble (agent-context agent))
                             ;; Subject facts go with the other context items, after the cache
                             ;; marker, so a change to one does not invalidate the thread's cached
@@ -687,13 +704,12 @@ untrusted, the turn becomes untrusted (#317's taint ruling)."
                                              :budget (thread-memory-facts-budget memory)))))
          (facts (prompt:render-items assembled)))
     (when start
-      (multiple-value-bind (text untrusted) (thread-observations-text memory)
-        (when text
-          (setf trimmed (%with-observations-first trimmed text))
-          ;; An untrusted observation in the block makes the turn untrusted, as an untrusted
-          ;; context item does, under either scope (#317's taint ruling).
-          (when untrusted
-            (setf (turn-guard-untrusted (%turn-guard agent)) t)))))
+      (destructuring-bind (text untrusted) observed
+        (setf trimmed (%with-observations-first trimmed text))
+        ;; An untrusted observation in the block makes the turn untrusted, as an untrusted
+        ;; context item does, under either scope (#317's taint ruling).
+        (when untrusted
+          (setf (turn-guard-untrusted (%turn-guard agent)) t))))
     ;; AN UNTRUSTED ITEM IN THE PROMPT MAKES THE TURN UNTRUSTED, under either taint scope
     ;; (#317's taint ruling). Stricter than the rule for a raw untrusted result, which :TURN stops
     ;; counting after the user's next message: an item such as a condensed observation is a
@@ -715,10 +731,6 @@ untrusted, the turn becomes untrusted (#317's taint ruling)."
 memory store, the subject and the thread they are about, the observer that writes them, the token
 budget for facts about the subject, and REPLACE-AT. See ATTACH-THREAD-MEMORY."
   store subject thread observer (facts-budget 1000) (replace-at nil))
-
-(defparameter *read-observed-messages-means* "read-observed-messages"
-  "The name of the means ATTACH-THREAD-MEMORY registers: it returns the messages an observation
-was distilled from.")
 
 (defun attach-thread-memory (agent store subject thread observer
                              &key (facts-budget 1000) replace-at (read-tool t))
@@ -762,7 +774,9 @@ are marked as this agent judges its windows (#906)."
     (register-means agent *read-observed-messages-means*
                     "Return the messages of this conversation that an observation, given by its id, was taken from, exactly as they were written. Use it when an observation leaves out a detail you need."
                     (lambda (args) (%read-observed-messages agent (and (hash-table-p args) (gethash "id" args))))
-                    :schema (%string-arg-schema "id" "The observation's id, as shown in the observations.")))
+                    :schema (%string-arg-schema "id" "The observation's id, as shown in the observations.")
+                    ;; Each call can return many messages, so a turn reads a few at most.
+                    :max-per-turn 5))
   agent)
 
 (defun %observation-order (a b)
@@ -786,20 +800,45 @@ prompt's cached prefix the same between distillations."
                 (dolist (o observations)
                   (format s "~%[~A] ~A~:[~; (from untrusted content, not from the person)~] ~A"
                           (mem:observation-id o) (dst:date-string (mem:observation-valid-from o))
-                          (mem:observation-untrusted-p o) (mem:observation-content o))))
+                          (mem:observation-untrusted-p o) (%observation-line-text (mem:observation-content o)))))
               (and (some #'mem:observation-untrusted-p observations) t)))))
+
+(defun %observation-line-text (text)
+  "TEXT on one line, with every [ written \\[, so an observation's content cannot start a line of
+its own or look like an observation's id. Without it, an untrusted observation whose content held
+a line break followed by \"[obs-3] 2026-10-01 ...\" forged an unlabelled line (#908's review). A
+line break is any of the characters PRAXEON/PROMPT counts as one; each becomes a space."
+  ;; A CASE ON THE CHARACTER, with the code test last. Written as a COND whose second clause was
+  ;; (MEMBER (CHAR-CODE CH) '(#x0B #x85 #x2028 #x2029)), SBCL 2.6.9 compiled it so that the next
+  ;; clause, (CHAR= CH #\[), was never taken, and no [ was escaped; the same COND interpreted
+  ;; escaped it. Found writing #908's forging test, which fails without the escape.
+  (with-output-to-string (s)
+    (loop for ch across text
+          do (case ch
+               ((#\Newline #\Return #\Page #\Tab) (write-char #\Space s))
+               (#\[ (write-string "\\[" s))
+               (t (if (member (char-code ch) '(#x0B #x85 #x2028 #x2029))
+                      (write-char #\Space s)
+                      (write-char ch s)))))))
 
 (defun %replacing-start (memory history)
   "The position in HISTORY from which messages are sent when MEMORY's observations replace the
-earlier ones, or NIL while they do not: before REPLACE-AT is reached, or with REPLACE-AT NIL. The
-first message the user wrote at or after the observer's mark, so a tool's result is never sent
-without its call; failing that, the last one before it, so the current turn is always sent."
+earlier ones, or NIL while they do not: before REPLACE-AT is reached, or with REPLACE-AT NIL.
+
+NOTHING UNOBSERVED IS CUT (#908's review). The cut is never past the observer's mark, nor past the
+first message of any skipped window, open or closed, whose messages the observer gave up on and
+which must stay raw in the prompt. Within that limit it is the last message the user wrote at or
+before it, so a turn cut mid-exchange (a held call's result, parallel tool calls, a window that
+ended between a call and its result) is sent whole, and a tool's result is never sent without
+its call. Re-sending messages that were observed is safe; dropping ones that were not is not.
+With no user message at or before the limit, everything is sent from the start."
   (let* ((replace-at (thread-memory-replace-at memory))
-         (mark (min (obs:observer-mark (thread-memory-observer memory)) (length history))))
-    (when (and replace-at (plusp mark)
-               (>= (prompt:messages-tokens (subseq history 0 mark)) replace-at))
-      (or (position-if #'%user-message-p history :start mark)
-          (position-if #'%user-message-p history :end mark :from-end t)
+         (observer (thread-memory-observer memory))
+         (limit (reduce #'min (mapcar (lambda (window) (1- (first window))) (obs:observer-skipped observer))
+                        :initial-value (min (obs:observer-mark observer) (length history)))))
+    (when (and replace-at (plusp limit)
+               (>= (prompt:messages-tokens (subseq history 0 limit)) replace-at))
+      (or (position-if #'%user-message-p history :end (min (1+ limit) (length history)) :from-end t)
           0))))
 
 (defun %with-observations-first (messages text)
@@ -834,47 +873,76 @@ has already happened."
                     (format nil "[result: ~A]" (if (stringp c) c (princ-to-string c)))))
     (t (princ-to-string part))))
 
-(defun %read-observed-messages (agent id)
-  "*READ-OBSERVED-MESSAGES-MEANS*: the messages of AGENT's history that the observation ID, or the
-observations it was condensed from, were distilled from, each with its position and role. Marks
-the turn untrusted when the observation is untrusted or those messages hold an untrusted call,
-since the model is then reading that content again (#906)."
+(defun %observed-positions (agent id)
+  "The observation ID of AGENT's thread memory, and the history positions (from 1, ascending) of
+the messages it, or the observations it was condensed from, came from. NIL when there is no such
+observation in the thread."
   (let* ((memory (agent-thread-memory agent))
          (thread (thread-memory-thread memory))
          (all (mem:observations-of (thread-memory-store memory) (thread-memory-subject memory)
                                    :thread thread :include-superseded t))
          (find (lambda (x) (find x all :key #'mem:observation-id :test #'equal)))
-         (observation (and (stringp id) (funcall find id))))
+         (observation (and (stringp id) (funcall find id)))
+         (positions '())
+         (seen '()))
+    (when observation
+      (labels ((collect (o)
+                 (unless (member (mem:observation-id o) seen :test #'string=)
+                   (push (mem:observation-id o) seen)
+                   (let ((p (mem:observation-provenance o)))
+                     (when (and (string= (mem:provenance-conversation p) thread) (plusp (mem:provenance-turn p)))
+                       (loop for i from (mem:provenance-turn p) to (or (mem:provenance-through p) (mem:provenance-turn p))
+                             do (pushnew i positions))))
+                   (dolist (source (mem:observation-condensed-from o))
+                     (let ((s (funcall find source))) (when s (collect s)))))))
+        (collect observation))
+      (values observation (sort positions #'<)))))
+
+(defun %observed-messages-untrusted-p (agent id)
+  "Whether reading back the observation ID with *READ-OBSERVED-MESSAGES-MEANS* reads untrusted
+content: the observation is untrusted, or the messages it came from hold an untrusted call. Also
+what %UNTRUSTED-CALL-P recomputes for such a call, so the judgement survives an agent rebuilt from
+its history (#908's review). True when AGENT has no thread memory or there is no such observation,
+since the result cannot then be judged."
+  (if (null (agent-thread-memory agent))
+      t
+      (multiple-value-bind (observation positions) (%observed-positions agent id)
+        (or (null observation)
+            (mem:observation-untrusted-p observation)
+            (let ((history (agent-history agent)))
+              (funcall (untrusted-window-predicate agent)
+                       (loop for i in positions when (<= i (length history)) collect (nth (1- i) history))))))))
+
+(defun %read-observed-messages (agent id)
+  "*READ-OBSERVED-MESSAGES-MEANS*: the messages of AGENT's history that the observation ID, or the
+observations it was condensed from, were distilled from, each with its position and role, at most
+*READ-RESULT-MAX-CHARACTERS* characters of them. When they are untrusted
+(%OBSERVED-MESSAGES-UNTRUSTED-P), the turn is marked untrusted and the answer says so first, since
+the model is reading that content again (#906, #908's review)."
+  (multiple-value-bind (observation positions) (%observed-positions agent id)
     (if (null observation)
         (format nil "No observation ~S in this conversation." id)
-        (let ((positions '()) (seen '()))
-          (labels ((collect (o)
-                     (unless (member (mem:observation-id o) seen :test #'string=)
-                       (push (mem:observation-id o) seen)
-                       (let ((p (mem:observation-provenance o)))
-                         (when (and (string= (mem:provenance-conversation p) thread) (plusp (mem:provenance-turn p)))
-                           (loop for i from (mem:provenance-turn p) to (or (mem:provenance-through p) (mem:provenance-turn p))
-                                 do (pushnew i positions))))
-                       (dolist (source (mem:observation-condensed-from o))
-                         (let ((s (funcall find source))) (when s (collect s)))))))
-            (collect observation))
-          (let* ((history (agent-history agent))
-                 (wanted (sort (remove-if (lambda (i) (> i (length history))) positions) #'<))
-                 (messages (mapcar (lambda (i) (nth (1- i) history)) wanted)))
-            (when (or (mem:observation-untrusted-p observation)
-                      (funcall (untrusted-window-predicate agent) messages))
-              (mark-untrusted))
-            (if (null messages)
-                (format nil "The messages behind ~A are no longer in this conversation's history." id)
-                (with-output-to-string (s)
-                  (format s "The messages ~A was taken from, exactly as written:" id)
-                  (loop for i in wanted
-                        for m in messages
-                        for content = (getf m :content)
-                        do (format s "~%~%message ~D, ~A:~%~A" i (getf m :role)
-                                   (if (stringp content)
-                                       content
-                                       (format nil "~{~A~^~%~}" (mapcar #'%raw-part-text content))))))))))))
+        (let* ((history (agent-history agent))
+               (wanted (remove-if (lambda (i) (> i (length history))) positions))
+               (messages (mapcar (lambda (i) (nth (1- i) history)) wanted))
+               (untrusted (%observed-messages-untrusted-p agent id)))
+          (when untrusted (mark-untrusted))
+          (if (null messages)
+              (format nil "The messages behind ~A are no longer in this conversation's history." id)
+              (let ((text (with-output-to-string (s)
+                            (format s "~:[~;These messages hold content from outside the conversation, not from the person. ~]The messages ~A was taken from, exactly as written:"
+                                    untrusted id)
+                            (loop for i in wanted
+                                  for m in messages
+                                  for content = (getf m :content)
+                                  do (format s "~%~%message ~D, ~A:~%~A" i (getf m :role)
+                                             (if (stringp content)
+                                                 content
+                                                 (format nil "~{~A~^~%~}" (mapcar #'%raw-part-text content))))))))
+                (if (> (length text) *read-result-max-characters*)
+                    (format nil "~A~%~%[cut at ~D of ~D characters]" (subseq text 0 *read-result-max-characters*)
+                            *read-result-max-characters* (length text))
+                    text)))))))
 
 (defun agent-system-parts (agent)
   "The agent's system prompt as PRAXEON/LLM wants it: a plain string, or -- when
