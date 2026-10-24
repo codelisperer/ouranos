@@ -793,6 +793,31 @@ its tag.
 
 ### Added
 
+- **praxeon/actor: an agent can send its thread's observations in place of the messages they
+  were distilled from** (#317, step C). `(praxeon/actor:attach-thread-memory agent store subject
+  thread observer &key facts-budget replace-at read-tool)` gives an agent a thread memory:
+  - after every turn, `run-turn` (and `continue-turn`) gives the observer the agent's history,
+    which returns at once; the history stays the full record;
+  - facts about the subject are recalled within `:facts-budget` (1000 estimated tokens) and
+    attached after the cache marker with the agent's other context items;
+  - **`:replace-at` is NIL by default, which never replaces**, until #317's benchmark measures a
+    value. Once the observed messages reach it, what is sent is the system prompt, then a user
+    message with the thread's observations as its first part, carrying the cache marker, then the
+    rest of the history, trimmed as before, with the observations counted against its budget.
+    **Nothing unobserved is cut:** the cut is the last message the user wrote at or before the
+    observer's mark and before any skipped window, so a turn cut mid-exchange is sent whole, a
+    tool's result is never sent without its call, and a window the observer gave up on stays
+    raw; with no observations nothing is cut. The observations are rendered in a fixed order
+    (`thread-observations-text`), each on one line with its content's line breaks collapsed and
+    `[` escaped, so the part up to the marker is byte-identical from turn to turn until a
+    distillation or a reflection changes them;
+  - an observation from untrusted content is labelled in that part and makes the turn untrusted;
+  - `read-observed-messages`, registered unless `:read-tool nil` with `:max-per-turn 5`,
+    returns the messages an observation, or the observations a condensed one replaced, came
+    from, at most `*read-result-max-characters*` of them. When the observation or those messages
+    are untrusted it says so in its answer and marks the turn untrusted, and a call to it in the
+    history counts as untrusted for an agent rebuilt from it.
+
 - **hades: `reveal-path` shows a file or directory in the system file manager, and `open-url`
   opens a web page in the default browser** (#820), with no shell. `(hades/open:reveal-path path
   :select t)` selects the item in its folder: `explorer.exe /select,"<path>"` on Windows,

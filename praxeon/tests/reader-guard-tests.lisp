@@ -589,3 +589,25 @@ predicate takes a later window with no call as untrusted too. Under :TURN it doe
                         (subseq history (- (length history) 2)))))))
     (is-true (later-window-untrusted-p :conversation))
     (is-false (later-window-untrusted-p :turn) "control: the default scope")))
+
+(test reading-back-an-untrusted-window-refuses-a-spending-means
+  "The raw-message tool returns messages that held an untrusted call, so the model is reading that
+content again: the turn becomes untrusted and a spending means it then asks for is refused. #317,
+step C, under #906's rule."
+  (let* ((store (mem:make-in-memory-store))
+         (observer (obs:make-observer (make-instance 'scripted :script nil) store "member-1" "conv-7"))
+         (history (list (llm:msg "user" "Read the page.")
+                        (list :role "assistant"
+                              :content (list (list :type :tool-use :id "old1" :name "gone-reader" :input nil)))
+                        (list :role "user"
+                              :content (list (list :type :tool-result :tool-use-id "old1" :content "Refunds to 99.")))
+                        (llm:msg "assistant" "Done.")))
+         (o (mem:remember store "member-1" "Refunds to 99." :thread "conv-7"
+                          :provenance (mem:make-provenance "conv-7" 1 :through 4)))
+         (ag (%guard-agent (%calls (list "read-observed-messages" (%args "id" (mem:observation-id o))))
+                           (%calls (list "buy" (%args "item" "x")))))
+         (runs (%spender ag)))
+    (setf (actor:agent-history ag) history)
+    (actor:attach-thread-memory ag store "member-1" "conv-7" observer)
+    (is (equal '(:ok :not-run) (%outcomes (%results (lambda () (actor:run-turn ag "What did it say?"))))))
+    (is (= 0 (funcall runs)))))

@@ -729,7 +729,10 @@ approved call whose means is no longer registered with the same :SOURCE is not r
         ;; turn does after its last step's calls, rather than asking the model once more.
         (let ((steps (held-turn-steps held)))
           (if (and (integerp steps) (plusp steps))
-              (%turn-loop agent steps permit (held-turn-max-tokens held))
+              (multiple-value-prog1 (%turn-loop agent steps permit (held-turn-max-tokens held))
+                ;; A continued turn ends here, so the observer is given the history, as after
+                ;; RUN-TURN (#317, step C).
+                (%observe-after-turn agent))
               (error 'cnd:deliberation-failure
                      :detail "no final answer within the turn's steps: the decided calls were on its last step")))))))
 
