@@ -296,11 +296,17 @@
 (:name "Linux runner image" :category :ci
  :where ((:text ".github/workflows/verify.yml" "- os: ubuntu-" nil)
          (:text ".github/workflows/verify.yml" "runs-on: ubuntu-" nil)
-         (:text ".github/workflows/desktop-release.yml" "- os: ubuntu-" nil)
-         (:text ".github/workflows/desktop-release.yml" "runs-on: ubuntu-" nil)
          (:text ".github/workflows/upstream.yml" "runs-on: ubuntu-" nil))
  :upstream (:manual "https://github.com/actions/runner-images")
- :reviewed "2026-10-17")
+ :reviewed "2026-10-24")
+
+(:name "Linux desktop build image" :category :ci
+ :where ((:text ".github/workflows/desktop-release.yml" "- os: ubuntu-" nil)
+         (:text ".github/workflows/desktop-release.yml" "runs-on: ubuntu-" nil))
+ :upstream (:manual "https://github.com/actions/runner-images")
+ :reviewed "2026-10-24"
+ :held (:reason "a Linux bundle needs at least the glibc of its build image; ubuntu-26.04 has glibc 2.43 and Ubuntu 24.04 desktops have 2.39, so the maintainer kept the desktop build on ubuntu-24.04 while verify.yml tests on ubuntu-26.04"
+        :issue 766))
 
 (:name "macOS runner image" :category :ci
  :where ((:text ".github/workflows/verify.yml" "- os: macos-" nil))
