@@ -7,6 +7,11 @@ schedules decision 4, the removal of Woo and Hunchentoot. Proposed 2026-09-13. A
 explicitly a waypoint: *"Amend or supersede this ADR once the desktop path actually runs on
 the native server."* ADR-0011's Content-Length half is untouched and stands permanently.
 
+Decision 1 was carried out by #710 on 2026-10-24: `:uv` heads `+backends+`, and
+`default-server` skips it, returning the reason `:libuv-unavailable`, when
+`hyperion/server-uv` is loaded but libuv itself does not load. The code quoted under Context
+below is the table as it was before that change.
+
 ## Context
 
 pre-publication issue 117 M2 lands the native libuv server —

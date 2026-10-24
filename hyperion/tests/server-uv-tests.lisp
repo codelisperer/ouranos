@@ -816,6 +816,14 @@ test, so the native server must be both the only option and the chosen one."
       "no Clack HANDLER is loaded here -- clack itself being present must not count")
   (is (eq :uv (hsrv:default-server))))
 
+(test default-server-says-why-it-chose-uv
+  "Here libuv loads, so the reason is :PREFERRED and there is no libuv error (#710)."
+  (let ((env (uiop:getenv "HYPERION_SERVER")))
+    (unwind-protect
+         (progn (setf (uiop:getenv "HYPERION_SERVER") "")
+                (is (equal '(:uv :preferred nil) (multiple-value-list (hsrv:default-server)))))
+      (setf (uiop:getenv "HYPERION_SERVER") (or env "")))))
+
 (test hyperion-server-start-runs-the-native-backend
   "Chosen, started and served through the framework's own entry point."
   (with-hyperion-server (port (const-app 200 +ok+ '("via hyperion/server")) :log nil)
@@ -1073,6 +1081,27 @@ exists to make possible, and the thing that was impossible before M2."
     ;; several loops, #463, sets it).
     (is (eq srv:*dispatch* dispatch-before)
         "and the global *DISPATCH* was not changed by either server"))))
+
+(test start-gives-uv-two-workers-unless-told-otherwise
+  "START with no :WORKERS runs the handler on a pool of two, as HYPERION/DESKTOP:RUN-APP and
+HYPERION/DEV:SERVE do (#710). Control: :WORKERS NIL, given explicitly, runs it inline."
+  (flet ((serve-once (&rest workers)
+           (let* ((ran-on nil) (threads 0)
+                  (h (apply #'hsrv:start
+                            (lambda (env)
+                              (declare (ignore env))
+                              (setf ran-on (sb-thread:thread-name sb-thread:*current-thread*)
+                                    threads (length (%worker-threads)))
+                              (list 200 +ok+ (list "x")))
+                            :server :uv :port 0 :log nil workers)))
+             (unwind-protect (get* (srv:server-port h) "GET / HTTP/1.1" "Host: x")
+               (hsrv:stop h))
+             (values ran-on threads))))
+    (multiple-value-bind (ran-on threads) (serve-once)
+      (is (search "server-uv-worker" (or ran-on "")) "no :workers: the handler ran on the pool")
+      (is (= 2 threads) "and the pool has two threads"))
+    (is (not (search "server-uv-worker" (or (serve-once :workers nil) "")))
+        "control: :workers nil ran it on the loop thread")))
 
 (test stop-ends-the-worker-threads-start-made
   (let ((h (hsrv:start (const-app 200 +ok+ '("x")) :server :uv :port 0 :log nil :workers 3)))

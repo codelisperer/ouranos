@@ -100,7 +100,7 @@
     server (hyperion/server-uv, pre-publication issue 117) be offered without core depending on libuv.
     HYPERION_SERVER overrides. START takes an already-built Ring app so app construction
     stays with the caller, and STOP takes whichever handler START returned.")
-  (:export #:default-server #:available-servers #:no-server-backend
+  (:export #:default-server #:default-workers #:available-servers #:no-server-backend
            #:native-backend-p
            #:*default-port* #:start #:stop #:handler-port
            ;; the same-origin guard for a server on this machine (#304)

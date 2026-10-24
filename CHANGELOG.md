@@ -14,6 +14,25 @@ its tag.
 
 ### An app may have to act
 
+- **hyperion/server: an app that loads `hyperion/server-uv` is served by it, and `:uv` gets 2
+  workers from every entry point** (#710). Before, `default-server` took Woo or Hunchentoot
+  over `:uv` whenever a Clack handler was loaded too, so an app could serve on Hunchentoot
+  without knowing it. Now:
+  - `default-server` prefers `:uv` when `hyperion/server-uv` is loaded and libuv itself loads.
+    When libuv does not load, it skips `:uv` and takes the next loaded backend. It returns a
+    second value saying why, `:requested`, `:preferred` or `:libuv-unavailable`, and a third,
+    libuv's error message, when `:uv` was skipped. An app that logs its choice can log these.
+  - `HYPERION_SERVER`, when set, still decides, as before.
+  - `start` and `serve-forever` give `:uv` 2 workers when `:workers` is not given, as
+    `hyperion/desktop:run-app` (#472) and `hyperion/dev:serve` (#432) already did. The number
+    is the new `hyperion/server:default-workers`. Pass `:workers nil` to run handlers on the
+    loop thread as before. Handlers on more than one thread must not share one database
+    connection: see `hyperion/db-connection:wrap-connection`.
+  - **To keep Hunchentoot**, set `HYPERION_SERVER=hunchentoot`, pass
+    `:server :hunchentoot`, or do not load `hyperion/server-uv`.
+  - An app that chose `:uv` by hand (`HYPERION_SERVER`, else `:uv` when
+    `aion/uv:library-path` loads, else Hunchentoot) can call `default-server` instead.
+
 - **praxeon/retrieval and praxeon/memory-db on SQLite: similarity search works at real corpus
   sizes, and the stored embeddings change form** (#425). A SQLite store kept each embedding as
   text and parsed every one on every search, so at width 1024 `retrieve-similar` took about a

@@ -189,8 +189,8 @@ So the fix for a Hyperion app is a **backend choice**, and pre-publication issue
 "hyperion/server-uv"            ; instead of "clack-handler-woo"
 ```
 
-`hyperion/server:start` will select it (`HYPERION_SERVER=uv`, or `:server :uv`, or by being
-the only backend loaded). Everything else in `serve-forever` — the banner, the wait loop,
+`hyperion/server:start` will select it (`HYPERION_SERVER=uv`, or `:server :uv`, or by default
+whenever libuv loads, #710). Everything else in `serve-forever` — the banner, the wait loop,
 `unwind-protect`, the shutdown hooks — is transport-independent and never needed to change.
 
 If a `uv_signal_t` installer is ever wanted for another reason, `*install-signal-handlers*`

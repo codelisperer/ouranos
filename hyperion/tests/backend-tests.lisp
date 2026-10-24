@@ -54,24 +54,48 @@
     (is (null missing)
         "reported as available, but the handler package is not loaded: ~S" missing)))
 
-;;; --- the native backend (pre-publication issue 117, commit 5) -----------------------------------
+;;; --- the native backend (pre-publication issue 117, #710) ------------------------------------
 ;;;
 ;;; Pure tests only, here. Whether :UV actually SERVES anything is asked in
 ;;; hyperion/server-uv/tests, which is the only suite that may load a system needing libuv.
-;;; What belongs here is the choosing, which is pure and is where the commit-6 boundary
-;;; lives: :UV is in the table and deliberately not at the head of it.
+;;; What belongs here is the choosing: :UV heads the table (#710), and is skipped with a reason
+;;; when libuv does not load.
 
-(test uv-is-known-but-not-preferred
-  ;; The whole of commit 5 in one assertion. Moving :UV to the head of +BACKENDS+ is
-  ;; commit 6 -- the demotion of Hunchentoot and Woo to opt-in -- and it is a decision
-  ;; someone makes, not something that drifts in behind a reordering.
-  (is-true (assoc :uv srv::+backends+) ":uv must be a known backend")
-  (is (not (eq :uv (car (first srv::+backends+))))
-      ":uv must NOT head the table -- moving it there IS the commit-6 demotion of
-Hunchentoot and Woo to opt-in, and that should be a decision someone makes rather than
-something that arrives behind an innocent-looking reorder")
-  (is (eq :hunchentoot (srv::%choose-server nil '(:hunchentoot :uv)))
-      "with both loaded and nothing requested, the Clack backend still wins in commit 5"))
+(test uv-is-preferred-when-libuv-loads
+  (is (eq :uv (car (first srv::+backends+))) ":uv heads the table")
+  (is (equal '(:uv :preferred) (multiple-value-list (srv::%choose-server nil '(:uv :hunchentoot))))))
+
+(test uv-is-skipped-with-a-reason-when-libuv-does-not-load
+  "Control: the same AVAILABLE as the test above, with UV-PROBLEM set."
+  (is (equal '(:hunchentoot :libuv-unavailable)
+             (multiple-value-list
+              (srv::%choose-server nil '(:uv :hunchentoot) :uv-problem "no libuv here"))))
+  (is (equal '(:hunchentoot :preferred)
+             (multiple-value-list
+              (srv::%choose-server nil '(:hunchentoot) :uv-problem "no libuv here")))
+      "with server-uv not loaded, libuv is not the reason"))
+
+(test uv-alone-is-chosen-even-when-libuv-does-not-load
+  ;; With nothing to fall back to, START is left to fail with libuv's own instructions.
+  (is (equal '(:uv :libuv-unavailable)
+             (multiple-value-list (srv::%choose-server nil '(:uv) :uv-problem "no libuv here")))))
+
+(test an-override-decides-whatever-libuv-does
+  (is (equal '(:uv :requested)
+             (multiple-value-list
+              (srv::%choose-server :uv '(:uv :hunchentoot) :uv-problem "no libuv here"))))
+  (is (equal '(:hunchentoot :requested)
+             (multiple-value-list (srv::%choose-server :hunchentoot '(:uv :hunchentoot))))
+      "HYPERION_SERVER=hunchentoot keeps Hunchentoot when libuv loads"))
+
+(test the-libuv-probe-returns-the-error-message-or-nil
+  (is (null (srv::%libuv-problem (lambda () t))))
+  (is (equal "libuv 1.40 is too old" (srv::%libuv-problem (lambda () (error "libuv 1.40 is too old"))))))
+
+(test uv-gets-two-workers-by-default-and-the-others-none
+  (is (eql 2 (srv:default-workers :uv)))
+  (is (null (srv:default-workers :hunchentoot)))
+  (is (null (srv:default-workers :woo))))
 
 (test uv-is-chosen-when-it-is-all-there-is
   (is (eq :uv (srv::%choose-server nil '(:uv)))))

@@ -924,9 +924,7 @@ the logger hardcoding knowledge of them."
   "The :WORKERS SERVE starts its server with (#432): WORKERS when given, even NIL; otherwise 2 on
 the native :uv backend, which without workers runs every handler on its loop thread, and NIL on
 the others, whose default is the same as production's."
-  (cond (workers-p workers)
-        ((eq server :uv) 2)
-        (t nil)))
+  (if workers-p workers (srv:default-workers server)))
 
 (defun serve (make-app &key paths system systems (port srv:*default-port*)
                             (host "127.0.0.1") (interval 0.5) block request-guard
