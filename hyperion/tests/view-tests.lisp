@@ -22,6 +22,14 @@
 ;;;; would train people to ignore it. FiveAM prints the skip and its reason, and
 ;;;; verify-tree surfaces skips rather than burying them (pre-publication issue 284's lesson, one file over) --
 ;;;; so "not built here" is visible rather than silent.
+;;;;
+;;;; A TEST THAT CREATES A WINDOW RUNS ONLY WHEN GITHUB_ACTIONS IS SET (#885). GitHub sets it on its
+;;;; runners. CI is not enough: agents set CI=1 on developers' machines when they run suites, and
+;;;; there a window would open on the developer's screen. Every such test checks
+;;;; %REAL-WINDOW-ALLOWED-P and skips, naming GITHUB_ACTIONS, when it is false; and
+;;;; %RUN-HIDDEN-LAUNCHER, the one function here that clears HYPERION_VIEW_NO_WINDOW, signals an
+;;;; error instead of starting the launcher, so a new test that forgets the check fails rather
+;;;; than opening a window. Every other call runs with HYPERION_VIEW_NO_WINDOW=1 (RUN-LAUNCHER).
 
 (defpackage #:hyperion/view/tests
   (:use #:cl #:fiveam)
@@ -57,7 +65,7 @@ resolution moves, this suite must move with it or say so."
 It runs with HYPERION_VIEW_NO_WINDOW=1, so a call that would create a window exits 3 instead
 (#521). None of these calls is meant to create one, and on a developer's machine a test that
 did would open a window on their screen. The real-window tests use %REPORT-PLACEMENT, which
-clears the variable and runs only on CI."
+clears the variable and runs only when GITHUB_ACTIONS is set (#885)."
   (let ((out (make-string-output-stream))
         (err (make-string-output-stream))
         (previous (uiop:getenv "HYPERION_VIEW_NO_WINDOW")))
@@ -244,9 +252,19 @@ code when it did not exit 0."
 ;;; real window, so it runs only where the CI environment variable is set, on a runner, and not
 ;;; on a developer's machine.
 
+(defun %real-window-allowed-p ()
+  "True when a test may create a real window: only on a GitHub Actions runner, where GitHub sets
+GITHUB_ACTIONS. CI is deliberately not read, because it is also set on developers' machines (#885)."
+  (and (uiop:getenvp "GITHUB_ACTIONS") t))
+
 (defun %run-hidden-launcher (&rest args)
   "Run `hyperion-view ARGS' started hidden, through PowerShell's Start-Process -WindowStyle
-Hidden, with HYPERION_VIEW_NO_WINDOW cleared. Returns (values EXIT-CODE OUTPUT)."
+Hidden, with HYPERION_VIEW_NO_WINDOW cleared. Returns (values EXIT-CODE OUTPUT).
+
+Signals an error, and starts nothing, unless %REAL-WINDOW-ALLOWED-P: with the variable cleared,
+the launcher creates a window (#885)."
+  (unless (%real-window-allowed-p)
+    (error "%RUN-HIDDEN-LAUNCHER creates a window, and runs only when GITHUB_ACTIONS is set (#885)."))
   (let* ((dir (uiop:ensure-directory-pathname
                (merge-pathnames (format nil "hyperion-view-report-~36R/" (random (expt 2 40)))
                                 (uiop:temporary-directory))))
@@ -272,13 +290,13 @@ Hidden, with HYPERION_VIEW_NO_WINDOW cleared. Returns (values EXIT-CODE OUTPUT).
          (and placement-file (list (uiop:native-namestring placement-file)))))
 
 (test the-window-is-placed-in-the-work-area-on-a-real-window
-  "On a CI Windows runner, a real window is placed where --placement says, inside the work area,
+  "On a GitHub Actions Windows runner, a real window is placed where --placement says, inside the work area,
 and Windows reports that rectangle."
   #-win32 (skip "The placement calls are Windows only")
   #+win32
   (with-launcher
-    (if (null (uiop:getenvp "CI"))
-        (skip "Runs only on CI (CI is not set here): it creates a window")
+    (if (not (%real-window-allowed-p))
+        (skip "Runs only on GitHub Actions (GITHUB_ACTIONS is not set here): it creates a window")
         (multiple-value-bind (code out) (%report-placement 1280 860)
           (is (eql 0 code) "--report-placement exited ~S: ~A" code out)
           (let ((line (find-if (lambda (l) (uiop:string-prefix-p "work " l))
@@ -552,13 +570,13 @@ when it did not exit 0."
            (uiop:split-string out :separator '(#\Newline #\Return))))
 
 (test a-real-window-is-restored-from-its-placement-file-and-saves-it
-  "On a CI Windows runner, a window opens at a saved placement that fits, writes it back, and
+  "On a GitHub Actions Windows runner, a window opens at a saved placement that fits, writes it back, and
 opens centred when the saved placement is on no monitor."
   #-win32 (skip "The placement calls are Windows only")
   #+win32
   (with-launcher
-    (if (null (uiop:getenvp "CI"))
-        (skip "Runs only on CI (CI is not set here): it creates a window")
+    (if (not (%real-window-allowed-p))
+        (skip "Runs only on GitHub Actions (GITHUB_ACTIONS is not set here): it creates a window")
         (let ((dir (%fresh-dir)))
           (unwind-protect
                (let* ((work (multiple-value-bind (code out) (%report-placement 1280 860)
@@ -606,15 +624,15 @@ opens centred when the saved placement is on no monitor."
             (aion/fs:delete-tree dir))))))
 
 (test the-placement-is-saved-while-the-window-is-open-and-a-maximised-start-is-maximised
-  "On a CI Windows runner, through --exercise-placement, which installs the window procedure a
+  "On a GitHub Actions Windows runner, through --exercise-placement, which installs the window procedure a
 launch installs: a move made with the move loop is saved with MAXIMIZED 0; maximising saves the
 same rectangle with MAXIMIZED 1; restoring saves MAXIMIZED 0; minimising and then closing leaves
 the file as it was. A start from a file that says MAXIMIZED 1 opens maximised (review of #521)."
   #-win32 (skip "The placement calls are Windows only")
   #+win32
   (with-launcher
-    (if (null (uiop:getenvp "CI"))
-        (skip "Runs only on CI (CI is not set here): it creates a window, and shows it maximised")
+    (if (not (%real-window-allowed-p))
+        (skip "Runs only on GitHub Actions (GITHUB_ACTIONS is not set here): it creates a window, and shows it maximised")
         (let* ((dir (%fresh-dir))
                (file (merge-pathnames "window-placement" dir))
                (start '(50 50 650 500)))
@@ -665,3 +683,21 @@ the file as it was. A start from a file that says MAXIMIZED 1 opens maximised (r
     (explain! results)
     (unless (results-status results)
       (error "hyperion/view tests failed"))))
+
+(test ci-alone-does-not-let-a-test-create-a-window
+  "#885. With CI=1 and GITHUB_ACTIONS unset, which is how agents run suites on developers'
+machines, no test may create a window: %REAL-WINDOW-ALLOWED-P is false, and %RUN-HIDDEN-LAUNCHER
+signals an error before it starts the launcher. With GITHUB_ACTIONS set it is true. Both variables
+are put back afterwards, so on a GitHub runner the real-window tests still run. Nothing here starts
+the launcher, so it runs everywhere."
+  (let ((ci (uiop:getenv "CI")) (gha (uiop:getenv "GITHUB_ACTIONS")))
+    (unwind-protect
+         (progn
+           (setf (uiop:getenv "CI") "1"
+                 (uiop:getenv "GITHUB_ACTIONS") "")
+           (is (null (%real-window-allowed-p)) "CI=1 alone allowed a window")
+           (signals error (%run-hidden-launcher "--report-placement" "800" "600"))
+           (setf (uiop:getenv "GITHUB_ACTIONS") "true")
+           (is-true (%real-window-allowed-p) "GITHUB_ACTIONS=true did not allow a window"))
+      (setf (uiop:getenv "CI") (or ci "")
+            (uiop:getenv "GITHUB_ACTIONS") (or gha "")))))
