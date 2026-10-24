@@ -809,11 +809,14 @@ static void set_placement_path(const char *path) { g_placement_path_utf8 = path;
 static bool save_placement(id window) {
   if (g_placement_path_utf8.empty() || !frame_saveable(window)) return false;
   bool zoomed = msg_bool(window, "isZoomed");
-  if (!zoomed) {
+  // A window that opens filling the visible frame, as place_window makes one larger than the
+  // screen, counts as zoomed to AppKit without having been zoomed. Until a frame has been
+  // recorded, the current one is the window's normal frame, and it is saved as not zoomed.
+  if (!zoomed || !g_have_normal_frame) {
     g_normal_frame = rect_of(window, "frame");
     g_have_normal_frame = true;
+    zoomed = false;
   }
-  if (!g_have_normal_frame) return false;
   char line[128];
   int n = format_saved_placement(saved_from_frame(g_normal_frame, zoomed), line, sizeof line);
   if (n <= 0 || n >= static_cast<int>(sizeof line)) return save_failed("format");
