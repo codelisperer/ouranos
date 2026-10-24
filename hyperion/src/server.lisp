@@ -775,12 +775,13 @@ when another Woo server is running, and register the new thread, in one critical
         (%refuse-second-woo host port)
         ;; THREAD-LIFETIME: independent -- a backend server thread; see the comment at the
         ;; call in %CLACK-START.
-        (let ((thread (sb-thread:make-thread function :name name)))
+        (let ((thread (sb-thread:make-thread (lambda () (aion/dynamic:unblock-interrupts) (funcall function))
+                                             :name name)))
           (push (list thread host port) *woo-servers*)
           thread))
       ;; THREAD-LIFETIME: independent -- a backend server thread; see the comment at the
       ;; call in %CLACK-START.
-      (sb-thread:make-thread function :name name)))
+      (sb-thread:make-thread (lambda () (aion/dynamic:unblock-interrupts) (funcall function)) :name name)))
 
 ;;; --- status lines Woo cannot write (#372) ------------------------------------
 ;;;

@@ -632,7 +632,9 @@ instead of starting a second."
                               ;; THREAD-LIFETIME: independent. It ends when the store call
                               ;; returns, which may be after the STOP that started it.
                               (sb-thread:make-thread
-                               (lambda () (%renew-leases scheduler (scheduler-clock-now scheduler)))
+                               (lambda ()
+                                 (aion/dynamic:unblock-interrupts)
+                                 (%renew-leases scheduler (scheduler-clock-now scheduler)))
                                :name "aion/schedule renewal")))))))
     (sb-thread:join-thread thread :timeout seconds :default nil)))
 
@@ -761,6 +763,7 @@ threads; for a libuv timer instead, see aion/schedule/uv. Returns SCHEDULER."
                (let ((thread
                        (sb-thread:make-thread
                         (lambda ()
+                          (aion/dynamic:unblock-interrupts)
                           (loop until (sb-thread:with-mutex (mutex) done)
                                 do (let ((delay (handler-case (next-wake scheduler)
                                                   (error () (max 1 (floor (scheduler-lease-seconds

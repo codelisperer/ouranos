@@ -272,6 +272,10 @@ stack, which is the property that makes foreign callbacks safe here."
         ;; submits to it, so it belongs to no one unit of work (#158).
         (sb-thread:make-thread
          (lambda ()
+           ;; First, because START-LOOP-THREAD can run inside a caller's
+           ;; SB-SYS:WITHOUT-INTERRUPTS, as hyperion/clack-handler-uv's RUN does, and a thread
+           ;; made there can inherit a blocked signal mask and never be interruptible (#541).
+           (aion/dynamic:unblock-interrupts)
            ;; :DEFAULT would return as soon as no handles were active, which for a
            ;; service loop is a race against the first submission. :ONCE in a loop, with
            ;; the referenced wakeup handle above, blocks until there is genuinely

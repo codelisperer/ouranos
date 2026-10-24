@@ -436,10 +436,11 @@ deferred and the observer's lock held, so it should not block."
   ;; mask. When an interrupt such as the app's deadline arrives during the step, SBCL blocks the
   ;; deferrable signals in the maker until the step ends, so a thread made then would run with
   ;; them blocked: no INTERRUPT-THREAD, no DESTROY-THREAD from STOP-OBSERVER, and no WITH-TIMEOUT
-  ;; inside the provider. SB-UNIX::UNBLOCK-DEFERRABLE-SIGNALS is internal to SBCL; the test
-  ;; a-deadline-deferred-in-the-step-leaves-the-worker-stoppable fails if it stops working.
+  ;; inside the provider. AION/DYNAMIC:UNBLOCK-INTERRUPTS is the one place that calls SBCL's
+  ;; internal for this (#541); the test a-deadline-deferred-in-the-step-leaves-the-worker-stoppable
+  ;; fails if it stops working.
   (bt:make-thread (aion/dynamic:inheriting (lambda ()
-                                             (sb-unix::unblock-deferrable-signals)
+                                             (aion/dynamic:unblock-interrupts)
                                              (%run observer history flush today)))
                   :name "praxeon-observer"))
 

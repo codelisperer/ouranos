@@ -2128,6 +2128,7 @@ a thread of its own, and STOP stops waiting for it after *STOP-WAIT-SECONDS* and
          ;; THREAD-LIFETIME: independent -- normally joined within *STOP-WAIT-SECONDS*; left
          ;; running, and logged, only when a handler never returns.
          (stopper (sb-thread:make-thread (lambda ()
+                                           (aion/dynamic:unblock-interrupts)
                                            (unwind-protect (pool:stop-pool workers)
                                              (sb-thread:signal-semaphore done)))
                                          :name "server-uv-stop-workers")))

@@ -438,6 +438,7 @@ the resolved request locale, handed to the responder (e.g. for Elise's translato
   (sb-thread:make-thread
    (aion/dynamic:inheriting
     (lambda ()
+     (aion/dynamic:unblock-interrupts)
      ;; THE TURN THREAD RENDERS. `%assistant-bubble' below is `spinneret:with-html-string',
      ;; and the request's own WITH-OUTPUT-STYLE wraps the dispatcher on the REQUEST thread,
      ;; which this is not. Before pre-publication issue 469 this worked because the style was a global assigned at

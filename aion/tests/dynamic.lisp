@@ -291,3 +291,118 @@ site as decided. That is a guard satisfied by prose about the guard."
 above would pass while checking nothing."
   (is (< 50 (length (%sweep-files)))
       "the sweep should be walking the tree, not an empty list"))
+
+;;; --- a new thread's signal mask (#541) -----------------------------------------
+
+(test the-sbcl-internal-unblock-interrupts-calls-exists
+  "UNBLOCK-INTERRUPTS calls SBCL's internal SB-UNIX::UNBLOCK-DEFERRABLE-SIGNALS, found by name.
+If a new SBCL renames or removes it, UNBLOCK-INTERRUPTS does nothing and every long-lived thread
+made while its creator had an interrupt deferred stops being interruptible again. This is the
+test that says so."
+  (let ((symbol (find-symbol "UNBLOCK-DEFERRABLE-SIGNALS" "SB-UNIX")))
+    (is-true symbol "SBCL ~A has no SB-UNIX::UNBLOCK-DEFERRABLE-SIGNALS, so AION/DYNAMIC:UNBLOCK-INTERRUPTS does nothing; find what this SBCL calls it and update aion/src/dynamic/dynamic.lisp (#541)" (lisp-implementation-version))
+    (is-true (and symbol (fboundp symbol)) "SB-UNIX::UNBLOCK-DEFERRABLE-SIGNALS exists in SBCL ~A but is not a function, so AION/DYNAMIC:UNBLOCK-INTERRUPTS does nothing (#541)" (lisp-implementation-version))
+    (is-true dyn::*unblock-deferrable-signals* "AION/DYNAMIC found no function to call when it was loaded (#541)")))
+
+(defun %thread-made-in-a-step (body &key (defer t))
+  "Make a thread running BODY from inside SB-SYS:WITHOUT-INTERRUPTS. With DEFER, another thread
+interrupts this one inside the step first, and the step waits 0.2 s for that interrupt to arrive
+and be deferred, so the new thread starts with the deferrable signals blocked. Returns the new
+thread once the step has ended and the deferred interrupt has run."
+  (let ((thread nil))
+    (sb-sys:without-interrupts
+      (when defer
+        (let ((me sb-thread:*current-thread*))
+          (sb-thread:join-thread
+           (sb-thread:make-thread (lambda () (sb-thread:interrupt-thread me (lambda () nil)))
+                                  :name "aion/dynamic test interrupter"))
+          (sleep 0.2)))
+      ;; THREAD-LIFETIME: scoped -- the test's own thread, stopped and joined by the caller.
+      ;; INTERRUPTS: BODY decides; that is what these tests compare.
+      (setf thread (sb-thread:make-thread body :name "aion/dynamic test thread")))
+    thread))
+
+(defun %interruptible-p (thread &optional (timeout 2))
+  "Whether an INTERRUPT-THREAD sent to THREAD runs within TIMEOUT seconds."
+  (let ((ran (sb-thread:make-semaphore)))
+    (sb-thread:interrupt-thread thread (lambda () (sb-thread:signal-semaphore ran)))
+    (and (sb-thread:wait-on-semaphore ran :timeout timeout) t)))
+
+(defun %interruptible-thread-check (body &key (defer t))
+  "Make a thread running BODY with %THREAD-MADE-IN-A-STEP, check whether it can be interrupted,
+then stop it. Returns whether the interrupt arrived."
+  (let* ((stop (sb-thread:make-semaphore))
+         (thread (%thread-made-in-a-step (lambda () (funcall body) (sb-thread:wait-on-semaphore stop :timeout 30))
+                                         :defer defer)))
+    (unwind-protect (%interruptible-p thread)
+      (sb-thread:signal-semaphore stop)
+      (sb-thread:join-thread thread :default nil :timeout 30))))
+
+(test a-thread-that-unblocks-interrupts-first-can-be-interrupted
+  "A thread made inside a step while an interrupt to its creator was deferred, whose first form is
+UNBLOCK-INTERRUPTS, receives an INTERRUPT-THREAD."
+  (is-true (%interruptible-thread-check #'dyn:unblock-interrupts)))
+
+(test a-thread-made-in-the-step-without-it-cannot-be-interrupted
+  "The control for the test above, and the defect: the same thread without UNBLOCK-INTERRUPTS
+inherits the blocked mask and never receives the interrupt."
+  (is-false (%interruptible-thread-check (lambda () nil))))
+
+(test a-thread-made-with-no-deferred-interrupt-can-be-interrupted
+  "The second control: with no interrupt deferred in the step, the same thread without
+UNBLOCK-INTERRUPTS can be interrupted, so the test above fails because of the deferred
+interrupt and not because of how it checks."
+  (is-true (%interruptible-thread-check (lambda () nil) :defer nil)))
+
+;;; --- the sweep: every spawn site has decided about interrupts (#541) ------------
+
+(defun %unblock-decided-p (lines n)
+  "Has the spawn site on line N (1-based) of LINES decided about its signal mask?
+
+Decided when the CODE in the spawn line and the six lines after it calls UNBLOCK-INTERRUPTS --
+six because a thread body may open with a comment, as aion/uv's loop thread does -- or when a
+COMMENT in the five lines above it or on it says INTERRUPTS: and why not. As in %DECIDED-P, the
+call is read only from the code, so a comment naming UNBLOCK-INTERRUPTS does not decide a site."
+  (let ((after (subseq lines (1- n) (min (length lines) (+ n 6))))
+        (before (subseq lines (max 0 (- n 6)) n)))
+    (or (search "unblock-interrupts" (%code-and-comments after))
+        (search "INTERRUPTS:" (nth-value 1 (%code-and-comments before))))))
+
+(defun %unblocking-undecided-in-lines (lines)
+  "Line numbers in LINES that spawn a thread without having decided about interrupts."
+  (loop for line in lines
+        for n from 1
+        when (and (search "make-thread" line) (not (%unblock-decided-p lines n)))
+          collect n))
+
+(defun %spawn-sites-without-unblock ()
+  (let ((found '()))
+    (dolist (path (%sweep-files) (nreverse found))
+      (let ((lines (uiop:read-file-lines path)))
+        (dolist (n (%unblocking-undecided-in-lines lines))
+          (push (format nil "~A:~D" (enough-namestring path (asdf:system-relative-pathname :aion "../")) n) found))))))
+
+(test every-thread-spawn-site-unblocks-interrupts-or-says-why-not
+  "A thread a framework here creates may be created while its creator has an interrupt deferred,
+and then cannot be interrupted for its whole life unless its body calls UNBLOCK-INTERRUPTS
+first (#541). So every spawn site either calls it within the first lines of the body or carries
+an INTERRUPTS: comment that says why not."
+  (let ((undecided (%spawn-sites-without-unblock)))
+    (is (null undecided)
+        "these spawn sites neither call aion/dynamic:unblock-interrupts first nor say INTERRUPTS: why not (#541): ~{~%  ~A~}" undecided)))
+
+(test the-interrupt-sweep-sees-a-spawn-without-the-call
+  "The control: a spawn whose body does not call it is found, and so is one where only a comment
+names the function."
+  (let ((bare (list "(sb-thread:make-thread (lambda () 1))"))
+        (named (list ";; this thread should call unblock-interrupts" "(sb-thread:make-thread (lambda () 1))")))
+    (is (equal '(1) (%unblocking-undecided-in-lines bare)))
+    (is (equal '(2) (%unblocking-undecided-in-lines named)))))
+
+(test the-interrupt-sweep-accepts-the-call-and-a-reason
+  "The other direction: the call as the body's first form decides a site, and so does an
+INTERRUPTS: comment above it."
+  (is (null (%unblocking-undecided-in-lines
+             (list "(sb-thread:make-thread" "  (lambda ()" "    (aion/dynamic:unblock-interrupts)" "    1))"))))
+  (is (null (%unblocking-undecided-in-lines
+             (list ";; INTERRUPTS: joined at once, and nothing interrupts it." "(sb-thread:make-thread (lambda () 1))")))))

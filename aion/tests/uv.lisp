@@ -670,3 +670,27 @@ loop lock only while the loop is not being freed. Repeated, because the window i
         (dolist (c closers) (sb-thread:join-thread c :default nil :timeout 30))
         (is (null errors) "round ~D: ~S" i errors)
         (is (eq :freed (uv:loop-freed-p l)) "round ~D" i)))))
+
+;;; --- #541: a loop thread started while an interrupt to the starter is deferred -----
+
+(test a-loop-thread-started-while-an-interrupt-is-deferred-can-be-interrupted
+  "START-LOOP-THREAD called inside a step while an interrupt to its caller is deferred, as
+hyperion/clack-handler-uv's RUN can call it through server-uv (#541). The loop thread unblocks
+interrupts first, so an INTERRUPT-THREAD reaches it while it waits in uv_run. Without that, it
+never did."
+  (let ((l (uv:make-loop)))
+    (unwind-protect
+         (progn
+           (sb-sys:without-interrupts
+             (let ((me sb-thread:*current-thread*))
+               (sb-thread:join-thread
+                (sb-thread:make-thread (lambda () (sb-thread:interrupt-thread me (lambda () nil)))
+                                       :name "uv-test interrupter"))
+               (sleep 0.2))
+             (uv:start-loop-thread l))
+           (let ((ran (sb-thread:make-semaphore)))
+             (sb-thread:interrupt-thread (aion/uv::loop-thread l)
+                                         (lambda () (sb-thread:signal-semaphore ran)))
+             (is-true (sb-thread:wait-on-semaphore ran :timeout 2)
+                      "an interrupt did not reach the loop thread")))
+      (uv:close-loop l))))

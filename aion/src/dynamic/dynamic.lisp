@@ -104,9 +104,9 @@ The capture happens now, on this thread, at the moment `inheriting' is called --
 the returned function runs. That is the only moment the bindings are visible, so a caller
 must wrap before spawning rather than inside the child.
 
-Intended use is at a spawn site:
+Intended use is at a spawn site, with UNBLOCK-INTERRUPTS as the body's first form:
 
-    (sb-thread:make-thread (aion/dynamic:inheriting (lambda () ...)))
+    (sb-thread:make-thread (aion/dynamic:inheriting (lambda () (aion/dynamic:unblock-interrupts) ...)))
 
 USE IT ONLY FOR A THREAD THAT CONTINUES THE CURRENT UNIT OF WORK. A long-lived worker --
 a pool thread, a server thread, an event loop -- must NOT inherit: it outlives the context
@@ -121,3 +121,36 @@ request a line belongs to, and it is much harder to notice because the field is 
   "Run BODY with the variables in SNAPSHOT bound. For a child that received a capture
 rather than a wrapped thunk."
   `(call-with-captured ,snapshot (lambda () ,@body)))
+
+;;; --- a new thread's signal mask (#541) ----------------------------------------
+
+(defparameter *unblock-deferrable-signals*
+  (let ((symbol (find-symbol "UNBLOCK-DEFERRABLE-SIGNALS" "SB-UNIX")))
+    (and symbol (fboundp symbol) (fdefinition symbol)))
+  "SBCL's internal SB-UNIX::UNBLOCK-DEFERRABLE-SIGNALS, found by name when this file is loaded,
+or NIL if this SBCL has no such function. Looked up by name so that a renamed internal leaves
+UNBLOCK-INTERRUPTS doing nothing instead of breaking the load of every system that starts a
+thread. The test the-sbcl-internal-unblock-interrupts-calls-exists fails when it is NIL.")
+
+(defun unblock-interrupts ()
+  "Unblock SBCL's deferrable signals in the calling thread, so that INTERRUPT-THREAD,
+DESTROY-THREAD, TERMINATE-THREAD and SB-EXT:WITH-TIMEOUT work in it. Returns NIL.
+
+CALL IT AS THE FIRST FORM OF A THREAD'S BODY. A new thread starts with the signal mask of the
+thread that created it. When an interrupt reaches a thread inside SB-SYS:WITHOUT-INTERRUPTS,
+SBCL defers it and blocks the deferrable signals in that thread until the step ends, so a
+thread created during the step starts with them blocked, and SBCL does not unblock them when
+the thread starts. Such a thread cannot be interrupted for as long as it runs: a handler's
+WITH-TIMEOUT never fires, and a stop that interrupts it never arrives (#541; #533's observer
+worker had the same defect).
+
+The creator does not have to be in such a step for this to matter: a server or pool can be
+started by any caller, from inside any step. So every long-lived thread that a framework in
+this tree creates calls this first, and the sweep in aion/dynamic's tests checks that every
+spawn site either does or says why not.
+
+Calling it in a thread whose signals are not blocked does nothing. It must not be called inside
+SB-SYS:WITHOUT-INTERRUPTS, because it would let interrupts in there."
+  (when *unblock-deferrable-signals*
+    (funcall *unblock-deferrable-signals*))
+  nil)

@@ -862,3 +862,61 @@ the hook that was in place before (#519)."
     (multiple-value-bind (stored passed condition) (hook-run :server)
       (is (null stored) "after the start, the error was stored where nothing reads it")
       (is (eq condition passed) "after the start, the earlier hook did not get the error"))))
+
+;;; --- #541: the server's threads stay interruptible after an interrupt during the start ---
+
+(defun %interrupt-arrives-p (thread &optional (timeout 2))
+  "Whether an INTERRUPT-THREAD sent to THREAD runs within TIMEOUT seconds."
+  (let ((ran (sb-thread:make-semaphore)))
+    (sb-thread:interrupt-thread thread (lambda () (sb-thread:signal-semaphore ran)))
+    (and (sb-thread:wait-on-semaphore ran :timeout timeout) t)))
+
+(defun %server-threads-interruptible-check (defer)
+  "Start a server through CLACK:CLACKUP with two workers and one loop, and check that an INTERRUPT-THREAD
+reaches each of its pool workers and its loop thread. With DEFER, SRV:START is wrapped so that,
+inside RUN's step that defers interrupts, another thread interrupts the thread running RUN and
+the wrapper waits 0.2 s for that interrupt to arrive and be deferred before the server starts.
+Returns the threads checked and the ones the interrupt did not reach."
+  (let ((before (sb-thread:list-all-threads))
+        (handler nil))
+    (sb-int:encapsulate 'srv:start 'interrupt-during-start
+                        (lambda (f &rest args)
+                          (when defer
+                            (let ((runner sb-thread:*current-thread*))
+                              (sb-thread:join-thread
+                               (sb-thread:make-thread
+                                (lambda () (sb-thread:interrupt-thread runner (lambda () nil)))
+                                :name "clack-uv-test interrupter"))
+                              (sleep 0.2)))
+                          (apply f args)))
+    (unwind-protect
+         (progn
+           (setf handler (%clackup (lambda (env) (declare (ignore env)) '(200 () ("ok")))
+                                   :worker-num 2 :loops 1))
+           (let* ((new (set-difference (sb-thread:list-all-threads) before))
+                  (checked (remove-if-not
+                            (lambda (th)
+                              (let ((name (sb-thread:thread-name th)))
+                                (and name (or (uiop:string-prefix-p "server-uv-worker" name)
+                                              (uiop:string-prefix-p "aion/uv loop" name)))))
+                            new)))
+             (values checked (remove-if #'%interrupt-arrives-p checked))))
+      (sb-int:unencapsulate 'srv:start 'interrupt-during-start)
+      (when handler (clack:stop handler)))))
+
+(test server-threads-stay-interruptible-after-an-interrupt-during-the-start
+  "An interrupt that reaches the thread running RUN while SRV:START runs is deferred by RUN's
+step (#444). SBCL then blocks the deferrable signals in that thread until the step ends, and a
+thread created meanwhile inherits that mask. Before #541 every pool worker and loop thread the
+start created stayed that way for the server's life: no INTERRUPT-THREAD, no WITH-TIMEOUT in a
+handler, no DESTROY-THREAD."
+  (multiple-value-bind (checked missed) (%server-threads-interruptible-check t)
+    (is (= 3 (length checked)) "two workers and one loop thread; found ~S" checked)
+    (is (null missed) "the interrupt did not reach ~S" (mapcar #'sb-thread:thread-name missed))))
+
+(test server-threads-are-interruptible-after-a-plain-start
+  "The control for the test above: with no interrupt during the start, the same check finds the
+same threads and reaches all of them, so it can see a delivered interrupt."
+  (multiple-value-bind (checked missed) (%server-threads-interruptible-check nil)
+    (is (= 3 (length checked)) "two workers and one loop thread; found ~S" checked)
+    (is (null missed) "the interrupt did not reach ~S" (mapcar #'sb-thread:thread-name missed))))

@@ -610,7 +610,8 @@ Returns the dev handle; stop with UNWATCH."
       (setf (dev-thread d)
             ;; THREAD-LIFETIME: independent -- the watcher runs for the life of the dev
             ;; server, not for the call that started it (#158).
-            (sb-thread:make-thread (lambda () (%watch-loop d)) :name "hyperion-dev-watch"))
+            (sb-thread:make-thread (lambda () (aion/dynamic:unblock-interrupts) (%watch-loop d))
+                                  :name "hyperion-dev-watch"))
       (let ((no-lisp (%note-roots-without-lisp roots exclude-directories exclude-types)))
         (format t "~&[dev] watching ~{~A~^ ~} — save any watched file to hot-reload~%"
                 (%root-listing roots no-lisp)))
