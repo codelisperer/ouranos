@@ -86,6 +86,29 @@ use freed memory when the callback returns, and the corruption appears later som
 unrelated. CLOSE-LOOP offers two restarts, WAIT-FOR-LOOP-THREAD and LEAVE-LOOP-UNFREED, and a
 later CLOSE-LOOP finishes the teardown once the thread has exited."))
 
+(define-condition loop-left-unfreed (warning)
+  ((loop :initarg :loop :reader loop-left-unfreed-loop)
+   (code :initarg :code :reader loop-left-unfreed-code
+         :documentation "uv_loop_close's last result, a negative libuv error code.")
+   (handles :initarg :handles :reader loop-left-unfreed-handles
+            :documentation "The kind of each handle still on the loop, as a keyword."))
+  (:report
+   (lambda (c stream)
+     (let ((handles (loop-left-unfreed-handles c)))
+       (format stream "uv_loop_close still returned ~A after CLOSE-LOOP closed the handles it found and tried again. ~D handle~:P still open~@[: ~{~(~A~)~^, ~}~]. The loop was left unfreed, which leaks its memory, because freeing it while libuv still uses it corrupts memory elsewhere."
+               (ffi:uv-err-name (loop-left-unfreed-code c))
+               (length handles)
+               handles))))
+  (:documentation
+   "CLOSE-LOOP could not close LOOP's uv_loop_t, so it did not free it (#877).
+
+uv_loop_close returns UV_EBUSY while a handle or a request is still open on the loop. CLOSE-LOOP
+then closes every handle it finds with uv_walk, runs the loop so their close callbacks fire,
+and tries again. This warning means that did not work in the attempts allowed, usually because
+a request (a filesystem operation in libuv's thread pool, for instance) was still running. A
+warning and not an error: the loop is unusable either way, and the leak is the safe outcome. A
+later CLOSE-LOOP tries again. A caller that logs can handle this condition and log it."))
+
 (defparameter *error-classes*
   '(("ENOENT" . file-not-found)
     ("EACCES" . permission-denied)

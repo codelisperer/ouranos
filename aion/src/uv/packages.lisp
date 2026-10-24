@@ -128,6 +128,9 @@ safe to call from any thread even while another thread runs a loop.")
    #:loop-thread-still-running #:loop-thread-still-running-loop
    #:loop-thread-still-running-thread #:loop-thread-still-running-timeout
    #:wait-for-loop-thread #:leave-loop-unfreed #:loop-freed-p
+   ;; uv_loop_close still failed after the handles were closed, so the loop was not freed (#877)
+   #:loop-left-unfreed #:loop-left-unfreed-loop #:loop-left-unfreed-code
+   #:loop-left-unfreed-handles
    ;; loop
    #:event-loop #:make-loop #:close-loop #:with-loop #:run #:stop #:loop-alive-p
    #:start-loop-thread #:stop-loop-thread #:submit #:loop-thread-p

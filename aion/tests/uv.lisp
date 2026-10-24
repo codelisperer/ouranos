@@ -670,3 +670,52 @@ loop lock only while the loop is not being freed. Repeated, because the window i
         (dolist (c closers) (sb-thread:join-thread c :default nil :timeout 30))
         (is (null errors) "round ~D: ~S" i errors)
         (is (eq :freed (uv:loop-freed-p l)) "round ~D" i)))))
+
+;;; --- uv_loop_close and handles CLOSE-LOOP does not know about (#877) -----------
+
+(defun %init-unowned-timer (l)
+  "A timer handle on L that is not on LOOP-OWNED, so CLOSE-LOOP's own list does not close it.
+The caller frees the memory, after the loop is closed."
+  (let ((handle (cffi:foreign-alloc :char :count (aion/uv/ffi:uv-handle-size aion/uv/ffi:+uv-timer+))))
+    (is (zerop (aion/uv/ffi:uv-timer-init (aion/uv::loop-pointer l) handle)))
+    handle))
+
+(test close-loop-closes-a-handle-it-does-not-own-and-frees-the-loop
+  "A handle created without going through LOOP-OWNED makes uv_loop_close return UV_EBUSY.
+CLOSE-LOOP finds it with uv_walk, closes it, and frees the loop once uv_loop_close succeeds,
+without a LOOP-LEFT-UNFREED warning."
+  (let* ((l (uv:make-loop))
+         (handle (%init-unowned-timer l))
+         (warnings '()))
+    (handler-bind ((uv:loop-left-unfreed (lambda (w) (push w warnings) (muffle-warning w))))
+      (uv:close-loop l))
+    (is (null warnings) "~{~A~^; ~}" warnings)
+    (is (eq :freed (uv:loop-freed-p l)))
+    (is (plusp (aion/uv/ffi:uv-is-closing handle)) "the walk closed the unowned handle")
+    (cffi:foreign-free handle)))
+
+(test without-the-walk-an-unowned-handle-leaves-the-loop-unfreed
+  "The control for the test above. With the walk's closing step removed, uv_loop_close keeps
+returning UV_EBUSY, so CLOSE-LOOP leaves the loop unfreed and warns, naming the timer. Before
+#877 it freed the loop here. Once the walk works again, a later CLOSE-LOOP frees it."
+  (let* ((l (uv:make-loop))
+         (handle (%init-unowned-timer l))
+         (warnings '())
+         (walk (fdefinition 'aion/uv::%close-open-handles)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'aion/uv::%close-open-handles)
+                 (lambda (loop) (declare (ignore loop)) nil))
+           (handler-bind ((uv:loop-left-unfreed (lambda (w) (push w warnings) (muffle-warning w))))
+             (is (null (uv:close-loop l)))))
+      (setf (fdefinition 'aion/uv::%close-open-handles) walk))
+    (is (= 1 (length warnings)))
+    (let ((w (first warnings)))
+      (when w
+        (is (equal "EBUSY" (aion/uv/ffi:uv-err-name (uv:loop-left-unfreed-code w))))
+        (is (member :timer (uv:loop-left-unfreed-handles w)))))
+    (is (null (uv:loop-freed-p l)) "the loop must not be freed while uv_loop_close fails")
+    (is (zerop (aion/uv/ffi:uv-is-closing handle)) "nothing closed the unowned handle")
+    (uv:close-loop l)
+    (is (eq :freed (uv:loop-freed-p l)) "a later close-loop frees it")
+    (cffi:foreign-free handle)))
