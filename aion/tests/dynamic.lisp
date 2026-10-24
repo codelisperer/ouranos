@@ -224,6 +224,22 @@ is a comment by design, so it is read only from the comments."
     (or (search "inheriting" code)
         (search "THREAD-LIFETIME" comments))))
 
+(defun %names-a-maker-p (line makers)
+  "Whether LINE names one of MAKERS (strings such as \"make-thread\") as a whole symbol: after a
+(, a :, a ', whitespace or the start of the line, and followed by whitespace, a ), or the end of
+the line. A plain substring search took a name that only contains one, such as
+%MAKE-THREAD-MEMORY, for a spawn site (#908's review)."
+  (some (lambda (maker)
+          (loop for at = (search maker line) then (search maker line :start2 (1+ at))
+                while at
+                thereis (and (or (zerop at) (find (char line (1- at)) "(:' ")
+                                 (char= (char line (1- at)) #\Tab))
+                             (let ((after (+ at (length maker))))
+                               (or (= after (length line))
+                                   (find (char line after) " )")
+                                   (char= (char line after) #\Tab))))))
+        makers))
+
 (defun %undecided-in-lines (lines)
   "Line numbers in LINES that spawn a thread without recording a decision.
 
@@ -233,7 +249,7 @@ copy of the logic, and would keep passing after the real one changed."
   (let ((found '()))
     (loop for line in lines
           for n from 1
-          when (search "make-thread" line)
+          when (%names-a-maker-p line '("make-thread"))
             do (let* ((start (max 0 (- n 6)))
                       (window (subseq lines start (min (length lines) (+ n 2)))))
                  (unless (%decided-p window)
@@ -411,7 +427,7 @@ site says INTERRUPTS: why not.")
   "Line numbers in LINES that spawn a thread without having decided about interrupts."
   (loop for line in lines
         for n from 1
-        when (and (some (lambda (maker) (search maker line)) +thread-makers+)
+        when (and (%names-a-maker-p line +thread-makers+)
                   (not (%unblock-decided-p lines n)))
           collect n))
 
@@ -453,3 +469,12 @@ INTERRUPTS: comment above it."
              (list "(sb-thread:make-thread" "  (lambda ()" "    (aion/dynamic:unblock-interrupts)" "    1))"))))
   (is (null (%unblocking-undecided-in-lines
              (list ";; INTERRUPTS: joined at once, and nothing interrupts it." "(sb-thread:make-thread (lambda () 1))")))))
+
+(test (the-sweeps-match-a-maker-as-a-whole-symbol :suite aion-dynamic)
+  "A name that only contains a maker's name, such as %MAKE-THREAD-MEMORY, is not a spawn site; a
+call to SB-THREAD:MAKE-THREAD, BT:MAKE-THREAD or MAKE-THREAD is."
+  (is (null (%undecided-in-lines (list "(defstruct (thread-memory (:constructor %make-thread-memory)))"))))
+  (is (null (%unblocking-undecided-in-lines (list "        (%make-thread-memory :store store)"))))
+  (is (equal '(1) (%undecided-in-lines (list "(sb-thread:make-thread (lambda () 1))"))))
+  (is (equal '(1) (%undecided-in-lines (list "  (bt:make-thread #'f)"))))
+  (is (equal '(1) (%unblocking-undecided-in-lines (list "(make-thread (lambda () 1) :name \"x\")")))))
