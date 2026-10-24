@@ -19,7 +19,7 @@
 
 (in-package #:aion/tls)
 
-(defconstant +shim-version+ 2
+(defconstant +shim-version+ 3
   "The version of aion/src/tls/c/ouranos_tls.c this code was written against. The loaded
 library's ouranos_tls_shim_version must return exactly this.")
 

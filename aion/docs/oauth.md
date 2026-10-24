@@ -53,7 +53,7 @@ It follows the authorization section of the MCP specification, revision 2026-07-
   - The authorization server's metadata is looked for at the RFC 8414 URL, then the OpenID Connect ones. For an issuer with a path, the path goes after the well-known suffix. The document's `issuer` must be identical to the issuer it was fetched for.
   - The server must offer PKCE with `S256`.
 - **URLs from servers.** Every URL a server supplies must be https, or http on a loopback address. It is fetched through `aion/http-client:fetch-public`, which refuses internal addresses and here follows no redirect. A request carrying a code, a refresh token or client metadata is therefore never forwarded to another host.
-- **Not on Windows yet.** `fetch-public` cannot pin a connection on Windows, and #295 decided that it signals `pinned-connect-unsupported` there rather than connect without the check. `aion/oauth` keeps that rule for every request, so a sign-in on Windows signals it, until `aion/http-client` can pin a connection there (#536).
+- **On Windows too.** `fetch-public` pins its connection on Windows as well (#536): aion/tls carries the TLS, and Windows decides whether to trust the server's certificate, so a sign-in works the same way on every platform. A certificate Windows refuses is signalled as a subclass of `aion/http-client:certificate-rejected`, such as `certificate-expired` or `certificate-untrusted-root`.
 - **The client id.** It comes from the first of these that applies:
   1. a client pre-registered for the issuer (`:pre-registered`, an alist of issuer to client id);
   2. the app's client ID metadata document, when the server sets `client_id_metadata_document_supported`;

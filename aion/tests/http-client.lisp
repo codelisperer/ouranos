@@ -249,18 +249,24 @@ UTF-8 sequence -- because that is the case the old contract silently destroyed."
 (defun server-port (server) (aion/test-http:server-port server))
 (defun server-heads (server) (aion/test-http:server-heads server))
 
+(defparameter +tls-certificate+
+  #+os-windows "pinned-test-ec.crt" #-os-windows "pinned-test.crt"
+  "The test server's certificate: an EC one on Windows, where aion/tls serves TLS and cannot
+present the RSA one (see fixtures/http-client/README.md), the RSA one elsewhere.")
+(defparameter +tls-key+ #+os-windows "pinned-test-ec.key" #-os-windows "pinned-test.key")
+
 (defun %start-server (handler &key tls)
   "A server on 127.0.0.1 answering with HANDLER, a function of (path head stream) that writes
-the response. Records every request head. TLS T presents the certificate for pinned.test; TLS :IP
-presents the one whose names are the addresses 127.0.0.1 and ::1."
-  (let ((base (if (eq tls :ip) "ip-test" "pinned-test")))
-    (aion/test-http:start-server
-     (lambda (request stream)
-       (funcall handler (aion/test-http:request-path request)
-                (aion/test-http:request-head request) stream))
-     :tls-certificate (and tls (%fixture (format nil "~A.crt" base)))
-     :tls-key (and tls (%fixture (format nil "~A.key" base)))
-     :name "http-client test server")))
+the response. Records every request head. TLS T presents the certificate for pinned.test
+(+TLS-CERTIFICATE+, an EC one on Windows); TLS :IP presents the one whose names are the addresses
+127.0.0.1 and ::1."
+  (aion/test-http:start-server
+   (lambda (request stream)
+     (funcall handler (aion/test-http:request-path request)
+              (aion/test-http:request-head request) stream))
+   :tls-certificate (and tls (%fixture (if (eq tls :ip) "ip-test.crt" +tls-certificate+)))
+   :tls-key (and tls (%fixture (if (eq tls :ip) "ip-test.key" +tls-key+)))
+   :name "http-client test server"))
 
 (defun %stop-server (server) (aion/test-http:stop-server server))
 
@@ -365,12 +371,12 @@ read stops at the cap. Control: a body exactly at the cap is returned whole."
                                    '())))
         (is (= 5000 (length (http:response-bytes ok))))))))
 
-;;; --- a pinned connection (not on Windows) -----------------------------------------------
+;;; --- a pinned connection -----------------------------------------------
 
 (test a-pinned-connection-keeps-the-host-name-in-the-host-header
   "pinned.test does not resolve anywhere, so the request can only have reached the server
 through CONNECT-ADDRESS; the server received the name, not the address."
-  (skip-on-windows "a pinned connection is not available on Windows (WinHTTP)"
+  (progn
     (with-server (s (lambda (path head stream)
                       (declare (ignore path head))
                       (%write-response stream 200 '() "pinned")))
@@ -386,12 +392,12 @@ through CONNECT-ADDRESS; the server received the name, not the address."
   "Connected to 127.0.0.1, the certificate for pinned.test is accepted for https://pinned.test
 and refused for https://other.test, so verification used the URL's name. Control for the trust
 root: without CA-PATH the self-signed certificate is refused as well."
-  (skip-on-windows "a pinned connection is not available on Windows (WinHTTP)"
+  (progn
     (with-server (s (lambda (path head stream)
                       (declare (ignore path head))
                       (%write-response stream 200 '() "over tls"))
                     :tls t)
-      (flet ((get-as (host &key (ca (%fixture "pinned-test.crt")))
+      (flet ((get-as (host &key (ca (%fixture +tls-certificate+)))
                (http:send-request (http:make-request :url (%local s "/" host "https")
                                                      :connect-address "127.0.0.1"
                                                      :ca-path ca :read-timeout 5)
@@ -411,7 +417,7 @@ verified was \"[::1]\", which no certificate holds, so this request was refused.
 an address the certificate does not name, is refused; the IPv4 literal is accepted; the host name
 other.test is refused. (cl+ssl also accepts the common name, ip.test, even though the certificate
 has subject alternative names, which RFC 6125 does not allow. That is unchanged here.)"
-  (skip-on-windows "a pinned connection is not available on Windows (WinHTTP)"
+  (skip-on-windows "ip-test.key is a PKCS#8 RSA key, which the aion/tls test server refuses (#914)"
     (with-server (s (lambda (path head stream)
                       (declare (ignore path head))
                       (%write-response stream 200 '() "over tls"))
@@ -503,7 +509,7 @@ Nothing connects."
 (test fetch-public-keeps-the-body-of-an-error-response
   "The body of a 400 fetched over a pinned connection is the body the server sent. It used to
 be lost, because the connection was closed before the body was read (#527)."
-  (skip-on-windows "fetch-public pins its connections, which Windows does not support here"
+  (progn
     (with-server (s (lambda (path head stream)
                       (declare (ignore path head))
                       (%write-response stream 400 '(("Content-Type" . "application/json"))
@@ -537,7 +543,7 @@ a function of no arguments, returns true."
   "A server that sends a byte every 2 seconds never trips a 5-second read timeout. With
 :DEADLINE 3 the fetch signals FETCH-DEADLINE-EXCEEDED after about 3 seconds; a fetch of the
 same kind of server with no deadline is still reading at that point (#807)."
-  (skip-on-windows "fetch-public pins its connections, which Windows does not support here"
+  (progn
     (let ((done nil))
       (with-server (slow (%slow-handler (lambda () done)))
         (with-server (other (%slow-handler (lambda () done)))
@@ -570,7 +576,7 @@ same kind of server with no deadline is still reading at that point (#807)."
 (test a-fetch-that-ends-before-its-deadline-leaves-no-timer-or-thread
   "The deadline's timer is unscheduled whether the fetch returns or signals, so no timer is left
 to fire later and no thread is started for it (#807)."
-  (skip-on-windows "fetch-public pins its connections, which Windows does not support here"
+  (progn
     (with-server (s (lambda (path head stream)
                       (declare (ignore path head))
                       (%write-response stream 200 '(("Content-Type" . "text/plain")) "ok")))
@@ -605,7 +611,7 @@ the deadline number where the watch belonged (#807)."
 (test fetch-public-returns-an-empty-response
   "A 404 with an empty body is an ordinary response: status 404, no bytes. It used to fail with
 CLOSED-STREAM-ERROR, because the connection was closed before the body was read (#527)."
-  (skip-on-windows "fetch-public pins its connections, which Windows does not support here"
+  (progn
     (with-server (s (lambda (path head stream)
                       (declare (ignore path head))
                       (%write-response stream 404 '() "")))
@@ -619,7 +625,7 @@ CLOSED-STREAM-ERROR, because the connection was closed before the body was read 
   "A public-looking URL redirects to one that resolves to the metadata address; that hop is
 refused, and the server saw only the first request. Control: a redirect to an allowed host is
 followed."
-  (skip-on-windows "fetch-public pins its connections, which Windows does not support here"
+  (progn
     (with-server (s (lambda (path head stream)
                       (declare (ignore head))
                       (cond ((string= path "/to-metadata")
@@ -875,3 +881,328 @@ changes that check. The control sends octets of another type, whose header is un
           "only a body of octets: dexador's own multipart handling of other bodies is left alone")
       (is (string= "multipart/form-data"
                    (sent-type '(("field" . "value")) "multipart/form-data"))))))
+
+;;; --- the HTTP/1.1 exchange a pinned connection uses on Windows (#536) ---------------------
+;;;
+;;; http1.lisp reads responses from servers a user named, so these feed it well-formed and
+;;; malformed responses from memory. Compiled and run on every platform, though only Windows'
+;;; pinned path uses it. Every refusal must be MALFORMED-RESPONSE, an HTTP-ERROR, so that %HTTP
+;;; passes it on as itself.
+
+(defclass %octet-input (sb-gray:fundamental-binary-input-stream)
+  ((octets :initarg :octets :reader %octets)
+   (at :initform 0 :accessor %at)))
+
+(defmethod stream-element-type ((s %octet-input)) '(unsigned-byte 8))
+
+(defmethod sb-gray:stream-read-byte ((s %octet-input))
+  (if (< (%at s) (length (%octets s)))
+      (prog1 (aref (%octets s) (%at s)) (incf (%at s)))
+      :eof))
+
+(defun %crlf (&rest lines)
+  "LINES joined with CRLF, as octets. A line that is a vector of octets is used as it is."
+  (let ((out (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+    (dolist (l lines (coerce out '(simple-array (unsigned-byte 8) (*))))
+      (loop for b across (if (stringp l) (sb-ext:string-to-octets l :external-format :latin-1) l)
+            do (vector-push-extend b out))
+      (vector-push-extend 13 out)
+      (vector-push-extend 10 out))))
+
+(defun %parse (octets &key (method :get))
+  "Read the response in OCTETS: (values STATUS FIELDS BODY-OCTETS)."
+  (let ((in (make-instance '%octet-input :octets octets)))
+    (multiple-value-bind (status fields) (http::read-response-head in)
+      (let ((body (http::response-body-stream in (http::response-framing method status fields)
+                                              (lambda () nil))))
+        (values status fields
+                (coerce (loop for b = (read-byte body nil nil) while b collect b)
+                        '(vector (unsigned-byte 8))))))))
+
+(defun %text (octets) (sb-ext:octets-to-string (coerce octets '(vector (unsigned-byte 8))) :external-format :latin-1))
+
+(test http1-reads-each-framing
+  (multiple-value-bind (status fields body)
+      (%parse (%crlf "HTTP/1.1 200 OK" "Content-Length: 5" "X-A: 1" "x-a: 2" "" "helloEXTRA"))
+    (is (= 200 status))
+    (is (string= "hello" (%text body)) "Content-Length stops the body: ~S" (%text body))
+    (is (string= "1, 2" (gethash "x-a" fields)) "repeated fields are joined as dexador joins them"))
+  (multiple-value-bind (status fields body)
+      (%parse (%crlf "HTTP/1.1 200 OK" "Transfer-Encoding: chunked" ""
+                     "3;ext=1" "abc" "A" "0123456789" "0" "Trailer-X: t" ""))
+    (declare (ignore fields))
+    (is (= 200 status))
+    (is (string= "abc0123456789" (%text body))))
+  (is (string= "to the close"
+               (%text (nth-value 2 (%parse (concatenate '(vector (unsigned-byte 8))
+                                                        (%crlf "HTTP/1.1 200 OK" "")
+                                                        (sb-ext:string-to-octets "to the close")))))))
+  (is (zerop (length (nth-value 2 (%parse (%crlf "HTTP/1.1 204 No Content" "Content-Length: 7" "" "ignored"))))))
+  (is (zerop (length (nth-value 2 (%parse (%crlf "HTTP/1.1 200 OK" "Content-Length: 7" "" "ignored")
+                                          :method :head)))))
+  (is (= 200 (%parse (%crlf "HTTP/1.1 100 Continue" "" "HTTP/1.1 200 OK" "Content-Length: 0" "")))
+      "an interim response is skipped")
+  (is (string= "abc" (%text (nth-value 2 (%parse (%crlf "HTTP/1.1 200 OK" "Content-Length: 3, 3" "" "abc")))))
+      "Content-Length sent twice with one value is that value"))
+
+(defun %refused-p (octets &key (method :get))
+  "Whether reading OCTETS signals MALFORMED-RESPONSE. Any other error is a test failure."
+  (handler-case (progn (%parse octets :method method) nil)
+    (http:malformed-response () t)))
+
+(test http1-refuses-what-could-be-framed-two-ways
+  "Request smuggling needs a response a proxy and a client frame differently."
+  (is-true (%refused-p (%crlf "HTTP/1.1 200 OK" "Content-Length: 3" "Transfer-Encoding: chunked" "" "0" "")))
+  (is-true (%refused-p (%crlf "HTTP/1.1 200 OK" "Transfer-Encoding: gzip, chunked" "" "0" "")))
+  (is-true (%refused-p (%crlf "HTTP/1.1 200 OK" "Content-Length: 3" "Content-Length: 4" "" "abcd")))
+  (is-true (%refused-p (%crlf "HTTP/1.1 200 OK" "Content-Length: 3, 4" "" "abcd")))
+  (is-true (%refused-p (%crlf "HTTP/1.1 200 OK" "Content-Length: +3" "" "abc")))
+  (is-true (%refused-p (%crlf "HTTP/1.1 200 OK" "Content-Length: 0x3" "" "abc")))
+  (is-true (%refused-p (%crlf "HTTP/1.1 200 OK" "Content-Length: 99999999999999999999" "" "abc"))))
+
+(test http1-refuses-a-head-outside-the-grammar
+  (dolist (bad (list (%crlf "HTTP/2 200 OK" "" "")
+                     (%crlf "HTTP/1.1 20 OK" "")
+                     (%crlf "HTTP/1.1 2000 OK" "")
+                     (%crlf "ICY 200 OK" "")
+                     (%crlf "HTTP/1.1 200 OK" "No colon here" "")
+                     (%crlf "HTTP/1.1 200 OK" "Bad Name: x" "")
+                     (%crlf "HTTP/1.1 200 OK" ": no name" "")
+                     (%crlf "HTTP/1.1 200 OK" "X-A: 1" " folded" "")
+                     (%crlf "HTTP/1.1 200 OK" (format nil "X-A: a~Cb" (code-char 0)) "")
+                     (sb-ext:string-to-octets (format nil "HTTP/1.1 200 OK~CX-A: 1~C~C~C" #\Return #\Return #\Return #\Newline))
+                     (sb-ext:string-to-octets "HTTP/1.1 200 OK")
+                     (%crlf "HTTP/1.1 200 OK" "X-A: 1")))
+    (is-true (%refused-p bad) "accepted: ~S" (%text (subseq bad 0 (min 60 (length bad)))))))
+
+(test http1-refuses-a-head-past-its-limits
+  (let ((long (make-string (1+ http::+max-line-octets+) :initial-element #\a)))
+    (is-true (%refused-p (%crlf "HTTP/1.1 200 OK" (concatenate 'string "X-Long: " long) "")))
+    (is-true (%refused-p (%crlf (concatenate 'string "HTTP/1.1 200 " long) ""))))
+  (is-true (%refused-p (apply #'%crlf "HTTP/1.1 200 OK"
+                              (append (loop for i from 0 to http::+max-header-fields+
+                                            collect (format nil "X-~D: v" i))
+                                      (list "")))))
+  (is-true (%refused-p (apply #'%crlf
+                              (append (loop repeat (1+ http::+max-interim-responses+)
+                                            append (list "HTTP/1.1 100 Continue" ""))
+                                      (list "HTTP/1.1 200 OK" "Content-Length: 0" "")))))
+  (let ((field (concatenate 'string "X-Big: " (make-string 60000 :initial-element #\b))))
+    (is-true (%refused-p (apply #'%crlf "HTTP/1.1 200 OK"
+                                (append (loop repeat 5 collect field) (list ""))))
+             "five fields under the line limit still pass the head's limit"))
+  (is (= 200 (%parse (%crlf "HTTP/1.1 200 OK"
+                            (concatenate 'string "Content-Security-Policy: " (make-string 20000 :initial-element #\c))
+                            "Content-Length: 0" "")))
+      "a header line longer than 8 KiB, as GitHub sends, is read"))
+
+(test http1-refuses-a-chunked-body-outside-the-grammar
+  (dolist (bad (list (%crlf "HTTP/1.1 200 OK" "Transfer-Encoding: chunked" "" "zz" "")
+                     (%crlf "HTTP/1.1 200 OK" "Transfer-Encoding: chunked" "" "-1" "")
+                     (%crlf "HTTP/1.1 200 OK" "Transfer-Encoding: chunked" "" "" "")
+                     (%crlf "HTTP/1.1 200 OK" "Transfer-Encoding: chunked" "" "1000000000000000" "")
+                     (%crlf "HTTP/1.1 200 OK" "Transfer-Encoding: chunked" "" "3 x" "abc" "0" "")
+                     (%crlf "HTTP/1.1 200 OK" "Transfer-Encoding: chunked" "" "3" "abcd" "0" "")
+                     (%crlf "HTTP/1.1 200 OK" "Transfer-Encoding: chunked" "" "5" "ab")
+                     (%crlf "HTTP/1.1 200 OK" "Transfer-Encoding: chunked" ""
+                            (concatenate 'string "1;" (make-string 2000 :initial-element #\e)) "a" "0" "")
+                     (%crlf "HTTP/1.1 200 OK" "Content-Length: 10" "" "short")))
+    (is-true (%refused-p bad) "accepted: ~S" (%text (subseq bad 0 (min 80 (length bad)))))))
+
+(test http1-never-signals-anything-but-a-malformed-response-on-garbage
+  "Seeded mutations of a valid response, and random octets: each read either returns or signals
+MALFORMED-RESPONSE, never another error, and always ends."
+  (let ((rs (sb-ext:seed-random-state 536))
+        (valid (%crlf "HTTP/1.1 200 OK" "Transfer-Encoding: chunked" "X-A: 1" "" "3" "abc" "0" ""))
+        (other '()))
+    (dotimes (i 400)
+      (let ((octets (if (evenp i)
+                        (let ((v (copy-seq valid)))
+                          (dotimes (k (1+ (random 4 rs)))
+                            (setf (aref v (random (length v) rs)) (random 256 rs)))
+                          v)
+                        (let ((v (make-array (random 300 rs) :element-type '(unsigned-byte 8))))
+                          (dotimes (k (length v) v) (setf (aref v k) (random 256 rs)))))))
+        (handler-case (%parse octets)
+          (http:malformed-response () nil)
+          (error (e) (push (list i (type-of e)) other)))))
+    (is (null other) "other errors: ~S" (subseq other 0 (min 5 (length other))))))
+
+(test http1-writes-a-request-that-cannot-be-split
+  (flet ((written (headers &optional content)
+           (let ((out (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+             (with-open-stream (s (make-instance '%octet-output :sink out))
+               (http::write-request s :post (quri:uri "https://h.test:8443/p?q=1") headers content))
+             (%text out))))
+    (let ((text (written (list (cons "Host" "evil.test") (cons "Content-Length" "999")
+                               (cons "Connection" "keep-alive") (cons "X-Ok" "1"))
+                         (list (cons "a" "b c")))))
+      (is (eql 0 (search (format nil "POST /p?q=1 HTTP/1.1~C~CHost: h.test:8443~C~C" #\Return #\Newline #\Return #\Newline) text))
+          "the request line, then the URL's host: ~S" text)
+      (is (not (search "evil.test" text)) "the caller's Host is not sent")
+      (is (not (search "999" text)) "the caller's Content-Length is not sent")
+      (is (search "Connection: close" text))
+      (is (search "Content-Type: application/x-www-form-urlencoded" text))
+      (is (search "Content-Length: 7" text) "a=b+c or a=b%20c is seven octets: ~S" text))
+    (signals http:http-error (written (list (cons "X-Bad" (format nil "a~C~CX-Injected: 1" #\Return #\Newline)))))
+    (signals http:http-error (written (list (cons "Bad Name" "x"))))))
+
+(defclass %octet-output (sb-gray:fundamental-binary-output-stream)
+  ((sink :initarg :sink :reader %sink)))
+
+(defmethod stream-element-type ((s %octet-output)) '(unsigned-byte 8))
+(defmethod sb-gray:stream-write-byte ((s %octet-output) b) (vector-push-extend b (%sink s)) b)
+
+;;; --- Windows: the certificate decision is Windows' (#536) ---------------------------------
+
+(test every-certificate-verdict-has-its-own-condition
+  "Each reason a platform verifier gives is signalled as its own subclass of
+CERTIFICATE-REJECTED, and an unknown one as CERTIFICATE-REJECTED itself, never a generic error."
+  (loop for (verdict . class) in '((:expired . http:certificate-expired)
+                                   (:untrusted-root . http:certificate-untrusted-root)
+                                   (:name-mismatch . http:certificate-name-mismatch)
+                                   (:revoked . http:certificate-revoked)
+                                   (:revocation-unknown . http:certificate-revocation-unknown)
+                                   (:distrusted . http:certificate-distrusted)
+                                   (:chain-incomplete . http:certificate-chain-incomplete)
+                                   (:wrong-usage . http:certificate-wrong-usage))
+        do (is (eq class (http::certificate-condition-class verdict)) "~S" verdict)
+           (is (subtypep class 'http:certificate-rejected))
+           (is (subtypep class 'http:http-error) "so %HTTP passes it on as itself"))
+  (is (eq 'http:certificate-rejected (http::certificate-condition-class :rejected))))
+
+#+os-windows
+(test windows-maps-its-policy-errors-to-verdicts
+  (loop for (code . verdict) in '((0 . :trusted) (#x800B0101 . :expired) (#x800B0109 . :untrusted-root)
+                                  (#x800B010F . :name-mismatch) (#x80092010 . :revoked)
+                                  (#x80092013 . :revocation-unknown) (#x800B0111 . :distrusted)
+                                  (#x800B010A . :chain-incomplete) (#x800B0110 . :wrong-usage)
+                                  (#x80096004 . :rejected))
+        do (is (eq verdict (aion/windows::policy-verdict code)) "#x~8,'0X" code)))
+
+#+os-windows
+(defun %fixture-octets (name)
+  (with-open-file (in (%fixture name) :element-type '(unsigned-byte 8))
+    (let* ((v (make-array (file-length in) :element-type '(unsigned-byte 8)))
+           (n (read-sequence v in)))
+      (subseq v 0 n))))
+
+#+os-windows
+(test windows-does-not-trust-a-self-signed-certificate
+  "The real crypt32 call, with no network: the self-signed fixture is not under any root this
+machine trusts. And the chain is judged for the name it is given."
+  (let* ((chain (aion/tls:make-certificate-chain (%fixture-octets +tls-certificate+)))
+         (der (aion/tls:certificate-chain-der chain)))
+    (unwind-protect
+         (multiple-value-bind (verdict code)
+             (aion/windows:verify-server-certificate-chain (list der) "pinned.test")
+           (is (eq :untrusted-root verdict) "~S #x~8,'0X" verdict code)
+           (is (= #x800B0109 code)))
+      (aion/tls:free-certificate-chain chain)))
+  (signals aion/windows:win32-error
+    (aion/windows:verify-server-certificate-chain
+     (list (make-array 8 :element-type '(unsigned-byte 8) :initial-element 1)) "x.test")))
+
+#+os-windows
+(test a-pinned-connection-on-windows-asks-windows-and-honours-its-answer
+  "Without CA-PATH, the pinned TLS connection gives the server's chain and the URL's host to the
+verifier and obeys it. A verifier that accepts gets the response; one that answers :EXPIRED
+makes the request signal CERTIFICATE-EXPIRED with Windows' code; and the real verifier refuses
+the self-signed test certificate as CERTIFICATE-UNTRUSTED-ROOT."
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "verified by the caller"))
+                  :tls t)
+    (flet ((get-it () (http:send-request (http:make-request :url (%local s "/" "pinned.test" "https")
+                                                            :connect-address "127.0.0.1"
+                                                            :read-timeout 5)
+                                         '())))
+      (let* ((seen '())
+             (http::*server-certificate-verifier*
+               (lambda (chain host) (push (list (length chain) host) seen) :trusted)))
+        (is (string= "verified by the caller" (http:response-body (get-it))))
+        (is (equal '((1 "pinned.test")) seen) "the verifier saw ~S" seen))
+      (let ((http::*server-certificate-verifier*
+              (lambda (chain host) (declare (ignore chain host)) (values :expired #x800B0101))))
+        (handler-case (progn (get-it) (fail "an :EXPIRED verdict was not refused"))
+          (http:certificate-expired (e)
+            (is (string= "pinned.test" (http:certificate-rejected-host e)))
+            (is (= #x800B0101 (http:certificate-rejected-code e))))))
+      (signals http:certificate-untrusted-root (get-it)))))
+
+;;; --- the opt-in check against public servers (GitHub Actions only) ------------------------
+
+(test public-https-through-the-pinned-path
+  "Against servers on the internet: a public https page is fetched through FETCH-PUBLIC's pinned
+connection, and on Windows an expired certificate is refused as CERTIFICATE-EXPIRED by Windows'
+own policy. It needs the network, so it runs only on GitHub's runners (GITHUB_ACTIONS), never
+by default on a developer's machine."
+  (if (not (uiop:getenvp "GITHUB_ACTIONS"))
+      (skip "Runs only on GitHub Actions (GITHUB_ACTIONS is not set here): it uses the network")
+      (progn
+        (let ((r (http:fetch-public "https://example.com/" :read-timeout 30 :deadline 60)))
+          (is (= 200 (http:response-status r))))
+        #+os-windows
+        (signals http:certificate-expired
+          (http:fetch-public "https://expired.badssl.com/" :read-timeout 30 :deadline 60)))))
+
+;;; --- the hub's review of #913 ---------------------------------------------------------------
+
+(test a-redirect-to-a-path-with-a-space-arrives-percent-encoded
+  "F1: a server redirects to \"/a b\". The next request's line must be \"GET /a%20b HTTP/1.1\": a
+raw space would split the request line for any proxy in between. On every platform, because
+FETCH-PUBLIC encodes each hop's URL before the request is made."
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore head))
+                    (if (string= path "/start")
+                        (%write-response stream 302 '(("Location" . "/a b")) "")
+                        (%write-response stream 200 '() "arrived"))))
+    (let ((r (http:fetch-public (%local s "/start" "start.test")
+                                :resolve (%resolver '(("start.test" "127.0.0.1")))
+                                :address-policy #'%loopback-allowed :read-timeout 5)))
+      (is (= 200 (http:response-status r)))
+      (let ((line (let ((h (first (server-heads s)))) (subseq h 0 (position #\Return h)))))
+        (is (string= "GET /a%20b HTTP/1.1" line) "the request line was ~S" line)))))
+
+(test the-request-target-is-percent-encoded-outside-printable-ascii
+  "F1: a space, a TAB, a control character, a Latin-1 character and one above U+00FF are each
+sent as their UTF-8 octets, percent-encoded; an existing escape and printable ASCII are kept."
+  (is (string= "/a%20b%09c%01d%C3%A9e%E2%98%BAf%2Fg?q=1&r=%22"
+               (http::%encode-target (format nil "/a b~Cc~Cd~Ce~Cf%2Fg?q=1&r=%22"
+                                             #\Tab (code-char 1) (code-char #xE9) (code-char #x263A)))))
+  (let ((out (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+    (with-open-stream (s (make-instance '%octet-output :sink out))
+      (http::write-request s :get (quri:uri (format nil "https://h.test/x y~C" (code-char #x263A)))
+                           nil nil))
+    (is (eql 0 (search "GET /x%20y%E2%98%BA HTTP/1.1" (%text out))) "~S" (%text out)))
+  (signals http:http-error
+    (http::%host-safe (format nil "h~C.test" (code-char #xE9)))))
+
+(test a-field-name-must-be-ascii-and-a-value-holds-no-control-characters
+  "F4 and F5: an accented letter is not a tchar; a value may hold HTAB and obs-text, but no other
+control character and no DEL."
+  (is-true (%refused-p (%crlf "HTTP/1.1 200 OK" (format nil "X-~C: 1" (code-char #xE9)) "")))
+  (dolist (c (list (code-char 1) (code-char 27) (code-char 127)))
+    (is-true (%refused-p (%crlf "HTTP/1.1 200 OK" (format nil "X-A: a~Cb" c) "Content-Length: 0" ""))
+             "accepted char ~D" (char-code c)))
+  (multiple-value-bind (status fields)
+      (%parse (%crlf "HTTP/1.1 200 OK" (format nil "X-A: a~Cb~Cc" #\Tab (code-char #xE9))
+                     "Content-Length: 0" ""))
+    (is (= 200 status))
+    (is (string= (format nil "a~Cb~Cc" #\Tab (code-char #xE9)) (gethash "x-a" fields)))))
+
+#+os-windows
+(test a-pinned-connection-to-an-ipv6-literal-asks-about-the-bare-address
+  "F3: QURI keeps the brackets of https://[::1]/; the verifier is asked about ::1, the name a
+certificate's IP address entry holds."
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "v6"))
+                  :tls t)
+    (let* ((seen '())
+           (http::*server-certificate-verifier*
+             (lambda (chain host) (declare (ignore chain)) (push host seen) :trusted)))
+      (http:send-request (http:make-request :url (format nil "https://[::1]:~D/" (server-port s))
+                                            :connect-address "127.0.0.1" :read-timeout 5)
+                         '())
+      (is (equal '("::1") seen) "the verifier was asked about ~S" seen))))

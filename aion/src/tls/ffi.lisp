@@ -16,6 +16,7 @@
 (defconstant +transport-stream+ 0)
 (defconstant +preset-default+ 0)
 (defconstant +verify-none+ 0)
+(defconstant +verify-optional+ 1)
 (defconstant +verify-required+ 2)
 (defconstant +err-want-read+ (- #x6900))
 (defconstant +err-want-write+ (- #x6880))
@@ -58,6 +59,10 @@
 (cffi:defcfun ("ouranos_tls_version_number" %version-number) :int (ssl :pointer))
 (cffi:defcfun ("ouranos_tls_handshake_over" %handshake-over) :int (ssl :pointer))
 (cffi:defcfun ("ouranos_tls_crt_der" %crt-der) :pointer (crt :pointer) (len :pointer))
+(cffi:defcfun ("ouranos_tls_crt_next" %crt-next) :pointer (crt :pointer))
+(cffi:defcfun ("ouranos_tls_conf_session_tickets" %conf-session-tickets) :int
+  (conf :pointer) (count :int) (out :pointer))
+(cffi:defcfun ("ouranos_tls_ticket_free" %ticket-free) :void (ticket :pointer))
 (cffi:defcfun ("ouranos_tls_crt_check_key" %crt-check-key) :int (crt :pointer) (key :pointer))
 (cffi:defcfun ("ouranos_tls_pk_generate_ec_p256" %pk-generate-ec-p256) :int (pk :pointer))
 (cffi:defcfun ("ouranos_tls_x509write_set_san" %x509write-set-san) :int
@@ -87,6 +92,7 @@
   (ssl :pointer) (ctx :pointer) (send :pointer) (recv :pointer) (recv-timeout :pointer))
 (cffi:defcfun ("mbedtls_ssl_handshake" %ssl-handshake) :int (ssl :pointer))
 (cffi:defcfun ("mbedtls_ssl_read" %ssl-read) :int (ssl :pointer) (buf :pointer) (len :size))
+(cffi:defcfun ("mbedtls_ssl_check_pending" %ssl-check-pending) :int (ssl :pointer))
 (cffi:defcfun ("mbedtls_ssl_write" %ssl-write) :int (ssl :pointer) (buf :pointer) (len :size))
 (cffi:defcfun ("mbedtls_ssl_close_notify" %ssl-close-notify) :int (ssl :pointer))
 (cffi:defcfun ("mbedtls_ssl_get_verify_result" %ssl-get-verify-result) :uint32 (ssl :pointer))
