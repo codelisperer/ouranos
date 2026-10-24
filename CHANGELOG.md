@@ -574,10 +574,13 @@ its tag.
   observation, in one process or two, no longer leave two current replacements. An app that
   superseded the same observation twice now gets a `praxeon-error` on the second call. The
   embedding is computed before the lock is taken, so a read does not wait for the model.
-- **praxeon/memory-db: every read needs two new columns, and `ensure-schema` adds them** (#317):
-  `thread` (TEXT) and `source_through` (BIGINT on Postgres, INTEGER on SQLite). A read of the
+- **praxeon/memory-db: every read needs three new columns, and `ensure-schema` adds them** (#317):
+  `thread` (TEXT), `source_through` (BIGINT on Postgres, INTEGER on SQLite) and `condensed_from`
+  (TEXT). `condensed_from` comes with the reflector (#464): it holds the ids a condensed
+  observation replaced, and a table made before it needs it too, whether or not the app reflects.
+  A read of the
   subject's facts filters on `thread IS NULL`, so on a table made before them every read fails,
-  not only a thread's. An app acts if it does not call `ensure-schema` at start: it adds the two
+  not only a thread's. An app acts if it does not call `ensure-schema` at start: it adds the three
   columns in its own migration before it reads. Existing rows become facts about their subject,
   as they were. `ensure-schema` also creates a second table, the observations table's name with
   `_progress` appended: `id` (TEXT, the primary key, which `record-thread-progress` upserts on),
@@ -1543,9 +1546,9 @@ its tag.
     so an observation the app writes into the thread closes nothing, and erasing a later
     window's observations reopens nothing. A window whose tries are spent, with no later window
     written, stays open and is not tried again.
-  - `make-observer` refuses `:accept`, `:promote` or `:promote-accept` that is not a function or
-    the name of one, including a symbol that names a macro or a special operator, such as
-    `when`.
+  - `make-observer` refuses `:accept`, `:promote`, `:promote-accept`, `:reflect-accept` or
+    `:reflect-accept-protected` that is not a function or the name of one, including a symbol
+    that names a macro or a special operator, such as `when`.
   - If the observer's thread cannot be made, `observe-turn` signals the error and gives back its
     claim on the conversation, so a later call can start a run. The claim, the thread and its
     recording are one step with interrupts deferred, so a deadline around the app's request
@@ -1587,6 +1590,42 @@ its tag.
     proposal, and so does an `applies_from` that is a number, an array, an object or `true`.
     JSON null, `false` (which jzon reads as NIL) and an empty string mean no date.
     `apply-distillation` takes `:thread`.
+- **praxeon/observe: `reflect` condenses a scope's observations once they pass a threshold**
+  (#317, step B), 40,000 estimated tokens by default. A model returns condensed observations,
+  each naming the observations it replaces, and each is written only when the app's `:accept`
+  allows it; one that would merge a correction, or an observation at or above `:protect-value`,
+  also needs `:accept-protected`. Both refuse by default. `reflect` signals when the model's
+  answer cannot be read.
+  - **What counts toward the threshold** is the observations `reflect` may condense on `:accept`
+    alone (`praxeon/observe:condensable-tokens`): corrections and observations at or above
+    `:protect-value` are left out, so a scope of corrections is not reflected on over and over.
+    `:floor` raises the threshold for one call.
+  - **An item that does not condense is not written:** one with a single source, or one whose
+    content is not shorter than its sources' contents together. An item `condense` refuses is
+    logged and the other items are still written. `reflect` returns the observations written,
+    the condensable tokens left, and whether the model was asked.
+  - **An observer made with `:reflect-threshold`** (NIL or a positive integer) reflects on its
+    thread once at the end of a run that wrote a window, after the windows' progress is saved,
+    with `:reflect-accept`, `:reflect-accept-protected` and `:reflect-protect-value` (NIL or a
+    number) as `reflect`'s accept functions and protect value. The reflection counts as an attempt
+    for `observer-stuck-p`, and `stop-observer` can end it without losing the run's saved mark.
+    After a reflection, written or not, the next waits until the condensable tokens have grown by
+    another threshold past what it left. A reflection that fails is counted in
+    `observer-failures` and logged, and the windows stay written. `make-observer` refuses a
+    store with no `condense` method when `:reflect-threshold` is given.
+  - `praxeon/memory:condense` replaces several current observations in one scope with one,
+    which supersedes them and records their ids in `observation-condensed-from`, so `recall
+    :as-of` before still returns them. Its kind defaults to `:correction` when any source is a
+    correction, and its value to the highest of the sources' (`condensed-kind`,
+    `condensed-value`), so a condensation keeps the protection its sources had. It checks that every source is still current and writes
+    in the same step: under the store's lock, and on the SQL store in one transaction whose
+    updates change a source only while it is still current. The SQL store computes the
+    condensed observation's embedding before taking the lock. It refuses a source named twice.
+    An app's own memory store implements `condense` before it can be reflected on. A promoted
+    correction of a condensed observation is matched to the subject facts its sources came from.
+  - `praxeon/memory:observations-from-conversation` returns every observation that came from a
+    conversation, including those condensed from one, at any depth: what an erasure of the
+    conversation has to find (#150).
 - **`scripts/build-installer.ps1` and `scripts/build-dmg.sh` read the bundle's `RELEASE` file,
   which `scripts/build-desktop-app.lisp` writes when given `--product`, `--display-name` or
   `--default-channel`** (#408).
