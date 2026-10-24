@@ -449,7 +449,8 @@
                ;; aion/fs for FILE-ATTRIBUTES, re-exported here (#349). It is one
                ;; GetFileAttributesW binding, kept in aion/fs because cons and the build scripts
                ;; load that without CFFI.
-               "aion/fs")
+               "aion/fs"
+               "aion/dynamic")   ; unblock-interrupts, first in shell-open's thread (#896)
   :serial t
   :components ((:module "src/windows"
                 :serial t
@@ -513,7 +514,8 @@
   ;; aion/windows/registry for CLASS-AVAILABLE-P alone (pre-publication issue 306): CoCreateInstance cannot tell
   ;; "not installed" from "installed for the other bitness" -- both are REGDB_E_CLASSNOTREG
   ;; under WOW64 -- and the registry can. Read-only and Windows-only, like this system.
-  :depends-on ("aion/windows" "aion/windows/registry")
+  :depends-on ("aion/windows" "aion/windows/registry"
+               "aion/dynamic")   ; unblock-interrupts, first in the apartment thread (#896)
   :serial t
   :components ((:module "src/windows/com"
                 :serial t

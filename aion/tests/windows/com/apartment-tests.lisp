@@ -73,6 +73,55 @@ value may name a DIFFERENT object that something else in the image still holds."
   ;; and it still comes back afterwards
   (is (= 1 (com:in-apartment () 1))))
 
+(defun %in-a-deferred-step (thunk)
+  "Call THUNK inside SB-SYS:WITHOUT-INTERRUPTS with an interrupt to this thread deferred, the
+state in which a thread made by THUNK inherits a blocked mask on a build without safepoints (#541).
+As in aion/dynamic's tests: another thread interrupts this one, and the interrupt waits for the
+step to end."
+  (sb-sys:without-interrupts
+    (let ((me sb-thread:*current-thread*))
+      (sb-thread:join-thread
+       ;; THREAD-LIFETIME: scoped -- it sends one interrupt and is joined here.
+       ;; INTERRUPTS: not needed -- it only sends an interrupt, and is joined at once.
+       (sb-thread:make-thread (lambda () (sb-thread:interrupt-thread me (lambda () nil)))
+                              :name "deferred-step interrupter"))
+      (sleep 0.2))
+    (funcall thunk)))
+
+(test an-apartment-started-while-an-interrupt-is-deferred-can-be-interrupted
+  "#896. The apartment thread unblocks interrupts first, so it can be interrupted even when it was
+started inside a step while an interrupt to the starter was deferred.
+
+This system runs only on Windows, whose SBCL is a :SB-SAFEPOINT build: there a new thread does
+not take its creator's mask, so this passes with or without the call, and the call is there so the
+thread is correct on any build. The interrupt is sent while the thread runs Lisp, inside a call
+that loops until the interrupt sets a flag. On a :SB-SAFEPOINT build an interrupt is delivered
+only when a thread returns from foreign code, and between calls the apartment thread waits in
+MsgWaitForMultipleObjects, so an interrupt sent then would wait for the next call or message, as
+in aion/uv's loop-thread test."
+  (com:stop-apartment)
+  (%in-a-deferred-step #'com:start-apartment)
+  (let* ((sta (com::apartment-thread com::*apartment*))
+         (inside (sb-thread:make-semaphore))
+         (flag nil)
+         (result nil)
+         ;; THREAD-LIFETIME: scoped -- it makes one call into the apartment and is joined below.
+         ;; INTERRUPTS: not needed -- nothing interrupts it, and it is joined in this test.
+         (caller (sb-thread:make-thread
+                  (lambda ()
+                    (setf result (com:in-apartment ()
+                                   (sb-thread:signal-semaphore inside)
+                                   (loop until flag do (sleep 0.01))
+                                   :interrupted)))
+                  :name "apartment caller")))
+    (is-true (sb-thread:wait-on-semaphore inside :timeout 10) "the call did not reach the apartment")
+    (sb-thread:interrupt-thread sta (lambda () (setf flag t)))
+    (is-true (sb-thread:join-thread caller :default nil :timeout 5)
+             "the interrupt did not reach the apartment thread")
+    (unless flag (setf flag t))
+    (sb-thread:join-thread caller :default nil :timeout 10)
+    (is (eq :interrupted result))))
+
 ;;; --- the extension surface (pre-publication issue 201) ---------------------------------------------
 ;;;
 ;;; The finding these come from: the first external consumer of this binding -- a typelib

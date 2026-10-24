@@ -116,6 +116,7 @@
   ;; /usr/bin/open on macOS, xdg-open and dbus-send on Linux, all run as programs;
   ;; hades/program finds the Linux ones on PATH.
   :depends-on ("hades/program"
+               "aion/dynamic"   ; unblock-interrupts, first in each reaper thread (#896)
                (:feature :win32 "aion/windows"))
   :serial t
   :components ((:module "src/open"

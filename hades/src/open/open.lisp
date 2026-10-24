@@ -147,8 +147,9 @@ name can contain and which would end the quoted path early."
                                           :input nil :output nil :error-output nil)))
         ;; THREAD-LIFETIME: ends when PROGRAM exits. On Unix a child nobody waits for stays a
         ;; zombie until it is reaped; this waits for it, so the app does not have to.
-        ;; INTERRUPTS: not yet -- hades/open does not depend on aion/dynamic, so it does not call aion/dynamic:unblock-interrupts (#896).
-        (sb-thread:make-thread (lambda () (ignore-errors (uiop:wait-process process)))
+        (sb-thread:make-thread (lambda ()
+                                 (aion/dynamic:unblock-interrupts)
+                                 (ignore-errors (uiop:wait-process process)))
                                :name "hades/open reaper")
         t)
     (error () nil)))
@@ -163,8 +164,9 @@ wait. True when it started."
                                          :wait nil :search nil :escape-arguments nil
                                          :input nil :output nil :error nil)))
         ;; THREAD-LIFETIME: ends when PROGRAM exits, as in %LAUNCH.
-        ;; INTERRUPTS: not yet -- hades/open does not depend on aion/dynamic, so it does not call aion/dynamic:unblock-interrupts (#896).
-        (sb-thread:make-thread (lambda () (ignore-errors (sb-ext:process-wait process)))
+        (sb-thread:make-thread (lambda ()
+                                 (aion/dynamic:unblock-interrupts)
+                                 (ignore-errors (sb-ext:process-wait process)))
                                :name "hades/open reaper")
         t)
     (error () nil))
