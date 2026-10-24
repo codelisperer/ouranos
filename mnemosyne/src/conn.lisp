@@ -264,9 +264,10 @@ ON POSTGRES THE DRIVER READS EVERY ROW AT EXECUTE, as QUERY does, and this then 
 on each: the same memory as QUERY. Nothing in the tree scans a large Postgres table through
 this; a caller that needs it should use a cursor.
 
-A caution that applies to every query through cl-dbi on SQLite: its driver treats an error from
-sqlite3_step as the end of the rows, so a scan that fails part-way returns the rows read so far
-without signalling."
+A statement that fails part-way, after some rows, signals DB-ERROR here as in QUERY: cl-dbi's
+SQLite driver catches the error from sqlite3_step and finalizes the statement, and
+sqlite3_finalize returns the same error, which cl-sqlite signals. The test
+a-query-that-fails-part-way-signals-and-does-not-return-the-rows-before pins that."
   (%wrapping-db-errors "map-query"
     (let* ((start (get-internal-real-time))
            (driver (dbi:connection-driver-type connection))

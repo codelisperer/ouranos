@@ -139,3 +139,19 @@ the same call fails."
       (conn:disconnect a)
       (conn:disconnect b)
       (ignore-errors (delete-file path)))))
+
+(test a-query-that-fails-part-way-signals-and-does-not-return-the-rows-before
+  "A SQLite statement that fails on its sixth row (an integer overflow in abs) signals DB-ERROR,
+through QUERY and through MAP-QUERY, rather than returning the five rows read before it as if they
+were the whole result. cl-dbi's SQLite driver catches the error from sqlite3_step and finalizes the
+statement; it reaches the caller because sqlite3_finalize returns the same error and cl-sqlite
+signals it. This pins that, so a change in either library that made the result silently partial
+fails here. MAP-QUERY has called FUNCTION on the rows before the failing one when it signals."
+  (%call-with-rewrite-db (%rewrite-rows 10)
+    (lambda (c)
+      (let ((sql "SELECT k, CASE WHEN k = 'k05' THEN abs(-9223372036854775808) ELSE 1 END AS v FROM rw_t ORDER BY k")
+            (seen 0))
+        (signals conn:db-error (conn:query c sql))
+        (signals conn:db-error (conn:map-query c (lambda (row) (declare (ignore row)) (incf seen)) sql))
+        (is (= 5 seen) "the five rows before the failing one were read: ~D" seen)
+        (is (= 10 (length (conn:query c "SELECT k FROM rw_t"))) "control: the table itself reads whole")))))
