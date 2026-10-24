@@ -283,6 +283,120 @@ bundle directory, which must be empty when it refuses."
       (is (probe-file (merge-pathnames "LICENSES/pdfium-licenses/abseil.txt" bundle)))
       (is (probe-file (merge-pathnames "LICENSES/pdfium-licenses/sub/zlib.txt" bundle))))))
 
+;;; --- the tree's SQLite, carried when the app loads cl-sqlite (#899) ---------------------
+;;;
+;;; TREE-SQLITE-CARRY decides; CARRY-DECLARED-LIBRARIES carries. Each test gives the decision
+;;; a fresh vendor/ directory, and LOADED stands in for cl-sqlite being open in the image, so
+;;; the tests do not depend on what this machine has built. The end-to-end check, a built
+;;; bundle running praxeon's retrieval on the carried copy, is the sqlite-probe job in
+;;; desktop-release.yml.
+
+(defun %tree-sqlite-carry (vendor carries &rest keys)
+  "(values TREE-CARRIES NOTE CONDITION) from TREE-SQLITE-CARRY."
+  (handler-case (multiple-value-bind (carries note)
+                    (apply (%carry-fn "TREE-SQLITE-CARRY") vendor carries keys)
+                  (values carries note nil))
+    (error (e) (values nil nil e))))
+
+(defun %build-fake-sqlite (vendor platform &key (license t) (stamp "9.9.9"))
+  "Write vendor/sqlite/lib/<the platform's name>, vendor/sqlite/LICENSE when LICENSE, a
+sqlite.pin for version 9.9.9 in the directory above VENDOR, and vendor/sqlite/BUILT-FROM naming
+version STAMP with the pin's sha256 when STAMP is a string. The stamp's form is the one
+build-sqlite.lisp writes."
+  (let ((lib (merge-pathnames (concatenate 'string "sqlite/lib/"
+                                           (funcall (%carry-fn "SQLITE-FILE-NAME") platform))
+                              vendor))
+        (built-from (merge-pathnames "sqlite/BUILT-FROM" vendor)))
+    (%write lib "not really sqlite")
+    (when license (%write (merge-pathnames "sqlite/LICENSE" vendor) "public domain"))
+    (%write (merge-pathnames "sqlite.pin" (uiop:pathname-parent-directory-pathname vendor))
+            (format nil "# a test pin~%version 9.9.9~%sha256  ABCD~%"))
+    (if stamp
+        (%write built-from (format nil "version ~A~%sha256 abcd~%" stamp))
+        (uiop:delete-file-if-exists built-from))
+    lib))
+
+(test the-tree-sqlite-is-carried-only-when-the-app-loads-cl-sqlite
+  (let ((vendor (merge-pathnames "vendor/" (%fresh-tree))))
+    (%build-fake-sqlite vendor :macos)
+    (multiple-value-bind (carries note e) (%tree-sqlite-carry vendor '() :loaded nil :platform :macos)
+      (is (null e) "got ~A" e)
+      (is (null carries) "an app without cl-sqlite carries no SQLite")
+      (is (null note)))
+    (multiple-value-bind (carries note e) (%tree-sqlite-carry vendor '() :loaded t :platform :macos)
+      (is (null e) "got ~A" e)
+      (is (null note))
+      (is (= 1 (length carries)))
+      (is (equal (probe-file (first (first carries)))
+                 (probe-file (merge-pathnames "sqlite/lib/libsqlite3.dylib" vendor))))
+      (is (equal (probe-file (second (first carries)))
+                 (probe-file (merge-pathnames "sqlite/LICENSE" vendor)))))))
+
+(test the-tree-sqlite-has-the-file-name-cl-sqlite-asks-for-on-each-platform
+  ;; cl-sqlite's definition: libsqlite3 on darwin, libsqlite3.so.0 or .so on other Unixes,
+  ;; libsqlite3.dll or sqlite3.dll on Windows. Carrying another name would leave the image's
+  ;; own library unmatched (%MATCHING-OPEN-LIBRARIES), and SBCL would reopen it by bare name.
+  (loop for (platform name) in '((:macos "libsqlite3.dylib") (:linux "libsqlite3.so.0")
+                                 (:windows "sqlite3.dll"))
+        do (let ((vendor (merge-pathnames "vendor/" (%fresh-tree))))
+             (%build-fake-sqlite vendor platform)
+             (let ((carries (%tree-sqlite-carry vendor '() :loaded t :platform platform)))
+               (is (equal name (file-namestring (first (first carries))))
+                   "~A: carried ~A" platform (first (first carries)))))))
+
+(test the-bundle-build-stops-with-the-command-when-the-tree-sqlite-is-not-built
+  (let ((vendor (merge-pathnames "vendor/" (%fresh-tree))))
+    (multiple-value-bind (carries note e) (%tree-sqlite-carry vendor '() :loaded t :platform :linux)
+      (declare (ignore note))
+      (is (null carries))
+      (is (typep e (find-symbol "CARRY-REFUSED" "OURANOS-CARRY")) "got ~A" e)
+      (is (search "sbcl --script" (princ-to-string e)) "~A" e)
+      (is (search "build-sqlite.lisp" (princ-to-string e)) "~A" e))
+    ;; The library without its LICENSE is refused too: the bundle carries the licence text.
+    (%build-fake-sqlite vendor :linux :license nil)
+    (let ((e (nth-value 2 (%tree-sqlite-carry vendor '() :loaded t :platform :linux))))
+      (is (typep e (find-symbol "CARRY-REFUSED" "OURANOS-CARRY")) "got ~A" e)
+      (is (search "LICENSE" (princ-to-string e)) "~A" e))
+    ;; Built from another release than the pin names, or with no stamp: refused, with the
+    ;; command, which rebuilds it.
+    (dolist (stamp '("9.9.8" nil))
+      (%build-fake-sqlite vendor :linux :stamp stamp)
+      (let ((e (nth-value 2 (%tree-sqlite-carry vendor '() :loaded t :platform :linux))))
+        (is (typep e (find-symbol "CARRY-REFUSED" "OURANOS-CARRY")) "stamp ~A: got ~A" stamp e)
+        (is (search "not built from the release sqlite.pin names" (princ-to-string e)) "~A" e)
+        (is (search "build-sqlite.lisp" (princ-to-string e)) "~A" e)))
+    ;; The control: once both are there, built from the pin's release, it is carried.
+    (%build-fake-sqlite vendor :linux)
+    (multiple-value-bind (carries note e) (%tree-sqlite-carry vendor '() :loaded t :platform :linux)
+      (declare (ignore note))
+      (is (null e) "got ~A" e)
+      (is (= 1 (length carries))))))
+
+(test an-app-that-carries-its-own-sqlite-keeps-it
+  (let ((vendor (merge-pathnames "vendor/" (%fresh-tree))))
+    (%build-fake-sqlite vendor :windows)
+    (multiple-value-bind (carries note e)
+        (%tree-sqlite-carry vendor '(("C:/app/dll/sqlite3.dll" "C:/app/notes/pd.txt"))
+                            :loaded t :platform :windows)
+      (is (null e) "got ~A" e)
+      (is (null carries) "the tree's copy must not be carried beside the app's own")
+      (is (search "carries its own" (or note "")) "note: ~A" note))))
+
+(test a-tree-carry-may-come-from-vendor
+  ;; The app's --carry of a file under vendor/ is refused (CARRY-REFUSES-A-LIBRARY-UNDER-VENDOR);
+  ;; the tree's own SQLite comes from there and is carried, with its licence.
+  (let* ((tree (%fresh-tree))
+         (vendor (merge-pathnames "vendor/" tree))
+         (lib (%build-fake-sqlite vendor :linux)))
+    (multiple-value-bind (e bundle)
+        (%carry-refusal '() :vendor vendor
+                            :tree-carries (list (list (uiop:native-namestring lib)
+                                                      (uiop:native-namestring
+                                                       (merge-pathnames "sqlite/LICENSE" vendor)))))
+      (is (null e) "got ~A" e)
+      (is (probe-file (merge-pathnames "libsqlite3.so.0" bundle)))
+      (is (probe-file (merge-pathnames "LICENSES/libsqlite3.so-LICENSE" bundle))))))
+
 ;;; --- macOS: carried libraries that link each other (#78, the macOS follow-up) ----------
 ;;;
 ;;; A dylib records each library it needs by that library's install name, an absolute path
@@ -384,3 +498,28 @@ was found some other way."
         (multiple-value-bind (out code) (%carry-pair-then-load :relink nil)
           (is (not (search "FIXA 43" (or out ""))) "A loaded without the relink:~%~A" out)
           (is (search "Library not loaded" (or out "")) "expected dyld's refusal (exit ~A):~%~A" code out)))))
+
+;;; --- the bundle directory is read as a native file name ---------------------------------
+
+(test the-runtime-directory-of-a-path-with-brackets-is-not-wild
+  "OPEN-CARRIED-LIBRARIES opens each carried library from RUNTIME-DIRECTORY. A directory named
+with [ or * in it is an ordinary directory, and must not become a wild pathname, or no carried
+library would open and the app would exit 3. Since #899 every app that loads cl-sqlite carries
+SQLite, so this applies to all of them. SBCL gives the running executable's path as a pathname
+made by SB-EXT:NATIVE-PATHNAME, which is what this passes (measured on macOS with SBCL 2.6.9:
+a runtime in a directory named `br [x]*' has a *RUNTIME-PATHNAME* that is not wild)."
+  (let* ((exe (sb-ext:native-pathname
+               (if (uiop:os-windows-p) "C:\\Apps\\My [Beta]*\\app.exe" "/opt/My [Beta]*/app")))
+         (want (if (uiop:os-windows-p) "C:\\Apps\\My [Beta]*\\" "/opt/My [Beta]*/"))
+         (dir (funcall (%carry-fn "RUNTIME-DIRECTORY") exe)))
+    (is (equal (funcall (%carry-fn "RUNTIME-DIRECTORY") (sb-ext:native-namestring exe)) dir)
+        "the path as a string gives another directory than as a pathname")
+    (is (pathnamep sb-ext:*runtime-pathname*)
+        "sb-ext:*runtime-pathname* is a ~S here, which RUNTIME-DIRECTORY was not written for"
+        (type-of sb-ext:*runtime-pathname*))
+    (is-false (wild-pathname-p dir) "~S parsed as a wild pathname" exe)
+    (is (string= want (uiop:native-namestring dir)) "~S gave the directory ~S"
+        exe (uiop:native-namestring dir))
+    (is (string= (concatenate 'string want "libsqlite3.dylib")
+                 (uiop:native-namestring (merge-pathnames "libsqlite3.dylib" dir)))
+        "a carried file name merged into it is not the file beside the executable")))

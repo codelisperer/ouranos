@@ -14,9 +14,6 @@
 (def-suite web-page :description "praxeon/web-page: the read-web-page means (#757)." :in praxeon)
 (in-suite web-page)
 
-(defmacro %skip-on-windows (reason &body body)
-  #+os-windows `(skip ,reason)
-  #-os-windows `(progn ,@body))
 
 (defun %page-resolver (&rest hosts-and-addresses)
   "A resolver for the test's host names; any other host does not resolve."
@@ -164,7 +161,7 @@ that were there before (#807)."
 ;;; --- PUBLIC-FETCH -----------------------------------------------------------------------------
 
 (test a-page-is-read-after-its-redirects-and-given-to-the-model-as-quoted-source
-  (%skip-on-windows "PUBLIC-FETCH pins its connections, which Windows does not support here"
+  (progn
     (%with-pages (s)
       (multiple-value-bind (text page) (wp:read-web-page (%fetcher) (%site s "/old"))
         (is (equal (%site s "/terms") (wp:page-url page)) "the URL after the redirect")
@@ -177,7 +174,7 @@ that were there before (#807)."
             "the page's own instruction is inside the quoted block")))))
 
 (test plain-text-is-read-and-other-types-are-refused
-  (%skip-on-windows "PUBLIC-FETCH pins its connections, which Windows does not support here"
+  (progn
     (%with-pages (s)
       (is (search (format nil "line one~%~%line two")
                   (wp:read-web-page (%fetcher) (%site s "/plain"))))
@@ -224,14 +221,14 @@ used, the server would have been reached."
     (is (null (aion/test-http:server-requests s)) "nothing reached the server")))
 
 (test a-redirect-to-an-internal-address-is-refused
-  (%skip-on-windows "PUBLIC-FETCH pins its connections, which Windows does not support here"
+  (progn
     (%with-pages (s)
       (is (eq :not-public (%unreadable-reason
                            (lambda () (wp:read-web-page (%fetcher) (%site s "/to-metadata"))))))
       (is (= 1 (length (aion/test-http:server-requests s)))))))
 
 (test a-page-is-decoded-in-the-charset-it-names
-  (%skip-on-windows "PUBLIC-FETCH pins its connections, which Windows does not support here"
+  (progn
     (%with-pages (s)
       (is (search (format nil "Caf~C cr~Cme" (code-char 233) (code-char 232))
                   (wp:page-text (nth-value 1 (wp:read-web-page (%fetcher) (%site s "/latin1")))))
@@ -283,7 +280,7 @@ used, the server would have been reached."
     (is (string= text (%decoded (%utf-16 text :big-endian t) :content-type "text/html; charset=utf-16be")))))
 
 (test a-page-with-no-content-type-is-read-when-it-is-text
-  (%skip-on-windows "PUBLIC-FETCH pins its connections, which Windows does not support here"
+  (progn
     (%with-pages (s)
       (is (equal "No type, still a page"
                  (wp:page-text (nth-value 1 (wp:read-web-page (%fetcher) (%site s "/untyped-html"))))))
@@ -294,7 +291,7 @@ used, the server would have been reached."
         (is (search "no stated type and not text" text) "~S" text)))))
 
 (test a-page-that-arrives-too-slowly-is-not-read
-  (%skip-on-windows "PUBLIC-FETCH pins its connections, which Windows does not support here"
+  (progn
     (%with-pages (s)
       (multiple-value-bind (reason outcome text)
           (%unreadable-reason (lambda () (wp:read-web-page (%fetcher :deadline 1) (%site s "/slow"))))
@@ -303,7 +300,7 @@ used, the server would have been reached."
         (is (search "within 1 seconds" text) "~S" text)))))
 
 (test a-redirect-to-another-scheme-is-refused-with-its-own-reason
-  (%skip-on-windows "PUBLIC-FETCH pins its connections, which Windows does not support here"
+  (progn
     (%with-pages (s)
       (multiple-value-bind (reason outcome text)
           (%unreadable-reason (lambda () (wp:read-web-page (%fetcher) (%site s "/to-ftp"))))
@@ -313,13 +310,13 @@ used, the server would have been reached."
         (is-false (search "internal address" text))))))
 
 (test a-page-larger-than-the-limit-is-refused
-  (%skip-on-windows "PUBLIC-FETCH pins its connections, which Windows does not support here"
+  (progn
     (%with-pages (s)
       (is (eq :too-large (%unreadable-reason
                           (lambda () (wp:read-web-page (%fetcher :max-bytes 1000) (%site s "/big")))))))))
 
 (test the-model-is-given-at-most-the-budget-and-told-how-much-was-left-out
-  (%skip-on-windows "PUBLIC-FETCH pins its connections, which Windows does not support here"
+  (progn
     (%with-pages (s)
       (multiple-value-bind (text page) (wp:read-web-page (%fetcher) (%site s "/long") :budget 100)
         (let* ((open (search (format nil "~%<<<SOURCE ") text))
@@ -391,7 +388,7 @@ answer and the events, oldest first."
     (%collecting-events (lambda () (actor:run-turn ag "what do these terms say?")))))
 
 (test in-a-turn-the-call-emits-events-and-a-one-line-status-without-the-page
-  (%skip-on-windows "PUBLIC-FETCH pins its connections, which Windows does not support here"
+  (progn
     (%with-pages (s)
       (multiple-value-bind (answer events) (%page-turn (%fetcher) (%site s "/terms"))
         (is (equal "Done." answer))

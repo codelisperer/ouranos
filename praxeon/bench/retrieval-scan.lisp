@@ -14,6 +14,17 @@
 ;;;; slowest of the timed runs, after warm-up runs, and Postgres's own execution time for the
 ;;;; main query from EXPLAIN ANALYZE, with the plan's top line. The table is dropped afterwards.
 ;;;;
+;;;; ON SQLITE (#425), with PRAXEON_BENCH_SQLITE=1 and no Postgres URL needed:
+;;;;
+;;;;   PRAXEON_BENCH_SQLITE=1 sbcl --dynamic-space-size 4096 --non-interactive \
+;;;;     --load praxeon/bench/retrieval-scan.lisp
+;;;;
+;;;; the same measurement runs against a fresh SQLite file in the temporary directory, at 2,400,
+;;;; 10,000 and 50,000 chunks a corpus, with the embeddings stored as the store stores them
+;;;; (single floats in a BLOB). There is no EXPLAIN ANALYZE; the time is RETRIEVE-SIMILAR's,
+;;;; which on SQLite includes reading every candidate and ranking it in Lisp. The file is
+;;;; deleted afterwards.
+;;;;
 ;;;; Not part of any suite: it takes a minute, and its numbers depend on the host.
 
 (ql:quickload '(:praxeon/retrieval) :silent t)
@@ -25,12 +36,14 @@
                     (#:conn #:mnemosyne/conn)
                     (#:url #:mnemosyne/url)
                     (#:mig #:mnemosyne/migrate)
-                    (#:param #:mnemosyne/param)))
+                    (#:param #:mnemosyne/param)
+                    (#:be #:mnemosyne/backend)))
 
 (in-package #:praxeon/bench/retrieval-scan)
 
 (defparameter *width* 1024)
 (defparameter *sizes* '(2400 10000))
+(defparameter *sqlite-sizes* '(2400 10000 50000))
 (defparameter *warm-up* 3)
 (defparameter *runs* 21)
 
@@ -54,6 +67,16 @@
              (format s "~,6F" (aref v i)))
     (write-char #\] s)))
 
+(defun fill-sqlite-corpus (c table corpus n deriver state)
+  "FILL-CORPUS on SQLite: one row per statement, the embedding bound as the BLOB the store writes
+(PRAXEON/LLM:VECTOR-OCTETS), all in one transaction."
+  (conn:with-transaction (c :immediate t)
+    (dotimes (i n)
+      (conn:exec c (format nil "INSERT INTO ~A (id, corpus, section_id, locale, chunk_index, document_id, locale_role, chunker, boundary, text, section_fingerprint, embedding, embedding_fingerprint, embedding_deriver) VALUES (?, ?, ?, 'en', 0, ?, 'source', 'section/1', 'whole-section', ?, 'fp', ?, 'efp', ?)" table)
+                 (format nil "~A-~D" corpus i) corpus (format nil "s~D" i) (format nil "d~D" (floor i 20))
+                 (format nil "Section ~D of ~A, with some ordinary words in it." i corpus)
+                 (llm:vector-octets (random-vector state)) deriver))))
+
 (defun fill-corpus (c table corpus n deriver state)
   "N chunks for CORPUS, embedded, inserted 200 rows per statement."
   (loop for start from 0 below n by 200
@@ -67,12 +90,14 @@
 
 (defun median (xs) (let ((s (sort (copy-list xs) #'<))) (nth (floor (length s) 2) s)))
 
-(defun measure (c n)
+(defun measure (c n &key (dialect :postgres))
   (let* ((table (format nil "praxeon_bench_scan_~D" n))
          (state (sb-ext:seed-random-state 138))
          (embedder (make-instance 'fixed-embedder :vector (random-vector state)))
          (deriver (rt:deriver-of embedder)))
     (conn:exec c (format nil "DROP TABLE IF EXISTS ~A" table))
+    (when (eq dialect :sqlite)
+      (return-from measure (measure-sqlite c n table state embedder deriver)))
     (unwind-protect
          (let* ((store (rt:make-chunk-store c :table table :dimensions *width* :ensure t))
                 (corpus (rt:make-corpus store "measured")))
@@ -101,6 +126,47 @@
              (format t "  EXPLAIN ANALYZE (lines cut at 150 characters):~%~{    ~A~%~}"
                      (mapcar (lambda (line) (subseq line 0 (min 150 (length line)))) plan))))
       (conn:exec c (format nil "DROP TABLE IF EXISTS ~A" table)))))
+
+(defun median-and-slowest (corpus embedder)
+  (dotimes (i *warm-up*) (rt:retrieve-similar corpus embedder "q" :limit 10))
+  (let ((times (loop repeat *runs*
+                     collect (let ((start (get-internal-real-time)))
+                               (rt:retrieve-similar corpus embedder "q" :limit 10)
+                               (/ (* 1000.0 (- (get-internal-real-time) start))
+                                  internal-time-units-per-second)))))
+    (values (median times) (reduce #'max times))))
+
+(defun measure-sqlite (c n table state embedder deriver)
+  (let* ((store (rt:make-chunk-store c :table table :dimensions *width* :ensure t))
+         (corpus (rt:make-corpus store "measured"))
+         (fill-start (get-internal-real-time)))
+    (fill-sqlite-corpus c table "measured" n deriver state)
+    (fill-sqlite-corpus c table "other" n deriver state)
+    (let ((fill-seconds (/ (- (get-internal-real-time) fill-start) internal-time-units-per-second)))
+      (multiple-value-bind (median slowest) (median-and-slowest corpus embedder)
+        (let ((result (rt:retrieve-similar corpus embedder "q" :limit 10)))
+          (format t "~&N=~D sections per corpus (~D rows in the table), width ~D, SQLite~%"
+                  n (* 2 n) *width*)
+          (format t "  retrieve-similar, ~D timed runs: median ~,1F ms, slowest ~,1F ms~%"
+                  *runs* median slowest)
+          (format t "  returned ~D passages, ~A; filling the table took ~,1F s~%"
+                  (length (rt:retrieval-result-passages result))
+                  (if (rt:complete-p (rt:retrieval-result-completeness result)) "COMPLETE" "TRUNCATED")
+                  fill-seconds))))
+    (conn:exec c (format nil "DROP TABLE IF EXISTS ~A" table))))
+
+(when (uiop:getenv "PRAXEON_BENCH_SQLITE")
+  (let* ((file (namestring (merge-pathnames (format nil "praxeon-bench-scan-~36R.db" (random (expt 2 40) (make-random-state t)))
+                                            (uiop:temporary-directory))))
+         (c (conn:connect (be:make-sqlite file))))
+    (unwind-protect
+         (progn
+           (format t "~&SQLite ~A~%" (mnemosyne/sqlite-library:describe-loaded-library))
+           (dolist (n *sqlite-sizes*) (measure c n :dialect :sqlite)))
+      (conn:disconnect c)
+      (dolist (suffix '("" "-journal" "-wal" "-shm"))
+        (let ((f (probe-file (concatenate 'string file suffix)))) (when f (delete-file f))))))
+  (uiop:quit 0))
 
 (let ((pg (uiop:getenv "MNEMOSYNE_TEST_PG_URL")))
   (unless pg (error "Set MNEMOSYNE_TEST_PG_URL to a Postgres with pgvector."))

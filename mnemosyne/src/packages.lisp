@@ -173,7 +173,7 @@
     that takes either.")
   (:export #:connect #:disconnect #:with-connection #:call-with-connection
            #:*sqlite-busy-timeout-ms*
-           #:exec #:query #:with-transaction
+           #:exec #:query #:map-query #:with-transaction
            #:db-error #:db-error-message #:db-error-cause
            ;; the connection pool (#325)
            #:pool #:poolp #:make-pool #:close-pool #:pool-size #:pool-backend
@@ -198,7 +198,9 @@
            ;; extensions are a deployment fact, not a schema one (pre-publication issue 258)
            #:require-extension #:extension-available-p #:extension-present-p
            #:extension-unavailable #:extension-unavailable-name
-           #:extension-unavailable-reason #:extension-unavailable-detail))
+           #:extension-unavailable-reason #:extension-unavailable-detail
+           ;; a column re-encoded in place, idempotently, in one transaction (#425)
+           #:rewrite-sqlite-text-values))
 
 ;;; --- query: HoneySQL-style data-driven SQL generation (CL) ---------------
 (cl:defpackage #:mnemosyne/query
@@ -216,7 +218,7 @@
   ;; the same three dialects, spelled as keywords where ddl and schema spelled them as
   ;; strings, and the two vocabularies could not disagree loudly -- only by one module
   ;; taking a branch meant for the other.
-  (:export #:sql #:fetch #:run #:parse #:*dialect*
+  (:export #:sql #:fetch #:map-fetch #:run #:parse #:*dialect*
            ;; identifiers and directions are checked before they are written into SQL (#860)
            #:invalid-identifier #:invalid-identifier-text #:invalid-identifier-expected
            #:invalid-identifier-clause

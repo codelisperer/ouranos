@@ -246,26 +246,27 @@ fi
 # check-dyld-log.lisp reads both and prints one line per library still loaded: pid, process
 # and path, separated by tabs.
 DYLD_CHECK="$(cd "$(dirname "$0")" && pwd)/check-dyld-log.lisp"
-LOADED=$(sbcl --script "$DYLD_CHECK" loaded "$LOG")
-TAB=$(printf '\t')
 
 # Every carried .dylib must have been loaded FROM THE BUNDLE. This is the check that a bare
 # exit code cannot make: without it a pass may mean the app silently used Homebrew's copy.
+# A copy from outside the bundle that is still loaded fails too, even beside the bundle's own
+# (#899): a global symbol lookup returns the first library loaded, so an app that loaded
+# Apple's libsqlite3 first may run on it although the bundle's copy was loaded as well. Apple's
+# copy in hyperion-view is allowed, because WebKit loads it. check-dyld-log.lisp has the rule.
 for lib in $CARRIED; do
-  if echo "$LOADED" | grep -qF "$TAB$DIR/$lib"; then
-    echo "  ok -- $lib loaded from the bundle"
-  elif echo "$LOADED" | grep -qF "/$lib"; then
-    echo "  FAIL -- $lib was loaded from OUTSIDE the bundle:"
-    echo "$LOADED" | grep -F "/$lib" | head -2 | sed 's/^/         /'
-    FAILED=1
-  else
-    if is_required "$lib"; then
-      echo "  FAIL -- $lib is required (--require-carried) and was never loaded on this run"
-      FAILED=1
-    else
-      echo "  note -- $lib was never loaded on this run (may need different app arguments)"
-    fi
-  fi
+  STATUS=0
+  sbcl --script "$DYLD_CHECK" carried "$LOG" "$DIR" "$lib" || STATUS=$?
+  case "$STATUS" in
+    0) ;;
+    3)
+      if is_required "$lib"; then
+        echo "  FAIL -- $lib is required (--require-carried) and was never loaded on this run"
+        FAILED=1
+      else
+        echo "  note -- $lib was never loaded on this run (may need different app arguments)"
+      fi ;;
+    *) FAILED=1 ;;
+  esac
 done
 
 # No process the bundle starts may have a libssl or libcrypto loaded that the bundle does not

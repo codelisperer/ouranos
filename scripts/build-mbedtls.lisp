@@ -127,6 +127,7 @@ are written down rather than left to the next failed build.")
 
 (defparameter *required-symbols*
   '("mbedtls_ssl_handshake" "mbedtls_ssl_set_bio" "mbedtls_ssl_conf_own_cert"
+    "mbedtls_ssl_check_pending"
     "psa_crypto_init" "mbedtls_x509_crt_parse_file"
     ;; Ours, from aion/src/tls/c/ouranos_tls.c (#125). One per reason the file exists:
     ;; allocation, inline wrappers, threading. A .def that dropped the ouranos_tls_ prefix
@@ -134,7 +135,7 @@ are written down rather than left to the next failed build.")
     "ouranos_tls_shim_version" "ouranos_tls_threading_kind" "ouranos_tls_setup"
     "ouranos_tls_ssl_new" "ouranos_tls_conf_version_range" "ouranos_tls_crt_der"
     "ouranos_tls_pk_generate_ec_p256" "ouranos_tls_x509write_set_san"
-    "ouranos_tls_crt_check_key"
+    "ouranos_tls_crt_check_key" "ouranos_tls_crt_next" "ouranos_tls_conf_session_tickets"
     ;; Exported only when MBEDTLS_THREADING_C is on, so its presence shows that
     ;; ouranos_tls_config.h reached the compile.
     "mbedtls_mutex_init")

@@ -334,6 +334,107 @@ jobs:
           path: dist/
           if-no-files-found: error
 
+  # --- praxeon's SQLite retrieval inside a built bundle (#899) -----------------------------
+  #
+  # A bundle for an app that loads cl-sqlite carries the tree's pinned SQLite, built by
+  # scripts/build-sqlite.lisp, and opens it from beside the executable (ADR-0013's amendment of
+  # 2026-10-24). This job builds praxeon/examples/sqlite-probe into a bundle on each OS and
+  # runs it. The probe syncs a fixed corpus into a SQLite file, embeds it with a fixed embedder,
+  # checks the ids RETRIEVE-SIMILAR and RETRIEVE-HYBRID return, and checks that the SQLite it
+  # called is the copy in the bundle at the pinned version. It opens no window and makes no
+  # network call.
+  #
+  # NOTHING HERE IS UPLOADED OR PUBLISHED. The bundle stays on the runner. The manifest job
+  # needs this one, so a tag whose probe fails publishes nothing.
+  sqlite-probe:
+    name: sqlite-probe ${{ matrix.platform }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-24.04
+            platform: linux-x86-64
+            cache: ~/.cache/common-lisp
+            exe: sqlite-probe
+          - os: windows-2022
+            platform: windows-x86-64
+            cache: ~/AppData/Local/cache/common-lisp
+            exe: sqlite-probe.exe
+          - os: macos-15
+            platform: macos-arm64
+            cache: ~/.cache/common-lisp
+            exe: sqlite-probe
+    env:
+      PROBE_DIR: dist/sqlite-probe-0.0.0-${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Cache Lisp toolchain
+        uses: actions/cache@v6
+        with:
+          path: |
+            ${{ matrix.cache }}
+            ~/quicklisp
+            ~/common-lisp/coalton
+          key: lisp-${{ matrix.platform }}-${{ hashFiles('scripts/versions.env') }}-${{ hashFiles('**/*.asd') }}
+          restore-keys: |
+            lisp-${{ matrix.platform }}-${{ hashFiles('scripts/versions.env') }}-
+            lisp-${{ matrix.platform }}-
+
+      - name: Provision the Lisp toolchain
+        shell: bash
+        run: |
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/setup.ps1 -CI
+          else
+            ./scripts/setup.sh --ci
+          fi
+
+      - name: Bootstrap the tree
+        env:
+          OURANOS_NO_WARM: "1"
+        run: sbcl --dynamic-space-size 4096 --script bootstrap.lisp
+
+      - name: Build the pinned SQLite
+        run: sbcl --dynamic-space-size 4096 --script scripts/build-sqlite.lisp
+
+      - name: Dump the probe
+        shell: bash
+        run: |
+          sbcl --dynamic-space-size 4096 --script scripts/build-desktop-app.lisp \
+            --system praxeon/examples/sqlite-probe --entry praxeon/examples/sqlite-probe:main \
+            --name sqlite-probe --version 0.0.0
+          ls -l "$PROBE_DIR"
+
+      # Exit 0 only when every query returned its expected ids and the SQLite the probe called
+      # is the bundle's copy at sqlite.pin's version. The SQLITE-LIBRARY line names the file.
+      - name: Run the probe
+        shell: bash
+        run: '"$PROBE_DIR/${{ matrix.exe }}"'
+
+      # macOS: which libsqlite3 the loader had in use, read from DYLD_PRINT_LIBRARIES by each
+      # library's last state. Fails when any libsqlite3 from outside the bundle stays loaded
+      # beside the bundle's, because a global symbol lookup could then find Apple's (#899). This
+      # is the rule verify-bundle-macos.sh applies to every carried library; it runs here alone
+      # because that script also fails any process that loads an OpenSSL the bundle does not
+      # carry (#783), and praxeon loads cl+ssl, which opens the runner's Homebrew OpenSSL.
+      # That is a separate question from this job's.
+      - name: The probe used only the bundle's libsqlite3 (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          DYLD_PRINT_LIBRARIES=1 "$PROBE_DIR/sqlite-probe" > dyld.log 2>&1
+          sbcl --script scripts/check-dyld-log.lisp carried dyld.log "$(cd "$PROBE_DIR" && pwd)" libsqlite3.dylib
+
+      # Windows: every DLL the probe maps is in the bundle or the operating system's, and
+      # sqlite3.dll is loaded from the bundle.
+      - name: The probe loads only what it carries (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/verify-bundle-windows.ps1 \
+            "$PROBE_DIR" -RequireLoaded sqlite3.dll
+
   # --- the signed manifest (pre-publication issue 75) ------------------------------------------------
   #
   # THE MANIFEST IS THE CONTRACT between this workflow and every installed app: one signed
@@ -350,7 +451,7 @@ jobs:
   # clients will refuse. Hence no `continue-on-error` here.
   manifest:
     name: signed manifest
-    needs: build
+    needs: [build, sqlite-probe]
     runs-on: ubuntu-24.04
     # A tag build publishes; a workflow_dispatch is a dry run that still proves the job works.
     steps:

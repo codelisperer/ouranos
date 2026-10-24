@@ -246,7 +246,10 @@ what this can render."
     (with-output-to-string (s)
       (write-string *context-open* s)
       (dolist (i items)
-        (format s "~&[~(~A~)] ~A" (ctx:ctx-item-role i) (%item-text (ctx:ctx-item-content i))))
+        ;; AN UNTRUSTED ITEM IS LABELLED (#317's taint ruling), so the model is told which notes
+        ;; came from outside the conversation.
+        (format s "~&[~(~A~)~:[~;, from untrusted content~]] ~A" (ctx:ctx-item-role i)
+                (ctx:ctx-item-untrusted i) (%item-text (ctx:ctx-item-content i))))
       (format s "~&~A" *context-close*))))
 
 (defun %tag-name (tag closing)

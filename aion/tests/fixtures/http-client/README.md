@@ -23,6 +23,15 @@ Made with:
     openssl req -x509 -newkey rsa:2048 -nodes -keyout ip-test.key -out ip-test.crt \
       -days 36500 -subj "/CN=ip.test" -addext "subjectAltName=IP:127.0.0.1,IP:::1"
 
+`pinned-test-ec.crt` and `pinned-test-ec.key` are the same certificate with an EC P-256 key, for
+the test server on Windows, which serves TLS through aion/tls (#536). mbedTLS 4.1.1's
+`mbedtls_pk_check_pair` refuses the RSA `pinned-test` pair above with
+`PSA_ERROR_INVALID_ARGUMENT`, so `aion/tls:make-server-config` cannot present it. Made with:
+
+    openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
+      -keyout pinned-test-ec.key -out pinned-test-ec.crt \
+      -days 36500 -subj "/CN=pinned.test" -addext "subjectAltName=DNS:pinned.test"
+
 `cn-and-san-test.crt` and `cn-only-test.crt`, each with its key, are for #917, a certificate's
 common name against its subject alternative names. `cn-and-san-test` has the common name `cn.test`
 and the single alternative name `DNS:san.test`, so a client that falls back to the common name

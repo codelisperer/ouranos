@@ -88,7 +88,7 @@
   (:use #:cl)
   (:local-nicknames (#:a #:alexandria))
   (:export
-   #:ctx-item #:make-ctx-item #:ctx-item-source #:ctx-item-content #:ctx-item-tokens
+   #:ctx-item #:make-ctx-item #:ctx-item-source #:ctx-item-untrusted #:ctx-item-content #:ctx-item-tokens
    #:ctx-item-valid-time #:ctx-item-tx-time #:ctx-item-role #:ctx-item-value
    #:context #:make-context #:context-budget #:context-items
    #:add-item #:assemble #:context-tokens #:now))
@@ -107,7 +107,8 @@
   (:export #:memory-store #:in-memory-store #:make-in-memory-store
            #:provenance #:make-provenance #:provenance-conversation #:provenance-turn
            #:provenance-at #:provenance-through #:observation-provenance #:check-provenance
-           #:provenance-p #:observation-thread
+           #:provenance-p #:observation-thread #:observation-condensed-from
+           #:observation-untrusted-p #:inherit-taint #:provenance-untrusted #:condense #:condensed-kind #:condensed-value #:observations-from-conversation
            #:observation #:observation-id #:observation-subject #:observation-content
            #:observation-kind #:observation-value #:observation-tokens
            #:observation-valid-from #:observation-recorded-at
@@ -155,6 +156,8 @@
    #:check-embedding-dimensions
    ;; a vector as text, for a store with no vector type (#425)
    #:vector-text #:parse-vector-text #:cosine-distance
+   #:vector-octets #:decode-vector-octets #:stored-vector #:vector-text-octets #:stored-distance
+   #:make-nearest #:nearest-offer #:nearest-items
    ;; the rerank seam (#316) -- also a separate hierarchy
    #:reranker #:rerank #:reranker-model-of #:rerank-request-body #:rerank-post
    #:voyage-reranker #:reranker-model #:reranker-base-url #:reranker-api-key
@@ -263,7 +266,8 @@
            #:observer-busy-p #:observer-stuck-p #:observer-mark #:observer-skipped
            #:observer-failures #:observer-last-error #:observer-thread #:observer-subject
            #:unobserved #:stored-mark #:running-observer #:supported-proposals #:window-not-distilled
-           #:*step-tokens* #:observer-running #:observer-running-subject #:observer-running-thread))
+           #:*step-tokens* #:observer-running #:observer-running-subject #:observer-running-thread
+           #:reflect #:*reflect-tokens* #:condensable-tokens #:window-holds-a-tool-call-p))
 
 (defpackage #:praxeon/turn
   (:use #:coalton #:coalton-prelude)
@@ -315,6 +319,9 @@
 (defpackage #:praxeon/actor
   (:use #:cl)
   (:local-nicknames (#:px #:praxeon/praxeology)
+                    (#:mem #:praxeon/memory)
+                    (#:obs #:praxeon/observe)
+                    (#:dst #:praxeon/distil)
                     (#:log #:aion/log)
                     (#:boundary #:aion/boundary)
                     (#:cnd #:praxeon/conditions)
@@ -340,6 +347,10 @@
    #:means-entry-untrusted #:means-entry-requires-user-intent #:means-entry-allow
    #:means-entry-max-per-turn
    #:user-texts #:turn-untrusted-p #:turn-urls #:note-turn-urls #:mark-untrusted
+   #:untrusted-window-predicate
+   ;; a thread's observations in the prompt in place of its observed messages (#317, step C)
+   #:thread-memory #:attach-thread-memory #:agent-thread-memory #:thread-memory-observer
+   #:thread-memory-replace-at #:*read-observed-messages-means* #:thread-observations-text
    #:agent-taint-scope
    ;; The accessors of what AGENT-MEANS-FOR returns. NAME and DESCRIPTION were missing, so an
    ;; app could enumerate the means it may use and not read them -- which is the

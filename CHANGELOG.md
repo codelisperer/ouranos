@@ -14,6 +14,150 @@ its tag.
 
 ### An app may have to act
 
+- **praxeon/retrieval and praxeon/memory-db on SQLite: similarity search works at real corpus
+  sizes, and the stored embeddings change form** (#425). A SQLite store kept each embedding as
+  text and parsed every one on every search, so at width 1024 `retrieve-similar` took about a
+  second over 2,400 chunks and exhausted a 4 GB heap at 10,000, and memory-db's
+  `recall-similar` took 3.7 s over 5,000 observations and exhausted the heap at 20,000. Now:
+  - the embedding is stored as single floats in a BLOB (`praxeon/llm:vector-octets`), the
+    precision pgvector stores. The schema declares it `:binary`; a table made before keeps its
+    `TEXT` declaration, which SQLite does not enforce;
+  - **`ensure-schema` re-encodes a store's existing text embeddings in place**, keeping every
+    fingerprint and deriver, so nothing is embedded again and no chunk becomes pending. It first
+    checks with one cheap query, outside any transaction, whether any text embedding is left, so
+    an open with nothing to do takes no write lock. Then it rewrites 500 rows per transaction,
+    so another process's writes wait for one batch at most, not for the whole table. Readers
+    accept both forms, so a store half re-encoded when a process stopped still opens, and the
+    next `ensure-schema` carries on. A row whose text cannot be converted (malformed, or a
+    number a single float cannot hold) is left as text and counted in the log. An app that opens
+    its stores without `:ensure t` keeps working on the text form until it runs `ensure-schema`;
+  - on SQLite the search reads candidates one at a time, through the new
+    `mnemosyne/conn:map-query` and `mnemosyne/query:map-fetch`, which prepare SQLite queries
+    unbuffered, and keeps the nearest as it goes. On Postgres `map-query` reads every row at
+    execute, as `query` does. Measured at width 1024 on one Linux laptop: `retrieve-similar`
+    20 ms at 2,400 chunks, 84 ms at 10,000, 424 ms at 50,000; `recall-similar` 8 ms at 1,000
+    observations, 44 ms at 5,000, 176 ms at 20,000;
+  - a stored embedding that cannot be compared with the query, because it has another number
+    of dimensions (an embedder change in memory-db), is malformed, or gives a distance that is
+    not finite, is left out of the result and counted in a warning, instead of failing the
+    search or taking a place among the nearest. `praxeon/llm:vector-octets` refuses NaN, the
+    infinities and numbers above `most-positive-single-float`;
+  - **rankings can differ from Postgres between near-ties.** Distances on SQLite are summed in
+    double precision in Lisp; pgvector computes its own way. Two chunks whose distances differ by
+    about 1e-7 or less may come back in either order on the two backends, and re-encoding a
+    store's text embeddings as single floats can move such a pair too.
+
+  Also new: `mnemosyne/migrate:rewrite-sqlite-text-values`, which rewrites a SQLite column's
+  text values through a function, idempotently, a batch per transaction; and in `praxeon/llm`,
+  `vector-octets`, `decode-vector-octets`, `stored-vector`, `stored-distance`,
+  `vector-text-octets`, and
+  `make-nearest`, `nearest-offer` and `nearest-items` for keeping the k nearest during a scan.
+  `praxeon/retrieval` now uses `praxeon/llm`'s `cosine-distance` and no longer keeps its own copy.
+
+- **Observations derived from untrusted content are marked, taint the turn when they are in the
+  prompt, and are not promoted by default** (#317, after #827). An observation distilled from a
+  window that read a web page, or another means that returns outside content, could be carried
+  into later prompts and into other conversations with nothing marking where it came from, and a
+  model's summary can make an injected instruction read like the member's own wish. Now:
+  - `praxeon/memory:provenance` has `untrusted` (`make-provenance … :untrusted t`), read by
+    `observation-untrusted-p`. `condense` marks the condensed observation untrusted when any
+    source is, in every store (`inherit-taint`).
+  - `praxeon/observe:make-observer` takes `:untrusted-p`, a function of a window's messages.
+    **By default any window holding a tool call or result is taken as untrusted**
+    (`window-holds-a-tool-call-p`), since the observer cannot tell which tools return outside
+    content; an app with an agent passes `(praxeon/actor:untrusted-window-predicate agent)`,
+    which judges each call as the agent does (#827's `:untrusted` means), counts a call whose
+    result became untrusted while it ran (a delegated agent that read a page or was given an
+    untrusted item), and under `:taint-scope :conversation` takes every window after an
+    untrusted read as untrusted.
+  - **With the default predicate, nearly every observation of an agent that uses tools is
+    untrusted, so once recalled into its context they hold or refuse its `:requires-user-intent`
+    means on every turn.** The remedy is to pass `(praxeon/actor:untrusted-window-predicate
+    agent)` as `:untrusted-p`. An observer of a sub-agent must pass the sub-agent's predicate:
+    the default does not count a delegated task, which is the coordinating model's text, as
+    untrusted. An app that wants untrusted observations out of a prompt altogether filters what
+    it recalls with `observation-untrusted-p`; `recall` has no option for it, since that would
+    change every store's protocol.
+  - **A later window cannot launder an untrusted observation.** A proposal that replaces an
+    untrusted observation, or repeats one word for word, is untrusted whatever its window
+    (`apply-distillation`), and the observations the distiller is shown as already known are
+    labelled when they came from untrusted content. A paraphrase is not caught; the label is what
+    tells the model. A promoted fact carries its observation's mark.
+  - **An untrusted observation is promoted to a fact about the subject only when the new
+    `:promote-untrusted` allows it, on top of `:promote`**; it refuses by default. An app that
+    promotes from conversations with tool calls gets no new subject facts from them until it
+    passes one of the two functions.
+  - `praxeon/context:ctx-item` has `untrusted`, set by `observation->ctx-item`.
+    `praxeon/prompt:render-items` labels such an item `[note, from untrusted content]`.
+  - **An agent whose assembled context holds an untrusted item treats its turn as untrusted**,
+    under both taint scopes, so means declared `:requires-user-intent` are refused or held, as
+    after a web read. This is stricter than the rule for a raw untrusted result, which `:turn`
+    stops counting at the user's next message, on purpose: the item is a summary that hides its
+    source.
+  - `praxeon/memory-db` stores it in a new `untrusted` column (BOOLEAN), which `ensure-schema`
+    adds to an existing table. **Rows written before read as trusted**, though nothing recorded
+    whether they were. `(praxeon/memory-db:ensure-schema store :legacy-untrusted t)` marks every
+    thread observation already in the table untrusted on the call that adds the column, and
+    leaves facts about the subject alone; for a table that already has the column, the same is
+    `UPDATE <table> SET untrusted = TRUE WHERE thread IS NOT NULL` (`= 1` on SQLite), run once.
+
+- **aion/http-client: on Windows, `fetch-public`, `aion/oauth` sign-in and praxeon's
+  `read-web-page` now work, and refuse a certificate Windows does not trust with a typed
+  condition** (#536). Before, a pinned connection (`:connect-address`, which `fetch-public`
+  always uses) signalled `pinned-connect-unsupported` on Windows, so none of them worked there.
+  Now Windows connects only to the address `fetch-public` checked, does the TLS handshake with
+  the URL's host name through `aion/tls`, and lets Windows decide whether to trust the server's
+  certificate, with `CertGetCertificateChain` and `CertVerifyCertificateChainPolicy`: the same
+  trust stores, automatic root download and Disallowed store that WinHTTP uses.
+  - **What an app sees change on Windows.** `pinned-connect-unsupported` is no longer signalled,
+    and code that handled it to hide a feature can stop. `praxeon/web-page:register-read-web-page`
+    now registers the means without a Tavily key (`*fetch-available-p*` is true there).
+  - **Refusals.** A refused certificate signals a subclass of the new
+    `aion/http-client:certificate-rejected`, an `http-error`, with `certificate-rejected-host`,
+    `-verdict` and `-code` (Windows' error code):
+    - `certificate-expired`;
+    - `certificate-untrusted-root`;
+    - `certificate-name-mismatch`;
+    - `certificate-revoked`, `certificate-revocation-unknown` and `certificate-distrusted`;
+    - `certificate-chain-incomplete` and `certificate-wrong-usage`.
+  - **No revocation check.** This is the same as WinHTTP's and cl+ssl's defaults. Microsoft's
+    "WinHTTP Security Considerations" says WinHTTP does not check revocation unless asked.
+  - **Responses.** On Windows the request and response go through a new HTTP/1.1 reader with
+    hard limits. A response outside the grammar or past a limit signals the new
+    `aion/http-client:malformed-response`. That includes `Transfer-Encoding` with
+    `Content-Length`, `Content-Length` values that disagree, a malformed chunk size, and a head
+    over 256 KiB. The request is sent with `Connection: close` and `Accept-Encoding: identity`.
+  - **`:ca-path` on Windows** takes one PEM file, not a directory.
+  - **mbedTLS at run time.** `aion/http-client` now depends on `aion/tls` on Windows, so an https
+    pinned request needs `mbedtls.dll`, built by `scripts/build-mbedtls.lisp`. A desktop bundle
+    carries it already when `aion/tls` is loaded (#481).
+
+- **Desktop bundles carry a pinned SQLite 3.54.1, and `scripts/build-desktop-app.lisp` stops
+  if it has not been built** (#899). Every app that uses mnemosyne loads cl-sqlite. When the
+  image being dumped has cl-sqlite's library open, the bundle now carries
+  `vendor/sqlite/lib/libsqlite3.dylib` (macOS), `libsqlite3.so.0` (Linux) or `sqlite3.dll`
+  (Windows), with `LICENSES/libsqlite3-LICENSE` (the name follows the file), and opens it from
+  beside the executable at startup instead of the machine's copy. Before building such a
+  bundle, run `sbcl --script scripts/build-sqlite.lisp` once per checkout, and again after
+  `sqlite.pin` changes; without it the bundle build exits 3 and prints that command. The build
+  writes `vendor/sqlite/BUILT-FROM` with the version and sha256 it used, and both scripts
+  compare it with `sqlite.pin`. The build is from the tarball the new root file
+  `sqlite.pin` names, with `SQLITE_THREADSAFE=1`, `SQLITE_ENABLE_MATH_FUNCTIONS` and
+  `SQLITE_OMIT_LOAD_EXTENSION`, and without FTS5; an app that calls
+  `sqlite3_load_extension` or uses FTS5 inside a bundle needs to carry its own SQLite. An app
+  that already passes its own `libsqlite3`/`sqlite3.dll` to `--carry` keeps it, and the tree's
+  build is not carried. The tree's suites and REPLs still use the system copy. Recorded as
+  ADR-0013's 2026-10-24 amendment, which is Proposed. `scripts/carry-natives.lisp` exports
+  `tree-sqlite-carry` and `sqlite-file-name`, and
+  `carry-declared-libraries` takes `:tree-carries`. The build log's summary line counts the
+  carried SQLite among the tree's libraries (`tree-natives.lisp`'s `carry-native-libraries`
+  takes `:already-carried`, #912).
+
+- **The Windows toolchain's SQLite DLL moves from 3.50.4 to 3.54.1** (#765).
+  `scripts/versions.env`'s `SQLITE_VERSION`, `SQLITE_YEAR` and the two zip sha256 values
+  changed; run `scripts/setup.ps1` again to install it. `upstream.sexp` now has one `SQLite`
+  entry covering `sqlite.pin` and `versions.env`, in place of `SQLite (Windows)`.
+
 - **aion/uv: `close-loop` frees a loop only when `uv_loop_close` succeeds** (#877). Before, it
   ignored `uv_loop_close`'s result and freed the loop even when libuv returned `UV_EBUSY`
   because a handle or request was still open on it, and libuv then used the freed memory. A
@@ -534,10 +678,13 @@ its tag.
   observation, in one process or two, no longer leave two current replacements. An app that
   superseded the same observation twice now gets a `praxeon-error` on the second call. The
   embedding is computed before the lock is taken, so a read does not wait for the model.
-- **praxeon/memory-db: every read needs two new columns, and `ensure-schema` adds them** (#317):
-  `thread` (TEXT) and `source_through` (BIGINT on Postgres, INTEGER on SQLite). A read of the
+- **praxeon/memory-db: every read needs three new columns, and `ensure-schema` adds them** (#317):
+  `thread` (TEXT), `source_through` (BIGINT on Postgres, INTEGER on SQLite) and `condensed_from`
+  (TEXT). `condensed_from` comes with the reflector (#464): it holds the ids a condensed
+  observation replaced, and a table made before it needs it too, whether or not the app reflects.
+  A read of the
   subject's facts filters on `thread IS NULL`, so on a table made before them every read fails,
-  not only a thread's. An app acts if it does not call `ensure-schema` at start: it adds the two
+  not only a thread's. An app acts if it does not call `ensure-schema` at start: it adds the three
   columns in its own migration before it reads. Existing rows become facts about their subject,
   as they were. `ensure-schema` also creates a second table, the observations table's name with
   `_progress` appended: `id` (TEXT, the primary key, which `record-thread-progress` upserts on),
@@ -702,6 +849,45 @@ its tag.
   `claude-opus-5-5` where they named `claude-opus-4-8`.
 
 ### Added
+
+- **praxeon/actor: an agent can send its thread's observations in place of the messages they
+  were distilled from** (#317, step C). `(praxeon/actor:attach-thread-memory agent store subject
+  thread observer &key facts-budget replace-at read-tool)` gives an agent a thread memory:
+  - after every turn, `run-turn` (and `continue-turn`) gives the observer the agent's history,
+    which returns at once; the history stays the full record;
+  - facts about the subject are recalled within `:facts-budget` (1000 estimated tokens) and
+    attached after the cache marker with the agent's other context items;
+  - **`:replace-at` is NIL by default, which never replaces**, until #317's benchmark measures a
+    value. Once the observed messages reach it, what is sent is the system prompt, then a user
+    message with the thread's observations as its first part, carrying the cache marker, then the
+    rest of the history, trimmed as before, with the observations counted against its budget.
+    **Nothing unobserved is cut:** the cut is the last message the user wrote at or before the
+    observer's mark and before any skipped window, so a turn cut mid-exchange is sent whole, a
+    tool's result is never sent without its call, and a window the observer gave up on stays
+    raw; with no observations nothing is cut. The observations are rendered in a fixed order
+    (`thread-observations-text`), each on one line with its content's line breaks collapsed and
+    `[` escaped, so the part up to the marker is byte-identical from turn to turn until a
+    distillation or a reflection changes them;
+  - an observation from untrusted content is labelled in that part and makes the turn untrusted;
+  - `read-observed-messages`, registered unless `:read-tool nil` with `:max-per-turn 5`,
+    returns the messages an observation, or the observations a condensed one replaced, came
+    from, at most `*read-result-max-characters*` of them. When the observation or those messages
+    are untrusted it says so in its answer and marks the turn untrusted, and a call to it in the
+    history counts as untrusted for an agent rebuilt from it.
+
+- **`scripts/check-dyld-log.lisp carried LOG BUNDLE FILE-NAME`** (#899) reads a
+  `DYLD_PRINT_LIBRARIES` log and fails (exit 1) when a process has a copy of FILE-NAME from
+  outside BUNDLE still loaded, exits 0 when the bundle's copy was loaded and no other, and 3
+  when neither was. `scripts/dyld-libraries.lisp` exports `carried-findings`.
+  `scripts/verify-bundle-macos.sh` now uses it for every `--require-carried` library, so a
+  bundle passes only when the system copy is not also loaded beside the carried one. The dyld
+  log reader also applies a `move delayed to loaded` line to the image it names in the delayed
+  state, which before could be another image with the same file name.
+
+- **`praxeon/examples/sqlite-probe`** (#899): a headless app that runs `retrieve-similar` and
+  `retrieve-hybrid` on SQLite and checks that the library it called is the bundle's, at the
+  pinned version. `desktop-release.yml`'s new `sqlite-probe` job builds and runs it on Linux,
+  macOS and Windows, uploads nothing, and the `manifest` job needs it.
 
 - **hades: `reveal-path` shows a file or directory in the system file manager, and `open-url`
   opens a web page in the default browser** (#820), with no shell. `(hades/open:reveal-path path
@@ -1503,9 +1689,9 @@ its tag.
     so an observation the app writes into the thread closes nothing, and erasing a later
     window's observations reopens nothing. A window whose tries are spent, with no later window
     written, stays open and is not tried again.
-  - `make-observer` refuses `:accept`, `:promote` or `:promote-accept` that is not a function or
-    the name of one, including a symbol that names a macro or a special operator, such as
-    `when`.
+  - `make-observer` refuses `:accept`, `:promote`, `:promote-accept`, `:reflect-accept` or
+    `:reflect-accept-protected` that is not a function or the name of one, including a symbol
+    that names a macro or a special operator, such as `when`.
   - If the observer's thread cannot be made, `observe-turn` signals the error and gives back its
     claim on the conversation, so a later call can start a run. The claim, the thread and its
     recording are one step with interrupts deferred, so a deadline around the app's request
@@ -1547,6 +1733,42 @@ its tag.
     proposal, and so does an `applies_from` that is a number, an array, an object or `true`.
     JSON null, `false` (which jzon reads as NIL) and an empty string mean no date.
     `apply-distillation` takes `:thread`.
+- **praxeon/observe: `reflect` condenses a scope's observations once they pass a threshold**
+  (#317, step B), 40,000 estimated tokens by default. A model returns condensed observations,
+  each naming the observations it replaces, and each is written only when the app's `:accept`
+  allows it; one that would merge a correction, or an observation at or above `:protect-value`,
+  also needs `:accept-protected`. Both refuse by default. `reflect` signals when the model's
+  answer cannot be read.
+  - **What counts toward the threshold** is the observations `reflect` may condense on `:accept`
+    alone (`praxeon/observe:condensable-tokens`): corrections and observations at or above
+    `:protect-value` are left out, so a scope of corrections is not reflected on over and over.
+    `:floor` raises the threshold for one call.
+  - **An item that does not condense is not written:** one with a single source, or one whose
+    content is not shorter than its sources' contents together. An item `condense` refuses is
+    logged and the other items are still written. `reflect` returns the observations written,
+    the condensable tokens left, and whether the model was asked.
+  - **An observer made with `:reflect-threshold`** (NIL or a positive integer) reflects on its
+    thread once at the end of a run that wrote a window, after the windows' progress is saved,
+    with `:reflect-accept`, `:reflect-accept-protected` and `:reflect-protect-value` (NIL or a
+    number) as `reflect`'s accept functions and protect value. The reflection counts as an attempt
+    for `observer-stuck-p`, and `stop-observer` can end it without losing the run's saved mark.
+    After a reflection, written or not, the next waits until the condensable tokens have grown by
+    another threshold past what it left. A reflection that fails is counted in
+    `observer-failures` and logged, and the windows stay written. `make-observer` refuses a
+    store with no `condense` method when `:reflect-threshold` is given.
+  - `praxeon/memory:condense` replaces several current observations in one scope with one,
+    which supersedes them and records their ids in `observation-condensed-from`, so `recall
+    :as-of` before still returns them. Its kind defaults to `:correction` when any source is a
+    correction, and its value to the highest of the sources' (`condensed-kind`,
+    `condensed-value`), so a condensation keeps the protection its sources had. It checks that every source is still current and writes
+    in the same step: under the store's lock, and on the SQL store in one transaction whose
+    updates change a source only while it is still current. The SQL store computes the
+    condensed observation's embedding before taking the lock. It refuses a source named twice.
+    An app's own memory store implements `condense` before it can be reflected on. A promoted
+    correction of a condensed observation is matched to the subject facts its sources came from.
+  - `praxeon/memory:observations-from-conversation` returns every observation that came from a
+    conversation, including those condensed from one, at any depth: what an erasure of the
+    conversation has to find (#150).
 - **`scripts/build-installer.ps1` and `scripts/build-dmg.sh` read the bundle's `RELEASE` file,
   which `scripts/build-desktop-app.lisp` writes when given `--product`, `--display-name` or
   `--default-channel`** (#408).
@@ -1968,6 +2190,16 @@ its tag.
   `0:0:0:0:0:0:0:1` are the same address), and no SNI name is sent for an IPv4 or IPv6 address,
   as RFC 6066 requires. Requests to host names are unchanged. Windows is not affected, because
   it does not use cl+ssl.
+
+- **aion/tls: a client reads data a TLS 1.3 server sent after its session tickets** (#536).
+  OpenSSL and most CDNs send session tickets right after a TLS 1.3 handshake. mbedTLS 4.1.1
+  handles each over several calls of `mbedtls_ssl_read`, and returns `WANT_READ` while records
+  sent after it are still in the input. `aion/tls` took that as "wait for the network". A
+  response sent before the server closed was then reported as `aion/tls:tls-truncated`, which
+  happened on example.com. `engine-read` now reads again while fed input remains, and stops
+  after `+max-idle-reads+` calls that read nothing. `aion/tls:make-server-config` takes a new
+  `:session-tickets` count, so an `aion/tls` server can send TLS 1.3 tickets the way OpenSSL does.
+  The regression test uses it against a local server.
 
 - **cons/coalton-repl and hades/open: the threads they create can be interrupted when they were
   started while an interrupt was deferred** (#896, the remaining sites of #541). On Linux and

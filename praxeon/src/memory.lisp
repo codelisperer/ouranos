@@ -39,7 +39,7 @@
 
 ;;; --- where an observation came from -----------------------------------------
 
-(defstruct (provenance (:constructor make-provenance (conversation turn &key at through)))
+(defstruct (provenance (:constructor make-provenance (conversation turn &key at through untrusted)))
   "Which conversation, which turn, and when -- the traceable source of an observation.
 
 REQUIRED ON EVERY WRITE (#150). Observational memory is personal data held indefinitely, and
@@ -67,11 +67,18 @@ way (#462's ninth review): FORGET-SUBJECT keeps each thread's mark at least at t
 its observations cite. So any cited position past the observer's mark, such as a correction the
 app makes at a later message of the thread, or a position past the transcript's end, keeps an
 observer from ever observing the messages between the mark and that position (#462's tenth
-review)."
+review).
+
+UNTRUSTED is true when the observation was derived from content that came from outside the
+conversation: a window holding the result of an untrusted means, such as a web page (#827), or
+an observation condensed from one that was (INHERIT-TAINT). Such an observation is marked when it
+is put into a prompt, it makes the turn untrusted (see PRAXEON/ACTOR), and the observer does not
+promote it to a fact about the subject unless the app allows it (#317's taint ruling)."
   (conversation "" :type string)
   (turn 0 :type integer)
   (at nil :type (or null integer))
-  (through nil :type (or null integer)))
+  (through nil :type (or null integer))
+  (untrusted nil :type boolean))
 
 ;;; --- what an observation is -------------------------------------------------
 
@@ -101,6 +108,10 @@ them."
   (supersedes nil)                    ; id of the observation this replaces, or NIL
   (superseded-by nil)                 ; id of the observation replacing this, or NIL
   (superseded-at nil)                 ; when that happened, or NIL
+  ;; CONDENSED-FROM is the ids of the observations this one condenses, when a reflection wrote
+  ;; it (#317, step B), or NIL. Each of them is superseded by this one. It is how an erasure of
+  ;; a conversation finds a condensed observation that came from it (OBSERVATIONS-FROM-CONVERSATION).
+  (condensed-from '() :type list)
   ;; THE SOURCE, and it is not optional. See PROVENANCE above.
   (provenance (error "an observation must carry its provenance (#150)") :type provenance))
 
@@ -174,6 +185,22 @@ the caller's, on the caller's thread, with the caller's provider -- which is als
 NOT EVERY STORE HAS A METHOD. A store that cannot rank by distance does not answer this, and
 that absence is structural: the caller gets no applicable method rather than a store quietly
 falling back to recency and returning plausible rows."))
+
+(defgeneric condense (store sources content &key provenance kind value tokens valid-from)
+  (:documentation "Replace SOURCES, several observations, with one new observation carrying
+CONTENT, and return it (#317, step B). Every source is marked superseded by the new one, which
+records their ids as its CONDENSED-FROM, so `recall :as-of' a time before still returns them.
+
+The sources must all be current, in this store, about one subject and in one scope; otherwise
+this signals PRAXEON-ERROR and changes nothing. KIND defaults to :CORRECTION when any source is
+a correction and otherwise to the first source's kind, and VALUE to the highest of the sources'
+values (CONDENSED-KIND, CONDENSED-VALUE). Taking the first source's, as this did, turned a fact
+condensed with a correction into a fact of the lower value, and the condensed observation then
+lost the protection a correction or a high value has from the next reflection (#464's review).
+
+A CONDENSATION IS A CLAIM THAT SEVERAL OBSERVATIONS ARE ABOUT ONE THING, the judgement
+`apply-distillation' refuses to apply without the app's approval. This function applies it; the
+approval is the caller's (see PRAXEON/OBSERVE:REFLECT)."))
 
 (defgeneric observations-of (store subject &key as-of include-superseded thread)
   (:documentation "The raw observations about SUBJECT. For tests, inspection, and the
@@ -293,8 +320,8 @@ SAFE TO SHARE BETWEEN THREADS (#317). An observer writes from a thread of its ow
 reads and writes from its own, and a plain hash table written from two threads at once loses
 entries or corrupts itself (measured on #462's review: 870 of 6,000 writes kept, and a table
 whose every later read failed). Every operation below holds the store's lock for its whole
-extent, including SUPERSEDE's check that the observation is not already superseded; the lock is
-recursive because SUPERSEDE calls REMEMBER."))
+extent, including SUPERSEDE's and CONDENSE's checks that what they replace is still current; the lock
+is recursive because SUPERSEDE and CONDENSE call REMEMBER."))
 
 ;;; Every generic's in-memory method runs under the store's lock. :AROUND methods, so the rule
 ;;; is written once for each operation rather than repeated inside each body. EACH LISTS ITS
@@ -326,6 +353,10 @@ recursive because SUPERSEDE calls REMEMBER."))
   (bt:with-recursive-lock-held ((store-lock store)) (call-next-method)))
 (defmethod record-thread-progress :around ((store in-memory-store) subject thread mark skipped)
   (declare (ignore subject thread mark skipped))
+  (bt:with-recursive-lock-held ((store-lock store)) (call-next-method)))
+(defmethod condense :around ((store in-memory-store) sources content
+                             &key provenance kind value tokens valid-from)
+  (declare (ignore sources content provenance kind value tokens valid-from))
   (bt:with-recursive-lock-held ((store-lock store)) (call-next-method)))
 
 (defun make-in-memory-store () (make-instance 'in-memory-store))
@@ -408,6 +439,99 @@ number feeds a budget comparison, and a caller that needs precision passes TOKEN
 that thread, :ALL for both."
   (or (eq thread :all) (equal (observation-thread observation) thread)))
 
+(defun %check-distinct-sources (sources)
+  "Signal PRAXEON-ERROR when an observation appears twice in SOURCES: it would be recorded twice
+in CONDENSED-FROM, and on the SQL store its second supersession would fail."
+  (let ((ids (mapcar #'observation-id sources)))
+    (unless (= (length ids) (length (remove-duplicates ids :test #'string=)))
+      (error 'praxeon/conditions:praxeon-error :detail "an observation is named twice among the sources to condense"))))
+
+(defun %check-sources (store sources)
+  "Signal PRAXEON-ERROR unless SOURCES, a non-empty list of observations, are all in STORE,
+current, and about one subject in one scope. Returns the stored ones."
+  (when (null sources)
+    (error 'praxeon/conditions:praxeon-error :detail "nothing to condense"))
+  (%check-distinct-sources sources)
+  (let ((held (mapcar (lambda (o)
+                        (or (gethash (observation-id o) (store-observations store))
+                            (error 'praxeon/conditions:praxeon-error
+                                   :detail (format nil "cannot condense ~A: it is not in this store"
+                                                   (observation-id o)))))
+                      sources)))
+    (dolist (o held)
+      (unless (observation-current-p o)
+        (error 'praxeon/conditions:praxeon-error
+               :detail (format nil "~A was already superseded by ~A"
+                               (observation-id o) (observation-superseded-by o))))
+      (unless (and (string= (observation-subject o) (observation-subject (first held)))
+                   (equal (observation-thread o) (observation-thread (first held))))
+        (error 'praxeon/conditions:praxeon-error
+               :detail "the observations to condense are not about one subject in one scope")))
+    held))
+
+(defun condensed-kind (sources)
+  "The kind of an observation condensed from SOURCES: :CORRECTION when any of them is one, so a
+correction keeps its protection through a condensation, otherwise the first source's kind."
+  (if (some (lambda (o) (eq :correction (observation-kind o))) sources)
+      :correction
+      (observation-kind (first sources))))
+
+(defun condensed-value (sources)
+  "The value of an observation condensed from SOURCES: the highest of theirs."
+  (reduce #'max sources :key #'observation-value))
+
+(defun observation-untrusted-p (observation)
+  "Whether OBSERVATION was derived from untrusted content: its provenance says so."
+  (provenance-untrusted (observation-provenance observation)))
+
+(defun inherit-taint (provenance sources)
+  "PROVENANCE, or a copy of it marked untrusted when any of SOURCES is untrusted. What CONDENSE
+writes, in every store: an observation condensed from untrusted content is untrusted whatever
+provenance its caller passed, because a summary hides where its words came from."
+  (if (and (not (provenance-untrusted provenance)) (some #'observation-untrusted-p sources))
+      (let ((copy (copy-provenance provenance)))
+        (setf (provenance-untrusted copy) t)
+        copy)
+      provenance))
+
+(defmethod condense ((store in-memory-store) sources content
+                     &key provenance kind value tokens valid-from)
+  (check-provenance provenance "condense")
+  (let* ((held (%check-sources store sources))
+         (first (first held))
+         (new (remember store (observation-subject first) content
+                        :thread (observation-thread first)
+                        :provenance (inherit-taint provenance held)
+                        :kind (or kind (condensed-kind held))
+                        :value (or value (condensed-value held))
+                        :tokens tokens :valid-from valid-from)))
+    (setf (observation-condensed-from new) (mapcar #'observation-id held))
+    (dolist (o held)
+      (setf (observation-superseded-by o) (observation-id new)
+            (observation-superseded-at o) (observation-recorded-at new)))
+    new))
+
+(defun observations-from-conversation (store subject conversation)
+  "Every observation about SUBJECT, in either scope and superseded or not, that came from
+CONVERSATION: those whose provenance names it, and every observation condensed from one of
+those, at any depth (#317, step B; #150). This is what an erasure of a conversation has to find.
+Oldest first."
+  (let* ((all (observations-of store subject :include-superseded t :thread :all))
+         (found (remove-if-not (lambda (o) (string= (provenance-conversation (observation-provenance o))
+                                                    conversation))
+                               all))
+         (ids (mapcar #'observation-id found)))
+    (loop
+      (let ((more (remove-if (lambda (o)
+                               (or (member (observation-id o) ids :test #'string=)
+                                   (notany (lambda (id) (member id ids :test #'string=))
+                                           (observation-condensed-from o))))
+                             all)))
+        (when (null more) (return))
+        (setf found (append found more)
+              ids (append ids (mapcar #'observation-id more)))))
+    (sort (copy-list found) #'< :key #'observation-recorded-at)))
+
 (defmethod observations-of ((store in-memory-store) subject
                             &key as-of include-superseded thread)
   (let ((all '()))
@@ -442,6 +566,7 @@ do I fix it' unanswerable."
    :value (observation-value observation)
    :valid-time (observation-valid-from observation)
    :tx-time (observation-recorded-at observation)
+   :untrusted (observation-untrusted-p observation)
    :source observation))
 
 (defmethod recall ((store in-memory-store) subject &key (budget 1000) kind as-of thread)

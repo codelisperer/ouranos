@@ -1,0 +1,8 @@
+dyld[2023]: <E24FA113-A79D-3ACD-8483-85DF14D50355> /Applications/Example App.app/Contents/MacOS/sbcl
+dyld[2023]: <4FED5EE2-5D3E-35B1-A170-9859C4B683BB> /usr/lib/libSystem.B.dylib
+dyld[2023]: <B67E4205-32B5-3FF3-9FB5-9186C0B32A90> /usr/lib/libsqlite3.dylib
+dyld[2023]: move loaded to delayed: libsqlite3.dylib
+dyld[2023]: <21ADDE67-03B6-3738-8ED3-87F4F19322AC> /Applications/Example App.app/Contents/MacOS/libsqlite3.dylib
+dyld[2023]: move delayed to loaded: libsqlite3.dylib
+opened /Applications/Example App.app/Contents/MacOS/libsqlite3.dylib
+opened /usr/lib/libsqlite3.dylib

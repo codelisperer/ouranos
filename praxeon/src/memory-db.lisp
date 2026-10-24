@@ -69,7 +69,7 @@
 
 (defun %schema-fields (dimensions dialect)
   "The observation columns, with the embedding sized for the configured provider. On SQLite
-the embedding is text (#425).
+the embedding is a BLOB of single floats (#425; text before it).
 
 Underscores rather than hyphens: a field name becomes a SQL identifier unquoted, and
 `valid-from' is not one."
@@ -95,8 +95,15 @@ Underscores rather than hyphens: a field name becomes a SQL identifier unquoted,
     ;; window an observation came from. Added to an existing table by ENSURE-SCHEMA.
     (:thread       :string)
     (:source_through :integer)
+    ;; The ids a condensed observation replaces, comma-separated (#317, step B).
+    (:condensed_from :text)
+    ;; True when the observation came from untrusted content (#317's taint ruling). NULL, read as
+    ;; false, on every row written before the column existed and on every trusted one.
+    (:untrusted :boolean)
+    ;; On SQLite, which has no vector type, single floats in a BLOB (#425). A table made before
+    ;; #425 declares the column TEXT; SQLite keeps a BLOB in it as it is, so it is not altered.
     ,(if (eq dialect :sqlite)
-         '(:embedding :text)
+         '(:embedding :binary)
          `(:embedding :vector :dimensions ,dimensions))))
 
 ;;; THE OBSERVER'S PROGRESS ON EACH THREAD (#317), one row per subject and thread, in a table of
@@ -129,8 +136,8 @@ gives another pair's key."
    (schema :initarg :schema :reader store-schema)
    (schema-name :initarg :schema-name :reader store-schema-name)
    (progress-schema :initarg :progress-schema :reader store-progress-schema)
-   ;; Recursive because SUPERSEDE holds it around REMEMBER, so the check that the observation
-   ;; is still current and the writes that replace it are one step.
+   ;; Recursive because SUPERSEDE and CONDENSE hold it around REMEMBER, so the check that what
+   ;; they replace is still current and the writes that replace it are one step.
    (lock :initform (bt:make-recursive-lock "praxeon-memory-db") :reader store-lock)
    ;; :UNKNOWN until the first similarity recall on Postgres reads the extension's version,
    ;; then T when pgvector has iterative index scans (0.8 or later) and NIL otherwise (#482).
@@ -309,9 +316,11 @@ installed in CONNECTION's database. Reads pg_extension and never creates it (#13
                                                          "SELECT current_database() AS db"))
                                       :db))))
 
-(defparameter +added-columns+ '((:thread . :string) (:source_through . :integer))
-  "Columns added after a table may already exist, with their schema field types: the thread scope
-and the window's last turn (#317). ENSURE-SCHEMA adds each one a table lacks.")
+(defparameter +added-columns+ '((:thread . :string) (:source_through . :integer) (:condensed_from . :text)
+                                (:untrusted . :boolean))
+  "Columns added after a table may already exist, with their schema field types: the thread scope,
+the window's last turn, the ids an observation was condensed from, and whether it came from
+untrusted content (#317). ENSURE-SCHEMA adds each one a table lacks.")
 
 (defun %add-column-sql (store name type)
   "The ALTER TABLE statement adding column NAME of field TYPE to STORE's table, in mnemosyne's
@@ -332,10 +341,26 @@ starting at the same moment."
   (mapcar (lambda (row) (string-downcase (param:row-value row :name)))
           (conn:query (store-connection store) (format nil "PRAGMA table_info(~A)" (store-table store)))))
 
-(defun ensure-schema (store)
+(defun %has-column-p (store column)
+  "Whether STORE's table exists and has COLUMN (a lowercase name)."
+  (if (eq (store-dialect store) :sqlite)
+      (and (member column (%sqlite-columns store) :test #'string=) t)
+      (and (conn:query (store-connection store)
+                       "SELECT 1 AS one FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?"
+                       (string-downcase (store-table store)) column)
+           t)))
+
+(defun ensure-schema (store &key legacy-untrusted)
   "Create the table, its index and the observer's progress table (#317) if they are not there,
 and add the columns +ADDED-COLUMNS+ names to a table made before them. Returns STORE. On Postgres the `vector' extension must
-already be installed; see CHECK-VECTOR-EXTENSION.
+already be installed; see CHECK-VECTOR-EXTENSION. On SQLite, embeddings still in the text form are
+re-encoded as single floats (#425).
+
+LEGACY-UNTRUSTED, for a table made before observations recorded whether they came from untrusted
+content: when this call is the one that adds the UNTRUSTED column, every thread observation
+already in the table is marked untrusted, since nothing recorded which of them were. Facts about
+the subject (THREAD NULL) are left as they are. Without it, those rows read as trusted. It does
+nothing once the column exists, so later calls cannot mark new trusted rows (#906's review).
 
 EVERY READ NEEDS THOSE COLUMNS, not only a thread's: a read of the subject's facts selects them
 and filters on THREAD IS NULL. So an app must run this at start, or add the columns in its own
@@ -343,25 +368,50 @@ migration, before it reads from a table made before #317."
   (%with-store (store :exclusive t)
     (when (eq (store-dialect store) :postgres)
       (check-vector-extension (store-connection store)))
-    (dolist (statement (store-ddl store))
-      (conn:exec (store-connection store) statement))
-    (let ((have (and (eq (store-dialect store) :sqlite) (%sqlite-columns store))))
-      (loop for (name . type) in +added-columns+
-            unless (member (string-downcase (symbol-name name)) have :test #'string=)
-              ;; Postgres answers an existing column with a notice, which the driver signals as
-              ;; a warning; it is the expected case on every start after the first.
-              do (handler-bind ((warning #'muffle-warning))
-                   (handler-case (conn:exec (store-connection store)
-                                            (%add-column-sql store name type))
-                     ;; ON SQLITE, ANOTHER PROCESS MAY ADD THE COLUMN between the read of the
-                     ;; columns above and this statement; SQLite has no IF NOT EXISTS for it. A
-                     ;; failure is accepted only when the column is there afterwards.
-                     (error (e)
-                       (unless (and (eq (store-dialect store) :sqlite)
-                                    (member (string-downcase (symbol-name name))
-                                            (%sqlite-columns store) :test #'string=))
-                         (error e))))))))
+    (let ((backfill (and legacy-untrusted (not (%has-column-p store "untrusted")))))
+      (dolist (statement (store-ddl store))
+        (conn:exec (store-connection store) statement))
+      (let ((have (and (eq (store-dialect store) :sqlite) (%sqlite-columns store))))
+        (loop for (name . type) in +added-columns+
+              unless (member (string-downcase (symbol-name name)) have :test #'string=)
+                ;; Postgres answers an existing column with a notice, which the driver signals as
+                ;; a warning; it is the expected case on every start after the first.
+                do (handler-bind ((warning #'muffle-warning))
+                     (handler-case (conn:exec (store-connection store)
+                                              (%add-column-sql store name type))
+                       ;; ON SQLITE, ANOTHER PROCESS MAY ADD THE COLUMN between the read of the
+                       ;; columns above and this statement; SQLite has no IF NOT EXISTS for it. A
+                       ;; failure is accepted only when the column is there afterwards.
+                       (error (e)
+                         (unless (and (eq (store-dialect store) :sqlite)
+                                      (member (string-downcase (symbol-name name))
+                                              (%sqlite-columns store) :test #'string=))
+                           (error e)))))))
+        ;; THE BACK-FILL, only on the call that added the column (LEGACY-UNTRUSTED above).
+        (when backfill
+          (q:run (store-connection store)
+                 (list :update (store-table store) :set (list :untrusted t)
+                       :where (list :is-not-null :thread))
+                 :dialect (store-dialect store)))))
+  ;; OUTSIDE THE EXCLUSIVE BLOCK: on SQLite over a pool that block is one IMMEDIATE transaction,
+  ;; and the re-encode commits batch by batch so the write lock is never held for the whole table
+  ;; (#425's review). A non-exclusive hold borrows a connection and opens no transaction.
+  (when (eq (store-dialect store) :sqlite)
+    (%with-store (store) (%reencode-sqlite-embeddings store)))
   store)
+
+(defun %reencode-sqlite-embeddings (store)
+  "Rewrite STORE's embeddings that are still text into BLOBs of single floats (#425),
+idempotently, one transaction per batch so SQLite's write lock is held for one batch at a time:
+see MNEMOSYNE/MIGRATE:REWRITE-SQLITE-TEXT-VALUES. A store half re-encoded when a process stopped
+opens as before, because RECALL-SIMILAR reads both forms, and the next ENSURE-SCHEMA finishes the
+job."
+  (multiple-value-bind (rewritten left)
+      (mig:rewrite-sqlite-text-values (store-connection store) (store-table store) "id" "embedding"
+                                      #'llm:vector-text-octets)
+    (when (plusp (+ rewritten left))
+      (log:info "praxeon/memory-db: SQLite embeddings re-encoded from text to single floats"
+                :table (store-table store) :rewritten rewritten :left left))))
 
 ;;; --- rows <-> observations ---------------------------------------------------
 
@@ -395,29 +445,36 @@ migration, before it reads from a table made before #317."
    ;; parsed back out of prose is a guess about what the model was told, not a record of
    ;; what was stored.
    :thread (let ((th (param:row-value row :thread))) (and (stringp th) th))
+   :condensed-from (let ((ids (param:row-value row :condensed_from)))
+                     (and (stringp ids) (plusp (length ids)) (uiop:split-string ids :separator ",")))
    :provenance (mem:make-provenance (or (param:row-value row :source_conversation) "")
                                     (or (param:row-value row :source_turn) 0)
                                     :at (param:row-value row :source_at)
-                                    :through (param:row-value row :source_through))))
+                                    :through (param:row-value row :source_through)
+                                    ;; Postgres returns T or NIL, SQLite 1, 0 or NIL.
+                                    :untrusted (let ((u (param:row-value row :untrusted)))
+                                                 (and u (not (eql u 0)) t)))))
 
 (defparameter +columns+
   '(:id :subject :content :kind :value :tokens :valid_from :recorded_at
     :supersedes :superseded_by :superseded_at
-    :source_conversation :source_turn :source_at :thread :source_through)
+    :source_conversation :source_turn :source_at :thread :source_through :condensed_from
+    :untrusted)
   "What a read selects. NOT the embedding: it is large, it is never shown to anyone, and
 selecting it would pull a megabyte of floats through every recall to be discarded.")
 
 (defun %vector-text (store vector &key (field :embedding))
-  "VECTOR in the text form pgvector accepts, through mnemosyne's own cast. On SQLite, where
-the column is text and a cast would take any string, PRAXEON/LLM:VECTOR-TEXT does the width
-check instead (#425).
+  "VECTOR as STORE's embedding column takes it: on Postgres the text form pgvector accepts,
+through mnemosyne's own cast. On SQLite, where the column has no vector type and a cast would
+take any value, a BLOB of single floats, PRAXEON/LLM:VECTOR-OCTETS, which does the width check
+instead (#425).
 
 THE QUERY VECTOR IS CAST LIKE A STORED ONE, on purpose. Casting is where a wrong width is
 refused, and a search argument of the wrong width is the same misconfiguration as a stored
 row of the wrong width -- it should not reach the database to be refused there in the
 language of columns."
   (when (eq (store-dialect store) :sqlite)
-    (return-from %vector-text (llm:vector-text vector (store-dimensions store))))
+    (return-from %vector-text (llm:vector-octets vector (store-dimensions store))))
   (let ((changeset (cs:cast (store-schema-name store) (list field vector) (list field))))
     (unless (cs:changeset-valid-p changeset)
       (error 'praxeon/conditions:deliberation-failure
@@ -496,14 +553,18 @@ STORE's embedder, except those already prepared for STORE."
                                                        embedding))
                                   (when at (list :source_at at))
                                   (when through (list :source_through through))
-                                  (when thread (list :thread thread)))
+                                  (when thread (list :thread thread))
+                                  ;; Written only when true, as THREAD and SOURCE_THROUGH are only
+                                  ;; when present; an absent value is NULL, which reads as false.
+                                  (when (mem:provenance-untrusted provenance) (list :untrusted t)))
                                  (append
                                   '(:id :subject :content :kind :value :tokens
                                     :valid_from :recorded_at :embedding
                                     :source_conversation :source_turn)
                                   (when at '(:source_at))
                                   (when through '(:source_through))
-                                  (when thread '(:thread))))))
+                                  (when thread '(:thread))
+                                  (when (mem:provenance-untrusted provenance) '(:untrusted))))))
         (cs:insert! changeset (store-connection store) :dialect (store-dialect store))))
     observation))
 
@@ -556,6 +617,58 @@ STORE's embedder, except those already prepared for STORE."
                 (mem:observation-superseded-at observation) (mem:observation-recorded-at replacement)
                 (mem:observation-supersedes replacement) (mem:observation-id observation))
           replacement)))))
+
+(defmethod mem:condense ((store db-memory-store) sources content
+                         &key provenance kind value tokens valid-from)
+  (mem:check-provenance provenance "condense")
+  (when (null sources)
+    (error 'praxeon/conditions:praxeon-error :detail "nothing to condense"))
+  (mem::%check-distinct-sources sources)
+  ;; THE CHECK AND THE WRITES ARE ONE STEP, as in SUPERSEDE. The operation holds the store's
+  ;; connection and, for a write, its lock or SQLite's write lock (%WITH-STORE, #653), so no other
+  ;; thread of this process can supersede a source between the check and the update, and in one
+  ;; transaction, begun IMMEDIATE, a failure part-way through leaves neither the new row nor a
+  ;; superseded source behind. Each UPDATE changes a source only while it is still current and
+  ;; must change one, which holds off another process. The embedding is computed first, outside
+  ;; the lock, as SUPERSEDE's is.
+  (let ((*prepared* (%prepare store (list content))))
+  (%with-store (store :exclusive t)
+    (conn:with-transaction ((store-connection store) :immediate t)
+      (let* ((first (first sources))
+             (held (mem:observations-of store (mem:observation-subject first)
+                                        :thread (mem:observation-thread first))))
+        ;; The same refusals as the in-memory store: every source current, here, in one scope.
+        (dolist (o sources)
+          (unless (find (mem:observation-id o) held :key #'mem:observation-id :test #'string=)
+            (error 'praxeon/conditions:praxeon-error
+                   :detail (format nil "cannot condense ~A: it is not a current observation in this scope"
+                                   (mem:observation-id o)))))
+        (let ((new (mem:remember store (mem:observation-subject first) content
+                                 :thread (mem:observation-thread first)
+                                 :provenance (mem:inherit-taint provenance sources)
+                                 :kind (or kind (mem:condensed-kind sources))
+                                 :value (or value (mem:condensed-value sources))
+                                 :tokens tokens :valid-from valid-from))
+              (ids (mapcar #'mem:observation-id sources)))
+          (dolist (id ids)
+            (unless (eql 1 (q:run (store-connection store)
+                                  (list :update (store-table store)
+                                        :set (list :superseded_by (mem:observation-id new)
+                                                   :superseded_at (mem:observation-recorded-at new))
+                                        :where (list :and (list := :id id) (list :is-null :superseded_by)))
+                                  :dialect (store-dialect store)))
+              (error 'praxeon/conditions:praxeon-error
+                     :detail (format nil "cannot condense ~A: it was superseded by another process meanwhile" id))))
+          (q:run (store-connection store)
+                 (list :update (store-table store)
+                       :set (list :condensed_from (format nil "~{~A~^,~}" ids))
+                       :where (list := :id (mem:observation-id new)))
+                 :dialect (store-dialect store))
+          (setf (mem:observation-condensed-from new) ids)
+          (dolist (o sources)
+            (setf (mem:observation-superseded-by o) (mem:observation-id new)
+                  (mem:observation-superseded-at o) (mem:observation-recorded-at new)))
+          new))))))
 
 (defun %where-current (subject as-of include-superseded &optional thread)
   "The WHERE clause for a subject's observations in the scope THREAD names: NIL for facts about
@@ -755,31 +868,39 @@ subject's rows."
             rows)))))
 
 (defun %sqlite-nearest (store subject embedding as-of limit &optional thread)
-  "RECALL-SIMILAR's ranking on SQLite (#425): the subject's current observations with their
-embeddings, the LIMIT nearest EMBEDDING by cosine distance, nearest first, ties by id. The
-query vector is checked for width as a stored one is. An observation with no embedding sorts
-after every other, as NULL does in Postgres's ascending ORDER BY. REMEMBER always writes one,
-so that case needs a row written some other way."
-  (let* ((query (llm:parse-vector-text (%vector-text store embedding)))
-         (rows (%with-store (store)
-                 (q:fetch (store-connection store)
-                          (list :select (append +columns+ '(:embedding))
-                                :from (list (store-table store))
-                                :where (%where-current subject as-of nil thread))
-                          :dialect :sqlite)))
-         (scored (mapcar (lambda (row)
-                           (let ((text (param:row-value row :embedding)))
-                             (cons (if text
-                                       (llm:cosine-distance query (llm:parse-vector-text text))
-                                       most-positive-double-float)
-                                   row)))
-                         rows))
-         (sorted (sort scored (lambda (a b)
-                                (or (< (car a) (car b))
-                                    (and (= (car a) (car b))
-                                         (string< (param:row-value (cdr a) :id)
-                                                  (param:row-value (cdr b) :id))))))))
-    (mapcar #'cdr (subseq sorted 0 (min limit (length sorted))))))
+  "RECALL-SIMILAR's ranking on SQLite (#425): the subject's current observations, read one at a
+time with their embeddings, the LIMIT nearest EMBEDDING by cosine distance kept as the scan goes,
+nearest first, ties by id. The query vector is checked for width as a stored one is. An
+observation with no embedding sorts after every other, as NULL does in Postgres's ascending ORDER
+BY. REMEMBER always writes one, so that case needs a row written some other way. An embedding
+still in the text form of a store written before #425's re-encode is read too. One of another
+width than the query, or one that cannot be read, is left out and counted in a warning."
+  (let* ((query (llm:stored-vector (%vector-text store embedding)))
+         (buffer (make-array (length query) :element-type 'double-float))
+         (nearest (llm:make-nearest limit))
+         (skipped 0))
+    (%with-store (store)
+      (q:map-fetch (store-connection store)
+                   (lambda (row)
+                     (let ((stored (param:row-value row :embedding)))
+                       (if (null stored)
+                           (llm:nearest-offer nearest most-positive-double-float (param:row-value row :id) row)
+                           ;; A row of another width (an embedder changed), malformed, or with a
+                           ;; distance that is not finite is skipped and counted, in either form,
+                           ;; not compared over a shorter length or allowed to fail the recall
+                           ;; (#425's review).
+                           (let ((d (llm:stored-distance query stored buffer)))
+                             (if d
+                                 (llm:nearest-offer nearest d (param:row-value row :id) row)
+                                 (incf skipped))))))
+                   (list :select (append +columns+ '(:embedding))
+                         :from (list (store-table store))
+                         :where (%where-current subject as-of nil thread))
+                   :dialect :sqlite))
+    (when (plusp skipped)
+      (log:warn "praxeon/memory-db: observations whose stored embedding could not be compared were left out"
+                :table (store-table store) :skipped skipped))
+    (mapcar #'cdr (llm:nearest-items nearest))))
 
 (defmethod mem:forget ((store db-memory-store) observation)
   (%with-store (store :exclusive t)

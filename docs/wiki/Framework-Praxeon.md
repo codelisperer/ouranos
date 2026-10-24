@@ -99,9 +99,9 @@ the CLI and as a web app.
 ### Planned
 
 Growing the Coalton typed core; **Kairos** (the bitemporal context engine, #60); the rest of
-observational memory, tracked in #317: a reflector that condenses a scope's observations with
-the app's approval (step B, #464), the thread's observations put into the prompt in place of
-its old messages (step C), and measuring tokens and accuracy together (step D); LLM-layer
+observational memory, tracked in #317: measuring tokens and accuracy together (step D), and
+from its results, a default for when observations replace messages (`:replace-at`, off until
+then); LLM-layer
 hardening (streaming, retry/backoff, real token counting); model routing; a graphical studio; per-session agents for
 multi-user "as a service"; live-reload layer 3 (conditions with restart selection in the
 browser).
@@ -286,8 +286,8 @@ What is on `main`:
   store implements it.
 - **`praxeon/memory-db`:** the same generics in a database. On Postgres the embedding is a
   pgvector column, with an HNSW index built for the cosine distance that `recall-similar`
-  queries. On SQLite the embedding is stored as text and `recall-similar` ranks one subject's
-  observations in Lisp. It is an aux system, because praxeon's core takes no database
+  queries. On SQLite the embedding is stored as single floats in a BLOB, and `recall-similar`
+  reads one subject's observations one at a time and ranks them in Lisp (#425). It is an aux system, because praxeon's core takes no database
   dependency: a store reaches it through the memory generics.
 - **`praxeon/distil`:** the distillation pass. A model reads a window of messages and proposes
   observations; `apply-distillation` writes them. A proposal that an observation replaces an
@@ -307,9 +307,12 @@ What is on `main`:
   before a later turn writes it, the window is distilled again, and a model that words its
   answer differently leaves both wordings.
 
-Still to come, in #317: a reflector that condenses a scope's observations (step B, #464), the
-thread's observations in the prompt in place of its old messages (step C), and a benchmark that
-measures tokens and accuracy together (step D).
+Also built, in #317:
+- **The reflector** (step B, #464). It condenses a scope's observations with the app's approval, once the observations it may condense pass a threshold. It backs off after each reflection.
+- **Taint** (#906). Observations from untrusted content are marked, carried through condensing and promotion, and labelled in the prompt. They make the turn untrusted, and they are not promoted without the app's approval.
+- **The prompt** (step C, #908). `praxeon/actor:attach-thread-memory` puts the thread's observations into the prompt in place of the messages they were distilled from. They go in a part that ends the cached prefix. This happens only once `:replace-at` is set and reached; it is off by default. A tool returns the raw messages behind an observation.
+
+Still to come is step D: a benchmark that measures tokens and accuracy together, which also decides `:replace-at`'s default.
 
 The Praxeon framing is unchanged: observation → imputed value → retained means/ends, the same
 economizing model as context assembly, extended across sessions.

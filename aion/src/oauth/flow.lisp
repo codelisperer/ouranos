@@ -198,10 +198,9 @@ HOST is refused without being sent. This follows PRAXEON/MCP's %SEND-WITHIN."
 the connection pinned to it, and no redirect is followed, so a code, a refresh token or client
 metadata is never sent anywhere else.
 
-On Windows FETCH-PUBLIC cannot pin a connection, and this signals PINNED-CONNECT-UNSUPPORTED,
-as #295 decided for every URL a server or a user supplies: there is no fallback that connects
-without the check. Sign-in is therefore not available on Windows until aion/http-client can
-pin a connection there."
+FETCH-PUBLIC pins the connection on every platform, Windows included since #536, so there is no
+fallback that connects without the check (#295). A PINNED-CONNECT-UNSUPPORTED from a platform
+that cannot pin is passed on as itself."
   (handler-case
       (%within broker (%host-of url) (1+ (broker-timeout broker))
                (lambda ()

@@ -10,9 +10,9 @@
 ;;;;                   page from its own servers. It reports no title, so PAGE-TITLE is NIL, and
 ;;;;                   the URL it reports is taken as the URL read.
 ;;;;   PUBLIC-FETCH    aion/http-client's FETCH-PUBLIC from this machine, and the page's text
-;;;;                   extracted here with plump. Not available on Windows, where FETCH-PUBLIC
-;;;;                   cannot pin its connection; REGISTER-READ-WEB-PAGE then registers nothing
-;;;;                   unless Tavily has a key, and logs why.
+;;;;                   extracted here with plump. On every platform, Windows included since
+;;;;                   #536, where FETCH-PUBLIC pins its connection too and Windows decides
+;;;;                   whether to trust the server's certificate.
 ;;;;
 ;;;; ADDRESSES. A URL whose host resolves to any private, loopback, link-local or other
 ;;;; non-public address is refused before anything is sent (aion/http-client's
@@ -70,9 +70,10 @@
 
 (defparameter *tavily-extract-endpoint* "https://api.tavily.com/extract")
 
-(defparameter *fetch-available-p* (not (uiop:os-windows-p))
-  "Whether PUBLIC-FETCH can run here. FETCH-PUBLIC pins each connection to the address it
-checked, which aion/http-client cannot do on Windows.")
+(defparameter *fetch-available-p* t
+  "Whether PUBLIC-FETCH can run here. True on every platform: FETCH-PUBLIC pins each connection
+to the address it checked, on Windows too since #536. Tests bind it to check what
+REGISTER-READ-WEB-PAGE does without it.")
 
 ;;; --- the protocol ---------------------------------------------------------------------------
 
