@@ -563,6 +563,107 @@ checkout: check-upstream walks the tree with check-pins' own PIN-FILES (#808)."
       (is (= 1 code) "exit ~D~%~A" code output)
       (is (search "uses: actions/cache@ has no entry" output) "~A" output))))
 
+;;; --- the places #749 added: runner images, env versions, compose and script images ----------
+
+(defun %upstream-with (files &key (inventory +upstream-inventory+))
+  "The passing fixture plus FILES, a list of (relative-path contents), with INVENTORY."
+  (let ((tree (%upstream-tree :inventory inventory)))
+    (loop for (path contents) in files
+          do (%write (merge-pathnames path tree) contents))
+    tree))
+
+(defparameter +upstream-workflow-with-runners+
+  (format nil "~A    runs-on: ubuntu-24.04~%  matrix-job:~%    runs-on: ${{ matrix.os }}~%    strategy:~%      matrix:~%        include:~%          - os: windows-2022~%    env:~%      PGVECTOR_VERSION: \"0.8.6\"~%      LIBFOO_COMMIT: abc123~%"
+          +upstream-workflow+)
+  "The fixture workflow with a runs-on image, a runs-on expression, a matrix os and two env
+pins.")
+
+(test upstream-fails-on-a-runs-on-image-with-no-entry
+  (multiple-value-bind (code output)
+      (%run-upstream (%upstream-with (list (list ".github/workflows/verify.yml"
+                                                 +upstream-workflow-with-runners+))))
+    (is (= 1 code) "exit ~D~%~A" code output)
+    (is (search "runs-on: ubuntu- has no entry" output) "~A" output)))
+
+(test upstream-fails-on-a-matrix-os-with-no-entry
+  (multiple-value-bind (code output)
+      (%run-upstream (%upstream-with (list (list ".github/workflows/verify.yml"
+                                                 +upstream-workflow-with-runners+))))
+    (is (= 1 code))
+    (is (search "- os: windows- has no entry" output) "~A" output)))
+
+(test upstream-fails-on-a-workflow-env-version-or-commit-with-no-entry
+  (multiple-value-bind (code output)
+      (%run-upstream (%upstream-with (list (list ".github/workflows/verify.yml"
+                                                 +upstream-workflow-with-runners+))))
+    (is (= 1 code))
+    (is (search "PGVECTOR_VERSION: \" has no entry" output) "~A" output)
+    (is (search "LIBFOO_COMMIT: " output) "~A" output)))
+
+(test upstream-does-not-take-a-runs-on-expression-for-a-pin
+  (multiple-value-bind (code output)
+      (%run-upstream (%upstream-with (list (list ".github/workflows/verify.yml"
+                                                 +upstream-workflow-with-runners+))))
+    (declare (ignore code))
+    (is (not (search "${{" output)) "~A" output)))
+
+(test upstream-fails-on-a-compose-image-with-no-entry
+  (multiple-value-bind (code output)
+      (%run-upstream (%upstream-with
+                      (list (list "docker-compose.test.yml"
+                                  (format nil "services:~%  pg:~%    image: postgres:17.6@sha256:abc~%")))))
+    (is (= 1 code) "exit ~D~%~A" code output)
+    (is (search "docker-compose.test.yml image: postgres: has no entry" output) "~A" output)))
+
+(test upstream-fails-on-a-script-image-with-no-entry-and-ignores-one-from-elsewhere
+  (multiple-value-bind (code output)
+      (%run-upstream (%upstream-with
+                      (list (list "scripts/clean.sh"
+                                  (format nil "#!/bin/sh~%image=ubuntu:24.04~%  --image) image=$2;;~%image=\"$(pick)\"~%")))))
+    (is (= 1 code) "exit ~D~%~A" code output)
+    (is (search "scripts/clean.sh image=ubuntu: has no entry" output) "~A" output)
+    (is (= 1 (count-matches "scripts/clean.sh" output)) "only the literal image is a pin: ~A" output)))
+
+(defun count-matches (needle haystack)
+  (loop with start = 0 for found = (search needle haystack :start2 start)
+        while found count t do (setf start (1+ found))))
+
+(test upstream-passes-when-every-new-kind-of-pin-has-an-entry
+  "The control for the six tests above: the same pins, each with an entry, pass, and are counted:
+the fixture's three pins and six more (runs-on, matrix os, two env keys, a compose image and a
+script image; the runs-on expression and the two script images from elsewhere are not pins)."
+  (let ((inventory (concatenate 'string +upstream-inventory+
+                                "(:name \"Linux runner\" :category :ci
+ :where ((:text \".github/workflows/verify.yml\" \"runs-on: ubuntu-\" nil))
+ :upstream (:manual \"https://github.com/actions/runner-images\") :reviewed \"2026-10-23\")
+(:name \"Windows runner\" :category :ci
+ :where ((:text \".github/workflows/verify.yml\" \"- os: windows-\" nil))
+ :upstream (:manual \"https://github.com/actions/runner-images\") :reviewed \"2026-10-23\")
+(:name \"pgvector\" :category :ci
+ :where ((:text \".github/workflows/verify.yml\" \"PGVECTOR_VERSION: \\\"\" \"\\\"\"))
+ :upstream (:github-tag \"pgvector/pgvector\" \"v\"))
+(:name \"libfoo commit\" :category :ci
+ :where ((:text \".github/workflows/verify.yml\" \"LIBFOO_COMMIT: \" nil))
+ :upstream (:manual \"https://example.com\") :reviewed \"2026-10-23\")
+(:name \"postgres image\" :category :container
+ :where ((:text \"docker-compose.test.yml\" \"image: postgres:\" \"@\"))
+ :upstream (:docker \"library/postgres\"))
+(:name \"clean image\" :category :container
+ :where ((:text \"scripts/clean.sh\" \"image=ubuntu:\" nil))
+ :upstream (:docker \"library/ubuntu\" \".04\"))
+")))
+    (multiple-value-bind (code output)
+        (%run-upstream
+         (%upstream-with
+          (list (list ".github/workflows/verify.yml" +upstream-workflow-with-runners+)
+                (list "docker-compose.test.yml"
+                      (format nil "services:~%  pg:~%    image: postgres:17.6@sha256:abc~%"))
+                (list "scripts/clean.sh"
+                      (format nil "#!/bin/sh~%image=ubuntu:24.04~%  --image) image=$2;;~%image=\"$(pick)\"~%")))
+          :inventory inventory))
+      (is (= 0 code) "exit ~D~%~A" code output)
+      (is (search "9 pins in the tree" output) "~A" output))))
+
 (test upstream-fails-when-an-entry-no-longer-finds-its-pin
   "The pin moved: versions.env renamed the key the entry names."
   (multiple-value-bind (code output)
