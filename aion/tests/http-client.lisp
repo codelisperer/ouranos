@@ -1109,3 +1109,64 @@ by default on a developer's machine."
         #+os-windows
         (signals http:certificate-expired
           (http:fetch-public "https://expired.badssl.com/" :read-timeout 30 :deadline 60)))))
+
+;;; --- the hub's review of #913 ---------------------------------------------------------------
+
+(test a-redirect-to-a-path-with-a-space-arrives-percent-encoded
+  "F1: a server redirects to \"/a b\". The next request's line must be \"GET /a%20b HTTP/1.1\": a
+raw space would split the request line for any proxy in between. On every platform, because
+FETCH-PUBLIC encodes each hop's URL before the request is made."
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore head))
+                    (if (string= path "/start")
+                        (%write-response stream 302 '(("Location" . "/a b")) "")
+                        (%write-response stream 200 '() "arrived"))))
+    (let ((r (http:fetch-public (%local s "/start" "start.test")
+                                :resolve (%resolver '(("start.test" "127.0.0.1")))
+                                :address-policy #'%loopback-allowed :read-timeout 5)))
+      (is (= 200 (http:response-status r)))
+      (let ((line (let ((h (first (server-heads s)))) (subseq h 0 (position #\Return h)))))
+        (is (string= "GET /a%20b HTTP/1.1" line) "the request line was ~S" line)))))
+
+(test the-request-target-is-percent-encoded-outside-printable-ascii
+  "F1: a space, a TAB, a control character, a Latin-1 character and one above U+00FF are each
+sent as their UTF-8 octets, percent-encoded; an existing escape and printable ASCII are kept."
+  (is (string= "/a%20b%09c%01d%C3%A9e%E2%98%BAf%2Fg?q=1&r=%22"
+               (http::%encode-target (format nil "/a b~Cc~Cd~Ce~Cf%2Fg?q=1&r=%22"
+                                             #\Tab (code-char 1) (code-char #xE9) (code-char #x263A)))))
+  (let ((out (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+    (with-open-stream (s (make-instance '%octet-output :sink out))
+      (http::write-request s :get (quri:uri (format nil "https://h.test/x y~C" (code-char #x263A)))
+                           nil nil))
+    (is (eql 0 (search "GET /x%20y%E2%98%BA HTTP/1.1" (%text out))) "~S" (%text out)))
+  (signals http:http-error
+    (http::%host-safe (format nil "h~C.test" (code-char #xE9)))))
+
+(test a-field-name-must-be-ascii-and-a-value-holds-no-control-characters
+  "F4 and F5: an accented letter is not a tchar; a value may hold HTAB and obs-text, but no other
+control character and no DEL."
+  (is-true (%refused-p (%crlf "HTTP/1.1 200 OK" (format nil "X-~C: 1" (code-char #xE9)) "")))
+  (dolist (c (list (code-char 1) (code-char 27) (code-char 127)))
+    (is-true (%refused-p (%crlf "HTTP/1.1 200 OK" (format nil "X-A: a~Cb" c) "Content-Length: 0" ""))
+             "accepted char ~D" (char-code c)))
+  (multiple-value-bind (status fields)
+      (%parse (%crlf "HTTP/1.1 200 OK" (format nil "X-A: a~Cb~Cc" #\Tab (code-char #xE9))
+                     "Content-Length: 0" ""))
+    (is (= 200 status))
+    (is (string= (format nil "a~Cb~Cc" #\Tab (code-char #xE9)) (gethash "x-a" fields)))))
+
+#+os-windows
+(test a-pinned-connection-to-an-ipv6-literal-asks-about-the-bare-address
+  "F3: QURI keeps the brackets of https://[::1]/; the verifier is asked about ::1, the name a
+certificate's IP address entry holds."
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "v6"))
+                  :tls t)
+    (let* ((seen '())
+           (http::*server-certificate-verifier*
+             (lambda (chain host) (declare (ignore chain)) (push host seen) :trusted)))
+      (http:send-request (http:make-request :url (format nil "https://[::1]:~D/" (server-port s))
+                                            :connect-address "127.0.0.1" :read-timeout 5)
+                         '())
+      (is (equal '("::1") seen) "the verifier was asked about ~S" seen))))

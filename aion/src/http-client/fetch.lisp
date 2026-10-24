@@ -266,7 +266,9 @@ CHAIN), both for the caller to free. A directory is refused: aion/tls reads one 
                          (n (read-sequence buffer in)))
                     (subseq buffer 0 n)))))
     (let ((chain (aion/tls:make-certificate-chain octets)))
-      (values (aion/tls:make-client-config chain) chain))))
+      (handler-bind ((error (lambda (e) (declare (ignore e))
+                              (aion/tls:free-certificate-chain chain))))
+        (values (aion/tls:make-client-config chain) chain)))))
 
 #+os-windows
 (defun %request-pinned (req)
@@ -312,8 +314,10 @@ body closes it; otherwise the body is read here and the connection closed."
              (when (string-equal (quri:uri-scheme uri) "https")
                (when (request-ca-path req)
                  (multiple-value-setq (own-config own-chain) (%ca-path-config (request-ca-path req))))
+               ;; QURI keeps an IPv6 literal's brackets, as in [::1]; the name the certificate
+               ;; is judged for, and the one aion/tls decides SNI from, is the bare address.
                (setf stream (aion/tls:make-tls-stream stream (or own-config (%verifying-config))
-                                                      :hostname host)))
+                                                      :hostname (string-trim "[]" host))))
              (multiple-value-bind (body status headers)
                  (http1-exchange stream (request-method req) uri (request-headers req)
                                  (request-content req) :closer #'close-connection)
@@ -435,12 +439,23 @@ internal addresses. Never pass one derived from a setting or from user input."
         (when watch (%take-back-socket))
         (when timer (sb-ext:unschedule-timer timer))))))
 
+(defun %encoded-url (url)
+  "URL with its path and query percent-encoded by %ENCODE-TARGET, so a space, a control
+character or a character beyond ASCII in a URL a user or a redirect supplied cannot reach a
+request line as it is, on any platform. QURI keeps them as they are when it parses a URL or
+merges a redirect's Location (the hub's review of #913)."
+  (let ((uri (quri:uri url)))
+    (setf (quri:uri-path uri) (and (quri:uri-path uri) (%encode-target (quri:uri-path uri)))
+          (quri:uri-query uri) (and (quri:uri-query uri) (%encode-target (quri:uri-query uri))))
+    (quri:render-uri uri)))
+
 (defun %fetch-hops (url method headers content max-redirects max-body-bytes
                     connect-timeout read-timeout ca-path resolve address-policy perform check)
   "FETCH-PUBLIC's redirect loop. CHECK is called with the hop's URL after each step, and
 signals when the deadline has passed."
   (let ((hops 0))
     (loop
+      (setf url (%encoded-url url))
       (let* ((uri (quri:uri url))
              (address (prog1 (%checked-address url uri resolve address-policy)
                         (funcall check url)))

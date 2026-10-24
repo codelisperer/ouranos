@@ -66,8 +66,9 @@ line is longer than BUDGET octets. Returns (values LINE OCTETS-READ)."
               (t (vector-push-extend (code-char b) line)))))))
 
 (defun %token-char-p (c)
-  "A tchar of RFC 9110: the characters a field name may hold."
-  (or (alphanumericp c) (find c "!#$%&'*+-.^_`|~")))
+  "A tchar of RFC 9110: the characters a field name may hold. ASCII only: ALPHANUMERICP would
+also accept letters such as an accented e, which a field name may not hold."
+  (or (char<= #\a c #\z) (char<= #\A c #\Z) (char<= #\0 c #\9) (find c "!#$%&'*+-.^_`|~")))
 
 (defun %parse-status-line (line)
   "The status code of the status line LINE, \"HTTP/1.x SSS reason\"."
@@ -87,9 +88,11 @@ spaces and tabs."
     (unless (and colon (plusp colon) (every #'%token-char-p (subseq line 0 colon)))
       (%malformed "not a header field: ~S" (subseq line 0 (min 80 (length line)))))
     (let ((value (string-trim '(#\Space #\Tab) (subseq line (1+ colon)))))
-      (when (find-if (lambda (c) (or (char= c (code-char 0)) (char= c #\Return) (char= c #\Newline)))
+      ;; RFC 9110 field-vchar and obs-text: no control character but HTAB, and no DEL.
+      (when (find-if (lambda (c) (let ((code (char-code c)))
+                                   (or (and (< code 32) (char/= c #\Tab)) (= code 127))))
                      value)
-        (%malformed "a header field's value holds a NUL, CR or LF"))
+        (%malformed "a header field's value holds a control character"))
       (values (string-downcase (subseq line 0 colon)) value))))
 
 (defun %read-fields (stream what)
@@ -250,6 +253,28 @@ an alist form-encoded, as dexador does."
     (list (values (sb-ext:string-to-octets (quri:url-encode-params content) :external-format :utf-8)
                   "application/x-www-form-urlencoded"))))
 
+(defun %encode-target (string)
+  "STRING with every character outside 0x21-0x7E percent-encoded as its UTF-8 octets: a space,
+a TAB, a control character, DEL and anything beyond ASCII. A URL from a server or a redirect can
+hold any of them, and written as it is a space splits the request line for a proxy, octets
+0x80-0xFF go out as raw Latin-1, and a character above U+00FF cannot be written at all (the hub's
+review of #913). Characters already percent-encoded, and every other printable ASCII character,
+are left as they are."
+  (with-output-to-string (out)
+    (loop for c across string
+          for code = (char-code c)
+          do (if (<= #x21 code #x7E)
+                 (write-char c out)
+                 (loop for b across (sb-ext:string-to-octets (string c) :external-format :utf-8)
+                       do (format out "%~2,'0X" b))))))
+
+(defun %host-safe (host)
+  "HOST, refused unless every character is printable ASCII (0x21-0x7E). A host name is ASCII
+(an internationalised one is sent in its A-label form), so anything else is not a host."
+  (unless (and (plusp (length host)) (every (lambda (c) (<= #x21 (char-code c) #x7E)) host))
+    (error 'http-error :detail (format nil "not a host name for the Host field: ~S" host)))
+  host)
+
 (defun write-request (stream method uri headers content)
   "Write an HTTP/1.1 request for METHOD on URI (a QURI:URI) with HEADERS, an alist, and CONTENT
 to the binary STREAM, and force it out. Host is the URI's host (and port when it is not the
@@ -257,7 +282,7 @@ scheme's default). Connection: close and Accept-Encoding: identity are always se
 caller's own values for those, for Host and for Content-Length are not."
   (multiple-value-bind (body default-type) (%content-octets content)
     (let* ((path (let ((p (or (quri:uri-path uri) "")) (q (quri:uri-query uri)))
-                   (format nil "~A~@[?~A~]" (if (string= p "") "/" p) q)))
+                   (%encode-target (format nil "~A~@[?~A~]" (if (string= p "") "/" p) q))))
            (port (quri:uri-port uri))
            (default-port (if (string-equal (quri:uri-scheme uri) "https") 443 80))
            (host (if (and port (/= port default-port))
@@ -265,7 +290,7 @@ caller's own values for those, for Host and for Content-Length are not."
                      (quri:uri-host uri)))
            (skip '("host" "connection" "accept-encoding" "content-length" "transfer-encoding"))
            ;; Newest first, and reversed when written: the request line comes out first.
-           (lines (list (format nil "Host: ~A" (%field-safe host "host"))
+           (lines (list (format nil "Host: ~A" (%host-safe host))
                         (format nil "~A ~A HTTP/1.1" (string-upcase (symbol-name method))
                                 (%field-safe path "path")))))
       (dolist (h headers)

@@ -127,6 +127,7 @@ are written down rather than left to the next failed build.")
 
 (defparameter *required-symbols*
   '("mbedtls_ssl_handshake" "mbedtls_ssl_set_bio" "mbedtls_ssl_conf_own_cert"
+    "mbedtls_ssl_check_pending"
     "psa_crypto_init" "mbedtls_x509_crt_parse_file"
     ;; Ours, from aion/src/tls/c/ouranos_tls.c (#125). One per reason the file exists:
     ;; allocation, inline wrappers, threading. A .def that dropped the ouranos_tls_ prefix

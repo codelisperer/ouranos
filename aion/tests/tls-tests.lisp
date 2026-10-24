@@ -666,3 +666,40 @@ RECEIVED-NEW-SESSION-TICKET for them."
   (dolist (bad '(0 17 :many))
     (signals error (tls:make-server-config (tls:make-certificate-chain (getf (pki) :cert-pem))
                                            (getf (pki) :key) :session-tickets bad))))
+
+(test nine-tickets-in-one-record-do-not-stop-the-read
+  "The hub's review of #913: several tickets can share one record, so after the record is read
+none of them consumes input. Each must count as progress; counted as idle, nine of them ended
+the loop at +MAX-IDLE-READS+ with the response still buffered."
+  (let ((*scripted-engine* (%engine-with-input 100)))
+    (unwind-protect
+         (%with-ssl-read ((append (list (list 30 aion/tls::+err-want-read+))
+                                  (loop repeat 9
+                                        append (list (list 0 aion/tls::+err-received-new-session-ticket+)
+                                                     (list 0 aion/tls::+err-want-read+)))
+                                  (list (list 70 :data 5))))
+           (let ((got (tls:engine-read *scripted-engine*)))
+             (is (= 5 (length got)) "got ~S" got)))
+      (tls:free-engine *scripted-engine*))))
+
+(test a-client-reads-data-sent-after-nine-session-tickets
+  "Against this tree's own server sending nine TLS 1.3 tickets, then a response."
+  (let* ((client (tls:make-engine (client-config) :hostname "localhost"))
+         (server (tls:make-engine (tls:make-server-config
+                                   (tls:make-certificate-chain (getf (pki) :cert-pem))
+                                   (getf (pki) :key) :session-tickets 9))))
+    (unwind-protect
+         (progn
+           (is-true (handshake client server))
+           (tls:engine-write server (octets "after nine tickets"))
+           (move server client)
+           (is (string= "after nine tickets" (text (tls:engine-read client)))))
+      (tls:free-engine client)
+      (tls:free-engine server))))
+
+(test an-ip-literal-is-told-apart-from-a-host-name
+  "F3: what aion/tls sends no SNI for, under a caller's verifier."
+  (dolist (ip '("127.0.0.1" "::1" "2001:db8::1" "10.0.0.255"))
+    (is-true (tls:ip-literal-p ip) "~A" ip))
+  (dolist (name '("example.com" "pinned.test" "1.2.3" "1.2.3.4.5" "a.b.c.d"))
+    (is-false (tls:ip-literal-p name) "~A" name)))

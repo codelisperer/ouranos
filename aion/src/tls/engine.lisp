@@ -83,11 +83,24 @@ accept any certificate the trusted CAs signed, for any name."
     (sb-thread:with-mutex (*engines-lock*) (setf (gethash id *engines*) engine))
     (handler-bind ((error (lambda (e) (declare (ignore e)) (free-engine engine))))
       (%check (%ssl-setup ssl (%pointer config)) "mbedtls_ssl_setup")
-      (when hostname
+      ;; mbedTLS sends SNI from the name set here and also verifies against it. RFC 6066 does
+      ;; not allow an IP address as SNI, so with a caller's verifier, which does the name
+      ;; check itself and gets HOSTNAME from the engine, an IP literal is not set at all. A
+      ;; config that trusts CA certificates needs the name set to verify it, and mbedTLS has no
+      ;; way to verify against a name it does not also send.
+      (when (and hostname (not (and (config-verifier config) (ip-literal-p hostname))))
         (%check (%ssl-set-hostname ssl hostname) "mbedtls_ssl_set_hostname"))
       (%ssl-set-bio ssl context (cffi:callback %bio-send) (cffi:callback %bio-recv)
                     (cffi:null-pointer)))
     engine))
+
+(defun ip-literal-p (name)
+  "Whether NAME is an IP address rather than a host name: four dot-separated decimal numbers, or
+anything holding a colon (an IPv6 address, without the brackets a URL puts round it)."
+  (or (find #\: name)
+      (let ((parts (uiop:split-string name :separator ".")))
+        (and (= 4 (length parts))
+             (every (lambda (p) (and (plusp (length p)) (every #'digit-char-p p))) parts)))))
 
 (defun free-engine (engine)
   "Free ENGINE's mbedTLS context. Idempotent. Its config is not freed."
@@ -196,17 +209,23 @@ a whole record has not arrived yet, or :EOF once the peer has sent close_notify.
                 ;; response's records were still unread here. Returning at the first WANT-READ
                 ;; made the caller wait on the network for data it already had, and a server
                 ;; that closed after its response was reported as a truncated stream (#536).
-                ;; So read again while fed input is still unread. A call that reads nothing
-                ;; counts as idle, and after +MAX-IDLE-READS+ of them in a row this returns, so
-                ;; mbedTLS refusing the input for good cannot loop here.
+                ;; So read again while fed input is still unread, or while mbedTLS says it holds
+                ;; input it has not processed (mbedtls_ssl_check_pending). A call that reads
+                ;; nothing and reports no ticket counts as idle, and after +MAX-IDLE-READS+ of
+                ;; them in a row this returns, so mbedTLS refusing the input for good cannot
+                ;; loop here.
                 ((or (= n +err-want-read+) (= n +err-want-write+))
                  (if (= (%in-start engine) before) (incf idle) (setf idle 0))
-                 (unless (and (< (%in-start engine) (fill-pointer (%in engine)))
-                              (< idle +max-idle-reads+))
+                 (unless (and (< idle +max-idle-reads+)
+                              (or (< (%in-start engine) (fill-pointer (%in engine)))
+                                  (plusp (%ssl-check-pending (%ssl engine)))))
                    (return)))
                 ;; A TLS 1.3 server may send session tickets after the handshake. We keep no
-                ;; sessions, so a ticket is read and dropped.
-                ((= n +err-received-new-session-ticket+))
+                ;; sessions, so a ticket is read and dropped. A ticket is progress: several can
+                ;; share one record, so none of them reads input, and counting them as idle
+                ;; stopped the loop after +MAX-IDLE-READS+ tickets with the response still
+                ;; buffered (the hub's review of #913).
+                ((= n +err-received-new-session-ticket+) (setf idle 0))
                 ((or (zerop n) (= n +err-peer-close-notify+))
                  (setf (%peer-closed engine) t)
                  (return))

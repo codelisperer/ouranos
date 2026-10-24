@@ -36,6 +36,6 @@
    #:engine #:make-engine #:free-engine #:engine-feed #:engine-take-output
    #:engine-output-pending-p #:engine-handshake #:engine-handshake-done-p
    #:engine-read #:engine-write #:engine-close-notify
-   #:engine-version #:engine-ciphersuite #:engine-peer-certificate-der #:engine-peer-certificate-chain-der
+   #:engine-version #:engine-ciphersuite #:engine-peer-certificate-der #:engine-peer-certificate-chain-der #:ip-literal-p
    ;; the blocking stream
    #:tls-stream #:make-tls-stream #:tls-stream-engine))

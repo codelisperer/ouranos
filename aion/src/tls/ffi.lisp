@@ -92,6 +92,7 @@
   (ssl :pointer) (ctx :pointer) (send :pointer) (recv :pointer) (recv-timeout :pointer))
 (cffi:defcfun ("mbedtls_ssl_handshake" %ssl-handshake) :int (ssl :pointer))
 (cffi:defcfun ("mbedtls_ssl_read" %ssl-read) :int (ssl :pointer) (buf :pointer) (len :size))
+(cffi:defcfun ("mbedtls_ssl_check_pending" %ssl-check-pending) :int (ssl :pointer))
 (cffi:defcfun ("mbedtls_ssl_write" %ssl-write) :int (ssl :pointer) (buf :pointer) (len :size))
 (cffi:defcfun ("mbedtls_ssl_close_notify" %ssl-close-notify) :int (ssl :pointer))
 (cffi:defcfun ("mbedtls_ssl_get_verify_result" %ssl-get-verify-result) :uint32 (ssl :pointer))
