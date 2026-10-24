@@ -88,7 +88,7 @@
   (:use #:cl)
   (:local-nicknames (#:a #:alexandria))
   (:export
-   #:ctx-item #:make-ctx-item #:ctx-item-source #:ctx-item-content #:ctx-item-tokens
+   #:ctx-item #:make-ctx-item #:ctx-item-source #:ctx-item-untrusted #:ctx-item-content #:ctx-item-tokens
    #:ctx-item-valid-time #:ctx-item-tx-time #:ctx-item-role #:ctx-item-value
    #:context #:make-context #:context-budget #:context-items
    #:add-item #:assemble #:context-tokens #:now))
@@ -108,7 +108,7 @@
            #:provenance #:make-provenance #:provenance-conversation #:provenance-turn
            #:provenance-at #:provenance-through #:observation-provenance #:check-provenance
            #:provenance-p #:observation-thread #:observation-condensed-from
-           #:condense #:condensed-kind #:condensed-value #:observations-from-conversation
+           #:observation-untrusted-p #:inherit-taint #:provenance-untrusted #:condense #:condensed-kind #:condensed-value #:observations-from-conversation
            #:observation #:observation-id #:observation-subject #:observation-content
            #:observation-kind #:observation-value #:observation-tokens
            #:observation-valid-from #:observation-recorded-at
@@ -265,7 +265,7 @@
            #:observer-failures #:observer-last-error #:observer-thread #:observer-subject
            #:unobserved #:stored-mark #:running-observer #:supported-proposals #:window-not-distilled
            #:*step-tokens* #:observer-running #:observer-running-subject #:observer-running-thread
-           #:reflect #:*reflect-tokens* #:condensable-tokens))
+           #:reflect #:*reflect-tokens* #:condensable-tokens #:window-holds-a-tool-call-p))
 
 (defpackage #:praxeon/turn
   (:use #:coalton #:coalton-prelude)
@@ -342,6 +342,7 @@
    #:means-entry-untrusted #:means-entry-requires-user-intent #:means-entry-allow
    #:means-entry-max-per-turn
    #:user-texts #:turn-untrusted-p #:turn-urls #:note-turn-urls #:mark-untrusted
+   #:untrusted-window-predicate
    #:agent-taint-scope
    ;; The accessors of what AGENT-MEANS-FOR returns. NAME and DESCRIPTION were missing, so an
    ;; app could enumerate the means it may use and not read them -- which is the

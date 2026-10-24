@@ -39,7 +39,7 @@
 
 ;;; --- where an observation came from -----------------------------------------
 
-(defstruct (provenance (:constructor make-provenance (conversation turn &key at through)))
+(defstruct (provenance (:constructor make-provenance (conversation turn &key at through untrusted)))
   "Which conversation, which turn, and when -- the traceable source of an observation.
 
 REQUIRED ON EVERY WRITE (#150). Observational memory is personal data held indefinitely, and
@@ -67,11 +67,18 @@ way (#462's ninth review): FORGET-SUBJECT keeps each thread's mark at least at t
 its observations cite. So any cited position past the observer's mark, such as a correction the
 app makes at a later message of the thread, or a position past the transcript's end, keeps an
 observer from ever observing the messages between the mark and that position (#462's tenth
-review)."
+review).
+
+UNTRUSTED is true when the observation was derived from content that came from outside the
+conversation: a window holding the result of an untrusted means, such as a web page (#827), or
+an observation condensed from one that was (INHERIT-TAINT). Such an observation is marked when it
+is put into a prompt, it makes the turn untrusted (see PRAXEON/ACTOR), and the observer does not
+promote it to a fact about the subject unless the app allows it (#317's taint ruling)."
   (conversation "" :type string)
   (turn 0 :type integer)
   (at nil :type (or null integer))
-  (through nil :type (or null integer)))
+  (through nil :type (or null integer))
+  (untrusted nil :type boolean))
 
 ;;; --- what an observation is -------------------------------------------------
 
@@ -473,6 +480,20 @@ correction keeps its protection through a condensation, otherwise the first sour
   "The value of an observation condensed from SOURCES: the highest of theirs."
   (reduce #'max sources :key #'observation-value))
 
+(defun observation-untrusted-p (observation)
+  "Whether OBSERVATION was derived from untrusted content: its provenance says so."
+  (provenance-untrusted (observation-provenance observation)))
+
+(defun inherit-taint (provenance sources)
+  "PROVENANCE, or a copy of it marked untrusted when any of SOURCES is untrusted. What CONDENSE
+writes, in every store: an observation condensed from untrusted content is untrusted whatever
+provenance its caller passed, because a summary hides where its words came from."
+  (if (and (not (provenance-untrusted provenance)) (some #'observation-untrusted-p sources))
+      (let ((copy (copy-provenance provenance)))
+        (setf (provenance-untrusted copy) t)
+        copy)
+      provenance))
+
 (defmethod condense ((store in-memory-store) sources content
                      &key provenance kind value tokens valid-from)
   (check-provenance provenance "condense")
@@ -480,7 +501,7 @@ correction keeps its protection through a condensation, otherwise the first sour
          (first (first held))
          (new (remember store (observation-subject first) content
                         :thread (observation-thread first)
-                        :provenance provenance
+                        :provenance (inherit-taint provenance held)
                         :kind (or kind (condensed-kind held))
                         :value (or value (condensed-value held))
                         :tokens tokens :valid-from valid-from)))
@@ -545,6 +566,7 @@ do I fix it' unanswerable."
    :value (observation-value observation)
    :valid-time (observation-valid-from observation)
    :tx-time (observation-recorded-at observation)
+   :untrusted (observation-untrusted-p observation)
    :source observation))
 
 (defmethod recall ((store in-memory-store) subject &key (budget 1000) kind as-of thread)

@@ -14,6 +14,33 @@ its tag.
 
 ### An app may have to act
 
+- **Observations derived from untrusted content are marked, taint the turn when they are in the
+  prompt, and are not promoted by default** (#317, after #827). An observation distilled from a
+  window that read a web page, or another means that returns outside content, could be carried
+  into later prompts and into other conversations with nothing marking where it came from, and a
+  model's summary can make an injected instruction read like the member's own wish. Now:
+  - `praxeon/memory:provenance` has `untrusted` (`make-provenance … :untrusted t`), read by
+    `observation-untrusted-p`. `condense` marks the condensed observation untrusted when any
+    source is, in every store (`inherit-taint`).
+  - `praxeon/observe:make-observer` takes `:untrusted-p`, a function of a window's messages.
+    **By default any window holding a tool call or result is taken as untrusted**
+    (`window-holds-a-tool-call-p`), since the observer cannot tell which tools return outside
+    content; an app with an agent passes `(praxeon/actor:untrusted-window-predicate agent)`,
+    which judges each call as the agent does (#827's `:untrusted` means).
+  - **An untrusted observation is promoted to a fact about the subject only when the new
+    `:promote-untrusted` allows it, on top of `:promote`**; it refuses by default. An app that
+    promotes from conversations with tool calls gets no new subject facts from them until it
+    passes one of the two functions.
+  - `praxeon/context:ctx-item` has `untrusted`, set by `observation->ctx-item`.
+    `praxeon/prompt:render-items` labels such an item `[note, from untrusted content]`.
+  - **An agent whose assembled context holds an untrusted item treats its turn as untrusted**,
+    under both taint scopes, so means declared `:requires-user-intent` are refused or held, as
+    after a web read. This is stricter than the rule for a raw untrusted result, which `:turn`
+    stops counting at the user's next message, on purpose: the item is a summary that hides its
+    source.
+  - `praxeon/memory-db` stores it in a new `untrusted` column (BOOLEAN), which `ensure-schema`
+    adds to an existing table; rows written before read as trusted.
+
 - **aion/uv: `close-loop` frees a loop only when `uv_loop_close` succeeds** (#877). Before, it
   ignored `uv_loop_close`'s result and freed the loop even when libuv returned `UV_EBUSY`
   because a handle or request was still open on it, and libuv then used the freed memory. A

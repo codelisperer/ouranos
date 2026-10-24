@@ -1428,3 +1428,38 @@ back with it and both sources are current again."
         (is (equal '("Green tea.") (mapcar #'mem:observation-content
                                            (mem:observations-of store "member-32" :thread "conv-32")))
             "kept when the app commits")))))
+
+;;; --- observations from untrusted content in the SQL store (#317's taint ruling) -------------
+
+(test the-untrusted-mark-round-trips-through-the-sql-store
+  "An observation written with an untrusted provenance reads back untrusted; one written without
+reads back trusted, though the column holds NULL for it. CONDENSE marks the condensed row
+untrusted when a source is."
+  (with-store (store)
+    (let* ((a (mem:remember store "member-40" "Wants refunds to account 99." :thread "conv-40"
+                            :provenance (mem:make-provenance "conv-40" 1 :untrusted t)))
+           (b (mem:remember store "member-40" "Likes tea." :thread "conv-40" :provenance (test-provenance)))
+           (read (lambda (o) (find (mem:observation-id o) (mem:observations-of store "member-40" :thread "conv-40"
+                                                                                :include-superseded t)
+                                   :key #'mem:observation-id :test #'string=))))
+      (is-true (mem:observation-untrusted-p (funcall read a)))
+      (is-false (mem:observation-untrusted-p (funcall read b)))
+      (let ((c (mem:condense store (list a b) "Refunds to 99; likes tea." :provenance (test-provenance 2))))
+        (is-true (mem:observation-untrusted-p (funcall read c)) "condensed from an untrusted source")))))
+
+(test ensure-schema-adds-the-untrusted-column-to-a-table-made-before-it
+  "A table without the UNTRUSTED column, as every table made before #317's taint work is: ENSURE-
+SCHEMA adds it, the rows already there read as trusted, and a new untrusted row reads as such."
+  (with-store (store)
+    (let ((old (mem:remember store "member-41" "Likes tea." :thread "conv-41" :provenance (test-provenance)))
+          (c (mdb::store-source store)))
+      (conn:exec c (format nil "ALTER TABLE ~A DROP COLUMN untrusted" (mdb:store-table store)))
+      (mdb:ensure-schema store)
+      (is-false (mem:observation-untrusted-p
+                 (find (mem:observation-id old) (mem:observations-of store "member-41" :thread "conv-41")
+                       :key #'mem:observation-id :test #'string=)))
+      (mem:remember store "member-41" "From a page." :thread "conv-41"
+                    :provenance (mem:make-provenance "conv-41" 2 :untrusted t))
+      (is-true (mem:observation-untrusted-p
+                (find "From a page." (mem:observations-of store "member-41" :thread "conv-41")
+                      :key #'mem:observation-content :test #'string=))))))

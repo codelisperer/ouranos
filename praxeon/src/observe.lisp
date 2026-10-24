@@ -171,6 +171,8 @@ window, Mastra's step.")
    (reflect-accept :initarg :reflect-accept :reader observer-reflect-accept)
    (reflect-accept-protected :initarg :reflect-accept-protected :reader observer-reflect-accept-protected)
    (reflect-protect-value :initarg :reflect-protect-value :reader observer-reflect-protect-value)
+   (untrusted-p :initarg :untrusted-p :reader observer-untrusted-p)
+   (promote-untrusted :initarg :promote-untrusted :reader observer-promote-untrusted)
    ;; REFLECT's :FLOOR for the next reflection: the condensable tokens the last one left (or found,
    ;; when it failed) plus the threshold, so a scope the model cannot bring under the threshold is
    ;; not reflected on after every run (#464's review).
@@ -264,12 +266,25 @@ before `praxeon/memory:forget-subject'."
 (`praxeon/memory:thread-progress'), or 0 when nothing is recorded."
   (or (mem:thread-progress store subject thread) 0))
 
+(defun window-holds-a-tool-call-p (messages)
+  "True when MESSAGES hold a tool call or a tool result: the observer's default UNTRUSTED-P, which
+cannot tell a means that returns outside content from one that does not, so it takes any tool as
+possibly untrusted. PRAXEON/ACTOR:UNTRUSTED-WINDOW-PREDICATE judges each call instead."
+  (some (lambda (m)
+          (let ((content (getf m :content)))
+            (or (equal "tool" (getf m :role))
+                (and (listp content)
+                     (some (lambda (p) (and (listp p) (member (getf p :type) '(:tool-use :tool-result))))
+                           content)))))
+        messages))
+
 (defun make-observer (provider store subject thread
                       &key (step *step-tokens*) (accept (constantly nil)) (promote (constantly nil))
                            (promote-accept (constantly nil)) verify distil-options
                            (max-attempts 3) (retry-delay 2) (window-timeout 300) mark reflect-threshold
                            (reflect-accept (constantly nil)) (reflect-accept-protected (constantly nil))
-                           reflect-protect-value)
+                           reflect-protect-value (untrusted-p #'window-holds-a-tool-call-p)
+                           (promote-untrusted (constantly nil)))
   "An observer of THREAD (a string, usually the conversation's id) about SUBJECT, distilling
 with PROVIDER into STORE, a PRAXEON/MEMORY:MEMORY-STORE.
 
@@ -300,7 +315,16 @@ REFLECT-PROTECT-VALUE (NIL or a number) are REFLECT's ACCEPT, ACCEPT-PROTECTED a
 both accept functions refuse by default. After a reflection, the next waits until the condensable
 tokens have grown by another REFLECT-THRESHOLD past what it left. A reflection that fails is
 counted and logged, and undoes nothing. The store must have a method for
-PRAXEON/MEMORY:CONDENSE when REFLECT-THRESHOLD is given."
+PRAXEON/MEMORY:CONDENSE when REFLECT-THRESHOLD is given.
+
+UNTRUSTED-P is called with each window's messages, true when they hold content from outside the
+conversation; the window's observations are then marked untrusted in their provenance (#317's
+taint ruling). An app with an agent passes (PRAXEON/ACTOR:UNTRUSTED-WINDOW-PREDICATE agent), which
+judges each call as the agent does. Without it, any window holding a tool call is taken as
+untrusted, since the observer cannot tell which tools return outside content.
+PROMOTE-UNTRUSTED must also allow an untrusted observation before it becomes a fact about the
+subject, on top of PROMOTE; it refuses by default, because a subject fact is carried into every
+other conversation, where nothing marks the turn it came from."
   (check-type thread string)
   (unless (and (integerp step) (plusp step))
     (error 'praxeon/conditions:praxeon-error :detail (format nil ":step must be a positive integer, not ~S" step)))
@@ -308,7 +332,8 @@ PRAXEON/MEMORY:CONDENSE when REFLECT-THRESHOLD is given."
     (error 'praxeon/conditions:praxeon-error :detail (format nil ":max-attempts must be a positive integer, not ~S" max-attempts)))
   (loop for (name value) on (list :accept accept :promote promote :promote-accept promote-accept
                                  :reflect-accept reflect-accept
-                                 :reflect-accept-protected reflect-accept-protected)
+                                 :reflect-accept-protected reflect-accept-protected
+                                 :untrusted-p untrusted-p :promote-untrusted promote-untrusted)
         by #'cddr
         unless (or (functionp value)
                    (and value (symbolp value) (fboundp value)
@@ -347,6 +372,7 @@ PRAXEON/MEMORY:CONDENSE when REFLECT-THRESHOLD is given."
                              :reflect-threshold reflect-threshold :reflect-accept reflect-accept
                              :reflect-accept-protected reflect-accept-protected
                              :reflect-protect-value reflect-protect-value
+                             :untrusted-p untrusted-p :promote-untrusted promote-untrusted
                              :mark (or mark stored 0) :skipped skipped
                              :transactions (mem:store-transactions-p store))))
 
@@ -918,7 +944,8 @@ with the closing save before the first write (%CLOSE-OPEN-WINDOWS-BEFORE)."
          (subject (observer-subject observer))
          (thread (observer-thread observer))
          (known (mem:observations-of store subject :thread thread))
-         (provenance (mem:make-provenance thread (1+ start) :through end)))
+         (provenance (mem:make-provenance thread (1+ start) :through end
+                                                     :untrusted (and (funcall (observer-untrusted-p observer) window) t))))
     (multiple-value-bind (distillation condition)
         (apply #'distil:distil (observer-provider observer) subject window
                :known known :today today (observer-distil-options observer))
@@ -1038,6 +1065,9 @@ unlinked contradiction first, only the first is replaced."
   (let* ((store (observer-store observer))
          (subject (observer-subject observer)))
     (when (and (funcall (observer-promote observer) observation)
+               ;; AN UNTRUSTED OBSERVATION NEEDS PROMOTE-UNTRUSTED TOO (#317's taint ruling).
+               (or (not (mem:observation-untrusted-p observation))
+                   (funcall (observer-promote-untrusted observer) observation))
                (not (%current-fact store subject (mem:observation-content observation))))
       (let* ((contents (%lineage-contents observation
                                           (mem:observations-of store subject :thread (observer-thread observer)
@@ -1169,12 +1199,14 @@ their turns when they share one conversation; otherwise a provenance naming no c
 (\"\", turn 0), since the sources are then recorded only in CONDENSED-FROM."
   (let* ((ps (mapcar #'mem:observation-provenance sources))
          (conversation (mem:provenance-conversation (first ps))))
-    (if (every (lambda (p) (string= (mem:provenance-conversation p) conversation)) ps)
-        (mem:make-provenance conversation
-                             (reduce #'min ps :key #'mem:provenance-turn)
-                             :through (reduce #'max ps :key (lambda (p) (or (mem:provenance-through p)
-                                                                            (mem:provenance-turn p)))))
-        (mem:make-provenance "" 0))))
+    (mem:inherit-taint
+     (if (every (lambda (p) (string= (mem:provenance-conversation p) conversation)) ps)
+         (mem:make-provenance conversation
+                              (reduce #'min ps :key #'mem:provenance-turn)
+                              :through (reduce #'max ps :key (lambda (p) (or (mem:provenance-through p)
+                                                                             (mem:provenance-turn p)))))
+         (mem:make-provenance "" 0))
+     sources)))
 
 (defun %protected-p (observation protect-value)
   "Whether REFLECT may merge OBSERVATION only with ACCEPT-PROTECTED: a correction, or a value at or
