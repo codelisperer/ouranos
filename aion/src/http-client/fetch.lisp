@@ -174,14 +174,46 @@ an IP address in text resolves to itself."
 
 ;;; --- a connection to a chosen address ------------------------------------------------
 
+(defun %tls-names (host)
+  "Two values for a TLS handshake to the URL host HOST: the name to send as SNI, and the name to
+verify the server's certificate against.
+
+For a host name, HOST both times. For an IP address (#915), NIL and the address as text: RFC 6066
+allows no IP address in SNI, so none is sent, and a URL's IPv6 host carries brackets, [::1],
+which are not part of the address. The text is usocket's rendering of the parsed address, which
+is how cl+ssl writes a certificate's iPAddress entries before it compares them, so ::1 and
+0:0:0:0:0:0:0:1 in a URL both match a certificate for ::1."
+  (let ((address (parse-address host)))
+    (if address
+        (values nil (usocket:host-to-hostname address))
+        (values host host))))
+
+#-os-windows
+(defun %verify-peer-name (stream name)
+  "Verify the certificate the server on STREAM presented against NAME, with cl+ssl's own check,
+and free it. Used for an IP address, where the handshake sent no SNI, so cl+ssl verified the
+chain but not the name. Signals what CL+SSL:VERIFY-HOSTNAME signals on a mismatch.
+
+cl+ssl compares the address with the text of the certificate's subject alternative names of
+either kind, iPAddress and dNSName, and with its common name when no alternative name matches,
+so a certificate whose dNSName or CN is the address text is accepted too. That is looser than
+RFC 6125, which matches an address only against iPAddress entries, and it is cl+ssl's rule for
+every name it verifies, here as for a host name."
+  (let ((certificate (cl+ssl:ssl-stream-x509-certificate stream)))
+    (when (cffi:null-pointer-p certificate)
+      (error 'http-error :detail "the server presented no certificate"))
+    (unwind-protect (cl+ssl:verify-hostname certificate name)
+      (cl+ssl:x509-free certificate))))
+
 #-os-windows
 (defun %request-pinned (req)
   "Run REQ over a connection to its CONNECT-ADDRESS, returning what DEX:REQUEST returns.
 
 The socket is opened here, to that address. For https the TLS handshake uses the URL's host
 name, so the server is asked for that name (SNI) and its certificate is verified against that
-name, not against the address. DEX:REQUEST then writes the request on this connection, so the
-Host header is the URL's too."
+name, not against the address. When the URL's host is itself an IP address, no SNI is sent and
+the certificate is verified against the address without its brackets (%TLS-NAMES, #915).
+DEX:REQUEST then writes the request on this connection, so the Host header is the URL's too."
   (let* ((uri (quri:uri (request-url req)))
          (host (quri:uri-host uri))
          (address (or (parse-address (request-connect-address req))
@@ -204,9 +236,14 @@ Host header is the URL's too."
                              :verify-location (if (request-ca-path req)
                                                   (uiop:native-namestring (request-ca-path req))
                                                   :default))))
-               (cl+ssl:with-global-context (context :auto-free-p t)
-                 (setf stream (cl+ssl:make-ssl-client-stream stream :hostname host
-                                                                    :verify :required)))))
+               (multiple-value-bind (sni name) (%tls-names host)
+                 (cl+ssl:with-global-context (context :auto-free-p t)
+                   ;; With no SNI name, cl+ssl verifies the chain but not a name, so the address is
+                   ;; verified here.
+                   (setf stream (cl+ssl:make-ssl-client-stream stream :hostname sni
+                                                                      :verify :required))
+                   (unless sni
+                     (%verify-peer-name stream name))))))
            (multiple-value-bind (body status headers)
                ;; A non-2xx is caught HERE, while the connection is open, and returned like any
                ;; other response. Caught in %HTTP instead, the HANDLER-CASE there unwound
@@ -230,10 +267,107 @@ Host header is the URL's too."
         (ignore-errors (usocket:socket-close socket))))))
 
 #+os-windows
+(defvar *server-certificate-verifier* 'aion/windows:verify-server-certificate-chain
+  "The function that decides about a pinned connection's server certificate on Windows: called
+with the chain, DER and leaf first, and the URL's host, it returns (values VERDICT CODE) as
+AION/WINDOWS:VERIFY-SERVER-CERTIFICATE-CHAIN does. A test binds it; nothing else should.")
+
+#+os-windows
+(defvar *%verifying-config* nil
+  "The aion/tls client config whose verifier is the one above, made once on first use.")
+#+os-windows
+(defvar *%verifying-config-lock* (sb-thread:make-mutex :name "aion/http-client tls config"))
+
+#+os-windows
+(defun %verifying-config ()
+  (sb-thread:with-mutex (*%verifying-config-lock*)
+    (or *%verifying-config*
+        (setf *%verifying-config*
+              (aion/tls:make-verifying-client-config
+               (lambda (chain host)
+                 (multiple-value-bind (verdict code) (funcall *server-certificate-verifier* chain host)
+                   (if (eq verdict :trusted)
+                       t
+                       (error (certificate-condition-class verdict)
+                              :host host :verdict verdict :code code)))))))))
+
+#+os-windows
+(defun %ca-path-config (path)
+  "A client config that trusts the CA certificates in the PEM file PATH, as cl+ssl's
+:VERIFY-LOCATION does on the other platforms, and the certificate chain it holds: (values CONFIG
+CHAIN), both for the caller to free. A directory is refused: aion/tls reads one file."
+  (when (uiop:directory-exists-p path)
+    (error 'http-error :detail (format nil "ca-path ~A is a directory; on Windows give one PEM file" path)))
+  (let ((octets (with-open-file (in path :element-type '(unsigned-byte 8))
+                  (let* ((buffer (make-array (file-length in) :element-type '(unsigned-byte 8)))
+                         (n (read-sequence buffer in)))
+                    (subseq buffer 0 n)))))
+    (let ((chain (aion/tls:make-certificate-chain octets)))
+      (handler-bind ((error (lambda (e) (declare (ignore e))
+                              (aion/tls:free-certificate-chain chain))))
+        (values (aion/tls:make-client-config chain) chain)))))
+
+#+os-windows
 (defun %request-pinned (req)
-  (error 'pinned-connect-unsupported
-         :detail (format nil "cannot connect ~A to ~A: on Windows dexador uses WinHTTP, which does not accept a connection opened by the caller"
-                         (request-url req) (request-connect-address req))))
+  "Run REQ over a connection to its CONNECT-ADDRESS, returning (values BODY STATUS HEADERS) as
+DEX:REQUEST does (#536).
+
+The socket is opened here, to that address and nowhere else. For https, aion/tls does the
+handshake with the URL's host name, so the server is asked for that name (SNI), and Windows
+decides whether to trust the certificate, for that name, through *SERVER-CERTIFICATE-VERIFIER*:
+a refusal is a CERTIFICATE-REJECTED of the matching subclass. With the request's CA-PATH, the CA
+certificates in that file decide instead. The request is written and the response read by
+http1.lisp, whose limits apply, and the Host header is the URL's.
+
+The socket is lent to FETCH-PUBLIC's deadline watch, and the read timeout is the socket's
+receive timeout. A body read as a stream (MAX-BODY-BYTES) keeps the connection, and closing the
+body closes it; otherwise the body is read here and the connection closed."
+  (let* ((uri (quri:uri (request-url req)))
+         (host (quri:uri-host uri))
+         (address (or (parse-address (request-connect-address req))
+                      (error 'http-error
+                             :detail (format nil "connect-address ~S is not an IP address"
+                                             (request-connect-address req)))))
+         (socket (usocket:socket-connect address (%port-of uri)
+                                         :element-type '(unsigned-byte 8)
+                                         :timeout (request-connect-timeout req)))
+         (stream nil)
+         (own-config nil)
+         (own-chain nil)
+         (body-owns-connection nil))
+    (%lend-socket socket)
+    (flet ((close-connection ()
+             (%take-back-socket)
+             (when stream (ignore-errors (close stream)))
+             (ignore-errors (usocket:socket-close socket))
+             ;; A CA-PATH config is this connection's own; the verifying one is shared.
+             (when own-config (ignore-errors (aion/tls:free-config own-config)))
+             (when own-chain (ignore-errors (aion/tls:free-certificate-chain own-chain)))))
+      (unwind-protect
+           (progn
+             (setf stream (usocket:socket-stream socket))
+             (when (request-read-timeout req)
+               (setf (usocket:socket-option socket :receive-timeout) (request-read-timeout req)))
+             (when (string-equal (quri:uri-scheme uri) "https")
+               (when (request-ca-path req)
+                 (multiple-value-setq (own-config own-chain) (%ca-path-config (request-ca-path req))))
+               ;; QURI keeps an IPv6 literal's brackets, as in [::1]; the name the certificate
+               ;; is judged for, and the one aion/tls decides SNI from, is the bare address.
+               (setf stream (aion/tls:make-tls-stream stream (or own-config (%verifying-config))
+                                                      :hostname (string-trim "[]" host))))
+             (multiple-value-bind (body status headers)
+                 (http1-exchange stream (request-method req) uri (request-headers req)
+                                 (request-content req) :closer #'close-connection)
+               (if (request-max-body-bytes req)
+                   (progn (setf body-owns-connection t)
+                          (values body status headers))
+                   (let ((octets (let ((out (make-array 0 :element-type '(unsigned-byte 8)
+                                                          :adjustable t :fill-pointer 0)))
+                                   (loop for b = (read-byte body nil nil)
+                                         while b do (vector-push-extend b out))
+                                   (coerce out '(simple-array (unsigned-byte 8) (*))))))
+                     (values octets status headers)))))
+        (unless body-owns-connection (close-connection))))))
 
 ;;; --- fetch-public ------------------------------------------------------------------
 
@@ -309,8 +443,8 @@ those are checked against the deadline when they return, so they can overrun it 
 resolver's own time and CONNECT-TIMEOUT. With CONNECT-TIMEOUT NIL the operating system's own
 connect limit applies, about 127 seconds on Linux. NIL, the default, sets no deadline.
 
-On Windows the pinned connection is not available and this signals
-PINNED-CONNECT-UNSUPPORTED.
+On Windows the pinned connection goes over aion/tls, and Windows decides whether to trust the
+server's certificate; a refusal is a subclass of CERTIFICATE-REJECTED (#536).
 
 RESOLVE, ADDRESS-POLICY and PERFORM are for tests. ADDRESS-POLICY decides which addresses count
 as public, so a policy other than the default turns off the check that keeps this from reaching
@@ -342,12 +476,23 @@ internal addresses. Never pass one derived from a setting or from user input."
         (when watch (%take-back-socket))
         (when timer (sb-ext:unschedule-timer timer))))))
 
+(defun %encoded-url (url)
+  "URL with its path and query percent-encoded by %ENCODE-TARGET, so a space, a control
+character or a character beyond ASCII in a URL a user or a redirect supplied cannot reach a
+request line as it is, on any platform. QURI keeps them as they are when it parses a URL or
+merges a redirect's Location (the hub's review of #913)."
+  (let ((uri (quri:uri url)))
+    (setf (quri:uri-path uri) (and (quri:uri-path uri) (%encode-target (quri:uri-path uri)))
+          (quri:uri-query uri) (and (quri:uri-query uri) (%encode-target (quri:uri-query uri))))
+    (quri:render-uri uri)))
+
 (defun %fetch-hops (url method headers content max-redirects max-body-bytes
                     connect-timeout read-timeout ca-path resolve address-policy perform check)
   "FETCH-PUBLIC's redirect loop. CHECK is called with the hop's URL after each step, and
 signals when the deadline has passed."
   (let ((hops 0))
     (loop
+      (setf url (%encoded-url url))
       (let* ((uri (quri:uri url))
              (address (prog1 (%checked-address url uri resolve address-policy)
                         (funcall check url)))

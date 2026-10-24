@@ -48,6 +48,12 @@
            #:address-category #:parse-address #:address-string #:resolve-host
            #:response-too-large #:response-too-large-limit
            #:pinned-connect-unsupported
+           ;; a pinned connection's certificate, refused by the OS (#536)
+           #:certificate-rejected #:certificate-rejected-host #:certificate-rejected-verdict
+           #:certificate-rejected-code #:certificate-expired #:certificate-untrusted-root
+           #:certificate-name-mismatch #:certificate-revoked #:certificate-revocation-unknown
+           #:certificate-distrusted #:certificate-chain-incomplete #:certificate-wrong-usage
+           #:malformed-response
            #:fetch-refused #:fetch-refused-url #:fetch-refused-host #:fetch-refused-address
            #:fetch-refused-reason
            #:too-many-redirects #:too-many-redirects-url #:too-many-redirects-limit

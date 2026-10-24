@@ -515,6 +515,113 @@
 
 (cffi:defcfun ("CoUninitialize" co-uninitialize) :void)
 
+;;; --- certificate chains (#536) -------------------------------------------------
+;;;
+;;; crypt32's chain engine decides whether a server certificate is trusted, with the user's and
+;;; the machine's trust stores, automatic root download and the Disallowed store: the same
+;;; decision WinHTTP makes. The documented layouts are from wincrypt.h's declarations, the
+;;; CERT_CHAIN_PARA without the optional fields CERT_CHAIN_PARA_HAS_EXTRA_FIELDS adds.
+
+(cffi:defcstruct cert-enhkey-usage
+  (c-usage-identifier dword)
+  (rgpsz-usage-identifier :pointer))
+
+(cffi:defcstruct cert-usage-match
+  (dw-type dword)
+  (usage (:struct cert-enhkey-usage)))
+
+(cffi:defcstruct cert-chain-para
+  (cb-size dword)
+  (requested-usage (:struct cert-usage-match)))
+
+(register-layout
+ :name "CERT_CHAIN_PARA"
+ :type '(:struct cert-chain-para)
+ ;; x64: cbSize at 0; CERT_USAGE_MATCH aligned to 8 for its pointer, so dwType at 8, the
+ ;; CERT_ENHKEY_USAGE at 16 with its pointer at 24. x86: 0, 4, 8, 12.
+ :size '(:x86 16 :x64 32)
+ :slots '((cb-size :offset (:x86 0 :x64 0))
+          (requested-usage :offset (:x86 4 :x64 8)))
+ :source "MSDN CERT_CHAIN_PARA, CERT_USAGE_MATCH, CERT_ENHKEY_USAGE (wincrypt.h)")
+
+(cffi:defcstruct ssl-extra-cert-chain-policy-para
+  (cb-size dword)
+  (dw-auth-type dword)
+  (fdw-checks dword)
+  (pwsz-server-name :pointer))
+
+(register-layout
+ :name "SSL_EXTRA_CERT_CHAIN_POLICY_PARA"
+ :type '(:struct ssl-extra-cert-chain-policy-para)
+ ;; Three DWORDs, then the name pointer: at 16 on x64 after 4 bytes of padding, at 12 on x86.
+ :size '(:x86 16 :x64 24)
+ :slots '((cb-size :offset (:x86 0 :x64 0))
+          (dw-auth-type :offset (:x86 4 :x64 4))
+          (fdw-checks :offset (:x86 8 :x64 8))
+          (pwsz-server-name :offset (:x86 12 :x64 16)))
+ :source "MSDN SSL_EXTRA_CERT_CHAIN_POLICY_PARA (wincrypt.h)")
+
+(cffi:defcstruct cert-chain-policy-para
+  (cb-size dword)
+  (dw-flags dword)
+  (pv-extra-policy-para :pointer))
+
+(register-layout
+ :name "CERT_CHAIN_POLICY_PARA"
+ :type '(:struct cert-chain-policy-para)
+ :size '(:x86 12 :x64 16)
+ :slots '((cb-size :offset (:x86 0 :x64 0))
+          (dw-flags :offset (:x86 4 :x64 4))
+          (pv-extra-policy-para :offset (:x86 8 :x64 8)))
+ :source "MSDN CERT_CHAIN_POLICY_PARA (wincrypt.h)")
+
+(cffi:defcstruct cert-chain-policy-status
+  (cb-size dword)
+  (dw-error dword)
+  (l-chain-index :int32)
+  (l-element-index :int32)
+  (pv-extra-policy-status :pointer))
+
+(register-layout
+ :name "CERT_CHAIN_POLICY_STATUS"
+ :type '(:struct cert-chain-policy-status)
+ :size '(:x86 20 :x64 24)
+ :slots '((cb-size :offset (:x86 0 :x64 0))
+          (dw-error :offset (:x86 4 :x64 4))
+          (l-chain-index :offset (:x86 8 :x64 8))
+          (l-element-index :offset (:x86 12 :x64 12))
+          (pv-extra-policy-status :offset (:x86 16 :x64 16)))
+ :source "MSDN CERT_CHAIN_POLICY_STATUS (wincrypt.h)")
+
+(defconstant +x509-asn-encoding+ #x00010001 "X509_ASN_ENCODING | PKCS_7_ASN_ENCODING.")
+(defconstant +cert-store-prov-memory+ 2 "CERT_STORE_PROV_MEMORY, an LPCSTR that is an integer.")
+(defconstant +cert-store-add-always+ 4)
+(defconstant +cert-chain-policy-ssl+ 4 "CERT_CHAIN_POLICY_SSL, an LPCSTR that is an integer.")
+(defconstant +authtype-server+ 2)
+(defconstant +usage-match-type-and+ 0)
+
+(cffi:defcfun ("CertCreateCertificateContext" cert-create-certificate-context) :pointer
+  (dw-cert-encoding-type dword) (pb-cert-encoded :pointer) (cb-cert-encoded dword))
+(cffi:defcfun ("CertFreeCertificateContext" cert-free-certificate-context) :int32
+  (p-cert-context :pointer))
+(cffi:defcfun ("CertOpenStore" cert-open-store) :pointer
+  (lpsz-store-provider :pointer) (dw-encoding-type dword) (h-crypt-prov :pointer)
+  (dw-flags dword) (pv-para :pointer))
+(cffi:defcfun ("CertAddEncodedCertificateToStore" cert-add-encoded-certificate-to-store) :int32
+  (h-cert-store :pointer) (dw-cert-encoding-type dword) (pb-cert-encoded :pointer)
+  (cb-cert-encoded dword) (dw-add-disposition dword) (pp-cert-context :pointer))
+(cffi:defcfun ("CertCloseStore" cert-close-store) :int32
+  (h-cert-store :pointer) (dw-flags dword))
+(cffi:defcfun ("CertGetCertificateChain" cert-get-certificate-chain) :int32
+  (h-chain-engine :pointer) (p-cert-context :pointer) (p-time :pointer)
+  (h-additional-store :pointer) (p-chain-para :pointer) (dw-flags dword)
+  (pv-reserved :pointer) (pp-chain-context :pointer))
+(cffi:defcfun ("CertFreeCertificateChain" cert-free-certificate-chain) :void
+  (p-chain-context :pointer))
+(cffi:defcfun ("CertVerifyCertificateChainPolicy" cert-verify-certificate-chain-policy) :int32
+  (psz-policy-oid :pointer) (p-chain-context :pointer) (p-policy-para :pointer)
+  (p-policy-status :pointer))
+
 ;;; --- the layout gate --------------------------------------------------------
 ;;;
 ;;; Run at LOAD, and deliberately fatal. ADR-0003 s4: "built in from the first commit". A

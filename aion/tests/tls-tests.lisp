@@ -482,3 +482,224 @@ to load mbedTLS, or loads one that is not the tree's, where any other image load
                 "a bundle's image must not load the source tree's mbedTLS: ~S" bundle)
             (is (from-tree-p other)
                 "control: any other image loads the vendored copy: ~S" other))))))
+
+;;; --- a client whose certificate decision is the caller's (#536) ----------------------
+
+(defun %recording-verifier (answer)
+  "A verifier that records the chain and hostname it was given and returns ANSWER. Returns
+(values VERIFIER CALLS), where CALLS is a one-element list holding the calls, newest first."
+  (let ((calls (list '())))
+    (values (lambda (chain hostname) (push (list chain hostname) (car calls)) answer)
+            calls)))
+
+(test a-verifying-client-config-needs-a-verifier
+  "There is no default and no value that accepts everything: anything but a function is
+refused when the config is made."
+  (dolist (bad (list nil t :accept "yes"))
+    (signals error (tls:make-verifying-client-config bad))))
+
+(test a-verifier-that-accepts-completes-the-handshake-and-sees-the-chain
+  "The verifier is called once, with the server's DER chain, leaf first, and the engine's
+hostname; once it accepts, data flows. The server here sends its certificate and the CA's, so
+the intermediate a real server sends arrives as the second element."
+  (multiple-value-bind (verify calls) (%recording-verifier t)
+    (let* ((client (tls:make-engine (tls:make-verifying-client-config verify) :hostname "localhost"))
+           (served (tls:make-certificate-chain
+                    (concatenate '(vector (unsigned-byte 8)) (getf (pki) :cert-pem) (getf (pki) :ca-pem))))
+           (server (tls:make-engine (tls:make-server-config served (getf (pki) :key)))))
+      (unwind-protect
+           (progn
+             (is-true (handshake client server))
+             (is (= 1 (length (car calls))) "the verifier ran ~D times" (length (car calls)))
+             (destructuring-bind (chain hostname) (first (car calls))
+               (is (string= "localhost" hostname))
+               (is (= 2 (length chain)) "the chain had ~D certificates" (length chain))
+               (let ((leaf (tls:make-certificate-chain (getf (pki) :cert-pem)))
+                     (ca (tls:make-certificate-chain (getf (pki) :ca-pem))))
+                 (unwind-protect
+                      (progn (is (equalp (tls:certificate-chain-der leaf) (first chain)) "the leaf is first")
+                             (is (equalp (tls:certificate-chain-der ca) (second chain)) "the intermediate follows"))
+                   (tls:free-certificate-chain leaf)
+                   (tls:free-certificate-chain ca))))
+             (tls:engine-write client (octets "after the verifier"))
+             (move client server)
+             (is (string= "after the verifier" (text (tls:engine-read server)))))
+        (tls:free-engine client)
+        (tls:free-engine server)))))
+
+(test a-verifier-that-returns-nil-refuses-and-nothing-is-sent
+  (multiple-value-bind (verify calls) (%recording-verifier nil)
+    (with-engines (client server :client-config (tls:make-verifying-client-config verify))
+      (is (typep (handler-case (progn (handshake client server) nil) (tls:tls-error (e) e))
+                 'tls:tls-verify-error))
+      (is (= 1 (length (car calls))))
+      (signals tls:tls-error (tls:engine-write client (octets "must not be sent")))
+      (signals tls:tls-error (tls:engine-read client)))))
+
+(define-condition %test-refusal (error) ())
+
+(test a-condition-the-verifier-signals-reaches-the-caller
+  "A typed refusal, such as Windows reporting an untrusted root, arrives as itself, not as a
+generic TLS error."
+  (with-engines (client server
+                 :client-config (tls:make-verifying-client-config
+                                 (lambda (chain hostname) (declare (ignore chain hostname))
+                                   (error '%test-refusal))))
+    (signals %test-refusal (handshake client server))
+    (signals tls:tls-error (tls:engine-read client))))
+
+(test a-verifying-client-ignores-what-mbedtls-would-say-and-asks-the-verifier
+  "The config has no CA certificates, so mbedTLS alone would refuse every chain; the handshake
+still completes when the verifier accepts. And the name the server is asked for is still the
+engine's: a verifier given another hostname is told that one."
+  (multiple-value-bind (verify calls) (%recording-verifier t)
+    (with-engines (client server :client-config (tls:make-verifying-client-config verify)
+                                 :hostname "not-localhost.example")
+      (is-true (handshake client server))
+      (is (string= "not-localhost.example" (second (first (car calls))))))))
+
+;;; --- input behind a TLS 1.3 session ticket is read without waiting (#536) ----------------
+;;;
+;;; mbedTLS 4.1.1 handles a TLS 1.3 session ticket over several calls of mbedtls_ssl_read,
+;;; returning WANT-READ while records the server sent after it are still in the engine's input.
+;;; Measured against example.com, which sends two tickets and then its response in one segment.
+;;; mbedTLS-to-mbedTLS never shows it, because aion/tls's servers send no tickets, so these
+;;; replay the measured sequence with %SSL-READ replaced, consuming the engine's input as the real
+;;; call would.
+
+(defun %engine-with-input (n)
+  "A client engine with N octets fed, and nothing else done to it."
+  (let ((engine (tls:make-engine (client-config) :hostname "localhost")))
+    (tls:engine-feed engine (make-array n :element-type '(unsigned-byte 8) :initial-element 0))
+    engine))
+
+(defmacro %with-ssl-read ((script) &body body)
+  "Run BODY with AION/TLS::%SSL-READ replaced. SCRIPT is a list of steps, one per call: (CONSUME
+CODE), where CONSUME octets of the engine's input are taken and CODE returned, or (CONSUME
+:DATA N) for N octets of plaintext. After the script, every call returns WANT-READ."
+  `(let ((original (fdefinition 'aion/tls::%ssl-read))
+         (steps ,script)
+         (calls 0))
+     (declare (ignorable calls))
+     (unwind-protect
+          (progn
+            (setf (fdefinition 'aion/tls::%ssl-read)
+                  (lambda (ssl buf len)
+                    (declare (ignore ssl len))
+                    (incf calls)
+                    (destructuring-bind (&optional (consume 0) (code aion/tls::+err-want-read+) n)
+                        (pop steps)
+                      (let ((e *scripted-engine*))
+                        (incf (aion/tls::%in-start e) consume))
+                      (if (eq code :data)
+                          (progn (dotimes (i n) (setf (cffi:mem-aref buf :unsigned-char i) 65)) n)
+                          code))))
+            ,@body)
+       (setf (fdefinition 'aion/tls::%ssl-read) original))))
+
+(defvar *scripted-engine* nil)
+
+(test data-behind-a-session-ticket-is-read-without-waiting-for-the-network
+  "The sequence measured against example.com: the ticket's record read with WANT-READ, the ticket
+reported, WANT-READ reading nothing, the second ticket reported, then the response. ENGINE-READ
+returns the response. Before #536 it returned nothing at the first WANT-READ, and the stream then
+waited on a connection the server had closed."
+  (let ((*scripted-engine* (%engine-with-input 100)))
+    (unwind-protect
+         (%with-ssl-read ((list (list 30 aion/tls::+err-want-read+)
+                                (list 0 aion/tls::+err-received-new-session-ticket+)
+                                (list 0 aion/tls::+err-want-read+)
+                                (list 0 aion/tls::+err-received-new-session-ticket+)
+                                (list 70 :data 5)))
+           (let ((got (tls:engine-read *scripted-engine*)))
+             (is (equalp (make-array 5 :element-type '(unsigned-byte 8) :initial-element 65) got)
+                 "got ~S" got)))
+      (tls:free-engine *scripted-engine*))))
+
+(test engine-read-stops-asking-when-input-is-never-consumed
+  "With input unread and every call returning WANT-READ and reading nothing, ENGINE-READ returns
+empty after +MAX-IDLE-READS+ calls rather than looping."
+  (let ((*scripted-engine* (%engine-with-input 100)))
+    (unwind-protect
+         (let ((count 0)
+               (original (fdefinition 'aion/tls::%ssl-read)))
+           (unwind-protect
+                (progn
+                  (setf (fdefinition 'aion/tls::%ssl-read)
+                        (lambda (ssl buf len) (declare (ignore ssl buf len))
+                          (incf count) aion/tls::+err-want-read+))
+                  (is (zerop (length (tls:engine-read *scripted-engine*))))
+                  (is (= aion/tls::+max-idle-reads+ count) "~D calls" count))
+             (setf (fdefinition 'aion/tls::%ssl-read) original)))
+      (tls:free-engine *scripted-engine*))))
+
+(test a-client-reads-data-a-tls-1.3-server-sent-after-its-session-tickets
+  "The same pattern against this tree's own server, deterministically: a server that sends two
+TLS 1.3 session tickets after the handshake, as OpenSSL does, then a response. The client's
+input then holds the tickets and the response together, and ENGINE-READ must return the
+response. The reads are recorded, to show the tickets were really there: mbedTLS reports
+RECEIVED-NEW-SESSION-TICKET for them."
+  (let* ((codes '())
+         (client (tls:make-engine (client-config) :hostname "localhost"))
+         (server (tls:make-engine (tls:make-server-config
+                                   (tls:make-certificate-chain (getf (pki) :cert-pem))
+                                   (getf (pki) :key) :session-tickets 2)))
+         (original (fdefinition 'aion/tls::%ssl-read)))
+    (unwind-protect
+         (progn
+           (is-true (handshake client server))
+           (is (= tls:+tls-1.3+ (tls:engine-version client)))
+           (tls:engine-write server (octets "after the tickets"))
+           (move server client)
+           (setf (fdefinition 'aion/tls::%ssl-read)
+                 (lambda (ssl buf len) (let ((n (funcall original ssl buf len))) (push n codes) n)))
+           (let ((got (tls:engine-read client)))
+             (setf (fdefinition 'aion/tls::%ssl-read) original)
+             (is (member aion/tls::+err-received-new-session-ticket+ codes)
+                 "no session ticket was seen; the reads returned ~S" (reverse codes))
+             (is (string= "after the tickets" (text got)) "got ~S after reads ~S" got (reverse codes))))
+      (setf (fdefinition 'aion/tls::%ssl-read) original)
+      (tls:free-engine client)
+      (tls:free-engine server))))
+
+(test a-server-config-refuses-a-ticket-count-out-of-range
+  (dolist (bad '(0 17 :many))
+    (signals error (tls:make-server-config (tls:make-certificate-chain (getf (pki) :cert-pem))
+                                           (getf (pki) :key) :session-tickets bad))))
+
+(test nine-tickets-in-one-record-do-not-stop-the-read
+  "The hub's review of #913: several tickets can share one record, so after the record is read
+none of them consumes input. Each must count as progress; counted as idle, nine of them ended
+the loop at +MAX-IDLE-READS+ with the response still buffered."
+  (let ((*scripted-engine* (%engine-with-input 100)))
+    (unwind-protect
+         (%with-ssl-read ((append (list (list 30 aion/tls::+err-want-read+))
+                                  (loop repeat 9
+                                        append (list (list 0 aion/tls::+err-received-new-session-ticket+)
+                                                     (list 0 aion/tls::+err-want-read+)))
+                                  (list (list 70 :data 5))))
+           (let ((got (tls:engine-read *scripted-engine*)))
+             (is (= 5 (length got)) "got ~S" got)))
+      (tls:free-engine *scripted-engine*))))
+
+(test a-client-reads-data-sent-after-nine-session-tickets
+  "Against this tree's own server sending nine TLS 1.3 tickets, then a response."
+  (let* ((client (tls:make-engine (client-config) :hostname "localhost"))
+         (server (tls:make-engine (tls:make-server-config
+                                   (tls:make-certificate-chain (getf (pki) :cert-pem))
+                                   (getf (pki) :key) :session-tickets 9))))
+    (unwind-protect
+         (progn
+           (is-true (handshake client server))
+           (tls:engine-write server (octets "after nine tickets"))
+           (move server client)
+           (is (string= "after nine tickets" (text (tls:engine-read client)))))
+      (tls:free-engine client)
+      (tls:free-engine server))))
+
+(test an-ip-literal-is-told-apart-from-a-host-name
+  "F3: what aion/tls sends no SNI for, under a caller's verifier."
+  (dolist (ip '("127.0.0.1" "::1" "2001:db8::1" "10.0.0.255"))
+    (is-true (tls:ip-literal-p ip) "~A" ip))
+  (dolist (name '("example.com" "pinned.test" "1.2.3" "1.2.3.4.5" "a.b.c.d"))
+    (is-false (tls:ip-literal-p name) "~A" name)))

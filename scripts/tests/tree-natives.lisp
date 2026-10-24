@@ -341,3 +341,30 @@ writes nothing into the directory it points at (hub's review of #567). No librar
                  "naming the list as a link:~%~A" out))
            (is (null (uiop:directory-files outside)) "and nothing was written where the link points"))
       (aion/fs:delete-tree tree :if-does-not-exist :ignore))))
+
+;;; --- the summary line counts what carry-natives.lisp carried for the tree (#912) ----------
+
+(defun %carry-summary (already-carried)
+  "The output of CARRY-NATIVE-LIBRARIES with ALREADY-CARRIED, run against an empty vendor/ and
+bundle, with no lazily loaded libraries to release."
+  (let ((tree (%fresh-tree)))
+    (let ((ouranos-tree-natives:*vendor* (ensure-directories-exist (merge-pathnames "vendor/" tree)))
+          (ouranos-tree-natives:*bundle* (ensure-directories-exist (merge-pathnames "bundle/" tree)))
+          (ouranos-tree-natives::*carried-list* nil)
+          (ouranos-tree-natives::*lazy-natives* nil)
+          (ouranos-tree-natives::*label* "build-desktop-app")
+          (ouranos-tree-natives::*product* "the bundle"))
+      (with-output-to-string (*standard-output*)
+        (ouranos-tree-natives:carry-native-libraries :already-carried already-carried)))))
+
+(test the-summary-line-counts-the-tree-libraries-an-earlier-step-carried
+  "build-desktop-app.lisp carries the tree's SQLite through carry-natives.lisp and closes it
+before CARRY-NATIVE-LIBRARIES walks the open libraries, so the walk does not see it. The
+summary line said 0 of the tree's libraries were carried when SQLite was (#912). It now adds
+the number the earlier step passes in."
+  (let ((one (%carry-summary 1))
+        (none (%carry-summary 0)))
+    (is (search "build-desktop-app: 1 of this tree's native library carried into the bundle." one)
+        "with one carried earlier:~%~A" one)
+    (is (search "build-desktop-app: 0 of this tree's native libraries carried into the bundle." none)
+        "with none carried earlier:~%~A" none)))

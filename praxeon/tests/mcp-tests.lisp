@@ -963,8 +963,6 @@ server AS issued; every other path is AS. URL is the MCP endpoint."
   "The path the issue names: a 401, the app signs the user in from the challenge, the call
 succeeds; the server refuses the token, the client refreshes once and retries without
 running the tool twice; the refresh token is revoked, and the user is asked to sign in."
-  #+os-windows (skip "aion/oauth needs a pinned connection, which Windows does not offer (#295)")
-  #-os-windows
   (with-oauth-mcp (as fake url) (:rotate t) (:tools (%tools "a"))
     (let* ((broker (aion/oauth/tests::%broker))
            (client (mcp:make-client
@@ -1023,8 +1021,6 @@ running the tool twice; the refresh token is revoked, and the user is asked to s
             broker)))
 
 (test a-legacy-handshake-refused-for-its-token-is-retried-after-a-refresh
-  #+os-windows (skip "aion/oauth needs a pinned connection, which Windows does not offer (#295)")
-  #-os-windows
   (with-oauth-mcp (as fake url) (:rotate t) (:era :legacy :tools (%tools "a"))
     (let ((client (%signed-in-oauth-client as url)))
       ;; The token is good, and only the legacy initialize is refused: the refusal is answered
@@ -1036,8 +1032,6 @@ running the tool twice; the refresh token is revoked, and the user is asked to s
       (is (= 1 (aion/oauth/tests::as-refresh-requests as))))))
 
 (test insufficient-scope-asks-for-a-sign-in-without-a-refresh
-  #+os-windows (skip "aion/oauth needs a pinned connection, which Windows does not offer (#295)")
-  #-os-windows
   (with-oauth-mcp (as fake url) () (:tools (%tools "a"))
     (let ((client (%signed-in-oauth-client as url)))
       (setf *gate* :insufficient-scope)
@@ -1080,8 +1074,6 @@ shared between them."))
 (test the-retry-after-a-refused-token-checks-the-issuer-again
   "The server refuses the token, and the resource's metadata now names another authorization
 server. The refreshed token is not sent: the call asks for a sign-in, and the tool does not run."
-  #+os-windows (skip "aion/oauth needs a pinned connection, which Windows does not offer (#295)")
-  #-os-windows
   (with-oauth-mcp (as fake url) (:rotate t) (:tools (%tools "a"))
     (let* ((client (%signed-in-oauth-client as url))
            (tool (first (mcp:list-tools client :principal "u1"))))
@@ -1203,8 +1195,6 @@ without confirmation, so it is refused before anything is registered."
   "A tool the app holds for confirmation may spend the user's credits, so after the server
 refuses its token it is not sent again. The token is refreshed for the next call, and this one
 fails as not run."
-  #+os-windows (skip "aion/oauth needs a pinned connection, which Windows does not offer (#295)")
-  #-os-windows
   (with-oauth-mcp (as fake url) (:rotate t) (:tools (%tools "a"))
     (let* ((client (%signed-in-oauth-client as url))
            (tool (first (mcp:list-tools client :principal "u1"))))

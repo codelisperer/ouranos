@@ -50,6 +50,19 @@
    #:pointer-width #:layout-column #:layout-mismatch #:layout-mismatch-details
    ;; structs the foundation owns (IID/CLSID are typedefs of GUID)
    #:filetime #:guid
+   ;; certificate chains (#536)
+   #:cert-enhkey-usage #:c-usage-identifier #:rgpsz-usage-identifier
+   #:cert-usage-match #:dw-type #:usage
+   #:cert-chain-para #:cb-size #:requested-usage
+   #:ssl-extra-cert-chain-policy-para #:dw-auth-type #:fdw-checks #:pwsz-server-name
+   #:cert-chain-policy-para #:pv-extra-policy-para   ; dw-flags is exported with startupinfo-w
+   #:cert-chain-policy-status #:dw-error #:l-chain-index #:l-element-index
+   #:pv-extra-policy-status
+   #:+x509-asn-encoding+ #:+cert-store-prov-memory+ #:+cert-store-add-always+
+   #:+cert-chain-policy-ssl+ #:+authtype-server+ #:+usage-match-type-and+
+   #:cert-create-certificate-context #:cert-free-certificate-context #:cert-open-store
+   #:cert-add-encoded-certificate-to-store #:cert-close-store #:cert-get-certificate-chain
+   #:cert-free-certificate-chain #:cert-verify-certificate-chain-policy
    ;; Credential Manager (#357)
    #:credential-w #:flags #:target-name #:comment #:last-written
    #:credential-blob-size #:credential-blob #:persist #:attribute-count #:attributes
@@ -114,6 +127,8 @@
    #:spawn-in-job #:default-job-function #:find-executable
    ;; the Windows directory, and opening a URL with its registered program (#820)
    #:system-windows-directory #:shell-open
+   ;; a TLS server's certificate chain, judged by Windows (#536)
+   #:verify-server-certificate-chain
    #:quote-windows-argument #:windows-command-line
    #:process-not-started #:process-not-started-program #:process-not-started-reason
    #:job-process #:job-process-p #:job-process-pid #:job-process-job

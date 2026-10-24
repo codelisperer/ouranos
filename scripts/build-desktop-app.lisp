@@ -25,6 +25,12 @@
 ;;;; after a --carry, names it instead, as for a public-domain library that ships none. See
 ;;;; scripts/carry-natives.lisp (#78).
 ;;;;
+;;;; An app that loads cl-sqlite carries the tree's pinned SQLite without a --carry, and the
+;;;; build stops, naming the command, when it has not been built:
+;;;;     sbcl --script scripts/build-sqlite.lisp
+;;;; An app that already passes --carry for its own sqlite3.dll or libsqlite3 keeps its own
+;;;; (#899, ADR-0013's amendment of 2026-10-24).
+;;;;
 ;;;; The command is IDENTICAL on Linux / macOS / Windows -- which is the whole point:
 ;;;; SBCL cannot cross-compile (save-lisp-and-die dumps an image for the HOST platform
 ;;;; only), so every OS builds its own on a native CI runner, and the only way that stays
@@ -652,13 +658,22 @@ nothing."
 ;; we wanted (pre-publication issue 325).
 (ouranos-tree-natives:wake-lazy-natives)
 (ouranos-tree-natives:verify-natives-will-be-carried)
-;; The app's own libraries go first. The step closes each one it carries, so the step after
-;; it does not also list them as system libraries that are left out.
-(handler-case (ouranos-carry:carry-declared-libraries *carry* *bundle* :vendor *vendor*)
+;; The app's own libraries go first, then the tree's SQLite when the app loads cl-sqlite
+;; (#899): cl-sqlite opens it at load time, so it is closed before the dump and reopened from
+;; the bundle at startup, as a --carry is. The step closes each one it carries, so the step
+;; after it does not also list them as system libraries that are left out.
+(defparameter *tree-carried* 0
+  "How many of this tree's libraries the step below carried, for the summary line (#912).")
+(handler-case
+    (multiple-value-bind (tree-carries note) (ouranos-carry:tree-sqlite-carry *vendor* *carry*)
+      (when note (format t "~&  ~A~%" note))
+      (ouranos-carry:carry-declared-libraries *carry* *bundle* :vendor *vendor*
+                                                               :tree-carries tree-carries)
+      (setf *tree-carried* (length tree-carries)))
   (ouranos-carry:carry-refused (e)
     (format *error-output* "~&build-desktop-app: ~A~%" e)
     (sb-ext:exit :code 3)))
-(ouranos-tree-natives:carry-native-libraries)
+(ouranos-tree-natives:carry-native-libraries :already-carried *tree-carried*)
 (carry-runtime-linked-libraries)
 
 ;;; VERSION is what a fresh install reports before the app has ever run, and what the

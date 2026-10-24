@@ -88,10 +88,14 @@
  :where ((:field "libgit2.pin" "version"))
  :upstream (:github-release "libgit2/libgit2"))
 
-(:name "SQLite (Windows)" :category :native
- :where ((:env "scripts/versions.env" "SQLITE_VERSION"))
+;;; sqlite.pin is the source desktop bundles carry (#899); versions.env is sqlite.org's
+;;; prebuilt DLL that setup.ps1 installs for the Windows toolchain. One entry, so the two
+;;; cannot drift apart.
+(:name "SQLite" :category :native
+ :where ((:field "sqlite.pin" "version")
+         (:env "scripts/versions.env" "SQLITE_VERSION"))
  :upstream (:manual "https://sqlite.org/download.html")
- :reviewed "2026-10-17")
+ :reviewed "2026-10-24")
 
 (:name "webview (hyperion-view)" :category :native
  :where ((:concat "."

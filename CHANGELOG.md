@@ -101,6 +101,63 @@ its tag.
     leaves facts about the subject alone; for a table that already has the column, the same is
     `UPDATE <table> SET untrusted = TRUE WHERE thread IS NOT NULL` (`= 1` on SQLite), run once.
 
+- **aion/http-client: on Windows, `fetch-public`, `aion/oauth` sign-in and praxeon's
+  `read-web-page` now work, and refuse a certificate Windows does not trust with a typed
+  condition** (#536). Before, a pinned connection (`:connect-address`, which `fetch-public`
+  always uses) signalled `pinned-connect-unsupported` on Windows, so none of them worked there.
+  Now Windows connects only to the address `fetch-public` checked, does the TLS handshake with
+  the URL's host name through `aion/tls`, and lets Windows decide whether to trust the server's
+  certificate, with `CertGetCertificateChain` and `CertVerifyCertificateChainPolicy`: the same
+  trust stores, automatic root download and Disallowed store that WinHTTP uses.
+  - **What an app sees change on Windows.** `pinned-connect-unsupported` is no longer signalled,
+    and code that handled it to hide a feature can stop. `praxeon/web-page:register-read-web-page`
+    now registers the means without a Tavily key (`*fetch-available-p*` is true there).
+  - **Refusals.** A refused certificate signals a subclass of the new
+    `aion/http-client:certificate-rejected`, an `http-error`, with `certificate-rejected-host`,
+    `-verdict` and `-code` (Windows' error code):
+    - `certificate-expired`;
+    - `certificate-untrusted-root`;
+    - `certificate-name-mismatch`;
+    - `certificate-revoked`, `certificate-revocation-unknown` and `certificate-distrusted`;
+    - `certificate-chain-incomplete` and `certificate-wrong-usage`.
+  - **No revocation check.** This is the same as WinHTTP's and cl+ssl's defaults. Microsoft's
+    "WinHTTP Security Considerations" says WinHTTP does not check revocation unless asked.
+  - **Responses.** On Windows the request and response go through a new HTTP/1.1 reader with
+    hard limits. A response outside the grammar or past a limit signals the new
+    `aion/http-client:malformed-response`. That includes `Transfer-Encoding` with
+    `Content-Length`, `Content-Length` values that disagree, a malformed chunk size, and a head
+    over 256 KiB. The request is sent with `Connection: close` and `Accept-Encoding: identity`.
+  - **`:ca-path` on Windows** takes one PEM file, not a directory.
+  - **mbedTLS at run time.** `aion/http-client` now depends on `aion/tls` on Windows, so an https
+    pinned request needs `mbedtls.dll`, built by `scripts/build-mbedtls.lisp`. A desktop bundle
+    carries it already when `aion/tls` is loaded (#481).
+
+- **Desktop bundles carry a pinned SQLite 3.54.1, and `scripts/build-desktop-app.lisp` stops
+  if it has not been built** (#899). Every app that uses mnemosyne loads cl-sqlite. When the
+  image being dumped has cl-sqlite's library open, the bundle now carries
+  `vendor/sqlite/lib/libsqlite3.dylib` (macOS), `libsqlite3.so.0` (Linux) or `sqlite3.dll`
+  (Windows), with `LICENSES/libsqlite3-LICENSE` (the name follows the file), and opens it from
+  beside the executable at startup instead of the machine's copy. Before building such a
+  bundle, run `sbcl --script scripts/build-sqlite.lisp` once per checkout, and again after
+  `sqlite.pin` changes; without it the bundle build exits 3 and prints that command. The build
+  writes `vendor/sqlite/BUILT-FROM` with the version and sha256 it used, and both scripts
+  compare it with `sqlite.pin`. The build is from the tarball the new root file
+  `sqlite.pin` names, with `SQLITE_THREADSAFE=1`, `SQLITE_ENABLE_MATH_FUNCTIONS` and
+  `SQLITE_OMIT_LOAD_EXTENSION`, and without FTS5; an app that calls
+  `sqlite3_load_extension` or uses FTS5 inside a bundle needs to carry its own SQLite. An app
+  that already passes its own `libsqlite3`/`sqlite3.dll` to `--carry` keeps it, and the tree's
+  build is not carried. The tree's suites and REPLs still use the system copy. Recorded as
+  ADR-0013's 2026-10-24 amendment, which is Proposed. `scripts/carry-natives.lisp` exports
+  `tree-sqlite-carry` and `sqlite-file-name`, and
+  `carry-declared-libraries` takes `:tree-carries`. The build log's summary line counts the
+  carried SQLite among the tree's libraries (`tree-natives.lisp`'s `carry-native-libraries`
+  takes `:already-carried`, #912).
+
+- **The Windows toolchain's SQLite DLL moves from 3.50.4 to 3.54.1** (#765).
+  `scripts/versions.env`'s `SQLITE_VERSION`, `SQLITE_YEAR` and the two zip sha256 values
+  changed; run `scripts/setup.ps1` again to install it. `upstream.sexp` now has one `SQLite`
+  entry covering `sqlite.pin` and `versions.env`, in place of `SQLite (Windows)`.
+
 - **aion/uv: `close-loop` frees a loop only when `uv_loop_close` succeeds** (#877). Before, it
   ignored `uv_loop_close`'s result and freed the loop even when libuv returned `UV_EBUSY`
   because a handle or request was still open on it, and libuv then used the freed memory. A
@@ -817,6 +874,20 @@ its tag.
     from, at most `*read-result-max-characters*` of them. When the observation or those messages
     are untrusted it says so in its answer and marks the turn untrusted, and a call to it in the
     history counts as untrusted for an agent rebuilt from it.
+
+- **`scripts/check-dyld-log.lisp carried LOG BUNDLE FILE-NAME`** (#899) reads a
+  `DYLD_PRINT_LIBRARIES` log and fails (exit 1) when a process has a copy of FILE-NAME from
+  outside BUNDLE still loaded, exits 0 when the bundle's copy was loaded and no other, and 3
+  when neither was. `scripts/dyld-libraries.lisp` exports `carried-findings`.
+  `scripts/verify-bundle-macos.sh` now uses it for every `--require-carried` library, so a
+  bundle passes only when the system copy is not also loaded beside the carried one. The dyld
+  log reader also applies a `move delayed to loaded` line to the image it names in the delayed
+  state, which before could be another image with the same file name.
+
+- **`praxeon/examples/sqlite-probe`** (#899): a headless app that runs `retrieve-similar` and
+  `retrieve-hybrid` on SQLite and checks that the library it called is the bundle's, at the
+  pinned version. `desktop-release.yml`'s new `sqlite-probe` job builds and runs it on Linux,
+  macOS and Windows, uploads nothing, and the `manifest` job needs it.
 
 - **hades: `reveal-path` shows a file or directory in the system file manager, and `open-url`
   opens a web page in the default browser** (#820), with no shell. `(hades/open:reveal-path path
@@ -2098,6 +2169,27 @@ its tag.
   "Long-running calls".
 
 ### Fixed
+
+- **aion/http-client: an https request to an IPv6 address such as `https://[::1]/` verifies the
+  certificate against the address, and a request to any IP address sends no SNI name** (#915).
+  On Linux and macOS, a request through a pinned connection (`:connect-address`, which
+  `fetch-public` uses) passed the URL's host to cl+ssl unchanged. For an IPv6 address that host is
+  `[::1]` with brackets, so cl+ssl sent `[::1]` as the SNI name and checked the certificate
+  against `[::1]`, which no certificate names, and the request was refused. Now an IP address is
+  checked without brackets against the certificate's IP address names (`::1` and
+  `0:0:0:0:0:0:0:1` are the same address), and no SNI name is sent for an IPv4 or IPv6 address,
+  as RFC 6066 requires. Requests to host names are unchanged. Windows is not affected, because
+  it does not use cl+ssl.
+
+- **aion/tls: a client reads data a TLS 1.3 server sent after its session tickets** (#536).
+  OpenSSL and most CDNs send session tickets right after a TLS 1.3 handshake. mbedTLS 4.1.1
+  handles each over several calls of `mbedtls_ssl_read`, and returns `WANT_READ` while records
+  sent after it are still in the input. `aion/tls` took that as "wait for the network". A
+  response sent before the server closed was then reported as `aion/tls:tls-truncated`, which
+  happened on example.com. `engine-read` now reads again while fed input remains, and stops
+  after `+max-idle-reads+` calls that read nothing. `aion/tls:make-server-config` takes a new
+  `:session-tickets` count, so an `aion/tls` server can send TLS 1.3 tickets the way OpenSSL does.
+  The regression test uses it against a local server.
 
 - **cons/coalton-repl and hades/open: the threads they create can be interrupted when they were
   started while an interrupt was deferred** (#896, the remaining sites of #541). On Linux and

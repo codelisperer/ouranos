@@ -321,14 +321,18 @@ src/ is carried once."
             (push file found)))))
     (nreverse found)))
 
-(defun carry-native-libraries ()
+(defun carry-native-libraries (&key (already-carried 0))
   "Copy every vendored native library the image has open into the bundle, and report the rest.
+
+ALREADY-CARRIED is the number of this tree's libraries an earlier step carried. The summary
+line counts them too: build-desktop-app.lisp carries the tree's SQLite through
+carry-natives.lisp before this runs, and closes it, so this walk does not see it (#899, #912).
 
 Assumes WAKE-LAZY-NATIVES and VERIFY-NATIVES-WILL-BE-CARRIED have already run -- see the
 build sequence below. It used to wake them itself, which is how the shipping check came to
 be missing from a step named for waking."
   (let ((libraries (loaded-foreign-libraries))
-        (carried 0))
+        (carried already-carried))
     (if (null libraries)
         (format t "~&~A: no other foreign libraries are open -- none of this tree's to carry.~%" *label*)
         (dolist (lib libraries)

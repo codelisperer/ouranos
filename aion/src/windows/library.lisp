@@ -6,8 +6,9 @@
 ;;;; question when a desktop app is packaged -- the DLLs are already on every machine the
 ;;;; app can run on.
 ;;;;
-;;;; THIS FILE LOADS SIX: kernel32 (errors, handles), ole32 and oleaut32 (COM), user32 (the
-;;;; STA message pump), advapi32 (Credential Manager) and shell32 (ShellExecuteW). The list is
+;;;; THIS FILE LOADS SEVEN: kernel32 (errors, handles), ole32 and oleaut32 (COM), user32 (the
+;;;; STA message pump), advapi32 (Credential Manager), shell32 (ShellExecuteW) and crypt32
+;;;; (certificate chains). The list is
 ;;;; kept to what is actually loaded because this file is the obvious place a reader looks to
 ;;;; find out what this image opened.
 ;;;;
@@ -37,12 +38,15 @@
 ;; shell32 for ShellExecuteW, which hades/open uses to open a URL in the default browser
 ;; (#820).
 (cffi:define-foreign-library shell32  (:windows "shell32.dll"))
+;; crypt32 for CertGetCertificateChain and CertVerifyCertificateChainPolicy, with which Windows
+;; decides whether a TLS server's certificate is trusted (#536).
+(cffi:define-foreign-library crypt32  (:windows "crypt32.dll"))
 
 (defvar *loaded* nil "Which of the OS libraries have been loaded into this image.")
 
 (defun load-windows-libraries ()
   "Load the OS DLLs this system binds. Idempotent; returns the list loaded."
-  (dolist (lib '(kernel32 ole32 oleaut32 user32 advapi32 shell32) *loaded*)
+  (dolist (lib '(kernel32 ole32 oleaut32 user32 advapi32 shell32 crypt32) *loaded*)
     (unless (member lib *loaded*)
       (cffi:load-foreign-library lib)
       (push lib *loaded*))))

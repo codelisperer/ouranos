@@ -87,13 +87,29 @@ is NIL, Connection: close, and BODY, a string (sent as UTF-8) or octets."
 
 (defstruct server port heads requests listener thread stop)
 
+(defun %file-octets (path)
+  (with-open-file (in path :element-type '(unsigned-byte 8))
+    (let* ((buffer (make-array (file-length in) :element-type '(unsigned-byte 8)))
+           (n (read-sequence buffer in)))
+      (subseq buffer 0 n))))
+
+#+os-windows
+(defun %aion-tls-server-config (certificate key)
+  "An aion/tls server config presenting the PEM files CERTIFICATE and KEY (#536)."
+  (uiop:symbol-call :aion/tls :make-server-config
+                    (uiop:symbol-call :aion/tls :make-certificate-chain (%file-octets certificate))
+                    (uiop:symbol-call :aion/tls :make-private-key (%file-octets key))))
+
 (defun start-server (handler &key tls-certificate tls-key (name "aion/test-http server"))
   "Start a server on 127.0.0.1, on a port the system chooses, and return it. HANDLER is a
 function of (REQUEST STREAM) that writes the response. Every request is recorded, and so is
 its head (SERVER-HEADS, newest first). With TLS-CERTIFICATE and TLS-KEY, pathnames of PEM
-files, the server speaks TLS; not on Windows, where nothing in the tree loads OpenSSL."
-  #+os-windows (when tls-certificate (error "aion/test-http: TLS is not available on Windows"))
-  (let* ((listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t
+files, the server speaks TLS: through cl+ssl, and on Windows, where nothing in the tree loads
+OpenSSL, through aion/tls (#536). Either is reached by name, so the system that asks for TLS
+loads the library and this one does not."
+  (let* ((tls-config #+os-windows (and tls-certificate (%aion-tls-server-config tls-certificate tls-key))
+                     #-os-windows nil)
+         (listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t
                                                         :element-type '(unsigned-byte 8)))
          (server (make-server :port (usocket:get-local-port listener) :heads '()
                               :requests '() :listener listener))
@@ -121,6 +137,10 @@ files, the server speaks TLS; not on Windows, where nothing in the tree loads Op
                                            :cl+ssl :make-ssl-server-stream stream
                                            :certificate (namestring tls-certificate)
                                            :key (namestring tls-key))))
+                           #+os-windows
+                           (when tls-config
+                             (setf stream (uiop:symbol-call :aion/tls :make-tls-stream
+                                                            stream tls-config)))
                            (let ((request (%read-request stream)))
                              (bt:with-lock-held (lock)
                                (push (request-head request) (server-heads server))

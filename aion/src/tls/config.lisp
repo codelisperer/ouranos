@@ -54,7 +54,12 @@ that silently vanished from the list would change what we offer without saying s
    (endpoint :initarg :endpoint :reader config-endpoint)
    (ciphersuites :initarg :ciphersuites :reader config-ciphersuites)
    ;; Kept reachable, because the mbedtls_ssl_config holds pointers into them.
-   (holds :initarg :holds :reader %holds))
+   (holds :initarg :holds :reader %holds)
+   ;; For a config from MAKE-VERIFYING-CLIENT-CONFIG, the caller's verifier; otherwise NIL,
+   ;; and mbedTLS verifies against trusted CAs (#536).
+   (verifier :initarg :verifier :initform nil :reader config-verifier)
+   ;; For a server config made with :SESSION-TICKETS, its ticket context; freed with it.
+   (tickets :initform nil :accessor %tickets))
   (:documentation "An mbedtls_ssl_config, owned by this object, for :SERVER or :CLIENT use.
 It holds references to the certificate chains and key it was made with, which must not be
 freed while it is in use."))
@@ -74,15 +79,27 @@ freed while it is in use."))
         (%ssl-conf-ciphersuites p (%suites config)))
       config)))
 
-(defun make-server-config (chain key)
+(defun make-server-config (chain key &key session-tickets)
   "A server config presenting CHAIN, whose first certificate must be KEY's. Refuses a key that
-does not match the certificate, before anything is served with it."
+does not match the certificate, before anything is served with it.
+
+SESSION-TICKETS, a count, makes the server send that many TLS 1.3 session tickets after each
+handshake, as OpenSSL servers and CDNs do; NIL, the default, sends none. Tickets are issued but
+nothing here resumes a session from one: this exists so a client's handling of tickets can be
+tested against this tree's own server (#536)."
   (unless (certificate-chain-matches-key-p chain key)
     (error "aion/tls: the private key is not the key of the certificate it was given with"))
   (let ((config (%make-config :server (list chain key))))
-    (%ssl-conf-authmode (%pointer config) +verify-none+)
-    (%check (%ssl-conf-own-cert (%pointer config) (%pointer chain) (%pointer key))
-            "mbedtls_ssl_conf_own_cert")
+    (handler-bind ((error (lambda (e) (declare (ignore e)) (free-config config))))
+      (%ssl-conf-authmode (%pointer config) +verify-none+)
+      (%check (%ssl-conf-own-cert (%pointer config) (%pointer chain) (%pointer key))
+              "mbedtls_ssl_conf_own_cert")
+      (when session-tickets
+        (check-type session-tickets (integer 1 16))
+        (cffi:with-foreign-object (out :pointer)
+          (%check (%conf-session-tickets (%pointer config) session-tickets out)
+                  "mbedtls_ssl_ticket_setup")
+          (setf (%tickets config) (cffi:mem-ref out :pointer)))))
     config))
 
 (defun make-client-config (trusted)
@@ -95,11 +112,38 @@ reason TLS exists."
     (%ssl-conf-ca-chain (%pointer config) (%pointer trusted) (cffi:null-pointer))
     config))
 
+(defun make-verifying-client-config (verify)
+  "A client config whose decision about the server's certificate is made by VERIFY, a function
+the caller supplies, instead of by CA certificates given here. For a platform whose own trust
+store and policy should decide, such as Windows through crypt32 (#536).
+
+VERIFY IS REQUIRED. There is no default and no value that accepts everything: anything but a
+function is refused here, before a connection can be made with the config. VERIFY is called once
+per connection, after the handshake and before ENGINE-HANDSHAKE reports :DONE, with two
+arguments: the server's certificate chain as a list of DER octet vectors, the leaf first and the
+intermediates the server sent after it, and the HOSTNAME the engine was made with. It accepts
+the chain by returning true. It refuses it by signalling a condition, which ENGINE-HANDSHAKE
+then signals, or by returning NIL, which ENGINE-HANDSHAKE reports as TLS-VERIFY-ERROR. Until it
+has accepted, the engine reads and writes nothing.
+
+mbedTLS checks nothing about the chain itself here: it is set to verify optionally, with no CA
+certificates, so the handshake completes and VERIFY sees the chain whatever mbedTLS would have
+said. The name the server is asked for (SNI) is still the engine's HOSTNAME."
+  (unless (functionp verify)
+    (error "aion/tls: a verifying client config needs a function that decides about the server's certificate, not ~S" verify))
+  (let ((config (%make-config :client '())))
+    (setf (slot-value config 'verifier) verify)
+    (%ssl-conf-authmode (%pointer config) +verify-optional+)
+    config))
+
 (defun free-config (config)
-  (let ((p (%pointer config)) (suites (%suites config)))
+  (let ((p (%pointer config)) (suites (%suites config)) (tickets (%tickets config)))
     (when p
       (setf (%pointer config) nil)
       (%config-free p))
+    (when tickets
+      (setf (%tickets config) nil)
+      (%ticket-free tickets))
     (when suites
       (setf (%suites config) nil)
       (cffi:foreign-free suites)))
