@@ -14,6 +14,25 @@ its tag.
 
 ### An app may have to act
 
+- **aion/uv: `close-loop` frees a loop only when `uv_loop_close` succeeds** (#877). Before, it
+  ignored `uv_loop_close`'s result and freed the loop even when libuv returned `UV_EBUSY`
+  because a handle or request was still open on it, and libuv then used the freed memory. A
+  handle opens a loop this way when it was created without being added to `loop-owned`. Now:
+  - on `UV_EBUSY`, `close-loop` closes every handle `uv_walk` finds that is not already closing,
+    runs the loop so their close callbacks fire, and calls `uv_loop_close` again, up to
+    `aion/uv::*loop-close-attempts*` (4) calls in all. A handle closed this way gets no close
+    callback, so its memory is not freed;
+  - if the loop is still busy after that, `close-loop` leaves it unfreed, signals the new
+    warning `aion/uv:loop-left-unfreed` (`loop-left-unfreed-loop`, `-code`, `-handles`, the
+    last naming each remaining handle's kind), and returns `nil`. `aion/uv:loop-freed-p` stays
+    `nil`, and a later `close-loop` tries again.
+
+  An unhandled `loop-left-unfreed` prints as an ordinary Lisp warning on `*error-output*`. An
+  app that logs can handle it and pass it to `aion/log`. `hyperion/server-uv:stop` (and
+  `hyperion/server:stop` on `:uv`) does this: it logs a warning naming the shard, the libuv
+  error code and the number of open handles, does not let the warning reach its caller, and
+  keeps the unfreed loop for a later `stop`, as it does for a loop thread still in a handler.
+
 - **hyperion/static serves only regular files, and serves some it used to refuse** (#687).
   `file-response` and `make-static-handler` now:
   - **refuse a FIFO, a device or a socket under the static root** with a 404, without reading
