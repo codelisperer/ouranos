@@ -29,7 +29,19 @@ pages from the same tree its request, or the export, is using, so a reload durin
 cannot mix two versions on one page. `export-site` writes `index.html`, `404.html` and one file
 per readable page (`roles/a.html` for the page served at `/roles/a`, or `roles/a/index.html`
 with `:layout :directory`). It writes nothing if any page fails to render, and it refuses a
-non-empty directory unless given `:clean t`. The site copies its own static assets.
+non-empty directory unless given `:clean t`. `:assets` names a directory of the site's own files
+(CSS, images, fonts, `.well-known/`), copied into the export after `:clean` empties it, each at
+its path relative to that directory. The export is refused, before anything is written, if an
+asset and a page cannot both be written (the same path, or one under the other), if the assets
+directory holds a link or a name with `*`, `?`, `[`, `]` or the escape character (`^` on
+Windows, `\` elsewhere), or if it holds or is inside the export directory.
+
+In a collection, `:sort-by` names a field, `:order` is `:ascending` (the default) or
+`:descending`, and a document without the field comes last. Documents tied on the field keep
+ascending key order under either `:order`, because `:descending` reverses the comparison and not
+the list. `:then-by` names a second field that orders a tie in the same direction, with a
+document lacking it last among the tie. `:then-by` without `:sort-by` is an error:
+`(klio:collection *site* "posts" :sort-by "date" :order :descending :then-by "title")`.
 
 A controlled list, such as skills, is declared once and checked on every load: a page that
 refers to a label that is not in the list fails to load, naming both files.
@@ -49,6 +61,15 @@ turn on the RSS and Atom feeds (`/feed.xml`, `/atom.xml`, with `:feed-collection
 of every readable page for a search box. A tag's URL is its slug (`C#` is `/tags/c-sharp/`). A
 listing theme gets `*page-number*` and `*page-count*`, and `page-url` and `tag-url` for links.
 `publish-at` takes an ISO 8601 date, and a scheduled page appears when its time comes.
+
+A collection has no listing page of its own unless the site names it in `:collections`. Each
+entry is a name or a name with an ordering, `(:collections '("posts" ("roles" :sort-by "start"
+:order :descending)))`, and gets a listing at `/<name>/` (and `/<name>/page/2/` with
+`:per-page`), rendered by `:collection-theme`, `(lambda (site name documents) ...)`, which
+`collection-url` gives links to. A name is `/`-separated segments of letters, digits, `.`, `-`
+and `_`, none starting with `.` or `_`, and may not be at or under the tag prefix or the page
+segment (`tags/lisp`, `page/2`). `export-site` refuses a listing and a page that cannot both be
+written, such as a collection named `one.html` beside the document `one`.
 
 `/search.json` holds, for every readable page, its URL, title, tags, date and Markdown body, and
 anyone can fetch it. Pass `:search-path nil` to `site-app` and `export-site` to have no search

@@ -78,7 +78,7 @@
    #:payment-provider #:register-payment-impl #:payments #:provider-call
    #:idempotency-key #:derived-idempotency-key
    #:dev-payments #:make-dev-payments #:dev-add-subscription #:dev-sign
-   #:stripe-payments #:make-stripe-payments #:*webhook-tolerance*
+   #:stripe-payments #:make-stripe-payments #:*webhook-tolerance* #:+stripe-api-version+
    #:unix->universal #:+unix-epoch+
    ;; operations
    #:create-customer #:create-checkout #:create-portal-session

@@ -121,6 +121,44 @@ for name in $REQUIRED; do
   fi
 done
 
+# --- check 0: no binary needs a later macOS than the app says it runs on ---------------
+# A .app states the oldest macOS it runs on as LSMinimumSystemVersion. Each Mach-O in it
+# records the oldest macOS it was built for (minos). One whose minos is later than the stated
+# minimum makes the statement false, and the app fails to start on the Macs in between. This
+# happened when the build image moved to macos-26 (#763).
+# ver_gt A B: true when version A is later than B, comparing each dotted part as a number, so
+# 15 and 15.0 are equal.
+ver_gt() {
+  awk -v a="$1" -v b="$2" 'BEGIN { n = split(a, x, "."); m = split(b, y, ".")
+    for (i = 1; i <= (n > m ? n : m); i++) { if (x[i] + 0 > y[i] + 0) exit 0; if (x[i] + 0 < y[i] + 0) exit 1 }
+    exit 1 }'
+}
+case "$TARGET" in
+  *.app)
+    echo "--- check 0: no binary needs a later macOS than LSMinimumSystemVersion ---"
+    MIN=$(/usr/libexec/PlistBuddy -c "Print :LSMinimumSystemVersion" "$TARGET/Contents/Info.plist" 2>/dev/null || true)
+    if [ -z "$MIN" ]; then
+      echo "  FAIL -- Info.plist has no LSMinimumSystemVersion"
+      FAILED=1
+    else
+      echo "  LSMinimumSystemVersion = $MIN"
+      for f in "$DIR"/*; do
+        [ -f "$f" ] && file -b "$f" | grep -q Mach-O || continue
+        MINOS=$(vtool -show-build "$f" 2>/dev/null | awk '$1 == "minos" {print $2; exit}')
+        if [ -z "$MINOS" ]; then
+          echo "  FAIL -- $(basename "$f"): vtool reported no minos"
+          FAILED=1
+        elif ver_gt "$MINOS" "$MIN"; then
+          echo "  FAIL -- $(basename "$f") needs macOS $MINOS, later than $MIN"
+          FAILED=1
+        else
+          echo "  ok -- $(basename "$f") needs macOS $MINOS"
+        fi
+      done
+    fi
+    echo ;;
+esac
+
 # --- check 1: no build-machine paths survive in the load commands ----------------------
 # The bug ADR-0014 exists for. A path under /opt/homebrew, /usr/local or the source tree is
 # a machine-specific dependency that will not exist on a user's Mac.
@@ -202,14 +240,23 @@ if ! grep -q "dyld" "$LOG"; then
   FAILED=1
 fi
 
+# WHICH LIBRARIES WERE LOADED is each library's LAST dyld state, not whether dyld printed its
+# path (#783). On current macOS dyld prints a path line for libraries in its shared cache that
+# the process never uses, Apple's libssl among them, and then `move loaded to delayed'.
+# check-dyld-log.lisp reads both and prints one line per library still loaded: pid, process
+# and path, separated by tabs.
+DYLD_CHECK="$(cd "$(dirname "$0")" && pwd)/check-dyld-log.lisp"
+LOADED=$(sbcl --script "$DYLD_CHECK" loaded "$LOG")
+TAB=$(printf '\t')
+
 # Every carried .dylib must have been loaded FROM THE BUNDLE. This is the check that a bare
 # exit code cannot make: without it a pass may mean the app silently used Homebrew's copy.
 for lib in $CARRIED; do
-  if grep -q "$DIR/$lib" "$LOG"; then
+  if echo "$LOADED" | grep -qF "$TAB$DIR/$lib"; then
     echo "  ok -- $lib loaded from the bundle"
-  elif grep -q "$lib" "$LOG"; then
+  elif echo "$LOADED" | grep -qF "/$lib"; then
     echo "  FAIL -- $lib was loaded from OUTSIDE the bundle:"
-    grep "$lib" "$LOG" | grep dyld | head -2 | sed 's/^/         /'
+    echo "$LOADED" | grep -F "/$lib" | head -2 | sed 's/^/         /'
     FAILED=1
   else
     if is_required "$lib"; then
@@ -220,6 +267,13 @@ for lib in $CARRIED; do
     fi
   fi
 done
+
+# No process the bundle starts may have a libssl or libcrypto loaded that the bundle does not
+# carry (#783). The app's Lisp image loads OpenSSL only through cl+ssl, and a bundle that does
+# so reopens the build machine's copy at startup, which a Mac without it does not have (#191).
+# The one exception is Apple's /usr/lib copy in hyperion-view: WebKit loads it through Apple's
+# libcurl, and the app has no say in that.
+sbcl --script "$DYLD_CHECK" openssl "$LOG" "$DIR" || FAILED=1
 
 # --- check 3: the control, for linked libraries only -----------------------------------
 # Decisive on any machine: @executable_path has no fallback. Skipped for dlopen'd libraries,

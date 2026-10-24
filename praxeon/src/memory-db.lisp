@@ -123,7 +123,7 @@ gives another pair's key."
 ;;; --- the store --------------------------------------------------------------
 
 (defclass db-memory-store (mem:memory-store)
-  ((connection :initarg :connection :reader store-connection)
+  ((source :initarg :source :reader store-source)
    (dialect :initarg :dialect :initform :postgres :reader store-dialect)
    (table :initarg :table :initform *table* :reader store-table)
    (embedder :initarg :embedder :reader store-embedder)
@@ -133,12 +133,114 @@ gives another pair's key."
    (progress-schema :initarg :progress-schema :reader store-progress-schema)
    ;; Recursive because SUPERSEDE and CONDENSE hold it around REMEMBER, so the check that what
    ;; they replace is still current and the writes that replace it are one step.
-   (lock :initform (bt:make-recursive-lock "praxeon-memory-db") :reader store-lock))
-  (:documentation "Observations in a mnemosyne-backed table, embedded on write."))
+   (lock :initform (bt:make-recursive-lock "praxeon-memory-db") :reader store-lock)
+   ;; :UNKNOWN until the first similarity recall on Postgres reads the extension's version,
+   ;; then T when pgvector has iterative index scans (0.8 or later) and NIL otherwise (#482).
+   (iterative-scan :initform :unknown :accessor store-iterative-scan))
+  (:documentation "Observations in a mnemosyne-backed table, embedded on write. See %WITH-STORE
+for how each operation gets its connection."))
+
+;;; --- one connection per operation (#653) ---------------------------------------------
+;;;
+;;; OVER A POOL, each operation borrows a connection for its extent, and a write on Postgres also
+;;; holds the store's lock, taken after the connection, so no writer holds the lock while it waits
+;;; for one (the order hyperion/auth-db uses, #371). A write on SQLite holds the database's write
+;;; lock instead (below). praxeon/observe writes on a thread of its own, so it
+;;; borrows a connection of its own: an app's transaction on its request thread cannot contain
+;;; the observer's writes, and the observer's COMMIT cannot end the app's transaction. Before,
+;;; with one connection shared, cl-dbi saw the app's transaction only on the app's thread, so
+;;; on Postgres the observer's COMMIT committed it and on SQLite its BEGIN was refused (#651).
+;;; A store call on the app's own thread, inside its CONN:WITH-CONNECTION on the same pool, uses
+;;; that thread's lent connection and is part of the app's transaction.
+;;;
+;;; OVER ONE CONNECTION, every operation, reads included, holds the store's lock, and the store
+;;; is safe only when nothing else uses that connection.
+;;;
+;;; ON SQLITE every pooled connection waits up to mnemosyne's busy timeout for the database's
+;;; write lock (MNEMOSYNE/CONN:*SQLITE-BUSY-TIMEOUT-MS*, 5000 ms by default, set on every
+;;; connection mnemosyne opens). The store's own transactions, which read before they write, begin
+;;; IMMEDIATE, so they wait for the lock at BEGIN rather than failing at once when they first
+;;; write behind another connection's write transaction (the hub's review of #654).
+;;;
+;;; ON SQLITE OVER A POOL A WRITE TAKES THE DATABASE'S WRITE LOCK, NOT THE STORE'S LOCK. It runs in
+;;; a transaction that begins IMMEDIATE, or in a savepoint when its connection already has one open.
+;;; A savepoint inside an app's CONN:WITH-TRANSACTION that has not written yet is inside a
+;;; transaction that began deferred, so it takes the write lock only at its first write, and if
+;;; another connection commits a write in between, that write can fail with SQLITE_BUSY instead
+;;; of waiting.
+;;; SQLite allows one writer at a time, so that lock serializes the store's writes, in this process
+;;; and in others. Holding the store's lock as well made a cycle that only the busy timeout broke
+;;; (Copilot's review of train 47): an app's transaction on its own pooled connection keeps the
+;;; database's write lock after its first REMEMBER returns; the observer took the store's lock and
+;;; waited in BEGIN IMMEDIATE for the app to commit; the app's next REMEMBER waited for the store's
+;;; lock. Now the observer waits in BEGIN IMMEDIATE holding nothing the app needs, the app's writes
+;;; go on, and the observer begins once the app commits. On Postgres there is no such lock, so the
+;;; store's lock is still taken after the connection.
+;;;
+;;; AN OPERATION INSIDE ANOTHER on the same thread, as SUPERSEDE's REMEMBER, a window's
+;;; transaction or an app's :PROMOTE callback inside it, uses the connection already held, so it
+;;; stays in the same transaction and does not wait for itself (the hub's ruling on #653).
+
+(defvar *held* '()
+  "An alist of (store . connection), one entry for each store whose operation runs on this
+thread, so an operation of one store inside an operation of another, and back, reuses each
+store's connection (the hub's review of #654).")
+
+(defun store-connection (store)
+  "The connection the running operation of STORE holds; over one connection, that connection."
+  (cond ((assoc store *held* :test #'eq) (cdr (assoc store *held* :test #'eq)))
+        ((conn:poolp (store-source store))
+         (error "praxeon/memory-db: no connection is held; run the operation inside %WITH-STORE"))
+        (t (store-source store))))
+
+(defun %call-with-write-lock (connection function)
+  "FUNCTION in a transaction on CONNECTION that begins IMMEDIATE, so it holds SQLite's write lock,
+or in a savepoint when CONNECTION already has a transaction open on this thread. When that
+transaction began deferred and has not written yet, the savepoint takes the write lock only at
+its first write, which can fail with SQLITE_BUSY instead of waiting if another connection
+commits a write in between."
+  (conn:with-transaction (connection :immediate t) (funcall function)))
+
+(defun %call-with-store (store function exclusive)
+  (let ((source (store-source store)))
+    (cond ((assoc store *held* :test #'eq)
+           (cond ((not exclusive) (funcall function))
+                 ((and (conn:poolp source) (eq (store-dialect store) :sqlite))
+                  (%call-with-write-lock (store-connection store) function))
+                 (t (bt:with-recursive-lock-held ((store-lock store)) (funcall function)))))
+          ((conn:poolp source)
+           ;; CONNECTION FIRST, THEN THE LOCK (the hub's ruling on #653).
+           (conn:with-connection (c source)
+             (let ((*held* (acons store c *held*)))
+               (cond ((not exclusive) (funcall function))
+                     ((eq (store-dialect store) :sqlite) (%call-with-write-lock c function))
+                     (t (bt:with-recursive-lock-held ((store-lock store)) (funcall function)))))))
+          (t
+           (bt:with-recursive-lock-held ((store-lock store))
+             (let ((*held* (acons store source *held*)))
+               (funcall function)))))))
+
+(defmacro %with-store ((store &key exclusive) &body body)
+  "Run BODY with a connection held for STORE (#653): borrowed from its pool for BODY's extent, or
+its one connection. EXCLUSIVE, for a write, also holds the store's lock, taken after the
+connection, except on SQLite over a pool, where it holds the database's write lock instead; over
+one connection the store's lock is always held. Inside another operation of STORE on this thread,
+the connection already held is used."
+  `(%call-with-store ,store (lambda () ,@body) ,exclusive))
 
 (defun make-db-memory-store (connection &key embedder (table *table*) (dialect :postgres)
                                           ensure)
-  "A store over CONNECTION. EMBEDDER is an LLM:EMBEDDING-PROVIDER and decides the width.
+  "A store over CONNECTION: an open mnemosyne connection, or a mnemosyne pool (#653).
+EMBEDDER is an LLM:EMBEDDING-PROVIDER and decides the width.
+
+A POOL IS WHAT AN APP THAT ALSO USES THE DATABASE PASSES, usually the pool it gives
+HYPERION/DB-CONNECTION:WRAP-CONNECTION. Over one connection nothing else may use it: an app that
+opens a transaction on it while praxeon/observe writes has that transaction committed by the
+observer on Postgres, and the observer's writes refused on SQLite (#651).
+
+ON SQLITE every connection the pool opens waits up to mnemosyne's busy timeout for the
+database's write lock: MNEMOSYNE/CONN:*SQLITE-BUSY-TIMEOUT-MS*, 5000 ms by default. The store's
+own transactions begin IMMEDIATE, so they wait at BEGIN (#653).
 
 EMBEDDER IS INJECTED, NOT RESOLVED HERE. `make-embedding-provider-from-env' reads
 `*provider-role*', and #158 records that resolving across a thread boundary falls through to
@@ -159,7 +261,7 @@ bound and hand it in; then no path through this store can resolve one."
                     (schema:make-schema (intern (format nil "~:@(~A~)-PROGRESS-~A" table dialect) '#:praxeon/memory-db)
                                         (%progress-table table) +progress-fields+)))
          (store (make-instance 'db-memory-store
-                               :connection connection :dialect dialect :table table
+                               :source connection :dialect dialect :table table
                                :embedder embedder :dimensions dimensions
                                :schema sch :schema-name name :progress-schema progress)))
     (when ensure (ensure-schema store))
@@ -185,6 +287,19 @@ bound and hand it in; then no path through this store can resolve one."
                             :columns '(:embedding)
                             :using :hnsw
                             :opclass :vector_cosine_ops)
+                      :dialect (store-dialect store))
+             ;; A SUBJECT'S OWN ROWS HAVE AN INDEX OF THEIR OWN (#482). An HNSW scan applies the
+             ;; WHERE clause to the nearest rows of the whole table, so when a subject's current
+             ;; rows in its scope are a small part of the table, the scan can end with fewer than
+             ;; LIMIT of them, or none. With this index the planner reads the subject's rows and
+             ;; ranks them exactly when they are few, which is the case where the HNSW scan comes
+             ;; up short. It is on SUBJECT alone, not on THREAD too, because this statement runs
+             ;; before ENSURE-SCHEMA adds THREAD to a table made before #317.
+             (ddl:ddl (list :create-index
+                            :name (intern (string-upcase
+                                           (format nil "~A_subject_idx" table)) :keyword)
+                            :on (intern (string-upcase table) :keyword)
+                            :columns '(:subject))
                       :dialect (store-dialect store)))))))
 
 (defun check-vector-extension (connection)
@@ -228,25 +343,27 @@ already be installed; see CHECK-VECTOR-EXTENSION.
 EVERY READ NEEDS THOSE COLUMNS, not only a thread's: a read of the subject's facts selects them
 and filters on THREAD IS NULL. So an app must run this at start, or add the columns in its own
 migration, before it reads from a table made before #317."
-  (when (eq (store-dialect store) :postgres)
-    (check-vector-extension (store-connection store)))
-  (dolist (statement (store-ddl store))
-    (conn:exec (store-connection store) statement))
-  (let ((have (and (eq (store-dialect store) :sqlite) (%sqlite-columns store))))
-    (loop for (name . type) in +added-columns+
-          unless (member (string-downcase (symbol-name name)) have :test #'string=)
-            ;; Postgres answers an existing column with a notice, which the driver signals as
-            ;; a warning; it is the expected case on every start after the first.
-            do (handler-bind ((warning #'muffle-warning))
-                 (handler-case (conn:exec (store-connection store) (%add-column-sql store name type))
-                   ;; ON SQLITE, ANOTHER PROCESS MAY ADD THE COLUMN between the read of the
-                   ;; columns above and this statement; SQLite has no IF NOT EXISTS for it. A
-                   ;; failure is accepted only when the column is there afterwards.
-                   (error (e)
-                     (unless (and (eq (store-dialect store) :sqlite)
-                                  (member (string-downcase (symbol-name name)) (%sqlite-columns store)
-                                          :test #'string=))
-                       (error e)))))))
+  (%with-store (store :exclusive t)
+    (when (eq (store-dialect store) :postgres)
+      (check-vector-extension (store-connection store)))
+    (dolist (statement (store-ddl store))
+      (conn:exec (store-connection store) statement))
+    (let ((have (and (eq (store-dialect store) :sqlite) (%sqlite-columns store))))
+      (loop for (name . type) in +added-columns+
+            unless (member (string-downcase (symbol-name name)) have :test #'string=)
+              ;; Postgres answers an existing column with a notice, which the driver signals as
+              ;; a warning; it is the expected case on every start after the first.
+              do (handler-bind ((warning #'muffle-warning))
+                   (handler-case (conn:exec (store-connection store)
+                                            (%add-column-sql store name type))
+                     ;; ON SQLITE, ANOTHER PROCESS MAY ADD THE COLUMN between the read of the
+                     ;; columns above and this statement; SQLite has no IF NOT EXISTS for it. A
+                     ;; failure is accepted only when the column is there afterwards.
+                     (error (e)
+                       (unless (and (eq (store-dialect store) :sqlite)
+                                    (member (string-downcase (symbol-name name))
+                                            (%sqlite-columns store) :test #'string=))
+                         (error e))))))))
   store)
 
 ;;; --- rows <-> observations ---------------------------------------------------
@@ -316,29 +433,50 @@ language of columns."
 
 (defun %now () (get-universal-time))
 
-(defvar *embedded* nil
-  "(CONTENT . EMBEDDING), computed before the store's lock was taken, for the REMEMBER that
-SUPERSEDE calls under it. The embedding model is a network call, and a request's read waits for
-the lock (#462's third review: 997 ms behind a 1 s embedder).")
+(defvar *prepared* '()
+  "An alist of (STORE . TABLE), each TABLE a hash table from content to the embedding STORE's
+embedder computed for it before the store's lock was taken: by CALL-WITH-STORE-TRANSACTION for
+the REMEMBERs and SUPERSEDEs inside the transaction (the hub's review of #645), and by SUPERSEDE
+for the REMEMBER it calls under the lock. The embedding model is a network call, and a request's
+read waits for the lock (#462's third review: 997 ms behind a 1 s embedder).
 
-(defun %embed-before-lock (store content)
-  "CONTENT's embedding, as *EMBEDDED* holds it."
-  (cons content (first (llm:embed-documents (store-embedder store) (list content)))))
+AN EMBEDDING IS USED ONLY BY THE STORE THAT PREPARED IT. Inside store A's transaction, a REMEMBER
+on store B of the same text embeds it with B's embedder: A's vector comes from another model, and
+may have another width (Copilot's review of train 47).")
+
+(defun %prepared-embedding (store content)
+  "The embedding of CONTENT that STORE's embedder computed earlier in this dynamic extent, or NIL."
+  (loop for (owner . table) in *prepared*
+        when (eq owner store)
+          do (let ((embedding (gethash content table)))
+               (when embedding (return embedding)))))
+
+(defun %prepare (store contents)
+  "*PREPARED* with an entry for STORE holding the embeddings of CONTENTS, computed in one call to
+STORE's embedder, except those already prepared for STORE."
+  (let ((missing (remove-if (lambda (c) (%prepared-embedding store c))
+                            (remove-duplicates contents :test #'string=))))
+    (if (null missing)
+        *prepared*
+        (let ((table (make-hash-table :test #'equal)))
+          (loop for content in missing
+                for embedding in (llm:embed-documents (store-embedder store) missing)
+                do (setf (gethash content table) embedding))
+          (acons store table *prepared*)))))
 
 (defmethod mem:remember ((store db-memory-store) subject content
                          &key provenance (kind :observation) (value 1) tokens valid-from thread)
   (mem:check-provenance provenance "remember" subject)
   (let* ((id (format nil "obs-~36R-~36R" (get-universal-time) (random (expt 2 32))))
          (now (%now))
-         (embedding (if (and *embedded* (string= (car *embedded*) content))
-                        (cdr *embedded*)
+         (embedding (or (%prepared-embedding store content)
                         (first (llm:embed-documents (store-embedder store) (list content)))))
          (observation (mem::%make-observation
                        :id id :subject subject :content content :kind kind :value value
                        :tokens (or tokens (max 1 (ceiling (length content) 4)))
                        :valid-from (or valid-from now) :recorded-at now
                        :thread thread :provenance provenance)))
-    (bt:with-recursive-lock-held ((store-lock store))
+    (%with-store (store :exclusive t)
       ;; AN UNRECORDED SOURCE TIME IS OMITTED, NOT CAST. `cast' refuses NIL for an integer
       ;; field -- correctly, because NIL is not an integer -- and the tempting fixes are
       ;; both wrong: coercing it to 0 invents a time, and widening the column's type to
@@ -382,10 +520,11 @@ the lock (#462's third review: 997 ms behind a 1 s embedder).")
   ;; and in one transaction a failure part-way through, or a thread ended by STOP-OBSERVER,
   ;; leaves neither the replacement nor a half-made link behind. Another process is held off
   ;; by the UPDATE itself, which only changes a row that is still current and must change one.
-  ;; The embedding is computed first, outside the lock.
-  (let ((*embedded* (%embed-before-lock store content)))
-    (bt:with-recursive-lock-held ((store-lock store))
-      (conn:with-transaction ((store-connection store))
+  ;; The embedding is computed first, outside the lock, unless this store prepared it already, as
+  ;; a window's transaction does for a correction (Copilot's review of train 47).
+  (let ((*prepared* (%prepare store (list content))))
+    (%with-store (store :exclusive t)
+      (conn:with-transaction ((store-connection store) :immediate t)
         (let ((row (first (q:fetch (store-connection store)
                                    (list :select '(:superseded_by)
                                          :from (list (store-table store))
@@ -429,14 +568,16 @@ the lock (#462's third review: 997 ms behind a 1 s embedder).")
   (when (null sources)
     (error 'praxeon/conditions:praxeon-error :detail "nothing to condense"))
   (mem::%check-distinct-sources sources)
-  ;; THE CHECK AND THE WRITES ARE ONE STEP. Under the store's lock no other thread of this
-  ;; process can supersede a source between the check and the update, and in one transaction a
-  ;; failure part-way through leaves neither the new row nor a superseded source behind. Each
-  ;; UPDATE changes a source only while it is still current and must change one, which holds
-  ;; off another process. The embedding is computed first, outside the lock, as SUPERSEDE's is.
-  (let ((*embedded* (%embed-before-lock store content)))
-  (bt:with-recursive-lock-held ((store-lock store))
-    (conn:with-transaction ((store-connection store))
+  ;; THE CHECK AND THE WRITES ARE ONE STEP, as in SUPERSEDE. The operation holds the store's
+  ;; connection and, for a write, its lock or SQLite's write lock (%WITH-STORE, #653), so no other
+  ;; thread of this process can supersede a source between the check and the update, and in one
+  ;; transaction, begun IMMEDIATE, a failure part-way through leaves neither the new row nor a
+  ;; superseded source behind. Each UPDATE changes a source only while it is still current and
+  ;; must change one, which holds off another process. The embedding is computed first, outside
+  ;; the lock, as SUPERSEDE's is.
+  (let ((*prepared* (%prepare store (list content))))
+  (%with-store (store :exclusive t)
+    (conn:with-transaction ((store-connection store) :immediate t)
       (let* ((first (first sources))
              (held (mem:observations-of store (mem:observation-subject first)
                                         :thread (mem:observation-thread first))))
@@ -494,7 +635,7 @@ which is the whole point of keeping the old one."
     (if (rest clauses) (cons :and (nreverse clauses)) (first clauses))))
 
 (defmethod mem:observations-of ((store db-memory-store) subject &key as-of include-superseded thread)
-  (bt:with-recursive-lock-held ((store-lock store))
+  (%with-store (store)
     (mapcar #'%row->observation
             (q:fetch (store-connection store)
                      (list :select +columns+
@@ -542,6 +683,82 @@ of its own -- which is why this is ctx:assemble and not a LIMIT."
 (defmethod mem:recall ((store db-memory-store) subject &key (budget 1000) kind as-of thread)
   (%assemble (mem:observations-of store subject :as-of as-of :thread thread) budget kind))
 
+;;; --- complete HNSW scans (#482) --------------------------------------------------
+
+(defun %iterative-scan-p (store)
+  "Whether STORE's Postgres has pgvector's iterative index scans, which came in 0.8. Read from
+pg_extension once per store."
+  (when (eq (store-iterative-scan store) :unknown)
+    (setf (store-iterative-scan store)
+          (let* ((row (first (conn:query (store-connection store)
+                                         "SELECT extversion FROM pg_extension WHERE extname = 'vector'")))
+                 (version (and row (param:row-value row :extversion)))
+                 (parts (and version (mapcar (lambda (p) (or (parse-integer p :junk-allowed t) 0))
+                                             (uiop:split-string version :separator ".")))))
+            (and parts (or (> (first parts) 0) (>= (or (second parts) 0) 8))))))
+  (store-iterative-scan store))
+
+(defun %call-with-local-settings (store settings thunk)
+  "Call THUNK with each (NAME . VALUE) of SETTINGS set for the current transaction, and each put
+back as it was afterwards. Must run inside a transaction.
+
+PUT BACK, NOT LEFT TO THE TRANSACTION'S END (#625's review). Inside the app's own
+CONN:WITH-TRANSACTION the store's transaction is a savepoint, and a local setting made in a
+released savepoint lasts until the app's transaction ends, so every later query of the app's
+would run with it. On a normal exit a failed restore is signalled; on a non-local exit it is
+ignored, because the transaction or savepoint is then rolled back, which undoes the settings. A
+setting that did not exist before, as pgvector's do not until the library is loaded, is put back
+to its default."
+  (let* ((c (store-connection store))
+         (old (mapcar (lambda (setting)
+                        (cons (car setting)
+                              (param:row-value
+                               (first (conn:query c "SELECT current_setting(?, true) AS v"
+                                                  (car setting)))
+                               :v)))
+                      settings))
+         (finished nil))
+    (flet ((restore ()
+             (dolist (o old)
+               (if (cdr o)
+                   (conn:query c "SELECT set_config(?, ?, true) AS v" (car o) (cdr o))
+                   ;; A SETTING THAT DID NOT EXIST BEFORE (#625's review): on a connection that has
+                   ;; not loaded pgvector yet, hnsw.iterative_scan reads as NULL, and the query
+                   ;; loads the library, which makes it an enum that refuses "". Its default is
+                   ;; what the connection had. The names are this file's constants.
+                   (conn:exec c (format nil "SET LOCAL ~A TO DEFAULT" (car o)))))))
+      (dolist (setting settings)
+        (conn:query c "SELECT set_config(?, ?, true) AS v" (car setting) (cdr setting)))
+      (unwind-protect (multiple-value-prog1 (funcall thunk) (setf finished t))
+        (if finished (restore) (ignore-errors (restore)))))))
+
+(defmacro %with-complete-hnsw-scan ((store) &body body)
+  "Run BODY, a similarity query on STORE's Postgres, so that an HNSW index scan keeps going until
+it has LIMIT rows that pass the WHERE clause (#482).
+
+WHY. pgvector's HNSW scan collects the nearest HNSW.EF_SEARCH rows of the whole table (40 by
+default) and only then applies the WHERE clause. Measured on pgvector 0.8.6 with 16 dimensions:
+one subject with 20,050 current rows and :LIMIT 100 got 40 rows back; with the index used for a
+subject holding 50 of 20,051 rows, or 50 current rows beside 20,000 superseded ones, it got none.
+HNSW.ITERATIVE_SCAN = strict_order makes the scan go on past EF_SEARCH, keeping the order exact,
+and the same three cases then return 100, 20 and 20.
+
+IT IS NOT EXACT IN EVERY CASE. An iterative scan stops after HNSW.MAX_SCAN_TUPLES rows (20,000 by
+default) or at its memory limit, so a subject holding 50 of 100,051 rows still came back with 10
+when the index was forced. %POSTGRES-NEAREST runs the query again without index scans when the
+result is short, which is exact.
+
+The setting is made for a transaction this opens, or for a savepoint inside the app's own
+CONN:WITH-TRANSACTION, and put back as it was after BODY (%CALL-WITH-LOCAL-SETTINGS). On pgvector
+before 0.8 there is no iterative scan and BODY runs as it is."
+  (let ((s (gensym "STORE")))
+    `(let ((,s ,store))
+       (if (%iterative-scan-p ,s)
+           (conn:with-transaction ((store-connection ,s))
+             (%call-with-local-settings ,s '(("hnsw.iterative_scan" . "strict_order"))
+                                        (lambda () ,@body)))
+           (progn ,@body)))))
+
 (defmethod mem:recall-similar ((store db-memory-store) subject embedding
                                &key (budget 1000) kind as-of (limit 20) thread)
   "Nearest by COSINE distance, then budgeted.
@@ -557,16 +774,42 @@ ONE SCOPE: THREAD :ALL is refused, as RECALL refuses it, since a recall builds a
            :detail "recall-similar takes one scope: NIL for the subject's facts, or a thread's id; :all is for observations-of"))
   (let ((rows (if (eq (store-dialect store) :sqlite)
                   (%sqlite-nearest store subject embedding as-of limit thread)
-                  (bt:with-recursive-lock-held ((store-lock store))
-                    (q:fetch (store-connection store)
-                             (list :select +columns+
-                                   :from (list (store-table store))
-                                   :where (%where-current subject as-of nil thread)
-                                   :order-by (list (list (list :<=> :embedding
-                                                               (%vector-text store embedding))))
-                                   :limit limit)
-                             :dialect (store-dialect store))))))
+                  (%postgres-nearest store subject embedding as-of limit thread))))
     (%assemble (%rank-as-value (mapcar #'%row->observation rows)) budget kind)))
+
+(defun %postgres-nearest (store subject embedding as-of limit thread)
+  "RECALL-SIMILAR's ranking on Postgres: the LIMIT current observations of SUBJECT in THREAD's
+scope nearest EMBEDDING by cosine distance, nearest first.
+
+FIRST AS THE INDEX ALLOWS, THEN EXACTLY WHEN THAT CAME UP SHORT (#482). The query runs with an
+iterative HNSW scan (%WITH-COMPLETE-HNSW-SCAN). That scan still stops at HNSW.MAX_SCAN_TUPLES or
+its memory limit, so when it returns fewer than LIMIT rows, the query runs again with index
+scans turned off, and sequential and bitmap scans on, for its transaction. HNSW cannot serve it
+then, because pgvector's index has no bitmap scan, and the planner reads the subject's rows
+through the subject index's bitmap scan, or the table, and ranks every one. A subject with fewer
+than LIMIT observations in scope pays for that second query on every recall; it reads only the
+subject's rows."
+  (flet ((nearest ()
+           (q:fetch (store-connection store)
+                    (list :select +columns+
+                          :from (list (store-table store))
+                          :where (%where-current subject as-of nil thread)
+                          :order-by (list (list (list :<=> :embedding (%vector-text store embedding))))
+                          :limit limit)
+                    :dialect (store-dialect store))))
+    (%with-store (store)
+      (let ((rows (%with-complete-hnsw-scan (store) (nearest))))
+        (if (< (length rows) limit)
+            (conn:with-transaction ((store-connection store))
+              ;; Sequential and bitmap scans are turned on as well as index scans off, so that the
+              ;; session's own planner settings cannot leave the HNSW scan as the only plan left:
+              ;; with sequential scans off too, the planner chose it anyway on macOS and Windows CI
+              ;; and returned 1 row of 20 (#625's first CI run).
+              (%call-with-local-settings store '(("enable_indexscan" . "off")
+                                                 ("enable_seqscan" . "on")
+                                                 ("enable_bitmapscan" . "on"))
+                                         #'nearest))
+            rows)))))
 
 (defun %sqlite-nearest (store subject embedding as-of limit &optional thread)
   "RECALL-SIMILAR's ranking on SQLite (#425): the subject's current observations with their
@@ -575,7 +818,7 @@ query vector is checked for width as a stored one is. An observation with no emb
 after every other, as NULL does in Postgres's ascending ORDER BY. REMEMBER always writes one,
 so that case needs a row written some other way."
   (let* ((query (llm:parse-vector-text (%vector-text store embedding)))
-         (rows (bt:with-recursive-lock-held ((store-lock store))
+         (rows (%with-store (store)
                  (q:fetch (store-connection store)
                           (list :select (append +columns+ '(:embedding))
                                 :from (list (store-table store))
@@ -596,31 +839,40 @@ so that case needs a row written some other way."
     (mapcar #'cdr (subseq sorted 0 (min limit (length sorted))))))
 
 (defmethod mem:forget ((store db-memory-store) observation)
-  (bt:with-recursive-lock-held ((store-lock store))
-    ;; Unlink the forward pointer first, or a surviving predecessor claims to be superseded
-    ;; by something no longer there and can never be current again. Same rule as the
-    ;; in-memory store; stated here because the storage does not enforce it.
-    (q:run (store-connection store)
-           (list :update (store-table store)
-                 ;; NIL, not :NULL. In this DSL a keyword is an IDENTIFIER, so `:null'
-                 ;; would render as the bare word null -- which Postgres happens to read as
-                 ;; the literal, making it right by accident. NIL is a value and binds as
-                 ;; SQL NULL through the parameter path, which is right on purpose.
-                 :set (list :superseded_by nil :superseded_at nil)
-                 :where (list := :superseded_by (mem:observation-id observation)))
-           :dialect (store-dialect store))
-    (let ((n (q:run (store-connection store)
-                    (list :delete-from (store-table store)
-                          :where (list := :id (mem:observation-id observation)))
-                    :dialect (store-dialect store))))
-      (and (integerp n) (plusp n)))))
+  (%with-store (store :exclusive t)
+    ;; THE UNLINK AND THE DELETE ARE ONE TRANSACTION (Copilot's review of train 47), or a savepoint
+    ;; inside one already open. A pooled read takes no lock, and between the two statements it
+    ;; would see the predecessor and its replacement both current, which is true neither before
+    ;; nor after FORGET.
+    (conn:with-transaction ((store-connection store) :immediate t)
+      (%forget-rows store observation))))
+
+(defun %forget-rows (store observation)
+  "FORGET's two statements, on the connection STORE's operation holds."
+  ;; Unlink the forward pointer first, or a surviving predecessor claims to be superseded
+  ;; by something no longer there and can never be current again. Same rule as the
+  ;; in-memory store; stated here because the storage does not enforce it.
+  (q:run (store-connection store)
+         (list :update (store-table store)
+               ;; NIL, not :NULL. In this DSL a keyword is an IDENTIFIER, so `:null'
+               ;; would render as the bare word null -- which Postgres happens to read as
+               ;; the literal, making it right by accident. NIL is a value and binds as
+               ;; SQL NULL through the parameter path, which is right on purpose.
+               :set (list :superseded_by nil :superseded_at nil)
+               :where (list := :superseded_by (mem:observation-id observation)))
+         :dialect (store-dialect store))
+  (let ((n (q:run (store-connection store)
+                  (list :delete-from (store-table store)
+                        :where (list := :id (mem:observation-id observation)))
+                  :dialect (store-dialect store))))
+    (and (integerp n) (plusp n))))
 
 (defmethod mem:forget-subject :around ((store db-memory-store) subject)
   ;; THE STORE'S LOCK IS HELD AROUND EVERY METHOD, the :BEFORE that praxeon/observe adds to
   ;; refuse while an observer runs included, so no run can start between that check and the
   ;; deletion (#462's eighth review). The in-memory store does the same.
   (declare (ignore subject))
-  (bt:with-recursive-lock-held ((store-lock store)) (call-next-method)))
+  (%with-store (store :exclusive t) (call-next-method)))
 
 (defmethod mem:forget-subject ((store db-memory-store) subject)
   "ERASURE, NOT SUPERSESSION -- the rows are gone, including from :as-of views (#150). The
@@ -628,7 +880,7 @@ deletion and the progress rows' new marks are one transaction (#462's eighth rev
 transaction the app opened with CONN:WITH-TRANSACTION in the same dynamic extent, it is a
 savepoint. A transaction the app began with a raw BEGIN is not seen: on SQLite this call then
 signals and changes nothing, and on Postgres its COMMIT would end the app's transaction."
-  (conn:with-transaction ((store-connection store))
+  (conn:with-transaction ((store-connection store) :immediate t)
     (let* ((cited (mem::%last-cited-by-thread
                    (mem:observations-of store subject :include-superseded t :thread :all)))
            (n (q:run (store-connection store)
@@ -675,7 +927,7 @@ Postgres through the search path (TO_REGCLASS), on SQLite without regard to case
                             (when (equal status "closed") (list :closed)))))))
 
 (defmethod mem:thread-progress ((store db-memory-store) subject thread)
-  (let ((row (bt:with-recursive-lock-held ((store-lock store))
+  (let ((row (%with-store (store)
                (first (q:fetch (store-connection store)
                                (list :select '(:observed :skipped)
                                      :from (list (%progress-table (store-table store)))
@@ -687,7 +939,7 @@ Postgres through the search path (TO_REGCLASS), on SQLite without regard to case
 
 (defmethod mem:record-thread-progress ((store db-memory-store) subject thread mark skipped)
   (let ((text (%skipped->text skipped)))
-    (bt:with-recursive-lock-held ((store-lock store))
+    (%with-store (store :exclusive t)
       (q:run (store-connection store)
              (list :insert-into (%progress-table (store-table store))
                    :values (list (list :id (%progress-id subject thread) :subject subject :thread thread
@@ -696,3 +948,40 @@ Postgres through the search path (TO_REGCLASS), on SQLite without regard to case
                    :do-update (list :observed mark :skipped text :updated_at (get-universal-time)))
              :dialect (store-dialect store))))
   mark)
+
+;;; --- transactions (#529) ---------------------------------------------------------------
+
+(defmethod mem:store-transactions-p ((store db-memory-store)) t)
+
+(defmethod mem:call-with-store-transaction ((store db-memory-store) thunk
+                                            &key subject thread contents)
+  "THUNK in one transaction on STORE's connection, under the store's recursive lock, so a
+callback inside THUNK that reads or writes the store re-enters it (#529). On SQLite over a pool
+the transaction's write lock takes the place of the store's lock (see %WITH-STORE). CONTENTS, the texts
+THUNK will write, are embedded before the lock is taken. SUPERSEDE opens a transaction of its
+own, which becomes a savepoint inside this one; the other writes, REMEMBER, FORGET and
+RECORD-THREAD-PROGRESS among them, run in this transaction directly (Copilot's review of #645).
+
+The transaction runs on the connection %WITH-STORE holds: over a pool, one borrowed for it, or,
+on the app's own thread inside its CONN:WITH-CONNECTION on the same pool, the app's (#653). On
+SQLite an outermost transaction begins IMMEDIATE, so it waits for the database's write lock,
+within the busy timeout, before it reads.
+
+CALLED INSIDE CONN:WITH-TRANSACTION ON THE SAME THREAD, this is a savepoint, and a rollback of
+the outer transaction undoes what it wrote. That holds only on the thread that opened the outer
+transaction: cl-dbi records an open transaction per thread, not per connection. praxeon/observe
+writes on a thread of its own, so its window transaction is never a savepoint inside an app's
+transaction. Over a pool it also runs on a connection of its own, so the app's transaction and
+the observer's are separate. Over one connection shared with an app, the observer's BEGIN and
+COMMIT go to the app's connection: on Postgres its COMMIT commits the app's transaction, and on
+SQLite its BEGIN is refused (#651). So an app that also uses the database makes the store over
+its pool."
+  (declare (ignore subject thread))
+  ;; THE EMBEDDINGS ARE COMPUTED FIRST, outside the lock and the transaction (the hub's review of
+  ;; #645). The embedding model is a network call; inside, every read of the store would wait for
+  ;; it, and on SQLite the database's write lock would be held meanwhile. A REMEMBER inside THUNK
+  ;; whose content is not among CONTENTS still embeds where it is.
+  (let ((*prepared* (%prepare store contents)))
+    (%with-store (store :exclusive t)
+      (conn:with-transaction ((store-connection store) :immediate t)
+        (funcall thunk)))))

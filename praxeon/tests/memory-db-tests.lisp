@@ -776,3 +776,570 @@ condensation fail and roll back."
                                (mem:observations-of store "member-18" :thread "conv-9" :include-superseded t))
                        #'string<))
           "the condensed observation was rolled back"))))
+
+
+;;; --- similarity recall with the HNSW index in use (#482) ---------------------
+
+(defclass scattered-embedder (llm:embedding-provider) ()
+  (:documentation "Eight dimensions, each vector drawn from a random state seeded by the text, so
+distinct texts point in scattered directions and an HNSW graph over them is an ordinary one."))
+(defmethod llm:embedding-dimensions ((p scattered-embedder)) 8)
+(defmethod llm:embedding-model-of ((p scattered-embedder)) "scattered")
+(defmethod llm:embed ((p scattered-embedder) text)
+  (let ((rs (sb-ext:seed-random-state (sxhash text)))
+        (v (make-array 8 :element-type 'double-float)))
+    (dotimes (i 8 v) (setf (aref v i) (- (random 2d0 rs) 1d0)))))
+
+(defun %force-the-vector-index (store)
+  "ANALYZE STORE's table, then turn sequential scans off for its connection, as a table large
+enough for the planner to choose an index would. Returns the plan of a similarity query for
+member-x, as one string."
+  (let ((c (mdb::store-connection store)) (table (mdb:store-table store)))
+    (conn:exec c (format nil "ANALYZE ~A" table))
+    (conn:exec c "SET enable_seqscan = off")
+    (format nil "~{~A~^ | ~}"
+            (mapcar #'second
+                    (conn:query c (format nil "EXPLAIN SELECT id FROM ~A WHERE subject = 'member-x' AND thread IS NULL AND superseded_by IS NULL ORDER BY embedding <=> '[1,0,0,0,0,0,0,0]' LIMIT 20" table))))))
+
+(defun %drop-the-subject-index (store)
+  (conn:exec (mdb::store-connection store)
+             (format nil "DROP INDEX IF EXISTS ~A_subject_idx" (mdb:store-table store))))
+
+(defun %nearest-count (store limit &key thread)
+  (length (mem:recall-similar store "member-x"
+                              (llm:embed (make-instance 'scattered-embedder) "a query")
+                              :limit limit :budget 1000000 :thread thread)))
+
+(test a-similarity-recall-past-ef-search-returns-limit-rows
+  "One subject with 120 current observations and :LIMIT 100. With the subject index the planner
+reads the subject's rows and ranks them. With it dropped the query goes through the HNSW index,
+whose scan collects HNSW.EF_SEARCH rows, 40 by default, so before #482 the recall returned 40."
+  (if (%sqlite-p)
+      (skip "Postgres only: the HNSW index")
+      (with-store (store (make-instance 'scattered-embedder))
+        (dotimes (i 120)
+          (remember* store "member-x" (format nil "Fact ~D about member x." i)))
+        (%force-the-vector-index store)
+        (is (= 100 (%nearest-count store 100)) "with the subject index")
+        (%drop-the-subject-index store)
+        (let ((plan (%force-the-vector-index store)))
+          (is (search "_embedding_idx" plan) "precondition: without it, the HNSW index, got ~A" plan))
+        (is (= 100 (%nearest-count store 100)) "with the iterative scan alone"))))
+
+(test a-subject-with-few-rows-among-many-gets-all-it-asked-for
+  "Member x has 20 current observations among 400 of other subjects, and sequential scans are off.
+The recall returns 20. Before #482 the HNSW scan's 40 nearest rows held only a few of member x's.
+The subject index and the iterative scan each fix this; the test with the subject index dropped
+checks the iterative scan alone."
+  (if (%sqlite-p)
+      (skip "Postgres only: the HNSW index")
+      (with-store (store (make-instance 'scattered-embedder))
+        (dotimes (i 20)
+          (remember* store "member-x" (format nil "Fact ~D about member x." i)))
+        (dotimes (i 400)
+          (remember* store (format nil "member-~D" (mod i 40)) (format nil "Fact ~D about someone else." i)))
+        (%force-the-vector-index store)
+        (is (= 20 (%nearest-count store 20)) "with the subject index")
+        (%drop-the-subject-index store)
+        (let ((plan (%force-the-vector-index store)))
+          (is (search "_embedding_idx" plan) "precondition: without it, the HNSW index, got ~A" plan))
+        (is (= 20 (%nearest-count store 20)) "with the iterative scan alone"))))
+
+(test thread-observations-outnumbering-the-facts-do-not-crowd-them-out
+  "Member x has 20 facts and 400 observations of one thread, and sequential scans are off. A
+recall of the facts returns 20, and a recall of the thread returns 20 (#482's own case)."
+  (if (%sqlite-p)
+      (skip "Postgres only: the HNSW index")
+      (with-store (store (make-instance 'scattered-embedder))
+        (dotimes (i 20)
+          (remember* store "member-x" (format nil "Fact ~D about member x." i)))
+        (dotimes (i 400)
+          (remember* store "member-x" (format nil "Observation ~D of the thread." i) :thread "conv-7"))
+        (%drop-the-subject-index store)
+        (let ((plan (%force-the-vector-index store)))
+          (is (search "_embedding_idx" plan) "precondition: the HNSW index, got ~A" plan))
+        (is (= 20 (%nearest-count store 20)) "the facts")
+        (is (= 20 (%nearest-count store 20 :thread "conv-7")) "the thread"))))
+
+(test ensure-schema-creates-the-subject-index
+  "On Postgres the store's table gets an index on SUBJECT (#482), and ENSURE-SCHEMA can run again."
+  (if (%sqlite-p)
+      (skip "Postgres only")
+      (with-store (store)
+        (mdb:ensure-schema store)
+        (let ((defs (mapcar #'second
+                            (conn:query (mdb::store-connection store)
+                                        (format nil "SELECT indexdef FROM pg_indexes WHERE indexname = '~(~A~)_subject_idx'"
+                                                (mdb:store-table store))))))
+          (is (= 1 (length defs)) "one index of that name")
+          (is (search "(subject)" (first defs)) "on SUBJECT, got ~A" (first defs))))))
+
+(test an-iterative-scan-that-stops-short-is-followed-by-an-exact-query
+  "Member x has 20 observations among 400 of other subjects, without the subject index, and with
+pgvector's limits lowered so the iterative scan stops after 30 rows, as it stops after 20,000 in
+a large table. That scan alone returns fewer than 20 of member x's rows; RECALL-SIMILAR then runs
+the query again without index scans and returns all 20 (Copilot's review of #625), also when the
+session has sequential scans off and costly."
+  (if (%sqlite-p)
+      (skip "Postgres only: the HNSW index")
+      (with-store (store (make-instance 'scattered-embedder))
+        (dotimes (i 20)
+          (remember* store "member-x" (format nil "Fact ~D about member x." i)))
+        (dotimes (i 400)
+          (remember* store (format nil "member-~D" (mod i 40)) (format nil "Fact ~D about someone else." i)))
+        (%drop-the-subject-index store)
+        (let ((plan (%force-the-vector-index store))
+              (c (mdb::store-connection store)))
+          (is (search "_embedding_idx" plan) "precondition: the HNSW index, got ~A" plan)
+          (conn:exec c "SET hnsw.ef_search = 10")
+          (conn:exec c "SET hnsw.max_scan_tuples = 30")
+          (let ((alone (length (conn:with-transaction (c)
+                                 (conn:exec c "SET LOCAL hnsw.iterative_scan = strict_order")
+                                 (conn:query c (format nil "SELECT id FROM ~A WHERE subject = 'member-x' AND thread IS NULL AND superseded_by IS NULL ORDER BY embedding <=> '~A' LIMIT 20"
+                                                       (mdb:store-table store)
+                                                       (llm:vector-text (llm:embed (make-instance 'scattered-embedder) "a query"))))))))
+            (is (< alone 20) "precondition: the iterative scan alone returns ~D of 20" alone))
+          ;; A sequential scan this expensive makes the planner prefer the HNSW scan among plans
+          ;; it was told to avoid, as macOS's and Windows's Postgres did in #625's first CI run, so
+          ;; the second query is checked for not depending on the session's planner settings.
+          (conn:exec c "SET seq_page_cost = 1000"))
+        (is (= 20 (%nearest-count store 20))))))
+
+(test a-recall-inside-the-apps-transaction-puts-the-planner-settings-back
+  "Inside the app's own CONN:WITH-TRANSACTION the store's transaction is a savepoint, and a local
+setting made there would last until the app's transaction ends. After a recall that falls back to
+the exact query, inside such a transaction, each setting the recall changes reads what it read
+before (#625's review): enable_indexscan on, and enable_seqscan, enable_bitmapscan and
+hnsw.iterative_scan as the session had them."
+  (if (%sqlite-p)
+      (skip "Postgres only: the HNSW index")
+      (with-store (store (make-instance 'scattered-embedder))
+        (dotimes (i 20)
+          (remember* store "member-x" (format nil "Fact ~D about member x." i)))
+        (dotimes (i 400)
+          (remember* store (format nil "member-~D" (mod i 40)) (format nil "Fact ~D about someone else." i)))
+        (%drop-the-subject-index store)
+        (%force-the-vector-index store)
+        (let* ((c (mdb::store-connection store))
+               (names '("enable_indexscan" "enable_seqscan" "enable_bitmapscan" "hnsw.iterative_scan")))
+          (conn:exec c "SET hnsw.ef_search = 10")
+          (conn:exec c "SET hnsw.max_scan_tuples = 30")
+          (flet ((settings ()
+                   (mapcar (lambda (n)
+                             (param:row-value (first (conn:query c "SELECT current_setting(?) AS v" n)) :v))
+                           names)))
+            (conn:with-transaction (c)
+              (let ((before (settings))
+                    (count (%nearest-count store 20)))
+                (is (= 20 count) "precondition: the recall returned 20, through the exact query")
+                (is (equal before (settings)) "~{~A~^, ~}: ~S before, ~S after" names before (settings))
+                (is (equal "on" (first (settings))) "enable_indexscan is on"))))))))
+
+(test a-recall-as-a-new-connections-first-statement-works-and-puts-the-setting-back
+  "A new connection to an existing table, whose first statement is a similarity recall. Until
+pgvector's library is loaded, hnsw.iterative_scan does not exist and reads as NULL; the recall's
+query loads it. The recall returns the subject's rows, and the setting then reads as its default,
+off, not as strict_order (#625's review). Restoring NULL as an empty string failed here with
+\"invalid value for parameter\"."
+  (if (%sqlite-p)
+      (skip "Postgres only: pgvector's settings")
+      (with-store (store (make-instance 'scattered-embedder))
+        (dotimes (i 5)
+          (remember* store "member-x" (format nil "Fact ~D about member x." i)))
+        (let ((c (conn:connect (url:backend-from-url (%pg-url)))))
+          (unwind-protect
+               (let ((fresh (mdb:make-db-memory-store c :embedder (make-instance 'scattered-embedder)
+                                                        :table (mdb:store-table store) :dialect :postgres)))
+                 (flet ((setting ()
+                          (param:row-value (first (conn:query c "SELECT current_setting('hnsw.iterative_scan', true) AS v"))
+                                           :v)))
+                   (is (null (setting)) "precondition: the new connection has not loaded pgvector")
+                   (is (= 5 (handler-case (%nearest-count fresh 20)
+                              (error (e) (format t "~&recall failed: ~A~%" e) -1))))
+                   (is (equal "off" (setting)))))
+            (conn:disconnect c))))))
+
+;;; --- a window's writes and its progress in one transaction (#529) -------------------------
+
+(defclass progress-switch-db-store (mdb:db-memory-store)
+  ((failing :initform nil :accessor progress-failing))
+  (:documentation "A SQL store whose progress writes fail while PROGRESS-FAILING is true."))
+
+(defmethod mem:record-thread-progress :before ((store progress-switch-db-store) subject thread mark skipped)
+  (declare (ignore subject thread mark skipped))
+  (when (progress-failing store) (error "the progress write failed")))
+
+(defclass untransacted-switch-db-store (progress-switch-db-store) ()
+  (:documentation "The same store, saying it has no transactions."))
+
+(defmethod mem:store-transactions-p ((store untransacted-switch-db-store)) nil)
+
+(defun %two-sql-observers (store first-replies later-content)
+  "As the in-memory test: observer A distils 1-6 while STORE's progress writes fail, then B does
+with the writes working. Returns the thread's contents."
+  (let ((step (praxeon/prompt:messages-tokens (%chat 6))))
+    (setf (progress-failing store) t)
+    (let ((a (obs:make-observer (make-instance 'scripted-provider
+                                               :replies (mapcar #'%observations-call first-replies))
+                                store "member-529" "conv-529" :step step :retry-delay 0 :max-attempts 2)))
+      (obs:observe-turn a (%chat 6))
+      (obs:await-observer a :timeout 20))
+    (setf (progress-failing store) nil)
+    (let ((b (obs:make-observer (make-instance 'scripted-provider :replies (list (%observations-call later-content)))
+                                store "member-529" "conv-529" :step step :retry-delay 0 :max-attempts 2)))
+      (obs:observe-turn b (%chat 6))
+      (obs:await-observer b :timeout 20))
+    (sort (mapcar #'mem:observation-content (mem:observations-of store "member-529" :thread "conv-529"))
+          #'string<)))
+
+(test a-window-whose-progress-write-fails-leaves-one-copy-on-the-sql-store
+  "The issue's test on the SQL store: with its transactions, a window whose progress write fails
+leaves nothing, and a new observer whose model words the fact differently leaves one copy (#529).
+Control, the same store without transactions: two copies."
+  (with-store (store)
+    (change-class store 'progress-switch-db-store)
+    (is (equal '("Resides in Lisbon.")
+               (%two-sql-observers store '("Lives in Lisbon." "Lives in Lisbon.") "Resides in Lisbon.")))
+    (is (equal '(6 nil) (multiple-value-list (mem:thread-progress store "member-529" "conv-529")))))
+  (with-store (store)
+    (change-class store 'untransacted-switch-db-store)
+    (is (equal '("Lives in Lisbon." "Resides in Lisbon.")
+               (%two-sql-observers store '("Lives in Lisbon.") "Resides in Lisbon."))
+        "control, without transactions: two copies")))
+
+(test a-promote-function-that-reads-the-sql-store-runs-inside-the-transaction
+  "The app's :PROMOTE reads the thread's observations from the SQL store while the window's
+transaction holds the store's lock. The lock is recursive and the read uses the transaction's
+connection, so the run finishes, the read sees the window's uncommitted observation, and the fact
+is promoted (the hub's review of #529's design; Copilot's review of #645)."
+  (with-store (store)
+    (let* ((step (praxeon/prompt:messages-tokens (%chat 6)))
+           (seen nil)
+           (observer (obs:make-observer (make-instance 'scripted-provider
+                                                       :replies (list (%observations-call "Has a dog.")))
+                                        store "member-529" "conv-529" :step step
+                                        :promote (lambda (o) (declare (ignore o))
+                                                   (setf seen (length (mem:observations-of store "member-529"
+                                                                                           :thread "conv-529")))
+                                                   t))))
+      (obs:observe-turn observer (%chat 6))
+      (is-true (obs:await-observer observer :timeout 20) "the run finished")
+      (is (eql 1 seen) "the :promote function read the window's uncommitted observation")
+      (is (equal '("Has a dog.") (mapcar #'mem:observation-content (mem:observations-of store "member-529")))))))
+
+(test the-sql-store-rolls-back-a-transaction-that-signals
+  (with-store (store)
+    (mem:record-thread-progress store "member-529" "conv-529" 6 '((1 6 1)))
+    (signals simple-error
+      (mem:with-store-transaction (store :subject "member-529" :thread "conv-529")
+        (mem:remember store "member-529" "Has a dog." :thread "conv-529" :provenance (test-provenance 7 "conv-529"))
+        (mem:record-thread-progress store "member-529" "conv-529" 12 nil)
+        (error "the transaction fails")))
+    (is (null (mem:observations-of store "member-529" :thread "conv-529")))
+    (is (equal '(6 ((1 6 1))) (multiple-value-list (mem:thread-progress store "member-529" "conv-529"))))))
+
+(test a-windows-transaction-embeds-before-it-takes-the-stores-lock
+  "The observer's window proposes a fact whose embedding takes 0.6 s. The window's transaction
+embeds it before it takes the store's lock, so a read made meanwhile returns at once rather than
+waiting for the model (the hub's review of #645, as #462's supersede test)."
+  (with-store (store (make-instance 'slow-embedder))
+    (let* ((step (praxeon/prompt:messages-tokens (%chat 6)))
+           (observer (obs:make-observer (make-instance 'scripted-provider
+                                                       :replies (list (%observations-call "Slowly moved to Lisbon.")))
+                                        store "member-645" "conv-645" :step step :retry-delay 0)))
+      (is (obs::observer-transactions observer) "precondition: the SQL store has transactions")
+      (obs:observe-turn observer (%chat 6))
+      (sleep 0.15)
+      (let ((began (get-internal-real-time)))
+        (mem:observations-of store "member-645")
+        (let ((waited (/ (- (get-internal-real-time) began) internal-time-units-per-second)))
+          (is (< waited 0.3) "the read waited ~,3F s" waited)))
+      (is-true (obs:await-observer observer :timeout 20))
+      (is (equal '("Slowly moved to Lisbon.")
+                 (mapcar #'mem:observation-content (mem:observations-of store "member-645" :thread "conv-645")))))))
+
+(test a-sql-transaction-left-by-throw-or-return-from-is-rolled-back
+  (with-store (store)
+    (catch 'out
+      (mem:with-store-transaction (store :subject "member-645" :thread "conv-645")
+        (mem:remember store "member-645" "Has a dog." :thread "conv-645" :provenance (test-provenance 1 "conv-645"))
+        (throw 'out :thrown)))
+    (is (null (mem:observations-of store "member-645" :thread "conv-645")) "after THROW")
+    (block out
+      (mem:with-store-transaction (store :subject "member-645" :thread "conv-645")
+        (mem:remember store "member-645" "Has a cat." :thread "conv-645" :provenance (test-provenance 1 "conv-645"))
+        (return-from out :returned)))
+    (is (null (mem:observations-of store "member-645" :thread "conv-645")) "after RETURN-FROM")))
+
+;;; --- a store over a pool (#653) -----------------------------------------------------------
+
+(defmacro with-pool-store ((store-var pool-var &key (size 4)) &body body)
+  "A fresh table and a store over a mnemosyne pool of SIZE connections: on Postgres over the test
+database, on SQLite over a fresh database file. The pool is closed and the table dropped or the
+file deleted afterwards."
+  `(if (%sqlite-p)
+       (let ((file (%fresh-sqlite-file)))
+         (unwind-protect
+              (let ((,pool-var (conn:make-pool (be:make-sqlite (namestring file)) :size ,size)))
+                (unwind-protect
+                     (let ((,store-var (mdb:make-db-memory-store ,pool-var :embedder (make-instance 'basis-embedder)
+                                                                           :table "praxeon_observations"
+                                                                           :dialect :sqlite :ensure t)))
+                       ,@body)
+                  (conn:close-pool ,pool-var)))
+           (%delete-sqlite-files file)))
+       (let ((url (%pg-url)))
+         (if (not url)
+             (skip "MNEMOSYNE_TEST_PG_URL is not set -- this says nothing about the backend")
+             (let ((table (format nil "praxeon_obs_~(~36R~)" (random (expt 2 40) (make-random-state t))))
+                   (,pool-var (conn:make-pool (url:backend-from-url url) :size ,size)))
+               (unwind-protect
+                    (progn
+                      (conn:with-connection (c ,pool-var) (mig:require-extension c "vector"))
+                      (let ((,store-var (mdb:make-db-memory-store ,pool-var :embedder (make-instance 'basis-embedder)
+                                                                            :table table :dialect :postgres :ensure t)))
+                        ,@body))
+                 (ignore-errors (conn:with-connection (c ,pool-var)
+                                  (conn:exec c (format nil "DROP TABLE IF EXISTS ~A" table))
+                                  (conn:exec c (format nil "DROP TABLE IF EXISTS ~A_progress" table))))
+                 (conn:close-pool ,pool-var)))))))
+
+(defun %observe-one-window (store subject thread content)
+  "One observer turn on STORE that writes CONTENT for window 1-6, waited for. Returns the observer."
+  (let ((observer (obs:make-observer (make-instance 'scripted-provider :replies (list (%observations-call content)))
+                                     store subject thread :step (praxeon/prompt:messages-tokens (%chat 6))
+                                     :retry-delay 0)))
+    (obs:observe-turn observer (%chat 6))
+    (obs:await-observer observer :timeout 20)
+    observer))
+
+(test over-a-pool-an-apps-rollback-undoes-its-own-writes-and-not-the-observers
+  "A store over a pool. The app's thread borrows a connection and opens a transaction; on Postgres
+it writes through the store, which on its thread uses that connection; the observer, on a thread
+of its own with a connection of its own, writes a window; the app rolls back. The app's write is
+gone and the window is kept (#653).
+
+POSTGRES ONLY. On SQLite the app's open transaction holds the database's write lock, even before
+its first statement (measured: the observer's writes failed with \"database is locked\" after the
+busy timeout), so an app that waits for the observer inside its transaction waits for itself.
+SQLite allows one writer at a time; the next test checks that the observer waits behind an app's
+write transaction and writes once it ends."
+  (if (%sqlite-p)
+      (skip "Postgres only: SQLite allows one writer at a time")
+      (with-pool-store (store pool)
+        (handler-case
+            (conn:with-connection (c pool)
+              (conn:with-transaction (c)
+                (mem:remember store "member-653" "App's own write." :provenance (test-provenance 1 "app"))
+                (%observe-one-window store "member-653" "conv-653" "Has a dog.")
+                (error "the app's transaction fails")))
+          (error () nil))
+        (is (equal '("Has a dog.") (mapcar #'mem:observation-content (mem:observations-of store "member-653" :thread "conv-653")))
+            "the observer's window is kept")
+        (is (null (mem:observations-of store "member-653")) "the app's own write is rolled back"))))
+
+(test over-one-shared-connection-the-observer-commits-the-apps-transaction
+  "The control for the test above, and #651's measurement: over one connection shared with the
+app, the observer's COMMIT on Postgres commits the app's transaction, so its rollback undoes
+nothing. On SQLite the observer's BEGIN is refused and its window is not written."
+  (with-store (store)
+    (handler-case
+        (conn:with-transaction ((mdb::store-connection store))
+          (mem:remember store "member-653" "App's own write." :provenance (test-provenance 1 "app"))
+          (%observe-one-window store "member-653" "conv-653" "Has a dog.")
+          (error "the app's transaction fails"))
+      (error () nil))
+    (if (%sqlite-p)
+        (is (null (mem:observations-of store "member-653" :thread "conv-653")) "SQLite: the window was refused")
+        (is (equal '("App's own write.") (mapcar #'mem:observation-content (mem:observations-of store "member-653")))
+            "Postgres: the app's write survived its rollback"))))
+
+(test over-a-pool-the-observer-waits-behind-an-apps-write-transaction
+  "The app's thread holds a write transaction for 1 second while the observer writes a window. On
+SQLite the observer's connection waits for the database's write lock, within the pooled
+connection's busy timeout, and writes once the app commits; on Postgres it does not wait. Either
+way both writes are kept (the hub's ruling on #653)."
+  (with-pool-store (store pool)
+    (let ((observer (obs:make-observer (make-instance 'scripted-provider :replies (list (%observations-call "Has a dog.")))
+                                       store "member-653" "conv-653" :step (praxeon/prompt:messages-tokens (%chat 6))
+                                       :retry-delay 0 :max-attempts 1)))
+      (conn:with-connection (c pool)
+        (conn:with-transaction (c)
+          (mem:remember store "member-653" "App's own write." :provenance (test-provenance 1 "app"))
+          (obs:observe-turn observer (%chat 6))
+          (sleep 1)))
+      (is-true (obs:await-observer observer :timeout 20))
+      (is (= 0 (obs:observer-failures observer)) "the observer's write waited rather than failing")
+      (is (equal '("Has a dog.") (mapcar #'mem:observation-content (mem:observations-of store "member-653" :thread "conv-653"))))
+      (is (equal '("App's own write.") (mapcar #'mem:observation-content (mem:observations-of store "member-653")))))))
+
+(test over-a-pool-a-promote-callback-uses-the-observers-connection
+  "The app's :PROMOTE, called inside the window's transaction, reads the thread through the store.
+It sees the window's observation, which the transaction has written and not committed: the read
+used the observer's borrowed connection, not a second one from the pool, which could not see it
+(the hub's ruling on #653)."
+  (with-pool-store (store pool)
+    (let* ((seen nil)
+           (observer (obs:make-observer (make-instance 'scripted-provider :replies (list (%observations-call "Has a dog.")))
+                                        store "member-653" "conv-653" :step (praxeon/prompt:messages-tokens (%chat 6))
+                                        :retry-delay 0
+                                        :promote (lambda (o) (declare (ignore o))
+                                                   (setf seen (length (mem:observations-of store "member-653"
+                                                                                           :thread "conv-653")))
+                                                   t))))
+      (obs:observe-turn observer (%chat 6))
+      (is-true (obs:await-observer observer :timeout 20))
+      (is (eql 1 seen) "the callback saw the uncommitted window")
+      (is (equal '("Has a dog.") (mapcar #'mem:observation-content (mem:observations-of store "member-653")))))))
+
+(test over-a-pool-a-read-does-not-wait-for-the-stores-lock
+  "Over a pool a read borrows a connection and takes no lock, so it returns while another thread
+holds the store's lock; over one connection every operation takes the lock (#653)."
+  (with-pool-store (store pool)
+    (let ((done nil) (reader nil))
+      ;; The lock is released before the join, and the join is bounded, so a read that waits for
+      ;; the lock fails the check instead of hanging the suite (Copilot's review of #654).
+      (bt:with-recursive-lock-held ((mdb::store-lock store))
+        (setf reader (bt:make-thread (lambda () (mem:observations-of store "member-653") (setf done t))))
+        (loop repeat 200 until done do (sleep 0.01))
+        (is-true done "the read returned while the lock was held"))
+      (sb-thread:join-thread reader :default nil :timeout 10))))
+
+(defun %behind-an-apps-write-transaction (store pool function)
+  "Run FUNCTION on this thread 0.2 s into a 1-second write transaction the app holds on another
+pooled connection. Returns FUNCTION's value, or the error it signalled."
+  (let* ((holder (bt:make-thread
+                  (lambda ()
+                    (conn:with-connection (c pool)
+                      (conn:with-transaction (c)
+                        (mem:remember store "member-653" "App's own write." :provenance (test-provenance 1 "app"))
+                        (sleep 1))))))
+         (result (progn (sleep 0.2) (handler-case (funcall function) (error (e) e)))))
+    (bt:join-thread holder)
+    result))
+
+(test over-a-pool-a-supersession-waits-behind-an-apps-write-transaction
+  "SUPERSEDE reads the observation it replaces before it writes. Behind an app's write transaction
+on SQLite, a deferred transaction's upgrade to a writer failed with BUSY at once; the store's
+transaction now begins IMMEDIATE and waits for the lock (the hub's review of #654)."
+  (with-pool-store (store pool)
+    (let* ((porto (mem:remember store "member-653" "Lives in Porto." :provenance (test-provenance 1)))
+           (result (%behind-an-apps-write-transaction
+                    store pool (lambda () (mem:supersede store porto "Lives in Lisbon." :provenance (test-provenance 2))))))
+      (is (typep result 'mem:observation) "the supersession succeeded: ~A" result)
+      (is (member "Lives in Lisbon." (mapcar #'mem:observation-content (mem:observations-of store "member-653"))
+                  :test #'string=)))))
+
+(test over-a-pool-a-window-with-no-proposals-waits-behind-an-apps-write-transaction
+  "A window whose model proposes nothing writes only its progress, which it reads first. Behind an
+app's write transaction on SQLite it waits for the lock and records its progress, with no failed
+attempt (the hub's review of #654)."
+  (with-pool-store (store pool)
+    (let ((observer (obs:make-observer (make-instance 'scripted-provider :replies (list (%observations-call)))
+                                       store "member-653" "conv-653" :step (praxeon/prompt:messages-tokens (%chat 6))
+                                       :retry-delay 0 :max-attempts 1)))
+      (%behind-an-apps-write-transaction
+       store pool (lambda () (obs:observe-turn observer (%chat 6)) (obs:await-observer observer :timeout 20)))
+      (obs:await-observer observer :timeout 20)
+      (is (= 0 (obs:observer-failures observer)) "no attempt failed")
+      (is (equal '(6 nil) (multiple-value-list (mem:thread-progress store "member-653" "conv-653")))))))
+
+;;; --- Copilot's review of train 47 ---------------------------------------------------------
+
+(test over-a-pool-an-apps-second-write-does-not-wait-for-an-observer-waiting-for-its-commit
+  "The app's thread holds a transaction on its own pooled connection and writes through the store.
+The observer starts a window, which on SQLite waits for the app's write lock. The app then writes
+through the store again, and that write returns at once; the app commits, and the observer writes
+its window with no failed attempt. Before, on SQLite, the observer held the store's lock while it
+waited in BEGIN IMMEDIATE, so the app's second write waited for the store's lock until the
+observer's busy timeout failed it (Copilot's review of train 47)."
+  (with-pool-store (store pool)
+    (let ((observer (obs:make-observer (make-instance 'scripted-provider :replies (list (%observations-call "Has a dog.")))
+                                       store "member-653" "conv-653" :step (praxeon/prompt:messages-tokens (%chat 6))
+                                       :retry-delay 0 :max-attempts 1))
+          (waited nil))
+      (conn:with-connection (c pool)
+        (conn:with-transaction (c)
+          (mem:remember store "member-653" "App's first write." :provenance (test-provenance 1 "app"))
+          (obs:observe-turn observer (%chat 6))
+          (sleep 0.3)
+          (let ((began (get-internal-real-time)))
+            (mem:remember store "member-653" "App's second write." :provenance (test-provenance 2 "app"))
+            (setf waited (/ (- (get-internal-real-time) began) internal-time-units-per-second)))))
+      (is (< waited 1) "the app's second write waited ~,3F s" waited)
+      (is-true (obs:await-observer observer :timeout 20))
+      (is (= 0 (obs:observer-failures observer)) "the observer's window waited for the commit rather than failing")
+      (is (equal '("Has a dog.") (mapcar #'mem:observation-content (mem:observations-of store "member-653" :thread "conv-653"))))
+      (is (equal '("App's first write." "App's second write.")
+                 (sort (mapcar #'mem:observation-content (mem:observations-of store "member-653")) #'string<))))))
+
+(defun %second-store (store embedder)
+  "A store over STORE's connection with EMBEDDER and a table of its own, created now."
+  (mdb:make-db-memory-store (mdb::store-source store) :embedder embedder
+                                                      :table (format nil "~A_b" (mdb:store-table store))
+                                                      :dialect (mdb::store-dialect store) :ensure t))
+
+(defun %drop-store-tables (store)
+  (ignore-errors (conn:exec (mdb::store-source store) (format nil "DROP TABLE IF EXISTS ~A" (mdb:store-table store))))
+  (ignore-errors (conn:exec (mdb::store-source store) (format nil "DROP TABLE IF EXISTS ~A_progress" (mdb:store-table store)))))
+
+(test an-embedding-prepared-for-one-store-is-not-used-by-another
+  "Store A's transaction prepares the embedding of \"Has a dog.\". Inside it, a REMEMBER of the same
+text on store B, which has an embedder of its own, embeds the text with B's embedder. Before, B
+found A's embedding by its content and stored a vector from A's model (Copilot's review of train
+47)."
+  (with-store (a)
+    (let* ((b-embedder (make-instance 'call-recording-embedder))
+           (b (%second-store a b-embedder)))
+      (unwind-protect
+           (progn
+             (mem:with-store-transaction (a :subject "member-2" :contents '("Has a dog."))
+               (mem:remember a "member-2" "Has a dog." :provenance (test-provenance 1))
+               (mem:remember b "member-2" "Has a dog." :provenance (test-provenance 1)))
+             (is (equal '((:documents "Has a dog.")) (recorded-calls b-embedder))
+                 "B's embedder embedded the text: ~S" (recorded-calls b-embedder))
+             (is (equal '("Has a dog.") (mapcar #'mem:observation-content (mem:observations-of b "member-2")))))
+        (%drop-store-tables b)))))
+
+(test a-supersession-inside-a-transaction-uses-the-embedding-prepared-for-it
+  "A window's transaction prepares the embeddings of its proposals, a correction's included. A
+SUPERSEDE inside the transaction uses the prepared embedding, so the text is embedded once, before
+the transaction takes the store's lock. Before, SUPERSEDE embedded it again, under the lock and,
+on SQLite, the database's write lock (Copilot's review of train 47)."
+  (let ((embedder (make-instance 'call-recording-embedder)))
+    (with-store (store embedder)
+      (let ((porto (mem:remember store "member-4" "Lives in Porto." :provenance (test-provenance 1))))
+        (setf (recorded-calls embedder) '())
+        (mem:with-store-transaction (store :subject "member-4" :contents '("Lives in Lisbon."))
+          (mem:supersede store porto "Lives in Lisbon." :provenance (test-provenance 2)))
+        (is (equal '((:documents "Lives in Lisbon.")) (recorded-calls embedder))
+            "one embedding call, the transaction's: ~S" (recorded-calls embedder))
+        (is (equal '("Lives in Lisbon.") (mapcar #'mem:observation-content (mem:observations-of store "member-4"))))))))
+
+(defun %refuse-deletes (store)
+  "Make every DELETE from STORE's table fail, with a trigger."
+  (let ((c (mdb::store-source store)) (table (mdb:store-table store)))
+    (if (%sqlite-p)
+        (conn:exec c (format nil "CREATE TRIGGER ~A_no_delete BEFORE DELETE ON ~A BEGIN SELECT RAISE(ABORT, 'no delete'); END" table table))
+        (progn
+          (conn:exec c (format nil "CREATE FUNCTION ~A_no_delete() RETURNS trigger LANGUAGE plpgsql AS $$ BEGIN RAISE EXCEPTION 'no delete'; END $$" table))
+          (conn:exec c (format nil "CREATE TRIGGER ~A_no_delete BEFORE DELETE ON ~A FOR EACH ROW EXECUTE FUNCTION ~A_no_delete()" table table table))))))
+
+(test forget-unlinks-and-deletes-in-one-transaction
+  "FORGET of a replacement clears its predecessor's link and deletes it, in one transaction. When
+the DELETE fails, the link is restored with it, so the predecessor is still superseded and the
+replacement still current. Before, the UPDATE had committed on its own, and the store held both as
+current, as a reader between the two statements would have seen them (Copilot's review of train
+47)."
+  (with-store (store)
+    (let* ((porto (mem:remember store "member-3" "Lives in Porto." :provenance (test-provenance 1)))
+           (lisbon (mem:supersede store porto "Lives in Lisbon." :provenance (test-provenance 2))))
+      (unwind-protect
+           (progn
+             (%refuse-deletes store)
+             (signals error (mem:forget store lisbon))
+             (is (equal '("Lives in Lisbon.") (mapcar #'mem:observation-content (mem:observations-of store "member-3")))
+                 "only the replacement is current"))
+        (unless (%sqlite-p)
+          (ignore-errors (conn:exec (mdb::store-source store)
+                                    (format nil "DROP FUNCTION IF EXISTS ~A_no_delete() CASCADE" (mdb:store-table store)))))))))

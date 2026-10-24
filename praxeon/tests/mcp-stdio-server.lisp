@@ -32,8 +32,19 @@
 ;;;;                    and then answers
 ;;;;   modern-then-unsupported
 ;;;;                    modern at its first start, and unsupported once RECORD-FILE holds a start
+;;;;   hold-stdin       modern, with a sixth tool, exit-holding-stdin, which starts a shell with
+;;;;                    this process's stdin that reads nothing for 6 seconds and then reads
+;;;;                    it to its end, stops reading stdin for 1 second, then exits with status 3
 ;;;;   orphan           modern, with a sixth tool, exit-leaving-child, which starts /bin/sleep 6
 ;;;;                    with this process's stdout, then exits with status 3
+;;;;   hold-both        modern, with a sixth tool, exit-holding-both, which starts bash with this
+;;;;                    process's stdin and stdout; it reads nothing for 6 seconds, then reads
+;;;;                    stdin until its end, giving up when a line takes more than 20 seconds;
+;;;;                    this process stops reading stdin for 1 second, then exits with status 3
+;;;;   grandchild       modern, with a sixth tool, start-grandchild, which starts
+;;;;                    `ping -n 600 127.0.0.1' and answers with its pid; Windows only (#599)
+;;;;   grandchild-ignore-eof
+;;;;                    grandchild, and it keeps running after its stdin ends, as ignore-eof
 ;;;;
 ;;;; Every request also writes a line to stderr. Tools: echo, fail (isError), slow (30 s),
 ;;;; slow-a (0.5 s) and exit (the process exits with status 3), two per tools/list page.
@@ -93,7 +104,11 @@
 (defparameter +tools+
   (append '("echo" "fail" "slow" "slow-a" "exit")
           (cond ((equal *mode* "stall") '("stall"))
-                ((equal *mode* "orphan") '("exit-leaving-child")))))
+                ((equal *mode* "orphan") '("exit-leaving-child"))
+                ((equal *mode* "hold-stdin") '("exit-holding-stdin"))
+                ((equal *mode* "hold-both") '("exit-holding-both"))
+                ((member *mode* '("grandchild" "grandchild-ignore-eof") :test #'equal)
+                 '("start-grandchild")))))
 
 (defun send-bytes (octets)
   "Write OCTETS to stdout as they are, after what the character stream holds."
@@ -148,6 +163,11 @@
            (sb-ext:run-program "/bin/sleep" '("6") :input nil :output t :error nil :wait nil)
            (record "exiting")
            (sb-ext:exit :code 3 :abort t))
+          ((equal name "start-grandchild")
+           (let ((ping (sb-ext:run-program "ping" '("-n" "600" "127.0.0.1")
+                                           :search t :wait nil :input nil :output nil :error nil)))
+             (record "grandchild ~D" (sb-ext:process-pid ping))
+             (reply id (text-result (princ-to-string (sb-ext:process-pid ping))))))
           (t (fail id -32602 "Unknown tool")))))
 
 (defvar *initialized* nil)
@@ -197,6 +217,26 @@
               (fail id -32022 "Unsupported protocol version"
                     (obj "supported" (vector "2026-07-28") "requested" (or version 'null))))
              ((equal method "tools/list") (reply id (tools-page (gethash "cursor" params))))
+             ((and (equal method "tools/call") (equal (gethash "name" params) "exit-holding-stdin"))
+              ;; On this thread, so that stdin is not read again. The shell holds stdin open and
+              ;; reads nothing for 6 seconds, so a writer that has filled the pipe stays blocked
+              ;; after this exits, and then the rest of what it writes is read and discarded.
+              (sb-ext:run-program "/bin/sh" '("-c" "sleep 6; exec cat >/dev/null")
+                                  :input t :output nil :error nil :wait nil)
+              (sleep 1)
+              (record "exiting")
+              (sb-ext:exit :code 3 :abort t))
+             ((and (equal method "tools/call") (equal (gethash "name" params) "exit-holding-both"))
+              ;; As exit-holding-stdin, but the shell also holds stdout, so the client's reader
+              ;; does not reach the end of it until the shell exits, and the shell exits when
+              ;; its stdin ends. The 20-second limit on each read bounds how long the shell can
+              ;; outlive a client that never closes its stdin.
+              (sb-ext:run-program "/bin/bash"
+                                  '("-c" "sleep 6; while IFS= read -r -t 20 line; do :; done")
+                                  :input t :output t :error nil :wait nil)
+              (sleep 1)
+              (record "exiting")
+              (sb-ext:exit :code 3 :abort t))
              ((and (equal method "tools/call") (equal (gethash "name" params) "stall"))
               ;; On this thread, so that stdin is not read meanwhile.
               (sleep 5)
@@ -237,6 +277,6 @@
       while line
       do (handle line))
 (record "eof")
-(when (member *mode* '("ignore-eof" "ignore-term") :test #'equal)
+(when (member *mode* '("ignore-eof" "ignore-term" "grandchild-ignore-eof") :test #'equal)
   (loop (sleep 1)))
 (sb-ext:exit :code 0 :abort t)

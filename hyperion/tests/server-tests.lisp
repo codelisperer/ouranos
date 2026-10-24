@@ -309,7 +309,7 @@ complete one. Over HTTP/1.1 the backend chunks it, and the terminating chunk is 
 present or absent -- which is the only way a test can tell the two apart."
   (let ((s (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
     (unwind-protect
-         (sb-ext:with-timeout 10
+         (ports:with-deadline (10 (format nil "GET ~A on port ~D" path port))
            (sb-bsd-sockets:socket-connect s #(127 0 0 1) port)
            (let ((st (sb-bsd-sockets:socket-make-stream s :input t :output t
                                                           :element-type 'character
@@ -347,6 +347,65 @@ stream is exact framing whether the backend chunked the response or not."
              (is-true (search "one-two" r)
                       "both chunks arrived, in order, and the empty write did not end it")))
       (ignore-errors (srv:stop handler)))))
+
+(defun %adapt-stream-body (stream &key (method :get))
+  "Run a response whose body is STREAM through WRAP-STREAMING-BODY with a responder that
+records what a Clack backend would be given. Returns the head, the octets written as a
+string, whether the writer was closed, and the condition the response signalled, if any."
+  (let* ((app (srv:wrap-streaming-body
+               (lambda (env)
+                 (declare (ignore env))
+                 (list 200 (list :content-type "text/plain" :content-length 999) stream))))
+         (response (funcall app (list :request-method method)))
+         (head nil) (octets '()) (closed nil))
+    (let ((condition
+            (nth-value 1 (ignore-errors
+                          (funcall response
+                                   (lambda (h)
+                                     (setf head h)
+                                     (lambda (chunk &key close)
+                                       (when close (setf closed t))
+                                       (loop for o across (if (stringp chunk)
+                                                              (map 'vector #'char-code chunk)
+                                                              chunk)
+                                             do (push o octets)))))
+                          t))))
+      (values head (map 'string #'code-char (reverse octets)) closed condition))))
+
+(test the-streaming-shim-writes-a-file-stream-body-with-its-measured-length
+  "#314. hyperion/static returns the open stream of the file it checked. On a Clack backend
+the shim writes it through the responder with Content-Length measured from the stream, in
+place of any the handler set; HEAD gets the head only; the stream is closed either way. A file
+that ends before its length signals, so the backend drops the connection instead of leaving
+it owing octets."
+  (uiop:with-temporary-file (:pathname path :type "txt")
+    (with-open-file (out path :direction :output :if-exists :supersede)
+      (write-string "0123456789abcdef" out))
+    (let ((stream (open path :element-type '(unsigned-byte 8))))
+      (multiple-value-bind (head text closed condition) (%adapt-stream-body stream)
+        (is (= 200 (first head)))
+        (is (eql 16 (getf (second head) :content-length)))
+        (is (= 1 (count :content-length (second head))) "the handler's Content-Length was kept")
+        (is (string= "0123456789abcdef" text))
+        (is-true closed)
+        (is (null condition))
+        (is-false (open-stream-p stream))))
+    (let ((stream (open path :element-type '(unsigned-byte 8))))
+      (multiple-value-bind (head text closed) (%adapt-stream-body stream :method :head)
+        (is (eql 16 (getf (second head) :content-length)))
+        (is (string= "" text) "HEAD wrote the body")
+        (is-true closed)
+        (is-false (open-stream-p stream))))
+    ;; A file that ends early: the stream starts at octet 10, so only six octets are left
+    ;; while FILE-LENGTH still says 16.
+    (let ((stream (open path :element-type '(unsigned-byte 8))))
+      (file-position stream 10)
+      (multiple-value-bind (head text closed condition) (%adapt-stream-body stream)
+        (declare (ignore head))
+        (is (string= "abcdef" text))
+        (is-false closed "a short body was closed as though it were complete")
+        (is (typep condition 'error))
+        (is-false (open-stream-p stream))))))
 
 (test a-failed-stream-is-reported-as-COMPLETE-by-the-clack-backends
   "A KNOWN DIVERGENCE, asserted so it is documented rather than discovered.
@@ -490,6 +549,50 @@ invisible to a connect probe, so CHECK-PORT cannot see it and only the bind can 
     (is (ports:listening-p port) "START returned before the port was listening")
     (srv:stop h)
     (is (not (ports:listening-p port)) "STOP returned while the port was still accepting")))
+
+(test a-second-stop-does-not-interrupt-the-first
+  "#502. Two STOPs of one server from two threads, the second arriving while the first is in
+HUNCHENTOOT:STOP. hyperion/dev does this: SERVE with :BLOCK calls UNWATCH when its wait ends,
+right after the UNWATCH that ended it. The second STOP used to terminate the backend thread
+again, which interrupted HUNCHENTOOT:STOP before it set the acceptor's shutdown flag, and the
+listener thread then went on accepting with nothing left to stop it.
+
+HUNCHENTOOT:STOP is held at its start until the second STOP has returned, or for 2 s, so the
+second one always arrives while the first is stopping. With the fix the second STOP waits for
+the backend thread, which is waiting for the hold, so this test takes the 2 s."
+  (let* ((port nil)
+         (h (ports:call-with-port
+             (lambda (p)
+               (prog1 (srv:start (%srv-ok-app) :port p :server :hunchentoot :log nil)
+                 (setf port p)))))
+         (entered (sb-thread:make-semaphore))
+         (release (sb-thread:make-semaphore))
+         (acceptor nil)
+         (finished nil))
+    (sb-int:encapsulate 'hunchentoot:stop 'hold-the-first-stop
+                        (lambda (f a &rest args)
+                          (setf acceptor a)
+                          (sb-thread:signal-semaphore entered)
+                          (sb-thread:wait-on-semaphore release :timeout 2)
+                          (multiple-value-prog1 (apply f a args) (setf finished t))))
+    (unwind-protect
+         (let ((first-stop (sb-thread:make-thread
+                       ;; THREAD-LIFETIME: scoped -- joined below, before the assertions.
+                       (lambda () (srv:stop h)) :name "first stop")))
+           (is (sb-thread:wait-on-semaphore entered :timeout 5)
+               "the first STOP never reached HUNCHENTOOT:STOP")
+           (let ((second-stop (sb-thread:make-thread
+                          ;; THREAD-LIFETIME: scoped -- joined on the next line.
+                          (lambda () (srv:stop h)) :name "second stop")))
+             (sb-thread:join-thread second-stop :timeout 10 :default nil)
+             (sb-thread:signal-semaphore release)
+             (sb-thread:join-thread first-stop :timeout 10 :default nil))
+           (is-true finished "the second STOP interrupted HUNCHENTOOT:STOP before it finished")
+           (is (ports:await-released port)
+               "the port is still accepting after both STOPs returned"))
+      (sb-int:unencapsulate 'hunchentoot:stop 'hold-the-first-stop)
+      ;; Only after a failure: the listener the interrupted stop left behind.
+      (unless finished (when acceptor (ignore-errors (hunchentoot:stop acceptor)))))))
 
 (test start-gives-up-after-its-deadline-and-stops-the-server
   ;; The only way to make readiness never arrive on demand is to replace the probe. The

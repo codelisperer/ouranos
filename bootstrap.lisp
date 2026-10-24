@@ -257,5 +257,7 @@
 (let ((bin (merge-pathnames (if (uiop:os-windows-p) "bin/cons.exe" "bin/cons") *root*)))
   (ensure-directories-exist bin)
   (format t "~&bootstrap: saving cons -> ~A~%" (human-path:human-path bin))
+  ;; :DEVELOPMENT-RUNNER T: an app run by bin/cons runs in this image, which is one dumped file
+  ;; like a shipped Linux build, and aion/platform:shipped-image-p must not read it as one (#703).
   (funcall (read-from-string "ouranos-dump:dump-executable")
-           bin (fdefinition (read-from-string "cons/cli:main"))))
+           bin (fdefinition (read-from-string "cons/cli:main")) :development-runner t))

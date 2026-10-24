@@ -113,7 +113,8 @@
   :license "MIT"
   :version "0.0.0"
   :depends-on ("cffi" "coalton"
-               "aion/platform")   ; *search-source-tree*: a bundle does not search vendor/ (#472)
+               "aion/platform"    ; *search-source-tree*: a bundle does not search vendor/ (#472)
+               "aion/dynamic")    ; unblock-interrupts, first in the loop thread (#541)
   :serial t
   :components ((:module "src/uv"
                 :serial t
@@ -165,25 +166,29 @@
   :perform (test-op (o c) (uiop:symbol-call :aion/tls/tests :run-tests)))
 
 (defsystem "aion/libgit"
-  :description "Local git repositories over the libgit2 scripts/build-libgit2.lisp builds: create and open, stage, commit, history, a file at a revision, and a diff between two revisions."
+  :description "Git repositories over the libgit2 scripts/build-libgit2.lisp builds: create and open, stage, commit, history, a file at a revision, a diff between two revisions, and fetch, fast-forward pull and push."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
   :depends-on ("cffi"
-               "aion/platform")   ; *search-source-tree*: a bundle does not search vendor/ (#472)
+               "aion/platform"   ; *search-source-tree*: a bundle does not search vendor/ (#472)
+               "aion/secret")    ; a credential's token may be a secret (#429)
   :serial t
   :components ((:module "src/libgit"
                 :serial t
                 :components ((:file "packages")
                              (:file "ffi")
                              (:file "library")
-                             (:file "repository"))))
+                             (:file "repository")
+                             (:file "remote"))))
   :in-order-to ((test-op (test-op "aion/libgit/tests"))))
 
 (defsystem "aion/libgit/tests"
   :description "Tests for aion/libgit. Requires a built libgit2 (scripts/build-libgit2.lisp), and the git command, which checks what libgit2 wrote."
   :depends-on ("aion/libgit" "aion/fs" "fiveam" (:feature :unix (:require :sb-posix))
-               "aion/platform")   ; the tests bind *search-source-tree* (#429, #472)
+               "aion/platform"   ; the tests bind *search-source-tree* (#429, #472)
+               "aion/secret"     ; a credential whose token is a secret
+               "aion/test-http")   ; the server on 127.0.0.1 the remote tests talk to
   :serial t
   :components ((:module "tests"
                 :serial t
@@ -312,6 +317,7 @@
                 :serial t
                 :components ((:file "packages")
                              (:file "client")
+                             (:file "openssl") ; a patch to cl+ssl for OpenSSL 4 (#706)
                              (:file "fetch"))))
   :in-order-to ((test-op (test-op "aion/http-client/tests"))))
 
@@ -406,6 +412,31 @@
                 :components ((:file "cf-tests"))))
   :perform (test-op (o c) (uiop:symbol-call :aion/darwin/tests '#:run-tests)))
 
+(defsystem "aion/libsecret"
+  :description "The Secret Service client library, libsecret, bound for hades/credentials: schemas, attribute tables, secret values, the store, lookup and clear calls, one lock, and GError as a condition. Linux-only (#357)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; cffi only: libsecret is the distribution's shared library, loaded on first use and never
+  ;; built or carried here, so a machine without it still loads this system.
+  :depends-on ("cffi")
+  :serial t
+  :components ((:module "src/libsecret"
+                :serial t
+                :components ((:file "packages")
+                             (:file "ffi")
+                             (:file "libsecret"))))
+  :in-order-to ((test-op (test-op "aion/libsecret/tests"))))
+
+(defsystem "aion/libsecret/tests"
+  :description "Tests for aion/libsecret: the schema layout, attribute tables, secret values and GError. Linux-only; they never store an item."
+  :depends-on ("aion/libsecret" "cffi" "fiveam")
+  :serial t
+  :components ((:module "tests/libsecret"
+                :serial t
+                :components ((:file "libsecret-tests"))))
+  :perform (test-op (o c) (uiop:symbol-call :aion/libsecret/tests '#:run-tests)))
+
 (defsystem "aion/windows"
   :description "The Windows-specific API surface: UTF-16 marshalling, GetLastError/HRESULT as conditions, handle lifetime, and struct layouts asserted at load. Windows-only (ADR-0003)."
   :author "Bob <eternal.recursion@proton.me>"
@@ -429,7 +460,10 @@
                              (:file "ffi")
                              (:file "conditions")
                              (:file "string")
-                             (:file "handle"))))
+                             (:file "handle")
+                             (:file "job")
+                             (:file "process")
+                             (:file "shell"))))
   :in-order-to ((test-op (test-op "aion/windows/tests"))))
 
 (defsystem "aion/windows/tests"
@@ -442,7 +476,10 @@
                              (:file "layout-tests")
                              (:file "string-tests")
                              (:file "conditions-tests")
-                             (:file "file-tests"))))
+                             (:file "file-tests")
+                             (:file "job-tests")
+                             (:file "process-tests")
+                             (:file "shell-tests"))))
   :perform (test-op (op c) (uiop:symbol-call :aion/windows/tests :run-tests)))
 
 (defsystem "aion/windows/registry"
@@ -519,7 +556,8 @@
   ;; says nothing, nothing anywhere does. That is the doctrine this file's own header
   ;; states: consumers that want logging depend on aion/log.
   ;; sb-concurrency, an SBCL contrib, for the lock-free queue the submit path uses (#466).
-  :depends-on ("aion/log" (:require "sb-concurrency"))
+  :depends-on ("aion/log" (:require "sb-concurrency")
+               "aion/dynamic")   ; unblock-interrupts, first in each worker (#541)
   :pathname "src/pool"
   :serial t
   :components ((:file "packages")
@@ -534,6 +572,52 @@
                 :serial t
                 :components ((:file "pool"))))
   :perform (test-op (o c) (uiop:symbol-call :aion/pool/tests :run-tests)))
+
+(defsystem "aion/schedule"
+  :description "Named jobs on interval, daily and weekly schedules, run once per slot across instances through a lease, with a run log (#689)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; aion/tz for local-time schedules across daylight-saving changes; aion/pool to run jobs
+  ;; off the driver thread; aion/clock for run ids; aion/log for start, finish and failure.
+  ;; The store is a protocol: the in-memory store is here, the database one is mnemosyne/jobs.
+  :depends-on ("aion/tz" "aion/pool" "aion/clock" "aion/log"
+               "aion/dynamic")   ; unblock-interrupts, first in its threads (#541)
+  :serial t
+  :components ((:module "src/schedule"
+                :serial t
+                :components ((:file "packages")
+                             (:file "schedule")
+                             (:file "store")
+                             (:file "scheduler"))))
+  :in-order-to ((test-op (test-op "aion/schedule/tests"))))
+
+(defsystem "aion/schedule/tests"
+  :description "Tests for aion/schedule: next due times across daylight-saving changes, and the scheduler on a manual clock over the in-memory store."
+  :depends-on ("aion/schedule" "aion/tz" "fiveam" "aion/test-threads")
+  :serial t
+  :components ((:module "tests"
+                :serial t
+                ;; store-checks: the store protocol's contract as a function over a store
+                ;; constructor, which mnemosyne/jobs/tests runs against its database store.
+                :components ((:file "schedule-store-checks")
+                             (:file "schedule"))))
+  :perform (test-op (o c) (uiop:symbol-call :aion/schedule/tests :run-tests)))
+
+(defsystem "aion/schedule/uv"
+  :description "Drives an aion/schedule scheduler from a libuv timer on a loop of its own (#689). Requires a built libuv (scripts/build-libuv.lisp)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  :depends-on ("aion/schedule" "aion/uv" "aion/log")
+  :components ((:file "src/schedule/uv/uv"))
+  :in-order-to ((test-op (test-op "aion/schedule/uv/tests"))))
+
+(defsystem "aion/schedule/uv/tests"
+  :description "Tests for aion/schedule/uv. Requires a built libuv (scripts/build-libuv.lisp)."
+  :depends-on ("aion/schedule/uv" "aion/schedule" "aion/uv" "fiveam")  ; the tests stand in for aion/uv:make-timer
+  :components ((:file "tests/schedule-uv"))
+  :perform (test-op (o c) (uiop:symbol-call :aion/schedule/uv/tests :run-tests)))
 
 (defsystem "aion/interceptor"
   :description "A typed, protocol-agnostic interceptor pipeline over a context (Coalton)."
@@ -583,7 +667,7 @@
   :perform (test-op (op c) (uiop:symbol-call :aion/signature/tests :run-tests)))
 
 (defsystem "aion/fs"
-  :description "A directory-tree delete that removes a junction or symbolic link as a link and never follows one out of the tree (#347), and a temporary directory no other process can be given (#515)."
+  :description "A directory-tree delete that removes a junction or symbolic link as a link and never follows one out of the tree (#347), a temporary directory no other process can be given (#515), and making a directory link (a junction on Windows) or a file link without a shell (#825)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
@@ -596,6 +680,7 @@
                 :serial t
                 :components ((:file "packages")
                              (:file "delete-tree")
+                             (:file "links")      ; make-directory-link, make-file-link (#825); after delete-tree, whose %KIND it uses
                              (:file "attributes")
                              (:file "temporary"))))
   :in-order-to ((test-op (test-op "aion/fs/tests"))))
@@ -608,7 +693,8 @@
                 :serial t
                 :components ((:file "delete-tree-tests")
                              (:file "attributes-tests")
-                             (:file "temporary-tests"))))
+                             (:file "temporary-tests")
+                             (:file "links-tests"))))   ; #825; uses delete-tree-tests' %FRESH and %WRITE
   :perform (test-op (o c) (uiop:symbol-call :aion/fs/tests :run-tests)))
 
 (defsystem "aion/platform"
@@ -671,7 +757,8 @@
   ;; In aion so that hermes can use it as well as praxeon. Every dependency is already in the
   ;; tree: ironclad for the PKCE digest, cl-base64 for its encoding, jzon for the metadata.
   :depends-on ("aion/http-client" "aion/random" "aion/secret" "aion/log" "ironclad" "cl-base64"
-               "com.inuoe.jzon" "quri")
+               "com.inuoe.jzon" "quri"
+               "aion/dynamic")   ; unblock-interrupts, first in the request thread (#541)
   :serial t
   :components ((:module "src/oauth"
                 :serial t

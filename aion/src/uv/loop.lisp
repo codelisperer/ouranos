@@ -130,7 +130,12 @@ when you simply want the answer; use AWAIT when the work was already in flight."
    (stop-requested :initform nil :accessor loop-stop-requested-p
                    :documentation "Asks the loop thread to exit. Distinct from CLOSED:
 stopping the thread must not make CLOSE-LOOP think the loop is already torn down.")
-   (closed :initform nil :accessor loop-closed-p)
+   (closed :initform nil :accessor loop-closed-p
+           :documentation "Set by the first CLOSE-LOOP: SUBMIT refuses from then on.")
+   (freed :initform nil :accessor loop-freed-p
+          :documentation "NIL, :FREEING while one CLOSE-LOOP tears the loop down, or :FREED
+once its memory is released. Separate from CLOSED because freeing waits for the loop thread to
+exit, which a running callback can delay past a CLOSE-LOOP (#694).")
    (owned :initform '() :accessor loop-owned
           :documentation "Handles created against this loop, so CLOSE-LOOP can close them."))
   (:documentation
@@ -147,7 +152,7 @@ rather than at LOAD with a broken system."
   t)
 
 (defun version ()
-  "The version string of the libuv actually loaded, e.g. \"1.52.1\"."
+  "The version string of the libuv actually loaded, e.g. \"1.53.0\"."
   (ensure-available)
   (ffi:uv-version-string))
 
@@ -253,7 +258,13 @@ thread it is routed through SUBMIT so it lands on the owning thread."
   "Run LOOP on a dedicated SBCL thread and return that thread.
 
 An SBCL thread, specifically: callbacks then re-enter Lisp on a thread that has a Lisp
-stack, which is the property that makes foreign callbacks safe here."
+stack, which is the property that makes foreign callbacks safe here.
+
+TO WAKE THE LOOP THREAD, USE SUBMIT OR STOP-LOOP-THREAD, NOT AN INTERRUPT. Both go through the
+loop's async handle, which makes uv_run return. On Windows, SBCL (a :SB-SAFEPOINT build)
+delivers INTERRUPT-THREAD and SB-EXT:WITH-TIMEOUT to a thread only when it returns to Lisp, so
+they reach a loop thread waiting in uv_run only when an event wakes it, which may be never on an
+idle loop (#897's Windows leg). On Linux and macOS they arrive at once."
   (when (loop-thread loop)
     (error "This loop already has a thread."))
   (setf (loop-stop-requested-p loop) nil)
@@ -267,6 +278,10 @@ stack, which is the property that makes foreign callbacks safe here."
         ;; submits to it, so it belongs to no one unit of work (#158).
         (sb-thread:make-thread
          (lambda ()
+           ;; First, because START-LOOP-THREAD can run inside a caller's
+           ;; SB-SYS:WITHOUT-INTERRUPTS, as hyperion/clack-handler-uv's RUN does, and a thread
+           ;; made there can inherit a blocked signal mask and never be interruptible (#541).
+           (aion/dynamic:unblock-interrupts)
            ;; :DEFAULT would return as soon as no handles were active, which for a
            ;; service loop is a race against the first submission. :ONCE in a loop, with
            ;; the referenced wakeup handle above, blocks until there is genuinely
@@ -275,18 +290,45 @@ stack, which is the property that makes foreign callbacks safe here."
                  do (run loop :mode :once)))
          :name name)))
 
-(defun stop-loop-thread (loop &key (timeout 5))
-  "Stop the loop thread started by START-LOOP-THREAD and wait for it to exit.
-Leaves the loop itself usable; CLOSE-LOOP is what tears it down."
+(defun stop-loop-thread (loop &key (timeout 5) (wait t))
+  "Stop the loop thread started by START-LOOP-THREAD and wait up to TIMEOUT seconds for it to
+exit; NIL waits without a limit. Returns T once there is no loop thread. Leaves the loop
+itself usable; CLOSE-LOOP is what tears it down.
+
+With WAIT NIL it only asks: it sets the stop flag, wakes the loop, and returns NIL at once,
+keeping the thread recorded so a later call or CLOSE-LOOP waits for it. A caller that does its
+own waiting uses this, as aion/schedule/uv does.
+
+When the thread is still running after TIMEOUT, because a callback on it has not returned,
+this signals LOOP-THREAD-STILL-RUNNING and leaves the thread recorded on LOOP, so a later call
+waits for it again (#694). It used to forget the thread and return as if it had exited, and
+CLOSE-LOOP then freed the loop under the running callback."
   (let ((thread (loop-thread loop)))
     (when thread
-      (setf (loop-stop-requested-p loop) t)
-      ;; Wake the blocked uv_run so it re-tests the flag and returns.
-      (ignore-errors (ffi:uv-async-send (loop-async loop)))
-      (ignore-errors (sb-thread:join-thread thread :timeout timeout))
-      (setf (loop-thread loop) nil)
-      ;; Drop the reference again so a subsequent plain RUN can still terminate.
-      (ignore-errors (ffi:uv-unref (loop-async loop))))))
+      ;; The wakeup, and below the clear and the unref, touch LOOP-ASYNC, which a concurrent
+      ;; CLOSE-LOOP may be about to free. Each is done under LOOP-LOCK and only while the loop
+      ;; is not being freed and THREAD is still the one recorded; CLOSE-LOOP claims the freeing
+      ;; under the same lock (#876's review). The join stays outside it.
+      (sb-thread:with-mutex ((loop-lock loop))
+        (when (and (null (loop-freed-p loop)) (eq (loop-thread loop) thread))
+          (setf (loop-stop-requested-p loop) t)
+          ;; Wake the blocked uv_run so it re-tests the flag and returns.
+          (ignore-errors (ffi:uv-async-send (loop-async loop)))))
+      (unless wait (return-from stop-loop-thread nil))
+      ;; From a callback on the loop thread itself there is nothing to wait for: the thread
+      ;; cannot exit while this runs on it, so it is still running by definition.
+      (unless (eq thread sb-thread:*current-thread*)
+        (if timeout
+            (sb-thread:join-thread thread :timeout timeout :default nil)
+            (sb-thread:join-thread thread :default nil)))
+      (when (sb-thread:thread-alive-p thread)
+        (error 'loop-thread-still-running :loop loop :thread thread :timeout timeout))
+      (sb-thread:with-mutex ((loop-lock loop))
+        (when (and (null (loop-freed-p loop)) (eq (loop-thread loop) thread))
+          (setf (loop-thread loop) nil)
+          ;; Drop the reference again so a subsequent plain RUN can still terminate.
+          (ignore-errors (ffi:uv-unref (loop-async loop)))))))
+  t)
 
 (cffi:defcallback %close-callback :void ((handle :pointer))
   (with-callback-guard
@@ -313,22 +355,113 @@ like unrelated corruption much later."
     (register pointer (or finalizer t))
     (ffi:uv-close pointer (cffi:callback %close-callback))))
 
-(defun close-loop (loop)
-  "Close LOOP, its handles and its memory. Idempotent.
+;;; ---------------------------------------------- closing the uv_loop_t (#877)
 
-CLAIMING THE FLAG IS AN ATOMIC TEST-AND-SET UNDER LOOP-LOCK (pre-publication issue 296), for two reasons.
-It is what makes SUBMIT's refusal a guarantee rather than a narrowing -- see there. And
-it makes the idempotence real: the old `unless' read the flag and set it in two steps,
-so two threads closing at once could both pass the test and both reach FOREIGN-FREE.
+(defparameter *loop-close-attempts* 4
+  "How many times %CLOSE-UV-LOOP calls uv_loop_close before it gives up.")
 
-THE LOCK IS RELEASED BEFORE STOP-LOOP-THREAD, and must be. That joins the loop thread,
-whose async callback drains the queue under this same mutex -- holding it across the
-join deadlocks. Releasing is enough: a submit that got in first completes its send while
-the handle is still valid, and every later one is refused."
+(defvar %walked-handles '()
+  "Where %COLLECT-HANDLE deposits handles during a walk. A dynamic variable rather than
+uv_walk's ARG for the reason given at %WALK-ACCUMULATOR in introspect.lisp.")
+
+(cffi:defcallback %collect-handle :void ((handle :pointer) (arg :pointer))
+  (declare (ignore arg))
+  (with-callback-guard
+    (push handle %walked-handles)))
+
+(defun %loop-handle-pointers (loop)
+  "Every handle still on LOOP, closing or not. Called only by CLOSE-LOOP after the loop thread
+has exited, so the walk runs on the only thread using the loop."
+  (let ((%walked-handles '()))
+    (ffi:uv-walk (loop-pointer loop) (cffi:callback %collect-handle) (cffi:null-pointer))
+    (nreverse %walked-handles)))
+
+(defun %handle-kind-name (pointer)
+  "The handle's type as a keyword, for LOOP-LEFT-UNFREED's report."
+  (let ((name (ffi:uv-handle-type-name (ffi:uv-handle-get-type pointer))))
+    (if name (intern (string-upcase (substitute #\- #\_ name)) :keyword) :unknown)))
+
+(defun %close-open-handles (loop)
+  "Close every handle on LOOP that is not already closing, with no close callback (see
+%CLOSE-UV-LOOP for why)."
+  (dolist (handle (%loop-handle-pointers loop))
+    (unless (plusp (ffi:uv-is-closing handle))
+      (ffi:uv-close handle (cffi:null-pointer)))))
+
+(defun %run-close-callbacks (loop)
+  "Run LOOP without blocking until it has nothing left to do, at most 32 times, so libuv calls
+the close callbacks of the handles just closed."
+  (loop repeat 32
+        while (plusp (ffi:uv-run (loop-pointer loop) ffi:+uv-run-nowait+))))
+
+(defun %close-uv-loop (loop)
+  "Call uv_loop_close on LOOP and return its result: 0 once the loop is closed and its memory may
+be freed, or a negative libuv error code.
+
+uv_loop_close returns UV_EBUSY while a handle or request is still open on the loop. That
+happens when a handle was created without being added to LOOP-OWNED, or when a close callback
+has not run yet. Before #877, CLOSE-LOOP ignored the result and freed the loop anyway, and libuv
+then used the freed memory. Now each UV_EBUSY closes every handle uv_walk finds that is not
+already closing, runs the loop again so their close callbacks fire, and tries again, up to
+*LOOP-CLOSE-ATTEMPTS* calls in all, with a 10 ms pause before the third and later ones for a
+request in the thread pool to finish.
+
+A handle closed here gets no close callback, so its memory is not freed. It was not on
+LOOP-OWNED, so this code does not know who allocated it, and freeing memory that some other
+object will later read is the defect this function exists to prevent."
+  (let ((code 0))
+    (dotimes (attempt *loop-close-attempts* code)
+      (when (plusp attempt)
+        (%close-open-handles loop)
+        (when (> attempt 1) (sleep 0.01)))
+      (%run-close-callbacks loop)
+      (setf code (ffi:uv-loop-close (loop-pointer loop)))
+      (unless (and (minusp code) (equal (ffi:uv-err-name code) "EBUSY"))
+        (return code)))))
+
+(defun close-loop (loop &key (timeout 5))
+  "Close LOOP, its handles and its memory. Idempotent: a call after the loop is freed does
+nothing.
+
+CLOSING AND FREEING ARE TWO STEPS (#694). The first call sets CLOSED, so SUBMIT refuses from
+then on. The memory is freed only after the loop thread has exited. If it has not exited
+within TIMEOUT seconds, because a callback on it is still running, the loop is not freed and
+LOOP-THREAD-STILL-RUNNING is signalled, with two restarts:
+- WAIT-FOR-LOOP-THREAD waits for the thread without a limit, then frees the loop;
+- LEAVE-LOOP-UNFREED returns NIL and leaves the loop unfreed, which leaks it.
+A later CLOSE-LOOP, once the callback has returned, finishes the teardown. Before #694 the loop
+was freed anyway, and libuv used the freed memory when the callback returned.
+
+THE MEMORY IS FREED ONLY WHEN uv_loop_close SUCCEEDS (#877). It returns UV_EBUSY while a handle
+or request is still open; %CLOSE-UV-LOOP then closes every handle it finds and tries again. If
+the loop is still busy after that, CLOSE-LOOP leaves it unfreed, signals the warning
+LOOP-LEFT-UNFREED, and returns NIL; a later CLOSE-LOOP tries again.
+
+CLAIMING EACH STEP IS AN ATOMIC TEST-AND-SET UNDER LOOP-LOCK (pre-publication issue 296). That
+is what makes SUBMIT's refusal a guarantee rather than a narrowing -- see there -- and what keeps
+two threads closing at once from both reaching FOREIGN-FREE.
+
+THE LOCK IS RELEASED BEFORE STOP-LOOP-THREAD, and must be. That joins the loop thread, whose
+async callback drains the queue under this same mutex -- holding it across the join deadlocks.
+Releasing is enough: a submit that got in first completes its send while the handle is still
+valid, and every later one is refused."
+  (sb-thread:with-mutex ((loop-lock loop))
+    (setf (loop-closed-p loop) t))
+  (restart-case
+      (stop-loop-thread loop :timeout timeout)
+    (wait-for-loop-thread ()
+      :report "Wait for the loop thread to exit without a limit, then free the loop."
+      ;; Not on the loop's own thread, which cannot exit while it waits for itself.
+      :test (lambda (c) (declare (ignore c)) (not (loop-thread-p loop)))
+      (stop-loop-thread loop :timeout nil))
+    (leave-loop-unfreed ()
+      :report "Leave the loop unfreed (a deliberate leak); a later CLOSE-LOOP can still free it."
+      (return-from close-loop nil)))
+  ;; The thread has exited. Claim the freeing; a concurrent or earlier call that already did
+  ;; makes this one a no-op.
   (when (sb-thread:with-mutex ((loop-lock loop))
-          (unless (loop-closed-p loop)
-            (setf (loop-closed-p loop) t)))
-    (stop-loop-thread loop)
+          (unless (loop-freed-p loop)
+            (setf (loop-freed-p loop) :freeing)))
     ;; Close everything we created against this loop, then pump the loop so libuv can
     ;; run the close callbacks -- uv_loop_close fails with EBUSY while handles remain.
     (dolist (handle (loop-owned loop))
@@ -337,11 +470,19 @@ the handle is still valid, and every later one is refused."
     (deregister (loop-async loop))
     (unless (plusp (ffi:uv-is-closing (loop-async loop)))
       (ffi:uv-close (loop-async loop) (cffi:null-pointer)))
-    (loop repeat 32
-          while (plusp (ffi:uv-run (loop-pointer loop) ffi:+uv-run-nowait+)))
-    (ffi:uv-loop-close (loop-pointer loop))
-    (cffi:foreign-free (loop-async loop))
-    (cffi:foreign-free (loop-pointer loop)))
+    (let ((code (%close-uv-loop loop)))
+      (cond ((zerop code)
+             (cffi:foreign-free (loop-async loop))
+             (cffi:foreign-free (loop-pointer loop))
+             (setf (loop-freed-p loop) :freed))
+            (t
+             ;; Give the claim back, so a later CLOSE-LOOP can try again once whatever kept
+             ;; the loop busy has finished.
+             (sb-thread:with-mutex ((loop-lock loop))
+               (setf (loop-freed-p loop) nil))
+             (warn 'loop-left-unfreed
+                   :loop loop :code code
+                   :handles (mapcar #'%handle-kind-name (%loop-handle-pointers loop)))))))
   nil)
 
 (defmacro with-loop ((var) &body body)

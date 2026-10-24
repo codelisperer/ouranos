@@ -23,7 +23,8 @@
                     (#:bt   #:bordeaux-threads)
                     (#:pool #:aion/pool)
                     (#:uv   #:aion/uv)
-                    (#:static #:hyperion/static))
+                    (#:static #:hyperion/static)
+                    (#:ports #:hyperion/test-ports))  ; WITH-DEADLINE (#456)
   (:export #:run-tests))
 
 (in-package #:hyperion/server-uv/tests)
@@ -68,6 +69,11 @@ Generous for a loopback request that should finish in microseconds, and the only
 is not tighter is that a loaded CI box is slow in ways a hang is not. What matters is that
 it is FINITE: the failure this suite most wants to catch is a request that never gets an
 answer, and without a deadline that failure looks like a stuck test run.")
+
+(defun %what (request port)
+  "How a request is named when it goes unanswered: the first line of REQUEST, and PORT."
+  (format nil "~A on port ~D"
+          (subseq request 0 (or (position #\Return request) (length request))) port))
 
 (defun %wait-until (predicate &key (seconds +io-timeout+))
   "Call PREDICATE every 5 ms until it returns true or SECONDS have passed. Returns its last value.
@@ -178,7 +184,7 @@ distinction the mid-stream failure path exists to produce."
   "One request on its own connection, read as a chunked response."
   (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
     (unwind-protect
-         (sb-ext:with-timeout +io-timeout+
+         (ports:with-deadline (+io-timeout+ (%what (first lines) port))
            (sock:socket-connect s #(127 0 0 1) port)
            (let ((stream (sock:socket-make-stream s :input t :output t
                                                     :element-type '(unsigned-byte 8))))
@@ -201,7 +207,7 @@ PIECES rather than one string so a test can split a request ACROSS TCP WRITES --
 boundary is not a message boundary, and that is precisely what a server gets wrong."
   (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
     (unwind-protect
-         (sb-ext:with-timeout +io-timeout+
+         (ports:with-deadline (+io-timeout+ (%what (first pieces) port))
            (sock:socket-connect s #(127 0 0 1) port)
            (let ((stream (sock:socket-make-stream s :input t :output t
                                                     :element-type '(unsigned-byte 8))))
@@ -448,7 +454,7 @@ an empty piece and a nested list handled like any other."
 latin-1 text. For responses a framed read would misjudge, such as one to HEAD."
   (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
     (unwind-protect
-         (sb-ext:with-timeout +io-timeout+
+         (ports:with-deadline (+io-timeout+ (%what text port))
            (sock:socket-connect s #(127 0 0 1) port)
            (let ((stream (sock:socket-make-stream s :input t :output t
                                                     :element-type '(unsigned-byte 8))))
@@ -602,7 +608,7 @@ pipelining, which writes them all before reading anything. The two exercise diff
 of the drain loop and only one of them is what real clients mostly do."
   (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
     (unwind-protect
-         (sb-ext:with-timeout +io-timeout+
+         (ports:with-deadline (+io-timeout+ (%what (first requests) port))
            (sock:socket-connect s #(127 0 0 1) port)
            (let ((stream (sock:socket-make-stream s :input t :output t
                                                     :element-type '(unsigned-byte 8))))
@@ -1227,7 +1233,7 @@ response into this one, closing early truncates a stream that was fine."
     ;; desynchronised one, which is the only thing this test is for.
     (let ((sock (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
       (unwind-protect
-           (sb-ext:with-timeout +io-timeout+
+           (ports:with-deadline (+io-timeout+ (%what "GET /stream, then GET /" port))
              (sock:socket-connect sock #(127 0 0 1) port)
              (let ((st (sock:socket-make-stream sock :input t :output t
                                                      :element-type '(unsigned-byte 8))))
@@ -1336,7 +1342,7 @@ if two of them disagree about who writes what."
                                  :render (lambda (p) (format nil "~A=~A" (car p) (cdr p))))))
              (let ((sock (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
                (unwind-protect
-                    (sb-ext:with-timeout +io-timeout+
+                    (ports:with-deadline (+io-timeout+ (%what "GET /events" port))
                       (sock:socket-connect sock #(127 0 0 1) port)
                       (let ((st (sock:socket-make-stream sock :input t :output t
                                                               :element-type '(unsigned-byte 8))))
@@ -1441,6 +1447,83 @@ if two of them disagree about who writes what."
               "Content-Length must be the file's length -- static does not set it, the
 backend does"))))))
 
+(test a-static-file-stream-answers-head-with-its-size-and-is-closed
+  "#314. hyperion/static's body is the open stream of the file it checked. HEAD gets the file's
+size as Content-Length and nothing else, GET gets the bytes with the same length, and the
+server closes both streams. Control: the HEAD stream is the one the app handed over, still
+open when it was handed over."
+  (%with-static-dir (dir file "0123456789abcdef")
+    (let ((streams '()) (open-when-given '()))
+      (with-server (port (lambda (env)
+                           (let ((r (static:file-response dir "/hello.txt" :env env)))
+                             (push (third r) streams)
+                             (push (open-stream-p (third r)) open-when-given)
+                             r)))
+        (multiple-value-bind (head get lines) (head-then-get port)
+          (is (= 2 lines))
+          (is (string= "16" (header-of head "Content-Length")))
+          (is (string= "" (body-after-head head)) "the HEAD response carried a body")
+          (is (and get (string= "0123456789abcdef" (body-after-head get))))
+          (is (and get (string= "16" (header-of get "Content-Length"))))))
+      (is (= 2 (length streams)))
+      (is (every (lambda (s) (typep s 'file-stream)) streams))
+      (is (equal '(t t) open-when-given) "control: each stream was open when it was handed over")
+      (is-true (loop repeat 200
+                     when (notany #'open-stream-p streams) return t
+                     do (sleep 0.01))
+               "a stream the server was given is still open"))))
+
+;; The two tests below hold the stream in a variable, so its finalizer cannot run and close
+;; it: an open stream at the end means the server left it open.
+
+(test a-file-stream-whose-first-read-fails-is-closed
+  "#314. A file-stream body whose first read signals -- here a character stream, which
+%FILE-CHUNK cannot read octets from -- is answered with a 500 before any head is written, and
+the server closes the stream rather than leaving it to its finalizer. Control: the stream was
+open when it was handed over."
+  (%with-static-dir (dir file "0123456789abcdef")
+    (let ((stream nil) (open-when-given nil))
+      (with-server (port (lambda (env) (declare (ignore env))
+                           (setf stream (open file))
+                           (setf open-when-given (open-stream-p stream))
+                           (list 200 +ok+ stream)))
+        (is (= 500 (status-of (get* port "GET / HTTP/1.1" "Host: x")))))
+      (is-true open-when-given "control: the stream was open when it was handed over")
+      (is (typep stream 'file-stream))
+      (is-false (and stream (open-stream-p stream)) "the server left the stream open")
+      (when stream (close stream)))))
+
+(test a-file-stream-answered-after-the-peer-left-is-closed
+  "#314. A handler on a worker returns a file-stream body after its client has disconnected.
+Nothing is written, and the server closes the stream rather than dropping it to its
+finalizer. Control: the stream was open when it was handed over."
+  (%with-static-dir (dir file "0123456789abcdef")
+    (let ((stream nil) (open-when-given nil) (left nil))
+      (with-server (port (lambda (env) (declare (ignore env))
+                           (%wait-until (lambda () left))
+                           ;; Time for the loop to read the client's FIN and mark the
+                           ;; connection done.
+                           (sleep 0.3)
+                           (setf stream (open file :element-type '(unsigned-byte 8)))
+                           (setf open-when-given (open-stream-p stream))
+                           (list 200 +ok+ stream))
+                         :workers 2)
+        (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
+          (sock:socket-connect s #(127 0 0 1) port)
+          (let ((out (sock:socket-make-stream s :output t :element-type '(unsigned-byte 8))))
+            (write-sequence (sb-ext:string-to-octets (req "GET / HTTP/1.1" "Host: x")
+                                                     :external-format :latin-1)
+                            out)
+            (force-output out))
+          (sleep 0.1)
+          (sock:socket-close s)
+          (setf left t))
+        (%wait-until (lambda () (and stream (not (open-stream-p stream)))) :seconds 3))
+      (is-true open-when-given "control: the stream was open when it was handed over")
+      (is (typep stream 'file-stream))
+      (is-false (and stream (open-stream-p stream)) "the server left the stream open")
+      (when stream (close stream)))))
+
 (test a-static-binary-file-arrives-byte-for-byte
   ;; The clause reads OCTETS. A text-mode read would mangle every byte above 127, and this
   ;; serves images -- where the corruption is invisible in a status code and obvious to a
@@ -1532,7 +1615,7 @@ complete one -- the defect this file's own client comment warns about, in the on
 is about exactly that difference."
   (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
     (unwind-protect
-         (sb-ext:with-timeout +io-timeout+
+         (ports:with-deadline (+io-timeout+ (%what request port))
            (sock:socket-connect s #(127 0 0 1) port)
            (let ((stream (sock:socket-make-stream s :input t :output t
                                                     :element-type '(unsigned-byte 8))))
@@ -1777,7 +1860,7 @@ platform this test has no way to count them on (Windows)."
                     send a reset rather than an orderly close, on every platform we run on."
   (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
     (unwind-protect
-         (sb-ext:with-timeout +io-timeout+
+         (ports:with-deadline (+io-timeout+ (%what "GET /" port))
            (sock:socket-connect s #(127 0 0 1) port)
            (let ((stream (sock:socket-make-stream s :input t :output t
                                                     :element-type '(unsigned-byte 8))))
@@ -1834,7 +1917,8 @@ platform this test has no way to count them on (Windows)."
         ;; The idle timeout: a keep-alive connection the client leaves open and silent.
         (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
           (unwind-protect
-               (sb-ext:with-timeout +io-timeout+
+               (ports:with-deadline (+io-timeout+
+                                     (%what "GET / (left open for the idle timeout)" port))
                  (sock:socket-connect s #(127 0 0 1) port)
                  (let ((stream (sock:socket-make-stream s :input t :output t
                                                           :element-type '(unsigned-byte 8))))
@@ -1856,7 +1940,8 @@ platform this test has no way to count them on (Windows)."
          (s (make-instance 'sock:inet-socket :type :stream :protocol :tcp))
          (closed '()))
     (unwind-protect
-         (sb-ext:with-timeout +io-timeout+
+         (ports:with-deadline (+io-timeout+ (%what "GET / (left open while the server stops)"
+                                                 (srv:server-port server)))
            (sock:socket-connect s #(127 0 0 1) (srv:server-port server))
            (let ((stream (sock:socket-make-stream s :input t :output t
                                                     :element-type '(unsigned-byte 8))))
@@ -2081,12 +2166,25 @@ is read from the wrong place, which is request smuggling."
         (progn (sleep slow-seconds) (list 200 +ok+ '("slow")))
         (list 200 +ok+ '("fast")))))
 
+(defparameter +connection-reset-errnos+ '(54 104 10054)
+  "ECONNRESET on macOS, Linux and Windows.")
+
 (defun connect-refused-p (port)
-  "Whether a new TCP connection to PORT is refused."
+  "Whether a new TCP connection to PORT is refused.
+
+A connect that is reset counts as refused. On macOS a connect that lands in the listen queue
+just as the listener closes is answered with a reset, and the listener is then gone, which is
+what a caller of this asks about. Raised as an error, it ended a run of the grace-period test
+below under load (#540)."
   (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
-    (handler-case (progn (sock:socket-connect s #(127 0 0 1) port) nil)
-      (sock:connection-refused-error () t)
-      (:no-error (&rest _) (declare (ignore _)) (ignore-errors (sock:socket-close s)) nil))))
+    (unwind-protect
+         (handler-case (progn (sock:socket-connect s #(127 0 0 1) port) nil)
+           (sock:connection-refused-error () t)
+           (sock:socket-error (e)
+             (if (member (sock::socket-error-errno e) +connection-reset-errnos+)
+                 t
+                 (error e))))
+      (ignore-errors (sock:socket-close s)))))
 
 (defun %elapsed-since (start)
   (/ (- (get-internal-real-time) start) internal-time-units-per-second))
@@ -2190,10 +2288,14 @@ property is the response, not STOP's duration."
 ;; stop drains by ONLY-SIGTERM-WAITS-THE-GRACE-PERIOD, which sends no signal.
 #-win32
 (defun %sigterm-drain-check (&optional extra-environment)
-  "The acceptance test #388 asks for. The child drains for 1.5 s and has a request 2.5 s long
+  "The acceptance test #388 asks for. The child drains for 1.5 s and has a request 4.5 s long
 in flight when SIGTERM arrives: during the grace period the readiness path answers 503 and
 another request is answered; after it, a new connection is refused; the request in flight
 completes; and the process exits by itself, well within grace plus timeout.
+The refusal is checked 2.4 s after /bin/kill returns, so 0.9 s after the grace period ends and
+well before the request in flight does (#540). With a 2.5 s request and the check timed from
+before /bin/kill started, the check fell in a window about 0.3 s wide, and a slow runner could
+reach it before the listener closed.
 EXTRA-ENVIRONMENT is added to the child's environment, as \"NAME=value\" strings."
   (let* ((root (merge-pathnames "../" (asdf:system-source-directory "hyperion")))
          (child (uiop:launch-program
@@ -2204,7 +2306,7 @@ EXTRA-ENVIRONMENT is added to the child's environment, as \"NAME=value\" strings
                                                     #+win32 ";" #-win32 ":")
                                             "HYPERION_DRAIN_SECONDS=1.5"
                                             "HYPERION_DRAIN_TIMEOUT_SECONDS=10"
-                                            "CHILD_SLOW=2.5")
+                                            "CHILD_SLOW=4.5")
                                       extra-environment
                                       (remove-if (lambda (e)
                                                    (some (lambda (p) (uiop:string-prefix-p p e))
@@ -2223,8 +2325,12 @@ EXTRA-ENVIRONMENT is added to the child's environment, as \"NAME=value\" strings
                                                      (error (e) e))))
                              :name "sigterm test: slow request")))
                (sleep 0.3)
-               (let ((t0 (get-internal-real-time)))
+               (let ((t0 (get-internal-real-time))
+                     (signalled nil))
                  (uiop:run-program (list "/bin/kill" "-TERM" (princ-to-string pid)))
+                 ;; The signal has arrived by the time /bin/kill exits, and starting /bin/kill can
+                 ;; itself take 0.3 s, so the refusal is timed from here, not from T0 (#540).
+                 (setf signalled (get-internal-real-time))
                  (sleep 0.3)
                  (let ((health (get* port "GET /health HTTP/1.1" "Host: x"))
                        (fast (get* port "GET /fast HTTP/1.1" "Host: x")))
@@ -2232,7 +2338,7 @@ EXTRA-ENVIRONMENT is added to the child's environment, as \"NAME=value\" strings
                    (is (= 200 (status-of fast)) "another request is still answered during the grace period")
                    (is (string-equal "close" (header-of fast "Connection"))
                        "and its connection closes, so the next one goes elsewhere"))
-                 (sleep 1.6)
+                 (sleep (max 0 (- 2.4 (%elapsed-since signalled))))
                  (is-true (connect-refused-p port) "after the grace period a new connection is refused")
                  (bt:join-thread client)
                  (is (and (stringp slow) (= 200 (status-of slow)) (string= "slow" (body-of slow)))
@@ -2285,6 +2391,65 @@ REASON, the way the signal handler calls it. The installer is replaced, so no si
         (sigterm (%serve-forever-stop-time :sigterm 2)))
     (is (< sigint 1) "SIGINT stops at once: ~,1Fs" sigint)
     (is (<= 2 sigterm 4) "SIGTERM keeps serving for the 2 s grace period first: ~,1Fs" sigterm)))
+
+;;; The grace period ends when its seconds have passed since the signal arrived, not since
+;;; SERVE-FOREVER's poll noticed it, and the listener closes then, not on the next poll (#540).
+;;; With a 0.4 s poll the two were each up to 0.4 s late, and on a slow macOS runner the 0.1 s
+;;; default was enough for SIGTERM-DRAINS-A-SERVE-FOREVER-PROCESS-ON-FOUR-LOOPS to find the
+;;; port still accepting after the grace period.
+
+(defparameter +grace-poll+ 1.2
+  "The poll interval the grace-period test runs SERVE-FOREVER with. It is long so that each
+half of #540's defect, when present, makes the listener close 0.6 s or more late, which is
+large next to how late a busy CI runner schedules a thread. A 0.4 s poll left the defect
+0.28 s late, and the fixed code once measured 0.16 s late on a macOS runner.")
+
+(defun %grace-refusal-time (offset)
+  "Run SERVE-FOREVER on :uv with a 1 s grace period and a +GRACE-POLL+ poll, call its stop
+function the way the SIGTERM handler does OFFSET seconds after it is ready, and return how many
+seconds after that call new connections are first refused, or NIL if not within 4 s. No signal
+is sent."
+  (let* ((stop-fn nil)
+         (port nil)
+         (ready (sb-thread:make-semaphore))
+         (hsrv:*install-signal-handlers* (lambda (request-stop)
+                                           (setf stop-fn request-stop)
+                                           (lambda () nil)))
+         (runner (bt:make-thread
+                  (lambda ()
+                    (hsrv:serve-forever (const-app 200 +ok+ '("ok"))
+                                        :server :uv :port 0 :log nil :banner nil :loops 1
+                                        :drain-seconds 1 :drain-timeout 1
+                                        :on-ready (lambda (session)
+                                                    (setf port (srv:server-port
+                                                                (hsrv::server-session-handler session)))
+                                                    (sb-thread:signal-semaphore ready))))
+                  :name "grace test: serve-forever"
+                  :initial-bindings `((hsrv:*install-signal-handlers* . ,hsrv:*install-signal-handlers*)
+                                      (hsrv::*shutdown-poll-interval* . ,+grace-poll+)
+                                      (*standard-output* . ,(make-broadcast-stream))))))
+    (when (sb-thread:wait-on-semaphore ready :timeout 10)
+      (sleep offset)
+      (let ((start (get-internal-real-time)))
+        (funcall stop-fn :sigterm)
+        (prog1 (loop for now = (%elapsed-since start)
+                     while (< now 4)
+                     do (when (connect-refused-p port) (return now))
+                        (sleep 0.01))
+          (bt:join-thread runner))))))
+
+(test the-listener-closes-when-the-grace-period-ends-whatever-the-poll-interval
+  "With a 1.2 s poll (+GRACE-POLL+), the stop is requested 0.3 s and then 0.6 s into a poll, so
+the poll notices it 0.9 s or 0.6 s later, before the 1 s grace period has ended. With the fix
+new connections are refused 1 s after the request, and the accepted range is 0.95 s to 1.3 s.
+Each half of #540's defect alone makes both runs at least 0.6 s late. A grace period counted
+from the notice ends at 1.9 s and 1.6 s. A grace period whose sleep is a whole poll ends one
+poll after the notice, at 2.1 s and 1.8 s."
+  (dolist (offset '(0.3 0.6))
+    (let ((refused (%grace-refusal-time offset)))
+      (is (and refused (<= 0.95 refused 1.3))
+          "stop ~,2Fs into a ~,1F s poll: ~:[not refused in 4 s~;~:*refused ~,2Fs after~]"
+          offset +grace-poll+ refused))))
 
 ;;; --- responses encoded on the worker (#430) --------------------------------------------
 ;;;
@@ -2506,7 +2671,7 @@ and PORT, and always stop it."
 each one on before this returns. The caller closes them."
   (loop repeat n
         collect (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
-                  (sb-ext:with-timeout +io-timeout+
+                  (ports:with-deadline (+io-timeout+ (%what "GET /" port))
                     (sock:socket-connect s #(127 0 0 1) port)
                     (let ((stream (sock:socket-make-stream s :input t :output t
                                                              :element-type '(unsigned-byte 8))))
@@ -2814,3 +2979,143 @@ kernel lists as allowed in /proc/self/status, a second reading of the same mask.
 which current coreutils also limits by the cgroup quota and by OMP_ variables."
   (is (eql (%cpus-allowed-list-count) (srv::%affinity-count)))
   (is (<= (srv::%affinity-count) (srv::%online-cores))))
+
+;;; --- #694 / #876: STOP with a loop thread stuck in a handler --------------------------
+
+(test stop-with-a-loop-thread-stuck-in-a-handler-returns-and-keeps-that-loop
+  "A handler run on the loop thread (no :WORKERS) blocks. STOP must still return, leave that
+loop closed but unfreed rather than free it under the handler, and keep it, so a later STOP,
+once the handler has returned, frees it. Before #876's review the CLOSE-LOOP in STOP signalled
+and unwound STOP partway."
+  (let ((gate (sb-thread:make-semaphore))
+        (entered (sb-thread:make-semaphore))
+        (client nil))
+    (unwind-protect
+         (let* ((srv::*stop-wait-seconds* 0.5)
+                (server (srv:start (lambda (env)
+                                     (declare (ignore env))
+                                     (sb-thread:signal-semaphore entered)
+                                     (sb-thread:wait-on-semaphore gate :timeout 30)
+                                     (list 200 +ok+ (list "late")))
+                                   :port 0))
+                (port (srv:server-port server))
+                (loop (srv::server-loop server)))
+           ;; THREAD-LIFETIME: scoped -- its request ends once the handler is released, and it
+           ;; is joined below.
+           (setf client (bt:make-thread
+                         (lambda () (ignore-errors (get* port "GET / HTTP/1.1" "Host: x")))))
+           (is (sb-thread:wait-on-semaphore entered :timeout 10) "control: the handler is running")
+           (let ((start (get-internal-real-time)))
+             (finishes (srv:stop server))
+             (is (< (/ (- (get-internal-real-time) start) internal-time-units-per-second) 10)
+                 "STOP returned without waiting for the handler"))
+           (is (null (uv:loop-freed-p loop)) "the stuck loop was not freed")
+           (is (srv::server-shards server) "the stuck shard is kept for a later STOP")
+           (sb-thread:signal-semaphore gate 10)
+           (aion/test-threads:join client)
+           (setf client nil)
+           (finishes (srv:stop server))
+           (is (eq :freed (uv:loop-freed-p loop)) "a later STOP frees it")
+           (is (null (srv::server-shards server))))
+      (sb-thread:signal-semaphore gate 10)
+      (when client (ignore-errors (aion/test-threads:join client))))))
+
+;;; --- a request nobody answers (#456) -----------------------------------------
+;;;
+;;; The server here is a socket that listens and never accepts: the kernel completes the
+;;; connection and takes the request, and no response ever comes. That is what a server
+;;; regression that stops answering looks like to this suite's client.
+
+(defun %silent-listener ()
+  "A listening loopback socket that nothing accepts on, and its port."
+  (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
+    (setf (sock:sockopt-reuse-address s) t)
+    (sock:socket-bind s #(127 0 0 1) 0)
+    (sock:socket-listen s 8)
+    (values s (nth-value 1 (sock:socket-name s)))))
+
+(defvar *silent-port* nil
+  "The port A-REQUEST-NOBODY-ANSWERS sends to, bound by the test that runs it.")
+
+(def-suite unanswered-fixture
+  :description "Not in SERVER-UV. Run only by the test below, which counts its results.")
+
+(test (a-request-nobody-answers :suite unanswered-fixture)
+  (get* *silent-port* "GET /never HTTP/1.1" "Host: x")
+  (pass "never reached: nothing answers"))
+
+(test an-unanswered-request-fails-its-own-test-and-the-run-goes-on
+  "#456. A request whose response never arrives used to signal SB-EXT:TIMEOUT, which is not an
+ERROR, so FiveAM did not catch it and the image quit, ending the run at that test. Now it is
+an ERROR naming the request, recorded as that test's failure.
+
+The inner test runs with the deadline at 1 s instead of +IO-TIMEOUT+. The checks: the inner
+run returns, with exactly one result, a failure; its message names the request and the port;
+no thread was left running; and the client's socket was closed, which the listener sees as
+the end of the stream once it accepts the connection the client left in its queue."
+  (multiple-value-bind (listener port) (%silent-listener)
+    (unwind-protect
+         (let* ((before (sb-thread:list-all-threads))
+                (results (let ((*silent-port* port)
+                               (+io-timeout+ 1)
+                               (*test-dribble* (make-broadcast-stream)))
+                           (run 'a-request-nobody-answers)))
+                (failures (remove-if-not (lambda (r) (typep r 'fiveam::test-failure)) results)))
+           (is (= 1 (length results) (length failures))
+               "expected one failed result from the inner run, got ~S" results)
+           (when failures
+             (let ((reason (fiveam::reason (first failures))))
+               (is (search (format nil "no response to GET /never HTTP/1.1 on port ~D" port)
+                           reason)
+                   "the failure should name the request and the port: ~S" reason)))
+           (is (null (set-difference (sb-thread:list-all-threads) before))
+               "a thread was left running: ~S"
+               (set-difference (sb-thread:list-all-threads) before))
+           (let ((server-side (sock:socket-accept listener)))
+             (unwind-protect
+                  (let ((st (sock:socket-make-stream
+                             server-side :input t :element-type '(unsigned-byte 8))))
+                    (ports:with-deadline (+io-timeout+ "the client's end of the connection")
+                      (loop while (read-byte st nil nil)))
+                    (pass "the client closed its socket"))
+               (ignore-errors (sock:socket-close server-side)))))
+      (ignore-errors (sock:socket-close listener)))))
+
+;;; --- #877: STOP when uv_loop_close still reports a shard's loop busy ----------------
+
+(test stop-logs-a-loop-left-unfreed-and-keeps-that-loop
+  "A shard loop that uv_loop_close still reports busy after its handles are closed. CLOSE-LOOP
+warns with LOOP-LEFT-UNFREED; %CLOSE-SHARD-LOOP logs and muffles it, so the warning does not
+reach STOP's caller, and STOP keeps the unfreed loop. Once the loop can close, a later STOP frees
+it. The busy state is made with a timer handle nothing owns and with CLOSE-LOOP's closing step
+stubbed out, as in aion/uv's control for #877."
+  (let* ((server (srv:start (const-app 200 +ok+ (list "x")) :port 0))
+         (loop (srv::server-loop server))
+         (handle (cffi:foreign-alloc :char :count (aion/uv/ffi:uv-handle-size aion/uv/ffi:+uv-timer+)))
+         (done (sb-thread:make-semaphore))
+         (escaped '())
+         (out (make-string-output-stream))
+         (close-step (fdefinition 'aion/uv::%close-open-handles)))
+    (uv:submit loop (lambda ()
+                      (aion/uv/ffi:uv-timer-init (uv:loop-pointer loop) handle)
+                      (sb-thread:signal-semaphore done)))
+    (is (sb-thread:wait-on-semaphore done :timeout 10) "control: the timer was created on the loop")
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'aion/uv::%close-open-handles)
+                 (lambda (l) (declare (ignore l)) nil))
+           (aion/log:setup :env :prod :level :info :stream out)
+           (handler-bind ((uv:loop-left-unfreed (lambda (w) (push w escaped))))
+             (finishes (srv:stop server))))
+      (setf (fdefinition 'aion/uv::%close-open-handles) close-step)
+      (aion/log:setup :env :dev :level :warn :stream *standard-output*))
+    (is (null escaped) "the warning was handled inside STOP; ~D reached the caller" (length escaped))
+    (let ((log (get-output-stream-string out)))
+      (is (search "still reports the loop busy" log) "no log line for the unfreed loop in ~S" log)
+      (is (search "\"open-handles\":1" log) "the log line counts the timer: ~S" log))
+    (is (null (uv:loop-freed-p loop)) "the busy loop was not freed")
+    (is (srv::server-shards server) "the busy shard is kept for a later STOP")
+    (finishes (srv:stop server))
+    (is (eq :freed (uv:loop-freed-p loop)) "a later STOP frees it")
+    (is (null (srv::server-shards server)))
+    (cffi:foreign-free handle)))

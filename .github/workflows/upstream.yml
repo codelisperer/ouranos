@@ -1,0 +1,84 @@
+# upstream.yml --- compare every pinned version with its latest upstream release, weekly, and
+# rewrite one tracking issue with the result (#716).
+#
+# scripts/check-upstream.lisp --online does the work: each entry in upstream.sexp is reported as
+# current, behind, held (behind on purpose, with its reason and issue), manual (checked by hand,
+# with its review date) or unknown (the source could not be read; never reported as current).
+# This file only runs it and publishes what it printed.
+#
+# ONE ISSUE, EDITED IN PLACE. The open issue labelled `upstream' is rewritten on every run, so
+# there is one page to read and no pile of weekly issues. The first run creates it. That issue is
+# the checklist for the maintainer's requirement on #716 that every dependency and API is on its
+# latest release before the project is promoted.
+#
+# ISSUES: WRITE AND NOTHING ELSE (the hub's ruling on #716). The job reads this public repository
+# and the public APIs of each upstream, and writes one issue.
+#
+# On a pull request that changes the checker, the inventory or this file, the job runs the same
+# check and prints the report but does not touch the issue, so a change to any of them is seen
+# working before it merges.
+
+name: upstream
+
+on:
+  schedule:
+    - cron: "41 6 * * 1"
+  workflow_dispatch:
+  pull_request:
+    paths:
+      - upstream.sexp
+      - scripts/check-upstream.lisp
+      - .github/workflows/upstream.yml
+
+permissions:
+  issues: write
+
+concurrency:
+  group: upstream-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  upstream:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+
+      # The same downloads cache as verify.yml's Linux leg, keyed on the same pins.
+      - name: Cache the Lisp toolchain (downloads)
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/quicklisp
+            ~/common-lisp/coalton
+          key: toolchain-linux-x86-64-${{ hashFiles('scripts/versions.env', 'coalton.pin') }}
+          restore-keys: |
+            toolchain-linux-x86-64-
+
+      - name: Provision the Lisp toolchain
+        run: ./scripts/setup.sh --ci
+
+      - name: Compare every pin with its latest release
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: |
+          sbcl --dynamic-space-size 4096 --script scripts/check-upstream.lisp --online --markdown upstream-report.md
+          cat upstream-report.md >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Rewrite the tracking issue
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          {
+            echo "Every pinned version in upstream.sexp against its latest upstream release, from run ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }} at ${{ github.sha }}."
+            echo
+            cat upstream-report.md
+          } > issue-body.md
+          number=$(gh issue list --label upstream --state open --limit 1 --json number --jq '.[0].number // empty')
+          if [ -z "$number" ]; then
+            gh label create upstream --color 5319e7 --description "Pinned versions behind their latest release (#716)" --force
+            gh issue create --title "Pinned versions behind their latest release" --label upstream --body-file issue-body.md
+          else
+            gh issue edit "$number" --body-file issue-body.md
+          fi

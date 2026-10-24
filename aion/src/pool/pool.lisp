@@ -340,7 +340,12 @@ nothing was the wrong answer, and why a reporter that signals still cannot kill 
                 ;; worker ever handles: present, plausible and wrong, which is worse than
                 ;; the absent field it replaces (#158).
                 collect (let ((w w)) (sb-thread:make-thread
-                                      (lambda () (%worker pool w))
+                                      (lambda ()
+                                        ;; First, because a pool can be made inside any caller's
+                                        ;; SB-SYS:WITHOUT-INTERRUPTS, and a thread made there can
+                                        ;; inherit a blocked signal mask (#541).
+                                        (aion/dynamic:unblock-interrupts)
+                                        (%worker pool w))
                                       :name (format nil "~A-~D" name i)))))
     ;; Before MAKE-POOL returns, so before any job can call STOP-POOL and look for its worker.
     (loop for w in (pool-wakes pool)

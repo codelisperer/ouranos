@@ -297,7 +297,7 @@ the handshake fails rather than left running until CLOSE-CLIENT."
   (with-stdio-client (client record "legacy-no-init" :timeout 2 :restart nil)
     (is-true (%failure-of (lambda () (mcp:list-tools client))))
     (let ((process (praxeon/mcp::child-process (praxeon/mcp::client-child client))))
-      (is-false (sb-ext:process-alive-p process)))
+      (is-false (praxeon/mcp::%process-alive-p process)))
     (is (= 1 (%recorded-count record "eof")))
     (let ((e (%failure-of (lambda () (mcp:list-tools client)))))
       (is (eq :not-run (and e (cnd:tool-error-result-outcome e)))))
@@ -503,6 +503,112 @@ signalled by anything here, and can outlive the test by up to 6 seconds."
       (is (= 2 (%recorded-count record "start")))
       (is-true (%wait-for (lambda () (not (sb-thread:thread-alive-p reader))) 15)))))
 
+#-win32
+(test a-write-blocked-on-an-exited-server-is-ended-and-its-pipes-closed
+  "A server exits while a process it started holds its stdin and reads nothing, and a long
+request is still being written to it. When the client finishes that server, it ends the
+blocked writer thread, so the pipes are closed once, right then, and are not kept until the
+image exits (#601). The server started next gets only whole JSON lines. The shell holding the
+old stdin is not signalled, and can outlive the test by up to 6 seconds. The test checks that
+the old server was finished less than 5 seconds after the exit call, before that shell reads its
+stdin; on a run slower than that the writer could finish by itself, and the test fails instead
+of passing without having ended it."
+  (with-stdio-client (client record "hold-stdin" :timeout 3 :call-timeout 1)
+    (let* ((exit-tool (%tool-named client "exit-holding-stdin"))
+           (echo (%tool-named client "echo"))
+           (old (praxeon/mcp::client-child client))
+           (in (praxeon/mcp::%process-input (praxeon/mcp::child-process old)))
+           ;; Before the exit call is made, so the time measured below is not less than the
+           ;; time the shell has been sleeping, however this thread is scheduled (#628).
+           (started (get-internal-real-time))
+           (exiting (sb-thread:make-thread
+                     ;; THREAD-LIFETIME: scoped -- one call for this test, joined below.
+                     (lambda () (%failure-of (lambda () (mcp:call-tool client exit-tool nil))))
+                     :name "praxeon/mcp test exit-holding-stdin")))
+      ;; The server has read the exit call, and reads nothing more from here.
+      (is-true (%wait-for (lambda () (%received-method record "tools/call"))))
+      ;; About 1 MB, far more than a pipe holds, so the writer blocks. :UNKNOWN means the
+      ;; writer took the request; :NOT-RUN would mean it never did, and nothing would block.
+      (let ((e (%failure-of (lambda ()
+                              (mcp:call-tool client echo
+                                             (%text (make-string 1000000
+                                                                 :initial-element #\x)))))))
+        (is (eq :unknown (and e (cnd:tool-error-result-outcome e)))))
+      (is-true (aion/test-threads:join exiting))
+      ;; Both calls can time out before the server exits, so wait until its output has ended.
+      (is-true (%wait-for (lambda () (praxeon/mcp::child-exited old))))
+      ;; This finishes the old server, then starts the next one. The shell has not read yet.
+      ;; The clock stops when %FINISH-CHILD returns for the old server, inside this call. When
+      ;; the call returns, the next server, a new SBCL process, has also been started, which
+      ;; can take seconds by itself and once took the total past 5 (#836).
+      (let ((finished-at nil))
+        (sb-int:encapsulate 'praxeon/mcp::%finish-child 'finish-time
+                            (lambda (f client child)
+                              (multiple-value-prog1 (funcall f client child)
+                                (when (eq child old)
+                                  (setf finished-at (get-internal-real-time))))))
+        (unwind-protect
+             (is (equal "after" (mcp:call-tool client echo (%text "after"))))
+          (sb-int:unencapsulate 'praxeon/mcp::%finish-child 'finish-time))
+        ;; The shell reads its stdin 6 seconds after it starts, and the writer would then finish
+        ;; without being ended. Under 5 seconds, the checks below are about the ending.
+        (let ((seconds (and finished-at
+                            (/ (- finished-at started) internal-time-units-per-second))))
+          (is-true (and seconds (< seconds 5)) "~A"
+                   (if seconds
+                       (format nil "the old server was finished ~,1F seconds after the exit call" seconds)
+                       "the old server was not finished during the next call"))))
+      (is-false (sb-thread:thread-alive-p (praxeon/mcp::child-writer old)))
+      (is-false (open-stream-p in))
+      (is (= 1 (praxeon/mcp::child-closes old)))
+      (is (equal "later" (mcp:call-tool client echo (%text "later"))))
+      (is (= 2 (%recorded-count record "start")))
+      (let* ((lines (%recorded record))
+             (after (rest (member "start" (rest (member "start" lines :test #'equal))
+                                  :test #'equal)))
+             (bad (loop for line in after
+                        when (and (uiop:string-prefix-p "in " line)
+                                  (not (hash-table-p (ignore-errors
+                                                      (jzon:parse (subseq line 3))))))
+                          collect (subseq line 0 (min 60 (length line))))))
+        (is (null bad) "the second server read ~S" bad)))))
+
+#-win32
+(test ending-a-blocked-writer-closes-the-server-s-stdin
+  "A server exits while a process it started holds both its stdin and its stdout, reads nothing
+for 6 seconds, and then reads stdin until its end, and a long request is still being written.
+The client ends the blocked writer, and ending it closes the server's stdin, so the holder
+reads to the end and exits, the reader reaches the end of stdout, and the pipes are closed
+once (#628). The holder is not signalled. It exits about 6 seconds after it starts, and the
+test waits for that, so it leaves no process running. CONTROL: without the close, the holder
+waits for the end of stdin until a read takes 20 seconds, the reader is still running when
+the test has waited 15 seconds for it, and the last two checks fail."
+  (with-stdio-client (client record "hold-both" :timeout 3 :call-timeout 1)
+    (let* ((exit-tool (%tool-named client "exit-holding-both"))
+           (echo (%tool-named client "echo"))
+           (old (praxeon/mcp::client-child client))
+           (reader (praxeon/mcp::child-reader old))
+           (exiting (sb-thread:make-thread
+                     ;; THREAD-LIFETIME: scoped -- one call for this test, joined below.
+                     (lambda () (%failure-of (lambda () (mcp:call-tool client exit-tool nil))))
+                     :name "praxeon/mcp test exit-holding-both")))
+      (is-true (%wait-for (lambda () (%received-method record "tools/call"))))
+      ;; About 1 MB, so the writer blocks, as in the test above.
+      (let ((e (%failure-of (lambda ()
+                              (mcp:call-tool client echo
+                                             (%text (make-string 1000000
+                                                                 :initial-element #\x)))))))
+        (is (eq :unknown (and e (cnd:tool-error-result-outcome e)))))
+      (is-true (aion/test-threads:join exiting))
+      ;; Its output does not end while the holder has it, so wait for the process instead.
+      (is-true (%wait-for (lambda ()
+                            (not (praxeon/mcp::%process-alive-p (praxeon/mcp::child-process old))))))
+      ;; Finishes the old server, which ends the blocked writer, and starts the next one.
+      (is (equal "after" (mcp:call-tool client echo (%text "after"))))
+      (is-false (sb-thread:thread-alive-p (praxeon/mcp::child-writer old)))
+      (is-true (%wait-for (lambda () (not (sb-thread:thread-alive-p reader))) 15))
+      (is (= 1 (praxeon/mcp::child-closes old))))))
+
 (test with-restart-nil-a-local-server-that-exits-stays-down
   "With :RESTART NIL, every request after the server exits fails as not run, and nothing is
 started again. The client then has no era, since no server is running (#610)."
@@ -533,26 +639,36 @@ as not run."
     (mcp:list-tools client)
     (let ((process (praxeon/mcp::child-process (praxeon/mcp::client-child client))))
       (mcp:close-client client)
-      (is-false (sb-ext:process-alive-p process))
-      (is (eql 0 (sb-ext:process-exit-code process))))
+      (is-false (praxeon/mcp::%process-alive-p process))
+      (is (eql 0 (praxeon/mcp::%process-exit-code process))))
     (is (= 1 (%recorded-count record "eof")))
     (is (= 0 (%recorded-count record "SIGTERM")))
     (let ((e (%failure-of (lambda () (mcp:list-tools client)))))
       (is (eq :not-run (and e (cnd:tool-error-result-outcome e)))))))
 
+(test after-close-client-the-client-has-no-era
+  "CLIENT-ERA and CLIENT-PROTOCOL-VERSION describe the server that is running, so after
+CLOSE-CLIENT both are NIL (#601)."
+  (with-stdio-client (client record "modern")
+    (mcp:list-tools client)
+    (is (eq :modern (mcp:client-era client)))
+    (mcp:close-client client)
+    (is (null (mcp:client-era client)))
+    (is (null (mcp:client-protocol-version client)))))
+
 (test a-local-server-that-ignores-its-closed-stdin-is-ended
   "A server still running *STDIO-CLOSE-SECONDS* after its stdin closed is sent SIGTERM, to its
-own process group, which the client checks it leads first; on Windows it is ended with
-TerminateProcess."
+own process group, which the client checks it leads first; on Windows its job object is
+terminated, which ends it (#599)."
   (let ((mcp:*stdio-close-seconds* 1))
     (with-stdio-client (client record "ignore-eof")
       (mcp:list-tools client)
       (let* ((process (praxeon/mcp::child-process (praxeon/mcp::client-child client)))
-             (pid (sb-ext:process-pid process)))
+             (pid (praxeon/mcp::%process-pid process)))
         #-win32 (is (eql pid (praxeon/mcp::%getpgid pid))
                     "the server does not lead its own process group")
         (mcp:close-client client)
-        (is-false (sb-ext:process-alive-p process))
+        (is-false (praxeon/mcp::%process-alive-p process))
         (is (= 1 (%recorded-count record "eof")))
         #-win32 (is (= 1 (%recorded-count record "SIGTERM")))))))
 
@@ -565,10 +681,125 @@ group, which the client checks it leads first."
     (with-stdio-client (client record "ignore-term")
       (mcp:list-tools client)
       (let* ((process (praxeon/mcp::child-process (praxeon/mcp::client-child client)))
-             (pid (sb-ext:process-pid process)))
+             (pid (praxeon/mcp::%process-pid process)))
         (is (eql pid (praxeon/mcp::%getpgid pid)) "the server does not lead its own process group")
         (mcp:close-client client)
-        (is-false (sb-ext:process-alive-p process))
+        (is-false (praxeon/mcp::%process-alive-p process))
         (is (= 1 (%recorded-count record "SIGTERM")))
         (is (eq :signaled (sb-ext:process-status process)))
         (is (eql 9 (sb-ext:process-exit-code process)))))))
+
+;;; --- Windows: the processes a local server starts (#599) ----------------------------------
+;;;
+;;; The server starts `ping -n 600 127.0.0.1', which runs for about ten minutes. The control
+;;; test leaves it running on purpose, and each test ends what is left with taskkill, after
+;;; checking with tasklist that the pid still names a ping, so no other process is ended.
+
+#+win32
+(defun %ping-running-p (pid)
+  "Whether tasklist reports a process PING.EXE with PID."
+  (let ((line (string-trim '(#\Space #\Return #\Newline)
+                           (uiop:run-program (list "tasklist" "/FI" (format nil "PID eq ~D" pid)
+                                                   "/FO" "CSV" "/NH")
+                                             :output :string :ignore-error-status t))))
+    (uiop:string-prefix-p "\"ping.exe\"" (string-downcase line))))
+
+#+win32
+(defun %ping-ends-within-p (pid seconds)
+  (loop repeat (* seconds 5)
+        while (%ping-running-p pid)
+        do (sleep 0.2))
+  (not (%ping-running-p pid)))
+
+#+win32
+(defun %end-ping (pid)
+  (when (and pid (%ping-running-p pid))
+    (uiop:run-program (list "taskkill" "/PID" (princ-to-string pid) "/F")
+                      :output nil :error-output nil :ignore-error-status t)))
+
+#+win32
+(defun %start-grandchild (client)
+  (parse-integer (mcp:call-tool client (%tool-named client "start-grandchild") nil)))
+
+#+win32
+(test closing-a-client-ends-the-process-its-local-server-started
+  "Each local server runs in a job object that ends every process in it when it is closed, so a
+process the server started does not outlive it. This server exits when its stdin closes, so the
+job is closed without being terminated."
+  (let ((pid nil))
+    (unwind-protect
+         (with-stdio-client (client record "grandchild")
+           (setf pid (%start-grandchild client))
+           (is-true (%ping-running-p pid))
+           (is-true (praxeon/mcp::child-job (praxeon/mcp::client-child client)))
+           (mcp:close-client client)
+           (is (= 1 (%recorded-count record "eof")))
+           (is-true (%ping-ends-within-p pid 5) "the server's ping ~D is still running" pid))
+      (%end-ping pid))))
+
+#+win32
+(test a-local-server-that-is-ended-takes-the-process-it-started-with-it
+  "A server that ignores its closed stdin is ended by terminating its job, which ends the process
+it started as well."
+  (let ((pid nil)
+        (mcp:*stdio-close-seconds* 1))
+    (unwind-protect
+         (with-stdio-client (client record "grandchild-ignore-eof")
+           (setf pid (%start-grandchild client))
+           (let ((process (praxeon/mcp::child-process (praxeon/mcp::client-child client))))
+             (mcp:close-client client)
+             (is-false (praxeon/mcp::%process-alive-p process))
+             (is-true (%ping-ends-within-p pid 5) "the server's ping ~D is still running" pid)))
+      (%end-ping pid))))
+
+#+win32
+(test a-local-server-that-exits-by-itself-takes-the-process-it-started-with-it
+  "A server that exits with no request after it and no CLOSE-CLIENT has its job closed by the
+job watcher, which ends the process it started (Copilot's review of #648)."
+  (let ((pid nil))
+    (unwind-protect
+         (with-stdio-client (client record "grandchild" :call-timeout 3)
+           (setf pid (%start-grandchild client))
+           (%failure-of (lambda () (mcp:call-tool client (%tool-named client "exit") nil)))
+           (is (= 1 (%recorded-count record "exiting")))
+           (is-true (%ping-ends-within-p pid 5) "the server's ping ~D is still running" pid))
+      (%end-ping pid))))
+
+#+win32
+(test a-local-server-not-in-a-job-is-ended-alone-and-the-failure-is-logged
+  "The control for the three tests above, run in each of their cases, and the fallback: when the
+server cannot be put in a job, a warning names its pid and the Win32 error code, the server ends
+by its closed stdin, by TerminateProcess or by itself, and the process it started keeps running."
+  (dolist (case '(("grandchild" :close) ("grandchild-ignore-eof" :close) ("grandchild" :exit)))
+    (destructuring-bind (mode how) case
+      (let ((pid nil)
+            (server-pid nil)
+            (log (make-string-output-stream))
+            (mcp:*stdio-close-seconds* 1)
+            (praxeon/mcp::*child-job-function*
+              (lambda (pid)
+                (declare (ignore pid))
+                (error 'aion/windows:win32-error :code 5 :message "Access is denied."
+                                                 :operation :assign-process-to-job-object))))
+        (unwind-protect
+             (progn
+               (with-captured-log (log)
+                 (with-stdio-client (client record mode :call-timeout 3)
+                   (setf pid (%start-grandchild client))
+                   (let ((process (praxeon/mcp::child-process (praxeon/mcp::client-child client))))
+                     (setf server-pid (praxeon/mcp::%process-pid process))
+                     (is (null (praxeon/mcp::child-job (praxeon/mcp::client-child client))))
+                     (ecase how
+                       (:close (mcp:close-client client))
+                       (:exit (%failure-of (lambda ()
+                                             (mcp:call-tool client (%tool-named client "exit") nil)))
+                        ;; As long as the job watcher would take to close a job.
+                        (sleep 1)))
+                     (is-false (praxeon/mcp::%process-alive-p process))
+                     (is-true (%ping-running-p pid) "in ~A ~A, the ping ~D ended without a job to end it"
+                              mode how pid))))
+               (let ((logged (get-output-stream-string log)))
+                 (is-true (search "not in a job object" logged) "the log said ~S" logged)
+                 (is-true (search (format nil "pid=~D" server-pid) logged) "the log said ~S" logged)
+                 (is-true (search "code=5" logged) "the log said ~S" logged)))
+          (%end-ping pid))))))

@@ -417,13 +417,13 @@ profile put encoding the head and body at about 17% of the loop's time, with the
 most of theirs. Only the plain case is taken here, a response triple whose body is a string,
 an octet vector or a list of them, with nothing to drop and every header one we send. Anything
 else is returned as it is and %COMPLETE handles it on the loop exactly as before: a
-condition, a function body (a stream), a bare pathname (a file), a body on a status that
-carries none, a header we refuse, or any error while encoding. So this can only do the plain
+condition, a function body (a stream), a bare pathname or an open file stream (a file), a
+body on a status that carries none, a header we refuse, or any error while encoding. So this can only do the plain
 case's work early, never decide something differently."
   (or (ignore-errors
        (when (and (consp result) (= 3 (length result)))
          (destructuring-bind (status headers body) result
-           (unless (or (functionp body) (pathnamep body)
+           (unless (or (functionp body) (pathnamep body) (typep body 'file-stream)
                        (and (h1:body-forbidden? status) (not (%empty-body-p body))))
              (let ((pieces (%encode-response status headers
                                              (%body-pieces (if (h1:body-forbidden? status)
@@ -867,6 +867,12 @@ left, and it is what every client renders as a truncated response -- the same an
 (defun %write-file-response (conn app state status headers path keep-alive)
   "Answer with the contents of PATH: Content-Length from the file, body in bounded pieces.
 
+PATH is a pathname, which is opened here, or an open octet input FILE-STREAM, which is
+closed like one opened here. Content-Length is the stream's FILE-LENGTH, the whole file, so a
+stream must be at its start; hyperion/static returns one that is. hyperion/static returns a
+stream (#314), because the file it checked has to be the file that is sent: a pathname is
+opened again here, after the check, and a link swapped in between would be followed.
+
 Returns :STREAMING -- the response has begun and this path owns the connection until
 %FILE-FINISH settles it, exactly as %STREAM-RESPONSE does. %COMPLETE must neither resume nor
 close it in the meantime.
@@ -874,37 +880,54 @@ close it in the meantime.
 The file is opened and the head encoded BEFORE anything is written, because that is the last
 moment a refusal can still become a 500. An unreadable file signals here, where %COMPLETE's
 handler turns it into a 500; after the head there is no status left to change."
-  (let ((stream (open path :element-type '(unsigned-byte 8) :direction :input
-                           :if-does-not-exist nil)))
+  (let ((stream (if (streamp path)
+                    path
+                    (open path :element-type '(unsigned-byte 8) :direction :input
+                               :if-does-not-exist nil))))
     (unless stream
       (error "hyperion/server-uv: the response body names a file that is not readable: ~A"
              path))
-    (let* ((size (file-length stream))
-           (encoded (h1:encode-head-flat status (%head-strings headers 'h1:encode-head-flat)
-                                         size keep-alive)))
-      (cond
-        ((not (h1:encode-ok? encoded))
-         (close stream)
-         ;; Same answer as %WRITE-RESPONSE: a header we will not put on the wire is an
-         ;; application bug, reported as a 500 and never sanitised. NIL, because
-         ;; H1:ENCODE-ERROR says Connection: close and the socket must agree.
-         (log:warn "server-uv: response refused" :reason (h1:encode-reason encoded))
-         (net:write-bytes conn (%latin1 (h1:encode-error 500)))
-         nil)
-        (t
-         ;; THE REQUEST IS STILL IN FLIGHT, and saying so is what keeps a pipelined peer
-         ;; from being answered into the middle of this body. %COMPLETE clears the flag
-         ;; before it returns, and %RESUME serves the next buffered request as soon as it is
-         ;; clear -- so without this the second of two pipelined requests has its head and
-         ;; chunks queued BETWEEN this body's pieces. Measured before the fix: a 307200-octet
-         ;; file came back with its first wrong octet at 4096, exactly one piece in, and the
-         ;; connection then closed. %FILE-FINISH clears it, immediately before deciding what
-         ;; becomes of the connection.
-         (setf (conn-state-in-flight state) t)
-         (let ((fo (%make-file-out :conn conn :app app :state state :stream stream
-                                   :keep-alive keep-alive :declared size)))
-           (%file-emit fo (%latin1 (h1:encode-text encoded)))
-           :streaming))))))
+    ;; Until the write callbacks own the stream, this function does: a refusal, or an
+    ;; error from FILE-LENGTH, the encoder or the first read, closes it here rather than
+    ;; leaving the descriptor to the finalizer.
+    (let ((owned-elsewhere nil))
+      (unwind-protect
+           (%write-file-head conn app state status headers stream keep-alive
+                             (lambda () (setf owned-elsewhere t)))
+        (unless owned-elsewhere (close stream))))))
+
+(defun %write-file-head (conn app state status headers stream keep-alive hand-off)
+  "%WRITE-FILE-RESPONSE's body once STREAM is open. HAND-OFF is called once the first piece
+has been read and written, when the write callbacks own STREAM; until then the caller closes
+it on the way out."
+  (let* ((size (file-length stream))
+         (encoded (h1:encode-head-flat status (%head-strings headers 'h1:encode-head-flat)
+                                       size keep-alive)))
+    (cond
+      ((not (h1:encode-ok? encoded))
+       ;; Same answer as %WRITE-RESPONSE: a header we will not put on the wire is an
+       ;; application bug, reported as a 500 and never sanitised. NIL, because
+       ;; H1:ENCODE-ERROR says Connection: close and the socket must agree.
+       (log:warn "server-uv: response refused" :reason (h1:encode-reason encoded))
+       (net:write-bytes conn (%latin1 (h1:encode-error 500)))
+       nil)
+      (t
+       ;; THE REQUEST IS STILL IN FLIGHT, and saying so is what keeps a pipelined peer
+       ;; from being answered into the middle of this body. %COMPLETE clears the flag
+       ;; before it returns, and %RESUME serves the next buffered request as soon as it is
+       ;; clear -- so without this the second of two pipelined requests has its head and
+       ;; chunks queued BETWEEN this body's pieces. Measured before the fix: a 307200-octet
+       ;; file came back with its first wrong octet at 4096, exactly one piece in, and the
+       ;; connection then closed. %FILE-FINISH clears it, immediately before deciding what
+       ;; becomes of the connection.
+       (setf (conn-state-in-flight state) t)
+       (let ((fo (%make-file-out :conn conn :app app :state state :stream stream
+                                 :keep-alive keep-alive :declared size)))
+         ;; The first piece is read inside %FILE-EMIT. Only once it has returned do the
+         ;; write callbacks own the stream, and %FILE-FINISH close it.
+         (%file-emit fo (%latin1 (h1:encode-text encoded)))
+         (funcall hand-off)
+         :streaming)))))
 
 ;;; --- one connection --------------------------------------------------------
 ;;;
@@ -1406,6 +1429,10 @@ one test of a flag and does not require every dispatcher to be correct.
 Returning early when the connection is already DONE matters for the same reason in the
 other direction: a peer that disconnected while its handler ran must not have a response
 written into a closed socket."
+  (unless (and (conn-state-in-flight state) (not (conn-state-done state)))
+    ;; Not written: a second answer to one request, or a peer that has gone. A file-stream
+    ;; body is closed now rather than by its finalizer (#314).
+    (%close-file-body result))
   (when (conn-state-in-flight state)
     (setf (conn-state-in-flight state) nil)
     ;; A request that arrived before a drain began is answered after it: its response still
@@ -1442,6 +1469,12 @@ written into a closed socket."
               (kept (%resume conn app state))
               (t (%close-after conn state)))))))
 
+(defun %close-file-body (result)
+  "Close RESULT's body when RESULT is a response triple whose body is a file stream."
+  (when (and (consp result) (consp (cdr result)) (consp (cddr result))
+             (typep (third result) 'file-stream))
+    (close (third result))))
+
 (defun %complete-response (conn app state result keep-alive head-request)
   "Write the response triple RESULT on the loop thread, and return what %COMPLETE resumes on:
 true to keep the connection, :STREAMING, or NIL to close it. HEAD-REQUEST is true for a HEAD
@@ -1457,6 +1490,7 @@ request, which gets the head only."
           (unless (%empty-body-p body)
             (log:warn "server-uv: dropped the body of a response whose status carries none"
                       :status status))
+          (when (typep body 'file-stream) (close body))
           (setf body nil))
         (cond
           ;; A HEAD REQUEST GETS THE HEAD ONLY, whatever body the handler
@@ -1467,18 +1501,24 @@ request, which gets the head only."
            (%write-head-only conn status headers :chunked keep-alive))
           ((and head-request (pathnamep body))
            (%write-head-only conn status headers (%file-size body) keep-alive))
+          ;; AN OPEN FILE (#314): what hyperion/static returns, the handle whose path it
+          ;; checked. HEAD gets its size, and the stream is closed unread.
+          ((and head-request (typep body 'file-stream))
+           (unwind-protect
+                (%write-head-only conn status headers (file-length body) keep-alive)
+             (close body)))
           (head-request
            (%write-head-only conn status headers
                              (length (%body-octets body)) keep-alive))
           ((functionp body)
            (%stream-response conn app state status headers body keep-alive))
-          ;; A BARE PATHNAME IS A FILE, and it gets the bounded path (pre-publication issue 313):
-          ;; a known Content-Length with the body written in pieces. A
-          ;; pathname INSIDE a list still goes through %BODY-OCTETS, because
-          ;; a list body is pieces to concatenate and there is one length for
-          ;; the lot -- hyperion/static returns the pathname itself, which is
-          ;; the case that matters.
-          ((pathnamep body)
+          ;; A BARE PATHNAME OR AN OPEN FILE STREAM IS A FILE, and it gets the
+          ;; bounded path (pre-publication issue 313): a known Content-Length with
+          ;; the body written in pieces. A pathname INSIDE a list still goes
+          ;; through %BODY-OCTETS, because a list body is pieces to concatenate
+          ;; and there is one length for the lot. hyperion/static returns the
+          ;; open file stream it checked (#314), which is the case that matters.
+          ((or (pathnamep body) (typep body 'file-stream))
            (%write-file-response conn app state status headers body
                                  keep-alive))
           (t
@@ -1893,14 +1933,47 @@ Clack -- owning the socket is what makes it available at all."
         ;; START has not returned a SERVER, so the caller has nothing to STOP: release what
         ;; was made here. Closing a loop closes its listener and stops its thread if it runs.
         (unless started
+          ;; A stuck loop is logged and left unfreed by %CLOSE-SHARD-LOOP. Any other failure is
+          ;; logged too, rather than hiding the error that made START fail.
           (loop for shard across shards
-                do (ignore-errors (uv:close-loop (shard-loop shard))))
+                for i from 0
+                when shard
+                  do (handler-case (%close-shard-loop shard i)
+                       (error (e)
+                         (log:warn "server-uv: a loop could not be closed after START failed"
+                                   :shard i :error (princ-to-string e)))))
           (when workers-pool
             (%stop-workers workers-pool)))))))
 
 (defparameter *stop-wait-seconds* 5
   "How long STOP waits for the loop threads to close the listeners and the open connections
 before it closes the loops regardless.")
+
+(defun %close-shard-loop (shard index)
+  "Close SHARD's loop, waiting up to *STOP-WAIT-SECONDS* for its thread. Returns T when the loop
+was freed. When the thread is still in a callback, the loop is left closed but unfreed (#694):
+this logs a warning naming the shard and the thread, and returns NIL. Freeing it then would let
+the callback use freed memory when it returns.
+
+The same applies when uv_loop_close still reports the loop busy after its handles were closed
+(#877): CLOSE-LOOP warns with LOOP-LEFT-UNFREED, and this logs that warning in place of the
+default printout and returns NIL."
+  (handler-bind ((uv:loop-thread-still-running
+                   (lambda (c)
+                     (log:warn "server-uv: a loop thread is still in a callback, so its loop is left unfreed"
+                               :shard index
+                               :thread (sb-thread:thread-name (uv:loop-thread-still-running-thread c))
+                               :timeout-seconds *stop-wait-seconds*)
+                     (invoke-restart 'uv:leave-loop-unfreed)))
+                 (uv:loop-left-unfreed
+                   (lambda (w)
+                     (log:warn "server-uv: libuv still reports the loop busy after its handles were closed, so it is left unfreed"
+                               :shard index
+                               :code (uv:loop-left-unfreed-code w)
+                               :open-handles (length (uv:loop-left-unfreed-handles w)))
+                     (muffle-warning w))))
+    (uv:close-loop (shard-loop shard) :timeout *stop-wait-seconds*))
+  (and (uv:loop-freed-p (shard-loop shard)) t))
 
 (defun begin-drain (server)
   "Begin draining SERVER (#388): it keeps accepting and answering, and every response from now
@@ -2042,9 +2115,13 @@ once (#463)."
                                      (shard-live shard))
                             (loop for (conn . state) in open do (%finish conn state))))
                         "the connections adopted during stop"))
-      (loop for shard across (server-shards server)
-            do (uv:close-loop (shard-loop shard)))
-      (setf (server-shards server) nil))
+      ;; A shard whose loop thread is still in a callback is not freed (#694): it is logged,
+      ;; left closed but unfreed, and kept, so a later STOP tries it again. The other shards and
+      ;; the workers are still stopped, so STOP always returns (#876's review).
+      (let ((stuck (loop for shard across (server-shards server)
+                         for i from 0
+                         unless (%close-shard-loop shard i) collect shard)))
+        (setf (server-shards server) (and stuck (coerce stuck 'vector)))))
     (when (server-workers server)
       (%stop-workers (server-workers server) (if overdue 0.1 *stop-wait-seconds*))
       (setf (server-workers server) nil))
@@ -2062,6 +2139,7 @@ a thread of its own, and STOP stops waiting for it after *STOP-WAIT-SECONDS* and
          ;; THREAD-LIFETIME: independent -- normally joined within *STOP-WAIT-SECONDS*; left
          ;; running, and logged, only when a handler never returns.
          (stopper (sb-thread:make-thread (lambda ()
+                                           (aion/dynamic:unblock-interrupts)
                                            (unwind-protect (pool:stop-pool workers)
                                              (sb-thread:signal-semaphore done)))
                                          :name "server-uv-stop-workers")))

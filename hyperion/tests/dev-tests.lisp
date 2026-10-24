@@ -165,6 +165,149 @@ and the editor droppings that appear beside a file on every save."
         (is (member (namestring (truename css)) changed :test #'string=)
             "editing a stylesheet must register as a change")))))
 
+;;; --- a save in the same second as the snapshot (#658) ----------------------
+;;;
+;;; FILE-WRITE-DATE has one-second resolution, so these tests do not rely on the clock to make
+;;; two writes fall in one second: after each write, the file is given the write date of a
+;;; reference file, so its date is the same before and after the edit, as it is when a save
+;;; lands in the same second as the snapshot.
+
+(defun %copy-write-date (from to)
+  "Give the file TO the write date of the file FROM, to the precision the file system keeps."
+  (if (uiop:os-windows-p)
+      (uiop:run-program (list "powershell" "-NoProfile" "-NonInteractive" "-Command"
+                              (format nil "(Get-Item -LiteralPath '~A').LastWriteTimeUtc = (Get-Item -LiteralPath '~A').LastWriteTimeUtc"
+                                      (uiop:native-namestring to) (uiop:native-namestring from))))
+      (uiop:run-program (list "touch" "-r" (uiop:native-namestring from)
+                              (uiop:native-namestring to)))))
+
+(defun %write-dated (path text reference)
+  (with-open-file (s path :direction :output :if-exists :supersede)
+    (write-string text s))
+  (%copy-write-date reference path))
+
+(test a-save-in-the-same-second-as-the-snapshot-is-a-change
+  "Every snapshot is taken as of the reference file's date, so a slow step, such as a cold
+PowerShell start in %COPY-WRITE-DATE, cannot move the file out of the window (the hub's review
+of #659)."
+  (%with-dev-tree (root)
+    (let ((css (merge-pathnames "resources/style.css" root))
+          (reference (merge-pathnames "reference.txt" root)))
+      (with-open-file (s reference :direction :output :if-exists :supersede) (write-string "r" s))
+      (%write-dated css "body{color:red}" reference)
+      (let* ((key (namestring (truename css)))
+             (now (file-write-date reference))
+             (before (hyperion/dev::%snapshot (list root) :now now)))
+        ;; The same size, other content: only the hash can tell.
+        (%write-dated css "body{color:tan}" reference)
+        (let ((after (hyperion/dev::%snapshot (list root) :now now)))
+          ;; The control: the dates are equal, so the comparison of dates alone, which this
+          ;; replaced, reported no change.
+          (is (= (first (gethash key before)) (first (gethash key after))))
+          (is (eql (second (gethash key before)) (second (gethash key after))))
+          (is (member key (hyperion/dev::%changed-files before after) :test #'string=)
+              "a save with the same date and size must register as a change")
+          ;; Nothing written since: no change.
+          (is (null (hyperion/dev::%changed-files
+                     after (hyperion/dev::%snapshot (list root) :now now)))))
+        ;; Another size, the same date.
+        (let ((before (hyperion/dev::%snapshot (list root) :now now)))
+          (%write-dated css "body{color:rebeccapurple}" reference)
+          (is (member key (hyperion/dev::%changed-files
+                           before (hyperion/dev::%snapshot (list root) :now now))
+                      :test #'string=)))))))
+
+(test only-a-recently-written-file-is-hashed
+  "A file written more than *RECENT-SECONDS* before the snapshot is only dated: no size and no
+hash, so it is neither stat'ed for them nor opened. Its date would have moved had it been
+rewritten since."
+  (%with-dev-tree (root)
+    (let* ((css (merge-pathnames "resources/style.css" root))
+           (date (file-write-date css)))
+      (is (integerp (third (hyperion/dev::%file-state css date))))
+      (is (equal (list date nil :old)
+                 (hyperion/dev::%file-state css (+ date hyperion/dev:*recent-seconds* 1)))))))
+
+(test a-file-that-is-not-a-regular-file-is-never-read
+  "The hub's review of #659: a recent file is stat'ed before it is read, and only a regular
+file is read. A directory stands for a FIFO on every platform. On Linux and macOS a real FIFO
+under a watched root must not block the snapshot: opening one waits for a writer that never
+comes, and the reloader would wait with its lock held."
+  (%with-dev-tree (root)
+    (is (eq :not-regular (hyperion/dev::%regular-size root)))
+    (is (equal '(:not-regular :not-regular) (hyperion/dev::%content root)))
+    (is (null (hyperion/dev::%regular-size (merge-pathnames "no-such-file" root))))
+    #+win32 (skip "No FIFO on Windows; the directory above is the same case")
+    #-win32
+    (let ((fifo (merge-pathnames "resources/pipe.css" root)))
+      (uiop:run-program (list "mkfifo" (uiop:native-namestring fifo)))
+      (is (equal '(:not-regular :not-regular) (hyperion/dev::%content fifo))
+          "%CONTENT reads a FIFO's status, not the FIFO")
+      (let* ((result nil)
+             (thread (sb-thread:make-thread
+                      (lambda () (setf result (hyperion/dev::%snapshot (list root))))
+                      :name "fifo snapshot")))
+        (unwind-protect
+             (progn
+               (is (sb-thread:join-thread thread :timeout 10 :default nil)
+                   "the snapshot blocked on a FIFO")
+               ;; Keys are spelled as the directory listing spells them, so look by name.
+               ;; A listing that leaves FIFOs out is fine: the snapshot then never sees one.
+               (when result
+                 (maphash (lambda (key state)
+                            (when (string= "pipe.css" (file-namestring key))
+                              (is (equal '(:not-regular :not-regular) (rest state))
+                                  "the FIFO is recorded as not a regular file: ~S" state)))
+                          result)))
+          ;; A snapshot stuck in open is released by a writer, so the suite does not hang.
+          (when (sb-thread:thread-alive-p thread)
+            (ignore-errors
+             (with-open-file (out fifo :direction :output :if-exists :append)
+               (write-string "x" out)))))))))
+
+(test a-file-over-the-hash-limit-is-not-hashed
+  "The hub's review of #659: a recent file larger than +HASH-LIMIT+ is not read on each poll.
+Its state records :LARGE, and with the same date and size it counts as unchanged."
+  (%with-dev-tree (root)
+    (let ((big (merge-pathnames "resources/big.bin" root)))
+      (with-open-file (out big :direction :output :element-type '(unsigned-byte 8))
+        (write-sequence (make-array (1+ hyperion/dev::+hash-limit+)
+                                    :element-type '(unsigned-byte 8) :initial-element 7)
+                        out))
+      (let ((state (hyperion/dev::%file-state big (file-write-date big))))
+        (is (equal (list (1+ hyperion/dev::+hash-limit+) :large) (rest state)))
+        (is-true (hyperion/dev::%same-file-p big state state))
+        (is-false (hyperion/dev::%same-file-p big state (list (first state) 5 :large))
+                  "another size is still a change")))))
+
+(test a-recent-file-whose-content-was-not-read-counts-as-changed
+  "Copilot's review of #659: a recent file that could not be read, as when an editor replaces it,
+has no known content, and the next poll with the same date and size is a change, not proof that
+nothing changed. A file skipped because it is old is the same."
+  (%with-dev-tree (root)
+    (let* ((css (merge-pathnames "resources/style.css" root))
+           (now (hyperion/dev::%file-state css (file-write-date css))))
+      (destructuring-bind (date size hash) now
+        (is (integerp hash))
+        (is-false (hyperion/dev::%same-file-p css (list date size :unreadable) now))
+        (is-true (hyperion/dev::%same-file-p css (list date size :old) now))
+        (is-true (hyperion/dev::%same-file-p css now now))))))
+
+(test a-hash-the-snapshot-did-not-take-is-taken-when-the-dates-match
+  "A poll more than *RECENT-SECONDS* after a save that kept its date still compares content:
+the hash is computed then, because the earlier snapshot has one."
+  (%with-dev-tree (root)
+    (let ((css (merge-pathnames "resources/style.css" root))
+          (reference (merge-pathnames "reference.txt" root)))
+      (with-open-file (s reference :direction :output :if-exists :supersede) (write-string "r" s))
+      (%write-dated css "body{color:red}" reference)
+      (let ((old (hyperion/dev::%file-state css (file-write-date css))))
+        (%write-dated css "body{color:tan}" reference)
+        (let ((late (hyperion/dev::%file-state
+                     css (+ (file-write-date css) hyperion/dev:*recent-seconds* 1))))
+          (is (eq :old (third late)))
+          (is-false (hyperion/dev::%same-file-p css old late)))))))
+
 ;;;; ---------------------------------------------------------------------------
 ;;;; The hyperion/dev cluster: pre-publication issue 157 pre-publication issue 233 pre-publication issue 234 pre-publication issue 235 pre-publication issue 236 pre-publication issue 237.
 ;;;;
@@ -428,6 +571,138 @@ stylesheet change clears the error while the file still has never loaded -- the 
     (%write-dev-file root "style.css" "body{}")
     (is (eq :reloaded (hyperion/dev:reload! d)))
     (is (null (hyperion/dev::dev-last-error d)))))
+
+;;; --- #730: a limit on how many files are watched ------------------------------------------
+
+(defun %occurrences (needle haystack)
+  "How many times NEEDLE occurs in HAYSTACK, not overlapping."
+  (loop with start = 0 for at = (search needle haystack :start2 start)
+        while at count t do (setf start (+ at (length needle)))))
+;;;
+;;; The watcher snapshots every file under its roots on every poll. A test that watched the
+;;; whole temporary directory exhausted a 4 GB heap on a developer's Mac, and the backtrace
+;;; named whatever allocated last. Past the limit the walk stops and names the root.
+
+(defun %dev-root-of (n)
+  "A fresh root holding N files."
+  (let ((root (%fresh-dev-root)))
+    (dotimes (i n root)
+      (with-open-file (s (merge-pathnames (format nil "f~D.txt" i) root) :direction :output
+                                                                          :if-exists :supersede)
+        (write-string "x" s)))))
+
+(test a-root-over-the-file-limit-is-named-with-its-count
+  (let ((root (%dev-root-of 5)))
+    (unwind-protect
+         (let ((c (handler-case (progn (hyperion/dev::%snapshot (list root) :limit 3) nil)
+                    (hyperion/dev:watch-too-large (c) c))))
+           (is-true c "five files under a limit of three signalled nothing")
+           (when c
+             (is (equal (namestring (truename root))
+                        (namestring (hyperion/dev:watch-too-large-root c))))
+             (is (eql 4 (hyperion/dev:watch-too-large-count c)) "counting stops just past the limit")
+             (is (eql 3 (hyperion/dev:watch-too-large-limit c)))
+             (is (search (namestring (truename root)) (princ-to-string c))
+                 "the message names the root: ~A" c)
+             (is (search "watched roots have more than 3 files" (princ-to-string c))
+                 "the message says the limit is on all the roots together: ~A" c)))
+      (ignore-errors (aion/fs:delete-tree root)))))
+
+(test a-root-at-the-file-limit-is-watched
+  "The control for the test above: the same walk, with the limit equal to the file count."
+  (let ((root (%dev-root-of 5)))
+    (unwind-protect
+         (let ((h (hyperion/dev::%snapshot (list root) :limit 5)))
+           (is (eql 5 (hash-table-count h))))
+      (ignore-errors (aion/fs:delete-tree root)))))
+
+(test the-file-limit-counts-across-roots
+  (let ((a (%dev-root-of 3)) (b (%dev-root-of 3)))
+    (unwind-protect
+         (let ((c (handler-case (progn (hyperion/dev::%snapshot (list a b) :limit 5) nil)
+                    (hyperion/dev:watch-too-large (c) c))))
+           (is-true c "six files across two roots under a limit of five signalled nothing")
+           (when c
+             (is (equal (namestring (truename b))
+                        (namestring (hyperion/dev:watch-too-large-root c)))
+                 "the root named is the one being walked when the count passed the limit")
+             (is (eql 6 (hyperion/dev:watch-too-large-count c)))))
+      (ignore-errors (aion/fs:delete-tree a))
+      (ignore-errors (aion/fs:delete-tree b)))))
+
+(test watch-refuses-a-root-over-the-limit-before-building
+  (let ((root (%dev-root-of 5)) (built nil) (before hyperion/dev::*dev*))
+    (unwind-protect
+         (progn
+           (signals hyperion/dev:watch-too-large
+             (hyperion/dev:watch (lambda () (setf built t) nil) :paths (list root) :file-limit 3))
+           (is-false built "the builder ran for a watch that was refused")
+           (is (eq before hyperion/dev::*dev*) "a refused watch was left as the active one"))
+      (ignore-errors (aion/fs:delete-tree root)))))
+
+(test a-refused-watch-leaves-the-previous-dev-server-running
+  (let* ((root (%dev-root-of 5))
+         (previous (hyperion/dev::make-dev :builder (lambda () nil) :paths (list root)))
+         (hyperion/dev::*dev* previous))
+    (unwind-protect
+         (progn
+           (signals hyperion/dev:watch-too-large
+             (hyperion/dev:watch (lambda () nil) :paths (list root) :file-limit 3))
+           (is (eq previous hyperion/dev::*dev*) "the refused watch replaced the previous one")
+           (is-true (hyperion/dev::dev-running previous) "the refused watch stopped the previous one"))
+      (ignore-errors (aion/fs:delete-tree root)))))
+
+(test a-root-that-grows-past-the-limit-keeps-the-last-snapshot-and-reports-it
+  (%with-dev-reloader (d root)
+    (setf (hyperion/dev::dev-file-limit d) 3)
+    (%write-dev-file root "a.css" "a{}")
+    (is (eq :reloaded (hyperion/dev:reload! d)))
+    (let ((kept (hyperion/dev::dev-snapshot d)))
+      (dolist (name '("b.css" "c.css" "d.css"))
+        (with-open-file (s (merge-pathnames name root) :direction :output) (write-string "b{}" s)))
+      (is (eq :error (hyperion/dev:reload! d)))
+      (is (eq kept (hyperion/dev::dev-snapshot d)) "the snapshot over the limit replaced the last one")
+      (let ((err (hyperion/dev::dev-last-error d)))
+        (is (and err (search (namestring (truename root)) err)) "the overlay names the root: ~A" err))
+      (is (eq :error (hyperion/dev:reload! d)) "it stays an error while over the limit")
+      (delete-file (merge-pathnames "d.css" root))
+      (hyperion/dev:reload! d)
+      (is (null (hyperion/dev::dev-last-error d)) "back within the limit, the error is cleared"))))
+
+(test the-file-limit-message-is-printed-once-while-over-the-limit
+  (%with-dev-reloader (d root)
+    (setf (hyperion/dev::dev-file-limit d) 1)
+    (dolist (name '("a.css" "b.css"))
+      (with-open-file (s (merge-pathnames name root) :direction :output) (write-string "a{}" s)))
+    (let ((printed (with-output-to-string (*error-output*)
+                     (hyperion/dev:reload! d)
+                     (hyperion/dev:reload! d)
+                     (hyperion/dev:reload! d))))
+      (is (= 1 (%occurrences "watched roots have more than" printed))
+          "three polls over the limit printed: ~A" printed))))
+
+(test a-compile-error-is-shown-again-once-back-within-the-file-limit
+  (%with-dev-reloader (d root)
+    (setf (hyperion/dev::dev-file-limit d) 3)
+    (%write-dev-file root "app.lisp" +dev-438-bad+)
+    (is (eq :error (hyperion/dev:reload! d)))
+    (let ((compile-error (hyperion/dev::dev-last-error d)))
+      (is (and compile-error (search "app.lisp did not reload" compile-error)))
+      (dolist (name '("b.css" "c.css" "d.css"))
+        (with-open-file (s (merge-pathnames name root) :direction :output) (write-string "b{}" s)))
+      (is (eq :error (hyperion/dev:reload! d)))
+      (is (search "watched roots have more than" (hyperion/dev::dev-last-error d))
+          "over the limit, the overlay shows the limit")
+      ;; Remove every file added since, so the next snapshot equals the one kept and nothing
+      ;; is recompiled: the error can only come back from what was saved, not from a new compile.
+      (dolist (name '("b.css" "c.css" "d.css")) (delete-file (merge-pathnames name root)))
+      (is (eq :no-change (hyperion/dev:reload! d)))
+      (is (equal compile-error (hyperion/dev::dev-last-error d))
+          "back within the limit, the compile error is shown again"))))
+
+(test the-default-file-limit-is-set
+  (is (integerp hyperion/dev:*watch-file-limit*))
+  (is (>= hyperion/dev:*watch-file-limit* 10000)))
 
 (test a-structure-that-changes-layout-asks-for-a-restart
   (%with-dev-reloader (d root)

@@ -131,8 +131,8 @@ it has a complete response -- so every request on a keep-alive connection stalls
 delayed-ACK timer. On Hunchentoot that measured a flat p50 of 44 ms per request; the same
 server, same bytes, with Content-Length set: 0.17 ms. See hyperion/bench/ and ADR-0011.
 
-Bodies that are NOT a fully-known sequence -- a function (streamed), a pathname -- are left
-strictly alone: they must stay chunked, because their length is not knowable up front. SSE
+Bodies that are NOT a fully-known sequence -- a function (streamed), a pathname, an open
+file stream -- are left strictly alone: they must stay chunked, because their length is not knowable up front. SSE
 in particular depends on that."
   (lambda (env)
     (let ((res (funcall app env)))
@@ -159,6 +159,9 @@ a TYPE-ERROR on the Woo or Hunchentoot it is deployed to -- after it has been wr
 tested and shipped, naming a Clack internal rather than anything its author did. That is
 worse than not supporting streaming on those backends at all, which is why the adapter lands
 with the convention rather than after it.
+
+A body that is an open FILE-STREAM -- what hyperion/static returns (#314) -- is adapted by
+%FILE-STREAM-RESPONSE, with Content-Length measured from the stream.
 
 Clack's protocol is the other shape: the RESPONSE may be a function taking a responder, and
 the responder returns a writer of (chunk &key close). Hyperion keeps the response a
@@ -189,19 +192,69 @@ rather than a discovery, and it is the sharpest argument for the native path tha
 performance argument."
   (lambda (env)
     (let ((res (funcall app env)))
-      (if (and (consp res) (= (length res) 3) (functionp (third res)))
-          (destructuring-bind (status headers body) res
-            (lambda (responder)
-              (let ((writer (funcall responder (list status headers))))
-                (funcall body (lambda (chunk)
-                                ;; An empty chunk is a no-op, matching the native path: a
-                                ;; handler writing "" is an ordinary accident and must not
-                                ;; be mistaken for the end of the stream.
-                                (when (and chunk (plusp (length chunk)))
-                                  (funcall writer chunk))))
-                ;; Reached only on normal completion -- see the docstring.
-                (funcall writer "" :close t))))
-          res))))
+      (if (and (consp res) (= (length res) 3) (typep (third res) 'file-stream))
+          (%file-stream-response res (eq :head (getf env :request-method)))
+          (%function-body-response res)))))
+
+(defparameter *file-piece-octets* 65536
+  "How many octets %FILE-STREAM-RESPONSE reads from a file and writes at a time.")
+
+(defun %file-stream-response (res head-request)
+  "RES, whose body is an open octet input FILE-STREAM, as Clack's responder protocol: the head
+with Content-Length from the stream, then the file in pieces of *FILE-PIECE-OCTETS*. The
+stream is closed when this is done or fails. HEAD-REQUEST writes the head only.
+
+A stream body is what hyperion/static returns (#314): the handle whose path it checked, so
+the file sent is the file checked. A Clack backend takes a pathname and opens it again later,
+which is the gap that check closes, so the stream is written here instead. Hunchentoot sends
+the Content-Length; Woo sends any responder-written body chunked and drops it."
+  (destructuring-bind (status headers stream) res
+    (lambda (responder)
+      (unwind-protect
+           (let* ((size (file-length stream))
+                  (writer (funcall responder
+                                   (list status (list* :content-length size
+                                                       (%without-content-length headers))))))
+             (unless head-request
+               (let ((buffer (make-array (min size *file-piece-octets*)
+                                         :element-type '(unsigned-byte 8)))
+                     (left size))
+                 (loop while (plusp left)
+                       do (let ((n (read-sequence buffer stream
+                                                  :end (min left (length buffer)))))
+                            ;; A file that shrank. Signalling makes the backend drop the
+                            ;; connection, which tells the client the body is short; ending
+                            ;; normally would leave a kept-alive connection owing octets.
+                            (when (zerop n)
+                              (error "hyperion/server: the file ended after ~D of its ~D octets"
+                                     (- size left) size))
+                            (funcall writer (subseq buffer 0 n))
+                            (decf left n)))))
+             (funcall writer "" :close t))
+        (close stream)))))
+
+(defun %without-content-length (headers)
+  "HEADERS without any Content-Length, which %FILE-STREAM-RESPONSE replaces with the measured one."
+  (loop for (name value) on headers by #'cddr
+        unless (string-equal "content-length" (if (stringp name) name (symbol-name name)))
+          nconc (list name value)))
+
+(defun %function-body-response (res)
+  "RES as is, unless its body is a function: then the function adapted onto Clack's responder
+protocol. See WRAP-STREAMING-BODY."
+  (if (and (consp res) (= (length res) 3) (functionp (third res)))
+      (destructuring-bind (status headers body) res
+        (lambda (responder)
+          (let ((writer (funcall responder (list status headers))))
+            (funcall body (lambda (chunk)
+                            ;; An empty chunk is a no-op, matching the native path: a
+                            ;; handler writing "" is an ordinary accident and must not
+                            ;; be mistaken for the end of the stream.
+                            (when (and chunk (plusp (length chunk)))
+                              (funcall writer chunk))))
+            ;; Reached only on normal completion -- see the docstring.
+            (funcall writer "" :close t))))
+      res))
 
 (defun %uv-call (name &rest args)
   "Call NAME in HYPERION/SERVER-UV, a system this one deliberately does not depend on.
@@ -585,11 +638,13 @@ default on loopback, and HYPERION/DESKTOP:RUN-APP always has."
 ;;;            Ouranos Claude (macOS) on #188).
 
 (defstruct (clack-server (:constructor %make-clack-server) (:copier nil))
-  "What START returns for a Clack backend. STOP takes it."
+  "What START returns for a Clack backend. STOP takes it. STOPPING is set by the first STOP,
+so that only that one terminates THREAD (#502)."
   (thread nil)
   (server nil)
   (host nil)
-  (port nil))
+  (port nil)
+  (stopping nil))
 
 (defparameter +address-taken-errnos+
   #+linux '(98) #+darwin '(48)
@@ -720,12 +775,13 @@ when another Woo server is running, and register the new thread, in one critical
         (%refuse-second-woo host port)
         ;; THREAD-LIFETIME: independent -- a backend server thread; see the comment at the
         ;; call in %CLACK-START.
-        (let ((thread (sb-thread:make-thread function :name name)))
+        (let ((thread (sb-thread:make-thread (lambda () (aion/dynamic:unblock-interrupts) (funcall function))
+                                             :name name)))
           (push (list thread host port) *woo-servers*)
           thread))
       ;; THREAD-LIFETIME: independent -- a backend server thread; see the comment at the
       ;; call in %CLACK-START.
-      (sb-thread:make-thread function :name name)))
+      (sb-thread:make-thread (lambda () (aion/dynamic:unblock-interrupts) (funcall function)) :name name)))
 
 ;;; --- status lines Woo cannot write (#372) ------------------------------------
 ;;;
@@ -897,6 +953,20 @@ on the way out. Waiting for the thread is what makes the socket closed when STOP
     (ignore-errors (sb-thread:terminate-thread thread))
     (ignore-errors (sb-thread:join-thread thread :timeout 10 :default nil))))
 
+(defun %stop-clack-handler (handler)
+  "Stop HANDLER, a CLACK-SERVER, when STOP may be called for it more than once at a time.
+
+Only the first call terminates the thread; a later call waits for it to end. Terminating it
+again would interrupt the backend's cleanup while it runs. Under Hunchentoot that cleanup is
+HUNCHENTOOT:STOP, and interrupted before it sets the acceptor's shutdown flag, it leaves the
+listener thread accepting on the port with nothing left to stop it. hyperion/dev reaches this:
+SERVE with :BLOCK calls UNWATCH when its wait ends, which is right after an UNWATCH from another
+thread, and both stop the same server (#502)."
+  (let ((thread (clack-server-thread handler)))
+    (if (null (sb-ext:compare-and-swap (clack-server-stopping handler) nil t))
+        (%stop-clack-server thread)
+        (ignore-errors (sb-thread:join-thread thread :timeout 10 :default nil)))))
+
 (defun stop (handler &key (drain-timeout 0))
   "Stop a server started by START -- either kind.
 
@@ -904,14 +974,26 @@ DRAIN-TIMEOUT, in seconds, is passed to the native :uv server, which then stops 
 waits that long for requests in flight to finish (#388). The Clack backends stop as they always
 have, whatever it says: they have no drain to wait for.
 
+On a Clack backend STOP may be called more than once, from more than one thread at the same
+time: the first call stops the server, and the others wait for that to finish (#502).
+
 Dispatches on the HANDLER, not on a remembered backend name, because the handler is what
 callers actually hold: SERVE-FOREVER keeps it in a session, apps keep it in a variable, and
 a STOP that also needed the name would be a second value to thread through every one of
 them."
   (cond
     ((%uv-server-p handler) (%uv-call "STOP" handler :drain-timeout drain-timeout))
-    ((clack-server-p handler) (%stop-clack-server (clack-server-thread handler)) t)
+    ((clack-server-p handler) (%stop-clack-handler handler) t)
     (t (clack:stop handler))))
+
+(defun handler-port (handler)
+  "The port a server started by START listens on, or NIL when HANDLER does not say. The native
+:uv server reports the port it bound, which is the one the operating system chose when START was
+given port 0. A Clack backend reports the port START was given (#700)."
+  (cond
+    ((%uv-server-p handler) (%uv-call "SERVER-PORT" handler))
+    ((clack-server-p handler) (clack-server-port handler))
+    (t nil)))
 
 ;;; --- running in the foreground --------------------------------------------
 ;;;
@@ -1007,6 +1089,9 @@ uv_signal_t handler (pre-publication issue 117), or (constantly (lambda () nil))
   (reason nil)
   ;; How many stop signals have arrived. A second SIGTERM ends the drain's grace period early.
   (signals 0)
+  ;; GET-INTERNAL-REAL-TIME when the first stop signal arrived, or NIL. The grace period is
+  ;; counted from here, not from when the wait loop next looks at STOPPING (#540).
+  (signalled-at nil)
   ;; The grace period has begun: the readiness path answers 503 from now on.
   (draining nil))
 
@@ -1037,8 +1122,11 @@ Safe from any thread, and safe from a signal handler."
 ;;; not in REQUEST-SHUTDOWN where a caller would reasonably add a lock.
 (defun request-shutdown-from-signal (session &optional (reason :sigterm))
   "REQUEST-SHUTDOWN, from a signal context, for REASON (:SIGTERM or :SIGINT). Must remain
-lock-free and allocation-free: it sets three slots, one of them to a keyword constant."
+lock-free and allocation-free: it sets four slots, one to a keyword constant and one, on the
+first signal only, to GET-INTERNAL-REAL-TIME, a fixnum."
   (setf (server-session-reason session) reason)
+  (when (zerop (server-session-signals session))
+    (setf (server-session-signalled-at session) (get-internal-real-time)))
   (incf (server-session-signals session))
   (setf (server-session-stopping session) t)
   t)
@@ -1097,15 +1185,21 @@ DNS-rebinding page can read whatever that path returns."
 (defun %drain-grace (session handler seconds)
   "The first phase of a drain on SIGTERM (#388): keep serving for SECONDS, with the readiness
 path answering 503 and, on :uv, every response closing its connection. A second SIGTERM ends it
-early. Logged once."
+early. Logged once.
+
+The SECONDS are counted from when the signal arrived, and the last sleep ends at the deadline
+rather than at the next poll (#540). Counted from when the wait loop noticed the signal, and
+ended on a poll, the grace period ran up to two *SHUTDOWN-POLL-INTERVAL*s longer than asked,
+and a load balancer that stops sending after SECONDS could still reach an open listener."
   (setf (server-session-draining session) t)
   (when (%uv-server-p handler) (%uv-call "BEGIN-DRAIN" handler))
   (log:info "hyperion/server: SIGTERM received; still serving during the drain grace period"
             :seconds seconds)
-  (loop with deadline = (+ (get-internal-real-time) (* seconds internal-time-units-per-second))
-        while (and (< (get-internal-real-time) deadline)
-                   (< (server-session-signals session) 2))
-        do (sleep *shutdown-poll-interval*)))
+  (loop with deadline = (+ (or (server-session-signalled-at session) (get-internal-real-time))
+                           (round (* seconds internal-time-units-per-second)))
+        for left = (/ (- deadline (get-internal-real-time)) internal-time-units-per-second)
+        while (and (plusp left) (< (server-session-signals session) 2))
+        do (sleep (min left *shutdown-poll-interval*))))
 
 (defun serve-forever (app &key (server (default-server)) (port *default-port*)
                                (host "127.0.0.1") debug (log t) (security-headers t)

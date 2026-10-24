@@ -155,7 +155,7 @@ linux_sbcl_url() {
 }
 
 # Whether SBCL publishes no Linux binary for this machine at the pinned version. SBCL does
-# not build a Linux binary for every architecture: no 2.6.x release up to 2.6.8 has one for
+# not build a Linux binary for every architecture: no 2.6.x release up to 2.6.9 has one for
 # arm64 (#9). This asks the download server rather than keeping a list, so it stays right
 # when a release adds or drops one. Only a 404 counts as "not published"; any other failure
 # is left for the download itself to report, because it is usually a mirror problem that a

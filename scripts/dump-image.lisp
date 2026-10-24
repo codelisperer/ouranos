@@ -62,7 +62,15 @@ as bin/cons does for its REPL targets."
     (uiop:call-image-restore-hook)
     (funcall entry)))
 
-(defun dump-executable (path entry &key compression debugger)
+(defun %mark-development-runner (development-runner)
+  "Put :OURANOS-DEVELOPMENT-RUNNER on *FEATURES* when DEVELOPMENT-RUNNER, and take it off
+otherwise, so the image about to be dumped carries the mark only when asked to.
+aion/platform:development-runner-p reads it, and aion/platform:shipped-image-p is false while it
+is there (#703). Taking it off matters for a dump made from inside bin/cons, which carries it."
+  (setf *features* (remove :ouranos-development-runner *features*))
+  (when development-runner (push :ouranos-development-runner *features*)))
+
+(defun dump-executable (path entry &key compression debugger development-runner)
   "Dump this image to PATH as an executable that calls ENTRY, a function designator, when it
 starts. Does not return: `save-lisp-and-die' ends this process.
 
@@ -73,7 +81,11 @@ environment it runs in rather than the one it was dumped in.
 COMPRESSION, when true, is passed to `save-lisp-and-die' as :COMPRESSION, for an SBCL built
 with core compression; it is not passed at all otherwise (#287).
 
-DEBUGGER, false by default, keeps SBCL's debugger in the image; see %TOPLEVEL (#495)."
+DEBUGGER, false by default, keeps SBCL's debugger in the image; see %TOPLEVEL (#495).
+
+DEVELOPMENT-RUNNER, false by default, marks the image as one that runs apps in development
+rather than a shipped build; only bin/cons passes it. See %MARK-DEVELOPMENT-RUNNER (#703)."
+  (%mark-development-runner development-runner)
   (uiop:call-image-dump-hook)
   (apply #'sb-ext:save-lisp-and-die
          path
@@ -82,10 +94,11 @@ DEBUGGER, false by default, keeps SBCL's debugger in the image; see %TOPLEVEL (#
          :save-runtime-options t
          (and compression (list :compression compression))))
 
-(defun dump-core (path entry &key debugger)
+(defun dump-core (path entry &key debugger development-runner)
   "Dump this image to PATH as a core with no runtime in it, which calls ENTRY when it starts.
-Does not return. The same hooks as DUMP-EXECUTABLE, and the same DEBUGGER argument. The heap and
-the command line are the launcher's to set: see this file's header."
+Does not return. The same hooks as DUMP-EXECUTABLE, and the same DEBUGGER and DEVELOPMENT-RUNNER
+arguments. The heap and the command line are the launcher's to set: see this file's header."
+  (%mark-development-runner development-runner)
   (uiop:call-image-dump-hook)
   (sb-ext:save-lisp-and-die
    path

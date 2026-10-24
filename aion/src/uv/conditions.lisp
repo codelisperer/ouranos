@@ -67,6 +67,48 @@ during shutdown is the defect class this condition exists because of (pre-public
 the CALLER knows whether dropping that work is correct, so the caller has to say
 so. A teardown path that legitimately drops it handles this and says why."))
 
+(define-condition loop-thread-still-running (error)
+  ((loop :initarg :loop :reader loop-thread-still-running-loop)
+   (thread :initarg :thread :reader loop-thread-still-running-thread)
+   (timeout :initarg :timeout :reader loop-thread-still-running-timeout))
+  (:report
+   (lambda (c stream)
+     (format stream "The loop thread ~S did not exit within ~A seconds of being asked to stop; a callback on it is still running, so the loop was not freed."
+             (sb-thread:thread-name (loop-thread-still-running-thread c))
+             (loop-thread-still-running-timeout c))))
+  (:documentation
+   "STOP-LOOP-THREAD asked the loop thread to exit and it was still running when TIMEOUT
+ran out, because a callback on it had not returned (#694).
+
+Ours, not libuv's, so it is not a UV-ERROR. CLOSE-LOOP signals it rather than freeing the
+loop: freeing a uv_loop_t and its handles while a callback still runs on them makes libuv
+use freed memory when the callback returns, and the corruption appears later somewhere
+unrelated. CLOSE-LOOP offers two restarts, WAIT-FOR-LOOP-THREAD and LEAVE-LOOP-UNFREED, and a
+later CLOSE-LOOP finishes the teardown once the thread has exited."))
+
+(define-condition loop-left-unfreed (warning)
+  ((loop :initarg :loop :reader loop-left-unfreed-loop)
+   (code :initarg :code :reader loop-left-unfreed-code
+         :documentation "uv_loop_close's last result, a negative libuv error code.")
+   (handles :initarg :handles :reader loop-left-unfreed-handles
+            :documentation "The kind of each handle still on the loop, as a keyword."))
+  (:report
+   (lambda (c stream)
+     (let ((handles (loop-left-unfreed-handles c)))
+       (format stream "uv_loop_close still returned ~A after CLOSE-LOOP closed the handles it found and tried again. ~D handle~:P still open~@[: ~{~(~A~)~^, ~}~]. The loop was left unfreed, which leaks its memory, because freeing it while libuv still uses it corrupts memory elsewhere."
+               (ffi:uv-err-name (loop-left-unfreed-code c))
+               (length handles)
+               handles))))
+  (:documentation
+   "CLOSE-LOOP could not close LOOP's uv_loop_t, so it did not free it (#877).
+
+uv_loop_close returns UV_EBUSY while a handle or a request is still open on the loop. CLOSE-LOOP
+then closes every handle it finds with uv_walk, runs the loop so their close callbacks fire,
+and tries again. This warning means that did not work in the attempts allowed, usually because
+a request (a filesystem operation in libuv's thread pool, for instance) was still running. A
+warning and not an error: the loop is unusable either way, and the leak is the safe outcome. A
+later CLOSE-LOOP tries again. A caller that logs can handle this condition and log it."))
+
 (defparameter *error-classes*
   '(("ENOENT" . file-not-found)
     ("EACCES" . permission-denied)

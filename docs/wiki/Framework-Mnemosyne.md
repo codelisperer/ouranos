@@ -403,7 +403,7 @@ application's own runtime.
 
 - [Framework Hyperion](Framework-Hyperion.md) — the web framework; sessions behind a `store` protocol that a
   mnemosyne-backed store implements
-- [Framework Praxeon](Framework-Praxeon.md) — Kairos and the agent memory built on top of this layer
+- [Framework Praxeon](Framework-Praxeon.md) — the agent memory store built on this layer (`praxeon/memory-db`), and Kairos, which is planned
 - [Home](Home.md) — the ecosystem overview and the DAG rule
 - In the repository: `mnemosyne/docs/user-guide.md`, `mnemosyne/docs/xtdb-notes.md`,
   `docs/coalton-patterns.md`

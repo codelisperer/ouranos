@@ -7,7 +7,9 @@
 ;;;; caller already wrote the schema down when it built the tool-spec.
 ;;;;
 ;;;; So: force the named tool, take the arguments the model returned, and check them against
-;;;; that spec before handing them back.
+;;;; that spec before handing them back. A provider that cannot force a tool but takes a schema
+;;;; as response_format is asked that way instead, and the JSON object in its reply's text is
+;;;; checked the same way (#680).
 ;;;;
 ;;;; NO PARTIAL RESULTS. A half-valid record is the failure this exists to remove, so a
 ;;;; result that fails validation is signalled rather than returned with the bad fields
@@ -157,6 +159,180 @@ first and the caller's checks see arguments that are at least the right shape."
               for problem = (funcall validator arguments)
               when problem collect problem))))
 
+;;; --- a schema sent as response_format (#680) --------------------------------
+;;;
+;;; A provider may refuse some schemas in response_format, and says which through
+;;; RESPONSE-FORMAT-SCHEMA-PROBLEM, which llm.lisp defines with the rest of the provider
+;;; protocol. SCHEMA-RECURSION finds a recursive schema: one whose $ref chain leads back to a
+;;; schema it started from. A provider that refuses recursive schemas calls it from its method.
+
+(defparameter +data-keywords+ '("examples" "default" "const" "enum")
+  "Schema keywords whose values are JSON data, not schemas. A $ref or $anchor inside one is
+part of an example or a constant and refers to nothing (#686).")
+
+(defparameter +named-schema-keywords+
+  '("properties" "patternProperties" "$defs" "definitions" "dependentSchemas" "dependencies")
+  "Schema keywords whose value is an object of names to schemas. Its keys are names, so a
+property called \"default\" is a schema like any other property. \"dependencies\" is the
+older keyword that \"dependentSchemas\" replaced; a value under it that is an array of names
+holds no schema and is walked harmlessly.")
+
+(defun %walk-schemas (fn node)
+  "Call FN on every schema object inside NODE, NODE included when it is one, without entering
+the values of +DATA-KEYWORDS+. A keyword not named in either list is read as holding schemas,
+so an unfamiliar one is checked rather than skipped."
+  (labels ((schema (node)
+             (cond ((hash-table-p node)
+                    (funcall fn node)
+                    (maphash (lambda (key value)
+                               (cond ((member key +data-keywords+ :test #'equal))
+                                     ((and (member key +named-schema-keywords+ :test #'equal)
+                                           (hash-table-p value))
+                                      (maphash (lambda (name sub) (declare (ignore name))
+                                                 (schema sub))
+                                               value))
+                                     (t (schema value))))
+                             node))
+                   ((and (vectorp node) (not (stringp node))) (map nil #'schema node))
+                   ((consp node) (map nil #'schema node)))))
+    (schema node)))
+
+(defun %anchor-target (root name)
+  "The schema inside ROOT whose $anchor is NAME, or NIL."
+  (%walk-schemas (lambda (node)
+                   (when (equal (gethash "$anchor" node) name)
+                     (return-from %anchor-target node)))
+                 root)
+  nil)
+
+(defun %percent-decode (text)
+  "TEXT with each %XX replaced by the octet it encodes, the octets read as UTF-8, or NIL when
+TEXT has a malformed escape or the octets are not UTF-8. A $ref is a URI, so a fragment such
+as #/$defs/%6Eode names the definition node (#686)."
+  (if (not (find #\% text))
+      text
+      (let ((octets (make-array (length text) :element-type '(unsigned-byte 8) :fill-pointer 0
+                                                 :adjustable t)))
+        (loop with i = 0
+              while (< i (length text))
+              do (let ((c (char text i)))
+                   (cond ((char/= c #\%)
+                          (loop for o across (sb-ext:string-to-octets (string c)
+                                                                       :external-format :utf-8)
+                                do (vector-push-extend o octets))
+                          (incf i))
+                         ((and (<= (+ i 3) (length text))
+                               (digit-char-p (char text (+ i 1)) 16)
+                               (digit-char-p (char text (+ i 2)) 16))
+                          (vector-push-extend (parse-integer text :start (1+ i) :end (+ i 3)
+                                                             :radix 16)
+                                              octets)
+                          (incf i 3))
+                         (t (return-from %percent-decode nil)))))
+        (handler-case (sb-ext:octets-to-string (coerce octets '(vector (unsigned-byte 8)))
+                                               :external-format '(:utf-8 :replacement nil))
+          (error () nil)))))
+
+(defun %pointer-target (root ref)
+  "The schema REF names inside ROOT, or NIL when REF is not local or names nothing. A local
+reference is \"#\" (the root), a JSON pointer \"#/a/b\", or \"#name\", the schema whose
+$anchor is name. The fragment is percent-decoded first, because a $ref is a URI; a pointer is
+then split into tokens, and each token's escapes are read as JSON pointer defines them (~1 is
+/, ~0 is ~)."
+  (let ((fragment (and (stringp ref) (plusp (length ref)) (char= (char ref 0) #\#)
+                       (%percent-decode (subseq ref 1)))))
+    (cond
+      ((null fragment) nil)
+      ((string= fragment "") root)
+      ((char/= (char fragment 0) #\/) (%anchor-target root fragment))
+      (t
+        (let ((node root))
+          (dolist (token (rest (uiop:split-string fragment :separator "/")) node)
+            (let ((key (%unescape-pointer-token token)))
+              (setf node (cond ((hash-table-p node) (gethash key node))
+                               ((and (vectorp node) (not (stringp node))
+                                     (every #'digit-char-p key) (plusp (length key))
+                                     (< (parse-integer key) (length node)))
+                                (aref node (parse-integer key)))
+                               (t (return nil)))))))))))
+
+(defun %unescape-pointer-token (token)
+  (with-output-to-string (out)
+    (loop with i = 0
+          while (< i (length token))
+          do (let ((c (char token i)))
+               (if (and (char= c #\~) (< (1+ i) (length token))
+                        (member (char token (1+ i)) '(#\0 #\1)))
+                   (progn (write-char (if (char= (char token (1+ i)) #\1) #\/ #\~) out)
+                          (incf i 2))
+                   (progn (write-char c out) (incf i)))))))
+
+(defun %refs-in (schema)
+  "Every $ref string in a schema inside SCHEMA, in the order found. A $ref inside an example,
+a default, a const or an enum value is data and is not collected."
+  (let ((refs '()))
+    (%walk-schemas (lambda (node)
+                     (let ((ref (gethash "$ref" node)))
+                       (when (stringp ref) (push ref refs))))
+                   schema)
+    (nreverse refs)))
+
+(defun schema-recursion (schema)
+  "A list of the references that lead from a schema inside SCHEMA back to itself, or NIL when
+there is no such chain. Only local references (\"#...\") are followed; any other cannot be
+resolved here and is ignored."
+  (let ((state (make-hash-table :test #'eq))) ; node -> :visiting or :done
+    (labels ((visit (node path)
+               (case (gethash node state)
+                 (:visiting (return-from schema-recursion (reverse path)))
+                 (:done nil)
+                 (t (setf (gethash node state) :visiting)
+                    (dolist (ref (%refs-in node))
+                      (let ((target (%pointer-target schema ref)))
+                        (when (hash-table-p target)
+                          (visit target (cons ref path)))))
+                    (setf (gethash node state) :done)))))
+      (when (hash-table-p schema)
+        (visit schema '())
+        ;; A definition nothing refers to is still sent, so it is checked as well.
+        (dolist (key '("$defs" "definitions"))
+          (let ((defs (gethash key schema)))
+            (when (hash-table-p defs)
+              (maphash (lambda (name def)
+                         (when (hash-table-p def)
+                           (visit def (list (format nil "#/~A/~A" key name)))))
+                       defs))))
+        nil))))
+
+(define-condition unsendable-schema (praxeon/conditions:praxeon-error)
+  ((tool :initarg :tool :reader unsendable-schema-tool)
+   (reason :initarg :reason :reader unsendable-schema-reason))
+  (:report
+   (lambda (c s)
+     (format s "The schema of ~S cannot be sent as response_format: ~A. Nothing was sent."
+             (unsendable-schema-tool c) (unsendable-schema-reason c))))
+  (:documentation "GENERATE-STRUCTURED would send a tool-spec's schema as response_format, and the
+provider has said it refuses that schema (RESPONSE-FORMAT-SCHEMA-PROBLEM). Signalled before any
+request (#680). REASON says why."))
+
+(defun check-schema-sendable (provider spec)
+  "Signal UNSENDABLE-SCHEMA when PROVIDER cannot be sent SPEC's schema as response_format."
+  (let ((reason (response-format-schema-problem provider (tool-spec-schema spec))))
+    (when reason
+      (error 'unsendable-schema :tool (tool-spec-name spec) :reason reason))))
+
+(defun %reply-object (text)
+  "The JSON object TEXT holds, or NIL and a problem saying why there is none."
+  (let ((trimmed (string-trim '(#\Space #\Tab #\Newline #\Return) (or text ""))))
+    (if (zerop (length trimmed))
+        (values nil "the reply was empty, not a JSON object")
+        (let ((value (handler-case (jzon:parse trimmed)
+                       (error () (return-from %reply-object
+                                   (values nil "the reply was not valid JSON"))))))
+          (if (hash-table-p value)
+              (values value nil)
+              (values nil "the reply was JSON but not an object"))))))
+
 ;;; --- the conditions ---------------------------------------------------------
 
 (define-condition structured-result-invalid (praxeon/conditions:praxeon-error)
@@ -166,24 +342,27 @@ first and the caller's checks see arguments that are at least the right shape."
    (attempt :initarg :attempt :initform 1 :reader structured-result-invalid-attempt))
   (:report
    (lambda (c s)
-     (format s "The model's call to ~S did not match its schema (attempt ~D):~%~{  - ~A~%~}"
+     (format s "The model's result for ~S did not match its schema (attempt ~D):~%~{  - ~A~%~}"
              (structured-result-invalid-tool c)
              (structured-result-invalid-attempt c)
              (structured-result-invalid-problems c))))
-  (:documentation "The forced tool was called with arguments that failed validation."))
+  (:documentation "The structured result failed validation: the arguments of the forced tool call,
+or, on the response_format path, the reply's text, which was not a JSON object or was one that
+did not match the schema (#680)."))
 
 (define-condition structured-result-truncated (structured-result-invalid
                                                praxeon/conditions:output-limit-reached)
   ()
   (:report
    (lambda (c s)
-     (format s "The model's call to ~S reached the output limit of ~D tokens before the model had finished (attempt ~D), so its arguments may be incomplete (#338).~%~%A handler can ask again with a larger limit (RETRY-WITH-MAX-TOKENS) or take the cut-off arguments (ACCEPT-TRUNCATED). GENERATE-STRUCTURED's :max-tokens sets the limit."
+     (format s "The model's reply for ~S reached the output limit of ~D tokens before the model had finished (attempt ~D), so its result may be incomplete (#338).~%~%A handler can ask again with a larger limit (RETRY-WITH-MAX-TOKENS) or take the cut-off arguments (ACCEPT-TRUNCATED). GENERATE-STRUCTURED's :max-tokens sets the limit."
              (structured-result-invalid-tool c)
              (praxeon/conditions:output-limit-reached-max-tokens c)
              (structured-result-invalid-attempt c))))
   (:documentation "Signalled by GENERATE-STRUCTURED when the completion stopped at the output limit
-\(stop reason :MAX-TOKENS), whether or not the forced tool was called (#338). ARGUMENTS are the
-arguments the provider parsed from the cut-off output, or NIL when there was no call.
+\(stop reason :MAX-TOKENS), whether or not a result came back (#338). ARGUMENTS are what could be
+parsed from the cut-off output: the forced call's arguments, or the JSON object in the reply's
+text on the response_format path, or NIL when there was none (#680).
 
 A subtype of STRUCTURED-RESULT-INVALID, so a handler an app already has for a result it cannot
 use also receives this, and of OUTPUT-LIMIT-REACHED. Signalled with ERROR inside the restarts
@@ -220,10 +399,15 @@ failed' are different events and a caller needs to be able to handle one without
 
 ;;; --- the loop ---------------------------------------------------------------
 
-(defun %repair-message (problems)
+(defun %repair-message (problems &optional (strategy :tool-call))
   "The message appended when re-asking. Names every problem, in the model's own terms."
-  (format nil "The previous call was rejected for these reasons:~%~{- ~A~%~}Call the tool again with corrected arguments. Change only what is listed."
-          problems))
+  (ecase strategy
+    (:tool-call
+     (format nil "The previous call was rejected for these reasons:~%~{- ~A~%~}Call the tool again with corrected arguments. Change only what is listed."
+             problems))
+    (:response-format
+     (format nil "The previous reply was rejected for these reasons:~%~{- ~A~%~}Reply again with one corrected JSON object and nothing else. Change only what is listed."
+             problems))))
 
 (defun %find-call (completion name)
   (find name (completion-tool-calls completion)
@@ -260,24 +444,54 @@ A REPLY CUT OFF AT THE OUTPUT LIMIT signals STRUCTURED-RESULT-TRUNCATED (#338), 
 restarts RETRY-WITH-MAX-TOKENS, which asks again with a larger MAX-TOKENS without counting an
 attempt, and ACCEPT-TRUNCATED, which returns the cut-off arguments (NIL when there was no call)
 with a second value, :TRUNCATED. That is the one way this returns an unvalidated record, and it
-takes a handler that asked for it."
-  (check-tool-choice provider (list :tool (tool-spec-name spec)))
-  ;; BEFORE THE FIRST REQUEST, not after a reply comes back. A schema declaring what nothing
-  ;; checks is wrong on every call, so failing on the first one costs no tokens and points at
-  ;; the spec rather than at the model's answer (pre-publication issue 454).
-  (check-schema-enforceable spec)
+takes a handler that asked for it.
+
+TWO WAYS TO ASK (#680). A provider that can force a tool call (SUPPORTS-TOOL-CHOICE-P) is asked
+that way, as above. One that cannot, and takes a schema as response_format instead
+(SUPPORTS-RESPONSE-FORMAT-P), is asked through COMPLETE-WITH-SCHEMA, and the JSON object in its
+reply's text is the record. That reply is checked the same way: text that is not a JSON object,
+or an object that fails validation, is a rejected attempt with the same conditions and restarts
+as a bad tool argument, and the re-ask shows the model its reply. A schema the provider refuses
+(RESPONSE-FORMAT-SCHEMA-PROBLEM) is refused with UNSENDABLE-SCHEMA before anything is sent. A
+provider that can do neither signals TOOL-CHOICE-UNSUPPORTED, as before."
+  (let ((strategy (cond ((supports-tool-choice-p provider) :tool-call)
+                        ((supports-response-format-p provider) :response-format)
+                        (t (check-tool-choice provider (list :tool (tool-spec-name spec)))))))
+    ;; BEFORE THE FIRST REQUEST, not after a reply comes back. A schema declaring what nothing
+    ;; checks is wrong on every call, so failing on the first one costs no tokens and points at
+    ;; the spec rather than at the model's answer (pre-publication issue 454).
+    (check-schema-enforceable spec)
+    (when (eq strategy :response-format)
+      (check-schema-sendable provider spec))
+    (%generate-structured strategy provider messages spec system max-tokens temperature attempts)))
+
+(defun %generate-structured (strategy provider messages spec system max-tokens temperature attempts)
+  "GENERATE-STRUCTURED's loop, once STRATEGY (:TOOL-CALL or :RESPONSE-FORMAT) is chosen."
   (let ((conversation (copy-list messages))
         (attempt 0))
     (loop
       (incf attempt)
-      (let* ((completion (complete provider conversation
-                                   :system system
-                                   :tools (list spec)
-                                   :max-tokens max-tokens
-                                   :temperature temperature
-                                   :tool-choice (list :tool (tool-spec-name spec))))
-             (call (%find-call completion (tool-spec-name spec)))
+      (let* ((completion (ecase strategy
+                           (:tool-call
+                            (complete provider conversation
+                                      :system system
+                                      :tools (list spec)
+                                      :max-tokens max-tokens
+                                      :temperature temperature
+                                      :tool-choice (list :tool (tool-spec-name spec))))
+                           (:response-format
+                            (complete-with-schema provider conversation spec
+                                                  :system system
+                                                  :max-tokens max-tokens
+                                                  :temperature temperature))))
+             (call (and (eq strategy :tool-call) (%find-call completion (tool-spec-name spec))))
+             (arguments nil)
+             (reply-problem nil)
              (retried nil))
+        (ecase strategy
+          (:tool-call (setf arguments (and call (tool-call-arguments call))))
+          (:response-format (multiple-value-setq (arguments reply-problem)
+                              (%reply-object (completion-text completion)))))
         ;; A reply cut off at the output limit is checked before anything else. Its call may be
         ;; missing or its arguments incomplete, and neither is the model's mistake to repair at
         ;; the same limit (#338).
@@ -286,7 +500,7 @@ takes a handler that asked for it."
                                :tool (tool-spec-name spec)
                                :problems (list (format nil "the output reached the limit of ~D tokens"
                                                        max-tokens))
-                               :arguments (and call (tool-call-arguments call))
+                               :arguments arguments
                                :attempt attempt
                                :max-tokens max-tokens)
             (praxeon/conditions:retry-with-max-tokens (new-limit)
@@ -302,14 +516,15 @@ takes a handler that asked for it."
               (decf attempt))
             (praxeon/conditions:accept-truncated ()
               :report "Return the cut-off arguments, marked as truncated."
-              (return-from generate-structured
-                (values (and call (tool-call-arguments call)) :truncated)))))
+              (return-from %generate-structured (values arguments :truncated)))))
         (unless retried
-          (unless call
+          (when (and (eq strategy :tool-call) (null call))
             (error 'structured-result-not-called :tool (tool-spec-name spec)))
-          (let ((problems (validate-arguments spec (tool-call-arguments call))))
+          (let ((problems (if reply-problem
+                              (list reply-problem)
+                              (validate-arguments spec arguments))))
             (when (null problems)
-              (return-from generate-structured (tool-call-arguments call)))
+              (return-from %generate-structured arguments))
             ;; SIGNAL, not ERROR, so a caller's handler runs and can transfer control.
             ;; An inner HANDLER-BIND would run first -- handlers are searched innermost
             ;; outward -- so establishing the default repair here would make the caller's
@@ -324,7 +539,7 @@ takes a handler that asked for it."
                   (signal 'structured-result-rejected
                           :tool (tool-spec-name spec)
                           :problems problems
-                          :arguments (tool-call-arguments call)
+                          :arguments arguments
                           :attempt attempt)
                 (re-ask ()
                   :report "Ask again, appending the validation problems."
@@ -337,7 +552,7 @@ takes a handler that asked for it."
                 (error 'structured-result-invalid
                        :tool (tool-spec-name spec)
                        :problems problems
-                       :arguments (tool-call-arguments call)
+                       :arguments arguments
                        :attempt attempt))
               (unless retry (return))
               (setf conversation
@@ -345,6 +560,14 @@ takes a handler that asked for it."
                             ;; A message is a plist (:role R :content C) -- see the note at
                             ;; the top of llm.lisp. There is no message struct.
                             (list (list :role :assistant
-                                        :content (format nil "Called ~A." (tool-spec-name spec)))
+                                        :content (ecase strategy
+                                                   (:tool-call
+                                                    (format nil "Called ~A." (tool-spec-name spec)))
+                                                   ;; The reply itself, so the model sees what
+                                                   ;; it wrote. Never empty: a provider may
+                                                   ;; refuse an empty assistant message.
+                                                   (:response-format
+                                                    (let ((text (completion-text completion)))
+                                                      (if (plusp (length text)) text "(empty reply)")))))
                                   (list :role :user
-                                        :content (%repair-message problems))))))))))))
+                                        :content (%repair-message problems strategy))))))))))))

@@ -195,6 +195,22 @@ is why the argument is always supplied."
   (log:debug "db disconnect")
   (dbi:disconnect connection))
 
+(defun connection-open-p (connection)
+  "Whether CONNECTION is still open, as far as the client knows. After a DB-ERROR this tells a
+lost connection from a failed statement (#636): when Postgres ends the connection, as with
+SQLSTATE 57P01 (an administrator's command, a restart or a provider's maintenance), the driver
+closes its end, and every later statement fails with \"Connection to database server lost\" and
+no SQLSTATE at all, while a statement that fails on a working connection leaves it open. This
+reads the client's state and sends nothing, so a connection the server ended while it sat idle
+reads as open until it is next used. A SQLite connection always reads as open. A connection
+whose driver handle is NIL, or cannot be read, reads as closed, because there is nothing left
+to send a statement through (#675)."
+  (let ((handle (ignore-errors (dbi:connection-handle connection))))
+    (typecase handle
+      (null nil)
+      (cl-postgres:database-connection (cl-postgres:database-open-p handle))
+      (t t))))
+
 (defmacro with-connection ((var source) &body body)
   "Bind VAR to a connection from SOURCE, run BODY, and give the connection back on exit.
 
@@ -234,12 +250,21 @@ a single list.)"
                               :rows (length rows) :ms (%ms-since start))
         rows))))
 
-(defmacro with-transaction ((connection) &body body)
+(defmacro with-transaction ((connection &key immediate) &body body)
   "Run BODY inside a transaction on CONNECTION: commit on normal exit, roll back on a
-non-local exit, including when the commit itself fails. See CALL-WITH-TRANSACTION."
-  `(call-with-transaction ,connection (lambda () ,@body)))
+non-local exit, including when the commit itself fails. With IMMEDIATE, an outermost transaction
+on SQLite begins with BEGIN IMMEDIATE (#653). See CALL-WITH-TRANSACTION."
+  `(call-with-transaction ,connection (lambda () ,@body) :immediate ,immediate))
 
-(defun call-with-transaction (connection thunk)
+(defvar *sqlite-begin-immediate* nil
+  "True while CALL-WITH-TRANSACTION begins an outermost SQLite transaction with IMMEDIATE.")
+
+(defmethod dbi.driver:begin-transaction :around ((connection dbd.sqlite3:dbd-sqlite3-connection))
+  (if *sqlite-begin-immediate*
+      (sqlite:execute-non-query (dbi:connection-handle connection) "BEGIN IMMEDIATE")
+      (call-next-method)))
+
+(defun call-with-transaction (connection thunk &key immediate)
   "WITH-TRANSACTION's function. A SQLITE COMMIT THAT FAILS IS ROLLED BACK. SQLite refuses a
 COMMIT with BUSY while another connection still holds a read lock, and it leaves the transaction
 open so the COMMIT can be retried. cl-dbi only rolls back when the body fails, so the
@@ -247,7 +272,15 @@ connection used to stay inside that transaction: its later statements ran inside
 write lock kept every other connection from writing. Here the refused transaction is rolled
 back and the refusal signalled as a DB-ERROR, so the connection is outside a transaction
 afterwards, as after any other failure. Only the outermost WITH-TRANSACTION does this; an inner
-one is a savepoint (#400)."
+one is a savepoint (#400).
+
+IMMEDIATE, ON SQLITE, TAKES THE WRITE LOCK AT BEGIN (#653). A plain BEGIN is deferred: the
+transaction takes the write lock at its first write. When it has read first and another
+connection holds the write lock, that upgrade fails with SQLITE_BUSY at once, without waiting
+for the busy timeout, and in WAL mode with BUSY_SNAPSHOT. BEGIN IMMEDIATE waits for the lock,
+within the busy timeout (*SQLITE-BUSY-TIMEOUT-MS*), before the transaction reads anything. On
+Postgres and for an inner transaction it changes nothing. The body runs with it unset, so an
+outermost transaction the body opens on another connection is not made immediate."
   (let ((outermost (not (dbi:in-transaction connection)))
         (body-done nil))
     (handler-bind ((error (lambda (e)
@@ -263,9 +296,11 @@ one is a savepoint (#400)."
                               (unless (typep e 'db-error)
                                 (error 'db-error :message (format nil "commit: ~A" e)
                                                  :cause e))))))
-      (dbi:with-transaction connection
-        (multiple-value-prog1 (funcall thunk)
-          (setf body-done t))))))
+      (let ((*sqlite-begin-immediate* (and immediate outermost)))
+        (dbi:with-transaction connection
+          (let ((*sqlite-begin-immediate* nil))
+            (multiple-value-prog1 (funcall thunk)
+              (setf body-done t))))))))
 
 ;;; --- the pool (#325) ------------------------------------------------------------
 ;;;

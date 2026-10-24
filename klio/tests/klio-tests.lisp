@@ -908,6 +908,74 @@ included; a file whose name only begins with the collection's name is not a memb
       (is (typep (nth-value 1 (ignore-errors (k:tree-collection tree "notes" :order :sideways)))
                  'type-error)))))
 
+(defun %ranked (date rank)
+  (format nil "---~%title: \"Note\"~@[~%date: ~A~]~@[~%rank: ~D~]~%---~%x~%" date rank))
+
+(test descending-keeps-ties-in-key-order-and-then-by-orders-them
+  "#557: under :descending, documents tied on the sort field keep ascending key order, because
+the comparison is reversed and not the list. :THEN-BY orders a tie by a second field, in the
+same direction, with a document lacking it last among the tie; it also orders the documents
+that lack the sort field."
+  (with-content-dir (dir ("notes/a.md" . (%ranked "2024-01-01" 2))
+                         ("notes/b.md" . (%ranked "2024-01-01" 1))
+                         ("notes/c.md" . (%ranked "2020-01-01" 7))
+                         ("notes/d.md" . (%ranked "2024-01-01" nil))
+                         ("notes/e.md" . (%ranked nil 5))
+                         ("notes/f.md" . (%ranked nil 9)))
+    (let ((tree (k:load-tree dir :known-extra '("rank"))))
+      (flet ((keys (&rest options)
+               (mapcar (lambda (d) (subseq (k:document-key d) 6))
+                       (apply #'k:tree-collection tree "notes" :sort-by "date" options))))
+        (is (equal '("a" "b" "d" "c" "e" "f") (keys :order :descending))
+            "without :then-by, ties stay in key order under :descending: ~S" (keys :order :descending))
+        (is (equal '("a" "b" "d" "c" "f" "e") (keys :order :descending :then-by "rank"))
+            "descending by rank within the tie, the unranked one last: ~S"
+            (keys :order :descending :then-by "rank"))
+        (is (equal '("c" "b" "a" "d" "e" "f") (keys :then-by "rank"))
+            "ascending by rank within the tie, the unranked one last: ~S" (keys :then-by "rank"))
+        (is (equal '("c" "a" "b" "d" "e" "f") (keys :then-by "missing"))
+            "a :then-by field nobody has changes nothing: ~S" (keys :then-by "missing"))
+        (signals error (k:tree-collection tree "notes" :then-by "rank")
+          ":then-by without :sort-by is refused, not ignored")))))
+
+(test the-boolean-core-fields-sort-as-present-only-when-true
+  "DRAFT and SEARCH are stored as booleans, so `false' reads as NIL and counts as missing,
+unlike an `extra' field written false. Drafts are readable only in dev mode."
+  (with-content-dir (dir ("notes/a.md" . (format nil "---~%title: \"A\"~%draft: false~%search: false~%---~%x~%"))
+                         ("notes/b.md" . (format nil "---~%title: \"B\"~%draft: true~%---~%x~%"))
+                         ("notes/c.md" . (format nil "---~%title: \"C\"~%---~%x~%")))
+    (let ((tree (k:load-tree dir)))
+      (k:with-dev-mode ()
+        (flet ((keys (&rest options)
+                 (mapcar (lambda (d) (subseq (k:document-key d) 6))
+                         (apply #'k:tree-collection tree "notes" options))))
+          (is (equal '("b" "a" "c") (keys :sort-by "draft"))
+              "only b's draft is true; a's false and c's absent are both missing: ~S"
+              (keys :sort-by "draft"))
+          (is (equal '("b" "c" "a") (keys :sort-by "search"))
+              "search is T unless written false, and a's false is missing: ~S"
+              (keys :sort-by "search")))))))
+
+(test a-field-written-false-is-present-and-one-written-null-is-missing
+  "Copilot's review of #614 asked whether `rank: false' is read as a missing field. It is not:
+the front matter reads `false' as :FALSE, a value, which sorts as its text. `rank: null' and an
+empty `rank:' are read as NIL and count as missing, so they go last, for :THEN-BY and :SORT-BY
+alike."
+  (with-content-dir (dir ("notes/a.md" . (format nil "---~%title: \"A\"~%date: 2024-01-01~%---~%x~%"))
+                         ("notes/b.md" . (format nil "---~%title: \"B\"~%date: 2024-01-01~%rank: false~%---~%x~%"))
+                         ("notes/c.md" . (format nil "---~%title: \"C\"~%date: 2024-01-01~%rank: 3~%---~%x~%"))
+                         ("notes/d.md" . (format nil "---~%title: \"D\"~%date: 2024-01-01~%rank: null~%---~%x~%")))
+    (let ((tree (k:load-tree dir :known-extra '("rank"))))
+      (flet ((keys (&rest options)
+               (mapcar (lambda (d) (subseq (k:document-key d) 6))
+                       (apply #'k:tree-collection tree "notes" options))))
+        (is (equal '("c" "b" "a" "d") (keys :sort-by "date" :then-by "rank"))
+            "ascending: the number, then false as text, then the two without a value in key order: ~S"
+            (keys :sort-by "date" :then-by "rank"))
+        (is (equal '("b" "c" "a" "d") (keys :sort-by "rank" :order :descending))
+            "as the primary field: false is present, null and absent are last: ~S"
+            (keys :sort-by "rank" :order :descending))))))
+
 (test a-document-is-found-by-its-slug-only-when-a-reader-may-see-it
   (with-content-dir (dir ("skills.md" . (format nil "---~%title: \"Skills\"~%slug: \"toolbox\"~%---~%x~%"))
                          ("secret.md" . +draft+))
@@ -982,6 +1050,303 @@ process can take it in between."
           (is (search "A post" (%file-text out "index.html")) "the index theme lists what a reader may see")
           (is (not (search "Unfinished" (%file-text out "index.html"))))
           (is (not (probe-file (merge-pathnames "secret.html" out))) "a draft is not exported"))))))
+
+;;; --- static assets (#557) ------------------------------------------------------------------
+
+(defmacro with-assets-dir ((dir) &body body)
+  "A fresh directory holding a stylesheet, a binary image whose bytes are 0 to 255, and a file
+under .well-known/, deleted afterwards."
+  `(let ((,dir (aion/fs:make-temporary-directory "klio-assets")))
+     (unwind-protect
+          (progn
+            (with-open-file (o (merge-pathnames "style.css" ,dir) :direction :output)
+              (write-string "body { color: black; }" o))
+            (let ((png (merge-pathnames "img/logo.png" ,dir)))
+              (ensure-directories-exist png)
+              (with-open-file (o png :direction :output :element-type '(unsigned-byte 8))
+                (dotimes (i 256) (write-byte i o))))
+            (let ((wk (merge-pathnames ".well-known/security.txt" ,dir)))
+              (ensure-directories-exist wk)
+              (with-open-file (o wk :direction :output) (write-string "Contact: x" o)))
+            ,@body)
+       (ignore-errors (aion/fs:delete-tree ,dir)))))
+
+(defun %octets (path)
+  (with-open-file (in path :element-type '(unsigned-byte 8))
+    (let ((v (make-array (file-length in) :element-type '(unsigned-byte 8))))
+      (subseq v 0 (read-sequence v in)))))
+
+(test the-export-copies-the-sites-assets-byte-for-byte
+  (with-content-dir (src ("one.md" . +good+))
+    (with-assets-dir (assets)
+      (with-export-dir (out)
+        (let ((site (k:make-site src)))
+          (k:boot site)
+          (let ((written (k:export-site site out :assets assets)))
+            (is (equal '(".well-known/security.txt" "img/logo.png" "style.css")
+                       (last written 3))
+                "the assets come after the pages in the returned list: ~S" written)
+            (is (equal "body { color: black; }" (%file-text out "style.css")))
+            (is (equalp (%octets (merge-pathnames "img/logo.png" assets))
+                        (%octets (merge-pathnames "img/logo.png" out)))
+                "a binary file is copied byte for byte")
+            (is-true (probe-file (merge-pathnames ".well-known/security.txt" out))
+                     "a dot-name is copied: a static host reads .well-known/")
+            (is-true (probe-file (merge-pathnames "one.html" out)) "and the pages are written")))))))
+
+(test assets-are-copied-again-after-clean-empties-the-directory
+  "The case #557 reports: :clean t deleted the site's stylesheet, which the site then had to
+copy again after every export."
+  (with-content-dir (src ("one.md" . +good+))
+    (with-assets-dir (assets)
+      (with-export-dir (out)
+        (let ((site (k:make-site src)))
+          (k:boot site)
+          (k:export-site site out :assets assets)
+          (k:export-site site out :assets assets :clean t)
+          (is-true (probe-file (merge-pathnames "style.css" out)))
+          (k:export-site site out :clean t)
+          (is (null (probe-file (merge-pathnames "style.css" out)))
+              "the control: without :assets, :clean leaves no stylesheet"))))))
+
+(test an-asset-at-a-pages-path-is-refused-and-nothing-is-written
+  (with-content-dir (src ("one.md" . +good+))
+    (with-assets-dir (assets)
+      (with-open-file (o (merge-pathnames "One.html" assets) :direction :output)
+        (write-string "not the page" o))
+      (with-export-dir (out)
+        (let ((site (k:make-site src)))
+          (k:boot site)
+          (let ((e (nth-value 1 (ignore-errors (k:export-site site out :assets assets)))))
+            (is (typep e 'k:export-refused) "got ~S" e)
+            (is (and e (search "One.html" (princ-to-string e))) "the refusal names the asset: ~A" e)
+            (is (null (probe-file out)) "nothing was written")))))))
+
+(test assets-inside-or-around-the-output-are-refused
+  "Inside the output, :clean would delete them; around it, the copy would copy the export into
+itself."
+  (with-content-dir (src ("one.md" . +good+))
+    (with-assets-dir (assets)
+      (let ((site (k:make-site src)))
+        (k:boot site)
+        (let ((e (nth-value 1 (ignore-errors
+                               (k:export-site site (merge-pathnames "public/" assets) :assets assets)))))
+          (is (typep e 'k:export-refused) "output inside the assets: ~S" e))
+        (with-export-dir (out)
+          (let ((inner (merge-pathnames "static/" (uiop:ensure-directory-pathname out))))
+            (ensure-directories-exist inner)
+            (let ((e (nth-value 1 (ignore-errors (k:export-site site out :assets inner :clean t)))))
+              (is (typep e 'k:export-refused) "assets inside the output: ~S" e)
+              (is-true (uiop:directory-exists-p inner) "and :clean did not delete them"))))))))
+
+(defun %asset-link (link target)
+  "Make LINK, a directory link to the directory TARGET: a junction on Windows, which needs no
+privilege, and a symbolic link elsewhere. As aion/tests/fs/delete-tree-tests.lisp makes one."
+  (let ((l (string-right-trim "/\\" (uiop:native-namestring link)))
+        (tg (string-right-trim "/\\" (uiop:native-namestring target))))
+    (if (uiop:os-windows-p)
+        (uiop:run-program (list "cmd" "/c" "mklink" "/J" l tg) :output nil)
+        (uiop:run-program (list "ln" "-s" tg l) :output nil))
+    (assert (aion/fs:link-p (uiop:parse-native-namestring l)) () "the fixture did not make a link at ~A" l)))
+
+(test a-link-inside-the-assets-directory-is-refused-and-not-followed
+  "Copilot's review of #615: a link can lead outside the assets directory, or round in a cycle,
+so the export refuses one by name rather than copying what it points to."
+  (with-content-dir (src ("one.md" . +good+))
+    (with-assets-dir (assets)
+      (let ((outside (aion/fs:make-temporary-directory "klio-outside")))
+        (unwind-protect
+             (progn
+               (with-open-file (o (merge-pathnames "secret.txt" outside) :direction :output)
+                 (write-string "not an asset" o))
+               (%asset-link (merge-pathnames "escape/" assets) outside)
+               (with-export-dir (out)
+                 (let ((site (k:make-site src)))
+                   (k:boot site)
+                   (let ((e (nth-value 1 (ignore-errors (k:export-site site out :assets assets)))))
+                     (is (typep e 'k:export-refused) "got ~S" e)
+                     (is (and e (search "escape" (princ-to-string e))) "the refusal names the link: ~A" e)
+                     (is (null (probe-file (merge-pathnames "escape/secret.txt" out)))
+                         "the file outside the assets directory was not copied")
+                     (is (null (probe-file out)) "nothing was written")))))
+          (ignore-errors (aion/fs:delete-tree assets))
+          (ignore-errors (aion/fs:delete-tree outside)))))))
+
+(test an-asset-and-a-page-that-would-be-file-and-directory-are-refused
+  "Copilot's review of #615: an asset at one.html/image.png needs a directory one.html where the
+page one.html is a file, and the reverse, an asset file roles beside the page roles/two.html.
+Both are refused before anything is written."
+  (with-content-dir (src ("one.md" . +good+) ("roles/two.md" . +also-good+))
+    (dolist (asset '("one.html/image.png" "roles"))
+      (with-assets-dir (assets)
+        (let ((path (merge-pathnames asset assets)))
+          (ensure-directories-exist path)
+          (with-open-file (o path :direction :output) (write-string "x" o)))
+        (with-export-dir (out)
+          (let ((site (k:make-site src)))
+            (k:boot site)
+            (let ((e (nth-value 1 (ignore-errors (k:export-site site out :assets assets)))))
+              (is (typep e 'k:export-refused) "~A: got ~S" asset e)
+              (is (null (probe-file out)) "~A: nothing was written" asset))))))))
+
+(test an-asset-name-a-pathname-reads-as-a-wildcard-is-refused
+  "The hub's review of #615: a name with * ? [ ] or the escape character cannot be carried from
+the walk to the copy. a[1].css is a legal name on every operating system."
+  (with-content-dir (src ("one.md" . +good+))
+    (with-assets-dir (assets)
+      (with-open-file (o (uiop:parse-native-namestring
+                          (concatenate 'string (uiop:native-namestring assets) "a[1].css"))
+                         :direction :output)
+        (write-string "x" o))
+      (with-export-dir (out)
+        (let ((site (k:make-site src)))
+          (k:boot site)
+          (let ((e (nth-value 1 (ignore-errors (k:export-site site out :assets assets)))))
+            (is (typep e 'k:export-refused) "got ~S" e)
+            (is (and e (search "a[1].css" (princ-to-string e))) "the refusal names the file: ~A" e)
+            (is (null (probe-file out)) "nothing was written")))))))
+
+(test an-export-inside-the-assets-spelled-in-another-case-is-refused
+  "On Windows and macOS a directory spelled in another case is the same directory, so an export
+into ASSETS/PUBLIC/ is inside the assets however it is spelled."
+  (if (not (or (uiop:os-windows-p) (uiop:os-macosx-p)))
+      (skip "Linux file systems are case-sensitive, so another case is another directory")
+      (with-content-dir (src ("one.md" . +good+))
+        (with-assets-dir (assets)
+          (let ((site (k:make-site src))
+                (shouted (uiop:parse-native-namestring
+                          (concatenate 'string (string-upcase (uiop:native-namestring assets)) "public/"))))
+            (k:boot site)
+            (let ((e (nth-value 1 (ignore-errors (k:export-site site shouted :assets assets)))))
+              (is (typep e 'k:export-refused) "got ~S" e)))))))
+
+(test a-symlinked-file-in-the-assets-is-refused
+  "A file link, like a directory link, can lead outside the assets directory. POSIX only: on
+Windows making a file link needs a privilege the test runner may not have."
+  (if (uiop:os-windows-p)
+      (skip "a file symbolic link needs SeCreateSymbolicLinkPrivilege on Windows")
+      (with-content-dir (src ("one.md" . +good+))
+        (with-assets-dir (assets)
+          (let ((outside (aion/fs:make-temporary-directory "klio-outside")))
+            (unwind-protect
+                 (let ((secret (merge-pathnames "secret.txt" outside)))
+                   (with-open-file (o secret :direction :output) (write-string "not an asset" o))
+                   (uiop:run-program (list "ln" "-s" (uiop:native-namestring secret)
+                                           (uiop:native-namestring (merge-pathnames "link.txt" assets))))
+                   (with-export-dir (out)
+                     (let ((site (k:make-site src)))
+                       (k:boot site)
+                       (let ((e (nth-value 1 (ignore-errors (k:export-site site out :assets assets)))))
+                         (is (typep e 'k:export-refused) "got ~S" e)
+                         (is (and e (search "link.txt" (princ-to-string e))) "the refusal names the link: ~A" e)
+                         (is (null (probe-file out)) "nothing was written")))))
+              (ignore-errors (aion/fs:delete-tree outside))))))))
+
+(test a-missing-assets-directory-is-refused
+  (with-content-dir (src ("one.md" . +good+))
+    (with-export-dir (out)
+      (let ((site (k:make-site src)))
+        (k:boot site)
+        (let ((e (nth-value 1 (ignore-errors
+                               (k:export-site site out :assets (merge-pathnames "no-such-dir/" src))))))
+          (is (typep e 'k:export-refused) "got ~S" e)
+          (is (null (probe-file out)) "nothing was written"))))))
+
+;;; --- collection listing pages (#557) ------------------------------------------------------
+
+(defun %names-theme (site name documents)
+  "A collection theme that writes the collection's name and its documents' titles in order."
+  (declare (ignore site))
+  (format nil "~A:~{ ~A~}" name (mapcar (lambda (d) (k:document-field d "title")) documents)))
+
+(test a-collection-has-no-listing-page-unless-the-site-names-it
+  "Off by default, as #557's reporter asked."
+  (with-content-dir (src ("roles/a.md" . (%role "Alpha" "2019-03-01")))
+    (with-export-dir (out)
+      (let ((site (k:make-site src :known-extra +role-extra+)))
+        (k:boot site)
+        (let ((written (k:export-site site out)))
+          (is (not (member "roles/index.html" written :test #'string=)) "written: ~S" written))
+        (is (= 404 (%get (k:site-app site) "/roles/")))))))
+
+(test a-named-collection-gets-a-listing-page-in-its-order
+  (with-content-dir (src ("roles/a.md" . (%role "Alpha" "2019-03-01"))
+                         ("roles/b.md" . (%role "Beta" "2023-06-01"))
+                         ("roles/c.md" . (%role "Gamma" "2021-01-01")))
+    (with-export-dir (out)
+      (let ((site (k:make-site src :known-extra +role-extra+))
+            (options (list :collections '(("roles" :sort-by "start" :order :descending))
+                           :collection-theme #'%names-theme)))
+        (k:boot site)
+        (apply #'k:export-site site out options)
+        (is (equal "roles: Beta Gamma Alpha" (%file-text out "roles/index.html"))
+            "the listing is written to roles/index.html, newest first")
+        (multiple-value-bind (status body) (%get (apply #'k:site-app site options) "/roles/")
+          (is (= 200 status))
+          (is (equal "roles: Beta Gamma Alpha" body) "and served at /roles/"))
+        (multiple-value-bind (status body) (%get (apply #'k:site-app site options) "/roles/a")
+          (is (= 200 status) "a document under the collection is still served")
+          (is (search "Alpha" body)))))))
+
+(test a-collection-listing-paginates-and-collection-url-links-its-pages
+  (with-content-dir (src ("roles/a.md" . (%role "Alpha" "2019-03-01"))
+                         ("roles/b.md" . (%role "Beta" "2023-06-01")))
+    (with-export-dir (out)
+      (let ((site (k:make-site src :known-extra +role-extra+))
+            (urls '()))
+        (k:boot site)
+        (k:export-site site out :per-page 1 :collections '(("roles" :sort-by "start"))
+                                :collection-theme (lambda (site name documents)
+                                                    (declare (ignore site documents))
+                                                    (push (k:collection-url name k:*page-number*) urls)
+                                                    (format nil "page ~D of ~D" k:*page-number* k:*page-count*)))
+        (is (equal "page 1 of 2" (%file-text out "roles/index.html")))
+        (is (equal "page 2 of 2" (%file-text out "roles/page/2/index.html")))
+        (is (equal '("/roles/" "/roles/page/2/") (sort (remove-duplicates urls :test #'string=) #'string<))
+            "collection-url gives each page's URL: ~S" urls)))))
+
+(test collection-names-that-would-share-a-listings-url-are-refused
+  "Names that share a route with the tag pages or the index's pages, at the root or under it, and
+names that are not safe as a URL path and a path under the export directory (Copilot's review of
+#619): ../outside would be written outside it, and . would alias index.html."
+  (dolist (bad (list '("tags") '("page") '("roles" "roles") '(("roles" :colour "red")) '("") "roles"
+                     '("tags/lisp") '("page/2") '("roles" "roles/page/x")
+                     '("../outside") '(".") '("a/../b") '("a//b") (list (format nil "a~Cb" (code-char 92)))
+                     '("a:b") '("a*") '("a b")))
+    (is (typep (nth-value 1 (ignore-errors (k:make-site-options :collections bad))) 'error)
+        ":collections ~S was accepted" bad))
+  (is-true (k:make-site-options :collections '("roles" ("posts" :sort-by "date" :then-by "title")
+                                               "roles/older" "one.html" "my_notes-2"))
+           "the control: well-formed entries, a nested one and one with a dot, are accepted"))
+
+(test a-collection-listing-that-needs-a-pages-file-as-a-directory-is-refused
+  "Copilot's review of #619: a collection named one.html is listed at one.html/index.html, which
+needs a directory where the document one is written as the file one.html. search.json, the
+search index, clashes the same way."
+  (with-content-dir (src ("one.md" . +good+) ("one.html/a.md" . +also-good+)
+                         ("search.json/b.md" . +also-good+))
+    (dolist (name '("one.html" "search.json"))
+      (with-export-dir (out)
+        (let ((site (k:make-site src)))
+          (k:boot site)
+          (let ((e (nth-value 1 (ignore-errors (k:export-site site out :collections (list name))))))
+            (is (typep e 'k:export-refused) "~A: got ~S" name e)
+            (is (null (probe-file out)) "~A: nothing was written" name)))))))
+
+(test a-listing-and-a-document-written-to-one-file-are-refused
+  "A document keyed roles/index, or, under :layout :directory, one keyed roles, would be written
+to roles/index.html with the listing."
+  (dolist (case '(("roles/index.md" :file) ("roles.md" :directory)))
+    (with-content-dir (src ("roles/a.md" . (%role "Alpha" "2019-03-01"))
+                           ((first case) . +good+))
+      (with-export-dir (out)
+        (let ((site (k:make-site src :known-extra +role-extra+)))
+          (k:boot site)
+          (let ((e (nth-value 1 (ignore-errors
+                                 (k:export-site site out :collections '("roles") :layout (second case))))))
+            (is (typep e 'k:export-refused) "~A: got ~S" (first case) e)
+            (is (and e (search "roles/index.html" (princ-to-string e))) "~A: ~A" (first case) e)
+            (is (null (probe-file out)) "~A: nothing was written" (first case))))))))
 
 (test the-directory-layout-writes-an-index-file-per-page
   (with-content-dir (src ("roles/two.md" . +also-good+))
@@ -1758,3 +2123,17 @@ including a --> later on the line."
                  (mapcar #'k:document-key
                          (k:tree-readable-documents tree :now (encode-universal-time 0 0 0 2 1 2030 0))))
           "the control: at a time after it, it is readable"))))
+
+(test collection-names-windows-would-merge-or-refuse-are-refused-everywhere
+  "#631: Windows strips a trailing period, so roles. and roles would be one directory, and it
+cannot make a file or directory named for a device, with or without an extension. Refused on every
+operating system, so a site behaves the same everywhere."
+  (dolist (bad '("roles." "CON" "nul.txt" "com1" "posts/aux" "LPT9.x"))
+    (is (typep (nth-value 1 (ignore-errors (k:make-site-options :collections (list bad)))) 'error)
+        "~S was accepted" bad))
+  (let ((e (nth-value 1 (ignore-errors (k:make-site-options :collections '("CON"))))))
+    (is (and e (search "device name" (princ-to-string e)))
+        "the refusal names the rule CON breaks (Copilot's review of #633): ~A" e))
+  (dolist (good '("console" "com10" "nullable" "auxiliary" "roles.v2" "posts/lpt"))
+    (is-true (k:make-site-options :collections (list good))
+             "the control: ~S, not a device name, is accepted" good)))

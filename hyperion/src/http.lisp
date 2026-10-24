@@ -107,7 +107,12 @@ truncated body is indistinguishable from an absent one at every call site.
 
 Signals BODY-TOO-LARGE rather than truncating. A truncated JSON body is a parse error at
 best and a silently different request at worst, and neither is a thing to hand an
-application without telling it."
+application without telling it.
+
+A REQUEST WITH NEITHER CONTENT-LENGTH NOR TRANSFER-ENCODING HAS NO BODY (RFC 9112 6.3), so
+the stream is not read and the result is NIL. Reading it waited for the client to send more
+on a kept-alive connection, which it never does: htmx 2 sends a DELETE that way, and under
+Hunchentoot each one waited 20 seconds for the socket timeout (#717)."
   (let ((cached (getf env +body-string-key+ :%unread)))
     (if (not (eq cached :%unread))
         cached
@@ -118,7 +123,7 @@ application without telling it."
             ;; attack, so rejecting it should be the cheap defence.
             (when (and len (integerp len) (> len max-size))
               (error 'body-too-large :limit max-size :claimed len))
-            (when (or (null len) (plusp len))
+            (when (if len (plusp len) (request-header env "transfer-encoding"))
               (let ((buf (%read-bounded stream max-size :claimed len)))
                 (when (plusp (length buf))
                   (sb-ext:octets-to-string buf :external-format :utf-8)))))))))
@@ -135,6 +140,18 @@ application without telling it."
 (defun form-alist (body)
   "Every name/value pair of a urlencoded BODY, in order, url-decoded: ((name . value) ...).
 
+NAMES ARE DECODED AS WELL AS VALUES, with `+' read as a space (#715). A browser
+percent-encodes a field name the same way it encodes a value, so a field named en:who
+arrives as en%3Awho, items[0] as items%5B0%5D and `a b' as a+b. Before #715 only values were
+decoded, so FORM-PARAM and QUERY-PARAM never found those names by their real spelling and the
+handler read the field as not sent.
+
+A NAME OR VALUE THAT DOES NOT DECODE IS KEPT AS IT ARRIVED. quri signals
+URL-DECODING-ERROR for a truncated escape such as `x%4', even with :LENIENT, and the body is
+client-supplied, so a parser that let that through would give any client a way to turn a
+form read into an unhandled condition: the CSRF check reads its token through FORM-PARAM.
+The pair is kept rather than dropped, with only the part that failed left undecoded.
+
 URLENCODED ONLY. A multipart/form-data body is a different format entirely and yields
 nothing here; use MULTIPART-P and PARSE-MULTIPART for that.
 
@@ -150,8 +167,38 @@ true, which is a bigger change than it looks and is not what pre-publication iss
     (loop for pair in (uiop:split-string body :separator "&")
           for eq = (position #\= pair)
           when eq
-            collect (cons (subseq pair 0 eq)
-                          (quri:url-decode (subseq pair (1+ eq)) :lenient t)))))
+            collect (cons (%form-decode (subseq pair 0 eq))
+                          (%form-decode (subseq pair (1+ eq)))))))
+
+(defun %form-decode (string)
+  "STRING url-decoded with `+' as a space, or STRING itself when it does not decode, such as a
+truncated escape (`a%4'). Never signals: see FORM-ALIST."
+  (handler-case (quri:url-decode string :lenient t)
+    (error () string)))
+
+(defun %form-urlencode-string (string)
+  "STRING percent-encoded the way a browser encodes a form field: UTF-8, with ASCII letters,
+digits and * - . _ left as they are, a space as `+', and every other byte as %XX."
+  (with-output-to-string (out)
+    (loop for byte across (sb-ext:string-to-octets string :external-format :utf-8)
+          for ch = (code-char byte)
+          do (cond ((or (and (< byte 128) (alphanumericp ch)) (find ch "*-._"))
+                    (write-char ch out))
+                   ((= byte 32) (write-char #\+ out))
+                   (t (format out "%~:@(~2,'0X~)" byte))))))
+
+(defun form-urlencode (pairs)
+  "A urlencoded body for PAIRS, a list of (name . value) strings in order, encoded as a browser
+encodes a form it submits as application/x-www-form-urlencoded (#715): names and values both,
+with a space as `+'. FORM-ALIST reads it back as PAIRS.
+
+For tests above all. A body written by hand, such as \"en:who=x\", has a raw colon in the
+name, and no browser sends that, so a test built that way passes against a parser that fails
+on what a browser really posts."
+  (format nil "~{~A~^&~}"
+          (loop for (name . value) in pairs
+                collect (format nil "~A=~A" (%form-urlencode-string name)
+                                (%form-urlencode-string value)))))
 
 (defun form-params (body name)
   "EVERY url-decoded value of form field NAME in a urlencoded BODY string, in order, as a
@@ -195,6 +242,27 @@ this is first-wins rather than an error."
   "Request header NAME (case-insensitive) from the Clack ENV, or NIL."
   (let ((h (getf env :headers)))
     (and h (gethash (string-downcase name) h))))
+
+(defun query-string-with (query-string changes)
+  "QUERY-STRING with the parameters named in CHANGES replaced, for building a link that keeps
+the rest of the current query (#488). CHANGES is a list of (name . value): every existing
+pair with that name is removed, and the pair is appended when VALUE is a string. A value of
+NIL only removes. Other pairs keep their order. The result is encoded as FORM-URLENCODE
+encodes, and is the empty string when no pair is left.
+
+QUERY-STRING is what the Clack env holds under :QUERY-STRING, or NIL."
+  (let ((names (mapcar #'car changes)))
+    (form-urlencode
+     (append (remove-if (lambda (pair) (member (car pair) names :test #'string=))
+                        (form-alist query-string))
+             (loop for (name . value) in changes
+                   when value collect (cons name value))))))
+
+(defun htmx-request-p (env)
+  "True when the request was made by htmx: it carries the header HX-Request: true. A handler
+uses this to return only the fragment htmx swaps in, and the whole page otherwise. Such a
+response should carry Vary: HX-Request, so a cache does not serve one as the other."
+  (equal (request-header env "hx-request") "true"))
 
 (defun cookie (env name)
   "The value of cookie NAME from the request's Cookie header, or NIL."

@@ -51,17 +51,35 @@
    ;; conditions -- the failure protocol
    #:blob-error #:blob-error-bucket #:blob-error-key
    #:blob-not-found #:blob-invalid-key #:blob-invalid-key-fault
+   #:blob-invalid-metadata #:blob-invalid-metadata-name #:blob-invalid-metadata-fault
    #:blob-backend-error #:blob-backend-error-status #:blob-backend-error-detail
    #:blob-configuration-error #:blob-configuration-error-missing
    #:blob-unsupported #:blob-unsupported-operation
+   #:blob-precondition-failed #:blob-source-changed
+   #:blob-upload-refused #:blob-upload-refused-reason #:blob-upload-refused-size
+   #:blob-upload-refused-limit
    ;; the store protocol
    #:store #:store-name
    #:put-blob #:get-blob #:delete-blob #:blob-exists-p #:blob-metadata #:blob-url
-   #:list-blobs #:with-blob-stream
+   #:list-blobs #:with-blob-stream #:open-blob
+   ;; server-side copy (#804)
+   #:copy-blob #:move-blob
+   ;; a public copy of an image for a link-preview card (#830)
+   #:public-image-url #:delete-public-images #:strip-image-metadata
+   #:blob-image-refused #:blob-image-refused-reason #:blob-image-refused-size
+   #:blob-image-refused-limit #:*public-image-cache-control*
+   ;; direct uploads from a client (#770)
+   #:upload-url #:read-blob-range
+   #:upload-target #:make-upload-target #:upload-target-p #:upload-target-url
+   #:upload-target-method #:upload-target-headers #:upload-target-expires-in
+   #:upload-target-content-length
+   #:put-bucket-cors #:check-bucket-cors
+   #:start-multipart-upload #:multipart-part-url #:complete-multipart-upload
+   #:abort-multipart-upload #:list-multipart-parts
    ;; blob metadata (what a row should hold)
    #:blob-meta #:make-blob-meta #:blob-meta-p
    #:blob-meta-key #:blob-meta-size #:blob-meta-content-type
-   #:blob-meta-checksum #:blob-meta-last-modified
+   #:blob-meta-checksum #:blob-meta-last-modified #:blob-meta-etag
    ;; backend registry + environment selection
    #:register-store #:store-from-env #:*store*
    ;; orphan reconciliation

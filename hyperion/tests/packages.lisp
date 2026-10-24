@@ -27,6 +27,7 @@
                     (#:channel #:hyperion/channel)
                     (#:feed #:hyperion/feed)
                     (#:sse  #:hyperion/sse)
+                    (#:meta #:hyperion/page-meta)
                     (#:bt      #:bordeaux-threads)
                     (#:imp     #:hyperion/import))
   (:export #:run-tests #:hyperion))

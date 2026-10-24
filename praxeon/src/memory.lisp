@@ -239,11 +239,48 @@ KEPT IN THE STORE, NOT WORKED OUT FROM THE OBSERVATIONS (#462's second review). 
 message an observation cites passes a window whose writes failed part-way, forgets a window that
 was given up on, and counts observations the app wrote into the thread itself, so an observer
 restarted from it would pass messages that were never distilled. FORGET-SUBJECT reduces it to
-the mark, with no skipped windows (#462, the maintainer's ruling)."))
+the mark, with no skipped windows (#462, the maintainer's ruling).
+
+A STORE RETURNS SKIPPED AS IT WAS RECORDED, :CLOSED included and in the order given (#508). The
+observer decides whether a window is closed from this record alone, so a store that drops
+:CLOSED makes it try again a window it closed, and distil and promote messages older than a
+window it has already written."))
 
 (defgeneric record-thread-progress (store subject thread mark skipped)
   (:documentation "Record the observer's progress on THREAD about SUBJECT, as THREAD-PROGRESS
 returns it. Replaces what was recorded. Returns MARK."))
+
+;;; A GROUP OF WRITES THAT TAKE EFFECT TOGETHER OR NOT AT ALL (#529). praxeon/observe writes a
+;;; window's observations and then its progress; when the progress write failed, the store held
+;;; observations its progress did not cover, and the next observer distilled the window again
+;;; beside them. Both generics are optional: the default methods, on the base class, say a store
+;;; has no transactions and call the thunk as it is, so a store written outside this tree keeps
+;;; today's behaviour without a change.
+
+(defgeneric store-transactions-p (store)
+  (:documentation "Whether CALL-WITH-STORE-TRANSACTION on STORE makes the writes inside it take
+effect together or not at all (#529). The default method returns NIL.")
+  (:method ((store memory-store)) nil))
+
+(defgeneric call-with-store-transaction (store thunk &key subject thread contents)
+  (:documentation "Call THUNK so that STORE's writes inside it all take effect, or, when THUNK
+exits non-locally, none do (#529). Returns THUNK's values. SUBJECT and THREAD, when given, name
+the only subject and thread THUNK writes, which a store may use to keep less for a rollback.
+CONTENTS, when given, are the texts THUNK will write, which a store may prepare before it takes
+its lock, as the SQL store computes their embeddings (the hub's review of #645).
+
+THUNK MAY CALL BACK INTO THE STORE, as an app's :PROMOTE function reading the subject's facts
+does, on the same thread: a store that implements this holds a recursive lock, or none (the
+hub's review of #529's design). The default method calls THUNK and nothing more, which is right
+for a store whose STORE-TRANSACTIONS-P is NIL.")
+  (:method ((store memory-store) thunk &key subject thread contents)
+    (declare (ignore subject thread contents))
+    (funcall thunk)))
+
+(defmacro with-store-transaction ((store &key subject thread contents) &body body)
+  "Run BODY as CALL-WITH-STORE-TRANSACTION's thunk on STORE (#529)."
+  `(call-with-store-transaction ,store (lambda () ,@body)
+                                :subject ,subject :thread ,thread :contents ,contents))
 
 ;;; RECALL NEVER MIXES THE SCOPES (#317). :ALL is for OBSERVATIONS-OF, the access right; a
 ;;; recall builds a prompt, and one that mixed two conversations' observations with the subject's
@@ -568,3 +605,58 @@ whose mark is at least the last message its erased observations cited, with noth
 (defmethod record-thread-progress ((store in-memory-store) subject thread mark skipped)
   (setf (gethash (cons subject thread) (store-progress store)) (cons mark (copy-tree skipped)))
   mark)
+
+;;; --- transactions (#529) ---------------------------------------------------------------
+
+(defmethod store-transactions-p ((store in-memory-store)) t)
+
+(defun %copy-observation-into (to from)
+  "Set every slot of observation TO from observation FROM."
+  (dolist (slot (sb-mop:class-slots (class-of from)) to)
+    (let ((name (sb-mop:slot-definition-name slot)))
+      (setf (slot-value to name) (slot-value from name)))))
+
+(defmethod call-with-store-transaction ((store in-memory-store) thunk &key subject thread contents)
+  "Under the store's lock, keep what THUNK can change, call it, and put that back if it exits
+non-locally. CONTENTS is not used: this store embeds nothing.
+
+WHAT IS KEPT, AND WHAT THAT COSTS (the hub's review of #529's design). With SUBJECT: that
+subject's observations, each copied, because SUPERSEDE changes the one it replaces, and the
+progress entry for SUBJECT and THREAD. Without SUBJECT: every observation and every progress
+entry. Either way the id counter. So a transaction costs a copy of one subject's observations,
+not of the store. THUNK must not write another subject's observations or another thread's
+progress when it names a SUBJECT; the observer writes only its own."
+  (declare (ignore contents))
+  (bt:with-recursive-lock-held ((store-lock store))
+    (let* ((observations (store-observations store))
+           (progress (store-progress store))
+           (kept (loop for obs being the hash-values of observations
+                       when (or (null subject) (equal subject (observation-subject obs)))
+                         collect (cons obs (copy-observation obs))))
+           (counter (store-counter store))
+           (key (cons subject thread))
+           (kept-progress (if subject
+                              (multiple-value-bind (value present) (gethash key progress)
+                                (list (cons key (and present (cons :present (copy-tree value))))))
+                              (loop for k being the hash-keys of progress using (hash-value v)
+                                    collect (cons k (cons :present (copy-tree v))))))
+           (finished nil))
+      (unwind-protect (multiple-value-prog1 (funcall thunk) (setf finished t))
+        (unless finished
+          (let ((ids (make-hash-table :test #'equal)))
+            (dolist (pair kept) (setf (gethash (observation-id (car pair)) ids) t))
+            (loop for id in (loop for obs being the hash-values of observations
+                                  when (and (or (null subject)
+                                                (equal subject (observation-subject obs)))
+                                            (not (gethash (observation-id obs) ids)))
+                                    collect (observation-id obs))
+                  do (remhash id observations))
+            (dolist (pair kept)
+              (setf (gethash (observation-id (car pair)) observations)
+                    (%copy-observation-into (car pair) (cdr pair)))))
+          (setf (store-counter store) counter)
+          (unless subject (clrhash progress))
+          (dolist (entry kept-progress)
+            (if (cdr entry)
+                (setf (gethash (car entry) progress) (cddr entry))
+                (remhash (car entry) progress))))))))

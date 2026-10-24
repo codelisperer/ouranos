@@ -28,8 +28,10 @@ provider key (§1) and jump to [Talk to Elise](#4-talk-to-elise). The sections b
 explain each piece for when you want to set things up by hand or need to troubleshoot.
 
 (The framework-local `scripts/setup.sh` still works as an **interim** convenience —
-it clones Coalton, seeds `.env`, and with `--test` compiles + runs the suite — but
-discovery now comes from the bootstrap drop-in, not a `local-projects` symlink.)
+it checks that Coalton is at the commit in the monorepo's `coalton.pin`, seeds `.env`,
+and with `--test` compiles + runs the suite — but discovery now comes from the bootstrap
+drop-in, not a `local-projects` symlink. It does not install Coalton: the monorepo's
+`scripts/setup.sh` or `scripts/setup.ps1` checks out the pinned commit.)
 
 ## Prerequisites
 
@@ -43,8 +45,8 @@ discovery now comes from the bootstrap drop-in, not a `local-projects` symlink.)
   on its default source-registry). Praxeon's typed core is written in Coalton.
 - Dependencies (pulled by Quicklisp): `alexandria`, `dexador`, `com.inuoe.jzon`,
   `fiveam`, plus the web layer's `clack`, `woo`, `quri`, `spinneret`.
-- An **LLM provider**: an Anthropic API key with credits, an OpenRouter key, or
-  a local Ollama/LM Studio endpoint.
+- An **LLM provider**: an Anthropic API key with credits, an OpenRouter key, a key for
+  Meta's Model API, or a local Ollama/LM Studio endpoint.
 - **Optional**: a **Tavily** API key (`TAVILY_API_KEY`) to give agents web search.
 
 > If loading fails with `Bug in readtable iterators or concurrent access?`, that's
@@ -63,7 +65,7 @@ Minimum to talk to Elise via **Anthropic**:
 
 ```sh
 PRAXEON_LLM_IMPL=anthropic
-PRAXEON_ANTHROPIC_MODEL=claude-sonnet-5        # or claude-opus-4-8
+PRAXEON_ANTHROPIC_MODEL=claude-sonnet-5-5      # or claude-opus-5-5
 PRAXEON_ANTHROPIC_API_KEY=sk-ant-...
 ```
 
@@ -77,7 +79,17 @@ PRAXEON_OPENROUTER_API_KEY=sk-or-...
 
 Notes:
 
-- Impls: `anthropic`, `openai`, `ollama`, `openrouter`.
+- Impls: `anthropic`, `openai`, `ollama`, `openrouter`, `meta`.
+- `meta` is Meta's Model API (Muse Wonder). Its variables are `PRAXEON_META_API_KEY`
+  (required), `PRAXEON_META_MODEL` (default `muse-wonder-1.0`) and `PRAXEON_META_BASE_URL`
+  (default `https://api.meta.ai/v1`). Meta's API accepts only `tool_choice: "auto"`, so on
+  `meta` a forced tool choice passed to `complete` signals
+  `praxeon/conditions:tool-choice-unsupported` before any request is sent. `generate-structured`
+  still works on `meta`: it sends the spec's schema as `response_format` (`json_schema`) and
+  reads the JSON object in the reply's text, with the same validation, conditions and restarts
+  as the tool-call path. On `meta`, a recursive schema is refused with
+  `praxeon/llm:unsendable-schema` before anything is sent, because Meta returns HTTP 400 for one. Its models reason before they
+  answer, and the reasoning counts against `max_tokens`.
 - Every var can be **shared** (`PRAXEON_LLM_MODEL`, `PRAXEON_LLM_API_KEY`, …) or
   **per-provider** (`PRAXEON_<IMPL>_MODEL`, `PRAXEON_<IMPL>_API_KEY`, …). The
   per-provider form wins, so you can keep several providers configured and switch
@@ -352,7 +364,7 @@ inspectable. (To run the chat loop *and* inspect concurrently, run it in a threa
 With per-provider vars set (step 1), switching is one line in `.env`:
 
 ```sh
-PRAXEON_LLM_IMPL=anthropic        # <-> openrouter, ollama, openai
+PRAXEON_LLM_IMPL=anthropic        # <-> openrouter, ollama, openai, meta
 ```
 
 ### Per-agent models (roles)
@@ -363,13 +375,13 @@ the shared `PRAXEON_LLM_<VAR>` (for `MODEL`, `IMPL`, `API_KEY`, `AUTH`, `BASE_UR
 The shared level applies only when the role's provider is the one `PRAXEON_LLM_IMPL`
 names. A role that selects a different provider (`PRAXEON_<ROLE>_IMPL`) gets its
 settings from `PRAXEON_<ROLE>_<VAR>` or `PRAXEON_<IMPL>_<VAR>`. When that provider is
-a hosted one (`anthropic`, `openrouter`) and neither key variable is set, building it
+a hosted one (`anthropic`, `openrouter`, `meta`) and neither key variable is set, building it
 signals `praxeon/conditions:missing-provider-key`, which names both variables.
 So one process runs several agents, each on its own model/vendor:
 
 ```sh
-PRAXEON_LLM_MODEL=claude-sonnet-5                  # shared default (any role)
-PRAXEON_ELISE_MODEL=claude-opus-4-8                # Elise deliberates (therapist)
+PRAXEON_LLM_MODEL=claude-sonnet-5-5                # shared default (any role)
+PRAXEON_ELISE_MODEL=claude-opus-5-5                # Elise deliberates (therapist)
 PRAXEON_TRANSLATE_MODEL=claude-haiku-4-5-20251001  # the translator agent
 # PRAXEON_SCRIBE_MODEL=...                          # a future agent: just add a var
 ```
@@ -1037,7 +1049,215 @@ finds it. The clearing row shows a setting to avoid: when each result is about h
 a batch runs after almost every result, and each batch changes the start of the prompt, so the
 cached share falls.
 
-## 14. Run the tests
+## 14. Let an agent create images (`praxeon/image`, #758)
+
+`praxeon/image` gives an agent the means `generate-image`. The model calls it with a prompt and,
+optionally, a shape (`square`, `portrait`, `landscape`) and a quality (`low`, `medium`,
+`high`). The image goes to your app, never to the model: a means returns a string to the model,
+and the bytes are yours to store and serve. Praxeon keeps nothing.
+
+```lisp
+(ql:quickload :praxeon/image)
+
+(praxeon/image:register-openai-image
+ agent
+ :api-key (user-openai-key user)          ; the user's key first; omit to read the environment
+ :on-image (lambda (image)
+             ;; IMAGE is an IMAGE-RESULT: its octets, media type, revised prompt, size, quality.
+             (let ((id (store-image! (praxeon/image:image-result-octets image)
+                                     (praxeon/image:image-result-media-type image))))
+               ;; What you return is shown to the model as the image's reference, or NIL.
+               id)))
+```
+
+`register-openai-image` returns the means' name, or NIL when there is no key, in which case it
+registers nothing. Use it rather than `register`, so an agent never has a means that can only
+fail. With no `:api-key` it reads `PRAXEON_OPENAI_API_KEY`, then the deprecated
+`PRAXEON_IMAGE_API_KEY`, which logs a warning the first time it supplies the key; an `:api-key`
+you pass is used even when it is NIL. An `:api-key` of `""` is no key either: nothing
+is registered, and a warning is logged, because it usually means the app's key setting is blank.
+`PRAXEON_IMAGE_MODEL` and `PRAXEON_IMAGE_BASE_URL` override the model (default
+`gpt-image-2.5-flare`) and the endpoint.
+
+**Bounding what an image costs.** Pass `:qualities` to choose which qualities the model may ask
+for, and `:default-quality` and `:default-size` for a call that names none:
+
+```lisp
+(praxeon/image:register-openai-image
+ agent :on-image #'store-image!
+ :qualities '(:low :medium) :default-quality :low :default-size :square)
+```
+
+The tool schema then offers only `low` and `medium`, and a call that asks for `high` is refused
+with an error result naming the allowed values, before any request is sent. Without
+`:qualities` the model may ask for `low`, `medium`, `high` or `auto`. Each request makes one
+image.
+
+**Another model.** Pass any OpenAI image model id as `:model`, or set `PRAXEON_IMAGE_MODEL`. For
+example, `gpt-image-1-mini` costs about a quarter as much per token as the default. OpenAI shuts
+it down on 2026-12-01, along with `gpt-image-1.5` and `chatgpt-image-latest`; `gpt-image-1`
+shuts down on 2026-10-23. OpenAI names `gpt-image-2.5-flare` and `gpt-image-2.5-sunburst` as
+their replacements: Sunburst is the variant for work where editing precision matters most. The
+quality the model is asked for is a parameter too, so an app can trade cost for detail on each
+call.
+
+The model is told the image's media type, its size in bytes, your reference and the prompt the
+provider says it used. The bytes are passed to `:on-image` as the provider sent them and are
+never re-encoded, so provenance metadata embedded in the file, such as C2PA, is kept.
+
+**A refusal is a result, not a crash.** When the provider refuses a prompt under its content
+policy, the means signals `praxeon/image:image-refused`, a `tool-error-result`. The model is
+told the request was refused, with the provider's code, stage and categories, and the turn goes
+on, so the agent can explain it.
+
+**A busy or silent service is a result too.** When the service answers 429 or 5xx, or does not
+answer within the read timeout (120 seconds by default; pass `:read-timeout` to change it), the
+request signals `praxeon/image:image-request-failed`, whose `image-request-failed-kind` is
+`:rate-limited`, `:server-error` or `:no-answer`. Inside a turn the model is told the service is
+busy or unavailable and to try again later, with the wait the service's `Retry-After` header
+asked for when it sent one, and the turn goes on. Praxeon does not retry. The `:tool-result`
+outcome is `:not-run` for a 429 and `:unknown` otherwise, since the request may have been
+processed. Any other failed request, such as a 400, is `provider-request-failed`, as for the
+chat providers, and ends the turn.
+
+**Usage.** Each request that succeeds emits one `:image-usage` event through `praxeon/event`,
+with `:id`, `:principal` and `:agent` as on `:tool-result`, `:provider`, `:model`, `:count`,
+`:size` and `:quality`, plus `:input-tokens` and `:output-tokens` when the provider reports
+them, and `:cost` when it is known. A refused or failed request emits no `:image-usage` event,
+because the provider reports no usage with an error. Whether a provider charges for a refused
+request is its own policy, which praxeon cannot see. The model's call and its result arrive as
+the usual `:tool-call` and `:tool-result` events, so a status line can say an image is being
+made.
+
+**Cost.** OpenAI's reply reports token counts and no cost, and OpenAI publishes its image prices
+per token, not per image. For a model in `praxeon/image:*openai-image-prices*`, praxeon computes
+the cost from the reported counts and those prices, and the event carries it as `:cost`, in US
+dollars as an exact rational, with `:estimated t`. Each `image-result` carries its share in
+`image-result-cost`, with `image-result-cost-estimated-p` true. For a model not in the table,
+`:cost` is absent, never 0, and an app that bills must decide what to do with an unpriced model.
+
+The table holds the prices from OpenAI's pricing page
+(<https://developers.openai.com/api/docs/pricing>, "Image generation models", Standard), and
+`upstream.sexp` records the date each row was read. Each approximation praxeon makes raises the
+estimate rather than lowering it: cached input is priced at the full input rate, and a count the
+reply does not split into text and image tokens is priced at the higher of its two rates. The
+estimate is only as accurate as the token counts the reply reports, so reconcile it with
+OpenAI's invoice before relying on it for billing. `openai-image-cost` gives the same figure for
+a model and a plist of counts, and an app with a negotiated rate can bind `*openai-image-prices*`
+around its calls.
+
+A model OpenAI has scheduled for shutdown keeps its row after the date, so a request made before
+the shutdown can still be priced. Its `upstream.sexp` entry carries the date as `:retires`, and
+`scripts/check-upstream.lisp --online` lists the entry under "Past its shutdown date" from that
+day, so the row is removed deliberately. The dates on 2026-10-20 were `gpt-image-1` on
+2026-10-23, and `gpt-image-1-mini`, `gpt-image-1.5` and `chatgpt-image-latest` on 2026-12-01.
+
+**Logging** records the provider, model, count, size, quality, byte count, status and duration,
+and for an edit the number of reference images, their total size and whether there was a mask,
+never the prompt, the revised prompt or any image.
+
+To call the provider outside a turn, use `generate-image`:
+
+```lisp
+(praxeon/image:generate-image (praxeon/image:make-openai-images :api-key key)
+                              "a red fox at dusk" :size :landscape :quality :high)
+;; => a list of IMAGE-RESULTs
+```
+
+**Editing an image, or making a variation of it.** Pass reference images to `generate-image`:
+the new image is made from them and the prompt. Each is a `reference-image`, made from the file's
+bytes with `make-reference-image`, which reads the media type from the bytes themselves and
+refuses anything that is not a PNG, JPEG or WebP file, or is over 50 MB, with
+`praxeon/image:image-input-invalid`. Up to 16 references can go in one request
+(`*max-references*`), and together with the mask they may come to at most 64 MB
+(`*max-reference-total-bytes*`; raise it for larger images). The name you give
+`make-reference-image` only labels the image in refusals: the provider is sent `image-1.png`,
+`image-2.jpeg` and so on, so a name from a user or the model never reaches a request header.
+
+```lisp
+(praxeon/image:generate-image
+ provider "the same fox, in winter"
+ :references (list (praxeon/image:make-reference-image fox-octets :name "fox")))
+```
+
+A variation is the same call with a prompt that asks for one: OpenAI's `/images/variations`
+served only DALL-E, which OpenAI shut down on 2026-05-12. To change only part of an image, pass
+a `:mask` as well: a PNG with an alpha channel, the same size as the first reference, which must
+also be a PNG. Its transparent pixels mark what to replace. A mask that does not meet these is
+refused before any request, with the reason. With references, the OpenAI provider sends the
+request to `/images/edits` as `multipart/form-data`; without them, to `/images/generations` as
+before. The reply reports image input tokens separately, so the cost prices them at the image
+input rate.
+
+**Letting the model edit images.** Give `register` (or `register-openai-image`) a
+`:resolve-reference` function. The tool schema then offers `reference_images`, a list of at most
+`:max-references` (default 4) strings, and the model fills it with references it was given: the
+strings your `:on-image` returned for images made earlier, or ids you gave it for images the user
+uploaded. Your function turns each string into a `reference-image`, or returns NIL for one this
+model may not use, so the model reaches only the images you allow:
+
+```lisp
+(praxeon/image:register-openai-image
+ agent :on-image #'store-image!
+ :resolve-reference (lambda (ref)
+                      (let ((stored (find-image-for-user ref user)))
+                        (and stored
+                             (praxeon/image:make-reference-image (stored-octets stored)
+                                                                 :name ref)))))
+```
+
+A reference your function does not know, more references than allowed, or a file that is not an
+image is refused as a `:not-run` error result that tells the model why, and the turn goes on.
+Two references to the same stored image send it once. The images are added up as your function
+returns them, and the call is refused as soon as they pass `*max-reference-total-bytes*`, so
+praxeon stops asking for more. Your function still reads each image it returns, so look up the
+stored size first and return NIL for an image over 50 MB rather than reading it. Without
+`:resolve-reference` the model can only create images from a prompt, as before.
+
+**Google as the provider.** `register-google-image` takes the same arguments as
+`register-openai-image` and sends requests to Google's Gemini API:
+
+```lisp
+(praxeon/image:register-google-image
+ agent :on-image #'store-image!
+ :qualities '(:low :medium) :default-quality :low)
+```
+
+- **Key.** `:api-key`, else `PRAXEON_GOOGLE_API_KEY`, then `GEMINI_API_KEY`. The key is sent as
+  `x-goog-api-key`.
+- **Model.** The default is `gemini-nano-banana-2.1`, which Google recommends for new projects.
+  Pass `:model` or set `PRAXEON_GOOGLE_IMAGE_MODEL` for another. **`gemini-3.1-flash-lite-image`
+  is the low-cost choice**: its image output costs the same per token as the default's, its input
+  a sixth as much, and it makes 1K images only, so allow only `:low` with it.
+- **Shape and quality.** A shape is sent as an aspect ratio (square 1:1, portrait 2:3, landscape
+  3:2) and a quality as a resolution (low 1K, medium 2K, high 4K); `auto` sends neither, and
+  Google chooses. The qualities you allow therefore also bound the resolution, and with it the
+  cost. Some developers report Google ignoring the requested resolution, so check the size of
+  what arrives if it matters.
+- **What it does not take.** One image per request, up to 14 reference images (Google's page
+  allows fewer for some models), and no mask: describe in the prompt which part to change. A
+  request outside these is refused with `image-input-invalid` before anything is sent.
+- **Refusals and empty replies.** A prompt Google blocks, or an image it stops for safety, is
+  `image-refused`, with Google's reason as the code and `input` or `output` as the stage. A reply
+  with no image for another reason, such as Google's `NO_IMAGE`, is
+  `praxeon/image:image-not-made`, a `tool-error-result`, so the model is told and the turn goes
+  on.
+- **Cost.** `:image-usage` carries a `:cost` with `:estimated t`, from
+  `praxeon/image:*google-image-prices*` and the reply's token counts: image output at the image
+  rate, and text and thinking at the text rate. `upstream.sexp` dates each row
+  ("Google image prices: MODEL").
+- **Which API.** The provider uses `generateContent` at v1. Google calls that API's documentation
+  legacy and recommends its Interactions API, but only `generateContent` documents how refusals
+  arrive and how usage is split by modality.
+
+**Each provider reads only its own key variables.** The Google provider never reads
+`PRAXEON_IMAGE_API_KEY` or `PRAXEON_OPENAI_API_KEY`, so a key you set up for OpenAI is never
+sent to Google. The OpenAI provider reads `PRAXEON_OPENAI_API_KEY`, and then
+`PRAXEON_IMAGE_API_KEY`, which is deprecated because its name does not say which vendor it is
+for: a Google key put there would be sent to OpenAI. It still works, logs a warning once, and
+will be removed in a later release; move its value to `PRAXEON_OPENAI_API_KEY`.
+
+## 15. Run the tests
 
 Network-free (uses a scripted provider, no API key needed):
 

@@ -22,6 +22,15 @@
 ;;;; would train people to ignore it. FiveAM prints the skip and its reason, and
 ;;;; verify-tree surfaces skips rather than burying them (pre-publication issue 284's lesson, one file over) --
 ;;;; so "not built here" is visible rather than silent.
+;;;;
+;;;; A TEST THAT CREATES A WINDOW RUNS ONLY WHEN GITHUB_ACTIONS IS SET (#885). GitHub sets it on its
+;;;; runners. CI is not enough: agents set CI=1 on developers' machines when they run suites, and
+;;;; there a window would open on the developer's screen. Every such test checks
+;;;; %REAL-WINDOW-ALLOWED-P and skips, naming GITHUB_ACTIONS, when it is false; and
+;;;; %RUN-HIDDEN-LAUNCHER (Windows) and %RUN-SHOWN-LAUNCHER (macOS), the two functions here that
+;;;; clear HYPERION_VIEW_NO_WINDOW, signal an error instead of starting the launcher, so a new test
+;;;; that forgets the check fails rather than opening a window. Every other call runs with
+;;;; HYPERION_VIEW_NO_WINDOW=1 (RUN-LAUNCHER).
 
 (defpackage #:hyperion/view/tests
   (:use #:cl #:fiveam)
@@ -57,7 +66,8 @@ resolution moves, this suite must move with it or say so."
 It runs with HYPERION_VIEW_NO_WINDOW=1, so a call that would create a window exits 3 instead
 (#521). None of these calls is meant to create one, and on a developer's machine a test that
 did would open a window on their screen. The real-window tests use %REPORT-PLACEMENT, which
-clears the variable and runs only on CI."
+clears the variable, or on macOS %RUN-SHOWN-LAUNCHER; both run only when GITHUB_ACTIONS is set
+(#885)."
   (let ((out (make-string-output-stream))
         (err (make-string-output-stream))
         (previous (uiop:getenv "HYPERION_VIEW_NO_WINDOW")))
@@ -181,6 +191,19 @@ code when it did not exit 0."
     ;; Too wide and too tall on a small screen.
     (is (equal '(0 0 1366 728) (%placement 0 0 1366 728 1920 1080 96 16 39)))))
 
+(test a-window-on-a-mac-screen-is-placed-in-its-visible-frame
+  ;; The numbers macOS's place_window passes (#485): points at DPI 96, which leaves them
+  ;; unscaled, and y measured upwards, so the work area is the visible frame's left, bottom,
+  ;; right and top. A 1512x982 screen with a 33-point menu bar and a 70-point Dock has the
+  ;; visible frame 0,70 to 1512,949. webview_set_size makes the frame, title bar included,
+  ;; WIDTH x HEIGHT, so a 1200x800 window has a 1200x772 client and a 28-point title bar.
+  (with-launcher
+    (is (equal '(156 109 1200 800) (%placement 0 70 1512 949 1200 772 96 0 28))
+        "a window that fits is centred between the Dock and the menu bar")
+    ;; 1000 points high, in 879: cut to 879 and put on the Dock.
+    (is (equal '(116 70 1280 879) (%placement 0 70 1512 949 1280 972 96 0 28))
+        "a window taller than the visible frame is cut to it")))
+
 (test placement-refuses-what-is-not-nine-integers
   (with-launcher
     (is (eql 2 (%placement 0 0 2560 1528 1280 860 144 16)) "eight numbers")
@@ -244,9 +267,19 @@ code when it did not exit 0."
 ;;; real window, so it runs only where the CI environment variable is set, on a runner, and not
 ;;; on a developer's machine.
 
+(defun %real-window-allowed-p ()
+  "True when a test may create a real window: only on a GitHub Actions runner, where GitHub sets
+GITHUB_ACTIONS. CI is deliberately not read, because it is also set on developers' machines (#885)."
+  (and (uiop:getenvp "GITHUB_ACTIONS") t))
+
 (defun %run-hidden-launcher (&rest args)
   "Run `hyperion-view ARGS' started hidden, through PowerShell's Start-Process -WindowStyle
-Hidden, with HYPERION_VIEW_NO_WINDOW cleared. Returns (values EXIT-CODE OUTPUT)."
+Hidden, with HYPERION_VIEW_NO_WINDOW cleared. Returns (values EXIT-CODE OUTPUT).
+
+Signals an error, and starts nothing, unless %REAL-WINDOW-ALLOWED-P: with the variable cleared,
+the launcher creates a window (#885)."
+  (unless (%real-window-allowed-p)
+    (error "%RUN-HIDDEN-LAUNCHER creates a window, and runs only when GITHUB_ACTIONS is set (#885)."))
   (let* ((dir (uiop:ensure-directory-pathname
                (merge-pathnames (format nil "hyperion-view-report-~36R/" (random (expt 2 40)))
                                 (uiop:temporary-directory))))
@@ -272,13 +305,13 @@ Hidden, with HYPERION_VIEW_NO_WINDOW cleared. Returns (values EXIT-CODE OUTPUT).
          (and placement-file (list (uiop:native-namestring placement-file)))))
 
 (test the-window-is-placed-in-the-work-area-on-a-real-window
-  "On a CI Windows runner, a real window is placed where --placement says, inside the work area,
+  "On a GitHub Actions Windows runner, a real window is placed where --placement says, inside the work area,
 and Windows reports that rectangle."
   #-win32 (skip "The placement calls are Windows only")
   #+win32
   (with-launcher
-    (if (null (uiop:getenvp "CI"))
-        (skip "Runs only on CI (CI is not set here): it creates a window")
+    (if (not (%real-window-allowed-p))
+        (skip "Runs only on GitHub Actions (GITHUB_ACTIONS is not set here): it creates a window")
         (multiple-value-bind (code out) (%report-placement 1280 860)
           (is (eql 0 code) "--report-placement exited ~S: ~A" code out)
           (let ((line (find-if (lambda (l) (uiop:string-prefix-p "work " l))
@@ -301,6 +334,72 @@ and Windows reports that rectangle."
                   (destructuring-bind (l tp r b) window
                     (is (and (<= wl l) (<= wt tp) (<= r wr) (<= b wb))
                         "and inside the work area: ~S" line))))))))))
+
+;;; --- the same on a real macOS window, on a GitHub runner only (#485) ----------------------
+;;;
+;;; On macOS webview.h shows the window and activates the app as soon as it is created, and
+;;; there is no hidden start, so this test shows a window. It runs only when GITHUB_ACTIONS is
+;;; set. CI is not enough: agents set CI=1 when they run suites on a developer's machine, and
+;;; that must not open a window there (#885).
+
+(defun %run-shown-launcher (seconds &rest args)
+  "Run `hyperion-view ARGS' with HYPERION_VIEW_NO_WINDOW cleared, so it creates a window, which
+macOS shows. Returns (values EXIT-CODE OUTPUT), or :TIMEOUT when it is still running after
+SECONDS; then that process, and nothing else, is killed.
+
+Signals an error, and starts nothing, unless %REAL-WINDOW-ALLOWED-P, as %RUN-HIDDEN-LAUNCHER does
+(#885)."
+  (unless (%real-window-allowed-p)
+    (error "%RUN-SHOWN-LAUNCHER creates a window, and runs only when GITHUB_ACTIONS is set (#885)."))
+  (let ((previous (uiop:getenv "HYPERION_VIEW_NO_WINDOW"))
+        (deadline (+ (get-internal-real-time) (* seconds internal-time-units-per-second))))
+    (setf (uiop:getenv "HYPERION_VIEW_NO_WINDOW") "")
+    (unwind-protect
+         (let ((p (uiop:launch-program (cons (uiop:native-namestring (launcher)) args)
+                                       :output :stream :error-output nil)))
+           (unwind-protect
+                (progn
+                  (loop while (and (uiop:process-alive-p p) (< (get-internal-real-time) deadline))
+                        do (sleep 0.1))
+                  (if (uiop:process-alive-p p)
+                      (progn (uiop:terminate-process p :urgent t)
+                             (uiop:wait-process p)
+                             (values :timeout ""))
+                      (let ((out (uiop:slurp-stream-string (uiop:process-info-output p))))
+                        (values (uiop:wait-process p) out))))
+             (uiop:close-streams p)))
+      (setf (uiop:getenv "HYPERION_VIEW_NO_WINDOW") (or previous "")))))
+
+(test the-window-is-placed-in-the-visible-frame-on-a-real-mac-window
+  "On a GitHub macOS runner, a real window is placed where --placement says, inside the screen's
+visible frame, and a window taller than the screen is shrunk to the visible frame's height."
+  #-darwin (skip "The macOS placement calls run on macOS only")
+  #+darwin
+  (with-launcher
+    (if (not (%real-window-allowed-p))
+        (skip "Runs only on GitHub Actions (GITHUB_ACTIONS is not set here): it shows a window")
+        ;; webview_set_size makes the frame, title bar included, WIDTH x HEIGHT; the client is
+        ;; that less the frame the report gives.
+        (dolist (height '(860 5000))
+          (multiple-value-bind (code out)
+              (%run-shown-launcher 60 "--report-placement" "1280" (princ-to-string height))
+            (is (eql 0 code) "--report-placement 1280 ~D exited ~S: ~A" height code out)
+            ;; The work area (4), the DPI, the frame (2), the placement (4) and the window (4).
+            (let* ((line (%report-line out "work "))
+                   (n (and line (%report-numbers line))))
+              (is (eql 15 (length n)) "it printed a report: ~S" out)
+              (when (eql 15 (length n))
+                (destructuring-bind (wl wb wr wt dpi fw fh x y w h l b r tp) n
+                  (is (equal (list x y w h)
+                             (%placement wl wb wr wt (- 1280 fw) (- height fh) dpi fw fh))
+                      "the real calls computed what --placement computes: ~S" out)
+                  (is (equal (list l b r tp) (list x y (+ x w) (+ y h)))
+                      "macOS reports the window at the placement: ~S" out)
+                  (is (and (<= wl l) (<= wb b) (<= r wr) (<= tp wt))
+                      "and inside the visible frame: ~S" out)
+                  (when (eql height 5000)
+                    (is (eql h (- wt wb)) "a 5000-point window is cut to the visible frame: ~S"
+                        out))))))))))
 
 (defun %fresh-dir ()
   (let ((dir (uiop:ensure-directory-pathname
@@ -552,13 +651,13 @@ when it did not exit 0."
            (uiop:split-string out :separator '(#\Newline #\Return))))
 
 (test a-real-window-is-restored-from-its-placement-file-and-saves-it
-  "On a CI Windows runner, a window opens at a saved placement that fits, writes it back, and
+  "On a GitHub Actions Windows runner, a window opens at a saved placement that fits, writes it back, and
 opens centred when the saved placement is on no monitor."
   #-win32 (skip "The placement calls are Windows only")
   #+win32
   (with-launcher
-    (if (null (uiop:getenvp "CI"))
-        (skip "Runs only on CI (CI is not set here): it creates a window")
+    (if (not (%real-window-allowed-p))
+        (skip "Runs only on GitHub Actions (GITHUB_ACTIONS is not set here): it creates a window")
         (let ((dir (%fresh-dir)))
           (unwind-protect
                (let* ((work (multiple-value-bind (code out) (%report-placement 1280 860)
@@ -606,15 +705,15 @@ opens centred when the saved placement is on no monitor."
             (aion/fs:delete-tree dir))))))
 
 (test the-placement-is-saved-while-the-window-is-open-and-a-maximised-start-is-maximised
-  "On a CI Windows runner, through --exercise-placement, which installs the window procedure a
+  "On a GitHub Actions Windows runner, through --exercise-placement, which installs the window procedure a
 launch installs: a move made with the move loop is saved with MAXIMIZED 0; maximising saves the
 same rectangle with MAXIMIZED 1; restoring saves MAXIMIZED 0; minimising and then closing leaves
 the file as it was. A start from a file that says MAXIMIZED 1 opens maximised (review of #521)."
   #-win32 (skip "The placement calls are Windows only")
   #+win32
   (with-launcher
-    (if (null (uiop:getenvp "CI"))
-        (skip "Runs only on CI (CI is not set here): it creates a window, and shows it maximised")
+    (if (not (%real-window-allowed-p))
+        (skip "Runs only on GitHub Actions (GITHUB_ACTIONS is not set here): it creates a window, and shows it maximised")
         (let* ((dir (%fresh-dir))
                (file (merge-pathnames "window-placement" dir))
                (start '(50 50 650 500)))
@@ -665,3 +764,21 @@ the file as it was. A start from a file that says MAXIMIZED 1 opens maximised (r
     (explain! results)
     (unless (results-status results)
       (error "hyperion/view tests failed"))))
+
+(test ci-alone-does-not-let-a-test-create-a-window
+  "#885. With CI=1 and GITHUB_ACTIONS unset, which is how agents run suites on developers'
+machines, no test may create a window: %REAL-WINDOW-ALLOWED-P is false, and %RUN-HIDDEN-LAUNCHER
+signals an error before it starts the launcher. With GITHUB_ACTIONS set it is true. Both variables
+are put back afterwards, so on a GitHub runner the real-window tests still run. Nothing here starts
+the launcher, so it runs everywhere."
+  (let ((ci (uiop:getenv "CI")) (gha (uiop:getenv "GITHUB_ACTIONS")))
+    (unwind-protect
+         (progn
+           (setf (uiop:getenv "CI") "1"
+                 (uiop:getenv "GITHUB_ACTIONS") "")
+           (is (null (%real-window-allowed-p)) "CI=1 alone allowed a window")
+           (signals error (%run-hidden-launcher "--report-placement" "800" "600"))
+           (setf (uiop:getenv "GITHUB_ACTIONS") "true")
+           (is-true (%real-window-allowed-p) "GITHUB_ACTIONS=true did not allow a window"))
+      (setf (uiop:getenv "CI") (or ci "")
+            (uiop:getenv "GITHUB_ACTIONS") (or gha "")))))

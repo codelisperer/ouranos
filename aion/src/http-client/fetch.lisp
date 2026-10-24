@@ -192,6 +192,7 @@ Host header is the URL's too."
                                          :element-type '(unsigned-byte 8)
                                          :timeout (request-connect-timeout req)))
          (body-owns-connection nil))
+    (%lend-socket socket)
     (unwind-protect
          (let ((stream (usocket:socket-stream socket)))
            (when (request-read-timeout req)
@@ -225,6 +226,7 @@ Host header is the URL's too."
              (setf body-owns-connection (streamp body))
              (values body status headers)))
       (unless body-owns-connection
+        (%take-back-socket)
         (ignore-errors (usocket:socket-close socket))))))
 
 #+os-windows
@@ -266,14 +268,26 @@ Host header is the URL's too."
             (error 'fetch-refused :url url :host host :address a :reason category))))
       (first addresses))))
 
+(defun %fire (watch)
+  "The deadline has passed: record it, and shut down the socket the fetch is using, which wakes
+a read or write blocked on it."
+  (sb-thread:with-mutex ((%watch-lock watch))
+    (setf (%watch-fired watch) t)
+    (let ((socket (%watch-socket watch)))
+      (when socket (ignore-errors (usocket:socket-shutdown socket :io))))))
+
+(defun %fired-p (watch)
+  (and watch (sb-thread:with-mutex ((%watch-lock watch)) (%watch-fired watch))))
+
 (defun fetch-public (url &key (method :get) headers content
                            (max-redirects 5)
                            (max-body-bytes *fetch-public-max-body-bytes*)
-                           connect-timeout read-timeout ca-path
+                           connect-timeout read-timeout deadline ca-path
                            (resolve #'resolve-host)
                            (address-policy #'address-category)
                            (perform #'%http))
-  "Fetch URL, which a user supplied, and return the RESPONSE of the last hop. Any status is
+  "Fetch URL, which a user supplied, and return the RESPONSE of the last hop, and as a second
+value the URL of that hop, which differs from URL after a redirect (#757). Any status is
 returned as a response; apply ENSURE-2XX or similar to it as usual.
 
 Before each connection, including each redirect, the host is resolved (RESOLVE), and if any of
@@ -286,12 +300,57 @@ TOO-MANY-REDIRECTS. A redirect to another origin drops the Authorization and Coo
 and a 301, 302 or 303 turns any method but GET or HEAD into a GET without a body. The body of
 each response is limited to MAX-BODY-BYTES (RESPONSE-TOO-LARGE past it).
 
+CONNECT-TIMEOUT and READ-TIMEOUT are seconds for each connect and each socket read. DEADLINE,
+in seconds, limits the whole fetch over every hop (#807): when it passes, the socket in use is
+shut down and the fetch signals FETCH-DEADLINE-EXCEEDED, so a server that sends a byte now and
+then cannot hold the caller past it. It covers the TLS handshake, the request, the headers and
+the body. It does not interrupt resolving a host name (RESOLVE) or opening the TCP connection:
+those are checked against the deadline when they return, so they can overrun it by up to the
+resolver's own time and CONNECT-TIMEOUT. With CONNECT-TIMEOUT NIL the operating system's own
+connect limit applies, about 127 seconds on Linux. NIL, the default, sets no deadline.
+
 On Windows the pinned connection is not available and this signals
-PINNED-CONNECT-UNSUPPORTED. RESOLVE, ADDRESS-POLICY and PERFORM are parameters for tests."
+PINNED-CONNECT-UNSUPPORTED.
+
+RESOLVE, ADDRESS-POLICY and PERFORM are for tests. ADDRESS-POLICY decides which addresses count
+as public, so a policy other than the default turns off the check that keeps this from reaching
+internal addresses. Never pass one derived from a setting or from user input."
+  (let* ((current url)
+         (watch (and deadline (%make-watch)))
+         ;; THREAD-LIFETIME: a timer made with :THREAD T starts its thread only when it fires.
+         ;; That thread runs %FIRE once, a socket shutdown under the watch's lock, and ends. A
+         ;; fetch that finishes first unschedules the timer below, and then no thread is made.
+         ;; INTERRUPTS: not needed -- SBCL makes the thread, which runs one shutdown and ends.
+         (timer (and watch (sb-ext:make-timer (lambda () (%fire watch))
+                                              :thread t :name "fetch-public deadline")))
+         (*%watch* watch))
+    (flet ((check (&optional (hop current))
+             (setf current hop)
+             (when (%fired-p watch)
+               (error 'fetch-deadline-exceeded :url hop :deadline deadline))))
+      (when timer (sb-ext:schedule-timer timer deadline))
+      (unwind-protect
+           ;; After the deadline, any failure is the deadline's doing (a read on a shut-down
+           ;; socket fails, or ends early), so it is reported as the deadline.
+           (handler-bind ((error (lambda (e)
+                                   (unless (typep e 'fetch-deadline-exceeded) (check)))))
+             (%fetch-hops url method headers content max-redirects max-body-bytes
+                          connect-timeout read-timeout ca-path resolve address-policy perform
+                          #'check))
+        ;; The socket is taken from the watch before the timer is unscheduled, so a timer that
+        ;; fires in between finds nothing to shut down.
+        (when watch (%take-back-socket))
+        (when timer (sb-ext:unschedule-timer timer))))))
+
+(defun %fetch-hops (url method headers content max-redirects max-body-bytes
+                    connect-timeout read-timeout ca-path resolve address-policy perform check)
+  "FETCH-PUBLIC's redirect loop. CHECK is called with the hop's URL after each step, and
+signals when the deadline has passed."
   (let ((hops 0))
     (loop
       (let* ((uri (quri:uri url))
-             (address (%checked-address url uri resolve address-policy))
+             (address (prog1 (%checked-address url uri resolve address-policy)
+                        (funcall check url)))
              (response (funcall perform
                                 (make-request :method method :url url :headers headers
                                               :content content
@@ -301,10 +360,10 @@ PINNED-CONNECT-UNSUPPORTED. RESOLVE, ADDRESS-POLICY and PERFORM are parameters f
                                               :max-body-bytes max-body-bytes
                                               :connect-address address
                                               :ca-path ca-path)))
-             (status (response-status response))
+             (status (progn (funcall check url) (response-status response)))
              (location (and (member status '(301 302 303 307 308))
                             (header-value (response-headers response) "location"))))
-        (unless location (return response))
+        (unless location (return (values response url)))
         (when (>= hops max-redirects)
           (error 'too-many-redirects :url url :limit max-redirects))
         (let ((next (quri:merge-uris (quri:uri location) uri)))

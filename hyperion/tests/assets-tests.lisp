@@ -18,6 +18,7 @@
   (:use #:cl #:fiveam)
   (:local-nicknames (#:assets #:hyperion/assets)
                     (#:router #:hyperion/router)
+                    (#:http #:hyperion/http)
                     (#:ports #:hyperion/test-ports)))
 
 (in-package #:hyperion/assets/tests)
@@ -120,14 +121,14 @@ byte changed gives another fingerprint."
 ;;; --- serving ------------------------------------------------------------------
 
 (test url-is-content-addressed
-  (is (string= "/_hyperion/assets/htmx-449317ad.min.js" (assets:url :htmx)))
+  (is (string= "/_hyperion/assets/htmx-d6fdc75f.min.js" (assets:url :htmx)))
   (is (string= "/_hyperion/assets/bulma-67fa26df.min.css" (assets:url :bulma))))
 
 (test prefix-is-honoured-by-both-url-and-mount
   "URL and MOUNT read the same special, so they cannot disagree -- rebinding it moves
 the served path and the emitted href together."
   (let ((assets:*prefix* "/static/v"))
-    (is (string= "/static/v/htmx-449317ad.min.js" (assets:url :htmx)))
+    (is (string= "/static/v/htmx-d6fdc75f.min.js" (assets:url :htmx)))
     (let* ((app (router:router (assets:mount)))
            (res (router:dispatch app (list :request-method :get
                                            :path-info (assets:url :htmx)))))

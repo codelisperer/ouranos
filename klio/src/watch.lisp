@@ -96,6 +96,7 @@ edit leaves the last good content published (see RELOAD), and the watcher keeps 
           ;; THREAD-LIFETIME: independent -- runs until STOP-WATCHING, which joins it.
           (sb-thread:make-thread
            (lambda ()
+             (aion/dynamic:unblock-interrupts)
              (destructuring-bind (seen pending) baseline
                (loop until (sb-thread:wait-on-semaphore (watcher-stop watcher) :timeout interval)
                      do (multiple-value-bind (reload-p next-seen next-pending)

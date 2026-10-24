@@ -423,6 +423,7 @@ running (%KILL-GROUP)."
          ;; the caller's bindings, and is joined below before this function returns.
          (writer (sb-thread:make-thread
                   (lambda ()
+                    (aion/dynamic:unblock-interrupts)
                     (ignore-errors
                      (with-open-stream (in (sb-ext:process-input process))
                        (write-string input in))))))
@@ -430,6 +431,7 @@ running (%KILL-GROUP)."
          ;; none of the caller's bindings, and is joined below before this function returns.
          (reader (sb-thread:make-thread
                   (lambda ()
+                    (aion/dynamic:unblock-interrupts)
                     (ignore-errors
                      (let ((s (sb-ext:process-output process)))
                        (loop for line = (read-line s nil) while line
@@ -511,6 +513,7 @@ accept the spec."
          (thread (sb-thread:make-thread
                   (aion/dynamic:inheriting
                    (lambda ()
+                     (aion/dynamic:unblock-interrupts)
                      (handler-case
                          (setf result (llm:generate-structured
                                        (backend-provider backend)

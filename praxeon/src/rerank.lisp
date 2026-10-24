@@ -130,8 +130,7 @@ as a generic function so that a test can answer in its place without a network."
     (handler-case (jzon:parse (%post-json url headers payload))
       (praxeon/conditions:praxeon-error (e) (error e))
       (error (e)
-        (error 'praxeon/conditions:deliberation-failure
-               :detail (%http-error-detail (format nil "rerank request to ~A failed" url) e))))))
+        (error (%request-failure (format nil "rerank request to ~A failed" url) e))))))
 
 (defun %rerank-batches (query documents max-documents max-tokens)
   "DOCUMENTS as a list of (START . BATCH), in order, each BATCH within MAX-DOCUMENTS and within
