@@ -320,6 +320,7 @@ internal addresses. Never pass one derived from a setting or from user input."
          ;; THREAD-LIFETIME: a timer made with :THREAD T starts its thread only when it fires.
          ;; That thread runs %FIRE once, a socket shutdown under the watch's lock, and ends. A
          ;; fetch that finishes first unschedules the timer below, and then no thread is made.
+         ;; INTERRUPTS: not needed -- SBCL makes the thread, which runs one shutdown and ends.
          (timer (and watch (sb-ext:make-timer (lambda () (%fire watch))
                                               :thread t :name "fetch-public deadline")))
          (*%watch* watch))

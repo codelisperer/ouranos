@@ -149,8 +149,17 @@ started by any caller, from inside any step. So every long-lived thread that a f
 this tree creates calls this first, and the sweep in aion/dynamic's tests checks that every
 spawn site either does or says why not.
 
-Calling it in a thread whose signals are not blocked does nothing. It must not be called inside
-SB-SYS:WITHOUT-INTERRUPTS, because it would let interrupts in there."
+Calling it in a thread whose signals are not blocked does nothing.
+
+DO NOT MOVE IT LATER IN THE BODY, AND DO NOT CALL IT INSIDE SB-SYS:WITHOUT-INTERRUPTS. It would not
+let interrupts in there (SB-SYS:*INTERRUPTS-ENABLED* stays NIL), but when an interrupt is already
+deferred in that step, SBCL's runtime function unblock_deferrable_signals stops the whole image:
+it calls lose(\"unblock_deferrable_signals: losing proposition\") when a handler is pending
+(src/runtime/interrupt.c in SBCL 2.6.9). At the start of a new thread nothing can be pending.
+
+ON A :SB-SAFEPOINT BUILD (SBCL for Windows) a new thread does not take its creator's signal mask,
+so the defect does not occur there and this changes nothing; it is called anyway, so the code is
+the same on every platform."
   (when *unblock-deferrable-signals*
     (funcall *unblock-deferrable-signals*))
   nil)

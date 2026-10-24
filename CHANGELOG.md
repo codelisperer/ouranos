@@ -30,6 +30,9 @@ its tag.
     and workflow children create;
   - `aion/uv` now depends on `aion/dynamic`, which has no dependencies of its own.
 
+  SBCL for Windows (a `:sb-safepoint` build) does not give a new thread its creator's signal
+  mask, so the defect did not occur there; the call changes nothing on Windows.
+
   An app that starts its own threads from inside `sb-sys:without-interrupts`, or from code a
   caller may run inside it, can call `(aion/dynamic:unblock-interrupts)` first in each thread
   for the same reason. Five sites in `aion/windows`, `cons` and `hades` do not call it yet

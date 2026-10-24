@@ -345,8 +345,17 @@ UNBLOCK-INTERRUPTS, receives an INTERRUPT-THREAD."
 
 (test a-thread-made-in-the-step-without-it-cannot-be-interrupted
   "The control for the test above, and the defect: the same thread without UNBLOCK-INTERRUPTS
-inherits the blocked mask and never receives the interrupt."
-  (is-false (%interruptible-thread-check (lambda () nil))))
+inherits the blocked mask and never receives the interrupt.
+
+Not on a :SB-SAFEPOINT build (SBCL for Windows): there a new thread does not take its creator's
+signal mask, so the defect does not exist and the same thread can be interrupted. The test
+asserts that instead, so a change in either platform's behaviour is seen."
+  #-sb-safepoint
+  (is-false (%interruptible-thread-check (lambda () nil))
+            "this SBCL no longer passes a blocked mask to a new thread; UNBLOCK-INTERRUPTS may no longer be needed")
+  #+sb-safepoint
+  (is-true (%interruptible-thread-check (lambda () nil))
+           "on this :SB-SAFEPOINT build a new thread now takes its creator's blocked mask, which the other platforms do"))
 
 (test a-thread-made-with-no-deferred-interrupt-can-be-interrupted
   "The second control: with no interrupt deferred in the step, the same thread without
@@ -356,23 +365,54 @@ interrupt and not because of how it checks."
 
 ;;; --- the sweep: every spawn site has decided about interrupts (#541) ------------
 
+(defun %first-form-after-lambda (code)
+  "The text of the first form after the lambda list of the first LAMBDA in CODE, up to its first
+closing parenthesis, or NIL. CODE has its comments removed, so a comment between the lambda list
+and the form is skipped."
+  (let* ((at (search "(lambda" code))
+         (open (and at (position #\( code :start (+ at 7))))
+         (n (length code)))
+    (when open
+      (let ((i open) (depth 0))
+        (loop while (< i n)
+              do (case (char code i) (#\( (incf depth)) (#\) (decf depth)))
+                 (incf i)
+              until (zerop depth))
+        (let* ((start (position-if-not (lambda (c) (member c '(#\Space #\Tab #\Newline #\Return)))
+                                       code :start (min i n)))
+               (end (and start (position #\) code :start start))))
+          (and end (subseq code start (1+ end))))))))
+
 (defun %unblock-decided-p (lines n)
   "Has the spawn site on line N (1-based) of LINES decided about its signal mask?
 
-Decided when the CODE in the spawn line and the six lines after it calls UNBLOCK-INTERRUPTS --
-six because a thread body may open with a comment, as aion/uv's loop thread does -- or when a
-COMMENT in the five lines above it or on it says INTERRUPTS: and why not. As in %DECIDED-P, the
-call is read only from the code, so a comment naming UNBLOCK-INTERRUPTS does not decide a site."
+Decided when the first form of the thread's body -- the first form after the lambda list of the
+first LAMBDA in the spawn line and the six lines after it, comments ignored -- is a call to
+UNBLOCK-INTERRUPTS, or when a comment in the five lines above it or on it starts INTERRUPTS: and
+says why not. Six lines because a thread body may open with a comment, as aion/uv's loop thread
+does. The first form, because the call does not protect a body that has already taken a lock or
+entered SB-SYS:WITHOUT-INTERRUPTS (see UNBLOCK-INTERRUPTS). The comment is matched as \";;
+INTERRUPTS:\", so a comment that mentions WITHOUT-INTERRUPTS: does not count."
   (let ((after (subseq lines (1- n) (min (length lines) (+ n 6))))
         (before (subseq lines (max 0 (- n 6)) n)))
-    (or (search "unblock-interrupts" (%code-and-comments after))
-        (search "INTERRUPTS:" (nth-value 1 (%code-and-comments before))))))
+    (or (let ((form (%first-form-after-lambda (%code-and-comments after))))
+          (and form
+               (char= #\( (char form 0))
+               (not (find #\Space form))
+               (uiop:string-suffix-p form "unblock-interrupts)")))
+        (search ";; INTERRUPTS:" (nth-value 1 (%code-and-comments before))))))
+
+(defparameter +thread-makers+ '("make-thread" "make-ephemeral-thread" "sb-ext:make-timer")
+  "What starts a thread, as the sweep looks for it. SB-EXT:MAKE-TIMER is here because a timer made
+with :THREAD T starts a thread each time it fires; one made without it is still listed, and its
+site says INTERRUPTS: why not.")
 
 (defun %unblocking-undecided-in-lines (lines)
   "Line numbers in LINES that spawn a thread without having decided about interrupts."
   (loop for line in lines
         for n from 1
-        when (and (search "make-thread" line) (not (%unblock-decided-p lines n)))
+        when (and (some (lambda (maker) (search maker line)) +thread-makers+)
+                  (not (%unblock-decided-p lines n)))
           collect n))
 
 (defun %spawn-sites-without-unblock ()
@@ -392,12 +432,19 @@ an INTERRUPTS: comment that says why not."
         "these spawn sites neither call aion/dynamic:unblock-interrupts first nor say INTERRUPTS: why not (#541): ~{~%  ~A~}" undecided)))
 
 (test the-interrupt-sweep-sees-a-spawn-without-the-call
-  "The control: a spawn whose body does not call it is found, and so is one where only a comment
-names the function."
+  "The control: a spawn whose body does not call it is found; so is one where only a comment
+names the function, one that calls it after another form, one whose comment only mentions
+WITHOUT-INTERRUPTS:, and a timer that starts a thread."
   (let ((bare (list "(sb-thread:make-thread (lambda () 1))"))
-        (named (list ";; this thread should call unblock-interrupts" "(sb-thread:make-thread (lambda () 1))")))
+        (named (list ";; this thread should call unblock-interrupts" "(sb-thread:make-thread (lambda () 1))"))
+        (late (list "(sb-thread:make-thread" "  (lambda ()" "    (sb-thread:with-mutex (m)" "      (aion/dynamic:unblock-interrupts))))"))
+        (word (list ";; see SB-SYS:WITHOUT-INTERRUPTS: below" "(sb-thread:make-thread (lambda () 1))"))
+        (timer (list "(sb-ext:make-timer (lambda () 1) :thread t)")))
     (is (equal '(1) (%unblocking-undecided-in-lines bare)))
-    (is (equal '(2) (%unblocking-undecided-in-lines named)))))
+    (is (equal '(2) (%unblocking-undecided-in-lines named)))
+    (is (equal '(1) (%unblocking-undecided-in-lines late)) "the call must be the first form")
+    (is (equal '(2) (%unblocking-undecided-in-lines word)) "WITHOUT-INTERRUPTS: is not an INTERRUPTS: reason")
+    (is (equal '(1) (%unblocking-undecided-in-lines timer)))))
 
 (test the-interrupt-sweep-accepts-the-call-and-a-reason
   "The other direction: the call as the body's first form decides a site, and so does an
