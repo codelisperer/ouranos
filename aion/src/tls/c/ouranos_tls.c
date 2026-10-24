@@ -34,7 +34,7 @@
  * refuse a library built from a different version of this file. */
 int ouranos_tls_shim_version(void)
 {
-    return 2;
+    return 3;
 }
 
 /* Which threading implementation this library was built with: 1 for pthreads, 2 for the
@@ -130,6 +130,13 @@ const unsigned char *ouranos_tls_crt_der(const mbedtls_x509_crt *crt, size_t *le
 {
     *len = crt->raw.len;
     return crt->raw.p;
+}
+
+/* The certificate after CRT in its chain, or NULL after the last one. For walking the chain a
+ * peer presented, so a caller that verifies it can pass the intermediates along (#536). */
+const mbedtls_x509_crt *ouranos_tls_crt_next(const mbedtls_x509_crt *crt)
+{
+    return crt->next;
 }
 
 /* --- 4. keys and certificates ------------------------------------------------------ */

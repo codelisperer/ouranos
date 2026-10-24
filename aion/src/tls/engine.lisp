@@ -33,7 +33,10 @@
    (in-start :initform 0 :accessor %in-start)
    (out :initform (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)
         :accessor %out)
-   (peer-closed :initform nil :accessor %peer-closed))
+   (peer-closed :initform nil :accessor %peer-closed)
+   (hostname :initarg :hostname :initform nil :reader %hostname)
+   ;; For a config with a verifier: T once it has accepted the server's chain (#536).
+   (verified :initform nil :accessor %verified))
   (:documentation "One TLS connection, client or server by its config, over memory buffers."))
 
 (cffi:defcallback %bio-send :int ((context :pointer) (buf :pointer) (len :size))
@@ -74,7 +77,8 @@ accept any certificate the trusted CAs signed, for any name."
   (let* ((ssl (%ssl-new))
          (id (sb-thread:with-mutex (*engines-lock*) (incf *next-engine-id*)))
          (context (cffi:foreign-alloc :intptr :initial-element id))
-         (engine (make-instance 'engine :id id :ssl ssl :context context :config config)))
+         (engine (make-instance 'engine :id id :ssl ssl :context context :config config
+                                        :hostname hostname)))
     (when (cffi:null-pointer-p ssl) (error "aion/tls: out of memory allocating a connection"))
     (sb-thread:with-mutex (*engines-lock*) (setf (gethash id *engines*) engine))
     (handler-bind ((error (lambda (e) (declare (ignore e)) (free-engine engine))))
@@ -135,23 +139,71 @@ finished, or :WANT-READ when it needs more from the peer. Either way, send
 ENGINE-TAKE-OUTPUT afterwards. Signals TLS-ERROR, or TLS-VERIFY-ERROR, if it fails; the
 alert telling the peer so is then in the output."
   (let ((code (%ssl-handshake (%ssl engine))))
-    (cond ((zerop code) :done)
+    (cond ((zerop code) (%run-verifier engine) :done)
           ((or (= code +err-want-read+) (= code +err-want-write+)) :want-read)
           (t (error (%handshake-error engine code))))))
+
+(defun engine-peer-certificate-chain-der (engine)
+  "The DER octets of every certificate the peer presented, the leaf first, as a list; NIL if
+it presented none."
+  (loop for crt = (%ssl-get-peer-cert (%ssl engine)) then (%crt-next crt)
+        until (cffi:null-pointer-p crt)
+        collect (%crt-pointer-der crt)))
+
+(defun %run-verifier (engine)
+  "Once per engine whose config has a verifier: give it the peer's chain and the hostname, and
+mark the engine verified only when it accepts. A condition it signals goes to the caller."
+  (let ((verify (config-verifier (%config engine))))
+    (when (and verify (not (%verified engine)))
+      (let ((chain (engine-peer-certificate-chain-der engine)))
+        (unless (and chain (funcall verify chain (%hostname engine)))
+          (error 'tls-verify-error
+                 :code 0 :operation "the caller's certificate verifier" :flags 0
+                 :description (if chain
+                                  "the verifier refused the server's certificate chain"
+                                  "the server presented no certificate"))))
+      (setf (%verified engine) t))))
+
+(defun %require-verified (engine)
+  (when (and (config-verifier (%config engine)) (not (%verified engine)))
+    (error 'tls-error :code 0 :operation "aion/tls"
+                      :description "the server's certificate has not been accepted by the verifier")))
 
 (defun engine-handshake-done-p (engine)
   (plusp (%handshake-over (%ssl engine))))
 
+(defconstant +max-idle-reads+ 8
+  "How many calls of mbedtls_ssl_read in a row may read nothing, with fed input still unread,
+before ENGINE-READ stops asking. See the comment in ENGINE-READ.")
+
 (defun engine-read (engine)
   "Decrypt what has been fed. Returns the plaintext as an octet vector, possibly empty when
 a whole record has not arrived yet, or :EOF once the peer has sent close_notify."
+  (%require-verified engine)
   (let ((result (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
     (cffi:with-foreign-object (buf :unsigned-char 16384)
-      (loop
-        (let ((n (%ssl-read (%ssl engine) buf 16384)))
+      (loop with idle = 0
+            do
+        (let* ((before (%in-start engine))
+               (n (%ssl-read (%ssl engine) buf 16384)))
           (cond ((plusp n)
                  (dotimes (i n) (vector-push-extend (cffi:mem-aref buf :unsigned-char i) result)))
-                ((or (= n +err-want-read+) (= n +err-want-write+)) (return))
+                ;; WANT-READ does not always mean the fed ciphertext is used up. A TLS 1.3 server
+                ;; may send session tickets after the handshake (OpenSSL sends two). mbedTLS
+                ;; 4.1.1 handles a ticket over several calls of mbedtls_ssl_read, measured
+                ;; against example.com: WANT-READ having read the ticket's record, then
+                ;; RECEIVED-NEW-SESSION-TICKET, then WANT-READ again reading nothing, while the
+                ;; response's records were still unread here. Returning at the first WANT-READ
+                ;; made the caller wait on the network for data it already had, and a server
+                ;; that closed after its response was reported as a truncated stream (#536).
+                ;; So read again while fed input is still unread. A call that reads nothing
+                ;; counts as idle, and after +MAX-IDLE-READS+ of them in a row this returns, so
+                ;; mbedTLS refusing the input for good cannot loop here.
+                ((or (= n +err-want-read+) (= n +err-want-write+))
+                 (if (= (%in-start engine) before) (incf idle) (setf idle 0))
+                 (unless (and (< (%in-start engine) (fill-pointer (%in engine)))
+                              (< idle +max-idle-reads+))
+                   (return)))
                 ;; A TLS 1.3 server may send session tickets after the handshake. We keep no
                 ;; sessions, so a ticket is read and dropped.
                 ((= n +err-received-new-session-ticket+))
@@ -167,6 +219,7 @@ a whole record has not arrived yet, or :EOF once the peer has sent close_notify.
   "Encrypt OCTETS from START to END. The ciphertext is in ENGINE-TAKE-OUTPUT afterwards.
 All of it is consumed: SEND never refuses, so mbedtls_ssl_write only returns short when a
 record is full, and the loop writes the rest."
+  (%require-verified engine)
   (let ((n (- end start)))
     (when (plusp n)
       (cffi:with-foreign-object (buf :unsigned-char n)

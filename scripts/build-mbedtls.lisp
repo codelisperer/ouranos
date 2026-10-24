@@ -134,7 +134,7 @@ are written down rather than left to the next failed build.")
     "ouranos_tls_shim_version" "ouranos_tls_threading_kind" "ouranos_tls_setup"
     "ouranos_tls_ssl_new" "ouranos_tls_conf_version_range" "ouranos_tls_crt_der"
     "ouranos_tls_pk_generate_ec_p256" "ouranos_tls_x509write_set_san"
-    "ouranos_tls_crt_check_key"
+    "ouranos_tls_crt_check_key" "ouranos_tls_crt_next"
     ;; Exported only when MBEDTLS_THREADING_C is on, so its presence shows that
     ;; ouranos_tls_config.h reached the compile.
     "mbedtls_mutex_init")

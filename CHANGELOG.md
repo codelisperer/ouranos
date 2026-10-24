@@ -54,6 +54,37 @@ its tag.
   `make-nearest`, `nearest-offer` and `nearest-items` for keeping the k nearest during a scan.
   `praxeon/retrieval` now uses `praxeon/llm`'s `cosine-distance` and no longer keeps its own copy.
 
+- **aion/http-client: on Windows, `fetch-public`, `aion/oauth` sign-in and praxeon's
+  `read-web-page` now work, and refuse a certificate Windows does not trust with a typed
+  condition** (#536). Before, a pinned connection (`:connect-address`, which `fetch-public`
+  always uses) signalled `pinned-connect-unsupported` on Windows, so none of them worked there.
+  Now Windows connects only to the address `fetch-public` checked, does the TLS handshake with
+  the URL's host name through `aion/tls`, and lets Windows decide whether to trust the server's
+  certificate, with `CertGetCertificateChain` and `CertVerifyCertificateChainPolicy`: the same
+  trust stores, automatic root download and Disallowed store that WinHTTP uses.
+  - **What an app sees change on Windows.** `pinned-connect-unsupported` is no longer signalled,
+    and code that handled it to hide a feature can stop. `praxeon/web-page:register-read-web-page`
+    now registers the means without a Tavily key (`*fetch-available-p*` is true there).
+  - **Refusals.** A refused certificate signals a subclass of the new
+    `aion/http-client:certificate-rejected`, an `http-error`, with `certificate-rejected-host`,
+    `-verdict` and `-code` (Windows' error code):
+    - `certificate-expired`;
+    - `certificate-untrusted-root`;
+    - `certificate-name-mismatch`;
+    - `certificate-revoked`, `certificate-revocation-unknown` and `certificate-distrusted`;
+    - `certificate-chain-incomplete` and `certificate-wrong-usage`.
+  - **No revocation check.** This is the same as WinHTTP's and cl+ssl's defaults. Microsoft's
+    "WinHTTP Security Considerations" says WinHTTP does not check revocation unless asked.
+  - **Responses.** On Windows the request and response go through a new HTTP/1.1 reader with
+    hard limits. A response outside the grammar or past a limit signals the new
+    `aion/http-client:malformed-response`. That includes `Transfer-Encoding` with
+    `Content-Length`, `Content-Length` values that disagree, a malformed chunk size, and a head
+    over 256 KiB. The request is sent with `Connection: close` and `Accept-Encoding: identity`.
+  - **`:ca-path` on Windows** takes one PEM file, not a directory.
+  - **mbedTLS at run time.** `aion/http-client` now depends on `aion/tls` on Windows, so an https
+    pinned request needs `mbedtls.dll`, built by `scripts/build-mbedtls.lisp`. A desktop bundle
+    carries it already when `aion/tls` is loaded (#481).
+
 - **aion/uv: `close-loop` frees a loop only when `uv_loop_close` succeeds** (#877). Before, it
   ignored `uv_loop_close`'s result and freed the loop even when libuv returned `UV_EBUSY`
   because a handle or request was still open on it, and libuv then used the freed memory. A
@@ -1987,6 +2018,14 @@ its tag.
   "Long-running calls".
 
 ### Fixed
+
+- **aion/tls: a client reads data a TLS 1.3 server sent after its session tickets** (#536).
+  OpenSSL and most CDNs send session tickets right after a TLS 1.3 handshake. mbedTLS 4.1.1
+  handles each over several calls of `mbedtls_ssl_read`, and returns `WANT_READ` while records
+  sent after it are still in the input. `aion/tls` took that as "wait for the network". A
+  response sent before the server closed was then reported as `aion/tls:tls-truncated`, which
+  happened on example.com. `engine-read` now reads again while fed input remains, and stops
+  after `+max-idle-reads+` calls that read nothing.
 
 - **cons/coalton-repl and hades/open: the threads they create can be interrupted when they were
   started while an interrupt was deferred** (#896, the remaining sites of #541). On Linux and

@@ -54,7 +54,10 @@ that silently vanished from the list would change what we offer without saying s
    (endpoint :initarg :endpoint :reader config-endpoint)
    (ciphersuites :initarg :ciphersuites :reader config-ciphersuites)
    ;; Kept reachable, because the mbedtls_ssl_config holds pointers into them.
-   (holds :initarg :holds :reader %holds))
+   (holds :initarg :holds :reader %holds)
+   ;; For a config from MAKE-VERIFYING-CLIENT-CONFIG, the caller's verifier; otherwise NIL,
+   ;; and mbedTLS verifies against trusted CAs (#536).
+   (verifier :initarg :verifier :initform nil :reader config-verifier))
   (:documentation "An mbedtls_ssl_config, owned by this object, for :SERVER or :CLIENT use.
 It holds references to the certificate chains and key it was made with, which must not be
 freed while it is in use."))
@@ -93,6 +96,30 @@ reason TLS exists."
   (let ((config (%make-config :client (list trusted))))
     (%ssl-conf-authmode (%pointer config) +verify-required+)
     (%ssl-conf-ca-chain (%pointer config) (%pointer trusted) (cffi:null-pointer))
+    config))
+
+(defun make-verifying-client-config (verify)
+  "A client config whose decision about the server's certificate is made by VERIFY, a function
+the caller supplies, instead of by CA certificates given here. For a platform whose own trust
+store and policy should decide, such as Windows through crypt32 (#536).
+
+VERIFY IS REQUIRED. There is no default and no value that accepts everything: anything but a
+function is refused here, before a connection can be made with the config. VERIFY is called once
+per connection, after the handshake and before ENGINE-HANDSHAKE reports :DONE, with two
+arguments: the server's certificate chain as a list of DER octet vectors, the leaf first and the
+intermediates the server sent after it, and the HOSTNAME the engine was made with. It accepts
+the chain by returning true. It refuses it by signalling a condition, which ENGINE-HANDSHAKE
+then signals, or by returning NIL, which ENGINE-HANDSHAKE reports as TLS-VERIFY-ERROR. Until it
+has accepted, the engine reads and writes nothing.
+
+mbedTLS checks nothing about the chain itself here: it is set to verify optionally, with no CA
+certificates, so the handshake completes and VERIFY sees the chain whatever mbedTLS would have
+said. The name the server is asked for (SNI) is still the engine's HOSTNAME."
+  (unless (functionp verify)
+    (error "aion/tls: a verifying client config needs a function that decides about the server's certificate, not ~S" verify))
+  (let ((config (%make-config :client '())))
+    (setf (slot-value config 'verifier) verify)
+    (%ssl-conf-authmode (%pointer config) +verify-optional+)
     config))
 
 (defun free-config (config)

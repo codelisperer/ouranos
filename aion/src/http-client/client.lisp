@@ -48,8 +48,51 @@ so in Content-Length. The read stops at the limit, so the rest is never received
 
 (define-condition pinned-connect-unsupported (http-error) ()
   (:documentation "A request set CONNECT-ADDRESS on a platform where this client cannot pin the
-connection: on Windows dexador uses WinHTTP, which does not accept a connection opened by the
-caller. Signalled instead of connecting without the pin."))
+connection. Signalled instead of connecting without the pin. Since #536 every platform this tree
+supports can pin, so nothing in the tree signals it; it stays so code that handles it still
+compiles."))
+
+(define-condition certificate-rejected (http-error)
+  ((host :initarg :host :reader certificate-rejected-host)
+   (verdict :initarg :verdict :reader certificate-rejected-verdict)
+   (code :initarg :code :initform nil :reader certificate-rejected-code))
+  (:report (lambda (c s)
+             (format s "the TLS certificate of ~A was rejected (~(~A~)~@[, Windows error #x~8,'0X~])"
+                     (certificate-rejected-host c) (certificate-rejected-verdict c)
+                     (certificate-rejected-code c))))
+  (:documentation "The operating system refused a TLS server's certificate on a pinned connection
+(#536). VERDICT is the reason as a keyword and CODE the operating system's own error code. A
+reason with its own subclass is signalled as that subclass; any other reason as this class."))
+
+(define-condition certificate-expired (certificate-rejected) ()
+  (:documentation "The server's certificate, or one in its chain, is outside its validity period."))
+(define-condition certificate-untrusted-root (certificate-rejected) ()
+  (:documentation "The server's chain does not end at a root this machine trusts."))
+(define-condition certificate-name-mismatch (certificate-rejected) ()
+  (:documentation "The server's certificate is not valid for the URL's host name."))
+(define-condition certificate-revoked (certificate-rejected) ()
+  (:documentation "A certificate in the chain is revoked. Revocation is not checked by default
+(see aion/windows:verify-server-certificate-chain), so this comes only from a policy that did."))
+(define-condition certificate-revocation-unknown (certificate-rejected) ()
+  (:documentation "Revocation was checked and could not be decided, for instance offline."))
+(define-condition certificate-distrusted (certificate-rejected) ()
+  (:documentation "A certificate in the chain is in the machine's Disallowed store."))
+(define-condition certificate-chain-incomplete (certificate-rejected) ()
+  (:documentation "No chain could be built from the server's certificate to a root."))
+(define-condition certificate-wrong-usage (certificate-rejected) ()
+  (:documentation "The server's certificate is not valid for authenticating a TLS server."))
+
+(defparameter +certificate-conditions+
+  '((:expired . certificate-expired) (:untrusted-root . certificate-untrusted-root)
+    (:name-mismatch . certificate-name-mismatch) (:revoked . certificate-revoked)
+    (:revocation-unknown . certificate-revocation-unknown)
+    (:distrusted . certificate-distrusted) (:chain-incomplete . certificate-chain-incomplete)
+    (:wrong-usage . certificate-wrong-usage))
+  "Each verdict a platform verifier gives, with the condition class it is signalled as.")
+
+(defun certificate-condition-class (verdict)
+  "The condition class for VERDICT: its own subclass, or CERTIFICATE-REJECTED."
+  (or (cdr (assoc verdict +certificate-conditions+)) 'certificate-rejected))
 
 (define-condition fetch-refused (http-error)
   ((url :initarg :url :reader fetch-refused-url)
@@ -105,10 +148,11 @@ MAX-BODY-BYTES    when set, the body is read as a stream and reading stops at th
                   a longer body signals RESPONSE-TOO-LARGE. NIL reads the whole body.
 CONNECT-ADDRESS   an IP address, as a string or an octet vector, to connect to instead of
                   resolving the URL's host. The Host header, TLS SNI and certificate
-                  verification still use the URL's host name. Not available on Windows, where
-                  dexador uses WinHTTP: signals PINNED-CONNECT-UNSUPPORTED there.
-CA-PATH           trust roots for certificate verification (a PEM file or a directory). NIL
-                  uses the system's."
+                  verification still use the URL's host name. On Windows, where dexador's
+                  WinHTTP takes no caller's connection, the request goes over aion/tls and
+                  Windows decides about the certificate (#536); see %REQUEST-PINNED.
+CA-PATH           trust roots for certificate verification (a PEM file or a directory; on
+                  Windows a PEM file only). NIL uses the system's."
   (method :get :type keyword)
   (url "" :type string)
   (headers (quote ()) :type list)

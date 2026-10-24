@@ -311,13 +311,17 @@
   ;; directly. cl+ssl is dexador's TLS on every platform but Windows, where dexador uses
   ;; WinHTTP; fetch.lisp opens a pinned TLS connection with it (#295). Guarded on :os-windows,
   ;; which UIOP maintains before any .asd is read (see scripts/install-deps.lisp).
-  :depends-on ("dexador" "quri" "usocket" (:feature (:not :os-windows) "cl+ssl"))
+  ;; On Windows a pinned connection uses aion/tls for TLS and aion/windows for Windows' verdict
+  ;; on the server's certificate (#536). aion/tls loads its mbedTLS on first use, not here.
+  :depends-on ("dexador" "quri" "usocket" (:feature (:not :os-windows) "cl+ssl")
+               (:feature :os-windows "aion/tls") (:feature :os-windows "aion/windows"))
   :serial t
   :components ((:module "src/http-client"
                 :serial t
                 :components ((:file "packages")
                              (:file "client")
                              (:file "openssl") ; a patch to cl+ssl for OpenSSL 4 (#706)
+                             (:file "http1")   ; the pinned exchange on Windows (#536)
                              (:file "fetch"))))
   :in-order-to ((test-op (test-op "aion/http-client/tests"))))
 
@@ -464,7 +468,8 @@
                              (:file "handle")
                              (:file "job")
                              (:file "process")
-                             (:file "shell"))))
+                             (:file "shell")
+                             (:file "certificate"))))
   :in-order-to ((test-op (test-op "aion/windows/tests"))))
 
 (defsystem "aion/windows/tests"
@@ -784,6 +789,7 @@
   ;; Moved out of aion/http-client's tests so the tests of aion/oauth and praxeon/mcp can run
   ;; their own servers in the test image (#527). TLS is reached through cl+ssl when a test asks
   ;; for it, and that test's system loads cl+ssl; this one does not, so it loads on Windows.
+  ;; On Windows TLS is reached through aion/tls the same way (#536).
   :depends-on ("usocket" "bordeaux-threads" "aion/test-threads")
   :components ((:file "tests/test-http")))
 

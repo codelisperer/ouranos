@@ -21,13 +21,10 @@
 (in-suite oauth)
 
 (defmacro net-test (name &body body)
-  "A test that talks to the test authorization server. On Windows it is skipped, because
-aion/oauth signs in only through FETCH-PUBLIC, which cannot pin a connection there (#295); the
-Windows test below checks that it refuses."
+  "A test that talks to the test authorization server, through FETCH-PUBLIC's pinned
+connection. Since #536 that runs on Windows too, so nothing is skipped there."
   (let ((doc (and (stringp (first body)) (list (pop body)))))
-    `(test ,name ,@doc
-       #+os-windows (skip "aion/oauth needs a pinned connection, which Windows does not offer (#295)")
-       #-os-windows (progn ,@body))))
+    `(test ,name ,@doc (progn ,@body))))
 
 (defun run-tests ()
   (let ((results (run 'oauth)))
@@ -536,19 +533,6 @@ names the authorization server that issued the token, the token is not sent."
       (oauth:refresh cached "u1" "docs" (%resource as) :rejected "refused")
       (is (null (oauth:access-token cached "u1" "docs" (%resource as)))
           "a refused token makes the metadata be read again"))))
-
-(test on-windows-sign-in-refuses-instead-of-connecting-unpinned
-  "#295: a URL from a server is fetched only over a pinned connection, which Windows does not
-offer, so discovery signals PINNED-CONNECT-UNSUPPORTED there and nothing is fetched."
-  #-os-windows (skip "the pinned connection is available here")
-  #+os-windows
-  ;; A resolver that answers with a public address: FETCH-PUBLIC resolves and checks the host
-  ;; before it tries to pin, and a made-up host would be refused as unresolvable first.
-  (signals http:pinned-connect-unsupported
-    (oauth:discover (%broker :resolve (lambda (host) (declare (ignore host))
-                                        (list (http:parse-address "93.184.216.34"))))
-                    "https://mcp.example/mcp"
-                    :challenge "Bearer resource_metadata=\"https://mcp.example/prm\"")))
 
 ;;; --- the review of #539 ----------------------------------------------------------------
 
