@@ -9189,6 +9189,88 @@ them; for a condensed observation, its sources'."
     (is (equal '("Lives in Lisbon.") (mapcar #'mem:observation-content (mem:observations-of store "member-1" :thread "conv-7"))))
     (is (= 2 (obs:observer-mark observer)))))
 
+(defun %breakdown-sum (b)
+  "The parts of breakdown B that PRAXEON/PROMPT:MESSAGES-TOKENS counts, summed: all but :SYSTEM."
+  (+ (getf b :observations) (getf b :facts) (getf b :context) (getf b :tool-results)
+     (getf b :messages)))
+
+(test the-prompt-breakdown-names-each-source-and-adds-up-to-the-estimate
+  "#317, step D: REQUEST-MESSAGES's third value splits the estimate by source. The system prompt,
+the observations sent in place of observed messages, the subject facts and the rest of the context
+block are each measured from the text that was sent, and the parts other than :SYSTEM add up to the
+estimate exactly."
+  (multiple-value-bind (ag store) (%memory-agent :history (%history 13))
+    (setf (actor:agent-system-prompt ag) "You answer briefly.")
+    (remember* store "member-1" "Prefers mornings.")
+    (ctx:add-item (actor:agent-context ag)
+                  (ctx:make-ctx-item :content "a note retrieved this turn"
+                                     :tokens 10 :value 100 :role :note))
+    (multiple-value-bind (sent estimate b) (actor:request-messages ag)
+      (is (= estimate (%breakdown-sum b)) "~S against ~D" b estimate)
+      (is (= (prompt:estimate-tokens "You answer briefly.") (getf b :system)))
+      (is (= (prompt:estimate-tokens (getf (%first-part sent) :text)) (getf b :observations)))
+      (is (plusp (getf b :observations)))
+      (is (= (prompt:estimate-tokens "Prefers mornings.") (getf b :facts)))
+      (is (plusp (getf b :context)) "the retrieved note and the block's framing")
+      (is (zerop (getf b :tool-results)))
+      (is (plusp (getf b :messages)) "the unobserved messages"))))
+
+(test the-prompt-breakdown-counts-tool-results-apart-from-messages
+  "Without a thread memory or context, a history holding a tool call and its result: the result
+is :TOOL-RESULTS, the rest :MESSAGES, and nothing else is counted."
+  (let ((ag (actor:make-agent :provider (%provider-returning)))
+        (history (%history-with-a-tool-call 5)))
+    (setf (actor:agent-history ag) history)
+    (multiple-value-bind (sent estimate b) (actor:request-messages ag)
+      (declare (ignore sent))
+      (is (= (prompt:part-tokens (first (getf (third history) :content))) (getf b :tool-results)))
+      (is (plusp (getf b :tool-results)))
+      (is (= 0 (getf b :system) (getf b :observations) (getf b :facts) (getf b :context)))
+      (is (= estimate (%breakdown-sum b))))))
+
+(test each-step-logs-its-prompt-breakdown-and-the-usage-event-carries-it
+  "Every deliberation step logs the breakdown beside the provider's counts, and the :USAGE event
+carries it, with parts that add up to its :ESTIMATED-INPUT. The log line has counts only: the
+user's words are not in it."
+  (let ((out (make-string-output-stream))
+        (ag (actor:make-agent :name "metered" :provider (make-instance 'capturing)))
+        (events '()))
+    (unwind-protect
+         (progn
+           (aion/log:setup :env :dev :level :info :stream out)
+           (evt:with-observer ((lambda (e) (push e events)))
+             (actor:run-turn ag "a question about tides")))
+      (aion/log:setup :env :dev :level :warn :stream *standard-output*))
+    (let* ((usage (find :usage events :key #'evt:event-type))
+           (b (and usage (evt:event-get usage :breakdown)))
+           (lines (remove-if-not (lambda (line) (search "prompt tokens" line))
+                                 (uiop:split-string (get-output-stream-string out)
+                                                    :separator '(#\Newline)))))
+      (is-true b)
+      (is (= (evt:event-get usage :estimated-input) (%breakdown-sum b)))
+      (is (= 1 (length lines)) "one line for the one step: ~S" lines)
+      (is (every (lambda (key) (search key (first lines)))
+                 '("agent=metered" "estimated-input=" "messages=" "observations="
+                   "tool-results=" "input=700"))
+          "~S" lines)
+      (is (null (search "tides" (first lines))) "no payload"))))
+
+(test the-meter-records-a-breakdown-and-charges-nothing-for-it
+  "METER's BREAKDOWN-FN goes onto the usage line as :BREAKDOWN, and the charge is the provider's
+counts alone. Control: without BREAKDOWN-FN the line has no :BREAKDOWN."
+  (let* ((l (%ledger :token-cap 100000 :call-cap 10))
+         (b (list :system 1 :observations 2 :facts 3 :context 4 :tool-results 5 :messages 6)))
+    (turn:run-chain (list (ceiling:meter l :model "m" :input-fn (lambda () 50)
+                                           :breakdown-fn (lambda () b)))
+                    (%counting-effect (list 0)) (turn:make-turn "hi" "en"))
+    (turn:run-chain (list (ceiling:meter l :model "m" :input-fn (lambda () 50)))
+                    (%counting-effect (list 0)) (turn:make-turn "hi" "en"))
+    (destructuring-bind (without with) (ceiling::ledger-usage l)
+      (is (equal b (getf with :breakdown)))
+      (is (= 50 (getf with :charged)))
+      (is (null (getf without :breakdown)))
+      (is (= 100 (- 100000 (ceiling:remaining-tokens l)))))))
+
 (test attach-thread-memory-checks-its-settings
   (let ((store (mem:make-in-memory-store))
         (ag (actor:make-agent :name "x" :provider (%provider-returning))))

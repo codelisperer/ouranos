@@ -46,12 +46,13 @@
 ;;;;   (:type :task-finished .. :outcome .. :ms ..)
 ;;;;                        -- a task ended: :OK, :ERROR, :CANCELLED, :EXPIRED or :UNKNOWN
 ;;;;   (:type :usage        :input .. :output .. :cache-read .. :cache-write ..
-;;;;                        :estimated-input ..)
+;;;;                        :estimated-input .. :breakdown ..)
 ;;;;                        -- the token counts the provider reported for a step (#161). Each
 ;;;;                           count is as reported: NIL means the provider did not report it,
 ;;;;                           0 that it reported none. ESTIMATED-INPUT is the estimate the
-;;;;                           history budget was enforced against. Not emitted when the
-;;;;                           provider reported no counts at all
+;;;;                           history budget was enforced against. BREAKDOWN splits that
+;;;;                           estimate by source (PRAXEON/ACTOR:PROMPT-BREAKDOWN, #317). Not
+;;;;                           emitted when the provider reported no counts at all
 ;;;;   (:type :image-usage  :id .. :principal .. :agent .. :provider .. :model .. :count ..
 ;;;;                        :size .. :quality .. [:input-tokens ..] [:output-tokens ..] [:cost ..]
 ;;;;                        [:estimated t] [:references ..])

@@ -341,7 +341,7 @@
    #:agent #:make-agent #:agent-name #:agent-provider #:agent-means
    #:agent-context #:agent-history #:agent-history-budget #:agent-system-prompt
    #:agent-cache-system #:agent-system-parts #:agent-max-tokens
-   #:request-messages
+   #:request-messages #:prompt-breakdown
    #:means-entry #:means-entry-source #:register-means #:means-permitted-p #:agent-means-for
    ;; untrusted content in a turn (#827)
    #:means-entry-untrusted #:means-entry-requires-user-intent #:means-entry-allow
