@@ -223,7 +223,7 @@ line and collapsed only here, where a sum has to be a number."
             (* (%weight :cache-write) (or cache-write 0)))))
 
 (defun record-usage (ledger &key (input 0) (output 0) cache-read cache-write
-                                 (model "") (means ""))
+                                 (model "") (means "") breakdown)
   "Charge one completion's tokens to LEDGER and record the line. Returns the usage line.
 
 ALL FOUR COUNTS ARE RECORDED SEPARATELY and none is folded into another. A report that added
@@ -240,7 +240,11 @@ commentary above.
 
 Per model, and carrying MEANS when a caller knows it, because the question that decides
 what a pricing tier includes is which capability is expensive -- a ceiling that only knows
-how to say no leaves that unanswerable."
+how to say no leaves that unanswerable.
+
+BREAKDOWN, when given, is the prompt's estimated tokens by source, the plist
+PRAXEON/ACTOR:PROMPT-BREAKDOWN returns and each :USAGE event carries (#317, step D). It is kept
+on the line as :BREAKDOWN and charges nothing: what is charged is the provider's counts above."
   (bt:with-lock-held ((ledger-lock ledger))
     (let ((line (list :principal (grant-principal (ledger-grant ledger))
                       :group (grant-group (ledger-grant ledger))
@@ -251,6 +255,8 @@ how to say no leaves that unanswerable."
                                                   :cache-read cache-read
                                                   :cache-write cache-write)
                       :at (%now))))
+      (when breakdown
+        (setf line (append line (list :breakdown breakdown))))
       ;; :CHARGED is on the line as well as the four raw counts, because the weights are
       ;; rebindable: a line that recorded only the counts could not be reconciled against
       ;; the cap it was charged to if anything ever rebinds them.
@@ -333,7 +339,7 @@ cheaper model -- unpredictable output quality is a compliance problem, not a UX 
          (turn:halt-with tn (format nil "grant does not permit ~A" capability))))))
 
 (defun meter (ledger &key (model "") (means "")
-                          input-fn output-fn cache-read-fn cache-write-fn)
+                          input-fn output-fn cache-read-fn cache-write-fn breakdown-fn)
   "A leave stage that charges the turn's usage to LEDGER.
 
 The four functions are read at leave time -- the CL shell knows what the provider reported,
@@ -348,7 +354,10 @@ in the record: a missing INPUT-FN records 0, because that is the existing contra
 missing CACHE-READ-FN records NIL -- we were not told rather than told zero. Anything that
 omits the two cache readers is charged exactly what it was charged before this change, which
 is the one compatibility promise here and also the reason pre-publication issue 417 was invisible: the defaults
-read as complete."
+read as complete.
+
+BREAKDOWN-FN, when supplied, returns the turn's prompt breakdown for RECORD-USAGE's BREAKDOWN, for
+example the :BREAKDOWN of the turn's last :USAGE event (#317, step D)."
   (turn:leave-stage
    "meter"
    (lambda (tn)
@@ -358,5 +367,6 @@ read as complete."
                      :output (if output-fn (funcall output-fn) 0)
                      :cache-read (and cache-read-fn (funcall cache-read-fn))
                      :cache-write (and cache-write-fn (funcall cache-write-fn))
+                     :breakdown (and breakdown-fn (funcall breakdown-fn))
                      :model model :means means))
      tn)))
