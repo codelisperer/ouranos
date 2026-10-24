@@ -60,6 +60,9 @@
 (cffi:defcfun ("ouranos_tls_handshake_over" %handshake-over) :int (ssl :pointer))
 (cffi:defcfun ("ouranos_tls_crt_der" %crt-der) :pointer (crt :pointer) (len :pointer))
 (cffi:defcfun ("ouranos_tls_crt_next" %crt-next) :pointer (crt :pointer))
+(cffi:defcfun ("ouranos_tls_conf_session_tickets" %conf-session-tickets) :int
+  (conf :pointer) (count :int) (out :pointer))
+(cffi:defcfun ("ouranos_tls_ticket_free" %ticket-free) :void (ticket :pointer))
 (cffi:defcfun ("ouranos_tls_crt_check_key" %crt-check-key) :int (crt :pointer) (key :pointer))
 (cffi:defcfun ("ouranos_tls_pk_generate_ec_p256" %pk-generate-ec-p256) :int (pk :pointer))
 (cffi:defcfun ("ouranos_tls_x509write_set_san" %x509write-set-san) :int

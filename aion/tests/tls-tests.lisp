@@ -632,3 +632,37 @@ empty after +MAX-IDLE-READS+ calls rather than looping."
                   (is (= aion/tls::+max-idle-reads+ count) "~D calls" count))
              (setf (fdefinition 'aion/tls::%ssl-read) original)))
       (tls:free-engine *scripted-engine*))))
+
+(test a-client-reads-data-a-tls-1.3-server-sent-after-its-session-tickets
+  "The same pattern against this tree's own server, deterministically: a server that sends two
+TLS 1.3 session tickets after the handshake, as OpenSSL does, then a response. The client's
+input then holds the tickets and the response together, and ENGINE-READ must return the
+response. The reads are recorded, to show the tickets were really there: mbedTLS reports
+RECEIVED-NEW-SESSION-TICKET for them."
+  (let* ((codes '())
+         (client (tls:make-engine (client-config) :hostname "localhost"))
+         (server (tls:make-engine (tls:make-server-config
+                                   (tls:make-certificate-chain (getf (pki) :cert-pem))
+                                   (getf (pki) :key) :session-tickets 2)))
+         (original (fdefinition 'aion/tls::%ssl-read)))
+    (unwind-protect
+         (progn
+           (is-true (handshake client server))
+           (is (= tls:+tls-1.3+ (tls:engine-version client)))
+           (tls:engine-write server (octets "after the tickets"))
+           (move server client)
+           (setf (fdefinition 'aion/tls::%ssl-read)
+                 (lambda (ssl buf len) (let ((n (funcall original ssl buf len))) (push n codes) n)))
+           (let ((got (tls:engine-read client)))
+             (setf (fdefinition 'aion/tls::%ssl-read) original)
+             (is (member aion/tls::+err-received-new-session-ticket+ codes)
+                 "no session ticket was seen; the reads returned ~S" (reverse codes))
+             (is (string= "after the tickets" (text got)) "got ~S after reads ~S" got (reverse codes))))
+      (setf (fdefinition 'aion/tls::%ssl-read) original)
+      (tls:free-engine client)
+      (tls:free-engine server))))
+
+(test a-server-config-refuses-a-ticket-count-out-of-range
+  (dolist (bad '(0 17 :many))
+    (signals error (tls:make-server-config (tls:make-certificate-chain (getf (pki) :cert-pem))
+                                           (getf (pki) :key) :session-tickets bad))))

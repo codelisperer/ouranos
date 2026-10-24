@@ -2025,7 +2025,9 @@ its tag.
   sent after it are still in the input. `aion/tls` took that as "wait for the network". A
   response sent before the server closed was then reported as `aion/tls:tls-truncated`, which
   happened on example.com. `engine-read` now reads again while fed input remains, and stops
-  after `+max-idle-reads+` calls that read nothing.
+  after `+max-idle-reads+` calls that read nothing. `aion/tls:make-server-config` takes a new
+  `:session-tickets` count, so an `aion/tls` server can send TLS 1.3 tickets the way OpenSSL does.
+  The regression test uses it against a local server.
 
 - **cons/coalton-repl and hades/open: the threads they create can be interrupted when they were
   started while an interrupt was deferred** (#896, the remaining sites of #541). On Linux and

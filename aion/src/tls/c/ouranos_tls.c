@@ -28,6 +28,7 @@
 #include "mbedtls/pk.h"
 #include "mbedtls/threading.h"
 #include "mbedtls/x509.h"
+#include "mbedtls/ssl_ticket.h"
 #include "psa/crypto.h"
 
 /* Raised whenever a function here is added, removed or changes meaning, so the binding can
@@ -137,6 +138,39 @@ const unsigned char *ouranos_tls_crt_der(const mbedtls_x509_crt *crt, size_t *le
 const mbedtls_x509_crt *ouranos_tls_crt_next(const mbedtls_x509_crt *crt)
 {
     return crt->next;
+}
+
+/* Make the server config CONF issue COUNT TLS 1.3 session tickets after each handshake, from a
+ * new ticket context written to *OUT, which the caller frees with ouranos_tls_ticket_free once no
+ * connection uses CONF. A server sends tickets as OpenSSL servers and CDNs do, so a client's
+ * handling of them can be tested against our own server (#536). 0, or an mbedTLS error. */
+int ouranos_tls_conf_session_tickets(mbedtls_ssl_config *conf, int count,
+                                     mbedtls_ssl_ticket_context **out)
+{
+    mbedtls_ssl_ticket_context *t = calloc(1, sizeof(*t));
+    int rc;
+    if (t == NULL) {
+        return MBEDTLS_ERR_SSL_ALLOC_FAILED;
+    }
+    mbedtls_ssl_ticket_init(t);
+    rc = mbedtls_ssl_ticket_setup(t, PSA_ALG_GCM, PSA_KEY_TYPE_AES, 256, 86400);
+    if (rc != 0) {
+        mbedtls_ssl_ticket_free(t);
+        free(t);
+        return rc;
+    }
+    mbedtls_ssl_conf_session_tickets_cb(conf, mbedtls_ssl_ticket_write, mbedtls_ssl_ticket_parse, t);
+    mbedtls_ssl_conf_new_session_tickets(conf, (uint16_t) count);
+    *out = t;
+    return 0;
+}
+
+void ouranos_tls_ticket_free(mbedtls_ssl_ticket_context *t)
+{
+    if (t != NULL) {
+        mbedtls_ssl_ticket_free(t);
+        free(t);
+    }
 }
 
 /* --- 4. keys and certificates ------------------------------------------------------ */
