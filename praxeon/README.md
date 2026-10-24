@@ -226,7 +226,12 @@ A refused call is not run, and the model is told why, so it can tell the user.
   `register-agent-as-means` that read untrusted content makes its coordinator's turn count too,
   and a sub-agent asked for something after the coordinator read untrusted content starts its
   turn that way. The means `register-agent-as-means` registers is itself `:untrusted` when the
-  sub-agent has an untrusted means at that point.
+  sub-agent has an untrusted means at that point. A context item marked `untrusted` counts as
+  well, for every turn whose prompt includes it: an observation condensed from untrusted
+  content, an MCP resource added with `add-resource`, and a passage from a corpus made with
+  `make-corpus`, unless the app passed `:untrusted nil` for its own server or documents (#906,
+  #907). `register-corpus-search` registers its means `:untrusted` unless the corpus was made
+  that way.
 - **`:requires-user-intent t`** marks a means that spends, writes or sends for the user. A call
   the model asks for after untrusted content entered the turn is refused for the rest of the
   turn. Calls the model asked for in the same step as the read, before it saw the result, are

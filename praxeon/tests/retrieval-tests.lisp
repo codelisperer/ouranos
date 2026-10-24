@@ -987,6 +987,117 @@ chunk."
         (is (search "More passages matched than are shown here." text))
         (is (= 1 (count #\[ text)) "one passage, as :limit 1 asks")))))
 
+;;; --- passages are outside content unless the corpus is the app's own (#907) --------------
+
+(defclass %script (llm:provider)
+  ((steps :initarg :steps :accessor script-steps))
+  (:documentation "A provider that hands back queued completions in order, then ends the turn."))
+
+(defmethod llm:complete ((p %script) messages &key system tools max-tokens temperature tool-choice)
+  (declare (ignore messages system tools max-tokens temperature tool-choice))
+  (or (pop (script-steps p)) (llm:make-completion :text "Done." :stop-reason :end)))
+
+(defun %calling (&rest calls)
+  "An agent whose model makes CALLS, each a list (NAME ARG-PAIRS), one completion per call."
+  (actor:make-agent
+   :provider (make-instance
+              '%script
+              :steps (loop for (name pairs) in calls
+                           for i from 1
+                           collect (llm:make-completion
+                                    :text "" :stop-reason :tool-use
+                                    :tool-calls (list (llm:make-tool-call
+                                                       :id (format nil "c~D" i) :name name
+                                                       :arguments (apply #'%args pairs))))))))
+
+(defun %buyer (agent)
+  "Register \"buy\", a means that spends for the user, on AGENT. Returns a function that answers
+how many times it ran."
+  (let ((runs 0))
+    (actor:register-means agent "buy" "Buy something."
+                          (lambda (args) (declare (ignore args)) (incf runs) "Bought.")
+                          :requires-user-intent t)
+    (lambda () runs)))
+
+(test a-corpus-is-untrusted-by-default-and-its-passages-carry-the-flag
+  (with-store (store)
+    (let ((embedder (make-instance 'word-embedder))
+          (outside (rt:make-corpus store "outside" :strategy :hybrid))
+          (own (rt:make-corpus store "own" :strategy :hybrid :untrusted nil)))
+      (is-true (rt:corpus-untrusted outside))
+      (is-false (rt:corpus-untrusted own))
+      (rt:ingest outside +policy+ embedder)
+      (rt:ingest own +policy+ embedder)
+      ;; Called directly, not through the search means.
+      (dolist (result (list (rt:retrieve-similar outside embedder "refund")
+                            (rt:retrieve-hybrid outside embedder "refund")))
+        (is (= 3 (length (rt:retrieval-result-passages result))))
+        (is (every #'rt:passage-untrusted (rt:retrieval-result-passages result))))
+      (dolist (result (list (rt:retrieve-similar own embedder "refund")
+                            (rt:retrieve-hybrid own embedder "refund")))
+        (is (= 3 (length (rt:retrieval-result-passages result))))
+        (is (notany #'rt:passage-untrusted (rt:retrieval-result-passages result))))
+      (let ((from-outside (first (rt:retrieval-result-passages
+                                  (rt:retrieve-similar outside embedder "refund"))))
+            (from-own (first (rt:retrieval-result-passages
+                              (rt:retrieve-similar own embedder "refund")))))
+        (is-true (ctx:ctx-item-untrusted (rt:passage->ctx-item from-outside #'%render)))
+        (is-false (ctx:ctx-item-untrusted (rt:passage->ctx-item from-own #'%render)))
+        (is-false (ctx:ctx-item-untrusted
+                   (rt:passage->ctx-item from-outside #'%render :untrusted nil))
+                  ":untrusted nil overrides the passage's flag")
+        (is-true (ctx:ctx-item-untrusted
+                  (rt:passage->ctx-item from-own #'%render :untrusted t))
+                 ":untrusted t overrides the passage's flag")))))
+
+(defun %buy-with-passage-in-context (store corpus-untrusted)
+  "Retrieve a passage from a corpus in STORE made with :UNTRUSTED CORPUS-UNTRUSTED, put it in an
+agent's context as the app would, and let the model call \"buy\". Returns how many times it
+ran."
+  (let* ((embedder (make-instance 'word-embedder))
+         (corpus (rt:make-corpus store "policy" :untrusted corpus-untrusted))
+         (agent (%calling (list "buy" '("item" "x"))))
+         (buyer (%buyer agent)))
+    (rt:ingest corpus +policy+ embedder)
+    (ctx:add-item (actor:agent-context agent)
+                  (rt:passage->ctx-item
+                   (first (rt:retrieval-result-passages
+                           (rt:retrieve-similar corpus embedder "refund")))
+                   #'%render))
+    (actor:run-turn agent "Buy x")
+    (funcall buyer)))
+
+(test a-passage-from-an-untrusted-corpus-in-the-context-refuses-a-spending-means
+  (with-store (store)
+    (is (= 0 (%buy-with-passage-in-context store t)))))
+
+(test a-passage-from-a-trusted-corpus-in-the-context-leaves-a-spending-means-alone
+  "The control for the test above."
+  (with-store (store)
+    (is (= 1 (%buy-with-passage-in-context store nil)))))
+
+(defun %buy-after-search (store corpus-untrusted)
+  "An agent whose model searches a corpus in STORE made with :UNTRUSTED CORPUS-UNTRUSTED and
+then calls \"buy\" in the same turn. Returns how many times \"buy\" ran."
+  (let* ((embedder (make-instance 'word-embedder))
+         (corpus (rt:make-corpus store "policy" :untrusted corpus-untrusted))
+         (agent (%calling (list "search-documents" '("query" "refund"))
+                          (list "buy" '("item" "x"))))
+         (buyer (%buyer agent)))
+    (rt:ingest corpus +policy+ embedder)
+    (rt:register-corpus-search agent corpus embedder #'%render)
+    (actor:run-turn agent "Buy x")
+    (funcall buyer)))
+
+(test a-search-of-an-untrusted-corpus-refuses-a-spending-means-later-in-the-turn
+  (with-store (store)
+    (is (= 0 (%buy-after-search store t)))))
+
+(test a-search-of-a-trusted-corpus-leaves-a-spending-means-alone
+  "The control for the test above."
+  (with-store (store)
+    (is (= 1 (%buy-after-search store nil)))))
+
 (test (every-truncation-reason-gets-a-sentence-for-the-model :suite chunkers)
   ;; Checked directly, with a TRUNCATED value built for each reason, so every reason has a
   ;; sentence whether or not a test's corpus can be brought into that state.

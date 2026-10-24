@@ -319,14 +319,16 @@ still paid for at the cache-read price on every call, so MAKE-CORPUS takes :WHOL
    (whole-limit :initarg :whole-limit :reader corpus-whole-limit)
    (expected-tokens :initarg :expected-tokens :reader corpus-expected-tokens)
    (contextualizer :initarg :contextualizer :reader corpus-contextualizer)
-   (backfill :initarg :backfill :reader corpus-backfill))
+   (backfill :initarg :backfill :reader corpus-backfill)
+   (untrusted :initarg :untrusted :reader corpus-untrusted))
   (:documentation "A named set of documents searched together. Its rows are in its store's
 table, marked with its NAME. Creating one writes nothing: a corpus exists once it has rows.
 MAKE-CORPUS describes the other slots."))
 
 (defun make-corpus (store name &key (chunker (make-instance 'section-chunker))
                                     (strategy :auto) (whole-limit *whole-limit*)
-                                    expected-tokens contextualizer (backfill :automatic))
+                                    expected-tokens contextualizer (backfill :automatic)
+                                    (untrusted t))
   "The corpus NAME (a non-empty string) in STORE. Cheap, and runs no SQL.
 
 STRATEGY is how RETRIEVE answers a query (#316):
@@ -348,7 +350,14 @@ searches the chunks' text alone.
 BACKFILL says when an :AUTO corpus that has grown past WHOLE-LIMIT gets its contexts written:
 :AUTOMATIC (the default) at the next CONTEXTUALIZE-PENDING, or :EXPLICIT only after the app calls
 START-BACKFILL. That backfill writes a context for every chunk and re-embeds every chunk, which
-is the one large cost of this design."
+is the one large cost of this design.
+
+UNTRUSTED, true by default, says the corpus's documents came from outside the app: uploaded by
+its users, crawled, or sent by anyone else. Every passage retrieved from it is then
+PASSAGE-UNTRUSTED, its context item is CTX:CTX-ITEM-UNTRUSTED (PASSAGE->CTX-ITEM), and
+REGISTER-CORPUS-SEARCH registers its search means :UNTRUSTED, so while such content is in a turn
+a means that spends or writes for the user is refused or held (#827, #906, #907). Pass NIL for a
+corpus of the app's own text, such as its help pages, that nobody outside the app can change."
   (unless (and (stringp name) (plusp (length name)))
     (error "praxeon/retrieval: a corpus name must be a non-empty string, not ~S" name))
   (unless (member strategy '(:auto :whole :hybrid))
@@ -362,7 +371,8 @@ is the one large cost of this design."
     (error "praxeon/retrieval: :backfill must be :AUTOMATIC or :EXPLICIT, not ~S" backfill))
   (make-instance 'corpus :store store :name name :chunker chunker :strategy strategy
                          :whole-limit whole-limit :expected-tokens expected-tokens
-                         :contextualizer contextualizer :backfill backfill))
+                         :contextualizer contextualizer :backfill backfill
+                         :untrusted (and untrusted t)))
 
 (defun corpus-where (corpus &rest clauses)
   "The WHERE clause restricting a query to CORPUS, ANDed with CLAUSES.
@@ -992,8 +1002,9 @@ BM25 score from RETRIEVE-KEYWORD, the reciprocal-rank-fusion score from RETRIEVE
 reranker's score when a reranker ordered the result. They are on different scales, so compare
 scores only within one result. CONTEXT is the context the
 corpus's contextualizer wrote for the chunk, or NIL (#316). TEXT is always the chunk's own text,
-without the context."
-  text provenance distance score context)
+without the context. UNTRUSTED is the corpus's CORPUS-UNTRUSTED when the passage was retrieved
+(#907)."
+  text provenance distance score context untrusted)
 
 (defstruct (complete (:constructor make-complete))
   "Every chunk of the corpus was a candidate, and nothing was cut off.")
@@ -1069,6 +1080,7 @@ list of scores parallel to ROWS."
               (%make-passage
                :text (param:row-value row :text)
                :context (param:row-value row :context)
+               :untrusted (corpus-untrusted corpus)
                :score (and score (coerce score 'double-float))
                :distance (and with-distance
                               (let ((d (param:row-value row :distance :if-missing nil)))
@@ -1090,10 +1102,14 @@ list of scores parallel to ROWS."
             rows
             (or scores (make-list (length rows) :initial-element nil)))))
 
-(defun passage->ctx-item (passage render)
+(defun passage->ctx-item (passage render &key (untrusted (passage-untrusted passage)))
   "PASSAGE as a context item. RENDER is required: a function from the passage to the string
 the model reads. The item's SOURCE is the passage itself, which is the provenance the caller
-keeps. praxeon does not choose how a citation is written, so there is no default RENDER (#138)."
+keeps. praxeon does not choose how a citation is written, so there is no default RENDER (#138).
+
+The item is CTX:CTX-ITEM-UNTRUSTED when UNTRUSTED is true, which defaults to PASSAGE-UNTRUSTED:
+the corpus's MAKE-CORPUS :UNTRUSTED when the passage was retrieved (#907). An app that has
+checked a passage itself may pass NIL."
   (unless (functionp render)
     (error "praxeon/retrieval: PASSAGE->CTX-ITEM needs RENDER, a function from a passage to the text the model reads; ~S is not one"
            render))
@@ -1102,7 +1118,8 @@ keeps. praxeon does not choose how a citation is written, so there is no default
     (ctx:make-ctx-item :content content
                        :tokens (max 1 (ceiling (length content) 4))
                        :role :note
-                       :source passage)))
+                       :source passage
+                       :untrusted (and untrusted t))))
 
 ;;; --- exact retrieval ---------------------------------------------------------------
 
