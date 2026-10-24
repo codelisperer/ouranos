@@ -94,16 +94,20 @@ jobs:
         # macOS and 2x for Windows, so pull requests ran Linux alone, pushes to main added
         # Windows, and macOS ran only weekly and on dispatch. docs/ci.md keeps that history.
         #
-        # The same triple desktop-release.yml builds, deliberately: two workflows
-        # disagreeing about which platforms are supported is worse than either answer. The
-        # Linux floor is set by SBCL's own binary -- 2.6.9 needs GLIBC_2.38 and
-        # ubuntu-22.04 ships 2.35 -- so 24.04 it is. See scripts/versions.env. macos-26
-        # is arm64; that is the leg that is NOT amd64, which is exactly why the Linux one
-        # matters. The macOS image is the one place the two workflows differ: tests run on
-        # macos-26, while desktop-release.yml builds on an older image, because a build on
-        # macos-26 requires macOS 26 to run (#763).
+        # The same three platforms desktop-release.yml builds, so the two workflows agree
+        # about which platforms are supported. They differ only in the image versions, where
+        # a build would raise what the user's machine needs and a test run does not:
+        #   - Linux: tests run on ubuntu-26.04 (glibc 2.43), the current LTS image, and
+        #     desktop-release.yml builds on ubuntu-24.04, because a binary built on 26.04
+        #     needs glibc 2.43 and Ubuntu 24.04 desktops have 2.39 (the maintainer's ruling on
+        #     #766). SBCL's own binary sets the lowest image either can use: 2.6.9 needs
+        #     GLIBC_2.38, and ubuntu-22.04 ships 2.35. See scripts/versions.env.
+        #   - macOS: tests run on macos-26, and desktop-release.yml builds on an older image,
+        #     because a build on macos-26 requires macOS 26 to run (#763).
+        # macos-26 is arm64; that is the leg that is NOT amd64, which is exactly why the
+        # Linux one matters.
         include:
-          - os: ubuntu-24.04
+          - os: ubuntu-26.04
             platform: linux-x86-64
             fasl: "~/.cache/common-lisp"
           - os: macos-26
@@ -589,7 +593,7 @@ jobs:
   # the repo was private, for the same billing reason as the matrix above.
   release-mode:
     name: release-mode (linux-x86-64)
-    runs-on: ubuntu-24.04
+    runs-on: ubuntu-26.04
     timeout-minutes: 120
 
     steps:

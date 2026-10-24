@@ -28,7 +28,7 @@ unevidenced:
 > amd64**. It runs under QEMU, which mis-emulates SBCL's compile-time 64-bit overflow
 > folding and produces *spurious* failures in Coalton's `library/math/bounded` (pre-publication issue 110). A
 > red local amd64 build is not evidence of an incompatibility, and a green one is not
-> evidence of compatibility. The `ubuntu-24.04` leg is the only native amd64 signal this
+> evidence of compatibility. The `ubuntu-26.04` leg is the only native amd64 signal this
 > project has.
 
 ## Which legs run
@@ -37,7 +37,7 @@ Every event — a pull request, a push to `main`, the weekly cron and `workflow_
 runs all three legs, and the release-mode job on Linux. Standard GitHub-hosted runners are
 free for public repositories, so there is no cost reason to run fewer.
 
-The `ubuntu-24.04` leg is the **native amd64** signal, the one piece of evidence that cannot
+The `ubuntu-26.04` leg is the **native amd64** signal, the one piece of evidence that cannot
 be obtained any other way. The breaks the other two catch — a CRLF checkout, a path
 separator, anything specific to arm64 — now show up on the pull request that causes them,
 rather than after it merges.
@@ -142,8 +142,10 @@ Pins live in [`scripts/versions.env`](../scripts/versions.env) and the repo-root
 
 - **Linux** — the official SBCL binary tarball at the pinned version. That pin sets a
   **glibc floor**: SBCL 2.6.9's Linux binary needs `GLIBC_2.38`, which `ubuntu-22.04`
-  (2.35) does not have, so the matrix runs `ubuntu-24.04` and binaries produced here need
-  glibc 2.39+. Lowering that means building SBCL from source.
+  (2.35) does not have. The test matrix runs `ubuntu-26.04` (glibc 2.43), and
+  `desktop-release.yml` builds on `ubuntu-24.04` (glibc 2.39), so the bundles it produces
+  run on Ubuntu 24.04 and later; a build on 26.04 would need glibc 2.43 (#766). Lowering the
+  floor below 2.39 means building SBCL from source.
 - **macOS** — **Homebrew, not the pin.** Upstream publishes no macOS SBCL binaries, so
   there is nothing to pin to and the machine gets whatever brew carries.
   `setup.sh --check` passes on the mismatch deliberately: it checks *presence*, not
