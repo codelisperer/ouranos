@@ -259,6 +259,7 @@
   :depends-on ("hyperion/server-uv" "hyperion" "aion/pool" "aion/uv"  ; server-uv-tests.lisp calls pool: and uv:
                "aion/boundary"                                        ; and names its condition (#110)
                "aion/log"                                             ; and the log line #475's test reads
+               "cffi"                                                 ; and allocates a raw libuv handle (#877)
                "hyperion/http1"                                       ; and the encoder it names (#110)
                "aion/uv/net"                                          ; and its connection class (#262)
                "aion/fs"                                              ; and the dev:serve test's temp root (#432), and its temporary directories (#515)

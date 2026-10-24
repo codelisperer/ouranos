@@ -28,7 +28,10 @@ its tag.
     `nil`, and a later `close-loop` tries again.
 
   An unhandled `loop-left-unfreed` prints as an ordinary Lisp warning on `*error-output*`. An
-  app that logs can handle it and pass it to `aion/log`.
+  app that logs can handle it and pass it to `aion/log`. `hyperion/server-uv:stop` (and
+  `hyperion/server:stop` on `:uv`) does this: it logs a warning naming the shard, the libuv
+  error code and the number of open handles, does not let the warning reach its caller, and
+  keeps the unfreed loop for a later `stop`, as it does for a loop thread still in a handler.
 
 - **hyperion/static serves only regular files, and serves some it used to refuse** (#687).
   `file-response` and `make-static-handler` now:
