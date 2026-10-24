@@ -2166,12 +2166,25 @@ is read from the wrong place, which is request smuggling."
         (progn (sleep slow-seconds) (list 200 +ok+ '("slow")))
         (list 200 +ok+ '("fast")))))
 
+(defparameter +connection-reset-errnos+ '(54 104 10054)
+  "ECONNRESET on macOS, Linux and Windows.")
+
 (defun connect-refused-p (port)
-  "Whether a new TCP connection to PORT is refused."
+  "Whether a new TCP connection to PORT is refused.
+
+A connect that is reset counts as refused. On macOS a connect that lands in the listen queue
+just as the listener closes is answered with a reset, and the listener is then gone, which is
+what a caller of this asks about. Raised as an error, it ended a run of the grace-period test
+below under load (#540)."
   (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp)))
-    (handler-case (progn (sock:socket-connect s #(127 0 0 1) port) nil)
-      (sock:connection-refused-error () t)
-      (:no-error (&rest _) (declare (ignore _)) (ignore-errors (sock:socket-close s)) nil))))
+    (unwind-protect
+         (handler-case (progn (sock:socket-connect s #(127 0 0 1) port) nil)
+           (sock:connection-refused-error () t)
+           (sock:socket-error (e)
+             (if (member (sock::socket-error-errno e) +connection-reset-errnos+)
+                 t
+                 (error e))))
+      (ignore-errors (sock:socket-close s)))))
 
 (defun %elapsed-since (start)
   (/ (- (get-internal-real-time) start) internal-time-units-per-second))
@@ -2275,10 +2288,14 @@ property is the response, not STOP's duration."
 ;; stop drains by ONLY-SIGTERM-WAITS-THE-GRACE-PERIOD, which sends no signal.
 #-win32
 (defun %sigterm-drain-check (&optional extra-environment)
-  "The acceptance test #388 asks for. The child drains for 1.5 s and has a request 2.5 s long
+  "The acceptance test #388 asks for. The child drains for 1.5 s and has a request 4.5 s long
 in flight when SIGTERM arrives: during the grace period the readiness path answers 503 and
 another request is answered; after it, a new connection is refused; the request in flight
 completes; and the process exits by itself, well within grace plus timeout.
+The refusal is checked 2.4 s after /bin/kill returns, so 0.9 s after the grace period ends and
+well before the request in flight does (#540). With a 2.5 s request and the check timed from
+before /bin/kill started, the check fell in a window about 0.3 s wide, and a slow runner could
+reach it before the listener closed.
 EXTRA-ENVIRONMENT is added to the child's environment, as \"NAME=value\" strings."
   (let* ((root (merge-pathnames "../" (asdf:system-source-directory "hyperion")))
          (child (uiop:launch-program
@@ -2289,7 +2306,7 @@ EXTRA-ENVIRONMENT is added to the child's environment, as \"NAME=value\" strings
                                                     #+win32 ";" #-win32 ":")
                                             "HYPERION_DRAIN_SECONDS=1.5"
                                             "HYPERION_DRAIN_TIMEOUT_SECONDS=10"
-                                            "CHILD_SLOW=2.5")
+                                            "CHILD_SLOW=4.5")
                                       extra-environment
                                       (remove-if (lambda (e)
                                                    (some (lambda (p) (uiop:string-prefix-p p e))
@@ -2308,8 +2325,12 @@ EXTRA-ENVIRONMENT is added to the child's environment, as \"NAME=value\" strings
                                                      (error (e) e))))
                              :name "sigterm test: slow request")))
                (sleep 0.3)
-               (let ((t0 (get-internal-real-time)))
+               (let ((t0 (get-internal-real-time))
+                     (signalled nil))
                  (uiop:run-program (list "/bin/kill" "-TERM" (princ-to-string pid)))
+                 ;; The signal has arrived by the time /bin/kill exits, and starting /bin/kill can
+                 ;; itself take 0.3 s, so the refusal is timed from here, not from T0 (#540).
+                 (setf signalled (get-internal-real-time))
                  (sleep 0.3)
                  (let ((health (get* port "GET /health HTTP/1.1" "Host: x"))
                        (fast (get* port "GET /fast HTTP/1.1" "Host: x")))
@@ -2317,7 +2338,7 @@ EXTRA-ENVIRONMENT is added to the child's environment, as \"NAME=value\" strings
                    (is (= 200 (status-of fast)) "another request is still answered during the grace period")
                    (is (string-equal "close" (header-of fast "Connection"))
                        "and its connection closes, so the next one goes elsewhere"))
-                 (sleep 1.6)
+                 (sleep (max 0 (- 2.4 (%elapsed-since signalled))))
                  (is-true (connect-refused-p port) "after the grace period a new connection is refused")
                  (bt:join-thread client)
                  (is (and (stringp slow) (= 200 (status-of slow)) (string= "slow" (body-of slow)))
@@ -2370,6 +2391,65 @@ REASON, the way the signal handler calls it. The installer is replaced, so no si
         (sigterm (%serve-forever-stop-time :sigterm 2)))
     (is (< sigint 1) "SIGINT stops at once: ~,1Fs" sigint)
     (is (<= 2 sigterm 4) "SIGTERM keeps serving for the 2 s grace period first: ~,1Fs" sigterm)))
+
+;;; The grace period ends when its seconds have passed since the signal arrived, not since
+;;; SERVE-FOREVER's poll noticed it, and the listener closes then, not on the next poll (#540).
+;;; With a 0.4 s poll the two were each up to 0.4 s late, and on a slow macOS runner the 0.1 s
+;;; default was enough for SIGTERM-DRAINS-A-SERVE-FOREVER-PROCESS-ON-FOUR-LOOPS to find the
+;;; port still accepting after the grace period.
+
+(defparameter +grace-poll+ 1.2
+  "The poll interval the grace-period test runs SERVE-FOREVER with. It is long so that each
+half of #540's defect, when present, makes the listener close 0.6 s or more late, which is
+large next to how late a busy CI runner schedules a thread. A 0.4 s poll left the defect
+0.28 s late, and the fixed code once measured 0.16 s late on a macOS runner.")
+
+(defun %grace-refusal-time (offset)
+  "Run SERVE-FOREVER on :uv with a 1 s grace period and a +GRACE-POLL+ poll, call its stop
+function the way the SIGTERM handler does OFFSET seconds after it is ready, and return how many
+seconds after that call new connections are first refused, or NIL if not within 4 s. No signal
+is sent."
+  (let* ((stop-fn nil)
+         (port nil)
+         (ready (sb-thread:make-semaphore))
+         (hsrv:*install-signal-handlers* (lambda (request-stop)
+                                           (setf stop-fn request-stop)
+                                           (lambda () nil)))
+         (runner (bt:make-thread
+                  (lambda ()
+                    (hsrv:serve-forever (const-app 200 +ok+ '("ok"))
+                                        :server :uv :port 0 :log nil :banner nil :loops 1
+                                        :drain-seconds 1 :drain-timeout 1
+                                        :on-ready (lambda (session)
+                                                    (setf port (srv:server-port
+                                                                (hsrv::server-session-handler session)))
+                                                    (sb-thread:signal-semaphore ready))))
+                  :name "grace test: serve-forever"
+                  :initial-bindings `((hsrv:*install-signal-handlers* . ,hsrv:*install-signal-handlers*)
+                                      (hsrv::*shutdown-poll-interval* . ,+grace-poll+)
+                                      (*standard-output* . ,(make-broadcast-stream))))))
+    (when (sb-thread:wait-on-semaphore ready :timeout 10)
+      (sleep offset)
+      (let ((start (get-internal-real-time)))
+        (funcall stop-fn :sigterm)
+        (prog1 (loop for now = (%elapsed-since start)
+                     while (< now 4)
+                     do (when (connect-refused-p port) (return now))
+                        (sleep 0.01))
+          (bt:join-thread runner))))))
+
+(test the-listener-closes-when-the-grace-period-ends-whatever-the-poll-interval
+  "With a 1.2 s poll (+GRACE-POLL+), the stop is requested 0.3 s and then 0.6 s into a poll, so
+the poll notices it 0.9 s or 0.6 s later, before the 1 s grace period has ended. With the fix
+new connections are refused 1 s after the request, and the accepted range is 0.95 s to 1.3 s.
+Each half of #540's defect alone makes both runs at least 0.6 s late. A grace period counted
+from the notice ends at 1.9 s and 1.6 s. A grace period whose sleep is a whole poll ends one
+poll after the notice, at 2.1 s and 1.8 s."
+  (dolist (offset '(0.3 0.6))
+    (let ((refused (%grace-refusal-time offset)))
+      (is (and refused (<= 0.95 refused 1.3))
+          "stop ~,2Fs into a ~,1F s poll: ~:[not refused in 4 s~;~:*refused ~,2Fs after~]"
+          offset +grace-poll+ refused))))
 
 ;;; --- responses encoded on the worker (#430) --------------------------------------------
 ;;;

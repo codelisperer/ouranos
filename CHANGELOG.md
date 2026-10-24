@@ -1934,6 +1934,15 @@ its tag.
   `:timed-out`. Windows CI hit it with 18 microseconds to spare. The time left is now never
   below zero. An app that caught `type-error` around `stop` can remove that handler.
 
+- **hyperion: after SIGTERM, `serve-forever` stops accepting when the drain grace period ends,
+  not up to two polls later** (#540). The `HYPERION_DRAIN_SECONDS` (`:drain-seconds`) grace
+  period is now counted from when the signal arrived, and ends at its deadline. Before, it was
+  counted from when `serve-forever`'s wait loop next checked for a stop, every
+  `*shutdown-poll-interval*` (0.1 s), and ended on a later check, so the listener stayed open up
+  to about 0.2 s longer than asked. A platform that stops routing to an instance after that
+  many seconds could still have a connection accepted. The readiness path still starts
+  answering 503 when the wait loop notices the signal.
+
 - **aion/http-client: a body of octets with a `multipart/` Content-Type reaches the server as
   given on Linux and macOS** (#828). This is a workaround placed once in the client, not a
   native way to send a header unchanged, because dexador offers none. Dexador's usocket backend
