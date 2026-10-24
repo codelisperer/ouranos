@@ -881,6 +881,14 @@ strategy (`:similar`, `:keyword`, `:hybrid`) how often that section is in the to
 `passage->ctx-item` turns a passage into a context item, and takes a function that writes the
 text the model reads, so the app decides how a citation looks.
 
+**A corpus is untrusted by default (#907).** A document can carry text written to steer the
+model, so `make-corpus` takes `:untrusted`, default T. Every passage a retrieve function returns
+carries its corpus's value in `passage-untrusted`, and `passage->ctx-item` copies it to the
+context item (pass `:untrusted` to override it). While an untrusted item is in the prompt, the
+agent refuses a means registered `:requires-user-intent t`, and `register-corpus-search`
+registers its means `:untrusted` for such a corpus, so a search refuses those means for the rest
+of the turn. For a corpus of the app's own documents, pass `:untrusted nil` to `make-corpus`.
+
 **Whole or searched, by the corpus's size (#316).** `retrieve` is the call to make when the app
 does not care how a corpus is searched. It follows the corpus's `:strategy`:
 
