@@ -190,19 +190,36 @@ is how cl+ssl writes a certificate's iPAddress entries before it compares them, 
 
 #-os-windows
 (defun %verify-peer-name (stream name)
-  "Verify the certificate the server on STREAM presented against NAME, with cl+ssl's own check,
-and free it. Used for an IP address, where the handshake sent no SNI, so cl+ssl verified the
-chain but not the name. Signals what CL+SSL:VERIFY-HOSTNAME signals on a mismatch.
+  "Verify the certificate the server on STREAM presented against NAME, and free it. Signals
+HTTP-ERROR when the certificate does not name NAME.
 
-cl+ssl compares the address with the text of the certificate's subject alternative names of
-either kind, iPAddress and dNSName, and with its common name when no alternative name matches,
-so a certificate whose dNSName or CN is the address text is accepted too. That is looser than
-RFC 6125, which matches an address only against iPAddress entries, and it is cl+ssl's rule for
-every name it verifies, here as for a host name."
+THE SUBJECT ALTERNATIVE NAMES FIRST (#917). When the certificate has any dNSName or iPAddress
+alternative name, NAME must match one of them, and its common name is not consulted, as RFC 6125
+section 6.4.4 requires. Only a certificate with no such name is checked against its common name.
+cl+ssl's own check, CL+SSL:VERIFY-HOSTNAME, falls back to the common name in both cases, so a
+certificate for other names whose common name is NAME passed it.
+
+Called for every pinned https connection: for a host name after cl+ssl's own check in the
+handshake, which this narrows, and for an IP address (#915) as the only check, since no SNI name
+was sent and cl+ssl verified the chain but not a name. Names are matched with cl+ssl's matcher,
+so case and wildcards are treated as there. cl+ssl gives dNSName and iPAddress entries as one
+list of text, so an address can match a dNSName entry that is the same text.
+
+ONLY THE PINNED PATH (:CONNECT-ADDRESS, which FETCH-PUBLIC always uses). A request without
+CONNECT-ADDRESS goes through dexador, where cl+ssl's own check is the only one, and a common name
+is still accepted on a certificate with alternative names. Changing that would mean patching
+cl+ssl for the whole image (#917)."
   (let ((certificate (cl+ssl:ssl-stream-x509-certificate stream)))
     (when (cffi:null-pointer-p certificate)
       (error 'http-error :detail "the server presented no certificate"))
-    (unwind-protect (cl+ssl:verify-hostname certificate name)
+    (unwind-protect
+         ;; Entries of other kinds, such as an email address, come back as NIL and do not count.
+         (let ((alternative-names (remove nil (cl+ssl::certificate-dns-alt-names certificate))))
+           (unless (if alternative-names
+                       (cl+ssl::try-match-hostnames alternative-names name)
+                       (ignore-errors (cl+ssl:verify-hostname certificate name)))
+             (error 'http-error
+                    :detail (format nil "the server's certificate does not name ~A" name))))
       (cl+ssl:x509-free certificate))))
 
 #-os-windows
@@ -212,7 +229,9 @@ every name it verifies, here as for a host name."
 The socket is opened here, to that address. For https the TLS handshake uses the URL's host
 name, so the server is asked for that name (SNI) and its certificate is verified against that
 name, not against the address. When the URL's host is itself an IP address, no SNI is sent and
-the certificate is verified against the address without its brackets (%TLS-NAMES, #915).
+the certificate is verified against the address without its brackets (%TLS-NAMES, #915). In
+both cases a certificate with alternative names must match one of them; its common name counts
+only when it has none (%VERIFY-PEER-NAME, #917).
 DEX:REQUEST then writes the request on this connection, so the Host header is the URL's too."
   (let* ((uri (quri:uri (request-url req)))
          (host (quri:uri-host uri))
@@ -238,12 +257,11 @@ DEX:REQUEST then writes the request on this connection, so the Host header is th
                                                   :default))))
                (multiple-value-bind (sni name) (%tls-names host)
                  (cl+ssl:with-global-context (context :auto-free-p t)
-                   ;; With no SNI name, cl+ssl verifies the chain but not a name, so the address is
-                   ;; verified here.
+                   ;; With no SNI name, cl+ssl verifies the chain but not a name. Either way the
+                   ;; name is verified here, alternative names first (#917).
                    (setf stream (cl+ssl:make-ssl-client-stream stream :hostname sni
                                                                       :verify :required))
-                   (unless sni
-                     (%verify-peer-name stream name))))))
+                   (%verify-peer-name stream name)))))
            (multiple-value-bind (body status headers)
                ;; A non-2xx is caught HERE, while the connection is open, and returned like any
                ;; other response. Caught in %HTTP instead, the HANDLER-CASE there unwound
