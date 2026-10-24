@@ -174,14 +174,46 @@ an IP address in text resolves to itself."
 
 ;;; --- a connection to a chosen address ------------------------------------------------
 
+(defun %tls-names (host)
+  "Two values for a TLS handshake to the URL host HOST: the name to send as SNI, and the name to
+verify the server's certificate against.
+
+For a host name, HOST both times. For an IP address (#915), NIL and the address as text: RFC 6066
+allows no IP address in SNI, so none is sent, and a URL's IPv6 host carries brackets, [::1],
+which are not part of the address. The text is usocket's rendering of the parsed address, which
+is how cl+ssl writes a certificate's iPAddress entries before it compares them, so ::1 and
+0:0:0:0:0:0:0:1 in a URL both match a certificate for ::1."
+  (let ((address (parse-address host)))
+    (if address
+        (values nil (usocket:host-to-hostname address))
+        (values host host))))
+
+#-os-windows
+(defun %verify-peer-name (stream name)
+  "Verify the certificate the server on STREAM presented against NAME, with cl+ssl's own check,
+and free it. Used for an IP address, where the handshake sent no SNI, so cl+ssl verified the
+chain but not the name. Signals what CL+SSL:VERIFY-HOSTNAME signals on a mismatch.
+
+cl+ssl compares the address with the text of the certificate's subject alternative names of
+either kind, iPAddress and dNSName, and with its common name when no alternative name matches,
+so a certificate whose dNSName or CN is the address text is accepted too. That is looser than
+RFC 6125, which matches an address only against iPAddress entries, and it is cl+ssl's rule for
+every name it verifies, here as for a host name."
+  (let ((certificate (cl+ssl:ssl-stream-x509-certificate stream)))
+    (when (cffi:null-pointer-p certificate)
+      (error 'http-error :detail "the server presented no certificate"))
+    (unwind-protect (cl+ssl:verify-hostname certificate name)
+      (cl+ssl:x509-free certificate))))
+
 #-os-windows
 (defun %request-pinned (req)
   "Run REQ over a connection to its CONNECT-ADDRESS, returning what DEX:REQUEST returns.
 
 The socket is opened here, to that address. For https the TLS handshake uses the URL's host
 name, so the server is asked for that name (SNI) and its certificate is verified against that
-name, not against the address. DEX:REQUEST then writes the request on this connection, so the
-Host header is the URL's too."
+name, not against the address. When the URL's host is itself an IP address, no SNI is sent and
+the certificate is verified against the address without its brackets (%TLS-NAMES, #915).
+DEX:REQUEST then writes the request on this connection, so the Host header is the URL's too."
   (let* ((uri (quri:uri (request-url req)))
          (host (quri:uri-host uri))
          (address (or (parse-address (request-connect-address req))
@@ -204,9 +236,14 @@ Host header is the URL's too."
                              :verify-location (if (request-ca-path req)
                                                   (uiop:native-namestring (request-ca-path req))
                                                   :default))))
-               (cl+ssl:with-global-context (context :auto-free-p t)
-                 (setf stream (cl+ssl:make-ssl-client-stream stream :hostname host
-                                                                    :verify :required)))))
+               (multiple-value-bind (sni name) (%tls-names host)
+                 (cl+ssl:with-global-context (context :auto-free-p t)
+                   ;; With no SNI name, cl+ssl verifies the chain but not a name, so the address is
+                   ;; verified here.
+                   (setf stream (cl+ssl:make-ssl-client-stream stream :hostname sni
+                                                                      :verify :required))
+                   (unless sni
+                     (%verify-peer-name stream name))))))
            (multiple-value-bind (body status headers)
                ;; A non-2xx is caught HERE, while the connection is open, and returned like any
                ;; other response. Caught in %HTTP instead, the HANDLER-CASE there unwound
