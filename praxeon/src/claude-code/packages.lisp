@@ -47,14 +47,17 @@
                     (#:llm #:praxeon/llm))
   (:documentation
    "The `hook' command: a Claude Code PostToolUse hook that replaces a large search output with
-    a list of facts a second model wrote, after checking the list against the raw text. On any
-    failure it prints nothing, so the original output goes through.")
+    lines of it, copied unchanged: grouped by file for rg and grep, or chosen by a second model
+    as ranges of line numbers. On any failure it prints nothing, so the original output goes
+    through.")
   (:export #:run-hook #:decide #:parse-event #:event #:event-tool #:event-shape #:event-text
-           #:event-eligibility #:check-summary #:unsupported-tokens #:replacement-text
-           #:hook-output #:prompt #:summarize #:claude-cli #:praxeon-provider #:cli-arguments
+           #:event-eligibility #:output-lines #:render-kept-lines #:omission-marker
+           #:check-replacement #:clamp-ranges #:select-within-budget #:group-matches #:group-line
+           #:replacement-text #:*marker-prefix* #:*lines-per-file*
+           #:hook-output #:prompt #:select-lines #:claude-cli #:praxeon-provider #:cli-arguments
            #:backend-from-env #:archive #:log-event #:cache-directory #:sha256-hex
            #:summarizer-failure #:summarizer-timeout #:summarizer-exit #:summarizer-bad-reply
-           #:validate-facts #:facts-spec
+           #:validate-selection #:selection-ranges #:selection-spec
            #:*timeout-seconds* #:*archive-days*))
 
 (cl:defpackage #:praxeon/claude-code
