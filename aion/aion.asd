@@ -328,10 +328,12 @@
 (defsystem "aion/http-client/tests"
   :description "Tests for aion/http-client: stage order, the effect seam, and failure."
   ;; The transport tests run a small HTTP server in the test image (usocket, bordeaux-threads)
-  ;; and, off Windows, a TLS one (cl+ssl) (#295).
+  ;; and, off Windows, a TLS one (cl+ssl) (#295). On Windows the pinned-connection tests call
+  ;; aion/tls and aion/windows directly (#536).
   :depends-on ("aion/http-client" "fiveam" "usocket" "bordeaux-threads" "aion/test-threads" "quri"
                "aion/test-http"
-               (:feature (:not :os-windows) "cl+ssl"))
+               (:feature (:not :os-windows) "cl+ssl")
+               (:feature :os-windows "aion/tls") (:feature :os-windows "aion/windows"))
   :serial t
   :components ((:module "tests"
                 :serial t
