@@ -808,10 +808,15 @@ time, across processes as well (a Postgres advisory lock; on SQLite, SQLite's ow
 the same, with these differences:
 
 - There is no extension to install and no width check on the table. The embedding is stored as
-  text, and a vector of the wrong width is refused when it is written.
+  single floats in a BLOB, the precision pgvector stores, and a vector of the wrong width is
+  refused when it is written. A store written before #425 kept it as text; `ensure-schema`
+  re-encodes those rows in place, in one transaction, keeping every chunk's fingerprints, so
+  nothing is embedded again. Until it has run, the text form is still read.
 - Similarity is computed in Lisp: the store reads every chunk of the corpus that the current
-  model embedded and computes each cosine distance. That is the same exact scan the Postgres
-  store does, done outside the database.
+  model embedded, one at a time, computes each cosine distance, and keeps the nearest. That is
+  the same exact scan the Postgres store does, done outside the database. Measured at width 1024
+  on one Linux laptop (#425): a median of 24 ms a query at 2,400 chunks a corpus, 88 ms at
+  10,000 and 524 ms at 50,000, where Postgres took 8 ms and 32 ms at the first two (#306).
 - BM25 scores are computed in Lisp from the numbers the database returns, because SQLite has a
   logarithm only in builds that include its math functions.
 - `retrieve-exact` matches case-insensitively for the ASCII letters A to Z only. SQLite's

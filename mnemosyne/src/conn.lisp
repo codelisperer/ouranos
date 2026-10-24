@@ -250,6 +250,27 @@ a single list.)"
                               :rows (length rows) :ms (%ms-since start))
         rows))))
 
+(defun map-query (connection function sql &rest params)
+  "Run a SELECT SQL with positional PARAMS and call FUNCTION on each row, a plist as QUERY
+returns them, one at a time as the driver reads it. Returns the number of rows.
+
+QUERY reads every row before it returns, so a scan over a large table holds the whole result in
+memory at once. This holds one row (#425: a SQLite similarity scan over 10,000 embeddings ran out
+of heap through QUERY). FUNCTION must not run another statement on CONNECTION while the scan is
+open; collect what it needs and act after MAP-QUERY returns."
+  (%wrapping-db-errors "map-query"
+    (let* ((start (get-internal-real-time))
+           (driver (dbi:connection-driver-type connection))
+           (params (param:to-driver-params params driver))
+           (result (dbi:execute (dbi:prepare connection sql) params))
+           (n 0))
+      (loop for row = (dbi:fetch result)
+            while row
+            do (incf n)
+               (funcall function (param:from-driver-row row driver)))
+      (log:debug "db map-query" :sql sql :params (length params) :rows n :ms (%ms-since start))
+      n)))
+
 (defmacro with-transaction ((connection &key immediate) &body body)
   "Run BODY inside a transaction on CONNECTION: commit on normal exit, roll back on a
 non-local exit, including when the commit itself fails. With IMMEDIATE, an outermost transaction

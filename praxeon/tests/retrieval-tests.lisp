@@ -484,24 +484,33 @@ text and would hold any list of numbers."
       (is (= 3 (rt:embed-pending corpus (make-instance 'word-embedder))) "control: four numbers are"))))
 
 (test (a-stored-vector-reads-back-as-the-numbers-written :suite chunkers)
-  "The text a SQLite store keeps for a vector (#369) reads back as the same doubles, including
-numbers written with an exponent. Text that is not a vector is refused rather than read as one."
-  (let* ((store (make-instance 'rc::chunk-store :dimensions 4))
+  "The BLOB a SQLite store keeps for a vector (#425) reads back as the same numbers to single-float
+precision, which is also what pgvector stores, including numbers with an exponent. A vector of the
+wrong width is refused when it is written. The text form a store wrote before #425 still reads,
+and a BLOB that is not a whole number of single floats is refused rather than read."
+  (let* ((store (make-instance 'rc::chunk-store :dimensions 4 :dialect :sqlite))
          (numbers #(0.1d0 -2.5d0 1.0d-7 3.0d12))
-         (text (rt::%sqlite-vector-text store numbers)))
-    (is (char= #\[ (char text 0)))
-    (is (equalp numbers (rt::%parse-vector-text text)))
-    (is (< (abs (- 0.1d0 (aref (rt::%parse-vector-text
-                                (rt::%sqlite-vector-text store (vector 0.1f0 0 1 2)))
-                               0)))
-           1d-6)
-        "single floats and integers are written as doubles")
-    (signals cnd:deliberation-failure (rt::%sqlite-vector-text store #(1d0 2d0)))
-    (signals cnd:deliberation-failure (rt::%parse-vector-text "1,2,3"))
-    (signals cnd:deliberation-failure (rt::%parse-vector-text "[1,#.(quit),3]"))
-    (is (= 0d0 (rt::%cosine-distance #(1d0 0d0) #(2d0 0d0))))
-    (is (= 1d0 (rt::%cosine-distance #(1d0 0d0) #(0d0 1d0))))
-    (is (= 1d0 (rt::%cosine-distance #(0d0 0d0) #(1d0 0d0))) "a zero vector is distance 1")))
+         (octets (rt::%vector-text store numbers))
+         (back (llm:stored-vector octets)))
+    (is (typep octets '(simple-array (unsigned-byte 8) (16))) "four single floats, 16 bytes")
+    (is (every (lambda (x y) (<= (abs (- x y)) (* 1d-6 (max 1d0 (abs x))))) numbers back)
+        "read back as ~S" back)
+    (signals cnd:deliberation-failure (rt::%vector-text store #(1d0 2d0)))
+    (is (equalp (coerce numbers '(simple-array double-float (*)))
+                (llm:stored-vector (llm:vector-text numbers)))
+        "the text form of a store written before #425 reads as before")
+    (is (equalp octets (llm:vector-text-octets (llm:vector-text numbers)))
+        "the re-encode turns the text form into the same BLOB")
+    (is (null (llm:vector-text-octets "[1,#.(quit),3]")) "malformed text is left, not re-encoded")
+    (signals cnd:deliberation-failure
+      (llm:stored-vector (make-array 5 :element-type '(unsigned-byte 8) :initial-element 0)))
+    (let ((a (llm:stored-vector (llm:vector-octets #(1 2 3 4))))
+          (b (llm:stored-vector (llm:vector-octets #(4 3 2 1)))))
+      (is (< (abs (- (llm:cosine-distance a b) (llm:cosine-distance #(1 2 3 4) #(4 3 2 1)))) 1d-12)
+          "the typed path computes what the generic one does"))
+    (is (= 1d0 (llm:cosine-distance (llm:stored-vector (llm:vector-octets #(0 0)))
+                                    (llm:stored-vector (llm:vector-octets #(1 0)))))
+        "a zero vector is distance 1")))
 
 (test a-vector-for-replaced-text-is-dropped
   "A vector is written only if its chunk still holds the text that was embedded. Here the
@@ -1669,3 +1678,131 @@ written as though it were whole."
                  (mapcar (lambda (r) (getf r :strategy))
                          (rt:evaluate-retrieval corpus embedder '() :k 1)))
           "control: without one, the three configurations of step 2"))))
+
+;;; --- similarity at a corpus larger than the fixtures, and the re-encode (#425) -----------
+
+(defclass seeded-embedder (llm:embedding-provider)
+  ((width :initarg :width :initform 16 :reader seeded-width))
+  (:documentation "A vector of WIDTH numbers in [-1, 1) drawn from a generator seeded by the
+text, so the same text always gets the same vector and different texts get unrelated ones."))
+
+(defmethod llm:embedding-dimensions ((p seeded-embedder)) (seeded-width p))
+(defmethod llm:embedding-model-of ((p seeded-embedder)) "seeded")
+(defmethod llm:embed ((p seeded-embedder) text)
+  (let ((state (sb-ext:seed-random-state (sxhash text)))
+        (v (make-array (seeded-width p) :element-type 'double-float)))
+    (dotimes (i (length v) v) (setf (aref v i) (- (random 2d0 state) 1d0)))))
+
+(defun %as-stored (vector)
+  "VECTOR rounded to single floats, as both backends store it: pgvector's vector is single
+precision, and a SQLite store keeps single floats (#425)."
+  (map '(simple-array double-float (*)) (lambda (x) (coerce (coerce x 'single-float) 'double-float))
+       vector))
+
+(defun %numbered-sections (n)
+  (loop for i below n
+        collect (sec (format nil "s~3,'0D" i) (format nil "Section ~D, about item ~D." i (* 7 i))
+                     :document-id (format nil "d~D" (floor i 10)))))
+
+(defun %similar-ranking (corpus embedder query limit)
+  "The texts and distances RETRIEVE-SIMILAR returns, and whether the result was complete."
+  (let ((result (rt:retrieve-similar corpus embedder query :limit limit)))
+    (values (mapcar (lambda (p) (cons (rt:passage-text p) (rt:passage-distance p)))
+                    (rt:retrieval-result-passages result))
+            (rt:complete-p (rt:retrieval-result-completeness result)))))
+
+(test similarity-over-600-chunks-ranks-as-computed-on-both-backends
+  "600 chunks of width 16, far more than the other fixtures. RETRIEVE-SIMILAR's 25 nearest are the
+25 a cosine computed here over the stored precision gives, in the same order, with the same
+distances, on Postgres and on SQLite. On SQLite the candidates are read one at a time and the
+nearest kept as the scan goes (#425), so this is the test that sees that path at more than a
+handful of rows."
+  (with-store (store :dimensions 16)
+    (let* ((corpus (rt:make-corpus store "large"))
+           (embedder (make-instance 'seeded-embedder))
+           (sections (%numbered-sections 600)))
+      (rt:sync-corpus corpus sections)
+      (is (= 600 (rt:embed-pending corpus embedder)))
+      (let* ((query (%as-stored (llm:embed embedder "which item")))
+             (expected (subseq (sort (mapcar (lambda (s)
+                                               (cons (rt:section-text s)
+                                                     (llm:cosine-distance
+                                                      query (%as-stored (llm:embed embedder (rt:section-text s))))))
+                                             sections)
+                                     #'< :key #'cdr)
+                               0 25)))
+        (multiple-value-bind (ranking complete) (%similar-ranking corpus embedder "which item" 25)
+          (is-true complete)
+          (is (equal (mapcar #'car expected) (mapcar #'car ranking))
+              "on ~A the order differs" *backend*)
+          (is (every (lambda (e r) (< (abs (- (cdr e) (cdr r))) 1d-5)) expected ranking)
+              "on ~A a distance differs" *backend*))))))
+
+(defun %embedding-columns (store)
+  (conn:query (rt:store-connection store)
+              (format nil "SELECT id, embedding_fingerprint, input_fingerprint, embedding_deriver FROM ~A ORDER BY id"
+                      (rt:store-table store))))
+
+(defun %rewrite-embeddings-as (store form &key (where "1 = 1"))
+  "Rewrite the embeddings of STORE's rows matching WHERE into FORM, :TEXT (what a SQLite store
+wrote before #425) or :BLOB, directly in SQL, as an older build or a crash would leave them."
+  (let ((c (rt:store-connection store)) (table (rt:store-table store)))
+    (dolist (row (conn:query c (format nil "SELECT id, embedding FROM ~A WHERE embedding IS NOT NULL AND ~A" table where)))
+      (let ((v (llm:stored-vector (param:row-value row :embedding))))
+        (conn:exec c (format nil "UPDATE ~A SET embedding = ? WHERE id = ?" table)
+                   (ecase form (:text (llm:vector-text v)) (:blob (llm:vector-octets v)))
+                   (param:row-value row :id))))))
+
+(defun %fields-before-425 (fields)
+  "FIELDS, a store's SQLite field list, with the embedding declared TEXT, as every SQLite table
+made before #425 has it."
+  (mapcar (lambda (field) (if (eq (first field) :embedding) (list* :embedding :text (cddr field)) field))
+          fields))
+
+(defun %declared-type (connection table column)
+  (param:row-value (find column (conn:query connection (format nil "PRAGMA table_info(~A)" table))
+                         :key (lambda (row) (param:row-value row :name)) :test #'string-equal)
+                   :type))
+
+(test on-sqlite-a-store-written-with-text-embeddings-is-re-encoded-in-place
+  "A SQLite store whose embeddings are text, as every SQLite store written before #425 is. It
+ranks as before while it is text, and while it is half text and half BLOB, as a re-encode stopped
+part-way leaves it. Opening it with ENSURE re-encodes every row as single floats, keeps each row's
+fingerprints and deriver so no chunk becomes pending, and ranks exactly as before."
+  (if (not (%sqlite-p))
+      (skip "SQLite only: Postgres stores a vector column, and nothing is re-encoded there")
+      (with-store (fixture-store :dimensions 16)
+        (let* ((c (rt:store-connection fixture-store))
+               (table "chunks_before_425")
+               (store (progn
+                        ;; The table as a SQLite store made it before #425: the same columns, with
+                        ;; the embedding declared TEXT. ENSURE then adds only what is missing.
+                        (conn:exec c (mnemosyne/schema:schema-ddl
+                                      (mnemosyne/schema:make-schema
+                                       'chunks-before-425 table
+                                       (%fields-before-425 (rc::%schema-fields 16 :sqlite)))
+                                      :dialect "sqlite"))
+                        (rt:make-chunk-store c :table table :dimensions 16 :ensure t)))
+               (corpus (rt:make-corpus store "old"))
+               (embedder (make-instance 'seeded-embedder)))
+          (is (string-equal "TEXT" (%declared-type c table "embedding")) "the column is declared as before #425")
+          (rt:sync-corpus corpus (%numbered-sections 40))
+          (rt:embed-pending corpus embedder)
+          (let ((ranking (%similar-ranking corpus embedder "which item" 10))
+                (columns (%embedding-columns store)))
+            (%rewrite-embeddings-as store :text)
+            (is (= 40 (%column-count store "typeof(embedding) = 'text'")) "the store is in the old form")
+            (is (equal ranking (%similar-ranking corpus embedder "which item" 10))
+                "the text form ranks as the BLOB form does")
+            (%rewrite-embeddings-as store :blob :where "section_id < 's020'")
+            (is (= 20 (%column-count store "typeof(embedding) = 'text'")) "half re-encoded")
+            (is (equal ranking (%similar-ranking corpus embedder "which item" 10))
+                "a store half re-encoded still ranks the same")
+            (let* ((reopened (rt:make-chunk-store c :table table :dimensions 16 :ensure t))
+                   (corpus (rt:make-corpus reopened "old")))
+              (is (= 40 (%column-count reopened "typeof(embedding) = 'blob'")) "every row is single floats")
+              (is (equal columns (%embedding-columns reopened)) "fingerprints and derivers are kept")
+              (is (= 0 (rt:embed-pending corpus embedder)) "nothing became pending")
+              (is (equal ranking (%similar-ranking corpus embedder "which item" 10)))
+              (rt:make-chunk-store c :table table :dimensions 16 :ensure t)
+              (is (= 40 (%column-count reopened "typeof(embedding) = 'blob'")) "opening again changes nothing")))))))

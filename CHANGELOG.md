@@ -14,6 +14,30 @@ its tag.
 
 ### An app may have to act
 
+- **praxeon/retrieval and praxeon/memory-db on SQLite: similarity search works at real corpus
+  sizes, and the stored embeddings change form** (#425). A SQLite store kept each embedding as
+  text and parsed every one on every search, so at width 1024 `retrieve-similar` took about a
+  second over 2,400 chunks and exhausted a 4 GB heap at 10,000, and memory-db's
+  `recall-similar` took 3.7 s over 5,000 observations and exhausted the heap at 20,000. Now:
+  - the embedding is stored as single floats in a BLOB (`praxeon/llm:vector-octets`), the
+    precision pgvector stores. The schema declares it `:binary`; a table made before keeps its
+    `TEXT` declaration, which SQLite does not enforce;
+  - **`ensure-schema` re-encodes a store's existing text embeddings in place**, once, in one
+    transaction per table, keeping every fingerprint and deriver, so nothing is embedded again
+    and no chunk becomes pending. Readers accept both forms, so a store half re-encoded when a
+    process stopped still opens, and the next `ensure-schema` finishes. An app that opens its
+    stores without `:ensure t` keeps working on the text form until it runs `ensure-schema`;
+  - the search reads candidates one at a time (the new `mnemosyne/conn:map-query` and
+    `mnemosyne/query:map-fetch`) and keeps the nearest as it goes, so memory stays flat.
+    Measured at width 1024: `retrieve-similar` 24 ms at 2,400 chunks, 88 ms at 10,000, 524 ms
+    at 50,000; `recall-similar` 8 ms at 1,000 observations, 48 ms at 5,000, 212 ms at 20,000.
+
+  Also new: `mnemosyne/migrate:rewrite-sqlite-text-values`, which rewrites a SQLite column's
+  text values through a function, idempotently, in one transaction; and in `praxeon/llm`,
+  `vector-octets`, `decode-vector-octets`, `stored-vector`, `vector-text-octets`, and
+  `make-nearest`, `nearest-offer` and `nearest-items` for keeping the k nearest during a scan.
+  `praxeon/retrieval` now uses `praxeon/llm`'s `cosine-distance` and no longer keeps its own copy.
+
 - **hyperion/static serves only regular files, and serves some it used to refuse** (#687).
   `file-response` and `make-static-handler` now:
   - **refuse a FIFO, a device or a socket under the static root** with a 404, without reading

@@ -40,52 +40,14 @@ its embedding stays current."
                                   :source (format nil "the chunk store ~A"
                                                   (store-table (corpus-store corpus)))))
 
-(defun %sqlite-vector-text (store vector)
-  "VECTOR as the text a SQLite store keeps, in pgvector's form: [x,y,...]. Refuses a vector of
-the wrong width, as the cast does on Postgres."
-  (unless (= (length vector) (store-dimensions store))
-    (error 'praxeon/conditions:deliberation-failure
-           :detail (format nil "embedding rejected: ~D numbers where the store holds ~D"
-                           (length vector) (store-dimensions store))))
-  (with-standard-io-syntax
-    (let ((*read-default-float-format* 'double-float))
-      (format nil "[~{~A~^,~}]" (map 'list (lambda (x) (coerce x 'double-float)) vector)))))
-
-(defun %parse-vector-text (text)
-  "The numbers of a vector stored by %SQLITE-VECTOR-TEXT, as a simple vector of doubles. Signals
-DELIBERATION-FAILURE if TEXT is not that form."
-  (flet ((bad () (error 'praxeon/conditions:deliberation-failure
-                        :detail (format nil "a stored embedding is not a vector: ~S"
-                                        (subseq text 0 (min 40 (length text)))))))
-    (let ((n (length text)))
-      (unless (and (> n 1) (char= (char text 0) #\[) (char= (char text (1- n)) #\]))
-        (bad))
-      (with-standard-io-syntax
-        (let ((*read-default-float-format* 'double-float)
-              (*read-eval* nil))
-          (coerce (loop for start = 1 then (1+ end)
-                        for end = (or (position #\, text :start start) (1- n))
-                        collect (let ((x (ignore-errors (read-from-string text t nil
-                                                                          :start start :end end))))
-                                  (if (realp x) (coerce x 'double-float) (bad)))
-                        while (< end (1- n)))
-                  'simple-vector))))))
-
-(defun %cosine-distance (a b)
-  "One minus the cosine of the angle between A and B, as pgvector's <=> computes it. A vector of
-all zeros has no direction, and its distance from anything is taken as 1."
-  (let ((dot 0d0) (na 0d0) (nb 0d0))
-    (loop for x across a for y across b
-          do (incf dot (* x y)) (incf na (* x x)) (incf nb (* y y)))
-    (if (or (zerop na) (zerop nb))
-        1d0
-        (- 1d0 (/ dot (sqrt (* na nb)))))))
+(setf rc::*sqlite-embedding-reencoder* #'llm:vector-text-octets)
 
 (defun %vector-text (store vector)
-  "VECTOR in the text form pgvector accepts, through mnemosyne's cast, which also refuses a
-vector of the wrong width before it reaches the database. On SQLite, %SQLITE-VECTOR-TEXT."
+  "VECTOR as STORE's embedding column takes it, after refusing one of the wrong width. On
+Postgres, the text form pgvector accepts, through mnemosyne's cast. On SQLite, a BLOB of single
+floats (PRAXEON/LLM:VECTOR-OCTETS, #425); the error for a wrong width is the same one."
   (when (rc::%sqlite-p store)
-    (return-from %vector-text (%sqlite-vector-text store vector)))
+    (return-from %vector-text (llm:vector-octets vector (store-dimensions store))))
   (let ((changeset (cs:cast (rc::store-schema-name store) (list :embedding vector) '(:embedding))))
     (unless (cs:changeset-valid-p changeset)
       (error 'praxeon/conditions:deliberation-failure
@@ -191,27 +153,49 @@ TRUNCATED with reason :NOT-EMBEDDED gives the number of chunks that were not, be
 no embedding from this model yet: the normal state while EMBED-PENDING catches up after a sync
 or a model change."))
 
-(defun %sqlite-similar-rows (corpus deriver vector-text limit)
-  "%SIMILAR-ROWS on SQLite: every chunk DERIVER embedded is read with its embedding, and the
-distances are computed and sorted here, ties by id."
-  (let* ((query (%parse-vector-text vector-text))
-         (rows (mapcar (lambda (row)
-                         (list* :distance
-                                (%cosine-distance query (%parse-vector-text
-                                                         (param:row-value row :embedding)))
-                                row))
-                       (rc::%fetch (corpus-store corpus)
-                                   (list :select (append rc::+passage-columns+ '(:id :embedding))
-                                         :from (list (store-table (corpus-store corpus)))
-                                         :where (corpus-where corpus
-                                                              (list := :embedding_deriver deriver)
-                                                              (list :is-not-null :embedding)))))))
-    (let ((sorted (sort rows (lambda (a b)
-                               (let ((da (getf a :distance)) (db (getf b :distance)))
-                                 (or (< da db)
-                                     (and (= da db)
-                                          (string< (param:row-value a :id) (param:row-value b :id)))))))))
-      (subseq sorted 0 (min limit (length sorted))))))
+(defun %sqlite-similar-rows (corpus deriver query-octets limit)
+  "%SIMILAR-ROWS on SQLite (#425). The chunks DERIVER embedded are read one at a time, with only
+their id and embedding, each embedding decoded into one reused array, and the LIMIT nearest kept
+as the scan goes, ties by id. Then the passage columns of those LIMIT chunks are read, in the
+caller's transaction, so in the same snapshot as the scan.
+
+Before #425's step 1 this read every candidate's passage columns and embedding at once, as text,
+and parsed each embedding: a second over 2,400 chunks at width 1024, and out of heap at 10,000. A
+chunk written before the re-encode, still in the text form, is read too
+(PRAXEON/LLM:STORED-VECTOR)."
+  (let* ((query (llm:stored-vector query-octets))
+         (buffer (make-array (length query) :element-type 'double-float))
+         (nearest (llm:make-nearest limit))
+         (store (corpus-store corpus)))
+    (rc::with-db (store)
+      (q:map-fetch (store-connection store)
+                   (lambda (row)
+                     (let ((stored (param:row-value row :embedding)))
+                       (llm:nearest-offer nearest
+                                          (llm:cosine-distance
+                                           query (llm:stored-vector
+                                                  stored (and (typep stored '(simple-array (unsigned-byte 8) (*)))
+                                                              buffer)))
+                                          (param:row-value row :id)
+                                          (param:row-value row :id))))
+                   (list :select '(:id :embedding)
+                         :from (list (store-table store))
+                         :where (corpus-where corpus
+                                              (list := :embedding_deriver deriver)
+                                              (list :is-not-null :embedding)))
+                   :dialect :sqlite))
+    (let* ((kept (llm:nearest-items nearest))   ; (distance . id), nearest first
+           (ids (mapcar #'cdr kept))
+           (rows (and ids
+                      (rc::%fetch store
+                                  (list :select (append rc::+passage-columns+ '(:id))
+                                        :from (list (store-table store))
+                                        :where (corpus-where corpus (list :in :id ids)))))))
+      (mapcar (lambda (entry)
+                (list* :distance (car entry)
+                       (find (cdr entry) rows :key (lambda (row) (param:row-value row :id))
+                                              :test #'string=)))
+              kept))))
 
 (defun %similar-rows (corpus deriver vector-text limit)
   "The rows of CORPUS's LIMIT chunks nearest VECTOR-TEXT among those DERIVER embedded, nearest

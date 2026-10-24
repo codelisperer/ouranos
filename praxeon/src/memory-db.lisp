@@ -69,7 +69,7 @@
 
 (defun %schema-fields (dimensions dialect)
   "The observation columns, with the embedding sized for the configured provider. On SQLite
-the embedding is text (#425).
+the embedding is a BLOB of single floats (#425; text before it).
 
 Underscores rather than hyphens: a field name becomes a SQL identifier unquoted, and
 `valid-from' is not one."
@@ -95,8 +95,10 @@ Underscores rather than hyphens: a field name becomes a SQL identifier unquoted,
     ;; window an observation came from. Added to an existing table by ENSURE-SCHEMA.
     (:thread       :string)
     (:source_through :integer)
+    ;; On SQLite, which has no vector type, single floats in a BLOB (#425). A table made before
+    ;; #425 declares the column TEXT; SQLite keeps a BLOB in it as it is, so it is not altered.
     ,(if (eq dialect :sqlite)
-         '(:embedding :text)
+         '(:embedding :binary)
          `(:embedding :vector :dimensions ,dimensions))))
 
 ;;; THE OBSERVER'S PROGRESS ON EACH THREAD (#317), one row per subject and thread, in a table of
@@ -335,7 +337,8 @@ starting at the same moment."
 (defun ensure-schema (store)
   "Create the table, its index and the observer's progress table (#317) if they are not there,
 and add the columns +ADDED-COLUMNS+ names to a table made before them. Returns STORE. On Postgres the `vector' extension must
-already be installed; see CHECK-VECTOR-EXTENSION.
+already be installed; see CHECK-VECTOR-EXTENSION. On SQLite, embeddings still in the text form are
+re-encoded as single floats (#425).
 
 EVERY READ NEEDS THOSE COLUMNS, not only a thread's: a read of the subject's facts selects them
 and filters on THREAD IS NULL. So an app must run this at start, or add the columns in its own
@@ -360,8 +363,22 @@ migration, before it reads from a table made before #317."
                        (unless (and (eq (store-dialect store) :sqlite)
                                     (member (string-downcase (symbol-name name))
                                             (%sqlite-columns store) :test #'string=))
-                         (error e))))))))
+                         (error e)))))))
+    (when (eq (store-dialect store) :sqlite)
+      (%reencode-sqlite-embeddings store)))
   store)
+
+(defun %reencode-sqlite-embeddings (store)
+  "Rewrite STORE's embeddings that are still text into BLOBs of single floats (#425), in one
+transaction, idempotently: see MNEMOSYNE/MIGRATE:REWRITE-SQLITE-TEXT-VALUES. A store half
+re-encoded when a process stopped opens as before, because RECALL-SIMILAR reads both forms, and
+the next ENSURE-SCHEMA finishes the job."
+  (multiple-value-bind (rewritten left)
+      (mig:rewrite-sqlite-text-values (store-connection store) (store-table store) "id" "embedding"
+                                      #'llm:vector-text-octets)
+    (when (plusp (+ rewritten left))
+      (log:info "praxeon/memory-db: SQLite embeddings re-encoded from text to single floats"
+                :table (store-table store) :rewritten rewritten :left left))))
 
 ;;; --- rows <-> observations ---------------------------------------------------
 
@@ -408,16 +425,17 @@ migration, before it reads from a table made before #317."
 selecting it would pull a megabyte of floats through every recall to be discarded.")
 
 (defun %vector-text (store vector &key (field :embedding))
-  "VECTOR in the text form pgvector accepts, through mnemosyne's own cast. On SQLite, where
-the column is text and a cast would take any string, PRAXEON/LLM:VECTOR-TEXT does the width
-check instead (#425).
+  "VECTOR as STORE's embedding column takes it: on Postgres the text form pgvector accepts,
+through mnemosyne's own cast. On SQLite, where the column has no vector type and a cast would
+take any value, a BLOB of single floats, PRAXEON/LLM:VECTOR-OCTETS, which does the width check
+instead (#425).
 
 THE QUERY VECTOR IS CAST LIKE A STORED ONE, on purpose. Casting is where a wrong width is
 refused, and a search argument of the wrong width is the same misconfiguration as a stored
 row of the wrong width -- it should not reach the database to be refused there in the
 language of columns."
   (when (eq (store-dialect store) :sqlite)
-    (return-from %vector-text (llm:vector-text vector (store-dimensions store))))
+    (return-from %vector-text (llm:vector-octets vector (store-dimensions store))))
   (let ((changeset (cs:cast (store-schema-name store) (list field vector) (list field))))
     (unless (cs:changeset-valid-p changeset)
       (error 'praxeon/conditions:deliberation-failure
@@ -755,31 +773,34 @@ subject's rows."
             rows)))))
 
 (defun %sqlite-nearest (store subject embedding as-of limit &optional thread)
-  "RECALL-SIMILAR's ranking on SQLite (#425): the subject's current observations with their
-embeddings, the LIMIT nearest EMBEDDING by cosine distance, nearest first, ties by id. The
-query vector is checked for width as a stored one is. An observation with no embedding sorts
-after every other, as NULL does in Postgres's ascending ORDER BY. REMEMBER always writes one,
-so that case needs a row written some other way."
-  (let* ((query (llm:parse-vector-text (%vector-text store embedding)))
-         (rows (%with-store (store)
-                 (q:fetch (store-connection store)
-                          (list :select (append +columns+ '(:embedding))
-                                :from (list (store-table store))
-                                :where (%where-current subject as-of nil thread))
-                          :dialect :sqlite)))
-         (scored (mapcar (lambda (row)
-                           (let ((text (param:row-value row :embedding)))
-                             (cons (if text
-                                       (llm:cosine-distance query (llm:parse-vector-text text))
-                                       most-positive-double-float)
-                                   row)))
-                         rows))
-         (sorted (sort scored (lambda (a b)
-                                (or (< (car a) (car b))
-                                    (and (= (car a) (car b))
-                                         (string< (param:row-value (cdr a) :id)
-                                                  (param:row-value (cdr b) :id))))))))
-    (mapcar #'cdr (subseq sorted 0 (min limit (length sorted))))))
+  "RECALL-SIMILAR's ranking on SQLite (#425): the subject's current observations, read one at a
+time with their embeddings, the LIMIT nearest EMBEDDING by cosine distance kept as the scan goes,
+nearest first, ties by id. The query vector is checked for width as a stored one is. An
+observation with no embedding sorts after every other, as NULL does in Postgres's ascending ORDER
+BY. REMEMBER always writes one, so that case needs a row written some other way. An embedding
+still in the text form of a store written before #425's re-encode is read too."
+  (let* ((query (llm:stored-vector (%vector-text store embedding)))
+         (buffer (make-array (length query) :element-type 'double-float))
+         (nearest (llm:make-nearest limit)))
+    (%with-store (store)
+      (q:map-fetch (store-connection store)
+                   (lambda (row)
+                     (let ((stored (param:row-value row :embedding)))
+                       (llm:nearest-offer
+                        nearest
+                        (if stored
+                            (llm:cosine-distance
+                             query (llm:stored-vector
+                                    stored (and (typep stored '(simple-array (unsigned-byte 8) (*)))
+                                                buffer)))
+                            most-positive-double-float)
+                        (param:row-value row :id)
+                        row)))
+                   (list :select (append +columns+ '(:embedding))
+                         :from (list (store-table store))
+                         :where (%where-current subject as-of nil thread))
+                   :dialect :sqlite))
+    (mapcar #'cdr (llm:nearest-items nearest))))
 
 (defmethod mem:forget ((store db-memory-store) observation)
   (%with-store (store :exclusive t)

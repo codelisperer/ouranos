@@ -1270,3 +1270,54 @@ current, as a reader between the two statements would have seen them (Copilot's 
         (unless (%sqlite-p)
           (ignore-errors (conn:exec (mdb::store-source store)
                                     (format nil "DROP FUNCTION IF EXISTS ~A_no_delete() CASCADE" (mdb:store-table store)))))))))
+
+;;; --- the re-encode of a SQLite store's text embeddings (#425) ------------------------
+
+(defun %observation-embedding-count (connection table typeof)
+  (param:row-value (first (conn:query connection
+                                      (format nil "SELECT count(*) AS n FROM ~A WHERE typeof(embedding) = ?" table)
+                                      typeof))
+                   :n))
+
+(test on-sqlite-observations-stored-as-text-are-re-encoded-in-place
+  "A SQLite memory store whose embeddings are text, as every one written before #425 is. RECALL-
+SIMILAR finds the same nearest observation while they are text, and after the store is opened
+again with ENSURE, which re-encodes every row as single floats."
+  (if (not (%sqlite-p))
+      (skip "SQLite only: Postgres stores a vector column, and nothing is re-encoded there")
+      (with-store (fixture-store)
+        (let* ((connection (mdb::store-source fixture-store))
+               (table "observations_before_425")
+               (store (progn
+                        ;; The table as a SQLite store made it before #425, embedding declared TEXT.
+                        (conn:exec connection
+                                   (mnemosyne/schema:schema-ddl
+                                    (mnemosyne/schema:make-schema
+                                     'observations-before-425 table
+                                     (mapcar (lambda (f) (if (eq (first f) :embedding) '(:embedding :text) f))
+                                             (mdb::%schema-fields 4 :sqlite)))
+                                    :dialect "sqlite"))
+                        (mdb:make-db-memory-store connection :embedder (make-instance 'basis-embedder)
+                                                             :table table :dialect :sqlite :ensure t))))
+          (is (string-equal "TEXT" (param:row-value
+                                    (find "embedding" (conn:query connection (format nil "PRAGMA table_info(~A)" table))
+                                          :key (lambda (row) (param:row-value row :name)) :test #'string-equal)
+                                    :type))
+              "the column is declared as before #425")
+        (remember* store "member-3" "the member prefers mornings")
+        (remember* store "member-3" "the member's budget is tight")
+        (remember* store "member-3" "the member dislikes phone calls")
+        (let* ((query (llm:embed (make-instance 'basis-embedder) "the member's budget is tight"))
+               (nearest (lambda (s) (mapcar #'praxeon/context:ctx-item-content
+                                            (mem:recall-similar s "member-3" query :budget 1000 :limit 1)))))
+          (is (equal '("the member's budget is tight") (funcall nearest store)))
+          (dolist (row (conn:query connection (format nil "SELECT id, embedding FROM ~A" table)))
+            (conn:exec connection (format nil "UPDATE ~A SET embedding = ? WHERE id = ?" table)
+                       (llm:vector-text (llm:stored-vector (param:row-value row :embedding)))
+                       (param:row-value row :id)))
+          (is (= 3 (%observation-embedding-count connection table "text")) "the store is in the old form")
+          (is (equal '("the member's budget is tight") (funcall nearest store)) "the text form is read")
+          (let ((reopened (mdb:make-db-memory-store connection :embedder (make-instance 'basis-embedder)
+                                                               :table table :dialect :sqlite :ensure t)))
+            (is (= 3 (%observation-embedding-count connection table "blob")) "every row is single floats")
+            (is (equal '("the member's budget is tight") (funcall nearest reopened)))))))))
