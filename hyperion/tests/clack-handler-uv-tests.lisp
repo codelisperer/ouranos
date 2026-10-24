@@ -871,10 +871,18 @@ the hook that was in place before (#519)."
     (sb-thread:interrupt-thread thread (lambda () (sb-thread:signal-semaphore ran)))
     (and (sb-thread:wait-on-semaphore ran :timeout timeout) t)))
 
+(defconstant +threads-checked+ (+ 2 #-sb-safepoint 1)
+  "The threads %SERVER-THREADS-INTERRUPTIBLE-CHECK checks: the two pool workers and, except on a
+:SB-SAFEPOINT build, the one loop thread. On SBCL for Windows an interrupt is delivered only when
+a thread leaves foreign code, so it does not reach a loop thread waiting in uv_run until an event
+wakes it, mask or no mask; #897's Windows leg showed this for the plain start as well as the
+deferred one. A new thread there does not inherit its creator's mask, so the workers show the
+defect cannot occur.")
+
 (defun %server-threads-interruptible-check (defer)
-  "Start a server through CLACK:CLACKUP with two workers and one loop, and check that an INTERRUPT-THREAD
-reaches each of its pool workers and its loop thread. With DEFER, SRV:START is wrapped so that,
-inside RUN's step that defers interrupts, another thread interrupts the thread running RUN and
+  "Start a server through CLACK:CLACKUP with two workers and one loop, and check that an
+INTERRUPT-THREAD reaches each of its pool workers and, except on a :SB-SAFEPOINT build, its loop
+thread. With DEFER, SRV:START is wrapped so that, inside RUN's step that defers interrupts, another thread interrupts the thread running RUN and
 the wrapper waits 0.2 s for that interrupt to arrive and be deferred before the server starts.
 Returns the threads checked and the ones the interrupt did not reach."
   (let ((before (sb-thread:list-all-threads))
@@ -898,6 +906,10 @@ Returns the threads checked and the ones the interrupt did not reach."
                             (lambda (th)
                               (let ((name (sb-thread:thread-name th)))
                                 (and name (or (uiop:string-prefix-p "server-uv-worker" name)
+                                              ;; Not on a :SB-SAFEPOINT build: there an interrupt
+                                              ;; reaches a thread in uv_run only when uv_run
+                                              ;; returns, whatever its mask (+THREADS-CHECKED+).
+                                              #-sb-safepoint
                                               (uiop:string-prefix-p "aion/uv loop" name)))))
                             new)))
              (values checked (remove-if #'%interrupt-arrives-p checked))))
@@ -911,12 +923,12 @@ thread created meanwhile inherits that mask. Before #541 every pool worker and l
 start created stayed that way for the server's life: no INTERRUPT-THREAD, no WITH-TIMEOUT in a
 handler, no DESTROY-THREAD."
   (multiple-value-bind (checked missed) (%server-threads-interruptible-check t)
-    (is (= 3 (length checked)) "two workers and one loop thread; found ~S" checked)
+    (is (= +threads-checked+ (length checked)) "~D threads expected; found ~S" +threads-checked+ checked)
     (is (null missed) "the interrupt did not reach ~S" (mapcar #'sb-thread:thread-name missed))))
 
 (test server-threads-are-interruptible-after-a-plain-start
   "The control for the test above: with no interrupt during the start, the same check finds the
 same threads and reaches all of them, so it can see a delivered interrupt."
   (multiple-value-bind (checked missed) (%server-threads-interruptible-check nil)
-    (is (= 3 (length checked)) "two workers and one loop thread; found ~S" checked)
+    (is (= +threads-checked+ (length checked)) "~D threads expected; found ~S" +threads-checked+ checked)
     (is (null missed) "the interrupt did not reach ~S" (mapcar #'sb-thread:thread-name missed))))

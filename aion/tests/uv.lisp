@@ -677,7 +677,16 @@ loop lock only while the loop is not being freed. Repeated, because the window i
   "START-LOOP-THREAD called inside a step while an interrupt to its caller is deferred, as
 hyperion/clack-handler-uv's RUN can call it through server-uv (#541). The loop thread unblocks
 interrupts first, so an INTERRUPT-THREAD reaches it while it waits in uv_run. Without that, it
-never did."
+never did.
+
+Skipped on a :SB-SAFEPOINT build (SBCL for Windows). There a new thread does not inherit the
+mask, so the defect does not occur; and an interrupt is delivered only when a thread leaves
+foreign code, so it does not reach a loop thread waiting in uv_run until an event wakes it, mask
+or no mask. Measured on #897's Windows leg, where the plain-start control in
+hyperion/clack-handler-uv's tests failed the same way."
+  #+sb-safepoint
+  (skip "interrupts reach a thread in uv_run only when it returns, on a :sb-safepoint build")
+  #-sb-safepoint
   (let ((l (uv:make-loop)))
     (unwind-protect
          (progn
