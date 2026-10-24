@@ -26,7 +26,23 @@ its tag.
     **By default any window holding a tool call or result is taken as untrusted**
     (`window-holds-a-tool-call-p`), since the observer cannot tell which tools return outside
     content; an app with an agent passes `(praxeon/actor:untrusted-window-predicate agent)`,
-    which judges each call as the agent does (#827's `:untrusted` means).
+    which judges each call as the agent does (#827's `:untrusted` means), counts a call whose
+    result became untrusted while it ran (a delegated agent that read a page or was given an
+    untrusted item), and under `:taint-scope :conversation` takes every window after an
+    untrusted read as untrusted.
+  - **With the default predicate, nearly every observation of an agent that uses tools is
+    untrusted, so once recalled into its context they hold or refuse its `:requires-user-intent`
+    means on every turn.** The remedy is to pass `(praxeon/actor:untrusted-window-predicate
+    agent)` as `:untrusted-p`. An observer of a sub-agent must pass the sub-agent's predicate:
+    the default does not count a delegated task, which is the coordinating model's text, as
+    untrusted. An app that wants untrusted observations out of a prompt altogether filters what
+    it recalls with `observation-untrusted-p`; `recall` has no option for it, since that would
+    change every store's protocol.
+  - **A later window cannot launder an untrusted observation.** A proposal that replaces an
+    untrusted observation, or repeats one word for word, is untrusted whatever its window
+    (`apply-distillation`), and the observations the distiller is shown as already known are
+    labelled when they came from untrusted content. A paraphrase is not caught; the label is what
+    tells the model. A promoted fact carries its observation's mark.
   - **An untrusted observation is promoted to a fact about the subject only when the new
     `:promote-untrusted` allows it, on top of `:promote`**; it refuses by default. An app that
     promotes from conversations with tool calls gets no new subject facts from them until it
@@ -39,7 +55,11 @@ its tag.
     stops counting at the user's next message, on purpose: the item is a summary that hides its
     source.
   - `praxeon/memory-db` stores it in a new `untrusted` column (BOOLEAN), which `ensure-schema`
-    adds to an existing table; rows written before read as trusted.
+    adds to an existing table. **Rows written before read as trusted**, though nothing recorded
+    whether they were. `(praxeon/memory-db:ensure-schema store :legacy-untrusted t)` marks every
+    thread observation already in the table untrusted on the call that adds the column, and
+    leaves facts about the subject alone; for a table that already has the column, the same is
+    `UPDATE <table> SET untrusted = TRUE WHERE thread IS NOT NULL` (`= 1` on SQLite), run once.
 
 - **aion/uv: `close-loop` frees a loop only when `uv_loop_close` succeeds** (#877). Before, it
   ignored `uv_loop_close`'s result and freed the loop even when libuv returned `UV_EBUSY`

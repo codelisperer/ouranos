@@ -1088,10 +1088,11 @@ unlinked contradiction first, only the first is replaced."
           (head
            (when (funcall (observer-promote-accept observer) observation head)
              (mem:supersede store head (mem:observation-content observation)
-                            :provenance provenance :kind (mem:observation-kind observation)
+                            :provenance (mem:inherit-taint provenance (list observation))
+                            :kind (mem:observation-kind observation)
                             :valid-from (mem:observation-valid-from observation))))
           (t (mem:remember store subject (mem:observation-content observation)
-                           :provenance provenance
+                           :provenance (mem:inherit-taint provenance (list observation))
                            :kind (mem:observation-kind observation)
                            :valid-from (mem:observation-valid-from observation))))))))
 

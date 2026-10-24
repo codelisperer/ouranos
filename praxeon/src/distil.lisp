@@ -219,12 +219,16 @@ new observation."
 reading next to `+kinds+': the two have to agree about what a kind means.")
 
 (defun %known-block (known)
-  "KNOWN observations rendered for the prompt, or NIL when there are none."
+  "KNOWN observations rendered for the prompt, or NIL when there are none. One derived from
+untrusted content is labelled, so the model is told that it did not come from the person and does
+not restate it as something they said (#906's review); APPLY-DISTILLATION also carries the mark to
+a proposal that replaces or repeats it."
   (when known
     (format nil "Already believed about this person:~%~{~A~%~}"
             (mapcar (lambda (o)
-                      (format nil "  [~A] ~A"
+                      (format nil "  [~A]~:[~; (from untrusted content, not from the person)~] ~A"
                               (mem:observation-id o)
+                              (mem:observation-untrusted-p o)
                               (mem:observation-content o)))
                     known))))
 
@@ -332,15 +336,26 @@ review and nothing to replace.
 
 THREAD, when given, writes the observations into that thread's scope, and looks for the
 observation a proposal replaces only there (#317). A proposal's APPLIES-FROM becomes its
-observation's valid-from."
-  (let ((written '()))
+observation's valid-from.
+
+A PROPOSAL CARRIES THE TAINT OF WHAT IT REPLACES OR REPEATS (#906's review). When the
+observation it names as replaced is untrusted, or it restates the content of an untrusted current
+observation in the thread, its provenance is marked untrusted (PRAXEON/MEMORY:INHERIT-TAINT), even
+when PROVENANCE, the window's, is not. Otherwise a page could plant a claim in one window and a
+later window with no tool call restate it as trusted, ready to be promoted. A paraphrase is not
+caught by this; %KNOWN-BLOCK's label is what tells the model."
+  (let ((written '())
+        (scope (mem:observations-of store (distillation-subject distillation) :thread thread)))
     (dolist (p (distillation-proposals distillation) (nreverse written))
       (let* ((target (and (proposal-replaces p)
-                          (find (proposal-replaces p)
-                                (mem:observations-of
-                                 store (distillation-subject distillation) :thread thread)
-                                :key #'mem:observation-id
-                                :test #'equal)))
+                          (find (proposal-replaces p) scope :key #'mem:observation-id :test #'equal)))
+             (repeated (find-if (lambda (o)
+                                  (and (mem:observation-untrusted-p o)
+                                       (string-equal (string-trim '(#\Space #\Tab #\Newline) (mem:observation-content o))
+                                                     (string-trim '(#\Space #\Tab #\Newline) (proposal-content p)))))
+                                scope))
+             (tainting (remove-if-not #'mem:observation-untrusted-p (remove nil (list target repeated))))
+             (provenance (if tainting (mem:inherit-taint provenance tainting) provenance))
              (replace-p (and target
                              (mem:observation-current-p target)
                              (funcall accept p target))))

@@ -339,10 +339,25 @@ starting at the same moment."
   (mapcar (lambda (row) (string-downcase (param:row-value row :name)))
           (conn:query (store-connection store) (format nil "PRAGMA table_info(~A)" (store-table store)))))
 
-(defun ensure-schema (store)
+(defun %has-column-p (store column)
+  "Whether STORE's table exists and has COLUMN (a lowercase name)."
+  (if (eq (store-dialect store) :sqlite)
+      (and (member column (%sqlite-columns store) :test #'string=) t)
+      (and (conn:query (store-connection store)
+                       "SELECT 1 AS one FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = ? AND column_name = ?"
+                       (string-downcase (store-table store)) column)
+           t)))
+
+(defun ensure-schema (store &key legacy-untrusted)
   "Create the table, its index and the observer's progress table (#317) if they are not there,
 and add the columns +ADDED-COLUMNS+ names to a table made before them. Returns STORE. On Postgres the `vector' extension must
 already be installed; see CHECK-VECTOR-EXTENSION.
+
+LEGACY-UNTRUSTED, for a table made before observations recorded whether they came from untrusted
+content: when this call is the one that adds the UNTRUSTED column, every thread observation
+already in the table is marked untrusted, since nothing recorded which of them were. Facts about
+the subject (THREAD NULL) are left as they are. Without it, those rows read as trusted. It does
+nothing once the column exists, so later calls cannot mark new trusted rows (#906's review).
 
 EVERY READ NEEDS THOSE COLUMNS, not only a thread's: a read of the subject's facts selects them
 and filters on THREAD IS NULL. So an app must run this at start, or add the columns in its own
@@ -350,6 +365,7 @@ migration, before it reads from a table made before #317."
   (%with-store (store :exclusive t)
     (when (eq (store-dialect store) :postgres)
       (check-vector-extension (store-connection store)))
+    (let ((backfill (and legacy-untrusted (not (%has-column-p store "untrusted")))))
     (dolist (statement (store-ddl store))
       (conn:exec (store-connection store) statement))
     (let ((have (and (eq (store-dialect store) :sqlite) (%sqlite-columns store))))
@@ -367,7 +383,13 @@ migration, before it reads from a table made before #317."
                        (unless (and (eq (store-dialect store) :sqlite)
                                     (member (string-downcase (symbol-name name))
                                             (%sqlite-columns store) :test #'string=))
-                         (error e))))))))
+                         (error e)))))))
+      ;; THE BACK-FILL, only on the call that added the column (LEGACY-UNTRUSTED above).
+      (when backfill
+        (q:run (store-connection store)
+               (list :update (store-table store) :set (list :untrusted t)
+                     :where (list :is-not-null :thread))
+               :dialect (store-dialect store)))))
   store)
 
 ;;; --- rows <-> observations ---------------------------------------------------
