@@ -934,9 +934,7 @@ static bool restore_placement(webview_t w, const char *path, std::FILE *report, 
   set_frame(window, frame);
   g_normal_frame = frame;
   g_have_normal_frame = true;
-  if (p.maximized && zoom && !msg_bool(window, "isZoomed"))
-    reinterpret_cast<void (*)(id, SEL, id)>(objc_msgSend)(window, sel_registerName("zoom:"),
-                                                          nullptr);
+  (void)zoom;
   if (report != nullptr) {
     CGRect placed = rect_of(window, "frame");
     long left = std::lround(placed.origin.x), bottom = std::lround(placed.origin.y);
