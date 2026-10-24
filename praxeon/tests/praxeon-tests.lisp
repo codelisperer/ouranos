@@ -8723,3 +8723,166 @@ records). At the next turn, with the store back, the window is written once and 
                                         :provenance (mem:make-provenance "conv-7" 1))
                           (return-from out :returned)))))
     (is (null (%thread-contents store)) "after RETURN-FROM")))
+
+;;; --------------------------------------------------------------------------
+;;; The reflector, after #464's review: what a condensation keeps, what reflect writes, when it
+;;; asks the model, and where the observer runs it.
+;;; --------------------------------------------------------------------------
+
+(test condense-keeps-a-corrections-kind-and-the-highest-value
+  "A fact condensed with a correction is a correction, with the higher value. Taking the first
+source's kind and value made it a fact of value 1, and the next reflection could then merge it on
+ACCEPT alone (#464's review)."
+  (let* ((store (mem:make-in-memory-store))
+         (fact (remember* store "member-1" "Lives in Porto." :thread "conv-7" :value 1))
+         (correction (remember* store "member-1" "Lives in Lisbon now." :thread "conv-7"
+                                :kind :correction :value 9))
+         (c (mem:condense store (list fact correction) "Lives in Lisbon." :provenance (test-provenance))))
+    (is (eq :correction (mem:observation-kind c)))
+    (is (= 9 (mem:observation-value c)))
+    (let ((x (remember* store "member-1" "A." :thread "conv-8" :kind :preference))
+          (y (remember* store "member-1" "B." :thread "conv-8" :kind :fact)))
+      (is (eq :preference (mem:observation-kind (mem:condense store (list x y) "AB." :provenance (test-provenance))))
+          "with no correction among the sources, the first source's kind"))))
+
+(test a-reflection-item-that-does-not-condense-is-not-written
+  "REFLECT writes an item only when it names two or more sources and its content is shorter than
+theirs together. Here one item names a single source, one is longer than its sources, and one
+condenses; only the last is written."
+  (multiple-value-bind (store os) (%store-with '("Likes tea." :fact) '("Likes green tea." :fact)
+                                               '("Has a dog." :fact) '("Has a black dog." :fact)
+                                               '("Moved to Lisbon." :fact))
+    (destructuring-bind (a b c d e) (mapcar #'mem:observation-id os)
+      (let* ((provider (%provider-returning
+                        (%condensed (list "Moved to Lisbon, the capital." e)
+                                    (list "Has a dog, a black one, which is a labrador of nine years." c d)
+                                    (list "Likes green tea." a b))))
+             (written (obs:reflect provider store "member-1" :thread "conv-7" :threshold 1
+                                                            :accept (constantly t))))
+        (is (equal '("Likes green tea.") (mapcar #'mem:observation-content written)))
+        (is (= 4 (length (mem:observations-of store "member-1" :thread "conv-7")))
+            "the two items that do not condense left their three sources as they were")))))
+
+(test the-reflect-threshold-counts-only-what-may-be-condensed
+  "A long correction and a short fact: the correction cannot be merged on ACCEPT alone, so the
+condensable tokens are the fact's, below the threshold, and no model call is made. Control: the
+same text as a fact passes it and the model is asked."
+  (flet ((asked-p (kind)
+           (multiple-value-bind (store os)
+               (%store-with (list (format nil "~{~A~^ ~}" (make-list 40 :initial-element "Lisbon")) kind)
+                            '("A." :fact))
+             (declare (ignore os))
+             (let ((provider (%provider-returning (%condensed '("x" "obs-999")))))
+               (ignore-errors (obs:reflect provider store "member-1" :thread "conv-7" :threshold 20
+                                                                     :accept (constantly t)))
+               (null (scripted-script provider))))))
+    (is-false (asked-p :correction) "a correction's tokens do not start a reflection")
+    (is-true (asked-p :fact) "control: the same tokens as a fact do")))
+
+(defun %reflecting-observer (store &rest keys)
+  (apply #'obs:make-observer (first keys) store "member-1" "conv-7" :step (%step-for 6)
+         :reflect-accept (constantly t) (rest keys)))
+
+(test the-observer-passes-its-protect-value-to-the-reflector
+  "With :REFLECT-PROTECT-VALUE 8, an observation of value 9 is merged only with
+REFLECT-ACCEPT-PROTECTED, which refuses here; ACCEPT alone, which allows everything, is not
+enough. Before #464's review the observer never passed a protect value. Control: without one, the
+same answer merges it."
+  (flet ((stays-current-p (&rest keys)
+           (let* ((store (mem:make-in-memory-store))
+                  (a (remember* store "member-1" "Allergic to peanuts." :thread "conv-7" :value 9))
+                  (b (remember* store "member-1" "Avoids peanut sauce." :thread "conv-7" :value 1))
+                  (provider (%provider-returning (%call-with (%ob "Likes tea." "fact"))
+                                                 (%condensed (list "Allergic: no peanuts."
+                                                                   (mem:observation-id a) (mem:observation-id b)))))
+                  (observer (apply #'%reflecting-observer store provider :reflect-threshold 1 keys)))
+             (obs:observe-turn observer (%history 6))
+             (obs:await-observer observer :timeout 10)
+             (mem:observation-current-p
+              (find (mem:observation-id a) (mem:observations-of store "member-1" :thread "conv-7"
+                                                                                  :include-superseded t)
+                    :key #'mem:observation-id :test #'string=)))))
+    (is-true (stays-current-p :reflect-protect-value 8) "the value-9 observation stays")
+    (is-false (stays-current-p) "control: with no protect value it is merged")))
+
+(test the-observer-waits-for-another-threshold-after-a-reflection
+  "A reflection whose model answer is not accepted leaves the scope above the threshold. The next
+run, one window later, does not ask the model again until the condensable tokens have grown by
+another threshold. Had it asked, the scripted provider would have nothing left to return, the
+reflection would fail, and it would be counted."
+  (let* ((store (mem:make-in-memory-store))
+         (os (list (remember* store "member-1" "Likes tea, mostly green, in the mornings." :thread "conv-7")
+                   (remember* store "member-1" "Has a black dog called Rui, a labrador." :thread "conv-7")
+                   (remember* store "member-1" "Moved from Porto to Lisbon last spring." :thread "conv-7")))
+         (threshold (obs:condensable-tokens os nil))
+         (provider (%provider-returning (%call-with (%ob "D." "fact"))
+                                        (%condensed (list "Tea, a dog, Lisbon."
+                                                          (mem:observation-id (first os))
+                                                          (mem:observation-id (second os))))
+                                        (%call-with (%ob "E." "fact"))))
+         (observer (obs:make-observer provider store "member-1" "conv-7" :step (%step-for 6)
+                                      :reflect-threshold threshold)))
+    (obs:observe-turn observer (%history 6))
+    (is-true (obs:await-observer observer :timeout 10))
+    (obs:observe-turn observer (%history 12))
+    (is-true (obs:await-observer observer :timeout 10))
+    (is (null (scripted-script provider)) "both windows and one reflection used the script")
+    (is (= 0 (obs:observer-failures observer)) "no second reflection was asked for")
+    (is (= 12 (obs:observer-mark observer)))))
+
+(test a-reflection-runs-after-the-runs-saves-and-can-be-stopped
+  "The reflection runs once the run's windows are written and their progress saved (#464's
+review). While it hangs, here in REFLECT-ACCEPT, the store already holds the mark past the
+window, the observer counts the time as an attempt, and STOP-OBSERVER ends it; a new observer
+resumes past the window instead of distilling it again."
+  (let* ((store (mem:make-in-memory-store))
+         (gate (sb-thread:make-semaphore))
+         (os (list (remember* store "member-1" "Likes tea." :thread "conv-7")
+                   (remember* store "member-1" "Likes green tea." :thread "conv-7")))
+         (provider (%provider-returning (%call-with (%ob "Has a dog." "fact"))
+                                        (%condensed (list "Likes green tea."
+                                                          (mem:observation-id (first os))
+                                                          (mem:observation-id (second os))))))
+         (observer (obs:make-observer provider store "member-1" "conv-7" :step (%step-for 6)
+                                      :reflect-threshold 1
+                                      :reflect-accept (lambda (content sources)
+                                                        (declare (ignore content sources))
+                                                        (sb-thread:wait-on-semaphore gate :timeout 30)
+                                                        t))))
+    (unwind-protect
+         (progn
+           (obs:observe-turn observer (%history 6))
+           (loop repeat 200 until (numberp (obs::observer-attempt-started observer)) do (sleep 0.05))
+           (is (numberp (obs::%stuck-seconds observer)) "the hung reflection is timed as an attempt")
+           (is (= 6 (obs:stored-mark store "member-1" "conv-7")) "the window's mark was saved first")
+           (obs:stop-observer observer :timeout 0.2)
+           (is (= 6 (obs:observer-mark (obs:make-observer (%provider-returning) store "member-1" "conv-7"
+                                                          :step (%step-for 6))))
+               "a new observer resumes past the window"))
+      (sb-thread:signal-semaphore gate 5))))
+
+(defclass progress-only-store (mem:memory-store)
+  ((progress :initform nil :accessor progress-only-progress))
+  (:documentation "A store with the progress generics but no CONDENSE."))
+
+(defmethod mem:thread-progress ((store progress-only-store) subject thread)
+  (declare (ignore subject thread))
+  (values (progress-only-progress store) nil))
+
+(defmethod mem:record-thread-progress ((store progress-only-store) subject thread mark skipped)
+  (declare (ignore subject thread skipped))
+  (setf (progress-only-progress store) mark))
+
+(test make-observer-checks-its-reflector-settings
+  "#464's review: :REFLECT-THRESHOLD is NIL or a positive integer, :REFLECT-PROTECT-VALUE NIL or
+a number, and a reflecting observer's store must have a CONDENSE method, all refused when the
+observer is made instead of failing every reflection."
+  (let ((store (mem:make-in-memory-store))
+        (provider (%provider-returning)))
+    (signals cnd:praxeon-error (obs:make-observer provider store "member-1" "conv-7" :reflect-threshold 0))
+    (signals cnd:praxeon-error (obs:make-observer provider store "member-1" "conv-7" :reflect-threshold "40000"))
+    (signals cnd:praxeon-error (obs:make-observer provider store "member-1" "conv-7" :reflect-protect-value "high"))
+    (signals cnd:praxeon-error
+      (obs:make-observer provider (make-instance 'progress-only-store) "member-1" "conv-7" :reflect-threshold 100))
+    (finishes (obs:make-observer provider (make-instance 'progress-only-store) "member-1" "conv-7"))
+    (finishes (obs:make-observer provider store "member-1" "conv-7" :reflect-threshold 100 :reflect-protect-value 8))))

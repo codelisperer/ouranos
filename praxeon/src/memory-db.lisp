@@ -590,8 +590,8 @@ STORE's embedder, except those already prepared for STORE."
         (let ((new (mem:remember store (mem:observation-subject first) content
                                  :thread (mem:observation-thread first)
                                  :provenance provenance
-                                 :kind (or kind (mem:observation-kind first))
-                                 :value (or value (mem:observation-value first))
+                                 :kind (or kind (mem:condensed-kind sources))
+                                 :value (or value (mem:condensed-value sources))
                                  :tokens tokens :valid-from valid-from))
               (ids (mapcar #'mem:observation-id sources)))
           (dolist (id ids)

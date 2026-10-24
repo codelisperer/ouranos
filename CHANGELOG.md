@@ -536,7 +536,9 @@ its tag.
   embedding is computed before the lock is taken, so a read does not wait for the model.
 - **praxeon/memory-db: every read needs three new columns, and `ensure-schema` adds them** (#317):
   `thread` (TEXT), `source_through` (BIGINT on Postgres, INTEGER on SQLite) and `condensed_from`
-  (TEXT). A read of the
+  (TEXT). `condensed_from` comes with the reflector (#464): it holds the ids a condensed
+  observation replaced, and a table made before it needs it too, whether or not the app reflects.
+  A read of the
   subject's facts filters on `thread IS NULL`, so on a table made before them every read fails,
   not only a thread's. An app acts if it does not call `ensure-schema` at start: it adds the three
   columns in its own migration before it reads. Existing rows become facts about their subject,
@@ -1553,12 +1555,29 @@ its tag.
   each naming the observations it replaces, and each is written only when the app's `:accept`
   allows it; one that would merge a correction, or an observation at or above `:protect-value`,
   also needs `:accept-protected`. Both refuse by default. `reflect` signals when the model's
-  answer cannot be read. An observer made with `:reflect-threshold` reflects on its thread after
-  each window it writes; a reflection that fails is counted in `observer-failures` and logged,
-  and the window stays written.
+  answer cannot be read.
+  - **What counts toward the threshold** is the observations `reflect` may condense on `:accept`
+    alone (`praxeon/observe:condensable-tokens`): corrections and observations at or above
+    `:protect-value` are left out, so a scope of corrections is not reflected on over and over.
+    `:floor` raises the threshold for one call.
+  - **An item that does not condense is not written:** one with a single source, or one whose
+    content is not shorter than its sources' contents together. An item `condense` refuses is
+    logged and the other items are still written. `reflect` returns the observations written,
+    the condensable tokens left, and whether the model was asked.
+  - **An observer made with `:reflect-threshold`** (NIL or a positive integer) reflects on its
+    thread once at the end of a run that wrote a window, after the windows' progress is saved,
+    with `:reflect-accept`, `:reflect-accept-protected` and `:reflect-protect-value` (NIL or a
+    number) as `reflect`'s accept functions and protect value. The reflection counts as an attempt
+    for `observer-stuck-p`, and `stop-observer` can end it without losing the run's saved mark.
+    After a reflection, written or not, the next waits until the condensable tokens have grown by
+    another threshold past what it left. A reflection that fails is counted in
+    `observer-failures` and logged, and the windows stay written. `make-observer` refuses a
+    store with no `condense` method when `:reflect-threshold` is given.
   - `praxeon/memory:condense` replaces several current observations in one scope with one,
     which supersedes them and records their ids in `observation-condensed-from`, so `recall
-    :as-of` before still returns them. It checks that every source is still current and writes
+    :as-of` before still returns them. Its kind defaults to `:correction` when any source is a
+    correction, and its value to the highest of the sources' (`condensed-kind`,
+    `condensed-value`), so a condensation keeps the protection its sources had. It checks that every source is still current and writes
     in the same step: under the store's lock, and on the SQL store in one transaction whose
     updates change a source only while it is still current. The SQL store computes the
     condensed observation's embedding before taking the lock. It refuses a source named twice.

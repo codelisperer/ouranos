@@ -185,8 +185,11 @@ CONTENT, and return it (#317, step B). Every source is marked superseded by the 
 records their ids as its CONDENSED-FROM, so `recall :as-of' a time before still returns them.
 
 The sources must all be current, in this store, about one subject and in one scope; otherwise
-this signals PRAXEON-ERROR and changes nothing. KIND and VALUE default to those of the first
-source.
+this signals PRAXEON-ERROR and changes nothing. KIND defaults to :CORRECTION when any source is
+a correction and otherwise to the first source's kind, and VALUE to the highest of the sources'
+values (CONDENSED-KIND, CONDENSED-VALUE). Taking the first source's, as this did, turned a fact
+condensed with a correction into a fact of the lower value, and the condensed observation then
+lost the protection a correction or a high value has from the next reflection (#464's review).
 
 A CONDENSATION IS A CLAIM THAT SEVERAL OBSERVATIONS ARE ABOUT ONE THING, the judgement
 `apply-distillation' refuses to apply without the app's approval. This function applies it; the
@@ -459,6 +462,17 @@ current, and about one subject in one scope. Returns the stored ones."
                :detail "the observations to condense are not about one subject in one scope")))
     held))
 
+(defun condensed-kind (sources)
+  "The kind of an observation condensed from SOURCES: :CORRECTION when any of them is one, so a
+correction keeps its protection through a condensation, otherwise the first source's kind."
+  (if (some (lambda (o) (eq :correction (observation-kind o))) sources)
+      :correction
+      (observation-kind (first sources))))
+
+(defun condensed-value (sources)
+  "The value of an observation condensed from SOURCES: the highest of theirs."
+  (reduce #'max sources :key #'observation-value))
+
 (defmethod condense ((store in-memory-store) sources content
                      &key provenance kind value tokens valid-from)
   (check-provenance provenance "condense")
@@ -467,8 +481,8 @@ current, and about one subject in one scope. Returns the stored ones."
          (new (remember store (observation-subject first) content
                         :thread (observation-thread first)
                         :provenance provenance
-                        :kind (or kind (observation-kind first))
-                        :value (or value (observation-value first))
+                        :kind (or kind (condensed-kind held))
+                        :value (or value (condensed-value held))
                         :tokens tokens :valid-from valid-from)))
     (setf (observation-condensed-from new) (mapcar #'observation-id held))
     (dolist (o held)

@@ -170,6 +170,13 @@ window, Mastra's step.")
    (reflect-threshold :initarg :reflect-threshold :reader observer-reflect-threshold)
    (reflect-accept :initarg :reflect-accept :reader observer-reflect-accept)
    (reflect-accept-protected :initarg :reflect-accept-protected :reader observer-reflect-accept-protected)
+   (reflect-protect-value :initarg :reflect-protect-value :reader observer-reflect-protect-value)
+   ;; REFLECT's :FLOOR for the next reflection: the condensable tokens the last one left (or found,
+   ;; when it failed) plus the threshold, so a scope the model cannot bring under the threshold is
+   ;; not reflected on after every run (#464's review).
+   (reflect-floor :initform 0 :accessor observer-reflect-floor)
+   ;; Whether the current run wrote a window, which is when it reflects, once, at its end.
+   (run-wrote :initform nil :accessor observer-run-wrote)
    (mark :initarg :mark :accessor observer-mark)
    (skipped :initarg :skipped :accessor observer-skipped)
    ;; True when the last progress write failed, so the store is behind this observer.
@@ -261,7 +268,8 @@ before `praxeon/memory:forget-subject'."
                       &key (step *step-tokens*) (accept (constantly nil)) (promote (constantly nil))
                            (promote-accept (constantly nil)) verify distil-options
                            (max-attempts 3) (retry-delay 2) (window-timeout 300) mark reflect-threshold
-                           (reflect-accept (constantly nil)) (reflect-accept-protected (constantly nil)))
+                           (reflect-accept (constantly nil)) (reflect-accept-protected (constantly nil))
+                           reflect-protect-value)
   "An observer of THREAD (a string, usually the conversation's id) about SUBJECT, distilling
 with PROVIDER into STORE, a PRAXEON/MEMORY:MEMORY-STORE.
 
@@ -285,10 +293,14 @@ ACCEPT, PROMOTE, PROMOTE-ACCEPT, REFLECT-ACCEPT and REFLECT-ACCEPT-PROTECTED mus
 or names of functions: NIL, and a symbol that names a macro or a special operator, such as WHEN,
 are refused here rather than failing every window later.
 
-REFLECT-THRESHOLD, when given, makes the observer REFLECT on the thread after each window it
-writes, once the thread's observations pass that many estimated tokens, with REFLECT-ACCEPT and
-REFLECT-ACCEPT-PROTECTED as REFLECT's ACCEPT and ACCEPT-PROTECTED (both refuse by default). A
-reflection that fails is counted and logged, and does not undo or retry the window."
+REFLECT-THRESHOLD, NIL or a positive integer, makes the observer REFLECT on the thread once at the
+end of a run that wrote a window, after the windows' progress is saved, when the observations it
+may condense pass that many estimated tokens. REFLECT-ACCEPT, REFLECT-ACCEPT-PROTECTED and
+REFLECT-PROTECT-VALUE (NIL or a number) are REFLECT's ACCEPT, ACCEPT-PROTECTED and PROTECT-VALUE;
+both accept functions refuse by default. After a reflection, the next waits until the condensable
+tokens have grown by another REFLECT-THRESHOLD past what it left. A reflection that fails is
+counted and logged, and undoes nothing. The store must have a method for
+PRAXEON/MEMORY:CONDENSE when REFLECT-THRESHOLD is given."
   (check-type thread string)
   (unless (and (integerp step) (plusp step))
     (error 'praxeon/conditions:praxeon-error :detail (format nil ":step must be a positive integer, not ~S" step)))
@@ -303,6 +315,19 @@ reflection that fails is counted and logged, and does not undo or retry the wind
                         (not (macro-function value)) (not (special-operator-p value))))
           do (error 'praxeon/conditions:praxeon-error
                     :detail (format nil "~S must be a function, not ~S" name value)))
+  (unless (or (null reflect-threshold) (and (integerp reflect-threshold) (plusp reflect-threshold)))
+    (error 'praxeon/conditions:praxeon-error
+           :detail (format nil ":reflect-threshold must be NIL or a positive integer, not ~S" reflect-threshold)))
+  (unless (or (null reflect-protect-value) (realp reflect-protect-value))
+    (error 'praxeon/conditions:praxeon-error
+           :detail (format nil ":reflect-protect-value must be NIL or a number, not ~S" reflect-protect-value)))
+  ;; A REFLECTING OBSERVER NEEDS CONDENSE, checked here as the progress generics are below, or a
+  ;; store without it would be accepted and then fail every reflection (#464's review).
+  (when (and reflect-threshold
+             (notany (lambda (m) (null (method-qualifiers m)))
+                     (compute-applicable-methods #'mem:condense (list store '() ""))))
+    (error 'praxeon/conditions:praxeon-error
+           :detail (format nil "~A has no method for CONDENSE, which a reflecting observer needs" (type-of store))))
   (unless (and (realp retry-delay) (not (minusp retry-delay)))
     (error 'praxeon/conditions:praxeon-error :detail (format nil ":retry-delay must be a number of seconds, not ~S" retry-delay)))
   ;; BOTH PROGRESS GENERICS, checked here: a store with only the reader would be accepted and
@@ -321,6 +346,7 @@ reflection that fails is counted and logged, and does not undo or retry the wind
                              :window-timeout window-timeout
                              :reflect-threshold reflect-threshold :reflect-accept reflect-accept
                              :reflect-accept-protected reflect-accept-protected
+                             :reflect-protect-value reflect-protect-value
                              :mark (or mark stored 0) :skipped skipped
                              :transactions (mem:store-transactions-p store))))
 
@@ -431,7 +457,8 @@ deferred and the observer's lock held, so it should not block."
                      (let ((worker nil))
                        (setf (observer-started observer) (%now observer)
                              (observer-attempt-started observer) nil
-                             (observer-stopping observer) nil)
+                             (observer-stopping observer) nil
+                             (observer-run-wrote observer) nil)
                        (unwind-protect (setf worker (%start-worker observer snapshot flush today))
                          (unless worker (%release observer)))
                        (setf (observer-worker observer) worker)
@@ -507,7 +534,17 @@ in this thread would end the process."
        (handler-case
            (progn (%reconcile-progress observer)
                   (unless (eq (%retry-skipped observer history today) :unsaved)
-                    (%run-windows observer history flush today)))
+                    (%run-windows observer history flush today))
+                  ;; ONCE, AT THE END, after every window's progress is saved (#464's review). Run
+                  ;; per window, before %RUN-WINDOWS saved that window's mark, a reflection that
+                  ;; hung until STOP-OBSERVER ended the thread lost the save on a store without
+                  ;; transactions, and the next observer distilled the window again.
+                  (when (and (observer-run-wrote observer) (observer-reflect-threshold observer)
+                             (not (observer-stopping observer)))
+                    ;; Timed as an attempt, so OBSERVER-STUCK-P sees a reflection that hangs.
+                    (setf (observer-attempt-started observer) (%now observer))
+                    (unwind-protect (%reflect-thread observer)
+                      (setf (observer-attempt-started observer) :between))))
          (error (e)
            (incf (observer-failures observer))
            (setf (observer-last-error observer) e)
@@ -794,8 +831,8 @@ record it closed, so it would never be written. Never raises: this runs on a thr
                       (incf (observer-failures observer))
                       (setf (observer-last-error observer) e)))
                (setf (observer-attempt-started observer) :between)))
-    (when (and (eq outcome :written) (observer-reflect-threshold observer))
-      (%reflect-thread observer))
+    (when (eq outcome :written)
+      (setf (observer-run-wrote observer) t))
     (log:info "memory observer window" :thread (observer-thread observer)
                                        :from (1+ start) :through end :outcome outcome :written written
                                        :failures (observer-failures observer)
@@ -804,23 +841,40 @@ record it closed, so it would never be written. Never raises: this runs on a thr
     outcome))
 
 (defun %reflect-thread (observer)
-  "REFLECT on the observer's thread after a window was written. A failure is counted, recorded
-and logged; the window stays written and the mark moves past it."
-  (handler-case
-      (let ((written (reflect (observer-provider observer) (observer-store observer)
-                              (observer-subject observer)
-                              :thread (observer-thread observer)
-                              :threshold (observer-reflect-threshold observer)
-                              :accept (observer-reflect-accept observer)
-                              :accept-protected (observer-reflect-accept-protected observer))))
-        (when written
-          (log:info "memory observer reflected" :thread (observer-thread observer)
-                                                :condensed (length written))))
-    (error (e)
-      (incf (observer-failures observer))
-      (setf (observer-last-error observer) e)
-      (log:warn "memory observer reflection failed" :thread (observer-thread observer)
-                                                    :condition (string-downcase (princ-to-string (type-of e)))))))
+  "REFLECT on the observer's thread at the end of a run that wrote a window. A failure is counted,
+recorded and logged; the windows stay written. Either way the next reflection waits for another
+REFLECT-THRESHOLD of condensable tokens (OBSERVER-REFLECT-FLOOR)."
+  (let ((threshold (observer-reflect-threshold observer))
+        (protect-value (observer-reflect-protect-value observer)))
+    (handler-case
+        (multiple-value-bind (written left asked)
+            (reflect (observer-provider observer) (observer-store observer)
+                     (observer-subject observer)
+                     :thread (observer-thread observer)
+                     :threshold threshold
+                     :floor (observer-reflect-floor observer)
+                     :accept (observer-reflect-accept observer)
+                     :accept-protected (observer-reflect-accept-protected observer)
+                     :protect-value protect-value)
+          ;; WHENEVER THE MODEL WAS ASKED, written or not: a reflection that condensed nothing
+          ;; would otherwise be asked again after every run that wrote a window.
+          (when asked
+            (setf (observer-reflect-floor observer) (+ left threshold)))
+          (when written
+            (log:info "memory observer reflected" :thread (observer-thread observer)
+                                                  :condensed (length written) :condensable-left left)))
+      (error (e)
+        (incf (observer-failures observer))
+        (setf (observer-last-error observer) e)
+        (setf (observer-reflect-floor observer)
+              (+ threshold (or (ignore-errors
+                                (condensable-tokens (mem:observations-of (observer-store observer)
+                                                                         (observer-subject observer)
+                                                                         :thread (observer-thread observer))
+                                                    protect-value))
+                               0)))
+        (log:warn "memory observer reflection failed" :thread (observer-thread observer)
+                                                      :condition (string-downcase (princ-to-string (type-of e))))))))
 
 (define-condition window-not-distilled (praxeon/conditions:praxeon-error) ()
   (:documentation "distil could not read the model's answer for a window; carries its reason."))
@@ -1122,21 +1176,46 @@ their turns when they share one conversation; otherwise a provenance naming no c
                                                                             (mem:provenance-turn p)))))
         (mem:make-provenance "" 0))))
 
+(defun %protected-p (observation protect-value)
+  "Whether REFLECT may merge OBSERVATION only with ACCEPT-PROTECTED: a correction, or a value at or
+above PROTECT-VALUE."
+  (or (eq :correction (mem:observation-kind observation))
+      (and protect-value (>= (mem:observation-value observation) protect-value))))
+
+(defun condensable-tokens (observations protect-value)
+  "The estimated tokens of OBSERVATIONS that REFLECT may condense with ACCEPT alone: every one but
+the protected (%PROTECTED-P). What REFLECT's threshold counts (#464's review): counting protected
+observations as well, a scope whose corrections alone passed the threshold was reflected on after
+every window, over the whole scope, with nothing it could merge without approval."
+  (reduce #'+ (remove-if (lambda (o) (%protected-p o protect-value)) observations)
+          :key #'mem:observation-tokens))
+
 (defun reflect (provider store subject &key thread (threshold *reflect-tokens*)
                                            (accept (constantly nil)) (accept-protected (constantly nil))
-                                           protect-value)
+                                           protect-value ((:floor at-least) 0))
   "Condense SUBJECT's current observations in THREAD's scope (NIL for facts about the subject)
-when they pass THRESHOLD estimated tokens. Returns the condensed observations written, or NIL
-when the scope is under the threshold or nothing was accepted. Signals when the model's answer
-cannot be read, so a caller can tell a failure from a reflection that changed nothing.
+when the tokens it may condense (CONDENSABLE-TOKENS) reach THRESHOLD and FLOOR, whichever is
+higher. Returns three values: the condensed observations written, the condensable tokens left in
+the scope afterwards, and whether the model was asked. Returns NIL, the condensable tokens and NIL,
+without a model call, when the scope is below that. Signals when the model's answer cannot be read, so a caller can tell a failure from
+a reflection that changed nothing.
 
 ACCEPT is called with a condensation's content and its sources, true to write it. When any
 source is a correction, or has a value at or above PROTECT-VALUE, ACCEPT-PROTECTED must be true
-as well."
+as well.
+
+FLOOR IS THE BACKOFF. The observer passes the condensable tokens left by its last reflection plus
+THRESHOLD, so a scope the model could not bring under the threshold is reflected on again only
+after it has grown by another THRESHOLD, not after every window (#464's review).
+
+AN ITEM THAT DOES NOT CONDENSE IS NOT WRITTEN: one with a single source, which would only rewrite
+an observation, or one whose content is not shorter than its sources' contents together. And an
+item CONDENSE refuses, such as one whose source another process superseded meanwhile, is counted
+and logged, and the other items are still written."
   (let* ((current (mem:observations-of store subject :thread thread))
-         (tokens (reduce #'+ current :key #'mem:observation-tokens)))
-    (when (< tokens threshold)
-      (return-from reflect nil))
+         (tokens (condensable-tokens current protect-value)))
+    (when (< tokens (max threshold at-least))
+      (return-from reflect (values nil tokens nil)))
     (let* ((ids (mapcar #'mem:observation-id current))
            (listing (with-output-to-string (s)
                       (dolist (o current)
@@ -1145,16 +1224,28 @@ as well."
            (arguments (llm:generate-structured provider
                                                (list (llm:msg "user" (format nil "~A~%~%~A" *reflect-instructions* listing)))
                                                (%reflect-spec ids)))
-           (written '()))
+           (written '())
+           (rejected 0))
       (loop for item across (gethash "condensed" arguments)
             for sources = (loop for id across (gethash "sources" item)
                                 collect (find id current :key #'mem:observation-id :test #'equal))
             for content = (gethash "content" item)
-            for protected = (some (lambda (o) (or (eq :correction (mem:observation-kind o))
-                                                  (and protect-value (>= (mem:observation-value o) protect-value))))
-                                  sources)
-            when (and (funcall accept content sources)
-                      (or (not protected) (funcall accept-protected content sources)))
-              do (push (mem:condense store sources content :provenance (%combined-provenance sources))
-                       written))
-      (nreverse written))))
+            for protected = (some (lambda (o) (%protected-p o protect-value)) sources)
+            do (cond ((or (< (length sources) 2)
+                          (>= (length content)
+                              (reduce #'+ sources :key (lambda (o) (length (mem:observation-content o))))))
+                      (incf rejected))
+                     ((and (funcall accept content sources)
+                           (or (not protected) (funcall accept-protected content sources)))
+                      (handler-case
+                          (push (mem:condense store sources content :provenance (%combined-provenance sources))
+                                written)
+                        (error (e)
+                          (log:warn "memory reflection: a condensation was not written"
+                                    :sources (length sources)
+                                    :condition (string-downcase (princ-to-string (type-of e)))))))))
+      (when (plusp rejected)
+        (log:info "memory reflection: condensations that do not condense were left out" :rejected rejected))
+      (values (nreverse written)
+              (condensable-tokens (mem:observations-of store subject :thread thread) protect-value)
+              t))))

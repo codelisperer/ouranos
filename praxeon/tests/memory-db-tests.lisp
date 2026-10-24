@@ -1343,3 +1343,88 @@ current, as a reader between the two statements would have seen them (Copilot's 
         (unless (%sqlite-p)
           (ignore-errors (conn:exec (mdb::store-source store)
                                     (format nil "DROP FUNCTION IF EXISTS ~A_no_delete() CASCADE" (mdb:store-table store)))))))))
+
+;;; --- the reflector on the SQL store, after #464's review --------------------------------
+
+(defun %condensed-call (&rest items)
+  "A completion whose record_condensed call carries ITEMS, each (content . source-ids)."
+  (llm:make-completion
+   :stop-reason :tool-use
+   :tool-calls (list (llm:make-tool-call
+                      :id "r1" :name "record_condensed"
+                      :arguments (let ((h (make-hash-table :test #'equal)))
+                                   (setf (gethash "condensed" h)
+                                         (coerce (loop for (content . ids) in items
+                                                       collect (let ((o (make-hash-table :test #'equal)))
+                                                                 (setf (gethash "content" o) content
+                                                                       (gethash "sources" o) (coerce ids 'vector))
+                                                                 o))
+                                                 'vector))
+                                   h)))))
+
+(test condense-on-the-sql-store-keeps-a-corrections-kind-and-the-highest-value
+  (with-store (store)
+    (let* ((fact (mem:remember store "member-30" "Lives in Porto." :thread "conv-30" :value 1
+                                                                  :provenance (test-provenance)))
+           (correction (mem:remember store "member-30" "Lives in Lisbon now." :thread "conv-30"
+                                     :kind :correction :value 9 :provenance (test-provenance 2)))
+           (c (mem:condense store (list fact correction) "Lives in Lisbon." :provenance (test-provenance 3)))
+           (read-back (first (mem:observations-of store "member-30" :thread "conv-30"))))
+      (is (eq :correction (mem:observation-kind c)))
+      (is (= 9 (mem:observation-value c)))
+      (is (eq :correction (mem:observation-kind read-back)) "as read back from the table")
+      (is (= 9 (mem:observation-value read-back))))))
+
+(test the-observer-reflects-on-the-sql-store-at-the-end-of-its-run
+  "End to end on the SQL store: a run distils a window, saves the mark, then reflects and
+condenses two of the thread's observations; the condensed row records its sources and the mark
+is past the window."
+  (with-store (store)
+    (let* ((a (mem:remember store "member-31" "Likes tea." :thread "conv-31" :provenance (test-provenance)))
+           (b (mem:remember store "member-31" "Likes green tea." :thread "conv-31" :provenance (test-provenance 2)))
+           (step (praxeon/prompt:messages-tokens (%chat 6)))
+           (observer (obs:make-observer (make-instance 'scripted-provider
+                                                       :replies (list (%observations-call "Has a dog.")
+                                                                      (%condensed-call (list "Likes green tea."
+                                                                                             (mem:observation-id a)
+                                                                                             (mem:observation-id b)))))
+                                        store "member-31" "conv-31" :step step
+                                        :reflect-threshold 1 :reflect-accept (constantly t))))
+      (obs:observe-turn observer (%chat 6))
+      (is-true (obs:await-observer observer :timeout 20))
+      (is (= 0 (obs:observer-failures observer)))
+      (is (equal '("Has a dog." "Likes green tea.")
+                 (sort (mapcar #'mem:observation-content (mem:observations-of store "member-31" :thread "conv-31"))
+                       #'string<)))
+      (let ((condensed (find "Likes green tea." (mem:observations-of store "member-31" :thread "conv-31")
+                             :key #'mem:observation-content :test #'string=)))
+        (is (equal (list (mem:observation-id a) (mem:observation-id b)) (mem:observation-condensed-from condensed))))
+      (is (= 6 (obs:stored-mark store "member-31" "conv-31"))))))
+
+(test condense-inside-an-apps-transaction-on-a-pool-commits-and-rolls-back-with-it
+  "Over a pool, CONDENSE called on the app's thread inside the app's own transaction uses the
+app's connection, and on SQLite its transaction is a savepoint inside the app's (#653). When the
+app commits, the condensation is kept; when the app's transaction ends with an error, it is rolled
+back with it and both sources are current again."
+  (with-pool-store (store pool)
+    (let ((a (mem:remember store "member-32" "Likes tea." :thread "conv-32" :provenance (test-provenance)))
+          (b (mem:remember store "member-32" "Likes green tea." :thread "conv-32" :provenance (test-provenance 2))))
+      (ignore-errors
+       (conn:with-connection (c pool)
+         (conn:with-transaction (c)
+           (mem:condense store (list a b) "Green tea." :provenance (test-provenance 3))
+           (error "the app's transaction fails after the condensation"))))
+      (is (equal '("Likes green tea." "Likes tea.")
+                 (sort (mapcar #'mem:observation-content (mem:observations-of store "member-32" :thread "conv-32"))
+                       #'string<))
+          "rolled back with the app's transaction")
+      (let ((a (find "Likes tea." (mem:observations-of store "member-32" :thread "conv-32")
+                     :key #'mem:observation-content :test #'string=))
+            (b (find "Likes green tea." (mem:observations-of store "member-32" :thread "conv-32")
+                     :key #'mem:observation-content :test #'string=)))
+        (conn:with-connection (c pool)
+          (conn:with-transaction (c)
+            (mem:condense store (list a b) "Green tea." :provenance (test-provenance 3))))
+        (is (equal '("Green tea.") (mapcar #'mem:observation-content
+                                           (mem:observations-of store "member-32" :thread "conv-32")))
+            "kept when the app commits")))))
