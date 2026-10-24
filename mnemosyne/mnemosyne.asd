@@ -120,6 +120,7 @@
                              (:file "url")
                              (:file "param")
                              (:file "sqlite-busy")
+                             (:file "sqlite-rewrite")  ; map-query and the in-place re-encode (#425)
                              (:file "pool")         ; uses sqlite-busy's helpers (#325)
                              (:file "sqlite-library")
                              (:file "smoke"))))

@@ -154,3 +154,54 @@ call from every migration that depends on it rather than from one that has to ru
            ;; original text.
            (error 'extension-unavailable :name ext :reason :unprivileged
                                         :detail (princ-to-string e))))))))
+
+;;; --- rewriting a SQLite column's text values in place (#425) ---------------------
+
+(defun rewrite-sqlite-text-values (connection table key column function &key (batch-size 500))
+  "On a SQLite CONNECTION, set COLUMN of every row of TABLE whose COLUMN holds a TEXT value to
+(FUNCTION text). A row for which FUNCTION returns NIL is left as it was. KEY is a column that
+orders the rows uniquely, usually the primary key. Returns two values: the number of rows
+rewritten and the number left.
+
+FOR A STORE THAT CHANGES HOW IT ENCODES A COLUMN, in a store whose readers accept both encodings.
+It is written to be run on every open:
+- A CHEAP CHECK FIRST. One SELECT ... LIMIT 1, outside any transaction, asks whether any TEXT value
+  is left; when none is, this returns 0 and 0 without taking SQLite's write lock.
+- ONE TRANSACTION PER BATCH of BATCH-SIZE rows, each begun IMMEDIATE, so the write lock is held for
+  one batch at a time and another process's writes, or its own open, wait at most that long. A
+  single transaction over a large table held the lock for longer than mnemosyne's busy timeout
+  (*SQLITE-BUSY-TIMEOUT-MS*), and the other process's statement failed (#425's review).
+- RESUMABLE. An error in a batch rolls that batch back; the batches before it stay rewritten. The
+  table is then partly in each encoding, which its readers accept, and the next run carries on
+  from what is still TEXT.
+- A value in SQLite is typed by the value and not by the column's declared type, so FUNCTION may
+  return a BLOB for a column declared TEXT; that is what it is for.
+
+TABLE, KEY and COLUMN are interpolated into the SQL, so they must be identifiers the caller
+controls, never input."
+  (let ((rewritten 0) (left 0) (after nil))
+    (unless (conn:query connection
+                        (format nil "SELECT 1 AS one FROM ~A WHERE typeof(~A) = 'text' LIMIT 1" table column))
+      (return-from rewrite-sqlite-text-values (values 0 0)))
+    (loop
+      (let ((rows nil))
+        (conn:with-transaction (connection :immediate t)
+          (setf rows (if after
+                         (conn:query connection
+                                     (format nil "SELECT ~A AS k, ~A AS v FROM ~A WHERE typeof(~A) = 'text' AND ~A > ? ORDER BY ~A LIMIT ~D"
+                                             key column table column key key batch-size)
+                                     after)
+                         (conn:query connection
+                                     (format nil "SELECT ~A AS k, ~A AS v FROM ~A WHERE typeof(~A) = 'text' ORDER BY ~A LIMIT ~D"
+                                             key column table column key batch-size))))
+          (dolist (row rows)
+            (let ((value (funcall function (getf row :|v|))))
+              (if value
+                  (progn
+                    (conn:exec connection (format nil "UPDATE ~A SET ~A = ? WHERE ~A = ?" table column key)
+                               value (getf row :|k|))
+                    (incf rewritten))
+                  (incf left)))))
+        (when (null rows) (return))
+        (setf after (getf (car (last rows)) :|k|))))
+    (values rewritten left)))

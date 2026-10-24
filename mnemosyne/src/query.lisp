@@ -535,6 +535,12 @@ silently. See %CHECK-DIALECT."
   (multiple-value-bind (s p) (sql query :dialect dialect)
     (apply #'mnemosyne/conn:query connection s p)))
 
+(defun map-fetch (connection function query &key (dialect *dialect*))
+  "FETCH, calling FUNCTION on each row as it is read instead of returning a list of them, through
+MNEMOSYNE/CONN:MAP-QUERY. Returns the number of rows."
+  (multiple-value-bind (s p) (sql query :dialect dialect)
+    (apply #'mnemosyne/conn:map-query connection function s p)))
+
 (defun run (connection query &key (dialect *dialect*))
   "Compile QUERY and run it as a statement (insert/update/delete) on CONNECTION, returning
 the affected-row count. For a RETURNING statement whose rows you want, use FETCH instead."
