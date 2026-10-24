@@ -256,6 +256,7 @@ both lists."
                            (bt:make-thread
                             (aion/dynamic:inheriting
                              (lambda ()
+                               (aion/dynamic:unblock-interrupts)
                                ;; EVERY outcome is recorded rather than propagated, so the join
                                ;; can merge what worked and report what did not. A condition
                                ;; escaping a thread here would be lost with the thread.

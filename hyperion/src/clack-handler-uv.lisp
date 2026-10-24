@@ -155,6 +155,7 @@ open, so an app with many long streams (server-sent events) wants more.")
     (bt:make-thread
      (dyn:inheriting
       (lambda ()
+       (dyn:unblock-interrupts)
        (handler-case (funcall fn (%responder d))
          (error (e)
            ;; Before the head: the handler signals it, and server-uv answers 500. After it:

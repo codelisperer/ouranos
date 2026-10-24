@@ -197,7 +197,8 @@
   ;; Everything here is already in the tree; see docs/dependencies.md.
   ;; aion/windows on Windows only, for the job object each local server runs in (#599).
   :depends-on ("praxeon" "aion/http-client" "aion/log" "aion/oauth" "com.inuoe.jzon" "cl-base64"
-               (:feature :win32 "aion/windows"))
+               (:feature :win32 "aion/windows")
+               "aion/dynamic")   ; unblock-interrupts, first in each thread it starts (#541)
   :serial t
   :components ((:module "src/mcp"
                 :serial t
