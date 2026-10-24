@@ -169,6 +169,74 @@ available.
 This covers libgit2 only. Any other library whose licence is not permissive still needs its own
 decision by the maintainer, as the 2026-10-01 amendment says.
 
+## Amendment, 2026-10-24: SQLite, built from a pinned source and carried by default (#899)
+
+**Status of this amendment:** Proposed (pending maintainer). It applies decision 3 to a library
+the tree now builds, so the code that follows it can merge while the amendment is Proposed.
+
+Every app that uses `mnemosyne` loads cl-sqlite, through `dbd-sqlite3`, and cl-sqlite opens
+`libsqlite3` when it loads. Before this amendment a bundle carried no SQLite, so a bundled app
+ran on whichever copy the user's machine had: 3.51.0 on macOS 26.6, the distribution's on
+Linux, and none at all on stock Windows (it has `winsqlite3.dll`, a different name).
+
+**1. The tree builds SQLite from a pinned source.** `sqlite.pin` names the release, the URL of
+sqlite.org's `sqlite-autoconf` tarball and its sha256. sqlite.org publishes SHA3-256 rather
+than SHA-256, so the pin's comment records the SHA3-256 of the same tarball, which was checked
+against sqlite.org's download page when the pin was written. `scripts/build-sqlite.lisp`
+checks the tarball against the sha256, compiles the one file `sqlite3.c` with the platform's
+C compiler (cc on Linux and macOS, MSVC with `/MT` on Windows), and writes
+`vendor/sqlite/lib/` under the file name cl-sqlite opens: `libsqlite3.dylib`,
+`libsqlite3.so.0` or `sqlite3.dll`.
+
+**2. One set of compile options on every OS.** `SQLITE_THREADSAFE=1`,
+`SQLITE_ENABLE_MATH_FUNCTIONS` and `SQLITE_OMIT_LOAD_EXTENSION`; FTS5 is not compiled in.
+Extension loading is left out because nothing in the tree loads an extension, and a library
+built without it cannot load native code from a file at run time. Apple's copy also omits it.
+The build script refuses a library that exports `sqlite3_load_extension` or
+`sqlite3_enable_load_extension`. If an extension such as sqlite-vec is adopted later, that
+decision changes this option, and this amendment is the place to record it.
+
+**3. SQLite has no licence file, so the build writes one.** SQLite is public domain. The
+tarball ships no `LICENSE`, and decision 4 carries no library without licence text, so
+`build-sqlite.lisp` writes `vendor/sqlite/LICENSE` from the dedication at the head of
+`sqlite3.c`. It is carried under `LICENSES/` as every other licence is.
+
+**4. A bundle carries it when the app loads cl-sqlite, on Linux, macOS and Windows.**
+`scripts/build-desktop-app.lisp` asks `carry-natives`'s `tree-sqlite-carry` whether cl-sqlite's
+library is open in the image. If it is, the bundle carries `vendor/sqlite/lib/<name>` and its
+`LICENSE` by the 2026-09-28 amendment's mechanism: cl-sqlite's open library is closed before
+the dump, whichever copy the build machine had opened, and an `sb-ext:*init-hooks*` entry
+opens the carried copy by absolute path from the directory of `sb-ext:*runtime-pathname*`,
+exiting with code 3 if it is missing. Linux carries it too, so every OS runs one SQLite
+version, as libuv does under ADR-0011. The maintainer's hub ruled this on #899.
+
+**5. The bundle build fails when the app loads cl-sqlite and the pinned build is missing.**
+It stops with exit code 3 and prints the command, `sbcl --script scripts/build-sqlite.lisp`.
+It does not fall back to the build machine's copy and does not carry nothing, because either
+would ship a bundle that uses whatever SQLite the user's machine has, which is the case this
+amendment exists to remove. Ruled on #899 with point 4.
+
+**6. An app's own SQLite takes precedence.** An app that passes a library with one of
+cl-sqlite's file names to `--carry` keeps it, and the tree's build is not carried. The build
+log says so.
+
+**7. The tree's own suites and REPLs keep the system copy.** Only desktop bundles carry the
+pinned build. `scripts/versions.env` separately pins sqlite.org's prebuilt DLL, which
+`setup.ps1` installs for the Windows toolchain; it is kept at the same version, and
+`upstream.sexp` lists both under one entry so that `check-upstream` reports them together.
+
+**How it is checked.** `desktop-release.yml`'s `sqlite-probe` job builds
+`praxeon/examples/sqlite-probe` into a bundle on Linux, macOS and Windows and runs it. The
+probe runs praxeon's `retrieve-similar` and `retrieve-hybrid` on a fixed corpus in a fresh
+SQLite file, and passes only if the ids match, the library is the copy beside the executable
+and its version is the pinned one. On macOS the job also reads the dyld log, and fails if a
+libsqlite3 from outside the bundle stays loaded beside the bundle's; `verify-bundle-macos.sh`
+applies that rule to every carried library. On Windows it runs under
+`verify-bundle-windows.ps1 -RequireLoaded sqlite3.dll`, whose control run deletes the carried
+DLL and requires the probe to fail. The job uploads nothing.
+
+This covers desktop bundles. A binary that `cons bin` builds does not carry SQLite yet.
+
 ## Alternatives considered
 
 - **`$ORIGIN` in `DT_RUNPATH`** — the conventional Linux answer, and the initial lean here.

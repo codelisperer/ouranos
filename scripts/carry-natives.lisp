@@ -41,7 +41,9 @@
            #:carry-arguments
            #:carry-declared-libraries
            #:carry-refused
-           #:open-carried-libraries))
+           #:open-carried-libraries
+           #:sqlite-file-name
+           #:tree-sqlite-carry))
 
 (in-package #:ouranos-carry)
 
@@ -248,7 +250,8 @@ file is re-signed with `codesign --force -s -'."
                    (error 'carry-refused :path dst
                                          :reason (format nil "codesign could not re-sign it after relinking: ~A" out))))))))
 
-(defun carry-declared-libraries (carries bundle &key vendor (report *standard-output*))
+(defun carry-declared-libraries (carries bundle &key vendor tree-carries
+                                                     (report *standard-output*))
   "Copy each library in CARRIES into the directory BUNDLE, with its license text under
 BUNDLE/LICENSES/, and arrange for the dumped image to open the copy at startup.
 
@@ -256,23 +259,30 @@ Each element of CARRIES is a library's path, or a list (PATH . LICENSES) as DECL
 returns. LICENSES, when given, are the library's license texts; otherwise they are found by
 %LICENSE-FILES. A license text can be a file or a directory of notices.
 
+TREE-CARRIES are carried the same way, after CARRIES, and may be under VENDOR. They are the
+tree's own libraries that are carried this way rather than by tree-natives.lisp, because the
+image opens them at load time and must reopen them from the bundle: SQLite, from
+TREE-SQLITE-CARRY (#899).
+
 Signals CARRY-REFUSED, before copying anything, when a path or a named license does not exist,
-when a path is under VENDOR (the tree's own libraries, which build-desktop-app.lisp already
-carries), when two paths have the same file name, or when no license text is found for a
-library.
+when a path in CARRIES is under VENDOR (the tree's own libraries, which build-desktop-app.lisp
+already carries), when two paths have the same file name, or when no license text is found
+for a library.
 
 Returns the list of carried file names that the image had open, which are the ones
 OPEN-CARRIED-LIBRARIES opens at startup."
   (let* ((open (%open-libraries))
          (plan
-           (loop for carry in carries
+           (loop for (tree . carry) in (append (mapcar (lambda (c) (cons nil c)) carries)
+                                               (mapcar (lambda (c) (cons t c)) tree-carries))
                  for (path . named) = (if (consp carry) carry (list carry))
                  for truename = (probe-file path)
                  for name = (and truename (file-namestring truename))
                  do (cond
                       ((null truename)
                        (error 'carry-refused :path (pathname path) :reason "the file does not exist"))
-                      ((and vendor (probe-file vendor) (uiop:subpathp truename (truename vendor)))
+                      ((and (not tree) vendor (probe-file vendor)
+                            (uiop:subpathp truename (truename vendor)))
                        (error 'carry-refused :path truename
                                              :reason "it is under vendor/, and the bundler already carries the tree's own libraries")))
                     (dolist (l named)
@@ -315,6 +325,80 @@ OPEN-CARRIED-LIBRARIES opens at startup."
         (let ((names opened))
           (push (lambda () (open-carried-libraries names)) sb-ext:*init-hooks*)))
       opened)))
+
+;;; --- SQLite, carried by default (#899) -------------------------------------------------------
+;;;
+;;; cl-sqlite opens libsqlite3 when it is loaded, by a bare name the OS loader resolves, so a
+;;; bundle built without this carried nothing and used whatever SQLite the user's machine had:
+;;; Apple's on macOS, none on stock Windows. An app that loads cl-sqlite now gets the tree's
+;;; pinned build, from scripts/build-sqlite.lisp, through the same close-before-dump and
+;;; reopen-at-startup as a --carry (ADR-0013's amendment of 2026-10-24).
+
+(defun sqlite-file-name (&optional (platform (cond ((uiop:os-windows-p) :windows)
+                                                    ((uiop:os-macosx-p) :macos)
+                                                    (t :linux))))
+  "The file name scripts/build-sqlite.lisp gives the library on PLATFORM."
+  (ecase platform
+    (:macos "libsqlite3.dylib")
+    (:linux "libsqlite3.so.0")
+    (:windows "sqlite3.dll")))
+
+(defparameter *sqlite-file-names*
+  '("libsqlite3.dylib" "libsqlite3.so.0" "libsqlite3.so" "libsqlite3.dll" "sqlite3.dll")
+  "Every file name cl-sqlite's library definition asks for, on any platform. A --carry with
+one of these names is the app carrying its own SQLite.")
+
+(defun %sqlite-loaded-p ()
+  "Whether cl-sqlite is loaded and has its library open in this image."
+  (let* ((p (find-package "SQLITE-FFI"))
+         (lib (and p (find-symbol "SQLITE3-LIB" p)))
+         (loaded-p (%cffi "FOREIGN-LIBRARY-LOADED-P")))
+    (and lib loaded-p (ignore-errors (funcall loaded-p lib)) t)))
+
+(defun tree-sqlite-carry (vendor carries &key (loaded (%sqlite-loaded-p)) platform)
+  "What build-desktop-app.lisp carries for SQLite, as (values TREE-CARRIES NOTE).
+
+TREE-CARRIES is NIL, or a list of one (LIBRARY LICENSE) entry for CARRY-DECLARED-LIBRARIES's
+:TREE-CARRIES: VENDOR/sqlite/lib/<SQLITE-FILE-NAME> and VENDOR/sqlite/LICENSE. NOTE is a line
+for the build's report, or NIL.
+
+PLATFORM (:macos, :linux or :windows) is for tests; it defaults to this machine's.
+
+- LOADED false (the app does not load cl-sqlite): nothing, and no note.
+- CARRIES, the app's own --carry list, has a file cl-sqlite asks for: nothing, and a note
+  saying the app carries its own SQLite. That was the way to ship SQLite before #899, and an
+  app that does it keeps working.
+- Otherwise the tree's build, which must exist. When the library or its LICENSE is missing,
+  signals CARRY-REFUSED naming the command that builds them. Not carrying would let the
+  image reopen SQLite by bare name on the user's machine, which is what #899's probe exists to
+  catch."
+  (unless loaded (return-from tree-sqlite-carry (values nil nil)))
+  (let ((own (find-if (lambda (c)
+                        (member (file-namestring (if (consp c) (car c) c)) *sqlite-file-names*
+                                :test #'%same-file-name-p))
+                      carries)))
+    (when own
+      (return-from tree-sqlite-carry
+        (values nil (format nil "SQLite: the app carries its own (--carry ~A), so the tree's pinned build is not carried"
+                            (if (consp own) (car own) own))))))
+  (let* ((dir (merge-pathnames "sqlite/" (uiop:ensure-directory-pathname vendor)))
+         (library (merge-pathnames (concatenate 'string "lib/"
+                                                (if platform
+                                                    (sqlite-file-name platform)
+                                                    (sqlite-file-name)))
+                                   dir))
+         (license (merge-pathnames "LICENSE" dir))
+         (missing (find-if-not #'probe-file (list library license))))
+    (when missing
+      (error 'carry-refused
+             :path missing
+             :reason (format nil "the app loads cl-sqlite, and the tree's pinned SQLite has not been built, so the bundle would use whatever SQLite the user's machine has. Build it, then build the bundle again:~%  sbcl --script \"~A\""
+                             (uiop:native-namestring
+                              (merge-pathnames "scripts/build-sqlite.lisp"
+                                               (uiop:pathname-parent-directory-pathname
+                                                (uiop:ensure-directory-pathname vendor)))))))
+    (values (list (list (uiop:native-namestring library) (uiop:native-namestring license)))
+            nil)))
 
 (defun open-carried-libraries (names)
   "Open each file in NAMES from the directory of the running executable. Run from

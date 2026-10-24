@@ -19,6 +19,13 @@
 ;;;; library was in use is its LAST state, and a check that matches PATH lines alone reports a
 ;;;; library the process never used. That is what verify-bundle-macos.sh reported on #781.
 ;;;;
+;;;; A move names only a file name, and two images in one process can share it: a bundle's own
+;;;; libsqlite3.dylib and Apple's /usr/lib/libsqlite3.dylib (#899). A move applies to the image
+;;;; with that name that is in the state it moves FROM, which is the only one it can apply to.
+;;;; Measured on macOS 26.6 with the same C program: dlopen of the bundle's copy printed its PATH
+;;;; line and no move; dlopen of /usr/lib/libsqlite3.dylib after it printed `move delayed to
+;;;; loaded: libsqlite3.dylib', which is the cache copy's.
+;;;;
 ;;;; THE PROCESS. The first PATH line a process prints is its main executable. A launcher that
 ;;;; execs another program keeps its PID, and dyld then prints a new list, starting with the new
 ;;;; executable. So a PATH line that names neither a .dylib nor anything under /usr/lib/ or
@@ -29,7 +36,7 @@
 (defpackage #:ouranos-dyld-libraries
   (:use #:cl)
   (:export #:parse-dyld-log #:loaded-images #:image-pid #:image-process #:image-path
-           #:image-state #:openssl-findings))
+           #:image-state #:openssl-findings #:carried-findings))
 
 (in-package #:ouranos-dyld-libraries)
 
@@ -89,9 +96,11 @@ ignored, so the app's own output may be mixed in."
                                           ((search "to loaded" rest) :loaded))))
                         (when (and name state)
                           (let* ((process (gethash pid current))
+                                 (from (if (eq state :loaded) :delayed :loaded))
                                  (image (find-if (lambda (i)
                                                    (and (eql pid (image-pid i))
                                                         (equal process (image-process i))
+                                                        (eq from (image-state i))
                                                         (string= name (%file-name (image-path i)))))
                                                  images)))
                             (when image (setf (image-state image) state)))))))))))
@@ -123,6 +132,26 @@ copy or opening Homebrew's."
   (loop for image in (loaded-images images)
         for path = (image-path image)
         when (%openssl-p path)
+          collect (list (cond ((%inside-p path bundle-directory) :carried)
+                              ((and (eql 0 (search "hyperion-view" (image-process image)))
+                                    (eql 0 (search "/usr/lib/" path)))
+                               :webkit)
+                              (t :fail))
+                        (image-process image) (image-pid image) path)))
+
+(defun carried-findings (images bundle-directory file-name)
+  "A list of (VERDICT PROCESS PID PATH), one for each loaded image in IMAGES whose file name is
+FILE-NAME, a library the bundle carries. VERDICT is :CARRIED when PATH is in BUNDLE-DIRECTORY;
+:WEBKIT when the process is hyperion-view and PATH is under /usr/lib/, as for OPENSSL-FINDINGS;
+:FAIL otherwise.
+
+A :FAIL beside a :CARRIED is the case this exists for (#899). cl-sqlite's functions are looked
+up globally, and a global lookup returns the first library loaded that has the symbol, so an
+app process that loaded Apple's libsqlite3 before the bundle's copy may run on Apple's
+although the bundle's copy was loaded too."
+  (loop for image in (loaded-images images)
+        for path = (image-path image)
+        when (string= file-name (%file-name path))
           collect (list (cond ((%inside-p path bundle-directory) :carried)
                               ((and (eql 0 (search "hyperion-view" (image-process image)))
                                     (eql 0 (search "/usr/lib/" path)))

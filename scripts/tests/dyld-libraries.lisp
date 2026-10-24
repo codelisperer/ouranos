@@ -12,6 +12,12 @@
 ;;;;   opened-by-webkit.txt   hyperion-view opened WebKit.framework;
 ;;;;   carried-after-exec.txt the launcher `example' exec'd sbcl, which opened the bundle's own
 ;;;;                          libcrypto.3.dylib.
+;;;; and, for #899, trimmed to the lines about the process, libSystem and libsqlite3:
+;;;;   sqlite-carried.txt     sbcl opened the bundle's own libsqlite3.dylib, built by
+;;;;                          scripts/build-sqlite.lisp;
+;;;;   sqlite-carried-and-system.txt
+;;;;                          sbcl opened the bundle's libsqlite3.dylib and then
+;;;;                          /usr/lib/libsqlite3.dylib.
 
 (in-package #:checkers/tests)
 
@@ -111,3 +117,46 @@ excused or none is, 2 on a bad command line; `loaded' lists only libraries still
       (is (eql 0 code))
       (is (search (format nil "sbcl~C/usr/lib/libSystem.B.dylib" #\Tab) out))
       (is (not (search "libssl" out)) "a delayed library is not listed: ~A" out))))
+
+(defun %carried-verdicts (name file-name &optional (bundle +example-bundle+))
+  "Each (VERDICT PROCESS PATH) CARRIED-FINDINGS gives for FILE-NAME in the fixture NAME."
+  (mapcar (lambda (f) (list (first f) (second f) (fourth f)))
+          (ouranos-dyld-libraries:carried-findings
+           (ouranos-dyld-libraries:parse-dyld-log (%dyld-fixture name)) bundle file-name)))
+
+(test a-system-copy-loaded-beside-the-bundle-copy-fails
+  "Apple's libsqlite3 is moved back to loaded after the bundle's copy is opened. The move names
+only the file name, which both share; it applies to the image that was delayed, so the system
+copy counts as loaded and fails, and the bundle's copy passes (#899)."
+  (let ((bundle-copy (concatenate 'string +example-bundle+ "/libsqlite3.dylib")))
+    (is (equal `((:fail "sbcl" "/usr/lib/libsqlite3.dylib")
+                 (:carried "sbcl" ,bundle-copy))
+               (%carried-verdicts "sqlite-carried-and-system" "libsqlite3.dylib")))
+    (is (equal `((:carried "sbcl" ,bundle-copy))
+               (%carried-verdicts "sqlite-carried" "libsqlite3.dylib"))
+        "the bundle's copy alone passes: Apple's was mapped and moved to delayed")
+    (is (equal '(:fail)
+               (mapcar #'first (%carried-verdicts "sqlite-carried" "libsqlite3.dylib"
+                                                  "/Applications/Other.app/Contents/MacOS")))
+        "the same copy judged against another bundle fails")))
+
+(test check-dyld-log-exits-by-the-carried-verdict
+  "verify-bundle-macos.sh's check for each carried library: exit 1 when a copy from outside the
+bundle is loaded, even beside the bundle's; 0 when only the bundle's is; 3 when none is; 2 on a
+bad command line."
+  (flet ((check-dyld-log (&rest args)
+           (nth-value 2 (uiop:run-program
+                         (list* (uiop:native-namestring sb-ext:*runtime-pathname*) "--script"
+                                (uiop:native-namestring
+                                 (merge-pathnames "check-dyld-log.lisp" *scripts*))
+                                args)
+                         :input nil :output nil :error-output nil :ignore-error-status t)))
+         (fixture (name)
+           (uiop:native-namestring (%dyld-fixture-path name))))
+    (is (eql 1 (check-dyld-log "carried" (fixture "sqlite-carried-and-system") +example-bundle+
+                               "libsqlite3.dylib")))
+    (is (eql 0 (check-dyld-log "carried" (fixture "sqlite-carried") +example-bundle+
+                               "libsqlite3.dylib")))
+    (is (eql 3 (check-dyld-log "carried" (fixture "sqlite-carried") +example-bundle+
+                               "libuv.1.dylib")))
+    (is (eql 2 (check-dyld-log "carried" (fixture "sqlite-carried") +example-bundle+)))))
