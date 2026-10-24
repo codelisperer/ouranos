@@ -33,6 +33,52 @@ its tag.
   `hyperion/static:file-etag` returns NIL for a file that is not a regular file, and on Linux
   and macOS it reads the size and time with `stat` instead of opening the file.
 
+- **`scripts/verify-bundle-macos.sh` fails a bundle in which a process loaded a libssl or
+  libcrypto that the bundle does not carry** (#783). Before, it printed the OpenSSL libraries it
+  saw as information only, and it counted every library whose path dyld printed as loaded. On
+  current macOS dyld prints the path of Apple's `/usr/lib/libssl.48.dylib` and
+  `/usr/lib/libcrypto.46.dylib` even for a process that never uses them, followed by
+  `move loaded to delayed`. The script now judges each library by its last dyld state, through
+  the new `scripts/check-dyld-log.lisp`, and names the process that loaded it. Apple's
+  `/usr/lib` copy in `hyperion-view` passes, because WebKit loads it. An app whose image loads
+  cl+ssl, for example through `aion/http-client`, reopens the build machine's OpenSSL at startup
+  (#191), and its macOS bundle now fails this check until it carries libssl and libcrypto
+  (`scripts/carry-natives.lisp`, `--carry`). The Coalton REPL example loads no OpenSSL, and the
+  release note `desktop-release.yml` writes no longer says the macOS build needs Homebrew's
+  OpenSSL.
+
+- **aion/uv: `close-loop` no longer frees a loop whose thread is still running a callback, and
+  `stop-loop-thread` signals when the thread does not exit in time** (#694). Before,
+  `stop-loop-thread` timed out its wait silently, forgot the thread and returned. `close-loop`
+  then freed the loop and its handles while the callback was still running, and libuv used
+  the freed memory when the callback returned. Now:
+  - `stop-loop-thread` (`:timeout`, 5 seconds by default; `nil` waits without a limit) returns
+    `t` once the thread has exited. If the thread is still alive, it signals the new
+    `aion/uv:loop-thread-still-running` (`loop-thread-still-running-loop`, `-thread`,
+    `-timeout`) and keeps the thread recorded;
+  - `(stop-loop-thread loop :wait nil)` only asks the thread to stop and returns `nil` at once.
+    A caller that used `:timeout 0` for that should use this instead, because `:timeout 0` now
+    signals whenever the thread has not already exited;
+  - `close-loop` (new `:timeout`) refuses submissions from its first call. It frees the loop
+    only after the thread has exited. Until then it signals `loop-thread-still-running` with
+    two restarts: `aion/uv:wait-for-loop-thread`, which waits without a limit and then frees,
+    and `aion/uv:leave-loop-unfreed`, which returns `nil` and leaves the loop unfreed. A later
+    `close-loop` finishes the teardown, and `aion/uv:loop-freed-p` says whether it has;
+  - `close-loop` called from a callback on the loop's own thread signals instead of freeing
+    the loop it is running on.
+
+  `close-loop` and `stop-loop-thread` therefore signal where they used to return. An app that
+  wraps `close-loop` in `ignore-errors` now leaks a loop whose callback is still running,
+  instead of corrupting memory.
+
+  `hyperion/server-uv:stop` (and `hyperion/server:stop` on `:uv`) does not signal. When a loop
+  thread is still in a handler after `*stop-wait-seconds*`, it:
+  - logs a warning naming the shard and the thread;
+  - leaves that loop closed but unfreed, and keeps it on the server;
+  - still closes the other loops and stops the workers.
+  A later `stop`, once the handler has returned, frees the kept loop. A `start` that fails
+  partway logs a loop it cannot close, where it used to ignore the failure.
+
 - **hades/credentials: on Linux, `store-credential`, `fetch-credential` and `delete-credential`
   use the Secret Service instead of always signalling `credential-store-unavailable`** (#357).
   Items go into the default collection of whichever program provides the Secret Service on the
@@ -1870,6 +1916,23 @@ its tag.
   leaves the URL out. This is the rule `hades/open:open-url` uses. A browser that cannot be
   started is logged as a warning, and the server keeps running. `hyperion/desktop` now declares
   `aion/windows` on Windows, which it already loaded through `hyperion/sidecar`.
+
+- **hyperion/server: `stop` called twice at the same time for a Hunchentoot or Woo server no
+  longer leaves the port accepting** (#502). The second call terminated the server's thread again
+  while the first call's shutdown was running. Under Hunchentoot that interrupted
+  `hunchentoot:stop` before it set the acceptor's shutdown flag, and the listener thread went on
+  accepting connections on the port with nothing left to stop it. `hyperion/dev:serve` with
+  `:block t` did this every time it was stopped with `unwatch` from another thread, because it
+  calls `unwatch` again when its wait ends; the second stop interrupted the first only when the
+  two happened close together. Now only the first `stop` of a server ends its thread, and a later
+  or concurrent `stop` waits for that to finish. The `:uv` server's `stop` is unchanged.
+
+- **aion/schedule: `stop` no longer signals a `TYPE-ERROR` when its timeout runs out while it is
+  waiting for runs to finish** (#882). Its drain loop checked that time was left, then read the
+  clock again for the wait's timeout. When the deadline passed in between, the timeout was
+  negative and `sb-thread:condition-wait` signalled a `TYPE-ERROR` instead of `stop` returning
+  `:timed-out`. Windows CI hit it with 18 microseconds to spare. The time left is now never
+  below zero. An app that caught `type-error` around `stop` can remove that handler.
 
 - **aion/http-client: a body of octets with a `multipart/` Content-Type reaches the server as
   given on Linux and macOS** (#828). This is a workaround placed once in the client, not a

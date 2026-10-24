@@ -550,6 +550,50 @@ invisible to a connect probe, so CHECK-PORT cannot see it and only the bind can 
     (srv:stop h)
     (is (not (ports:listening-p port)) "STOP returned while the port was still accepting")))
 
+(test a-second-stop-does-not-interrupt-the-first
+  "#502. Two STOPs of one server from two threads, the second arriving while the first is in
+HUNCHENTOOT:STOP. hyperion/dev does this: SERVE with :BLOCK calls UNWATCH when its wait ends,
+right after the UNWATCH that ended it. The second STOP used to terminate the backend thread
+again, which interrupted HUNCHENTOOT:STOP before it set the acceptor's shutdown flag, and the
+listener thread then went on accepting with nothing left to stop it.
+
+HUNCHENTOOT:STOP is held at its start until the second STOP has returned, or for 2 s, so the
+second one always arrives while the first is stopping. With the fix the second STOP waits for
+the backend thread, which is waiting for the hold, so this test takes the 2 s."
+  (let* ((port nil)
+         (h (ports:call-with-port
+             (lambda (p)
+               (prog1 (srv:start (%srv-ok-app) :port p :server :hunchentoot :log nil)
+                 (setf port p)))))
+         (entered (sb-thread:make-semaphore))
+         (release (sb-thread:make-semaphore))
+         (acceptor nil)
+         (finished nil))
+    (sb-int:encapsulate 'hunchentoot:stop 'hold-the-first-stop
+                        (lambda (f a &rest args)
+                          (setf acceptor a)
+                          (sb-thread:signal-semaphore entered)
+                          (sb-thread:wait-on-semaphore release :timeout 2)
+                          (multiple-value-prog1 (apply f a args) (setf finished t))))
+    (unwind-protect
+         (let ((first-stop (sb-thread:make-thread
+                       ;; THREAD-LIFETIME: scoped -- joined below, before the assertions.
+                       (lambda () (srv:stop h)) :name "first stop")))
+           (is (sb-thread:wait-on-semaphore entered :timeout 5)
+               "the first STOP never reached HUNCHENTOOT:STOP")
+           (let ((second-stop (sb-thread:make-thread
+                          ;; THREAD-LIFETIME: scoped -- joined on the next line.
+                          (lambda () (srv:stop h)) :name "second stop")))
+             (sb-thread:join-thread second-stop :timeout 10 :default nil)
+             (sb-thread:signal-semaphore release)
+             (sb-thread:join-thread first-stop :timeout 10 :default nil))
+           (is-true finished "the second STOP interrupted HUNCHENTOOT:STOP before it finished")
+           (is (ports:await-released port)
+               "the port is still accepting after both STOPs returned"))
+      (sb-int:unencapsulate 'hunchentoot:stop 'hold-the-first-stop)
+      ;; Only after a failure: the listener the interrupted stop left behind.
+      (unless finished (when acceptor (ignore-errors (hunchentoot:stop acceptor)))))))
+
 (test start-gives-up-after-its-deadline-and-stops-the-server
   ;; The only way to make readiness never arrive on demand is to replace the probe. The
   ;; server itself does start; START must stop it rather than leave it running.

@@ -1933,14 +1933,36 @@ Clack -- owning the socket is what makes it available at all."
         ;; START has not returned a SERVER, so the caller has nothing to STOP: release what
         ;; was made here. Closing a loop closes its listener and stops its thread if it runs.
         (unless started
+          ;; A stuck loop is logged and left unfreed by %CLOSE-SHARD-LOOP. Any other failure is
+          ;; logged too, rather than hiding the error that made START fail.
           (loop for shard across shards
-                do (ignore-errors (uv:close-loop (shard-loop shard))))
+                for i from 0
+                when shard
+                  do (handler-case (%close-shard-loop shard i)
+                       (error (e)
+                         (log:warn "server-uv: a loop could not be closed after START failed"
+                                   :shard i :error (princ-to-string e)))))
           (when workers-pool
             (%stop-workers workers-pool)))))))
 
 (defparameter *stop-wait-seconds* 5
   "How long STOP waits for the loop threads to close the listeners and the open connections
 before it closes the loops regardless.")
+
+(defun %close-shard-loop (shard index)
+  "Close SHARD's loop, waiting up to *STOP-WAIT-SECONDS* for its thread. Returns T when the loop
+was freed. When the thread is still in a callback, the loop is left closed but unfreed (#694):
+this logs a warning naming the shard and the thread, and returns NIL. Freeing it then would let
+the callback use freed memory when it returns."
+  (handler-bind ((uv:loop-thread-still-running
+                   (lambda (c)
+                     (log:warn "server-uv: a loop thread is still in a callback, so its loop is left unfreed"
+                               :shard index
+                               :thread (sb-thread:thread-name (uv:loop-thread-still-running-thread c))
+                               :timeout-seconds *stop-wait-seconds*)
+                     (invoke-restart 'uv:leave-loop-unfreed))))
+    (uv:close-loop (shard-loop shard) :timeout *stop-wait-seconds*))
+  (and (uv:loop-freed-p (shard-loop shard)) t))
 
 (defun begin-drain (server)
   "Begin draining SERVER (#388): it keeps accepting and answering, and every response from now
@@ -2082,9 +2104,13 @@ once (#463)."
                                      (shard-live shard))
                             (loop for (conn . state) in open do (%finish conn state))))
                         "the connections adopted during stop"))
-      (loop for shard across (server-shards server)
-            do (uv:close-loop (shard-loop shard)))
-      (setf (server-shards server) nil))
+      ;; A shard whose loop thread is still in a callback is not freed (#694): it is logged,
+      ;; left closed but unfreed, and kept, so a later STOP tries it again. The other shards and
+      ;; the workers are still stopped, so STOP always returns (#876's review).
+      (let ((stuck (loop for shard across (server-shards server)
+                         for i from 0
+                         unless (%close-shard-loop shard i) collect shard)))
+        (setf (server-shards server) (and stuck (coerce stuck 'vector)))))
     (when (server-workers server)
       (%stop-workers (server-workers server) (if overdue 0.1 *stop-wait-seconds*))
       (setf (server-workers server) nil))

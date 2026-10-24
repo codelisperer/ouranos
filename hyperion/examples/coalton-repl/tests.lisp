@@ -80,3 +80,33 @@ SETF rather than LET, because the cancel test evaluates on another thread."
     (is (search "/cancel" page) "the page script posts to /cancel")
     (is (search "htmx:sendError" page))
     (is (search "htmx:timeout" page))))
+
+(defun %dependency-closure (name)
+  "The names of every system NAME depends on, directly or through others, under this image's
+features, as ASDF reads them from the .asd files. Nothing is loaded."
+  (let ((seen (make-hash-table :test 'equal)))
+    (labels ((spec (dep)
+               (cond ((or (stringp dep) (symbolp dep)) (visit (string-downcase (string dep))))
+                     ((and (consp dep) (eq (first dep) :feature))
+                      (when (uiop:featurep (second dep)) (spec (third dep))))
+                     ((and (consp dep) (eq (first dep) :version)) (spec (second dep)))))
+             (visit (system-name)
+               (unless (gethash system-name seen)
+                 (setf (gethash system-name seen) t)
+                 (let ((system (asdf:find-system system-name nil)))
+                   (when system (mapc #'spec (asdf:system-depends-on system)))))))
+      (visit name))
+    (loop for k being the hash-keys of seen collect k)))
+
+(test the-app-does-not-depend-on-cl+ssl
+  "#783: the app loads no OpenSSL of its own, so a Mac without Homebrew runs it. Checked by
+the systems it depends on, which is what the desktop build loads into the image. A new
+dependency that brings cl+ssl in would make the bundle reopen the build machine's libssl at
+startup (#191). CONTROL: aion/http-client, which does depend on cl+ssl outside Windows, is
+found to, so the walk can see the dependency."
+  (is (not (member "cl+ssl" (%dependency-closure "hyperion/examples/coalton-repl")
+                   :test #'string=))
+      "the Coalton REPL app depends on cl+ssl")
+  #-os-windows
+  (is (member "cl+ssl" (%dependency-closure "aion/http-client") :test #'string=)
+      "control: the walk does not find aion/http-client's cl+ssl"))

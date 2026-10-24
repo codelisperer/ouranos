@@ -523,3 +523,150 @@ from seeing a bundle without its libuv fail."
            (is (sb-thread:wait-on-semaphore ran :timeout 10)
                "the submitted thunk must actually run on the loop thread"))
       (uv:close-loop l))))
+
+;;; --- #694: CLOSE-LOOP does not free a loop whose thread is still running a callback ----
+;;;
+;;; STOP-LOOP-THREAD used to time out its join, forget the thread and return, and CLOSE-LOOP
+;;; then freed the loop and its handles under the callback still running on it. These block a
+;;; callback on a semaphore so the thread cannot exit within a short timeout. They are not run
+;;; against the old code as a control: that run would perform the use-after-free itself.
+
+(defun %blocked-loop ()
+  "A loop whose thread is running a callback that waits on the returned RELEASE semaphore.
+Returns the loop and RELEASE."
+  (let ((l (uv:make-loop))
+        (started (sb-thread:make-semaphore))
+        (release (sb-thread:make-semaphore)))
+    (uv:start-loop-thread l)
+    (uv:submit l (lambda ()
+                   (sb-thread:signal-semaphore started)
+                   (sb-thread:wait-on-semaphore release :timeout 60)))
+    (sb-thread:wait-on-semaphore started :timeout 10)
+    (values l release)))
+
+(defmacro %with-blocked-loop ((loop release) &body body)
+  "Bind LOOP and RELEASE from %BLOCKED-LOOP for BODY, and release the callback afterwards however
+BODY ends, so a failing test does not leave a loop thread blocked."
+  `(multiple-value-bind (,loop ,release) (%blocked-loop)
+     (unwind-protect (progn ,@body)
+       (sb-thread:signal-semaphore ,release 10))))
+
+(test close-loop-does-not-free-a-loop-whose-callback-is-still-running
+  (%with-blocked-loop (l release)
+    (let ((thread (aion/uv::loop-thread l))
+          (condition (handler-case (progn (uv:close-loop l :timeout 0.3) nil)
+                       (uv:loop-thread-still-running (e) e))))
+      (is (typep condition 'uv:loop-thread-still-running) "close-loop must signal, not free")
+      (when condition
+        (is (eq thread (uv:loop-thread-still-running-thread condition)))
+        (is (search "did not exit" (princ-to-string condition))))
+      (is (null (uv:loop-freed-p l)) "the loop must not have been freed")
+      (is (sb-thread:thread-alive-p thread) "the callback is still running")
+      (is (eq thread (aion/uv::loop-thread l)) "the thread is still recorded, to be waited for again")
+      (signals uv:loop-closed (uv:submit l (lambda () nil)))
+      ;; The callback returns; a second close finishes the teardown.
+      (sb-thread:signal-semaphore release)
+      (finishes (uv:close-loop l :timeout 10))
+      (is (eq :freed (uv:loop-freed-p l)))
+      (is (not (sb-thread:thread-alive-p thread)))
+      (finishes (uv:close-loop l)))))
+
+(test close-loop-can-wait-for-the-loop-thread
+  "The WAIT-FOR-LOOP-THREAD restart waits without a limit and then frees the loop. The handler
+releases the callback itself before invoking the restart, so the free can only come through
+the restart."
+  (%with-blocked-loop (l release)
+    (let ((used nil))
+      (handler-bind ((uv:loop-thread-still-running
+                       (lambda (c) (declare (ignore c))
+                         (setf used t)
+                         (sb-thread:signal-semaphore release)
+                         (invoke-restart 'uv:wait-for-loop-thread))))
+        (uv:close-loop l :timeout 0.2))
+      (is-true used "the timeout signalled and the handler ran")
+      (is (eq :freed (uv:loop-freed-p l))))))
+
+(test close-loop-can-leave-the-loop-unfreed-and-free-it-later
+  "The LEAVE-LOOP-UNFREED restart returns without freeing; a later close frees it."
+  (%with-blocked-loop (l release)
+    (is (null (handler-bind ((uv:loop-thread-still-running
+                               (lambda (c) (declare (ignore c)) (invoke-restart 'uv:leave-loop-unfreed))))
+                (uv:close-loop l :timeout 0.2))))
+    (is (null (uv:loop-freed-p l)))
+    (sb-thread:signal-semaphore release)
+    (uv:close-loop l :timeout 10)
+    (is (eq :freed (uv:loop-freed-p l)))))
+
+(test close-loop-from-the-loops-own-callback-does-not-free-it
+  "The loop thread cannot exit while a callback on it runs, so a close from that callback
+signals instead of freeing the loop it is running on. The WAIT-FOR-LOOP-THREAD restart is not
+offered there, because it would wait for the thread it runs on; LEAVE-LOOP-UNFREED is."
+  (let* ((l (uv:make-loop))
+         (done (sb-thread:make-semaphore))
+         (seen nil)
+         (wait-offered :unknown)
+         (leave-offered :unknown))
+    (uv:start-loop-thread l)
+    (uv:submit l (lambda ()
+                   (setf seen
+                         (handler-bind ((uv:loop-thread-still-running
+                                          (lambda (c)
+                                            (setf wait-offered (and (find-restart 'uv:wait-for-loop-thread c) t)
+                                                  leave-offered (and (find-restart 'uv:leave-loop-unfreed c) t))
+                                            (invoke-restart 'uv:leave-loop-unfreed))))
+                           (uv:close-loop l :timeout 0.1)
+                           :returned))
+                   (sb-thread:signal-semaphore done)))
+    (sb-thread:wait-on-semaphore done :timeout 10)
+    (is (eq :returned seen))
+    (is (eq nil wait-offered) "wait-for-loop-thread must not be offered on the loop's own thread")
+    (is (eq t leave-offered))
+    (is (null (uv:loop-freed-p l)))
+    (finishes (uv:close-loop l :timeout 10))
+    (is (eq :freed (uv:loop-freed-p l)))))
+
+(test a-loop-whose-thread-exits-is-freed-by-the-first-close
+  "The control: with no callback holding the thread, the first close frees the loop, so the
+refusal above is not unconditional."
+  (let ((l (uv:make-loop)))
+    (uv:start-loop-thread l)
+    (is (eq t (uv:stop-loop-thread l :timeout 10)) "stop-loop-thread reports the thread exited")
+    (uv:start-loop-thread l)
+    (finishes (uv:close-loop l))
+    (is (eq :freed (uv:loop-freed-p l)))))
+
+(test stop-loop-thread-without-waiting-only-asks
+  "With :WAIT NIL it sets the stop flag and returns NIL at once, even while a callback holds the
+thread, and keeps the thread recorded so a later close waits for it."
+  (%with-blocked-loop (l release)
+    (let ((thread (aion/uv::loop-thread l)))
+      (is (null (uv:stop-loop-thread l :wait nil)))
+      (is (eq thread (aion/uv::loop-thread l)))
+      (is (aion/uv::loop-stop-requested-p l))
+      (sb-thread:signal-semaphore release)
+      (sb-thread:join-thread thread :default nil :timeout 10)
+      (is (not (sb-thread:thread-alive-p thread)) "the thread exits once the callback returns")
+      (finishes (uv:close-loop l))
+      (is (eq :freed (uv:loop-freed-p l))))))
+
+(test two-threads-closing-a-loop-at-once-free-it-once
+  "Both join the exited thread; one claims the freeing. The other must not touch the wakeup
+handle the first frees (#876's review): the wakeup, the clear and the unref are done under the
+loop lock only while the loop is not being freed. Repeated, because the window is narrow."
+  (dotimes (i 20)
+    (let* ((l (uv:make-loop))
+           (errors '())
+           (lock (sb-thread:make-mutex))
+           (go (sb-thread:make-semaphore)))
+      (uv:start-loop-thread l)
+      (let ((closers (loop repeat 2
+                           collect (sb-thread:make-thread
+                                    (lambda ()
+                                      (sb-thread:wait-on-semaphore go)
+                                      (handler-case (uv:close-loop l :timeout 10)
+                                        (error (e) (sb-thread:with-mutex (lock) (push e errors)))))
+                                    :name "uv-test closer"))))
+        (sb-thread:signal-semaphore go 2)
+        (dolist (c closers) (sb-thread:join-thread c :default nil :timeout 30))
+        (is (null errors) "round ~D: ~S" i errors)
+        (is (eq :freed (uv:loop-freed-p l)) "round ~D" i)))))

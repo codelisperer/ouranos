@@ -2891,3 +2891,43 @@ kernel lists as allowed in /proc/self/status, a second reading of the same mask.
 which current coreutils also limits by the cgroup quota and by OMP_ variables."
   (is (eql (%cpus-allowed-list-count) (srv::%affinity-count)))
   (is (<= (srv::%affinity-count) (srv::%online-cores))))
+
+;;; --- #694 / #876: STOP with a loop thread stuck in a handler --------------------------
+
+(test stop-with-a-loop-thread-stuck-in-a-handler-returns-and-keeps-that-loop
+  "A handler run on the loop thread (no :WORKERS) blocks. STOP must still return, leave that
+loop closed but unfreed rather than free it under the handler, and keep it, so a later STOP,
+once the handler has returned, frees it. Before #876's review the CLOSE-LOOP in STOP signalled
+and unwound STOP partway."
+  (let ((gate (sb-thread:make-semaphore))
+        (entered (sb-thread:make-semaphore))
+        (client nil))
+    (unwind-protect
+         (let* ((srv::*stop-wait-seconds* 0.5)
+                (server (srv:start (lambda (env)
+                                     (declare (ignore env))
+                                     (sb-thread:signal-semaphore entered)
+                                     (sb-thread:wait-on-semaphore gate :timeout 30)
+                                     (list 200 +ok+ (list "late")))
+                                   :port 0))
+                (port (srv:server-port server))
+                (loop (srv::server-loop server)))
+           ;; THREAD-LIFETIME: scoped -- its request ends once the handler is released, and it
+           ;; is joined below.
+           (setf client (bt:make-thread
+                         (lambda () (ignore-errors (get* port "GET / HTTP/1.1" "Host: x")))))
+           (is (sb-thread:wait-on-semaphore entered :timeout 10) "control: the handler is running")
+           (let ((start (get-internal-real-time)))
+             (finishes (srv:stop server))
+             (is (< (/ (- (get-internal-real-time) start) internal-time-units-per-second) 10)
+                 "STOP returned without waiting for the handler"))
+           (is (null (uv:loop-freed-p loop)) "the stuck loop was not freed")
+           (is (srv::server-shards server) "the stuck shard is kept for a later STOP")
+           (sb-thread:signal-semaphore gate 10)
+           (aion/test-threads:join client)
+           (setf client nil)
+           (finishes (srv:stop server))
+           (is (eq :freed (uv:loop-freed-p loop)) "a later STOP frees it")
+           (is (null (srv::server-shards server))))
+      (sb-thread:signal-semaphore gate 10)
+      (when client (ignore-errors (aion/test-threads:join client))))))
