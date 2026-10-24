@@ -75,7 +75,8 @@
   :description "Headless Coalton eval + type-introspection engine (the REPL core)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
-  :depends-on ("coalton")
+  :depends-on ("coalton"
+               "aion/dynamic")   ; unblock-interrupts, first in each evaluation thread (#896)
   :serial t
   :components ((:file "src/coalton-repl")))
 

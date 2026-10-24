@@ -57,10 +57,10 @@ it is: the caller decides which targets it is willing to open."
     ;; THREAD-LIFETIME: joined before SHELL-OPEN returns; it ends when ShellExecuteW does.
     ;; ShellExecuteW can start a shell extension through COM, so it needs an apartment. A thread
     ;; of its own gets one without changing the apartment of the caller's thread.
-    ;; INTERRUPTS: not yet -- aion/windows does not depend on aion/dynamic, so it does not call aion/dynamic:unblock-interrupts (#896).
     (sb-thread:join-thread
      (sb-thread:make-thread
       (lambda ()
+        (aion/dynamic:unblock-interrupts)
         (setf result (handler-case (%shell-execute target)
                        (error () :error))))
       :name "aion/windows shell-open"))

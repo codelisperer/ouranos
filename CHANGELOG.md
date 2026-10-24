@@ -1948,6 +1948,18 @@ its tag.
 
 ### Fixed
 
+- **cons/coalton-repl and hades/open: the threads they create can be interrupted when they were
+  started while an interrupt was deferred** (#896, the remaining sites of #541). On Linux and
+  macOS, `cons/coalton-repl:eval-input` called from inside `sb-sys:without-interrupts`, for
+  example from a server request thread during such a step, made an evaluation thread that could
+  not be interrupted, so `:time-limit` and `cancel-evaluation` could not stop it and the
+  evaluation was left running. `hades/open`'s reaper threads, made by `reveal-path` and
+  `open-url`, had the same defect. Each now calls `aion/dynamic:unblock-interrupts` first.
+  `aion/windows:shell-open`'s thread and the `aion/windows/com` apartment thread call it too.
+  On Windows this changes nothing, because SBCL for Windows does not give a new thread its
+  creator's mask. `cons/coalton-repl`, `hades/open`, `aion/windows` and `aion/windows/com` now
+  depend on `aion/dynamic`, which has no dependencies of its own.
+
 - **hyperion/dev: a file saved in the same second as the reloader's last poll is reloaded** (#658).
   The reloader compared write dates only, and a write date has a resolution of one second, so
   such a save kept its date and was not reloaded until the file was saved again. For a file
