@@ -1088,6 +1088,9 @@ uv_signal_t handler (pre-publication issue 117), or (constantly (lambda () nil))
   (reason nil)
   ;; How many stop signals have arrived. A second SIGTERM ends the drain's grace period early.
   (signals 0)
+  ;; GET-INTERNAL-REAL-TIME when the first stop signal arrived, or NIL. The grace period is
+  ;; counted from here, not from when the wait loop next looks at STOPPING (#540).
+  (signalled-at nil)
   ;; The grace period has begun: the readiness path answers 503 from now on.
   (draining nil))
 
@@ -1118,8 +1121,11 @@ Safe from any thread, and safe from a signal handler."
 ;;; not in REQUEST-SHUTDOWN where a caller would reasonably add a lock.
 (defun request-shutdown-from-signal (session &optional (reason :sigterm))
   "REQUEST-SHUTDOWN, from a signal context, for REASON (:SIGTERM or :SIGINT). Must remain
-lock-free and allocation-free: it sets three slots, one of them to a keyword constant."
+lock-free and allocation-free: it sets four slots, one to a keyword constant and one, on the
+first signal only, to GET-INTERNAL-REAL-TIME, a fixnum."
   (setf (server-session-reason session) reason)
+  (when (zerop (server-session-signals session))
+    (setf (server-session-signalled-at session) (get-internal-real-time)))
   (incf (server-session-signals session))
   (setf (server-session-stopping session) t)
   t)
@@ -1178,15 +1184,21 @@ DNS-rebinding page can read whatever that path returns."
 (defun %drain-grace (session handler seconds)
   "The first phase of a drain on SIGTERM (#388): keep serving for SECONDS, with the readiness
 path answering 503 and, on :uv, every response closing its connection. A second SIGTERM ends it
-early. Logged once."
+early. Logged once.
+
+The SECONDS are counted from when the signal arrived, and the last sleep ends at the deadline
+rather than at the next poll (#540). Counted from when the wait loop noticed the signal, and
+ended on a poll, the grace period ran up to two *SHUTDOWN-POLL-INTERVAL*s longer than asked,
+and a load balancer that stops sending after SECONDS could still reach an open listener."
   (setf (server-session-draining session) t)
   (when (%uv-server-p handler) (%uv-call "BEGIN-DRAIN" handler))
   (log:info "hyperion/server: SIGTERM received; still serving during the drain grace period"
             :seconds seconds)
-  (loop with deadline = (+ (get-internal-real-time) (* seconds internal-time-units-per-second))
-        while (and (< (get-internal-real-time) deadline)
-                   (< (server-session-signals session) 2))
-        do (sleep *shutdown-poll-interval*)))
+  (loop with deadline = (+ (or (server-session-signalled-at session) (get-internal-real-time))
+                           (round (* seconds internal-time-units-per-second)))
+        for left = (/ (- deadline (get-internal-real-time)) internal-time-units-per-second)
+        while (and (plusp left) (< (server-session-signals session) 2))
+        do (sleep (min left *shutdown-poll-interval*))))
 
 (defun serve-forever (app &key (server (default-server)) (port *default-port*)
                                (host "127.0.0.1") debug (log t) (security-headers t)

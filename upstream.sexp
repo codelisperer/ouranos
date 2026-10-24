@@ -9,6 +9,13 @@
 ;;;;
 ;;;; Read with *READ-EVAL* off. Each entry is a plist:
 ;;;;
+;;;; Which places the checker searches for a pin by itself, so that a pin there with no entry fails
+;;;; the gate, is listed in the header of scripts/check-upstream.lisp: *.pin files,
+;;;; scripts/versions.env, and the workflows' actions, runner images and env versions, compose
+;;;; images and scripts' image= lines (#749). A version anywhere else, such as an API version or a
+;;;; default model id in Lisp source, has no fixed shape to search for. Its entry's :WHERE is its
+;;;; only coverage, and a new one with no entry here goes unreported.
+;;;;
 ;;;;   :name      a string, unique in this file
 ;;;;   :category  :toolchain :quicklisp :native :asset :api :ci :container
 ;;;;   :where     a list of places the pinned value is written; every one must give the same
@@ -283,7 +290,11 @@
  :upstream (:github-release "actions/download-artifact"))
 
 (:name "Linux runner image" :category :ci
- :where ((:text ".github/workflows/verify.yml" "- os: ubuntu-" nil))
+ :where ((:text ".github/workflows/verify.yml" "- os: ubuntu-" nil)
+         (:text ".github/workflows/verify.yml" "runs-on: ubuntu-" nil)
+         (:text ".github/workflows/desktop-release.yml" "- os: ubuntu-" nil)
+         (:text ".github/workflows/desktop-release.yml" "runs-on: ubuntu-" nil)
+         (:text ".github/workflows/upstream.yml" "runs-on: ubuntu-" nil))
  :upstream (:manual "https://github.com/actions/runner-images")
  :reviewed "2026-10-17")
 
@@ -300,13 +311,29 @@
         :issue 763))
 
 (:name "Windows runner image" :category :ci
- :where ((:text ".github/workflows/verify.yml" "- os: windows-" nil))
+ :where ((:text ".github/workflows/verify.yml" "- os: windows-" nil)
+         (:text ".github/workflows/desktop-release.yml" "- os: windows-" nil))
  :upstream (:manual "https://github.com/actions/runner-images")
  :reviewed "2026-10-17")
+
+(:name "Windows on Arm runner image" :category :ci
+ :where ((:text ".github/workflows/windows-arm64-probe.yml" "runs-on: windows-" nil))
+ ;; Listed in actions/runner-images as "Windows 11 Arm64 ... windows-11-arm" (read 2026-10-23).
+ ;; actions/partner-runner-images, which listed it before, is archived.
+ :upstream (:manual "https://github.com/actions/runner-images")
+ :reviewed "2026-10-23")
 
 (:name "pgvector (Windows CI)" :category :ci
  :where ((:text ".github/workflows/verify.yml" "PGVECTOR_VERSION: \"" "\""))
  :upstream (:github-tag "pgvector/pgvector" "v"))
+
+;; The commit the Windows leg checks out for PGVECTOR_VERSION's tag. It must be that tag's commit:
+;; on 2026-10-23, v0.8.6 pointed at 8ee86c96f0fd72390f890aa8a336fda6d3ab4c6c, which is the pin.
+;; Moving PGVECTOR_VERSION means moving this too, and reviewing it.
+(:name "pgvector commit (Windows CI)" :category :ci
+ :where ((:text ".github/workflows/verify.yml" "PGVECTOR_COMMIT: \"" "\""))
+ :upstream (:manual "https://github.com/pgvector/pgvector/tags")
+ :reviewed "2026-10-23")
 
 ;;; --- containers --------------------------------------------------------------------------
 

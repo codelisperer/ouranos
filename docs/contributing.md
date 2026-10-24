@@ -130,6 +130,23 @@ Setting the first variable is your decision about your own store. Setting the se
 chose not to, and the summary and NOT COVERED both name the skipped checks. CI sets the first on
 every leg, because a runner's store is thrown away with the runner.
 
+### A test that opens a window runs only on GitHub Actions
+
+A test that creates a real `hyperion-view` window runs only when `GITHUB_ACTIONS` is set, which
+GitHub does on its runners. Otherwise it skips, and its skip message names `GITHUB_ACTIONS` (#885).
+Do not gate such a test on `CI`. Agents set `CI=1` on the maintainer's machines when they run
+suites, and a window would then open on that screen.
+
+In `hyperion/tests/view-tests.lisp`:
+- A real-window test checks `%real-window-allowed-p` before it does anything else.
+- `%run-hidden-launcher`, the only helper that lets the launcher create a window, signals an error
+  when `GITHUB_ACTIONS` is not set, so a test that forgets the check fails instead of opening a
+  window.
+- Every other run of `hyperion-view` in the tests sets `HYPERION_VIEW_NO_WINDOW=1`, which makes a
+  call that would create a window exit 3 instead.
+
+Follow the same rules for any new test that starts a program with a window.
+
 ### When your control passes, suspect the control
 
 A control run is how you check that a test can detect the defect it was written for: break

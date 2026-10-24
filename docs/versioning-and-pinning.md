@@ -175,11 +175,20 @@ version is written and where its latest release is published, not what the versi
 cannot disagree with the pin. `scripts/check-upstream.lisp`, run by `verify-tree.lisp`, fails
 when an entry no longer finds its pin, or when two places an entry names disagree (for example
 `libuv.pin`'s `version` line and its `url` line). It also fails when a pin in one of the places it
-scans has no entry. It scans three places: the identity lines of every `*.pin` file, the
-`*_VERSION` keys and `QUICKLISP_DIST` in `scripts/versions.env`, and the `uses:` lines of every
-workflow. A version written anywhere else, such as an image tag in a compose file, an API
-version string in the source or a `runs-on:` line, is covered only if somebody adds an entry
-for it; nothing finds it missing. It is offline and deterministic, like the rest of the gate.
+scans has no entry. It scans:
+- the identity lines of every `*.pin` file;
+- the `*_VERSION` keys and `QUICKLISP_DIST` in `scripts/versions.env`;
+- in every workflow: the `uses:` lines, the runner images in `runs-on:` and matrix `- os:` lines
+  (a value written as an expression, such as `${{ matrix.os }}`, is not one), and the
+  `*_VERSION` and `*_COMMIT` keys of `env:` blocks (#749);
+- the `image:` lines of compose files at the top of the tree, and the `image=` lines of the
+  scripts in `scripts/`, except a value taken from elsewhere such as `image=$2` (#749).
+
+A runner image is therefore tracked like any other pin: moving a workflow to `ubuntu-26.04`, or
+adding a job on a new image, fails the gate until `upstream.sexp` says where it is written. A
+version written anywhere else, such as an API version string or a default model id in the
+source, has no fixed shape to scan for. It is covered only by its entry's `:where`, and a new one
+with no entry goes unreported. It is offline and deterministic, like the rest of the gate.
 
 `sbcl --script scripts/check-upstream.lisp --online` compares each entry with its upstream
 and prints current, behind, held (behind on purpose, with its reason and issue), manual (an API

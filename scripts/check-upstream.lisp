@@ -16,10 +16,18 @@
 ;;;;   2. Every place an entry names still yields a value, and all of them yield the same one.
 ;;;;      A pin that moved, or a second copy of a version that was not updated with the first
 ;;;;      (libuv.pin's version and url lines, ASSETS.pin and assets.lisp), fails here.
-;;;;   3. Every pin in the tree has an entry: each identity line of each *.pin file (`version'
-;;;;      or `sha', or an ASSETS.pin-style `NAME VERSION sha256 HASH' line), each *_VERSION key
-;;;;      and QUICKLISP_DIST in scripts/versions.env, and each `uses: ACTION@' in each workflow.
-;;;;      A pin added without an entry fails here, in the commit that added it.
+;;;;   3. Every pin in the tree has an entry. The places a pin is looked for:
+;;;;        - each identity line of each *.pin file (`version' or `sha', or an ASSETS.pin-style
+;;;;          `NAME VERSION sha256 HASH' line);
+;;;;        - each *_VERSION key and QUICKLISP_DIST in scripts/versions.env;
+;;;;        - in each workflow: each `uses: ACTION@', each `runs-on:' and matrix `os:' value (a
+;;;;          runner image), and each *_VERSION or *_COMMIT key of an `env:' block (#749);
+;;;;        - each `image:' line of a compose file at the top of the tree, and each `image=' line
+;;;;          of a script in scripts/ (#749).
+;;;;      A pin added in one of those places without an entry fails here, in the commit that
+;;;;      added it. A version written anywhere else, such as an API version or a default model
+;;;;      id in Lisp source, has no fixed shape to look for: its entry's :WHERE is its only
+;;;;      coverage, and nothing reports such a pin when it has no entry.
 ;;;;
 ;;;; WITH --ONLINE it then asks each entry's upstream for its latest release and prints, per
 ;;;; entry, current, behind, held (behind on purpose, with the reason and issue), manual (an API
@@ -210,9 +218,96 @@ says why the place could not be read at all."
 pin-files.lisp for what is left out (#808)."
   (pin-files:pin-files *root*))
 
+(defun %key-up-to-version (value)
+  "The part of VALUE before its version: up to and including its first `-' (ubuntu-24.04 =>
+ubuntu-, windows-11-arm => windows-), or all of VALUE when it has none."
+  (let ((dash (position #\- value)))
+    (if dash (subseq value 0 (1+ dash)) value)))
+
+(defun %suffix-p (suffix string)
+  (and (> (length string) (length suffix))
+       (string= suffix string :start2 (- (length string) (length suffix)))))
+
+(defun %workflow-items (file)
+  "The pins in the workflow FILE: each action it uses, each runner image named by `runs-on:' or a
+matrix `os:', and each *_VERSION or *_COMMIT key of an env block. A value written as an
+expression, such as ${{ matrix.os }}, names no image and is left out."
+  (remove-duplicates
+   (loop for line in (file-lines file)
+         for w = (words line)
+         unless (comment-line-p line)
+           append (let ((items '()))
+                    (let* ((at (search "uses: " line))
+                           (spec (and at (up-to-space (subseq line (+ at 6)))))
+                           (sign (and spec (position #\@ spec))))
+                      (when sign
+                        (push (list :text file (format nil "uses: ~A@" (subseq spec 0 sign))) items)))
+                    ;; runs-on: ubuntu-24.04
+                    (when (and (equal (first w) "runs-on:") (second w)
+                               (not (search "${{" (second w))))
+                      (push (list :text file (concatenate 'string "runs-on: "
+                                                          (%key-up-to-version (second w))))
+                            items))
+                    ;; - os: ubuntu-24.04, as a matrix include entry
+                    (when (and (equal (first w) "-") (equal (second w) "os:") (third w)
+                               (not (search "${{" (third w))))
+                      (push (list :text file (concatenate 'string "- os: "
+                                                          (%key-up-to-version (third w))))
+                            items))
+                    ;; PGVECTOR_VERSION: "0.8.6" in an env block
+                    (let ((key (and (first w) (> (length (first w)) 1)
+                                    (char= #\: (char (first w) (1- (length (first w)))))
+                                    (subseq (first w) 0 (1- (length (first w)))))))
+                      (when (and key (second w)
+                                 (every (lambda (c) (or (upper-case-p c) (digit-char-p c) (char= c #\_))) key)
+                                 (or (%suffix-p "_VERSION" key) (%suffix-p "_COMMIT" key)))
+                        (push (list :text file (format nil "~A: ~:[~;\"~]" key
+                                                       (char= #\" (char (second w) 0))))
+                              items)))
+                    (nreverse items)))
+   :test #'equal))
+
+(defun %image-key (prefix image)
+  "PREFIX followed by IMAGE's name up to and including the `:' before its tag, for an IMAGE such
+as pgvector/pgvector:0.8.6-pg18@sha256:...; NIL when IMAGE has no tag."
+  (let* ((name-and-tag (subseq image 0 (or (position #\@ image) (length image))))
+         (colon (position #\: name-and-tag :from-end t)))
+    (and colon (concatenate 'string prefix (subseq name-and-tag 0 (1+ colon))))))
+
+(defun %compose-items ()
+  "Each `image: NAME:TAG' of a compose file at the top of the tree."
+  (loop for path in (sort (append (directory (merge-pathnames "docker-compose*.yml" *root*))
+                                  (directory (merge-pathnames "compose*.yml" *root*)))
+                          #'string< :key #'namestring)
+        for file = (relative path)
+        append (remove-duplicates
+                (loop for line in (file-lines file)
+                      for w = (words line)
+                      for key = (and (not (comment-line-p line)) (equal (first w) "image:") (second w)
+                                     (%image-key "image: " (second w)))
+                      when key collect (list :text file key))
+                :test #'equal)))
+
+(defun %script-image-items ()
+  "Each `image=NAME:TAG' of a shell script in scripts/. A value taken from elsewhere, such as
+image=$2 or image=\"$(...)\", names no image and is left out."
+  (loop for path in (sort (directory (merge-pathnames "scripts/*.sh" *root*)) #'string< :key #'namestring)
+        for file = (relative path)
+        append (remove-duplicates
+                (loop for line in (file-lines file)
+                      for trimmed = (string-left-trim '(#\Space #\Tab) line)
+                      for value = (and (not (comment-line-p line))
+                                       (> (length trimmed) 6)
+                                       (string= "image=" trimmed :end2 6)
+                                       (up-to-space (subseq trimmed 6)))
+                      for key = (and value (plusp (length value))
+                                     (not (member (char value 0) '(#\$ #\" #\')))
+                                     (%image-key "image=" value))
+                      when key collect (list :text file key))
+                :test #'equal)))
+
 (defun pinned-items ()
-  "Every pin the tree has, as (kind file key): an identity line of a *.pin file, a version key
-of scripts/versions.env, and an action a workflow uses."
+  "Every pin the tree has, as (kind file key), from the places listed in this file's header."
   (append
    (loop for path in (pin-files)
          for file = (relative path)
@@ -224,22 +319,13 @@ of scripts/versions.env, and an action a workflow uses."
                         collect (list :field file (first w))))
    (loop for line in (file-lines "scripts/versions.env")
          for key = (let ((eq (position #\= line))) (and eq (not (comment-line-p line)) (subseq line 0 eq)))
-         when (and key (or (string= key "QUICKLISP_DIST")
-                           (let ((suffix "_VERSION"))
-                             (and (> (length key) (length suffix))
-                                  (string= suffix key :start2 (- (length key) (length suffix)))))))
+         when (and key (or (string= key "QUICKLISP_DIST") (%suffix-p "_VERSION" key)))
            collect (list :env "scripts/versions.env" key))
    (loop for path in (sort (directory (merge-pathnames ".github/workflows/*.yml" *root*))
                            #'string< :key #'namestring)
-         for file = (relative path)
-         append (remove-duplicates
-                 (loop for line in (file-lines file)
-                       for at = (search "uses: " line)
-                       for spec = (and at (not (comment-line-p line)) (up-to-space (subseq line (+ at 6))))
-                       for sign = (and spec (position #\@ spec))
-                       when sign
-                         collect (list :text file (format nil "uses: ~A@" (subseq spec 0 sign))))
-                 :test #'equal))))
+         append (%workflow-items (relative path)))
+   (%compose-items)
+   (%script-image-items)))
 
 (defun covers-p (entries item)
   "Does some place of some entry name ITEM?"

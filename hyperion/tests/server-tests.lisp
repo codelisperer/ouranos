@@ -309,7 +309,7 @@ complete one. Over HTTP/1.1 the backend chunks it, and the terminating chunk is 
 present or absent -- which is the only way a test can tell the two apart."
   (let ((s (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
     (unwind-protect
-         (sb-ext:with-timeout 10
+         (ports:with-deadline (10 (format nil "GET ~A on port ~D" path port))
            (sb-bsd-sockets:socket-connect s #(127 0 0 1) port)
            (let ((st (sb-bsd-sockets:socket-make-stream s :input t :output t
                                                           :element-type 'character
