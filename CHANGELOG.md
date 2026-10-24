@@ -31,7 +31,9 @@ its tag.
   - `aion/uv` now depends on `aion/dynamic`, which has no dependencies of its own.
 
   SBCL for Windows (a `:sb-safepoint` build) does not give a new thread its creator's signal
-  mask, so the defect did not occur there; the call changes nothing on Windows.
+  mask, so the defect did not occur there; the call changes nothing on Windows. There,
+  `interrupt-thread` and `with-timeout` reach an `aion/uv` loop thread only when `uv_run`
+  returns to Lisp, so wake a loop with `aion/uv:submit` or `stop-loop-thread` instead.
 
   An app that starts its own threads from inside `sb-sys:without-interrupts`, or from code a
   caller may run inside it, can call `(aion/dynamic:unblock-interrupts)` first in each thread

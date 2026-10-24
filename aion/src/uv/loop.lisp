@@ -258,7 +258,13 @@ thread it is routed through SUBMIT so it lands on the owning thread."
   "Run LOOP on a dedicated SBCL thread and return that thread.
 
 An SBCL thread, specifically: callbacks then re-enter Lisp on a thread that has a Lisp
-stack, which is the property that makes foreign callbacks safe here."
+stack, which is the property that makes foreign callbacks safe here.
+
+TO WAKE THE LOOP THREAD, USE SUBMIT OR STOP-LOOP-THREAD, NOT AN INTERRUPT. Both go through the
+loop's async handle, which makes uv_run return. On Windows, SBCL (a :SB-SAFEPOINT build)
+delivers INTERRUPT-THREAD and SB-EXT:WITH-TIMEOUT to a thread only when it returns to Lisp, so
+they reach a loop thread waiting in uv_run only when an event wakes it, which may be never on an
+idle loop (#897's Windows leg). On Linux and macOS they arrive at once."
   (when (loop-thread loop)
     (error "This loop already has a thread."))
   (setf (loop-stop-requested-p loop) nil)
