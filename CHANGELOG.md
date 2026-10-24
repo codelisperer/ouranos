@@ -869,6 +869,19 @@ its tag.
 
 ### Added
 
+- **praxeon/actor: every deliberation step records how many of the prompt's estimated tokens came
+  from each source** (#317, step D). `praxeon/actor:request-messages` returns a third value, and
+  `praxeon/actor:prompt-breakdown` computes it: a plist of estimated tokens under `:system`,
+  `:observations` (the thread's observations sent in place of observed messages), `:facts`
+  (recalled subject facts), `:context` (the other context items and the block's framing),
+  `:tool-results` and `:messages`. Every part except `:system` adds up exactly to the estimate.
+  `deliberate` returns it as a third value, and each `:usage` event carries it as `:breakdown`.
+  Every step also logs one info line through `aion/log`, "praxeon/actor: prompt tokens", with
+  the breakdown beside the provider's four counts. The line holds counts only, no prompt text.
+  `praxeon/ceiling:meter` takes `:breakdown-fn`, and `record-usage` takes `:breakdown`; either
+  one keeps the plist on the usage line as `:breakdown`, and it is not charged. These are
+  estimates, characters over `*chars-per-token*`, not the provider's count.
+
 - **praxeon/actor: an agent can send its thread's observations in place of the messages they
   were distilled from** (#317, step C). `(praxeon/actor:attach-thread-memory agent store subject
   thread observer &key facts-budget replace-at read-tool)` gives an agent a thread memory:

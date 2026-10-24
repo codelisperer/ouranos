@@ -667,7 +667,9 @@ cleared. Returns how many were erased. A stand-in that names one of them then re
     (if store (res:forget-conversation-results store (agent-conversation agent)) 0)))
 
 (defun request-messages (agent)
-  "The messages a deliberation SENDS. Returns (values messages estimated-tokens).
+  "The messages a deliberation SENDS. Returns (values messages estimated-tokens breakdown).
+
+BREAKDOWN is a plist of estimated tokens by source (#317, step D), see PROMPT-BREAKDOWN.
 
 Not `agent-history', and the difference is the whole of pre-publication issue 402 (ADR-0001):
 
@@ -695,13 +697,15 @@ untrusted, the turn becomes untrusted (#317's taint ruling)."
                        (max 0 (- b (prompt:estimate-tokens (first observed))))
                        b)))
          (trimmed (prompt:trim-history (if start (nthcdr start history) history) budget))
-         (assembled (append (ctx:assemble (agent-context agent))
+         (assembled-context (ctx:assemble (agent-context agent)))
+         (assembled (append assembled-context
                             ;; Subject facts go with the other context items, after the cache
                             ;; marker, so a change to one does not invalidate the thread's cached
                             ;; observations (#317, step C).
                             (and memory
                                  (mem:recall (thread-memory-store memory) (thread-memory-subject memory)
                                              :budget (thread-memory-facts-budget memory)))))
+         (subject-facts (and memory (nthcdr (length assembled-context) assembled)))
          (facts (prompt:render-items assembled)))
     (when start
       (destructuring-bind (text untrusted) observed
@@ -717,10 +721,43 @@ untrusted, the turn becomes untrusted (#317's taint ruling)."
     ;; the member's own wish, so its source is harder to see than the original's.
     (when (some #'ctx:ctx-item-untrusted assembled)
       (setf (turn-guard-untrusted (%turn-guard agent)) t))
-    (let ((messages (if facts
-                        (prompt:attach-context trimmed facts)
-                        trimmed)))
-      (values messages (prompt:messages-tokens messages)))))
+    (let* ((messages (if facts
+                         (prompt:attach-context trimmed facts)
+                         trimmed))
+           (estimate (prompt:messages-tokens messages)))
+      (values messages estimate
+              (prompt-breakdown agent messages estimate
+                                :observations (and start (first observed))
+                                :block facts :subject-facts subject-facts)))))
+
+(defun prompt-breakdown (agent messages estimate &key observations block subject-facts)
+  "The estimated tokens of a request by source, as a plist (#317, step D): :SYSTEM, the system
+prompt; :OBSERVATIONS, the thread's observations sent in place of observed messages; :FACTS, the
+subject facts recalled from the thread memory; :CONTEXT, the rest of the context block, which is
+the agent's context items and the block's own framing; :TOOL-RESULTS, the results of tool calls in
+MESSAGES; and :MESSAGES, everything else in MESSAGES, which is the raw conversation, the tool calls
+and each message's overhead. ESTIMATE is PRAXEON/PROMPT:MESSAGES-TOKENS of MESSAGES, which
+excludes the system prompt, and the parts other than :SYSTEM add up to it exactly. OBSERVATIONS
+and BLOCK are the texts that were sent, or NIL; SUBJECT-FACTS the recalled context items. These
+are estimates, characters over PRAXEON/PROMPT:*CHARS-PER-TOKEN*, never the provider's count; the
+:USAGE event carries both."
+  (let* ((system (let ((prompt (agent-system-prompt agent)))
+                   (if (stringp prompt) (prompt:estimate-tokens prompt) 0)))
+         (observations (if observations (prompt:estimate-tokens observations) 0))
+         (block-tokens (if block (prompt:estimate-tokens block) 0))
+         (facts (min block-tokens
+                     (reduce #'+ subject-facts
+                             :key (lambda (i) (prompt:estimate-tokens (ctx:ctx-item-content i)))
+                             :initial-value 0)))
+         (tool-results (loop for m in messages
+                             for content = (llm:content m)
+                             when (listp content)
+                               sum (loop for part in content
+                                         when (eq (getf part :type) :tool-result)
+                                           sum (prompt:part-tokens part)))))
+    (list :system system :observations observations :facts facts
+          :context (- block-tokens facts) :tool-results tool-results
+          :messages (- estimate observations block-tokens tool-results))))
 
 ;;; --------------------------------------------------------------------------
 ;;; A thread's observations in place of its observed messages (#317, step C)
@@ -994,7 +1031,8 @@ agent's MAX-TOKENS slot, else `llm:*default-max-tokens*' as it is now (#326)."
 (defun deliberate (agent &key permit max-tokens)
   "Ask the provider for the agent's next move given its current history,
 advertising the means PERMIT allows as tools. Returns (values COMPLETION
-ESTIMATED-INPUT-TOKENS). Signals DELIBERATION-FAILURE when no provider is configured.
+ESTIMATED-INPUT-TOKENS BREAKDOWN), BREAKDOWN as PROMPT-BREAKDOWN gives it. Signals
+DELIBERATION-FAILURE when no provider is configured.
 
 MAX-TOKENS is the output-token limit for this call. When it is NIL the agent's MAX-TOKENS slot
 applies, and when that is NIL too, `llm:*default-max-tokens*' (#326). Before #326 no limit was
@@ -1012,13 +1050,13 @@ PERMIT is passed to AGENT-TOOL-SPECS, so a means the caller may not use is never
 to the model at all (#90)."
   (unless (agent-provider agent)
     (error 'cnd:deliberation-failure :detail "no provider configured"))
-  (multiple-value-bind (messages estimate) (request-messages agent)
+  (multiple-value-bind (messages estimate breakdown) (request-messages agent)
     (values (llm:complete (agent-provider agent)
                           messages
                           :system (agent-system-parts agent)
                           :tools (agent-tool-specs agent :permit permit)
                           :max-tokens (%output-limit agent max-tokens))
-            estimate)))
+            estimate breakdown)))
 
 (defun act (agent means-name argument &key permit)
   "Apply a registered means by name to ARGUMENT, establishing recovery restarts.
@@ -1219,7 +1257,7 @@ values. CONTINUE-TURN enters here too, after it has written a held step's result
                           :detail (format nil "no final answer within ~A steps"
                                           max-steps)))
       (evt:emit :deliberating :step step)
-      (multiple-value-bind (completion estimate)
+      (multiple-value-bind (completion estimate breakdown)
           (deliberate agent :permit permit :max-tokens limit)
         ;; Economic calculation: report what this step cost so the scarce resource
         ;; (the token budget) is visible. :ESTIMATED-INPUT is what the history budget was
@@ -1255,6 +1293,16 @@ values. CONTINUE-TURN enters here too, after it has written a held step's result
               (out (llm:completion-output-tokens completion))
               (cache-read (llm:completion-cache-read-tokens completion))
               (cache-write (llm:completion-cache-write-tokens completion)))
+          ;; THE PER-STEP TOKEN BREAKDOWN (#317, step D), logged on every step whether or not the
+          ;; provider reported a count, because the estimate is ours and always exists. Counts
+          ;; only: no text of the prompt.
+          (log:info "praxeon/actor: prompt tokens"
+                    :agent (agent-name agent) :step step :estimated-input estimate
+                    :system (getf breakdown :system) :observations (getf breakdown :observations)
+                    :facts (getf breakdown :facts) :context (getf breakdown :context)
+                    :tool-results (getf breakdown :tool-results)
+                    :messages (getf breakdown :messages)
+                    :input in :output out :cache-read cache-read :cache-write cache-write)
           (when (or in out cache-read cache-write)
             ;; NO `(or in 0)'. NIL and 0 ARE DIFFERENT ANSWERS and the distinction is the
             ;; whole point -- `completion's own docstring says so, and `ceiling:record-usage'
@@ -1269,7 +1317,7 @@ values. CONTINUE-TURN enters here too, after it has written a held step's result
             ;; amount rather than absent, and short-by-unknown reads as a real number (pre-publication issue 444).
             (evt:emit :usage :input in :output out
                              :cache-read cache-read :cache-write cache-write
-                             :estimated-input estimate)))
+                             :estimated-input estimate :breakdown breakdown)))
         (let ((text (llm:completion-text completion))
               (calls (llm:completion-tool-calls completion)))
           (cond
