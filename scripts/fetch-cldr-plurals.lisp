@@ -42,7 +42,7 @@
 (defparameter *pin-file* (merge-pathnames "hyperion/src/vendor/PLURALS.pin" *root*))
 (defparameter *out-file* (merge-pathnames "hyperion/src/vendor/cldr-plurals.lisp" *root*))
 
-(defparameter *cldr-version* "48.2.1")
+(defparameter *cldr-version* "48.2.3")
 (defparameter *advisories* "https://github.com/unicode-org/cldr-json/security/advisories"
   "Where CLDR publishes security advisories, written into PLURALS.pin (#735).")
 (defparameter *expected-sha256*
