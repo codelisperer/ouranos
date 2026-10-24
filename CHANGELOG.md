@@ -54,6 +54,53 @@ its tag.
   `make-nearest`, `nearest-offer` and `nearest-items` for keeping the k nearest during a scan.
   `praxeon/retrieval` now uses `praxeon/llm`'s `cosine-distance` and no longer keeps its own copy.
 
+- **Observations derived from untrusted content are marked, taint the turn when they are in the
+  prompt, and are not promoted by default** (#317, after #827). An observation distilled from a
+  window that read a web page, or another means that returns outside content, could be carried
+  into later prompts and into other conversations with nothing marking where it came from, and a
+  model's summary can make an injected instruction read like the member's own wish. Now:
+  - `praxeon/memory:provenance` has `untrusted` (`make-provenance … :untrusted t`), read by
+    `observation-untrusted-p`. `condense` marks the condensed observation untrusted when any
+    source is, in every store (`inherit-taint`).
+  - `praxeon/observe:make-observer` takes `:untrusted-p`, a function of a window's messages.
+    **By default any window holding a tool call or result is taken as untrusted**
+    (`window-holds-a-tool-call-p`), since the observer cannot tell which tools return outside
+    content; an app with an agent passes `(praxeon/actor:untrusted-window-predicate agent)`,
+    which judges each call as the agent does (#827's `:untrusted` means), counts a call whose
+    result became untrusted while it ran (a delegated agent that read a page or was given an
+    untrusted item), and under `:taint-scope :conversation` takes every window after an
+    untrusted read as untrusted.
+  - **With the default predicate, nearly every observation of an agent that uses tools is
+    untrusted, so once recalled into its context they hold or refuse its `:requires-user-intent`
+    means on every turn.** The remedy is to pass `(praxeon/actor:untrusted-window-predicate
+    agent)` as `:untrusted-p`. An observer of a sub-agent must pass the sub-agent's predicate:
+    the default does not count a delegated task, which is the coordinating model's text, as
+    untrusted. An app that wants untrusted observations out of a prompt altogether filters what
+    it recalls with `observation-untrusted-p`; `recall` has no option for it, since that would
+    change every store's protocol.
+  - **A later window cannot launder an untrusted observation.** A proposal that replaces an
+    untrusted observation, or repeats one word for word, is untrusted whatever its window
+    (`apply-distillation`), and the observations the distiller is shown as already known are
+    labelled when they came from untrusted content. A paraphrase is not caught; the label is what
+    tells the model. A promoted fact carries its observation's mark.
+  - **An untrusted observation is promoted to a fact about the subject only when the new
+    `:promote-untrusted` allows it, on top of `:promote`**; it refuses by default. An app that
+    promotes from conversations with tool calls gets no new subject facts from them until it
+    passes one of the two functions.
+  - `praxeon/context:ctx-item` has `untrusted`, set by `observation->ctx-item`.
+    `praxeon/prompt:render-items` labels such an item `[note, from untrusted content]`.
+  - **An agent whose assembled context holds an untrusted item treats its turn as untrusted**,
+    under both taint scopes, so means declared `:requires-user-intent` are refused or held, as
+    after a web read. This is stricter than the rule for a raw untrusted result, which `:turn`
+    stops counting at the user's next message, on purpose: the item is a summary that hides its
+    source.
+  - `praxeon/memory-db` stores it in a new `untrusted` column (BOOLEAN), which `ensure-schema`
+    adds to an existing table. **Rows written before read as trusted**, though nothing recorded
+    whether they were. `(praxeon/memory-db:ensure-schema store :legacy-untrusted t)` marks every
+    thread observation already in the table untrusted on the call that adds the column, and
+    leaves facts about the subject alone; for a table that already has the column, the same is
+    `UPDATE <table> SET untrusted = TRUE WHERE thread IS NOT NULL` (`= 1` on SQLite), run once.
+
 - **aion/uv: `close-loop` frees a loop only when `uv_loop_close` succeeds** (#877). Before, it
   ignored `uv_loop_close`'s result and freed the loop even when libuv returned `UV_EBUSY`
   because a handle or request was still open on it, and libuv then used the freed memory. A
@@ -574,10 +621,13 @@ its tag.
   observation, in one process or two, no longer leave two current replacements. An app that
   superseded the same observation twice now gets a `praxeon-error` on the second call. The
   embedding is computed before the lock is taken, so a read does not wait for the model.
-- **praxeon/memory-db: every read needs two new columns, and `ensure-schema` adds them** (#317):
-  `thread` (TEXT) and `source_through` (BIGINT on Postgres, INTEGER on SQLite). A read of the
+- **praxeon/memory-db: every read needs three new columns, and `ensure-schema` adds them** (#317):
+  `thread` (TEXT), `source_through` (BIGINT on Postgres, INTEGER on SQLite) and `condensed_from`
+  (TEXT). `condensed_from` comes with the reflector (#464): it holds the ids a condensed
+  observation replaced, and a table made before it needs it too, whether or not the app reflects.
+  A read of the
   subject's facts filters on `thread IS NULL`, so on a table made before them every read fails,
-  not only a thread's. An app acts if it does not call `ensure-schema` at start: it adds the two
+  not only a thread's. An app acts if it does not call `ensure-schema` at start: it adds the three
   columns in its own migration before it reads. Existing rows become facts about their subject,
   as they were. `ensure-schema` also creates a second table, the observations table's name with
   `_progress` appended: `id` (TEXT, the primary key, which `record-thread-progress` upserts on),
@@ -742,6 +792,31 @@ its tag.
   `claude-opus-5-5` where they named `claude-opus-4-8`.
 
 ### Added
+
+- **praxeon/actor: an agent can send its thread's observations in place of the messages they
+  were distilled from** (#317, step C). `(praxeon/actor:attach-thread-memory agent store subject
+  thread observer &key facts-budget replace-at read-tool)` gives an agent a thread memory:
+  - after every turn, `run-turn` (and `continue-turn`) gives the observer the agent's history,
+    which returns at once; the history stays the full record;
+  - facts about the subject are recalled within `:facts-budget` (1000 estimated tokens) and
+    attached after the cache marker with the agent's other context items;
+  - **`:replace-at` is NIL by default, which never replaces**, until #317's benchmark measures a
+    value. Once the observed messages reach it, what is sent is the system prompt, then a user
+    message with the thread's observations as its first part, carrying the cache marker, then the
+    rest of the history, trimmed as before, with the observations counted against its budget.
+    **Nothing unobserved is cut:** the cut is the last message the user wrote at or before the
+    observer's mark and before any skipped window, so a turn cut mid-exchange is sent whole, a
+    tool's result is never sent without its call, and a window the observer gave up on stays
+    raw; with no observations nothing is cut. The observations are rendered in a fixed order
+    (`thread-observations-text`), each on one line with its content's line breaks collapsed and
+    `[` escaped, so the part up to the marker is byte-identical from turn to turn until a
+    distillation or a reflection changes them;
+  - an observation from untrusted content is labelled in that part and makes the turn untrusted;
+  - `read-observed-messages`, registered unless `:read-tool nil` with `:max-per-turn 5`,
+    returns the messages an observation, or the observations a condensed one replaced, came
+    from, at most `*read-result-max-characters*` of them. When the observation or those messages
+    are untrusted it says so in its answer and marks the turn untrusted, and a call to it in the
+    history counts as untrusted for an agent rebuilt from it.
 
 - **hades: `reveal-path` shows a file or directory in the system file manager, and `open-url`
   opens a web page in the default browser** (#820), with no shell. `(hades/open:reveal-path path
@@ -1543,9 +1618,9 @@ its tag.
     so an observation the app writes into the thread closes nothing, and erasing a later
     window's observations reopens nothing. A window whose tries are spent, with no later window
     written, stays open and is not tried again.
-  - `make-observer` refuses `:accept`, `:promote` or `:promote-accept` that is not a function or
-    the name of one, including a symbol that names a macro or a special operator, such as
-    `when`.
+  - `make-observer` refuses `:accept`, `:promote`, `:promote-accept`, `:reflect-accept` or
+    `:reflect-accept-protected` that is not a function or the name of one, including a symbol
+    that names a macro or a special operator, such as `when`.
   - If the observer's thread cannot be made, `observe-turn` signals the error and gives back its
     claim on the conversation, so a later call can start a run. The claim, the thread and its
     recording are one step with interrupts deferred, so a deadline around the app's request
@@ -1587,6 +1662,42 @@ its tag.
     proposal, and so does an `applies_from` that is a number, an array, an object or `true`.
     JSON null, `false` (which jzon reads as NIL) and an empty string mean no date.
     `apply-distillation` takes `:thread`.
+- **praxeon/observe: `reflect` condenses a scope's observations once they pass a threshold**
+  (#317, step B), 40,000 estimated tokens by default. A model returns condensed observations,
+  each naming the observations it replaces, and each is written only when the app's `:accept`
+  allows it; one that would merge a correction, or an observation at or above `:protect-value`,
+  also needs `:accept-protected`. Both refuse by default. `reflect` signals when the model's
+  answer cannot be read.
+  - **What counts toward the threshold** is the observations `reflect` may condense on `:accept`
+    alone (`praxeon/observe:condensable-tokens`): corrections and observations at or above
+    `:protect-value` are left out, so a scope of corrections is not reflected on over and over.
+    `:floor` raises the threshold for one call.
+  - **An item that does not condense is not written:** one with a single source, or one whose
+    content is not shorter than its sources' contents together. An item `condense` refuses is
+    logged and the other items are still written. `reflect` returns the observations written,
+    the condensable tokens left, and whether the model was asked.
+  - **An observer made with `:reflect-threshold`** (NIL or a positive integer) reflects on its
+    thread once at the end of a run that wrote a window, after the windows' progress is saved,
+    with `:reflect-accept`, `:reflect-accept-protected` and `:reflect-protect-value` (NIL or a
+    number) as `reflect`'s accept functions and protect value. The reflection counts as an attempt
+    for `observer-stuck-p`, and `stop-observer` can end it without losing the run's saved mark.
+    After a reflection, written or not, the next waits until the condensable tokens have grown by
+    another threshold past what it left. A reflection that fails is counted in
+    `observer-failures` and logged, and the windows stay written. `make-observer` refuses a
+    store with no `condense` method when `:reflect-threshold` is given.
+  - `praxeon/memory:condense` replaces several current observations in one scope with one,
+    which supersedes them and records their ids in `observation-condensed-from`, so `recall
+    :as-of` before still returns them. Its kind defaults to `:correction` when any source is a
+    correction, and its value to the highest of the sources' (`condensed-kind`,
+    `condensed-value`), so a condensation keeps the protection its sources had. It checks that every source is still current and writes
+    in the same step: under the store's lock, and on the SQL store in one transaction whose
+    updates change a source only while it is still current. The SQL store computes the
+    condensed observation's embedding before taking the lock. It refuses a source named twice.
+    An app's own memory store implements `condense` before it can be reflected on. A promoted
+    correction of a condensed observation is matched to the subject facts its sources came from.
+  - `praxeon/memory:observations-from-conversation` returns every observation that came from a
+    conversation, including those condensed from one, at any depth: what an erasure of the
+    conversation has to find (#150).
 - **`scripts/build-installer.ps1` and `scripts/build-dmg.sh` read the bundle's `RELEASE` file,
   which `scripts/build-desktop-app.lisp` writes when given `--product`, `--display-name` or
   `--default-channel`** (#408).

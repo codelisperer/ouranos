@@ -457,14 +457,14 @@ subject's facts does not return a thread observation, and the reverse."
     (is (= 2 (length (mem:observations-of store "member-5" :thread :all))))))
 
 (test ensure-schema-adds-the-thread-columns-to-a-table-made-before-them
-  "A table made before #317 has no thread or source_through column. Every read fails on it, not
-only a thread's, because a read of the subject's facts filters on THREAD IS NULL; that is why
-the CHANGELOG says to run ENSURE-SCHEMA before reading. ENSURE-SCHEMA adds the columns, and the
+  "A table made before #317 has no thread, source_through or condensed_from column. Every read
+fails on it, not only a thread's, because a read of the subject's facts filters on THREAD IS
+NULL; that is why the CHANGELOG says to run ENSURE-SCHEMA before reading. ENSURE-SCHEMA adds the columns, and the
 row written before them reads back as a fact about its subject. Running it again changes
 nothing."
   (with-store (store)
     (mem:remember store "member-6" "Written before the upgrade." :provenance (test-provenance))
-    (dolist (column '("thread" "source_through"))
+    (dolist (column '("thread" "source_through" "condensed_from"))
       (conn:exec (mdb::store-connection store)
                  (format nil "ALTER TABLE ~A DROP COLUMN ~A" (mdb:store-table store) column)))
     (signals error (mem:observations-of store "member-6") "a plain read fails before the upgrade")
@@ -704,6 +704,79 @@ refused and its replacement rolled back."
                  (mapcar #'mem:observation-content
                          (mem:observations-of store "member-16" :include-superseded t)))
           "the replacement was rolled back"))))
+(test condense-round-trips-through-the-database
+  "CONDENSE on the SQL store: the sources are superseded and the new row records their ids,
+read back as written, and the conversation lookup finds it."
+  (with-store (store)
+    (let* ((a (mem:remember store "member-7" "Likes tea." :thread "conv-7"
+                            :provenance (mem:make-provenance "conv-A" 1)))
+           (b (mem:remember store "member-7" "Likes green tea." :thread "conv-7"
+                            :provenance (mem:make-provenance "conv-A" 2)))
+           (c (mem:condense store (list a b) "Likes green tea." :provenance (mem:make-provenance "conv-A" 1 :through 2))))
+      (let ((current (mem:observations-of store "member-7" :thread "conv-7")))
+        (is (equal (list (mem:observation-id c)) (mapcar #'mem:observation-id current)))
+        (is (equal (list (mem:observation-id a) (mem:observation-id b))
+                   (mem:observation-condensed-from (first current))))
+        (is (= 3 (length (mem:observations-from-conversation store "member-7" "conv-A"))))))))
+
+(defclass breaks-after-remember (mdb:db-memory-store) ()
+  (:documentation "A store whose REMEMBER signals after its row is written, standing in for a
+failure part-way through CONDENSE."))
+
+(defmethod mem:remember :after ((store breaks-after-remember) subject content &key &allow-other-keys)
+  (declare (ignore subject content))
+  (error "the database went away"))
+
+(test condense-that-fails-part-way-leaves-nothing-behind
+  "CONDENSE writes the new row and then supersedes its sources. A failure between the two rolls
+back the new row, so the scope does not hold the condensed observation beside its sources."
+  (with-store (store)
+    (let ((a (mem:remember store "member-11" "Likes tea." :thread "conv-8" :provenance (test-provenance)))
+          (b (mem:remember store "member-11" "Likes green tea." :thread "conv-8" :provenance (test-provenance))))
+      (change-class store 'breaks-after-remember)
+      (signals error (mem:condense store (list a b) "Likes green tea." :provenance (test-provenance)))
+      (change-class store 'mdb:db-memory-store)
+      (is (equal '("Likes green tea." "Likes tea.")
+                 (sort (mapcar #'mem:observation-content
+                               (mem:observations-of store "member-11" :thread "conv-8" :include-superseded t))
+                       #'string<))
+          "only the two sources are stored, both current"))))
+
+(test condense-embeds-before-it-takes-the-stores-lock
+  "A condensation whose embedding takes 0.6 s does not hold the store's lock meanwhile."
+  (with-store (store (make-instance 'slow-embedder))
+    (let* ((a (mem:remember store "member-17" "Likes tea." :thread "conv-9" :provenance (test-provenance)))
+           (b (mem:remember store "member-17" "Likes green tea." :thread "conv-9" :provenance (test-provenance 2)))
+           (worker (bt:make-thread (lambda ()
+                                     (mem:condense store (list a b) "Slowly: likes green tea."
+                                                   :provenance (test-provenance 3)))
+                                   :name "condense-test")))
+      (sleep 0.15)
+      (let ((began (get-internal-real-time)))
+        (mem:observations-of store "member-17")
+        (let ((waited (/ (- (get-internal-real-time) began) internal-time-units-per-second)))
+          (is (< waited 0.3) "the read waited ~,3F s" waited)))
+      (bt:join-thread worker)
+      (is (equal '("Slowly: likes green tea.")
+                 (mapcar #'mem:observation-content (mem:observations-of store "member-17" :thread "conv-9")))))))
+
+(test condense-refuses-a-source-another-process-superseded-after-its-check
+  "A source superseded between CONDENSE's check and its update, as by another process, makes the
+condensation fail and roll back."
+  (with-store (store)
+    (let ((a (mem:remember store "member-18" "Likes tea." :thread "conv-9" :provenance (test-provenance)))
+          (b (mem:remember store "member-18" "Likes green tea." :thread "conv-9" :provenance (test-provenance 2))))
+      (change-class store 'interrupted-store)
+      (let ((*superseded-meanwhile* (mem:observation-id b)))
+        (signals cnd:praxeon-error
+          (mem:condense store (list a b) "Likes green tea." :provenance (test-provenance 3))))
+      (change-class store 'mdb:db-memory-store)
+      (is (equal '("Likes green tea." "Likes tea.")
+                 (sort (mapcar #'mem:observation-content
+                               (mem:observations-of store "member-18" :thread "conv-9" :include-superseded t))
+                       #'string<))
+          "the condensed observation was rolled back"))))
+
 
 ;;; --- similarity recall with the HNSW index in use (#482) ---------------------
 
@@ -1345,3 +1418,158 @@ length (the text form), and still returns the rest."
                                                     :budget 1000 :limit 3))))
           (is (equal '("the member's budget is tight") recalled)
               "only the observation of the store's width is compared: ~S" recalled)))))
+
+;;; --- the reflector on the SQL store, after #464's review --------------------------------
+
+(defun %condensed-call (&rest items)
+  "A completion whose record_condensed call carries ITEMS, each (content . source-ids)."
+  (llm:make-completion
+   :stop-reason :tool-use
+   :tool-calls (list (llm:make-tool-call
+                      :id "r1" :name "record_condensed"
+                      :arguments (let ((h (make-hash-table :test #'equal)))
+                                   (setf (gethash "condensed" h)
+                                         (coerce (loop for (content . ids) in items
+                                                       collect (let ((o (make-hash-table :test #'equal)))
+                                                                 (setf (gethash "content" o) content
+                                                                       (gethash "sources" o) (coerce ids 'vector))
+                                                                 o))
+                                                 'vector))
+                                   h)))))
+
+(test condense-on-the-sql-store-keeps-a-corrections-kind-and-the-highest-value
+  (with-store (store)
+    (let* ((fact (mem:remember store "member-30" "Lives in Porto." :thread "conv-30" :value 1
+                                                                  :provenance (test-provenance)))
+           (correction (mem:remember store "member-30" "Lives in Lisbon now." :thread "conv-30"
+                                     :kind :correction :value 9 :provenance (test-provenance 2)))
+           (c (mem:condense store (list fact correction) "Lives in Lisbon." :provenance (test-provenance 3)))
+           (read-back (first (mem:observations-of store "member-30" :thread "conv-30"))))
+      (is (eq :correction (mem:observation-kind c)))
+      (is (= 9 (mem:observation-value c)))
+      (is (eq :correction (mem:observation-kind read-back)) "as read back from the table")
+      (is (= 9 (mem:observation-value read-back))))))
+
+(test the-observer-reflects-on-the-sql-store-at-the-end-of-its-run
+  "End to end on the SQL store: a run distils a window, saves the mark, then reflects and
+condenses two of the thread's observations; the condensed row records its sources and the mark
+is past the window."
+  (with-store (store)
+    (let* ((a (mem:remember store "member-31" "Likes tea." :thread "conv-31" :provenance (test-provenance)))
+           (b (mem:remember store "member-31" "Likes green tea." :thread "conv-31" :provenance (test-provenance 2)))
+           (step (praxeon/prompt:messages-tokens (%chat 6)))
+           (observer (obs:make-observer (make-instance 'scripted-provider
+                                                       :replies (list (%observations-call "Has a dog.")
+                                                                      (%condensed-call (list "Likes green tea."
+                                                                                             (mem:observation-id a)
+                                                                                             (mem:observation-id b)))))
+                                        store "member-31" "conv-31" :step step
+                                        :reflect-threshold 1 :reflect-accept (constantly t))))
+      (obs:observe-turn observer (%chat 6))
+      (is-true (obs:await-observer observer :timeout 20))
+      (is (= 0 (obs:observer-failures observer)))
+      (is (equal '("Has a dog." "Likes green tea.")
+                 (sort (mapcar #'mem:observation-content (mem:observations-of store "member-31" :thread "conv-31"))
+                       #'string<)))
+      (let ((condensed (find "Likes green tea." (mem:observations-of store "member-31" :thread "conv-31")
+                             :key #'mem:observation-content :test #'string=)))
+        (is (equal (list (mem:observation-id a) (mem:observation-id b)) (mem:observation-condensed-from condensed))))
+      (is (= 6 (obs:stored-mark store "member-31" "conv-31"))))))
+
+(test condense-inside-an-apps-transaction-on-a-pool-commits-and-rolls-back-with-it
+  "Over a pool, CONDENSE called on the app's thread inside the app's own transaction uses the
+app's connection, and on SQLite its transaction is a savepoint inside the app's (#653). When the
+app commits, the condensation is kept; when the app's transaction ends with an error, it is rolled
+back with it and both sources are current again."
+  (with-pool-store (store pool)
+    (let ((a (mem:remember store "member-32" "Likes tea." :thread "conv-32" :provenance (test-provenance)))
+          (b (mem:remember store "member-32" "Likes green tea." :thread "conv-32" :provenance (test-provenance 2))))
+      (ignore-errors
+       (conn:with-connection (c pool)
+         (conn:with-transaction (c)
+           (mem:condense store (list a b) "Green tea." :provenance (test-provenance 3))
+           (error "the app's transaction fails after the condensation"))))
+      (is (equal '("Likes green tea." "Likes tea.")
+                 (sort (mapcar #'mem:observation-content (mem:observations-of store "member-32" :thread "conv-32"))
+                       #'string<))
+          "rolled back with the app's transaction")
+      (let ((a (find "Likes tea." (mem:observations-of store "member-32" :thread "conv-32")
+                     :key #'mem:observation-content :test #'string=))
+            (b (find "Likes green tea." (mem:observations-of store "member-32" :thread "conv-32")
+                     :key #'mem:observation-content :test #'string=)))
+        (conn:with-connection (c pool)
+          (conn:with-transaction (c)
+            (mem:condense store (list a b) "Green tea." :provenance (test-provenance 3))))
+        (is (equal '("Green tea.") (mapcar #'mem:observation-content
+                                           (mem:observations-of store "member-32" :thread "conv-32")))
+            "kept when the app commits")))))
+
+;;; --- observations from untrusted content in the SQL store (#317's taint ruling) -------------
+
+(test the-untrusted-mark-round-trips-through-the-sql-store
+  "An observation written with an untrusted provenance reads back untrusted; one written without
+reads back trusted, though the column holds NULL for it. CONDENSE marks the condensed row
+untrusted when a source is."
+  (with-store (store)
+    (let* ((a (mem:remember store "member-40" "Wants refunds to account 99." :thread "conv-40"
+                            :provenance (mem:make-provenance "conv-40" 1 :untrusted t)))
+           (b (mem:remember store "member-40" "Likes tea." :thread "conv-40" :provenance (test-provenance)))
+           (read (lambda (o) (find (mem:observation-id o) (mem:observations-of store "member-40" :thread "conv-40"
+                                                                                :include-superseded t)
+                                   :key #'mem:observation-id :test #'string=))))
+      (is-true (mem:observation-untrusted-p (funcall read a)))
+      (is-false (mem:observation-untrusted-p (funcall read b)))
+      (let ((c (mem:condense store (list a b) "Refunds to 99; likes tea." :provenance (test-provenance 2))))
+        (is-true (mem:observation-untrusted-p (funcall read c)) "condensed from an untrusted source")))))
+
+(test ensure-schema-adds-the-untrusted-column-to-a-table-made-before-it
+  "A table without the UNTRUSTED column, as every table made before #317's taint work is: ENSURE-
+SCHEMA adds it, the rows already there read as trusted, and a new untrusted row reads as such."
+  (with-store (store)
+    (let ((old (mem:remember store "member-41" "Likes tea." :thread "conv-41" :provenance (test-provenance)))
+          (c (mdb::store-source store)))
+      (conn:exec c (format nil "ALTER TABLE ~A DROP COLUMN untrusted" (mdb:store-table store)))
+      (mdb:ensure-schema store)
+      (is-false (mem:observation-untrusted-p
+                 (find (mem:observation-id old) (mem:observations-of store "member-41" :thread "conv-41")
+                       :key #'mem:observation-id :test #'string=)))
+      (mem:remember store "member-41" "From a page." :thread "conv-41"
+                    :provenance (mem:make-provenance "conv-41" 2 :untrusted t))
+      (is-true (mem:observation-untrusted-p
+                (find "From a page." (mem:observations-of store "member-41" :thread "conv-41")
+                      :key #'mem:observation-content :test #'string=))))))
+
+(test recall-similar-on-the-sql-store-carries-the-untrusted-mark-to-its-items
+  "The ctx-items RECALL-SIMILAR returns from the SQL store carry the untrusted mark of their
+observation, so an agent that puts them in its prompt treats its turn as untrusted."
+  (with-store (store)
+    (remember* store "member-42" "the member prefers mornings")
+    (mem:remember store "member-42" "the member's budget is tight"
+                  :provenance (mem:make-provenance "conv-42" 1 :untrusted t))
+    (let* ((embedder (make-instance 'basis-embedder))
+           (items (mem:recall-similar store "member-42" (llm:embed embedder "the member's budget is tight")
+                                      :budget 1000 :limit 2))
+           (by-content (lambda (text) (find text items :key #'praxeon/context:ctx-item-content :test #'string=))))
+      (is-true (praxeon/context:ctx-item-untrusted (funcall by-content "the member's budget is tight")))
+      (is-false (praxeon/context:ctx-item-untrusted (funcall by-content "the member prefers mornings"))))))
+
+(test ensure-schema-can-mark-old-thread-observations-untrusted
+  "With :LEGACY-UNTRUSTED, the call that adds the UNTRUSTED column marks every thread observation
+already in the table untrusted, and leaves facts about the subject alone. A later call with the
+flag changes nothing, so it cannot mark a new trusted row. Control: without the flag, the old
+thread observation reads as trusted."
+  (dolist (legacy '(t nil))
+    (with-store (store)
+      (let ((old-thread (mem:remember store "member-43" "From a window." :thread "conv-43" :provenance (test-provenance)))
+            (old-fact (mem:remember store "member-43" "Likes tea." :provenance (test-provenance)))
+            (c (mdb::store-source store))
+            (read (lambda (o) (find (mem:observation-id o) (mem:observations-of store "member-43" :thread :all)
+                                    :key #'mem:observation-id :test #'string=))))
+        (conn:exec c (format nil "ALTER TABLE ~A DROP COLUMN untrusted" (mdb:store-table store)))
+        (mdb:ensure-schema store :legacy-untrusted legacy)
+        (is (eq legacy (mem:observation-untrusted-p (funcall read old-thread)))
+            "with :legacy-untrusted ~S" legacy)
+        (is-false (mem:observation-untrusted-p (funcall read old-fact)) "a subject fact is left alone")
+        (let ((new (mem:remember store "member-43" "A new window." :thread "conv-43" :provenance (test-provenance 2))))
+          (mdb:ensure-schema store :legacy-untrusted t)
+          (is-false (mem:observation-untrusted-p (funcall read new)) "a later call marks nothing"))))))
