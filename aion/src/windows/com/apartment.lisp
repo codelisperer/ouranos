@@ -199,8 +199,9 @@ that skips this deadlocks against any out-of-process server that calls back into
     (setf (apartment-thread apartment)
           ;; THREAD-LIFETIME: independent -- an apartment is a long-lived home for COM
           ;; objects and serves whoever calls in later (#158).
-          ;; INTERRUPTS: not yet -- aion/windows/com does not depend on aion/dynamic, so it does not call aion/dynamic:unblock-interrupts (#896).
-          (sb-thread:make-thread (lambda () (%apartment-loop apartment))
+          (sb-thread:make-thread (lambda ()
+                                   (aion/dynamic:unblock-interrupts)
+                                   (%apartment-loop apartment))
                                  :name "aion/windows/com STA"))
     ;; Wait for the thread to reach a decided state rather than returning an apartment that
     ;; may still be about to fail -- otherwise the first call reports the failure, far from

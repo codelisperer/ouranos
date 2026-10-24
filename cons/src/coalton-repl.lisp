@@ -243,9 +243,10 @@ the one interrupted, and CANCEL-EVALUATION has a thread to aim at."
          ;; THREAD-LIFETIME: independent -- one evaluation, joined or abandoned before
          ;; EVAL-INPUT returns. It binds *PACKAGE* itself (see EVAL-INPUT) and does not see the
          ;; caller's other bindings; the CHANGELOG entry for #355 tells apps so.
-         ;; INTERRUPTS: not yet -- cons does not depend on aion/dynamic, so it does not call aion/dynamic:unblock-interrupts (#896).
          (worker (sb-thread:make-thread
-                  (lambda () (setf (car box) (funcall thunk)))
+                  (lambda ()
+                    (aion/dynamic:unblock-interrupts)
+                    (setf (car box) (funcall thunk)))
                   :name "coalton-repl evaluation")))
     (setf (session-worker session) worker)
     (unwind-protect

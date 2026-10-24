@@ -177,6 +177,37 @@ reader is actually asking about."
     (is (< (%seconds-since start) 5) "stopped after ~,1F s" (%seconds-since start))
     (is (string= "42" (repl:result-value (%ev s "(* 6 7)"))) "the session evaluates again")))
 
+(defun %in-a-deferred-step (thunk)
+  "Call THUNK inside SB-SYS:WITHOUT-INTERRUPTS with an interrupt to this thread deferred, the
+state in which a thread made by THUNK inherits a mask with SBCL's deferrable signals blocked
+(#541). As in aion/dynamic's tests: another thread interrupts this one, and the interrupt waits
+for the step to end."
+  (sb-sys:without-interrupts
+    (let ((me sb-thread:*current-thread*))
+      (sb-thread:join-thread
+       ;; THREAD-LIFETIME: scoped -- it sends one interrupt and is joined here.
+       ;; INTERRUPTS: not needed -- it only sends an interrupt, and is joined at once.
+       (sb-thread:make-thread (lambda () (sb-thread:interrupt-thread me (lambda () nil)))
+                              :name "deferred-step interrupter"))
+      (sleep 0.2))
+    (funcall thunk)))
+
+(test the-time-limit-stops-an-evaluation-started-while-an-interrupt-is-deferred
+  "#896. EVAL-INPUT called inside a step while an interrupt to its caller is deferred, as a
+server's request thread can call it. The evaluation's thread unblocks interrupts first, so the
+time limit's interrupt reaches it and the evaluation stops. Without that, on Linux and macOS the
+thread inherited the blocked mask, ignored the interrupt, and was left running.
+
+On a :SB-SAFEPOINT build (SBCL for Windows) a new thread does not take its creator's mask, so
+this passes there with or without the call."
+  (let* ((s (repl:make-session "COALTON-REPL-TESTS-DEFERRED"))
+         (start (get-internal-real-time))
+         (r (%in-a-deferred-step (lambda () (repl:eval-input s (%loop-forever) :time-limit 1)))))
+    (is (eq :error (repl:result-kind r)))
+    (is (search "time limit" (repl:result-message r))
+        "the time limit did not stop the evaluation: ~A" (repl:result-message r))
+    (is (< (%seconds-since start) 5) "stopped after ~,1F s" (%seconds-since start))))
+
 (test ignore-errors-in-the-users-code-does-not-swallow-the-stop
   (let ((r (repl:eval-input (repl:make-session "COALTON-REPL-TESTS-IGNORE")
                             "(lisp (-> Integer) () (cl:loop (cl:ignore-errors (cl:sleep 0.02))))"

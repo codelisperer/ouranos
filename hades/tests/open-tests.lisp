@@ -281,3 +281,51 @@ Returns the plans in order."
   (is (string= "file:///" (o::%file-uri "/")))
   (is (string= "file:///a-b_c.d~e/F9" (o::%file-uri "/a-b_c.d~e/F9")))
   (is (string= "file:///%23%3F%25%27%22%3B%26" (o::%file-uri "/#?%'\";&"))))
+
+;;; --- the reaper thread can be interrupted (#896) ---------------------------------------
+
+(defun %in-a-deferred-step (thunk)
+  "Call THUNK inside SB-SYS:WITHOUT-INTERRUPTS with an interrupt to this thread deferred, the
+state in which a thread made by THUNK inherits a mask with SBCL's deferrable signals blocked
+(#541). As in aion/dynamic's tests: another thread interrupts this one, and the interrupt waits
+for the step to end."
+  (sb-sys:without-interrupts
+    (let ((me sb-thread:*current-thread*))
+      (sb-thread:join-thread
+       ;; THREAD-LIFETIME: scoped -- it sends one interrupt and is joined here.
+       ;; INTERRUPTS: not needed -- it only sends an interrupt, and is joined at once.
+       (sb-thread:make-thread (lambda () (sb-thread:interrupt-thread me (lambda () nil)))
+                              :name "deferred-step interrupter"))
+      (sleep 0.2))
+    (funcall thunk)))
+
+(test a-reaper-started-while-an-interrupt-is-deferred-can-be-interrupted
+  "#896. %LAUNCH called inside a step while an interrupt to its caller is deferred. Its reaper
+thread unblocks interrupts first, so an INTERRUPT-THREAD reaches it while it waits for the
+program. Without that, on Linux and macOS the reaper inherited the blocked mask and never
+received it. The program is this SBCL, sleeping for 3 seconds, so nothing is opened and the
+reaper ends by itself.
+
+Skipped on a :SB-SAFEPOINT build (SBCL for Windows). There a new thread does not take its
+creator's mask, so the defect does not occur; and an interrupt is delivered only when a thread
+returns from foreign code, so it does not reach a reaper waiting for the process until the
+process ends, mask or no mask. aion/uv's loop-thread test is skipped there for the same reason."
+  #+sb-safepoint
+  (skip "interrupts reach a thread waiting in foreign code only when it returns, on a :sb-safepoint build")
+  #-sb-safepoint
+  (let* ((before (sb-thread:list-all-threads))
+         (started (%in-a-deferred-step
+                   (lambda ()
+                     (hades/open::%launch (uiop:native-namestring sb-ext:*runtime-pathname*)
+                                          (list "--noinform" "--no-sysinit" "--no-userinit"
+                                                "--non-interactive" "--eval" "(sleep 3)")))))
+         (reaper (find "hades/open reaper" (set-difference (sb-thread:list-all-threads) before)
+                       :key #'sb-thread:thread-name :test #'equal)))
+    (is-true started "the program did not start")
+    (is-true reaper "no new reaper thread")
+    (when reaper
+      (let ((ran (sb-thread:make-semaphore)))
+        (sb-thread:interrupt-thread reaper (lambda () (sb-thread:signal-semaphore ran)))
+        (is-true (sb-thread:wait-on-semaphore ran :timeout 2)
+                 "an interrupt did not reach the reaper")
+        (sb-thread:join-thread reaper :default nil :timeout 30)))))
