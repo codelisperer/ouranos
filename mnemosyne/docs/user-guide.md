@@ -565,7 +565,8 @@ data.
 #### Where this is tested
 
 Against a real pgvector, on all three CI legs. The Linux leg uses
-`pgvector/pgvector:pg17` from `docker-compose.test.yml`. The macOS leg installs pgvector
+the `pgvector/pgvector` image pinned by digest in `docker-compose.test.yml`
+(pgvector 0.8.7 on Postgres 18). The macOS leg installs pgvector
 from Homebrew, and the Windows leg builds it from a pinned tag against the runner's
 preinstalled Postgres. Both of those check that the running server can see the extension
 before any suite runs, so a missing pgvector fails the step instead of letting these tests

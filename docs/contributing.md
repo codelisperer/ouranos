@@ -74,7 +74,7 @@ container is one way to provide that server and a Postgres you already run is an
 nothing in the tree depends on Docker:
 
 ```sh
-scripts/test-postgres.sh up              # pgvector/pgvector:pg17 on :55432, waits until it answers
+scripts/test-postgres.sh up              # the pinned pgvector/pgvector image on :55432, waits until it answers
 eval "$(scripts/test-postgres.sh env)"   # exports MNEMOSYNE_TEST_PG_URL
 sbcl --dynamic-space-size 4096 --script scripts/verify-tree.lisp
 scripts/test-postgres.sh down
