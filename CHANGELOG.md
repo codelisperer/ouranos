@@ -1948,6 +1948,16 @@ its tag.
 
 ### Fixed
 
+- **aion/http-client: a pinned https request refuses a certificate whose common name matches
+  the host when its subject alternative names do not** (#917). On Linux and macOS, cl+ssl checks
+  a certificate's common name whenever none of its alternative names match, which RFC 6125
+  section 6.4.4 does not allow. A request with `:connect-address`, which `fetch-public` always
+  uses, now checks the host against the certificate's DNS and IP alternative names only, and uses
+  the common name only for a certificate that has none. A request without `:connect-address`
+  goes through dexador and cl+ssl's own check, and still accepts the common name; fixing that
+  would mean patching cl+ssl for the whole image. Windows is not affected, because it does not
+  use cl+ssl.
+
 - **aion/http-client: an https request to an IPv6 address such as `https://[::1]/` verifies the
   certificate against the address, and a request to any IP address sends no SNI name** (#915).
   On Linux and macOS, a request through a pinned connection (`:connect-address`, which

@@ -252,8 +252,9 @@ UTF-8 sequence -- because that is the case the old contract silently destroyed."
 (defun %start-server (handler &key tls)
   "A server on 127.0.0.1 answering with HANDLER, a function of (path head stream) that writes
 the response. Records every request head. TLS T presents the certificate for pinned.test; TLS :IP
-presents the one whose names are the addresses 127.0.0.1 and ::1."
-  (let ((base (if (eq tls :ip) "ip-test" "pinned-test")))
+presents the one whose names are the addresses 127.0.0.1 and ::1; a string names another fixture
+pair, \"cn-only-test\" for one such pair."
+  (let ((base (cond ((stringp tls) tls) ((eq tls :ip) "ip-test") (t "pinned-test"))))
     (aion/test-http:start-server
      (lambda (request stream)
        (funcall handler (aion/test-http:request-path request)
@@ -409,8 +410,8 @@ address there, and verifies the certificate against ::1, the address without the
 puts round it. The certificate's names are the addresses 127.0.0.1 and ::1. Before the fix the name
 verified was \"[::1]\", which no certificate holds, so this request was refused. Controls: [::2],
 an address the certificate does not name, is refused; the IPv4 literal is accepted; the host name
-other.test is refused. (cl+ssl also accepts the common name, ip.test, even though the certificate
-has subject alternative names, which RFC 6125 does not allow. That is unchanged here.)"
+other.test and ip.test are refused. ip.test is the certificate's common name, which cl+ssl's own
+check accepts; since #917 a certificate with alternative names must match one of them."
   (skip-on-windows "a pinned connection is not available on Windows (WinHTTP)"
     (with-server (s (lambda (path head stream)
                       (declare (ignore path head))
@@ -427,7 +428,44 @@ has subject alternative names, which RFC 6125 does not allow. That is unchanged 
         (is (string= "over tls" (http:response-body (get-as "127.0.0.1"))))
         (signals http:http-error (get-as "[::2]"))
         (signals http:http-error (get-as "127.0.0.2"))
-        (signals http:http-error (get-as "other.test"))))))
+        (signals http:http-error (get-as "other.test"))
+        (signals http:http-error (get-as "ip.test"))))))
+
+(defun %get-pinned-as (server host ca)
+  "A GET of https://HOST:port/ from SERVER, pinned to 127.0.0.1 and trusting the fixture CA."
+  (http:send-request (http:make-request :url (%local server "/" host "https")
+                                        :connect-address "127.0.0.1"
+                                        :ca-path (%fixture ca) :read-timeout 5)
+                     '()))
+
+(test a-certificate-with-alternative-names-is-not-matched-by-its-common-name
+  "#917: the certificate's common name is cn.test and its only alternative name is san.test.
+https://san.test/ is accepted and https://cn.test/ is refused, because a certificate with
+alternative names must match one of them (RFC 6125 section 6.4.4). cl+ssl's own check accepts
+cn.test through the common name; before #917 nothing else was checked, so it was accepted."
+  (skip-on-windows "a pinned connection is not available on Windows (WinHTTP)"
+    (with-server (s (lambda (path head stream)
+                      (declare (ignore path head))
+                      (%write-response stream 200 '() "over tls"))
+                    :tls "cn-and-san-test")
+      (is (string= "over tls"
+                   (http:response-body (%get-pinned-as s "san.test" "cn-and-san-test.crt"))))
+      (is (string= "over tls"
+                   (http:response-body (%get-pinned-as s "SAN.test" "cn-and-san-test.crt")))
+          "matched as cl+ssl matches, ignoring case")
+      (signals http:http-error (%get-pinned-as s "cn.test" "cn-and-san-test.crt")))))
+
+(test a-certificate-without-alternative-names-is-matched-by-its-common-name
+  "#917: a certificate with no alternative names, whose common name is cn-only.test, is accepted
+for https://cn-only.test/. Control: it is refused for other.test."
+  (skip-on-windows "a pinned connection is not available on Windows (WinHTTP)"
+    (with-server (s (lambda (path head stream)
+                      (declare (ignore path head))
+                      (%write-response stream 200 '() "over tls"))
+                    :tls "cn-only-test")
+      (is (string= "over tls"
+                   (http:response-body (%get-pinned-as s "cn-only.test" "cn-only-test.crt"))))
+      (signals http:http-error (%get-pinned-as s "other.test" "cn-only-test.crt")))))
 
 (test tls-names-gives-no-sni-name-for-an-ip-literal
   "#915: the SNI name and the name verified, for each kind of host."
