@@ -189,6 +189,18 @@
                 :components ((:file "retrieval-tests"))))
   :perform (test-op (o c) (symbol-call :praxeon/retrieval/tests '#:run-tests)))
 
+;;; praxeon/examples/sqlite-probe --- praxeon's SQLite retrieval, run inside a built desktop
+;;; bundle (#899). Dumped by build-desktop-app.lisp in desktop-release.yml's sqlite-probe job,
+;;; which runs it and checks that the bundle's own pinned SQLite answered. Not a test system:
+;;; it is only meaningful dumped, beside the library the bundle carries.
+(defsystem "praxeon/examples/sqlite-probe"
+  :description "Clean-room probe: praxeon retrieval on the SQLite a desktop bundle carries (#899)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("praxeon" "praxeon/retrieval" "mnemosyne")
+  :components ((:module "examples/sqlite-probe"
+                :components ((:file "app")))))
+
 (defsystem "praxeon/mcp"
   :description "Agents that use the tools an MCP server offers, over Streamable HTTP or stdio (#527)."
   :author "Bob <eternal.recursion@proton.me>"

@@ -1,0 +1,49 @@
+# The SQLite release this tree builds and desktop bundles carry (#899, ADR-0013).
+#
+# Built from source by
+#   sbcl --script scripts/build-sqlite.lisp
+# which compiles the amalgamation (sqlite3.c, one file) with the platform's own C compiler:
+# cc on Linux and macOS, MSVC on Windows. No make and no configure.
+#
+# Why a pinned build rather than the system copy:
+#   1. One version on every OS. macOS 26.6 ships 3.51.0, Ubuntu's differs by release, and
+#      stock Windows has no libsqlite3 at all (winsqlite3.dll is a different name).
+#   2. One set of compile options on every OS. Apple's copy is built with
+#      SQLITE_OMIT_LOAD_EXTENSION and THREADSAFE=2; sqlite.org's Windows DLL allows
+#      extension loading. build-sqlite.lisp says which options this build uses and why.
+#   3. A desktop bundle must carry the library it was tested with (ADR-0011, ADR-0013).
+#
+# The tree's own suites and REPLs keep the system copy; only desktop bundles carry this one.
+# scripts/versions.env pins sqlite.org's prebuilt DLL separately, for setup.ps1 on Windows,
+# at the same version.
+
+version 3.54.1
+sha256  926ef8d3eab93fbf6e06011901273eec076b25594a4e1cdadd50c987f4f6d64e
+url     https://sqlite.org/2026/sqlite-autoconf-3540100.tar.gz
+
+# On the checksum. sqlite.org publishes SHA3-256, not SHA-256, on its download page. The
+# tarball hashed for the line above has SHA3-256
+#   b6ced585c750916b1052667239a12c25a7ff34e7f06e1e6e01ecb0427657d9c4
+# which is the value sqlite.org lists for sqlite-autoconf-3540100.tar.gz (checked 2026-10-24,
+# with `openssl dgst -sha3-256`). So the SHA-256 above was checked against the publisher's own
+# hash once, and every later fetch on every machine is checked against the SHA-256.
+#
+# To adopt a new SQLite:
+#   1. download the sqlite-autoconf tarball from https://sqlite.org/download.html (the URL's
+#      year directory is the release year);
+#   2. compare `openssl dgst -sha3-256` with the page, then take `shasum -a 256`;
+#   3. update the three lines above and the SHA3-256 in this comment, run build-sqlite.lisp
+#      (it rebuilds, because vendor/sqlite/BUILT-FROM no longer matches this file, and until it
+#      does build-desktop-app.lisp refuses to carry the old build), and run the desktop-release
+#      dry run, whose sqlite-probe job checks the version a built bundle loads;
+#   4. move scripts/versions.env's SQLITE_* lines (the Windows toolchain DLL) to the same
+#      version.
+
+# --- staying current -------------------------------------------------------
+#
+# SQLite lists the vulnerabilities reported against it, with the release that fixed each, on
+# its CVE page. REVIEWED is the date a person last read that page; bump it when you look,
+# even when there is nothing to do.
+
+advisories https://sqlite.org/cves.html
+reviewed   2026-10-24

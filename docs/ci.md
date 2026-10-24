@@ -270,6 +270,12 @@ onto another port is fragility bought for nothing.
   only the processes whose program is in the bundle, and reports whether the window opened
   (#268). A real clean room on those two needs a runner with nothing installed, or a fresh
   VM. The shared design is ADR-0013.
+  `desktop-release.yml`'s `sqlite-probe` job builds `praxeon/examples/sqlite-probe` on all
+  three, runs praxeon's retrieval on SQLite inside the bundle, and checks that the probe
+  called the bundle's pinned libsqlite3 (#899). On macOS it reads the dyld log for libsqlite3
+  alone, through `check-dyld-log.lisp carried`, rather than running
+  `verify-bundle-macos.sh`, because praxeon loads cl+ssl and the runner's Homebrew OpenSSL,
+  which that script's OpenSSL rule fails. On Linux it runs on the runner, not in a clean room.
 - **`elenchon/tests`.** Deliberately unwired — a `:perform` over an empty suite relocates
   the dishonesty rather than removing it.
 - **Anything on a `+known-warnings+` line** in `scripts/compile-warnings.lisp`, **or a `+known-empty+` line** in `verify-tree.lisp`. Those

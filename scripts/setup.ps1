@@ -392,7 +392,7 @@ function Install-CoaltonDeps {
 # to do to the library holding a user's data. A pinned upstream build is stale in the same
 # way, but visibly, in versions.env, where bumping it is a decision somebody makes.
 function Get-SqliteUrl {
-  # Upstream encodes the version in the filename as MMmmppXX -- 3.50.4 becomes 3500400.
+  # Upstream encodes the version in the filename as MMmmppXX -- 3.54.1 becomes 3540100.
   # Derived rather than pinned separately, because two places naming one version is the
   # drift every pin in this file exists to prevent.
   $parts = $SqliteVersion -split '\.'
