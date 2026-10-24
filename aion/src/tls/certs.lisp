@@ -53,6 +53,30 @@ signalled it returns end of file. Usable directly as a HANDLER-BIND handler."
   (:documentation "The handshake failed because the peer's certificate chain did not verify.
 FLAGS are mbedTLS's verification flags; DESCRIPTION is mbedtls_x509_crt_verify_info's text."))
 
+(define-condition unsupported-private-key (tls-error)
+  ()
+  (:report (lambda (c stream)
+             (declare (ignore c))
+             (write-string
+              (concatenate
+               'string
+               "PKCS#8 RSA keys aren't supported by mbedTLS 4.1.1; convert with openssl rsa "
+               "-traditional (#914). The key is an RSA key in PKCS#8 form (a PEM file beginning "
+               "-----BEGIN PRIVATE KEY-----). Convert it with: openssl rsa -in KEY -traditional "
+               "-out KEY-PKCS1, which writes the same key as -----BEGIN RSA PRIVATE KEY-----.")
+              stream)))
+  (:documentation "KEY cannot be checked against its certificate, because it is an RSA key in
+PKCS#8 form and mbedtls_pk_check_pair in mbedTLS 4.1.1 (TF-PSA-Crypto 1.1.1) returns
+PSA_ERROR_INVALID_ARGUMENT for every such key, whether or not it is the certificate's (#914). The
+same key in PKCS#1 form works, and so does an EC key in either form. TF-PSA-Crypto commit
+841da2ad fixes this upstream; when a release carrying it is pinned, this restriction goes."))
+
+(defparameter +pkcs8-rsa-check-status+ -135
+  "What mbedtls_pk_check_pair returns for an RSA key in PKCS#8 form in mbedTLS 4.1.1:
+PSA_ERROR_INVALID_ARGUMENT. Measured on Windows for #914: the matching key in PKCS#8 form gives
+-135, the same key in PKCS#1 form gives 0, and a key that does not match (PKCS#1 RSA, or EC) gives
+-16128, MBEDTLS_ERR_PK_TYPE_MISMATCH. A PKCS#8 RSA key that does not match also gives -135.")
+
 (defparameter +psa-status-names+
   '((-132 . "PSA_ERROR_GENERIC_ERROR") (-133 . "PSA_ERROR_NOT_PERMITTED")
     (-134 . "PSA_ERROR_NOT_SUPPORTED") (-135 . "PSA_ERROR_INVALID_ARGUMENT")
@@ -203,8 +227,16 @@ report, and, for a server, the one it presents."
   (%crt-pointer-der (%pointer chain)))
 
 (defun certificate-chain-matches-key-p (chain key)
-  "Whether KEY is the private key for CHAIN's first certificate."
-  (zerop (%crt-check-key (%pointer chain) (%pointer key))))
+  "Whether KEY is the private key for CHAIN's first certificate.
+
+Signals UNSUPPORTED-PRIVATE-KEY when KEY is an RSA key in PKCS#8 form, which mbedTLS 4.1.1 cannot
+check: it reports such a key as wrong whether or not it matches, so NIL would be a false answer
+(#914)."
+  (let ((code (%crt-check-key (%pointer chain) (%pointer key))))
+    (when (= code +pkcs8-rsa-check-status+)
+      (error 'unsupported-private-key :code code :operation "mbedtls_pk_check_pair"
+                                      :description (%strerror code)))
+    (zerop code)))
 
 (defun free-certificate-chain (chain)
   (let ((p (%pointer chain)))

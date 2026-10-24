@@ -31,3 +31,11 @@ the test server on Windows, which serves TLS through aion/tls (#536). mbedTLS 4.
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
       -keyout pinned-test-ec.key -out pinned-test-ec.crt \
       -days 36500 -subj "/CN=pinned.test" -addext "subjectAltName=DNS:pinned.test"
+
+`pinned-test.key` is in PKCS#8 form (`-----BEGIN PRIVATE KEY-----`). That form is the reason for
+the refusal above (#914): mbedTLS 4.1.1 cannot check an RSA key in PKCS#8 form against its
+certificate. `pinned-test-pkcs1.key` is the same key in PKCS#1 form
+(`-----BEGIN RSA PRIVATE KEY-----`), which mbedTLS accepts. The aion/tls tests use the two to show
+the difference. Made with:
+
+    openssl rsa -in pinned-test.key -traditional -out pinned-test-pkcs1.key

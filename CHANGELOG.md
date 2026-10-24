@@ -2170,6 +2170,18 @@ its tag.
 
 ### Fixed
 
+- **aion/tls: a server key that is an RSA key in PKCS#8 form is refused with
+  `aion/tls:unsupported-private-key`, which says how to convert it** (#914). mbedTLS 4.1.1
+  cannot check an RSA key in PKCS#8 form (a PEM file beginning `-----BEGIN PRIVATE KEY-----`,
+  which `openssl req -newkey rsa` writes) against its certificate. Before, `make-server-config`
+  signalled "the private key is not the key of the certificate it was given with", even for the
+  right key, and `certificate-chain-matches-key-p` returned false. Now both signal
+  `unsupported-private-key`, a `tls-error`, whose message gives the conversion:
+  `openssl rsa -in KEY -traditional -out KEY-PKCS1`. A server key must be an EC key, in either
+  form, or an RSA key in PKCS#1 form (`-----BEGIN RSA PRIVATE KEY-----`). A key that does not
+  match its certificate is reported as before. The restriction is lifted when a TF-PSA-Crypto
+  release carrying upstream commit 841da2ad is pinned.
+
 - **aion/http-client: an https request to an IPv6 address such as `https://[::1]/` verifies the
   certificate against the address, and a request to any IP address sends no SNI name** (#915).
   On Linux and macOS, a request through a pinned connection (`:connect-address`, which
