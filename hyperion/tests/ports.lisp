@@ -10,7 +10,9 @@
 (cl:defpackage #:hyperion/test-ports
   (:use #:cl)
   (:export #:candidate-port #:call-with-port #:listening-p #:await-released
-           #:+attempts+))
+           #:+attempts+
+           #:with-deadline #:call-with-deadline #:no-response #:no-response-what
+           #:no-response-seconds))
 
 (in-package #:hyperion/test-ports)
 
@@ -57,3 +59,37 @@ socket is closed when STOP returns; this remains the check that says so."
       (unless (listening-p port) (return t))
       (when (> (get-internal-real-time) deadline) (return nil))
       (sleep 0.02))))
+
+;;; --- a deadline for a test client's request (#456) ----------------------------
+;;;
+;;; The test clients wait for a response inside SB-EXT:WITH-TIMEOUT. When the time runs out,
+;;; SBCL signals SB-EXT:TIMEOUT, which is a SERIOUS-CONDITION and not an ERROR. FiveAM records
+;;; an ERROR in a test as that test's failure and goes on to the next test, but it does not
+;;; handle a SERIOUS-CONDITION, so under --non-interactive the image quit with "Unhandled
+;;; SB-EXT:TIMEOUT" and every later test in the run was never run. WITH-DEADLINE signals
+;;; NO-RESPONSE, an ERROR, instead, so a server that stops answering fails only the test that
+;;; sent the request.
+;;;
+;;; What it leaves behind: the timer is SBCL's, scheduled on the calling thread and
+;;; unscheduled when WITH-TIMEOUT exits, so no thread is started. The condition unwinds the
+;;; body, so the caller's UNWIND-PROTECT closes the client socket before the test goes on.
+
+(define-condition no-response (error)
+  ((what :initarg :what :reader no-response-what)
+   (seconds :initarg :seconds :reader no-response-seconds))
+  (:report (lambda (c s)
+             (format s "no response to ~A within ~A s"
+                     (no-response-what c) (no-response-seconds c))))
+  (:documentation "A test client's request was not answered within its deadline (#456)."))
+
+(defun call-with-deadline (seconds what function)
+  "Call FUNCTION. If it has not returned after SECONDS, unwind it and signal NO-RESPONSE,
+whose message names WHAT, the request that went unanswered."
+  (handler-case (sb-ext:with-timeout seconds (funcall function))
+    (sb-ext:timeout () (error 'no-response :what what :seconds seconds))))
+
+(defmacro with-deadline ((seconds what) &body body)
+  "Run BODY, the sending of a request and the reading of its response, and signal NO-RESPONSE
+naming WHAT if it has not finished after SECONDS. Use it where a test client would use
+SB-EXT:WITH-TIMEOUT."
+  `(call-with-deadline ,seconds ,what (lambda () ,@body)))
