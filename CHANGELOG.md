@@ -1943,6 +1943,14 @@ its tag.
   many seconds could still have a connection accepted. The readiness path still starts
   answering 503 when the wait loop notices the signal.
 
+- **hyperion-view: on macOS, a window taller or wider than the screen is shrunk to fit the
+  screen's visible frame and centred in it** (#485). The visible frame leaves out the menu bar
+  and the Dock. Before, `webview_set_size` centred the window but kept its size, so with
+  `run-app`'s `:width` and `:height` larger than the screen, the bottom of the window opened
+  off-screen. A window that fits is centred exactly between the Dock and the menu bar, where
+  `[NSWindow center]` put it somewhat above the centre. `hyperion-view --report-placement` now
+  works on macOS, and shows a window.
+
 - **aion/http-client: a body of octets with a `multipart/` Content-Type reaches the server as
   given on Linux and macOS** (#828). This is a workaround placed once in the client, not a
   native way to send a header unchanged, because dexador offers none. Dexador's usocket backend
