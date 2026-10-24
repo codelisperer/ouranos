@@ -155,6 +155,8 @@
    #:check-embedding-dimensions
    ;; a vector as text, for a store with no vector type (#425)
    #:vector-text #:parse-vector-text #:cosine-distance
+   #:vector-octets #:decode-vector-octets #:stored-vector #:vector-text-octets #:stored-distance
+   #:make-nearest #:nearest-offer #:nearest-items
    ;; the rerank seam (#316) -- also a separate hierarchy
    #:reranker #:rerank #:reranker-model-of #:rerank-request-body #:rerank-post
    #:voyage-reranker #:reranker-model #:reranker-base-url #:reranker-api-key

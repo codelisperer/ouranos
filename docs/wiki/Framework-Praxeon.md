@@ -286,8 +286,8 @@ What is on `main`:
   store implements it.
 - **`praxeon/memory-db`:** the same generics in a database. On Postgres the embedding is a
   pgvector column, with an HNSW index built for the cosine distance that `recall-similar`
-  queries. On SQLite the embedding is stored as text and `recall-similar` ranks one subject's
-  observations in Lisp. It is an aux system, because praxeon's core takes no database
+  queries. On SQLite the embedding is stored as single floats in a BLOB, and `recall-similar`
+  reads one subject's observations one at a time and ranks them in Lisp (#425). It is an aux system, because praxeon's core takes no database
   dependency: a store reaches it through the memory generics.
 - **`praxeon/distil`:** the distillation pass. A model reads a window of messages and proposes
   observations; `apply-distillation` writes them. A proposal that an observation replaces an

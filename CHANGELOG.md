@@ -14,6 +14,46 @@ its tag.
 
 ### An app may have to act
 
+- **praxeon/retrieval and praxeon/memory-db on SQLite: similarity search works at real corpus
+  sizes, and the stored embeddings change form** (#425). A SQLite store kept each embedding as
+  text and parsed every one on every search, so at width 1024 `retrieve-similar` took about a
+  second over 2,400 chunks and exhausted a 4 GB heap at 10,000, and memory-db's
+  `recall-similar` took 3.7 s over 5,000 observations and exhausted the heap at 20,000. Now:
+  - the embedding is stored as single floats in a BLOB (`praxeon/llm:vector-octets`), the
+    precision pgvector stores. The schema declares it `:binary`; a table made before keeps its
+    `TEXT` declaration, which SQLite does not enforce;
+  - **`ensure-schema` re-encodes a store's existing text embeddings in place**, keeping every
+    fingerprint and deriver, so nothing is embedded again and no chunk becomes pending. It first
+    checks with one cheap query, outside any transaction, whether any text embedding is left, so
+    an open with nothing to do takes no write lock. Then it rewrites 500 rows per transaction,
+    so another process's writes wait for one batch at most, not for the whole table. Readers
+    accept both forms, so a store half re-encoded when a process stopped still opens, and the
+    next `ensure-schema` carries on. A row whose text cannot be converted (malformed, or a
+    number a single float cannot hold) is left as text and counted in the log. An app that opens
+    its stores without `:ensure t` keeps working on the text form until it runs `ensure-schema`;
+  - on SQLite the search reads candidates one at a time, through the new
+    `mnemosyne/conn:map-query` and `mnemosyne/query:map-fetch`, which prepare SQLite queries
+    unbuffered, and keeps the nearest as it goes. On Postgres `map-query` reads every row at
+    execute, as `query` does. Measured at width 1024 on one Linux laptop: `retrieve-similar`
+    20 ms at 2,400 chunks, 84 ms at 10,000, 424 ms at 50,000; `recall-similar` 8 ms at 1,000
+    observations, 44 ms at 5,000, 176 ms at 20,000;
+  - a stored embedding that cannot be compared with the query, because it has another number
+    of dimensions (an embedder change in memory-db), is malformed, or gives a distance that is
+    not finite, is left out of the result and counted in a warning, instead of failing the
+    search or taking a place among the nearest. `praxeon/llm:vector-octets` refuses NaN, the
+    infinities and numbers above `most-positive-single-float`;
+  - **rankings can differ from Postgres between near-ties.** Distances on SQLite are summed in
+    double precision in Lisp; pgvector computes its own way. Two chunks whose distances differ by
+    about 1e-7 or less may come back in either order on the two backends, and re-encoding a
+    store's text embeddings as single floats can move such a pair too.
+
+  Also new: `mnemosyne/migrate:rewrite-sqlite-text-values`, which rewrites a SQLite column's
+  text values through a function, idempotently, a batch per transaction; and in `praxeon/llm`,
+  `vector-octets`, `decode-vector-octets`, `stored-vector`, `stored-distance`,
+  `vector-text-octets`, and
+  `make-nearest`, `nearest-offer` and `nearest-items` for keeping the k nearest during a scan.
+  `praxeon/retrieval` now uses `praxeon/llm`'s `cosine-distance` and no longer keeps its own copy.
+
 - **aion/uv: `close-loop` frees a loop only when `uv_loop_close` succeeds** (#877). Before, it
   ignored `uv_loop_close`'s result and freed the loop even when libuv returned `UV_EBUSY`
   because a handle or request was still open on it, and libuv then used the freed memory. A

@@ -271,9 +271,11 @@ both naming the same table."))
     (:context_deriver    :string)
     (:context_document_fingerprint :string)
     (:input_fingerprint  :string)
-    ;; On SQLite, which has no vector type, the vector's numbers as text (#369).
+    ;; On SQLite, which has no vector type, the vector's numbers as single floats in a BLOB
+    ;; (#425; text before it, #369). A table made before #425 declares the column TEXT; SQLite
+    ;; keeps a BLOB in it as it is, so it is not altered.
     ,(if (eq dialect :sqlite)
-         '(:embedding :text :derived-from :text)
+         '(:embedding :binary :derived-from :text)
          `(:embedding :vector :dimensions ,dimensions :derived-from :text))))
 
 (defun make-chunk-store (connection &key (table *table*) dimensions ensure)
@@ -471,11 +473,31 @@ STRATEGY last changed, in universal time. BACKFILL_STARTED_AT is set by START-BA
     "context_deriver TEXT" "context_document_fingerprint TEXT" "input_fingerprint TEXT")
   "The columns #316 added to the chunk table, as `name type', for a table made before them.")
 
+(defvar *sqlite-embedding-reencoder* nil
+  "A function from an embedding in the text form a SQLite store wrote before #425 to the BLOB form,
+or NIL to leave it. Set by praxeon/retrieval's similar.lisp to PRAXEON/LLM:VECTOR-TEXT-OCTETS:
+this package cannot name praxeon/llm, by design (it cannot name an embedding provider).")
+
+(defun %reencode-sqlite-embeddings (store)
+  "Rewrite STORE's embeddings that are still text into BLOBs of single floats (#425), in one
+transaction, idempotently: see MNEMOSYNE/MIGRATE:REWRITE-SQLITE-TEXT-VALUES. A store half
+re-encoded when a process stopped opens as before, because readers accept both forms, and the
+next ENSURE-SCHEMA finishes the job. The fingerprint and deriver columns are not touched, so no
+chunk becomes pending."
+  (when *sqlite-embedding-reencoder*
+    (multiple-value-bind (rewritten left)
+        (mig:rewrite-sqlite-text-values (store-connection store) (store-table store) "id" "embedding"
+                                        *sqlite-embedding-reencoder*)
+      (when (plusp (+ rewritten left))
+        (log:info "praxeon/retrieval: SQLite embeddings re-encoded from text to single floats"
+                  :table (store-table store) :rewritten rewritten :left left)))))
+
 (defun %ensure-sqlite-schema (store)
   "ENSURE-SCHEMA on SQLite (#369). There is no extension to check and no width to compare: the
-embedding is text, and a vector of another width is from another deriver, which similarity
-never compares with the query. A column is added when PRAGMA table_info does not list it, since
-SQLite has no ADD COLUMN IF NOT EXISTS."
+embedding has no vector type, and a vector of another width is from another deriver, which
+similarity never compares with the query. A column is added when PRAGMA table_info does not list
+it, since SQLite has no ADD COLUMN IF NOT EXISTS. Embeddings still in the text form are
+re-encoded as single floats (#425)."
   (let ((c (store-connection store))
         (table (store-table store)))
     (with-db (store)
@@ -489,7 +511,8 @@ SQLite has no ADD COLUMN IF NOT EXISTS."
             (conn:exec c (format nil "ALTER TABLE ~A ADD COLUMN ~A" table column)))))
       (dolist (statement (%terms-ddl store))
         (conn:exec c statement))
-      (conn:exec c (%corpora-ddl store))))
+      (conn:exec c (%corpora-ddl store))
+      (%reencode-sqlite-embeddings store)))
   store)
 
 (defun ensure-schema (store)

@@ -223,14 +223,212 @@ and accepts only reals."
 
 (defun cosine-distance (a b)
   "One minus the cosine of the angle between A and B, the value pgvector's <=> computes. A
-vector of all zeros has no direction, and its distance from anything is taken as 1."
+vector of all zeros has no direction, and its distance from anything is taken as 1.
+
+Two vectors of type (SIMPLE-ARRAY DOUBLE-FLOAT (*)), which DECODE-VECTOR-OCTETS returns, take a
+loop with no generic arithmetic; a SQLite store computes this for every candidate (#425)."
+  (if (and (typep a '(simple-array double-float (*)))
+           (typep b '(simple-array double-float (*))))
+      (%cosine-distance-doubles a b)
+      (let ((dot 0d0) (na 0d0) (nb 0d0))
+        (map nil (lambda (x y)
+                   (incf dot (* x y)) (incf na (* x x)) (incf nb (* y y)))
+             a b)
+        (if (or (zerop na) (zerop nb))
+            1d0
+            (- 1d0 (/ dot (sqrt (* na nb))))))))
+
+(defun %cosine-distance-doubles (a b)
+  (declare (type (simple-array double-float (*)) a b)
+           (optimize (speed 3) (safety 1)))
   (let ((dot 0d0) (na 0d0) (nb 0d0))
-    (map nil (lambda (x y)
-               (incf dot (* x y)) (incf na (* x x)) (incf nb (* y y)))
-         a b)
+    (declare (type double-float dot na nb))
+    (dotimes (i (min (length a) (length b)))
+      (let ((x (aref a i)) (y (aref b i)))
+        (incf dot (* x y)) (incf na (* x x)) (incf nb (* y y))))
     (if (or (zerop na) (zerop nb))
         1d0
         (- 1d0 (/ dot (sqrt (* na nb)))))))
+
+;;; --- a vector as single-floats, for a store with no vector type (#425) ------------
+;;;
+;;; The text form above costs a parse of every number on every read: on SQLite at width 1024,
+;;; RETRIEVE-SIMILAR took a second over 2,400 chunks and ran out of heap at 10,000 (#425's
+;;; design note). So a SQLite store keeps an embedding as a BLOB of little-endian IEEE single
+;;; floats, 4 bytes a number, which is also the precision pgvector stores. Reading one is a
+;;; copy, not a parse. STORED-VECTOR still reads the text form, so a store written before the
+;;; change keeps working while it is re-encoded.
+
+(defun %single-representable-p (x)
+  "Whether X is a real that a single float holds: not NaN or infinite, and no larger in magnitude
+than MOST-POSITIVE-SINGLE-FLOAT. Checked before conversion, because converting a larger number
+signals SBCL's floating-point overflow, which is not a condition a store expects (#425's review)."
+  (and (realp x)
+       (not (and (floatp x) (or (sb-ext:float-nan-p x) (sb-ext:float-infinity-p x))))
+       (<= (abs x) most-positive-single-float)))
+
+(defun vector-octets (vector &optional dimensions)
+  "VECTOR, a sequence of reals, as a BLOB value: each number as a little-endian IEEE single
+float, 4 bytes, in a (SIMPLE-ARRAY (UNSIGNED-BYTE 8) (*)). With DIMENSIONS, signals
+PRAXEON/CONDITIONS:DELIBERATION-FAILURE unless VECTOR has that many numbers, as VECTOR-TEXT does.
+Signals it too for a number a single float cannot hold: NaN, an infinity, or a magnitude above
+MOST-POSITIVE-SINGLE-FLOAT."
+  (when (and dimensions (/= (length vector) dimensions))
+    (error 'praxeon/conditions:deliberation-failure
+           :detail (format nil "embedding rejected: ~D numbers where the store holds ~D"
+                           (length vector) dimensions)))
+  (let ((bad (position-if-not #'%single-representable-p vector)))
+    (when bad
+      (error 'praxeon/conditions:deliberation-failure
+             :detail (format nil "embedding rejected: number ~D is not a finite value a single float holds"
+                             bad))))
+  (let ((octets (make-array (* 4 (length vector)) :element-type '(unsigned-byte 8))))
+    (let ((i 0))
+      (map nil (lambda (x)
+                 (let ((bits (ldb (byte 32 0) (sb-kernel:single-float-bits (coerce x 'single-float)))))
+                   (setf (aref octets i) (ldb (byte 8 0) bits)
+                         (aref octets (+ i 1)) (ldb (byte 8 8) bits)
+                         (aref octets (+ i 2)) (ldb (byte 8 16) bits)
+                         (aref octets (+ i 3)) (ldb (byte 8 24) bits))
+                   (incf i 4)))
+           vector))
+    octets))
+
+(defun decode-vector-octets (octets &optional into)
+  "The numbers of OCTETS, written by VECTOR-OCTETS, as a (SIMPLE-ARRAY DOUBLE-FLOAT (*)). With
+INTO, an array of that type and of the right length, writes them there and returns it, so a scan
+over many rows reuses one array. Signals PRAXEON/CONDITIONS:DELIBERATION-FAILURE if the length of
+OCTETS is not a multiple of 4, or INTO has the wrong length."
+  (declare (type (simple-array (unsigned-byte 8) (*)) octets))
+  (multiple-value-bind (n rest) (floor (length octets) 4)
+    (unless (zerop rest)
+      (error 'praxeon/conditions:deliberation-failure
+             :detail (format nil "a stored embedding is ~D bytes, not a whole number of single floats"
+                             (length octets))))
+    (let ((out (or into (make-array n :element-type 'double-float))))
+      (declare (type (simple-array double-float (*)) out))
+      (unless (= (length out) n)
+        (error 'praxeon/conditions:deliberation-failure
+               :detail (format nil "a stored embedding has ~D numbers where ~D were expected"
+                               n (length out))))
+      (%decode-singles octets out n)
+      out)))
+
+(defun %decode-singles (octets out n)
+  "Write the N little-endian single floats in OCTETS into OUT as doubles. On a little-endian host,
+every one this tree builds for (x86-64 and arm64), each is read in place as a single float
+(SB-SYS:SAP-REF-SINGLE over the pinned array); this is the inner loop of a SQLite similarity scan,
+and assembling each number from its four bytes took most of the scan's time (#425). A big-endian
+host assembles the bytes."
+  (declare (type (simple-array (unsigned-byte 8) (*)) octets)
+           (type (simple-array double-float (*)) out)
+           (type fixnum n)
+           (optimize (speed 3) (safety 1)))
+  #+little-endian
+  (sb-sys:with-pinned-objects (octets)
+    (let ((sap (sb-sys:vector-sap octets)))
+      (dotimes (k n out)
+        (setf (aref out k) (coerce (sb-sys:sap-ref-single sap (* 4 k)) 'double-float)))))
+  #-little-endian
+  (dotimes (k n out)
+    (let* ((i (* 4 k))
+           (bits (logior (aref octets i)
+                         (ash (aref octets (+ i 1)) 8)
+                         (ash (aref octets (+ i 2)) 16)
+                         (ash (aref octets (+ i 3)) 24))))
+      (declare (type (unsigned-byte 32) bits))
+      (setf (aref out k)
+            (coerce (sb-kernel:make-single-float (if (logbitp 31 bits) (- bits #x100000000) bits))
+                    'double-float)))))
+
+(defun vector-text-octets (text)
+  "The BLOB form (VECTOR-OCTETS) of a vector stored as TEXT in the form VECTOR-TEXT writes, or NIL
+when TEXT is not that form. What a SQLite store's re-encode passes to
+MNEMOSYNE/MIGRATE:REWRITE-SQLITE-TEXT-VALUES (#425): a malformed value is left as it was, and its
+reader reports it as before."
+  ;; ANY ERROR, not only DELIBERATION-FAILURE: a re-encode runs on every open, and one value it
+  ;; cannot convert must leave that row as text, not stop the store from opening (#425's review).
+  (handler-case (vector-octets (parse-vector-text text))
+    (error () nil)))
+
+(defun stored-distance (query value &optional buffer)
+  "The cosine distance between QUERY, a (SIMPLE-ARRAY DOUBLE-FLOAT (*)), and VALUE, an embedding
+as a store keeps it (a BLOB from VECTOR-OCTETS or the text form of VECTOR-TEXT), or NIL when VALUE
+cannot be compared with QUERY: it has another number of dimensions, it is malformed, or the
+distance is not finite. BUFFER, an array of QUERY's length, is reused to decode a BLOB.
+
+What a scan over stored rows calls for each one, so that one row a store cannot read is skipped
+and counted by the caller instead of failing the search or, with a NaN, taking a place among the
+nearest (#425's review). Float traps are masked while it runs, so a corrupt value gives NIL
+instead of a floating-point trap."
+  (handler-case
+      (sb-int:with-float-traps-masked (:invalid :overflow :divide-by-zero)
+        (let ((stored (etypecase value
+                        ((simple-array (unsigned-byte 8) (*))
+                         (and (= (length value) (* 4 (length query)))
+                              (decode-vector-octets value (and buffer (= (length buffer) (length query))
+                                                               buffer))))
+                        (string
+                         (let ((numbers (parse-vector-text value)))
+                           (and (= (length numbers) (length query))
+                                (coerce numbers '(simple-array double-float (*)))))))))
+          (when stored
+            (let ((d (cosine-distance query stored)))
+              (and (not (sb-ext:float-nan-p d)) (not (sb-ext:float-infinity-p d)) d)))))
+    (error () nil)))
+
+(defun stored-vector (value &optional into)
+  "A stored embedding as a (SIMPLE-ARRAY DOUBLE-FLOAT (*)), whichever form it was stored in: a
+BLOB from VECTOR-OCTETS, or the text form of VECTOR-TEXT that a SQLite store wrote before #425's
+re-encode. INTO is as for DECODE-VECTOR-OCTETS, and is used only for a BLOB."
+  (etypecase value
+    ((simple-array (unsigned-byte 8) (*)) (decode-vector-octets value into))
+    (string (coerce (parse-vector-text value) '(simple-array double-float (*))))))
+
+;;; --- the K nearest, kept while scanning (#425) ---------------------------------
+;;;
+;;; A store with no vector index ranks its candidates in Lisp. Collecting every candidate and
+;;; sorting holds them all at once; this keeps the LIMIT best seen so far, nearest first, ties by
+;;; id ascending, the order pgvector's ORDER BY ... , id gives. LIMIT is small (10 to 150 in
+;;; praxeon's callers), so the list is kept sorted by insertion: once it is full, a candidate
+;;; that is not nearer than the last one costs one comparison.
+
+(defstruct (nearest (:constructor make-nearest (limit)))
+  "The LIMIT nearest candidates offered so far. See NEAREST-OFFER and NEAREST-ITEMS."
+  (limit 10 :type (integer 0) :read-only t)
+  (entries (make-array 0 :adjustable t :fill-pointer t) :read-only t))
+
+(declaim (inline %nearer-p))
+(defun %nearer-p (d1 id1 d2 id2)
+  (or (< d1 d2) (and (= d1 d2) (string< id1 id2))))
+
+(defun nearest-offer (nearest distance id item)
+  "Offer ITEM, at DISTANCE, with ID (a string, for ties) to NEAREST. Keeps it if it is among the
+LIMIT nearest so far. Returns NEAREST. A DISTANCE that is NaN or infinite is taken as
+MOST-POSITIVE-DOUBLE-FLOAT, the farthest, so it cannot hold a place among the nearest: a NaN
+compares false with everything, and in the last place it would make every later candidate look
+no nearer."
+  (when (or (not (realp distance))
+            (and (floatp distance) (or (sb-ext:float-nan-p distance) (sb-ext:float-infinity-p distance))))
+    (setf distance most-positive-double-float))
+  (let* ((entries (nearest-entries nearest))
+         (n (length entries))
+         (limit (nearest-limit nearest)))
+    (when (and (plusp limit)
+               (or (< n limit)
+                   (let ((last (aref entries (1- n))))
+                     (%nearer-p distance id (first last) (second last)))))
+      (let ((at (or (position-if (lambda (e) (%nearer-p distance id (first e) (second e))) entries)
+                    n)))
+        (when (= n limit) (decf (fill-pointer entries)))
+        (vector-push-extend nil entries)
+        (replace entries entries :start1 (1+ at) :start2 at :end2 (1- (length entries)))
+        (setf (aref entries at) (list distance id item))))
+    nearest))
+
+(defun nearest-items (nearest)
+  "The items NEAREST kept, nearest first, each as (DISTANCE . ITEM)."
+  (map 'list (lambda (e) (cons (first e) (third e))) (nearest-entries nearest)))
 
 ;;; --- batching within a provider's limits -----------------------------------
 
