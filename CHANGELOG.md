@@ -753,6 +753,25 @@ its tag.
 
 ### Added
 
+- **praxeon/actor: an agent can send its thread's observations in place of the messages they
+  were distilled from** (#317, step C). `(praxeon/actor:attach-thread-memory agent store subject
+  thread observer &key facts-budget replace-at read-tool)` gives an agent a thread memory:
+  - after every turn, `run-turn` (and `continue-turn`) gives the observer the agent's history,
+    which returns at once; the history stays the full record;
+  - facts about the subject are recalled within `:facts-budget` (1000 estimated tokens) and
+    attached after the cache marker with the agent's other context items;
+  - **`:replace-at` is NIL by default, which never replaces**, until #317's benchmark measures a
+    value. Once the observed messages reach it, what is sent is the system prompt, then the first
+    user message after the observer's mark with the thread's observations as its first part,
+    carrying the cache marker, then the rest of the history, trimmed as before. The cut moves to
+    a message the user wrote, so a tool's result is never sent without its call. The observations
+    are rendered in a fixed order (`thread-observations-text`), so the part up to the marker is
+    byte-identical from turn to turn until a distillation or a reflection changes them;
+  - an observation from untrusted content is labelled in that part and makes the turn untrusted;
+  - `read-observed-messages`, registered unless `:read-tool nil`, returns the messages an
+    observation, or the observations a condensed one replaced, came from, and marks the turn
+    untrusted when they held an untrusted call.
+
 - **hades: `reveal-path` shows a file or directory in the system file manager, and `open-url`
   opens a web page in the default browser** (#820), with no shell. `(hades/open:reveal-path path
   :select t)` selects the item in its folder: `explorer.exe /select,"<path>"` on Windows,

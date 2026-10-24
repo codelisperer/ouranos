@@ -317,6 +317,9 @@
 (defpackage #:praxeon/actor
   (:use #:cl)
   (:local-nicknames (#:px #:praxeon/praxeology)
+                    (#:mem #:praxeon/memory)
+                    (#:obs #:praxeon/observe)
+                    (#:dst #:praxeon/distil)
                     (#:log #:aion/log)
                     (#:boundary #:aion/boundary)
                     (#:cnd #:praxeon/conditions)
@@ -343,6 +346,9 @@
    #:means-entry-max-per-turn
    #:user-texts #:turn-untrusted-p #:turn-urls #:note-turn-urls #:mark-untrusted
    #:untrusted-window-predicate
+   ;; a thread's observations in the prompt in place of its observed messages (#317, step C)
+   #:thread-memory #:attach-thread-memory #:agent-thread-memory #:thread-memory-observer
+   #:thread-memory-replace-at #:*read-observed-messages-means* #:thread-observations-text
    #:agent-taint-scope
    ;; The accessors of what AGENT-MEANS-FOR returns. NAME and DESCRIPTION were missing, so an
    ;; app could enumerate the means it may use and not read them -- which is the

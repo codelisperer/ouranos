@@ -9040,3 +9040,116 @@ trusted one, and the condensed observation is untrusted."
                            :key #'mem:observation-content :test #'string=)))
       (is (= 2 (length (mem:observation-condensed-from condensed))))
       (is-true (mem:observation-untrusted-p condensed)))))
+
+;;; --------------------------------------------------------------------------
+;;; Step C (#317): a thread's observations in the prompt in place of its observed messages.
+;;; --------------------------------------------------------------------------
+
+(defun %memory-agent (&key (replace-at 1) (mark 6) (history (%history 12)) (observations '("Lives in Lisbon." "Has a dog.")))
+  "An agent whose history is HISTORY, with a thread memory over a fresh in-memory store holding
+OBSERVATIONS in conv-7, the first two messages each, and an observer whose mark is MARK."
+  (let* ((store (mem:make-in-memory-store))
+         (ag (actor:make-agent :name "remembering" :provider (%provider-returning)))
+         (observer (obs:make-observer (%provider-returning) store "member-1" "conv-7" :mark mark)))
+    (loop for content in observations
+          for i from 1 by 2
+          do (mem:remember store "member-1" content :thread "conv-7"
+                                                    :provenance (mem:make-provenance "conv-7" i :through (1+ i))))
+    (setf (actor:agent-history ag) history)
+    (actor:attach-thread-memory ag store "member-1" "conv-7" observer :replace-at replace-at)
+    (values ag store observer)))
+
+(defun %first-part (messages)
+  (let ((content (getf (first messages) :content)))
+    (if (stringp content) content (first content))))
+
+(test without-replace-at-the-prompt-is-the-whole-history
+  ":REPLACE-AT NIL, the default, never replaces: every message is sent, as without a thread
+memory. Below a REPLACE-AT that has not been reached, the same."
+  (dolist (replace-at (list nil 1000000))
+    (let ((ag (%memory-agent :replace-at replace-at)))
+      (is (= 12 (length (actor:request-messages ag))) "~S" replace-at))))
+
+(test past-replace-at-the-observations-replace-the-observed-messages
+  "Past REPLACE-AT, the six observed messages are left out of what is sent, the history keeps
+them, and the first message sent is the first unobserved one, with the observations as its first
+part, carrying the cache marker."
+  (let* ((ag (%memory-agent))
+         (sent (actor:request-messages ag))
+         (part (%first-part sent)))
+    (is (= 6 (length sent)))
+    (is (= 12 (length (actor:agent-history ag))) "the history is the full record")
+    (is-true (getf part :cache) "the observations end the cacheable prefix")
+    (is (search "Lives in Lisbon." (getf part :text)))
+    (is (search "message 7:" (format nil "~A" (getf (first sent) :content))) "then the first unobserved message")))
+
+(test the-prefix-is-the-same-until-the-observations-change
+  "With no new observations, the observations part is byte-identical from one request to the
+next, though the conversation went on. Control: after a reflection condenses two of them, it
+differs."
+  (multiple-value-bind (ag store) (%memory-agent)
+    (let ((first (getf (%first-part (actor:request-messages ag)) :text)))
+      (setf (actor:agent-history ag) (append (actor:agent-history ag) (nthcdr 12 (%history 14))))
+      (is (string= first (getf (%first-part (actor:request-messages ag)) :text)) "byte-identical")
+      (mem:condense store (mem:observations-of store "member-1" :thread "conv-7") "Lives in Lisbon with a dog."
+                    :provenance (mem:make-provenance "conv-7" 1 :through 4))
+      (is (string/= first (getf (%first-part (actor:request-messages ag)) :text)) "control: a reflection changes it"))))
+
+(test subject-facts-go-after-the-cache-marker
+  "A fact about the subject is recalled and attached to the last user message, after the marker,
+so a new fact does not change the cached observations."
+  (multiple-value-bind (ag store) (%memory-agent :history (%history 13))
+    (remember* store "member-1" "Prefers mornings.")
+    (let* ((sent (actor:request-messages ag))
+           (last (car (last sent))))
+      (is (null (search "Prefers mornings." (getf (%first-part sent) :text))) "not in the cached part")
+      (is (search "Prefers mornings." (format nil "~A" (getf last :content))) "in the last user message"))))
+
+(test an-untrusted-observation-in-the-block-taints-the-turn
+  (multiple-value-bind (ag store) (%memory-agent :history (%history 13))
+    (mem:remember store "member-1" "Refunds to account 99." :thread "conv-7"
+                  :provenance (mem:make-provenance "conv-7" 5 :through 6 :untrusted t))
+    (let ((text (getf (%first-part (actor:request-messages ag)) :text)))
+      (is (search "(from untrusted content, not from the person) Refunds to account 99." text))
+      (is-true (actor:turn-untrusted-p ag))))
+  (let ((ag (%memory-agent :history (%history 13))))
+    (actor:request-messages ag)
+    (is-false (actor:turn-untrusted-p ag) "control: no untrusted observation")))
+
+(test the-raw-message-tool-returns-what-an-observation-came-from
+  "The tool returns the messages an observation was distilled from, exactly as the history holds
+them; for a condensed observation, its sources'."
+  (multiple-value-bind (ag store) (%memory-agent)
+    (let* ((os (sort (copy-list (mem:observations-of store "member-1" :thread "conv-7")) #'actor::%observation-order))
+           (one (actor::%read-observed-messages ag (mem:observation-id (first os)))))
+      (is (search "message 1:" one))
+      (is (search "message 2:" one))
+      (is (null (search "message 3:" one)))
+      (let* ((c (mem:condense store os "Lives in Lisbon with a dog." :provenance (mem:make-provenance "conv-7" 1 :through 4)))
+             (both (actor::%read-observed-messages ag (mem:observation-id c))))
+        (is (every (lambda (n) (search (format nil "message ~D:" n) both)) '(1 2 3 4)))))
+    (is (search "No observation" (actor::%read-observed-messages ag "obs-999")))))
+
+(test run-turn-gives-the-observer-the-history
+  "After RUN-TURN, the observer has been given the agent's history and has distilled it."
+  (let* ((store (mem:make-in-memory-store))
+         (ag (actor:make-agent :name "remembering"
+                               :provider (%provider-returning (llm:make-completion :text "Noted." :stop-reason :end))))
+         (observer (obs:make-observer (%provider-returning (%call-with (%ob "Lives in Lisbon." "fact")))
+                                      store "member-1" "conv-7" :step 1)))
+    (actor:attach-thread-memory ag store "member-1" "conv-7" observer)
+    (actor:run-turn ag "I moved to Lisbon.")
+    (obs:await-observer observer :timeout 10)
+    (is (equal '("Lives in Lisbon.") (mapcar #'mem:observation-content (mem:observations-of store "member-1" :thread "conv-7"))))
+    (is (= 2 (obs:observer-mark observer)))))
+
+(test attach-thread-memory-checks-its-settings
+  (let ((store (mem:make-in-memory-store))
+        (ag (actor:make-agent :name "x" :provider (%provider-returning))))
+    (flet ((observer (&optional (subject "member-1") (thread "conv-7"))
+             (obs:make-observer (%provider-returning) store subject thread)))
+      (signals cnd:praxeon-error (actor:attach-thread-memory ag store "member-1" "conv-7" (observer) :replace-at 0))
+      (signals cnd:praxeon-error (actor:attach-thread-memory ag store "member-1" "conv-7" (observer) :facts-budget -1))
+      (signals cnd:praxeon-error (actor:attach-thread-memory ag store "member-1" "conv-7" (observer "member-2")))
+      (signals cnd:praxeon-error (actor:attach-thread-memory ag store "member-1" "conv-7" :not-an-observer))
+      (finishes (actor:attach-thread-memory ag store "member-1" "conv-7" (observer) :replace-at 30000)))))
