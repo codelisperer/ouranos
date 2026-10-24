@@ -251,14 +251,16 @@ UTF-8 sequence -- because that is the case the old contract silently destroyed."
 
 (defun %start-server (handler &key tls)
   "A server on 127.0.0.1 answering with HANDLER, a function of (path head stream) that writes
-the response. Records every request head. TLS presents the test certificate."
-  (aion/test-http:start-server
-   (lambda (request stream)
-     (funcall handler (aion/test-http:request-path request)
-              (aion/test-http:request-head request) stream))
-   :tls-certificate (and tls (%fixture "pinned-test.crt"))
-   :tls-key (and tls (%fixture "pinned-test.key"))
-   :name "http-client test server"))
+the response. Records every request head. TLS T presents the certificate for pinned.test; TLS :IP
+presents the one whose names are the addresses 127.0.0.1 and ::1."
+  (let ((base (if (eq tls :ip) "ip-test" "pinned-test")))
+    (aion/test-http:start-server
+     (lambda (request stream)
+       (funcall handler (aion/test-http:request-path request)
+                (aion/test-http:request-head request) stream))
+     :tls-certificate (and tls (%fixture (format nil "~A.crt" base)))
+     :tls-key (and tls (%fixture (format nil "~A.key" base)))
+     :name "http-client test server")))
 
 (defun %stop-server (server) (aion/test-http:stop-server server))
 
@@ -400,6 +402,40 @@ root: without CA-PATH the self-signed certificate is refused as well."
                        (%head-header (first (server-heads s)) "Host"))))
         (signals http:http-error (get-as "other.test"))
         (signals http:http-error (get-as "pinned.test" :ca nil))))))
+
+(test a-pinned-tls-connection-to-an-ip-literal-verifies-the-address-without-brackets
+  "#915: for https://[::1]/ the client sends no SNI name, since RFC 6066 does not allow an
+address there, and verifies the certificate against ::1, the address without the brackets the URL
+puts round it. The certificate's names are the addresses 127.0.0.1 and ::1. Before the fix the name
+verified was \"[::1]\", which no certificate holds, so this request was refused. Controls: [::2],
+an address the certificate does not name, is refused; the IPv4 literal is accepted; the host name
+other.test is refused. (cl+ssl also accepts the common name, ip.test, even though the certificate
+has subject alternative names, which RFC 6125 does not allow. That is unchanged here.)"
+  (skip-on-windows "a pinned connection is not available on Windows (WinHTTP)"
+    (with-server (s (lambda (path head stream)
+                      (declare (ignore path head))
+                      (%write-response stream 200 '() "over tls"))
+                    :tls :ip)
+      (flet ((get-as (host)
+               (http:send-request (http:make-request :url (%local s "/" host "https")
+                                                     :connect-address "127.0.0.1"
+                                                     :ca-path (%fixture "ip-test.crt")
+                                                     :read-timeout 5)
+                                  '())))
+        (is (string= "over tls" (http:response-body (get-as "[::1]"))))
+        (is (string= "over tls" (http:response-body (get-as "[0:0:0:0:0:0:0:1]"))))
+        (is (string= "over tls" (http:response-body (get-as "127.0.0.1"))))
+        (signals http:http-error (get-as "[::2]"))
+        (signals http:http-error (get-as "127.0.0.2"))
+        (signals http:http-error (get-as "other.test"))))))
+
+(test tls-names-gives-no-sni-name-for-an-ip-literal
+  "#915: the SNI name and the name verified, for each kind of host."
+  (flet ((names (host) (multiple-value-list (http::%tls-names host))))
+    (is (equal '(nil "::1") (names "[::1]")))
+    (is (equal '(nil "::1") (names "[0:0:0:0:0:0:0:1]")))
+    (is (equal '(nil "127.0.0.1") (names "127.0.0.1")))
+    (is (equal '("pinned.test" "pinned.test") (names "pinned.test")))))
 
 (test the-cl+ssl-patch-for-openssl-4-is-in-place
   "#706: aion/http-client points cl+ssl's ASN1-STRING-DATA at ASN1_STRING_get0_data, because

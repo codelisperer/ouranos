@@ -2099,6 +2099,17 @@ its tag.
 
 ### Fixed
 
+- **aion/http-client: an https request to an IPv6 address such as `https://[::1]/` verifies the
+  certificate against the address, and a request to any IP address sends no SNI name** (#915).
+  On Linux and macOS, a request through a pinned connection (`:connect-address`, which
+  `fetch-public` uses) passed the URL's host to cl+ssl unchanged. For an IPv6 address that host is
+  `[::1]` with brackets, so cl+ssl sent `[::1]` as the SNI name and checked the certificate
+  against `[::1]`, which no certificate names, and the request was refused. Now an IP address is
+  checked without brackets against the certificate's IP address names (`::1` and
+  `0:0:0:0:0:0:0:1` are the same address), and no SNI name is sent for an IPv4 or IPv6 address,
+  as RFC 6066 requires. Requests to host names are unchanged. Windows is not affected, because
+  it does not use cl+ssl.
+
 - **cons/coalton-repl and hades/open: the threads they create can be interrupted when they were
   started while an interrupt was deferred** (#896, the remaining sites of #541). On Linux and
   macOS, `cons/coalton-repl:eval-input` called from inside `sb-sys:without-interrupts`, for
