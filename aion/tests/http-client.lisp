@@ -1173,19 +1173,58 @@ the self-signed test certificate as CERTIFICATE-UNTRUSTED-ROOT."
 
 ;;; --- the opt-in check against public servers (GitHub Actions only) ------------------------
 
+(defun %runner-network-failure-p (condition)
+  "Whether CONDITION is a failure of the runner's network rather than of this client: the host
+did not resolve, a socket could not connect or timed out, or the fetch ran past its deadline. A
+TLS error, a refused certificate or a malformed response is not one of these, and still fails the
+test below (#931)."
+  (or (and (typep condition 'http:fetch-refused)
+           (eq :unresolvable (http:fetch-refused-reason condition)))
+      (typep condition '(or http:fetch-deadline-exceeded usocket:socket-condition
+                         usocket:ns-condition sb-sys:io-timeout))))
+
 (test public-https-through-the-pinned-path
   "Against servers on the internet: a public https page is fetched through FETCH-PUBLIC's pinned
 connection, and on Windows an expired certificate is refused as CERTIFICATE-EXPIRED by Windows'
 own policy. It needs the network, so it runs only on GitHub's runners (GITHUB_ACTIONS), never
-by default on a developer's machine."
+by default on a developer's machine.
+
+ANY HTTP STATUS PASSES. A response of any status means the TLS handshake, the verification of
+the server's certificate and the reading of an HTTP response all happened through the pinned
+connection, which is what this test is for. example.com once answered a runner with 503, and
+requiring 200 failed a run whose change could not have caused it (#931).
+
+A FAILURE OF THE RUNNER'S NETWORK IS A SKIP, with the condition as its reason: a host that does
+not resolve, a connection that fails or times out, or the deadline passing
+(%RUNNER-NETWORK-FAILURE-P). Those are not this client's doing. Every other condition fails the
+test."
   (if (not (uiop:getenvp "GITHUB_ACTIONS"))
       (skip "Runs only on GitHub Actions (GITHUB_ACTIONS is not set here): it uses the network")
-      (progn
-        (let ((r (http:fetch-public "https://example.com/" :read-timeout 30 :deadline 60)))
-          (is (= 200 (http:response-status r))))
-        #+os-windows
-        (signals http:certificate-expired
-          (http:fetch-public "https://expired.badssl.com/" :read-timeout 30 :deadline 60)))))
+      (block network
+        (handler-bind ((error (lambda (e)
+                                (when (%runner-network-failure-p e)
+                                  (skip "~A" (format nil "the runner's network failed: ~A" e))
+                                  (return-from network)))))
+          (let* ((r (http:fetch-public "https://example.com/" :read-timeout 30 :deadline 60))
+                 (status (http:response-status r)))
+            (is (and (integerp status) (<= 100 status 599)) "the status was ~S" status))
+          #+os-windows
+          (signals http:certificate-expired
+            (http:fetch-public "https://expired.badssl.com/" :read-timeout 30 :deadline 60))))))
+
+(test the-runner-network-failures-are-told-apart-from-this-clients
+  "#931: what PUBLIC-HTTPS-THROUGH-THE-PINNED-PATH skips and what it fails on. A host that does
+not resolve and a passed deadline are the runner's network; a refused certificate, a malformed
+response and a refused private address are not."
+  (is-true (%runner-network-failure-p
+            (make-condition 'http:fetch-refused :url "https://x.test/" :reason :unresolvable)))
+  (is-true (%runner-network-failure-p
+            (make-condition 'http:fetch-deadline-exceeded :url "https://x.test/" :deadline 1)))
+  (is-false (%runner-network-failure-p
+             (make-condition 'http:fetch-refused :url "https://x.test/" :reason :private)))
+  (is-false (%runner-network-failure-p
+             (make-condition 'http:certificate-expired :host "x.test" :verdict :expired :code 0)))
+  (is-false (%runner-network-failure-p (make-condition 'http:malformed-response :detail "x"))))
 
 ;;; --- the hub's review of #913 ---------------------------------------------------------------
 
