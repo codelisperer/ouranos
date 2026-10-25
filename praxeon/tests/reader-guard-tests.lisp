@@ -736,10 +736,66 @@ on the sub-agent's next turn, and the taint it recorded before that turn."
 (test a-delegated-task-records-the-conversation-untrusted
   "A delegated task is the coordinating model's text and stays in the sub-agent's history, so under
 :CONVERSATION the sub-agent's later turns are untrusted and its payment is refused (#948's
-review). Control: the same task from the user records :CLEAN and the payment runs."
+review). It records :DELEGATED, not :UNTRUSTED (#949's review). Control: the same task from the
+user records :CLEAN and the payment runs."
   (multiple-value-bind (runs recorded) (%delegated-then-paying t)
-    (is (eq :untrusted recorded))
+    (is (eq :delegated recorded))
     (is (= 0 runs) "the payment after a delegated task was refused"))
   (multiple-value-bind (runs recorded) (%delegated-then-paying nil)
     (is (eq :clean recorded) "control: the user's own task")
     (is (= 1 runs) "control: the payment ran")))
+
+(defun %coordinator-after-two-delegations (sub-reads)
+  "A coordinator under :TURN that delegates once in each of two turns to a sub-agent under
+:CONVERSATION. With SUB-READS the sub-agent's first task reads a page, an untrusted result. The
+reader is registered after the delegation means, so that means is not registered untrusted and
+only what happens at run time can mark the coordinator. Returns whether the coordinator's second
+turn is untrusted, and the sub-agent's recorded taint."
+  (flet ((answer (text) (llm:make-completion :text text :stop-reason :end))
+         (delegate () (%calls (list "helper" (%args "task" "look it up")))))
+    (let* ((sub (actor:make-agent
+                 :name "helper" :taint-scope :conversation
+                 :provider (make-instance
+                            'scripted
+                            :script (append (when sub-reads
+                                              (list (%calls (list "fetch" (%args "url" "x")))))
+                                            (list (answer "Found it.") (answer "Again."))))))
+           (coordinator (actor:make-agent
+                         :name "coordinator"
+                         :provider (make-instance 'scripted
+                                                  :script (list (delegate) (answer "Done.")
+                                                                (delegate) (answer "Done."))))))
+      (actor:register-agent-as-means coordinator sub :name "helper")
+      (actor:register-means sub "fetch" "Fetch a page."
+                            (lambda (args) (declare (ignore args)) "page") :untrusted t)
+      (actor:run-turn coordinator "Ask the helper.")
+      (actor:run-turn coordinator "Ask it again.")
+      (values (actor:turn-untrusted-p coordinator) (actor:agent-conversation-taint sub)))))
+
+(test a-second-delegation-marks-the-coordinator-only-when-the-sub-agent-read-something
+  "#949's review: a sub-agent untrusted only because a task was delegated to it earlier does not
+make its coordinator untrusted, so delegating twice leaves the coordinator's second turn clean.
+Control: when the sub-agent's first task read a page, its conversation is untrusted by what it
+read, and the second delegation marks the coordinator."
+  (multiple-value-bind (untrusted taint) (%coordinator-after-two-delegations nil)
+    (is (eq :delegated taint))
+    (is-false untrusted "the coordinator's second turn is clean"))
+  (multiple-value-bind (untrusted taint) (%coordinator-after-two-delegations t)
+    (is (eq :untrusted taint) "control: the sub-agent read a page")
+    (is-true untrusted "control: the second delegation marks the coordinator")))
+
+(test an-unknown-conversation-taint-is-refused
+  "As an unknown :TAINT-SCOPE is. Control: :CLEAN on the same agent answers."
+  (flet ((turn (taint)
+           (let ((ag (actor:make-agent
+                      :name "rebuilt" :taint-scope :conversation :conversation-taint taint
+                      :provider (make-instance 'scripted
+                                               :script (list (llm:make-completion
+                                                              :text "Hi." :stop-reason :end))))))
+             (setf (actor:agent-history ag) (list (llm:msg "user" "Earlier.")
+                                                  (llm:msg "assistant" "Yes.")))
+             (handler-case (actor:run-turn ag "Hello.")
+               (error (e) (princ-to-string e))))))
+    (let ((refused (turn :maybe)))
+      (is (and (stringp refused) (search ":conversation-taint must be" refused)) "~A" refused))
+    (is (equal "Hi." (turn :clean)) "control: a known value")))

@@ -57,21 +57,27 @@ its tag.
   for untrusted tool calls in the history, so a history rebuilt from text, which has none,
   made it behave like `:turn` without saying so. Now:
   - The agent records the conversation's taint in the new slot `agent-conversation-taint`:
-    `:untrusted` once untrusted content has entered the conversation, `:clean` from a first
-    turn until then, `nil` when not recorded. `make-agent` takes `:conversation-taint`.
+    `:untrusted` once the agent has read untrusted content, `:delegated` when the only such
+    content is a task a coordinating agent gave it, `:clean` from a first turn until either,
+    `nil` when not recorded. `make-agent` takes `:conversation-taint`; any other value signals
+    an error when the agent runs a turn.
   - **An app that stores text transcripts** stores this value with each transcript and passes it
     to `make-agent` when it rebuilds the agent.
   - Under `:conversation`, an agent with earlier turns, no tool calls in them and nothing recorded
     is treated as untrusted. Praxeon records `:untrusted`, logs it once for that agent, and
     signals the warning `praxeon/actor:conversation-taint-unrecorded`, whose message names the
     fix. Muffling the warning does not make the turn trusted.
-  - Once an agent records `:untrusted`, it stays untrusted under `:conversation` even if the app
-    removes the untrusted call from the history. Set the slot to `:clean` to start over.
+  - Once an agent records `:untrusted` or `:delegated`, it stays untrusted under `:conversation`
+    even if the app removes the untrusted call from the history. To start over, set the slot to
+    `:clean` and remove the untrusted calls from the history too.
   - `untrusted-window-predicate` reads the recorded value too, so an observer agrees with the turn.
   - **`:conversation` now refuses more than before:** a sub-agent given a task by
-    `register-agent-as-means` records `:untrusted`, because the task is another model's text and
+    `register-agent-as-means` records `:delegated`, because the task is another model's text and
     stays in its history. Under `:conversation`, the sub-agent's later turns are untrusted, so a
-    spending means is refused in them. The delegated turn itself is guarded as before.
+    spending means is refused in them. The delegated turn itself is treated as before.
+    `:delegated` is kept apart from `:untrusted` so that delegating to the same sub-agent again
+    does not make the coordinator untrusted; the coordinator is marked only when the sub-agent
+    read untrusted content, as before.
 
 - **praxeon/retrieval and praxeon/memory-db on SQLite: similarity search works at real corpus
   sizes, and the stored embeddings change form** (#425). A SQLite store kept each embedding as
