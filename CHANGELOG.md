@@ -68,6 +68,10 @@ its tag.
   - Once an agent records `:untrusted`, it stays untrusted under `:conversation` even if the app
     removes the untrusted call from the history. Set the slot to `:clean` to start over.
   - `untrusted-window-predicate` reads the recorded value too, so an observer agrees with the turn.
+  - **`:conversation` now refuses more than before:** a sub-agent given a task by
+    `register-agent-as-means` records `:untrusted`, because the task is another model's text and
+    stays in its history. Under `:conversation`, the sub-agent's later turns are untrusted, so a
+    spending means is refused in them. The delegated turn itself is guarded as before.
 
 - **praxeon/retrieval and praxeon/memory-db on SQLite: similarity search works at real corpus
   sizes, and the stored embeddings change form** (#425). A SQLite store kept each embedding as

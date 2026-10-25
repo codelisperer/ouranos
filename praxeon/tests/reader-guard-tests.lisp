@@ -710,3 +710,36 @@ from the text with that value refuses the payment. A fresh agent that reads noth
     (is-true (funcall (actor:untrusted-window-predicate tainted) (actor:agent-history tainted)))
     (is-false (funcall (actor:untrusted-window-predicate clean) (actor:agent-history clean))
               "control: recorded clean")))
+
+(defun %delegated-then-paying (delegate)
+  "A sub-agent under :CONVERSATION that answers one task, then asks to pay. With DELEGATE a
+coordinator gives it the task; otherwise the user does. Returns how many times the payment ran
+on the sub-agent's next turn, and the taint it recorded before that turn."
+  (let* ((sub (actor:make-agent
+               :name "helper" :taint-scope :conversation
+               :provider (make-instance 'scripted
+                                        :script (list (llm:make-completion :text "Found it."
+                                                                           :stop-reason :end)
+                                                      (%calls (list "pay" (%args "item" "x")))
+                                                      (llm:make-completion :text "Done."
+                                                                           :stop-reason :end)))))
+         (runs (%confirmed-spender sub)))
+    (if delegate
+        (let ((coordinator (%guard-agent (%calls (list "helper" (%args "task" "look it up"))))))
+          (actor:register-agent-as-means coordinator sub :name "helper")
+          (actor:run-turn coordinator "Ask the helper."))
+        (actor:run-turn sub "look it up"))
+    (let ((recorded (actor:agent-conversation-taint sub)))
+      (%approving sub "Now pay")
+      (values (funcall runs) recorded))))
+
+(test a-delegated-task-records-the-conversation-untrusted
+  "A delegated task is the coordinating model's text and stays in the sub-agent's history, so under
+:CONVERSATION the sub-agent's later turns are untrusted and its payment is refused (#948's
+review). Control: the same task from the user records :CLEAN and the payment runs."
+  (multiple-value-bind (runs recorded) (%delegated-then-paying t)
+    (is (eq :untrusted recorded))
+    (is (= 0 runs) "the payment after a delegated task was refused"))
+  (multiple-value-bind (runs recorded) (%delegated-then-paying nil)
+    (is (eq :clean recorded) "control: the user's own task")
+    (is (= 1 runs) "control: the payment ran")))

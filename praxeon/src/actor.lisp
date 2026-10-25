@@ -1317,7 +1317,12 @@ CONTINUE-TURN."
     (let ((guard (%make-turn-guard message nil agent)))
       (setf (agent-guard agent) guard)
       (when (or *decided-after-untrusted* (%history-untrusted-p agent message))
-        (%taint-guard guard))))
+        (%taint-guard guard)))
+    ;; A delegated task is a model's text, and it stays in this agent's history, so the
+    ;; conversation is untrusted from the next turn on (#948). This turn is guarded by
+    ;; UNTRUSTED-INPUTS above, as before.
+    (when *delegated*
+      (setf (agent-conversation-taint agent) :untrusted)))
   (%turn-loop agent max-steps permit (%output-limit agent max-tokens)))
 
 (defun %turn-loop (agent max-steps permit limit)

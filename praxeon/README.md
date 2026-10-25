@@ -270,7 +270,8 @@ and pass it back when the agent is rebuilt:
 ```
 
 `:conversation` counts a turn untrusted when the recorded value is `:untrusted`, or when the
-history holds an untrusted call. Once recorded `:untrusted`, an agent stays so; an app that
+history holds an untrusted call. A sub-agent given a task by `register-agent-as-means` records
+`:untrusted`, because the task is another model's text and stays in its history. Once recorded `:untrusted`, an agent stays so; an app that
 deliberately starts the conversation over sets it to `:clean`. When an agent under
 `:conversation` has earlier turns, no tool calls in them and nothing recorded, praxeon cannot
 tell whether untrusted content came before. It then treats the turn as untrusted, records
