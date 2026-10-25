@@ -875,7 +875,9 @@ its tag.
     gives that pool to a session store (`hyperion/session-db:make-db-store`), to a user store
     (`hyperion/auth-db:make-db-auth`), and to `hyperion/db-connection:wrap-connection`, which
     lends each request its own connection in `*db*`. The page counts visits in the session.
-    SQLite uses `data/NAME.db` when `DATABASE_URL` is unset; Postgres requires it.
+    SQLite uses `data/NAME.db` when `DATABASE_URL` is unset; Postgres requires it. A `start`
+    that fails closes the pool it opened. In every web app, with or without `--db`, a second
+    `start` while the app is running is refused.
     `.env.example` carries the line, and the generated `.gitignore` covers `data/`.
   - The web template now declares `aion/uv` and `aion/log`, its `start` logs which server
     `hyperion/server:default-server` chose and why (`server chosen server=uv
@@ -884,7 +886,8 @@ its tag.
   - The generated `tests/NAME-tests.lisp` starts the app on a free port, sends GET / over a
     socket and checks that `hyperion/server-uv`'s handler answered. With `--db` it also checks
     that two requests with the session cookie count two visits and that the session is in the
-    database. A Postgres app's tests skip when `DATABASE_URL` is unset.
+    database. They load the project's `.env` first, as `start` does. A Postgres app's tests
+    skip when `DATABASE_URL` is unset there and in the environment.
   - A template manifest may offer `:options`; each choice adds dependencies, files that
     replace or add to `files/`, and markers (`cons/docs/templates-design.md` §4). New in
     `cons/init`: `template-options`, `template-option-choices`, `templates-with-option`,

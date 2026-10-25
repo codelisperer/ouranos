@@ -32,7 +32,10 @@ set."
   (let ((url (uiop:getenv "DATABASE_URL")))
     (cond ((and url (plusp (length url))) url)
           (+default-database-url+ +default-database-url+)
-          (t (error "{{name}}: DATABASE_URL is not set. Set it in .env or the environment, for example DATABASE_URL=postgres://user@localhost:5432/{{name}}.")))))
+          (t (error (concatenate 'string
+                                 "{{name}}: DATABASE_URL is not set. Set it in .env or the "
+                                 "environment, for example "
+                                 "DATABASE_URL=postgres://user@localhost:5432/{{name}}."))))))
 
 (defun %ensure-sqlite-directory (url)
   "Make the directory a relative or absolute sqlite: URL's file is in, since SQLite creates the
@@ -42,12 +45,15 @@ file but not its directory."
       (ensure-directories-exist (subseq url (length prefix))))))
 
 (defun open-database ()
-  "Open the pool and both stores over it, creating their tables when they do not exist."
+  "Open the pool and both stores over it, creating their tables when they do not exist.
+Signals when the database is already open. If a store cannot be made, the pool is closed."
+  (when *pool* (error "{{name}}: the database is already open. Call CLOSE-DATABASE first."))
   (let ((url (database-url)))
     (%ensure-sqlite-directory url)
-    (setf *pool* (conn:make-pool (url:backend-from-url url) :size *pool-size*)
-          *sessions* (session-db:make-db-store *pool* :dialect +dialect+ :ensure t)
-          *users* (auth:make-db-auth *pool* :dialect +dialect+ :ensure t))))
+    (setf *pool* (conn:make-pool (url:backend-from-url url) :size *pool-size*))
+    (handler-bind ((error (lambda (e) (declare (ignore e)) (close-database))))
+      (setf *sessions* (session-db:make-db-store *pool* :dialect +dialect+ :ensure t)
+            *users* (auth:make-db-auth *pool* :dialect +dialect+ :ensure t)))))
 
 (defun close-database ()
   "Close the pool, and with it every connection the stores and requests used."

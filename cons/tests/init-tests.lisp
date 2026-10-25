@@ -442,10 +442,12 @@ table becoming a list of things that used to be true."
           (is (null (%file plain "src/db.lisp")))
           (is (not (search "mnemosyne" (%file plain "plain.asd"))))
           (is (equal ";; db sqlite://data/mine.db" (%file mine "src/main.lisp"))
-              "the choice's file replaced the base one, and its marker, which holds {{name}}, was filled")
-          (is (equal ";; only with --db" (%file mine "src/db.lisp")) "the choice's own file was added")
+              "the choice's file replaced the base one, and its marker, holding {{name}}, was filled")
+          (is (equal ";; only with --db" (%file mine "src/db.lisp"))
+              "the choice's own file was added")
           (is (search "\"alexandria\"" (%file mine "mine.asd")))
-          (is (search "\"mnemosyne\"" (%file mine "mine.asd")) "the choice's dependency was added"))))))
+          (is (search "\"mnemosyne\"" (%file mine "mine.asd"))
+              "the choice's dependency was added"))))))
 
 (test web-with-db-writes-one-pool-and-the-database-url
   (with-scaffold (root "shop" :template :web :options '(:db :sqlite))

@@ -5,12 +5,14 @@
 ;;;; START returned is server-uv's, and the request went to that handler's port. The second
 ;;;; checks that a session is kept in the database, through the one pool src/db.lisp makes.
 ;;;;
-;;;; The database: DATABASE_URL when it is set. Otherwise a SQLite app uses a new file in the
+;;;; The database: DATABASE_URL when it is set, in the environment or in the project's .env,
+;;;; which is loaded first, as START loads it. Otherwise a SQLite app uses a new file in the
 ;;;; temporary directory, deleted afterwards, and a Postgres app skips these tests.
 
 (cl:defpackage #:{{name}}/tests
   (:use #:cl #:fiveam)
-  (:local-nicknames (#:uv #:hyperion/server-uv)
+  (:local-nicknames (#:env #:cons/env)
+                    (#:uv #:hyperion/server-uv)
                     (#:srv #:hyperion/server)
                     (#:session #:hyperion/session))
   (:export #:{{name}} #:http-get #:call-with-app))
@@ -46,15 +48,20 @@ when it is given. Return the whole reply as a string."
       (sb-bsd-sockets:socket-close socket))))
 
 (defun %with-env (name value function)
-  "Call FUNCTION with the environment variable NAME set to VALUE, and restore it afterwards."
+  "Call FUNCTION with the environment variable NAME set to VALUE, and put it back afterwards: the
+value it had, or unset when it was not set."
   (let ((before (uiop:getenv name)))
     (setf (uiop:getenv name) value)
     (unwind-protect (funcall function)
-      (setf (uiop:getenv name) (or before "")))))
+      (if before
+          (setf (uiop:getenv name) before)
+          (uiop:symbol-call :sb-posix :unsetenv name)))))
 
 (defun call-with-database (function)
   "Call FUNCTION with a database to use: DATABASE_URL when it is set, a new SQLite file for a
-SQLite app, or else skip."
+SQLite app, or else skip. The project's .env is loaded first, so a DATABASE_URL set only there
+is used, as START would use it."
+  (env:load-project-env :{{name}})
   (let ((set (uiop:getenv "DATABASE_URL")))
     (cond ((and set (plusp (length set))) (funcall function))
           ((eq {{name}}::+dialect+ :sqlite)
@@ -114,3 +121,20 @@ the database through the pool, holds the session with that count."
                                           (subseq cookie (1+ (position #\= cookie))))))
            (is (and stored (eql 2 (session:session-get stored :visits)))
                "the database holds the session with two visits")))))))
+
+(test a-second-start-is-refused-and-the-database-stays-open
+  (call-with-app
+   (lambda (handler)
+     (declare (ignore handler))
+     (signals error ({{name}}:start :port 0))
+     (is (not (null {{name}}:*pool*)) "the running app's pool is still open"))))
+
+(test a-start-that-fails-closes-the-database-it-opened
+  "START opens the pool before it starts the server. When the server does not start, here
+because HYPERION_SERVER names no server, the pool is closed again."
+  (call-with-database
+   (lambda ()
+     (%with-env "HYPERION_SERVER" "no-such-server"
+                (lambda ()
+                  (signals error ({{name}}:start :port 0))
+                  (is (null {{name}}:*pool*) "the pool START opened was closed"))))))

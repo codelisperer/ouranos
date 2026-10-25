@@ -48,7 +48,10 @@ returned, and stop the app."
          (let ((handler ({{name}}:start :port 0)))
            (unwind-protect (funcall function handler)
              ({{name}}:stop)))
-      (setf (uiop:getenv "HYPERION_SERVER") (or chosen "")))))
+      ;; Put it back as it was: the value it had, or unset.
+      (if chosen
+          (setf (uiop:getenv "HYPERION_SERVER") chosen)
+          (uiop:symbol-call :sb-posix :unsetenv "HYPERION_SERVER")))))
 
 (test server-uv-answers-a-request-for-the-page
   (call-with-app
@@ -58,3 +61,9 @@ returned, and stop the app."
        (let ((reply (http-get (uv:server-port handler))))
          (is (uiop:string-prefix-p "HTTP/1.1 200" reply) "GET / answered 200")
          (is (search "{{name}} is running" reply) "the page is this app's"))))))
+
+(test a-second-start-is-refused
+  (call-with-app
+   (lambda (handler)
+     (declare (ignore handler))
+     (signals error ({{name}}:start :port 0)))))

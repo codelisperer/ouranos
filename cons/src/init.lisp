@@ -294,7 +294,8 @@ each of its options, such as (:DB :SQLITE). `cons template check' builds each on
 naming the templates that do, or when VALUE is not one of its choices."
   (let ((entry (assoc option (template-options template))))
     (unless entry
-      (error "Template ~(~A~) does not take --~(~A~); ~:[no template does~;~:*the templates that do: ~{~(~A~)~^ ~}~]."
+      (error (concatenate 'string "Template ~(~A~) does not take --~(~A~); "
+                          "~:[no template does~;~:*the templates that do: ~{~(~A~)~^ ~}~].")
              (template-name template) option (templates-with-option option)))
     (let ((choice (assoc value (rest entry))))
       (unless choice
@@ -469,13 +470,13 @@ reason."
          ;; the entry-point-shaped parts of the generated cons.lisp and README. A template
          ;; asks for the latter by marker without knowing what its kind will put there.
          (subs (append (loop for c in chosen append (getf c :markers))
-                      (list (cons "{{spec-params}}"   (target-kind-spec-params kind))
-                     (cons "{{targets-extra}}" (target-kind-extra-targets kind))
-                     (cons "{{run-line}}"      (target-kind-run-line kind))
-                     (cons "{{deps}}" (%render-deps dependencies))
-                     (cons "{{author}}" author)
-                     (cons "{{dev-port}}" (princ-to-string (dev-port name)))
-                     (cons "{{name}}" name)))))
+                       (list (cons "{{spec-params}}"   (target-kind-spec-params kind))
+                             (cons "{{targets-extra}}" (target-kind-extra-targets kind))
+                             (cons "{{run-line}}"      (target-kind-run-line kind))
+                             (cons "{{deps}}" (%render-deps dependencies))
+                             (cons "{{author}}" author)
+                             (cons "{{dev-port}}" (princ-to-string (dev-port name)))
+                             (cons "{{name}}" name)))))
     (unless (target-kind-implemented-p kind)
       ;; Not an error: files plus an honest warning beat the kind not existing (design §3).
       (format t "~&NOTE: target kind ~(~A~) is declared but its build/ship path is not implemented yet.~%"

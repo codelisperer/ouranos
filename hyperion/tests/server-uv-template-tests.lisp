@@ -77,51 +77,66 @@ workers and answers GET / with 200 and its own page (#472)."
 Returns (values STDOUT STDERR EXIT-CODE)."
   (uiop:run-program
    (list "sbcl" "--dynamic-space-size" "4096" "--non-interactive" "--no-sysinit" "--no-userinit"
-         "--eval" (format nil "(defparameter cl-user::*project-root* ~S)" (uiop:native-namestring root))
+         "--eval" (format nil "(defparameter cl-user::*project-root* ~S)"
+                          (uiop:native-namestring root))
          "--eval" (format nil "(defparameter cl-user::*project-name* ~S)" +template-project+)
          "--load" (uiop:native-namestring
                    (asdf:system-relative-pathname :hyperion/server-uv/tests
                                                   "tests/template-suite-child.lisp")))
    :output :string :error-output :string :ignore-error-status t))
 
-(defun %check-generated-suite (options expected-checks)
+(defun %check-generated-suite (options checks &key (skipped 0))
   "Scaffold the web template with OPTIONS, run the project's own suite in a fresh sbcl, and check
-that it ran EXPECTED-CHECKS checks, all of them passing."
+that it ran CHECKS checks, of which SKIPPED were skipped and the rest passed."
   (cons/tempdir:with-temporary-directory (work "uvsuite")
     (let ((root (let ((*standard-output* (make-broadcast-stream)))
                   (cons/init:scaffold +template-project+ :template :web :target work
                                                          :options options))))
       (multiple-value-bind (output error-output code) (%run-suite-child root)
-        (let ((context (format nil "exit ~A~%--- stdout~%~A~%--- stderr (last 3000)~%~A" code output
+        (let ((context (format nil "exit ~A~%--- stdout~%~A~%--- stderr (last 3000)~%~A"
+                               code output
                                (subseq error-output (max 0 (- (length error-output) 3000))))))
-          (is (eql 0 code) "the child sbcl exited 0: ~A" context)
-          (is (equal (princ-to-string expected-checks) (%template-field output "SUITE-CHECKS"))
-              "the project's suite ran ~D checks: ~A" expected-checks context)
-          (is (equal (princ-to-string expected-checks) (%template-field output "SUITE-PASSED"))
-              "every check passed: ~A" context)
-          (is (equal "0" (%template-field output "SUITE-FAILED")) "none failed: ~A" context)
-          (is (equal "0" (%template-field output "SUITE-SKIPPED")) "none skipped: ~A" context))))))
+          (flet ((field= (expected key)
+                   (equal (princ-to-string expected) (%template-field output key))))
+            (is (eql 0 code) "the child sbcl exited 0: ~A" context)
+            (is (field= checks "SUITE-CHECKS") "the project's suite ran ~D checks: ~A"
+                checks context)
+            (is (field= (- checks skipped) "SUITE-PASSED") "~D passed: ~A"
+                (- checks skipped) context)
+            (is (field= 0 "SUITE-FAILED") "none failed: ~A" context)
+            (is (field= skipped "SUITE-SKIPPED") "~D skipped: ~A" skipped context)))))))
 
 (test the-web-projects-own-tests-pass
-  "The plain web project's suite starts the app and checks server-uv answered GET /: 3 checks."
-  (%check-generated-suite nil 3))
+  "The plain web project's suite starts the app, checks server-uv answered GET /, and checks
+that a second START is refused: 4 checks."
+  (%check-generated-suite nil 4))
 
 (test the-web-sqlite-projects-own-tests-pass
-  "web --db sqlite: the page from server-uv, and two visits counted in a session that the
-database holds, through the one pool: 7 checks."
-  (%check-generated-suite '(:db :sqlite) 7))
+  "web --db sqlite: the page from server-uv; two visits counted in a session that the database
+holds, through the one pool; a second START refused with the pool still open; and a START that
+fails closes the pool it opened: 11 checks."
+  (%check-generated-suite '(:db :sqlite) 11))
 
-(test the-web-postgres-projects-own-tests-pass
-  "web --db postgres, against the gate's Postgres: the same 7 checks as SQLite."
+(defparameter +default-store-tables+
+  (format nil "~{~A~^,~}" '("hyperion_sessions" "hyperion_users" "hyperion_role_events"
+                           "hyperion_email_tokens" "hyperion_email_events"))
+  "The tables a generated Postgres project's stores create, under their default names.")
+
+(test the-web-postgres-project-builds-and-its-own-tests-pass
+  "web --db postgres is scaffolded and built on every leg. Against the gate's Postgres its suite
+runs the same 11 checks as SQLite. Without a Postgres URL, the project's four tests skip
+themselves, which this checks, and then this test records a skip."
   (let ((url (uiop:getenv "MNEMOSYNE_TEST_PG_URL")))
-    (if (or (null url) (zerop (length url)))
-        (skip "MNEMOSYNE_TEST_PG_URL is not set -- this says nothing about Postgres")
-        ;; The project's stores create their tables under the default names. The child drops
-        ;; the ones that were not there before it ran.
+    (if (and url (plusp (length url)))
+        ;; The child drops the default-named tables that were not there before it ran.
         (%with-environment `(("DATABASE_URL" . ,url)
-                             ("TEMPLATE_DROP_NEW_TABLES"
-                              . "hyperion_sessions,hyperion_users,hyperion_role_events,hyperion_email_tokens,hyperion_email_events"))
-                           (lambda () (%check-generated-suite '(:db :postgres) 7))))))
+                             ("TEMPLATE_DROP_NEW_TABLES" . ,+default-store-tables+))
+                           (lambda () (%check-generated-suite '(:db :postgres) 11)))
+        (progn
+          (%with-environment '(("DATABASE_URL" . nil))
+                             (lambda () (%check-generated-suite '(:db :postgres) 4 :skipped 4)))
+          (skip (concatenate 'string "MNEMOSYNE_TEST_PG_URL is not set -- the Postgres project "
+                             "was built, and its tests were not run"))))))
 
 ;;; --- cons bin carries libuv, and the binary serves away from the tree (#513) --------------
 ;;;

@@ -49,13 +49,24 @@ which is why the .env load is at the top of it rather than in MAIN alone."
   ;; first consumer happens to sit -- is a .env that was not loaded for whatever ran
   ;; before it, and that failure blames the library rather than this ordering.
   (env:load-project-env :{{name}})
-  ;; DEFAULT-SERVER chooses :uv when libuv loads, and otherwise the next server this app loads,
-  ;; and says why. HYPERION_SERVER, when set, decides. On :uv, START runs handlers on two
-  ;; worker threads, so one slow request does not hold up the others.
-  (open-database)
-  (multiple-value-bind (server reason detail) (srv:default-server)
-    (log:info "{{name}}: server chosen" :server server :reason reason :detail detail)
-    (setf *handler* (srv:start (app-with-database #'app) :host host :port port :server server)))
+  (when *handler*
+    (error "{{name}}: already running on port ~D. Call STOP first."
+           (srv:handler-port *handler*)))
+  ;; A pool opened here is closed again if the server does not start, so a failed START
+  ;; leaves no connections open. A pool already opened, at the REPL say, is used and kept.
+  (let ((opened (not *pool*))
+        (started nil))
+    (when opened (open-database))
+    (unwind-protect
+         ;; DEFAULT-SERVER chooses :uv when libuv loads, and otherwise the next server this
+         ;; app loads, and says why. HYPERION_SERVER, when set, decides. On :uv, START runs
+         ;; handlers on two worker threads, so one slow request does not hold up the others.
+         (multiple-value-bind (server reason detail) (srv:default-server)
+           (log:info "{{name}}: server chosen" :server server :reason reason :detail detail)
+           (setf *handler* (srv:start (app-with-database #'app)
+                                      :host host :port port :server server)
+                 started t))
+      (when (and opened (not started)) (close-database))))
   (format t "~&{{name}} serving at http://~A:~D/~%" host (srv:handler-port *handler*))
   (finish-output)
   *handler*)

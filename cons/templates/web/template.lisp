@@ -30,4 +30,5 @@
              :files "options/db/"
              :markers (("{{db-dialect}}" . ":postgres")
                        ("{{db-default-url}}" . "nil")
-                       ("{{db-env-line}}" . "# DATABASE_URL=postgres://user:REPLACE_ME@localhost:5432/{{name}}"))))))
+                       ("{{db-env-line}}"
+                       . "# DATABASE_URL=postgres://user:REPLACE_ME@localhost:5432/{{name}}"))))))
