@@ -429,13 +429,16 @@ ICON -- a pathname/string for the WINDOW icon, passed to the launcher as --icon 
   (BUNDLED-WINDOW-ICON), because ICON is usually a path on the machine that built the app.
 PLACEMENT-FILE -- a pathname for the file where the window's position, size and maximised state
   are kept between runs (#485). NIL, the default, keeps none, and the window opens centred in
-  the work area each time. With a file, the window opens where it was last time if that still
-  fits a monitor, and centred otherwise; the file is rewritten when a drag ends, on a maximise
-  or restore, and on close (hyperion-view.cc says which moves that misses). Put
-  it in the app's own data directory, for example (merge-pathnames \"window-placement\"
-  data-dir). Its directory is created if needed. Windows only for now: elsewhere the launcher
-  accepts it and ignores it. It needs a hyperion-view built with this change; an older one
-  refuses the option and exits 2.
+  the work area each time. With a file, on Windows the window opens where it was last time if
+  that still fits a monitor, and centred otherwise; the file is rewritten when a drag ends, on a
+  maximise or restore, and on close (hyperion-view.cc says which moves that misses). On macOS
+  the saved frame is moved into the screen it overlaps most, shrunk first if it is larger than
+  that screen's visible frame, and the window is centred only when it overlaps no screen; the
+  file is rewritten after each move, after a resize by dragging ends, on zoom and on close. On
+  Linux the launcher accepts the option and ignores it. Put it in the app's own data
+  directory, for example (merge-pathnames \"window-placement\" data-dir). Its directory is
+  created if needed. It needs a hyperion-view built with this change; an older one refuses the
+  option and exits 2.
 WORKERS -- the number of threads that run the embedded server's handlers, passed to
   HYPERION/SERVER:START. It defaults to 2 when SERVER is :uv (#472): without workers, :uv runs
   every handler on its loop thread, so a handler that waits -- a model call, a slow query, a

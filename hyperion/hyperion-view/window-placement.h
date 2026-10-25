@@ -11,7 +11,7 @@
 // shrinks it to fit that work area when it is larger. This file is the arithmetic, with no
 // platform calls in it, so `hyperion-view --placement' can print it and a test can check it on
 // every OS (hyperion/tests/view-tests.lisp). hyperion-view.cc supplies the real work area,
-// DPI and frame on Windows.
+// DPI and frame on Windows and macOS.
 
 #pragma once
 
@@ -73,9 +73,11 @@ inline window_placement place_in_work_area(long work_left, long work_top, long w
 //
 //     hyperion-view-placement 1 LEFT TOP RIGHT BOTTOM MAXIMIZED
 //
-// The rectangle is the window's frame in physical pixels, in screen coordinates, as it was
-// before it was maximised; MAXIMIZED is 1 or 0. At the next start the window is put back there
-// if the rectangle still fits a monitor's work area, and otherwise placed as above. A monitor
+// On Windows the rectangle is the window's frame in physical pixels, in screen coordinates, as it
+// was before it was maximised; MAXIMIZED is 1 or 0. At the next start the window is put back
+// there if the rectangle still fits a monitor's work area, and otherwise placed as above. macOS
+// uses the same line in its own coordinates, and its own rule for a frame that no longer fits
+// (RESTORE_INTO_SCREENS, below). A monitor
 // that was unplugged or rearranged, or a file that is not this format, is not an error: the
 // window opens centred.
 
@@ -160,4 +162,89 @@ inline bool saved_placement_fits(const saved_placement &p, long work_left, long 
   return p.right - p.left >= kMinSavedWidth && p.bottom - p.top >= kMinSavedHeight &&
          p.left >= work_left - border_left && p.top >= work_top - border_top &&
          p.right <= work_right + border_right && p.bottom <= work_bottom + border_bottom;
+}
+
+// --- restoring on macOS: clamped into the screen it overlaps most (#485) -----------------
+//
+// On macOS the saved line has the same form, with the frame in points in Cocoa's global
+// coordinates, which are measured upwards from the bottom of the main screen: LEFT and RIGHT are
+// the frame's x edges, and the two y fields hold its lower and its upper edge, in that order. So
+// in both coordinate systems the first y field is the smaller one, and the arithmetic below does
+// not depend on which way y runs.
+//
+// Displays change between launches more often on a Mac than the Windows rule allows for: a
+// laptop's lid is closed, an external display is unplugged, a resolution is changed. So instead
+// of using the saved frame only when it fits, as SAVED_PLACEMENT_FITS does on Windows, the frame
+// is put on the screen whose visible frame (the screen less the menu bar and the Dock) it
+// overlaps most, shrunk to that visible frame when it is larger, and then moved the least
+// distance that puts it inside. Only a frame that overlaps no screen at all is ignored, and the
+// window is then placed as PLACE_IN_WORK_AREA says.
+
+// A rectangle with X0 < X1 and Y0 < Y1, whichever way y runs.
+struct span_rect {
+  long x0, y0, x1, y1;
+};
+
+// The most screens --restore-placement takes on its command line.
+const int kMaxScreens = 16;
+
+// Where RESTORE_INTO_SCREENS puts a saved frame. IGNORED is nullptr when the frame is used, and
+// otherwise the reason it is not: "too-small" or "off-screen". SCREEN is the index of the screen
+// chosen, or -1.
+struct clamped_placement {
+  const char *ignored;
+  int screen;
+  long x0, y0, x1, y1;
+};
+
+// The area A and B have in common, or 0 when they only touch or do not meet. A long long,
+// because two coordinates within kMaxCoordinate of the origin can make a product past 32 bits.
+inline long long overlap_area(const span_rect &a, const span_rect &b) {
+  long w = (a.x1 < b.x1 ? a.x1 : b.x1) - (a.x0 > b.x0 ? a.x0 : b.x0);
+  long h = (a.y1 < b.y1 ? a.y1 : b.y1) - (a.y0 > b.y0 ? a.y0 : b.y0);
+  return (w > 0 && h > 0) ? static_cast<long long>(w) * h : 0;
+}
+
+// P put back on one of the COUNT visible frames in SCREENS, as described above. A screen with no
+// width or height is passed over. When two screens overlap P equally, the first is chosen. A
+// frame smaller than kMinSavedWidth x kMinSavedHeight is ignored, as on Windows. Coordinates are
+// within kMaxCoordinate of the origin: parse_saved_placement checks P's, and the caller checks
+// the screens'.
+inline clamped_placement restore_into_screens(const saved_placement &p, const span_rect *screens,
+                                              int count) {
+  clamped_placement out = {nullptr, -1, 0, 0, 0, 0};
+  long width = p.right - p.left;
+  long height = p.bottom - p.top;
+  if (width < kMinSavedWidth || height < kMinSavedHeight) {
+    out.ignored = "too-small";
+    return out;
+  }
+  span_rect saved = {p.left, p.top, p.right, p.bottom};
+  long long best = 0;
+  for (int i = 0; i < count; i++) {
+    if (screens[i].x1 <= screens[i].x0 || screens[i].y1 <= screens[i].y0) continue;
+    long long area = overlap_area(saved, screens[i]);
+    if (area > best) {
+      best = area;
+      out.screen = i;
+    }
+  }
+  if (out.screen < 0) {
+    out.ignored = "off-screen";
+    return out;
+  }
+  const span_rect &s = screens[out.screen];
+  if (width > s.x1 - s.x0) width = s.x1 - s.x0;
+  if (height > s.y1 - s.y0) height = s.y1 - s.y0;
+  long x = p.left;
+  if (x > s.x1 - width) x = s.x1 - width;
+  if (x < s.x0) x = s.x0;
+  long y = p.top;
+  if (y > s.y1 - height) y = s.y1 - height;
+  if (y < s.y0) y = s.y0;
+  out.x0 = x;
+  out.y0 = y;
+  out.x1 = x + width;
+  out.y1 = y + height;
+  return out;
 }
