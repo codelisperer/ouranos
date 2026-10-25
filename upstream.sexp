@@ -338,12 +338,13 @@
  :upstream (:github-tag "pgvector/pgvector" "v"))
 
 ;; The commit the Windows leg checks out for PGVECTOR_VERSION's tag. It must be that tag's commit:
-;; on 2026-10-23, v0.8.6 pointed at 8ee86c96f0fd72390f890aa8a336fda6d3ab4c6c, which is the pin.
+;; on 2026-10-24, v0.8.7 pointed at f37c13f68b57d2c3472b2214fbcff699d6d34876, which is the pin
+;; (gh api repos/pgvector/pgvector/git/ref/tags/v0.8.7: a lightweight tag, object type commit).
 ;; Moving PGVECTOR_VERSION means moving this too, and reviewing it.
 (:name "pgvector commit (Windows CI)" :category :ci
  :where ((:text ".github/workflows/verify.yml" "PGVECTOR_COMMIT: \"" "\""))
  :upstream (:manual "https://github.com/pgvector/pgvector/tags")
- :reviewed "2026-10-23")
+ :reviewed "2026-10-24")
 
 ;;; --- containers --------------------------------------------------------------------------
 

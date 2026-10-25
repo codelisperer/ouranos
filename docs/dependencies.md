@@ -151,7 +151,7 @@ deployment fact, so nothing here creates them (#138).
 
 | Extension | Role | Used by | Version |
 |---|---|---|---|
-| `vector` (pgvector) | the `vector` type, cosine distance and the HNSW index | `praxeon/memory-db`, `praxeon/retrieval` on Postgres | **0.8 or later recommended.** CI runs 0.8.6. `praxeon/memory-db`'s `recall-similar` uses pgvector 0.8's iterative index scans when they are there; on an older pgvector it still returns the right rows, but each result the HNSW scan cuts short is answered by a second, exact query that reads all of the subject's rows (#482). |
+| `vector` (pgvector) | the `vector` type, cosine distance and the HNSW index | `praxeon/memory-db`, `praxeon/retrieval` on Postgres | **0.8 or later recommended.** CI runs 0.8.7 on Linux and Windows, and Homebrew's on macOS. `praxeon/memory-db`'s `recall-similar` uses pgvector 0.8's iterative index scans when they are there; on an older pgvector it still returns the right rows, but each result the HNSW scan cuts short is answered by a second, exact query that reads all of the subject's rows (#482). |
 
 ### SBCL contrib (free — ships with SBCL)
 | Dep | Role | Used by |
