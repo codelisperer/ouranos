@@ -375,9 +375,7 @@ includes the port, and the port is not known until this function picks it."
   "The :WORKERS RUN-APP starts its embedded server with (#472): WORKERS when given, even NIL;
 otherwise 2 on the native :uv backend, which without workers runs every handler on its loop
 thread, and NIL on the others, which keeps their own default."
-  (cond (workers-p workers)
-        ((eq server :uv) 2)
-        (t nil)))
+  (if workers-p workers (hyperion/server:default-workers server)))
 
 (defun %app-loops (server loops loops-p)
   "The :LOOPS RUN-APP starts its embedded server with (#472): LOOPS when given, even NIL;

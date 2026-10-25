@@ -20,9 +20,9 @@
 (defparameter *default-port* 8080)
 
 (defparameter +backends+
-  '((:woo         . "CLACK.HANDLER.WOO")
-    (:hunchentoot . "CLACK.HANDLER.HUNCHENTOOT")
-    (:uv          . "HYPERION/SERVER-UV"))
+  '((:uv          . "HYPERION/SERVER-UV")
+    (:woo         . "CLACK.HANDLER.WOO")
+    (:hunchentoot . "CLACK.HANDLER.HUNCHENTOOT"))
   "Known backends, each paired with the package its system defines.
 
 Presence of the PACKAGE is the test, not presence of the system on disk. `clackup' will
@@ -37,9 +37,9 @@ never will. Asking whether the PACKAGE exists costs nothing and is answered corr
 both directions: an app that declared the system gets the native server as an option, and
 one that did not is unaffected. No `:depends-on' anywhere had to move.
 
-ORDER IS PREFERENCE, and :UV is deliberately LAST (pre-publication issue 117, commit 5). It is selectable --
-`HYPERION_SERVER=uv', or `:server :uv' -- and not yet selected: making it the default is a
-one-line move to the head of this list, and it waits for an app to have actually run it.")
+ORDER IS PREFERENCE. :UV is first (#710): an app that loads hyperion/server-uv and a Clack
+handler gets the native server. A loaded package does not prove that libuv itself loads, so
+DEFAULT-SERVER also checks that, and skips :UV with a reason when it does not.")
 
 (defparameter +native-backends+ '(:uv)
   "The backends that are OURS rather than Clack handlers.
@@ -77,15 +77,24 @@ scattered conditionals.")
   (loop for (name . package) in +backends+
         when (find-package package) collect name))
 
-(defun %choose-server (requested available)
-  "Which backend to use, given what was REQUESTED (a keyword or NIL) and what is AVAILABLE.
+(defun %choose-server (requested available &key uv-problem)
+  "Which backend to use, given what was REQUESTED (a keyword or NIL), what is AVAILABLE, and
+UV-PROBLEM: NIL when libuv loads, or a string saying why it does not. Returns two values: the
+backend, and a keyword an app can log saying why that one was chosen (#710):
+
+  :REQUESTED          HYPERION_SERVER named it.
+  :PREFERRED          the first available backend, and libuv loads when that is :UV.
+  :LIBUV-UNAVAILABLE  hyperion/server-uv is loaded but libuv does not load, so the next
+                      available backend was chosen. When there is no other, :UV is returned
+                      anyway, so that START fails with libuv's own instructions.
 
 Pure, and separate from DEFAULT-SERVER for that reason: the interesting behaviour is a
 handful of cases, and testing it should not mean mutating the environment of the image
 running the tests. The rules:
 
-  nothing requested        -> the first available, or NO-SERVER-BACKEND if there is none.
-  requested and available  -> honour it.
+  nothing requested        -> the first available, skipping :UV when UV-PROBLEM is set, or
+                              NO-SERVER-BACKEND if there is none.
+  requested and available  -> honour it, whatever UV-PROBLEM says.
   requested, KNOWN to us,
     but not loaded         -> NO-SERVER-BACKEND. Never fall back: answering requests on a
                               server the operator did not ask for is worse than not
@@ -95,20 +104,47 @@ running the tests. The rules:
                               we can name, not the ones Clack supports; a framework should
                               not veto a backend it has merely never heard of."
   (cond ((null requested)
-         (or (first available) (error 'no-server-backend)))
-        ((member requested available) requested)
-        ((not (assoc requested +backends+)) requested)
+         (let ((usable (if uv-problem (remove :uv available) available)))
+           (cond (usable (values (first usable)
+                                 (if (and uv-problem (member :uv available))
+                                     :libuv-unavailable
+                                     :preferred)))
+                 (available (values (first available) :libuv-unavailable))
+                 (t (error 'no-server-backend)))))
+        ((member requested available) (values requested :requested))
+        ((not (assoc requested +backends+)) (values requested :requested))
         (t (error 'no-server-backend :requested requested))))
 
+(defun %libuv-problem (&optional (load (lambda () (uiop:symbol-call :aion/uv :ensure-available))))
+  "NIL when LOAD, which loads libuv and checks it matches the binding, returns; otherwise the
+message of the error it signalled. Called only when hyperion/server-uv is loaded, which loads
+aion/uv."
+  (handler-case (progn (funcall load) nil)
+    (error (e) (or (ignore-errors (princ-to-string e)) (string (type-of e))))))
+
 (defun default-server ()
-  "The backend to use: HYPERION_SERVER (a keyword name) if set, else the first loaded one
-in +BACKENDS+ order. Signals NO-SERVER-BACKEND if there is none.
+  "The backend to use: HYPERION_SERVER (a keyword name) if set, else the first loaded one in
++BACKENDS+ order, with :UV skipped when libuv does not load. Signals NO-SERVER-BACKEND if there
+is none. Returns a second value saying why, and a third with libuv's error message when :UV
+was skipped (see %CHOOSE-SERVER). An app can log both:
+
+  (multiple-value-bind (server reason detail) (hyperion/server:default-server)
+    (log:info \"server chosen\" :server server :reason reason :detail detail))
 
 See %CHOOSE-SERVER for the rules; this function is only the part that reads the world."
-  (let ((env (uiop:getenv "HYPERION_SERVER")))
-    (%choose-server (when (and env (plusp (length env)))
-                      (intern (string-upcase env) :keyword))
-                    (available-servers))))
+  (let* ((env (uiop:getenv "HYPERION_SERVER"))
+         (requested (when (and env (plusp (length env)))
+                      (intern (string-upcase env) :keyword)))
+         (available (available-servers))
+         (problem (and (null requested) (member :uv available) (%libuv-problem))))
+    (multiple-value-bind (server reason) (%choose-server requested available :uv-problem problem)
+      (values server reason (and (eq reason :libuv-unavailable) problem)))))
+
+(defun default-workers (server)
+  "How many handler threads START, SERVE-FOREVER, HYPERION/DEV:SERVE and HYPERION/DESKTOP:RUN-APP
+give SERVER when the caller does not say (#710): 2 for :UV, which without workers runs every
+handler on its loop thread, and NIL for the others, which keeps their own behaviour."
+  (if (eq server :uv) 2 nil))
 
 (defun utf-8-length (string)
   "Octets STRING occupies in UTF-8, counted without allocating a byte vector.
@@ -487,7 +523,8 @@ and is always loaded by the time a server starts."
 
 (defun start (app &key (server (default-server)) (port *default-port*)
                        (host "127.0.0.1") debug (log t) (check-port t)
-                       (security-headers t) workers loops (request-guard :none))
+                       (security-headers t) (workers nil workers-p) loops
+                       (request-guard :none))
   "Start APP (a Ring handler) and return the running handler; stop it with STOP.
 SERVER names the backend (see DEFAULT-SERVER) and may be a Clack handler or ours;
 the returned handler differs between the two and STOP takes either.
@@ -514,14 +551,16 @@ Content-Security-Policy with no script-src (#119). T uses that module's defaults
 passed to it as keyword arguments, e.g. (:content-security-policy \"default-src 'self'\"
 :hsts \"max-age=31536000\"); NIL sends none of them.
 
-WORKERS (default NIL) is how many threads run request handlers, so that one slow handler
-does not hold up every other request (#324). NIL keeps each backend's own behaviour. What a
-number does depends on the backend:
+WORKERS is how many threads run request handlers, so that one slow handler does not hold up
+every other request (#324). When it is not given, it is DEFAULT-WORKERS: 2 for :uv and NIL for
+the others (#710), the same as HYPERION/DEV:SERVE and HYPERION/DESKTOP:RUN-APP, so a development
+server and a shipped one behave the same. NIL keeps each backend's own behaviour. What a number
+does depends on the backend:
 
   :woo          passed to Woo as :worker-num. NIL runs every handler on Woo's one event-loop
                 thread, one request at a time.
-  :uv           handlers run on an aion/pool of WORKERS threads. NIL runs them on the loop
-                thread, one at a time.
+  :uv           handlers run on an aion/pool of WORKERS threads. NIL, given explicitly, runs
+                them on the loop thread, one at a time.
   :hunchentoot  ignored, with a warning. Hunchentoot already runs each connection on a thread
                 of its own, with no limit, whatever this says.
 
@@ -552,6 +591,7 @@ visits can post to it, or read from it after a DNS rebinding. Leave it off behin
 proxy on the same machine: the server binds 127.0.0.1 there but receives the public Host from
 the proxy, and the guard would refuse every real request. HYPERION/DEV:SERVE turns it on by
 default on loopback, and HYPERION/DESKTOP:RUN-APP always has."
+  (unless workers-p (setf workers (default-workers server)))
   (check-type workers (or null (integer 1)))
   (check-type loops (or null (integer 1)))
   (when (and loops (not (native-backend-p server)))
@@ -1203,7 +1243,7 @@ and a load balancer that stops sending after SECONDS could still reach an open l
 
 (defun serve-forever (app &key (server (default-server)) (port *default-port*)
                                (host "127.0.0.1") debug (log t) (security-headers t)
-                               workers (loops (%env-count "HYPERION_LOOPS"))
+                               (workers nil workers-p) (loops (%env-count "HYPERION_LOOPS"))
                                name (banner :derive) (signals t) on-ready
                                (drain-seconds (%env-seconds "HYPERION_DRAIN_SECONDS" 5))
                                (drain-timeout (%env-seconds "HYPERION_DRAIN_TIMEOUT_SECONDS" 20))
@@ -1211,6 +1251,7 @@ and a load balancer that stops sending after SECONDS could still reach an open l
   "Start APP and BLOCK until interrupted or until REQUEST-SHUTDOWN is called. Returns NIL.
 
 The production counterpart to START: same arguments, plus a banner and interrupt handling.
+WORKERS defaults as START's does: 2 on :uv, and NIL on the others (#710).
 Every `main` in the tree should be a call to this.
 
   (srv:serve-forever (make-app) :port 8080 :name \"My App\")
@@ -1278,7 +1319,8 @@ can read whatever that path returns."
                                                                    readiness-path)
                                          session readiness-path)
                          :server server :port port :host host :debug debug :log log
-                         :security-headers security-headers :workers workers :loops loops
+                         :security-headers security-headers
+                         :workers (if workers-p workers (default-workers server)) :loops loops
                          :request-guard :none)
           (server-session-handler session) handler)
     ;; BANNER has THREE states, not two, so it cannot be a plain string-or-NIL: derive one
