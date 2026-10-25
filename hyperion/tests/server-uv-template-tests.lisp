@@ -50,12 +50,78 @@ workers and answers GET / with 200 and its own page (#472)."
           (is (eql 0 code) "the child sbcl exited 0: ~A" context)
           (is (equal "UV" (%template-field output "TEMPLATE-BACKEND"))
               "START chose the :uv backend: ~A" context)
+          (is (equal "PREFERRED" (%template-field output "TEMPLATE-REASON"))
+              "default-server chose :uv because it is preferred and libuv loaded: ~A" context)
+          (is (search "server chosen" (concatenate 'string output error-output))
+              "START logged the server it chose and why (#711): ~A" context)
+          (is (search "reason=preferred" (concatenate 'string output error-output))
+              "the log line carries the reason: ~A" context)
           (is (equal "2" (%template-field output "TEMPLATE-WORKERS"))
               "the :uv server has a pool of 2 workers: ~A" context)
           (is (equal "HTTP/1.1 200 OK" (%template-field output "TEMPLATE-STATUS"))
               "GET / answered 200: ~A" context)
           (is (equal "T" (%template-field output "TEMPLATE-PAGE"))
               "the page is the scaffolded one: ~A" context))))))
+
+;;; --- the generated project's own tests pass (#711) ------------------------------------------
+;;;
+;;; `cons init' writes a tests/ suite into the web project. These tests scaffold the plain web
+;;; template, web --db sqlite and web --db postgres, and run each project's own suite in a fresh
+;;; sbcl (template-suite-child.lisp), which prints how many checks passed, failed and were
+;;; skipped. The Postgres project's suite runs against MNEMOSYNE_TEST_PG_URL, the URL the gate
+;;; gives the mnemosyne suites, on every leg where that is set; where it is not set the test is
+;;; skipped, and so is counted as a skip rather than as a pass.
+
+(defun %run-suite-child (root)
+  "Run template-suite-child.lisp in a fresh sbcl on the project at ROOT.
+Returns (values STDOUT STDERR EXIT-CODE)."
+  (uiop:run-program
+   (list "sbcl" "--dynamic-space-size" "4096" "--non-interactive" "--no-sysinit" "--no-userinit"
+         "--eval" (format nil "(defparameter cl-user::*project-root* ~S)" (uiop:native-namestring root))
+         "--eval" (format nil "(defparameter cl-user::*project-name* ~S)" +template-project+)
+         "--load" (uiop:native-namestring
+                   (asdf:system-relative-pathname :hyperion/server-uv/tests
+                                                  "tests/template-suite-child.lisp")))
+   :output :string :error-output :string :ignore-error-status t))
+
+(defun %check-generated-suite (options expected-checks)
+  "Scaffold the web template with OPTIONS, run the project's own suite in a fresh sbcl, and check
+that it ran EXPECTED-CHECKS checks, all of them passing."
+  (cons/tempdir:with-temporary-directory (work "uvsuite")
+    (let ((root (let ((*standard-output* (make-broadcast-stream)))
+                  (cons/init:scaffold +template-project+ :template :web :target work
+                                                         :options options))))
+      (multiple-value-bind (output error-output code) (%run-suite-child root)
+        (let ((context (format nil "exit ~A~%--- stdout~%~A~%--- stderr (last 3000)~%~A" code output
+                               (subseq error-output (max 0 (- (length error-output) 3000))))))
+          (is (eql 0 code) "the child sbcl exited 0: ~A" context)
+          (is (equal (princ-to-string expected-checks) (%template-field output "SUITE-CHECKS"))
+              "the project's suite ran ~D checks: ~A" expected-checks context)
+          (is (equal (princ-to-string expected-checks) (%template-field output "SUITE-PASSED"))
+              "every check passed: ~A" context)
+          (is (equal "0" (%template-field output "SUITE-FAILED")) "none failed: ~A" context)
+          (is (equal "0" (%template-field output "SUITE-SKIPPED")) "none skipped: ~A" context))))))
+
+(test the-web-projects-own-tests-pass
+  "The plain web project's suite starts the app and checks server-uv answered GET /: 3 checks."
+  (%check-generated-suite nil 3))
+
+(test the-web-sqlite-projects-own-tests-pass
+  "web --db sqlite: the page from server-uv, and two visits counted in a session that the
+database holds, through the one pool: 7 checks."
+  (%check-generated-suite '(:db :sqlite) 7))
+
+(test the-web-postgres-projects-own-tests-pass
+  "web --db postgres, against the gate's Postgres: the same 7 checks as SQLite."
+  (let ((url (uiop:getenv "MNEMOSYNE_TEST_PG_URL")))
+    (if (or (null url) (zerop (length url)))
+        (skip "MNEMOSYNE_TEST_PG_URL is not set -- this says nothing about Postgres")
+        ;; The project's stores create their tables under the default names. The child drops
+        ;; the ones that were not there before it ran.
+        (%with-environment `(("DATABASE_URL" . ,url)
+                             ("TEMPLATE_DROP_NEW_TABLES"
+                              . "hyperion_sessions,hyperion_users,hyperion_role_events,hyperion_email_tokens,hyperion_email_events"))
+                           (lambda () (%check-generated-suite '(:db :postgres) 7))))))
 
 ;;; --- cons bin carries libuv, and the binary serves away from the tree (#513) --------------
 ;;;

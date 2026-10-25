@@ -192,7 +192,7 @@ BODY, and remove the directory however BODY exits."
              (cons/init:template-dependencies (cons/init:find-template :cli))))
   (is (equal '("cons/env" "praxeon")
              (cons/init:template-dependencies (cons/init:find-template :agent))))
-  (is (equal '("cons/env" "hyperion" "spinneret" "hyperion/server-uv")
+  (is (equal '("cons/env" "hyperion" "spinneret" "hyperion/server-uv" "aion/uv" "aion/log")
              (cons/init:template-dependencies (cons/init:find-template :web))))
   (is (null (cons/init:template-dependencies (cons/init:find-template :lib)))))
 
@@ -355,25 +355,114 @@ table becoming a list of things that used to be true."
   (let ((table (%shipped-table))
         (seen (make-hash-table :test #'equal)))
     (is (plusp (length table)) "the shipped-dependencies table is empty or unparsed")
+    ;; Every variant, because a choice such as `--db sqlite' adds dependencies of its own (#711).
     (dolist (template (cons/init:templates))
-      (let ((tname (string-downcase (string (cons/init:template-name template)))))
-        (with-scaffold (root (format nil "demo~A" tname)
-                             :template (cons/init:template-name template))
-          (dolist (dep (%asd-dependencies root))
-            ;; The project's own name and its own test system are not dependencies of it.
-            (unless (search "demo" dep)
-              (setf (gethash (list tname dep) seen) t)
-              (let ((row (assoc dep table :test #'string-equal)))
-                (is-true row
-                         "template ~A ships ~S, which is absent from the shipped-dependencies table in docs/dependencies.md"
-                         tname dep)
-                (when row
-                  (is-true (member tname (cdr row) :test #'string-equal)
-                           "template ~A ships ~S, but the table lists only ~{~A~^, ~}"
-                           tname dep (cdr row)))))))))
+      (dolist (options (cons/init:template-variants template))
+        (let ((tname (string-downcase (string (cons/init:template-name template)))))
+          (with-scaffold (root (format nil "demo~A" tname)
+                               :template (cons/init:template-name template) :options options)
+            (dolist (dep (%asd-dependencies root))
+              ;; The project's own name and its own test system are not dependencies of it.
+              (unless (search "demo" dep)
+                (setf (gethash (list tname dep) seen) t)
+                (let ((row (assoc dep table :test #'string-equal)))
+                  (is-true row
+                           "template ~A ships ~S, which is absent from the shipped-dependencies table in docs/dependencies.md"
+                           tname dep)
+                  (when row
+                    (is-true (member tname (cdr row) :test #'string-equal)
+                             "template ~A ships ~S, but the table lists only ~{~A~^, ~}"
+                             tname dep (cdr row))))))))))
     ;; The other direction: nothing in the table claims a template that no longer ships it.
     (dolist (row table)
       (dolist (tname (cdr row))
         (is-true (gethash (list tname (car row)) seen)
                  "docs/dependencies.md says template ~A ships ~S, and the scaffolded project does not"
                  tname (car row))))))
+
+;;; --- options: `cons init --template web --db sqlite|postgres' (#711) ----------------------
+
+(test only-the-web-template-takes-db-and-its-choices-are-sqlite-and-postgres
+  (is (equal '(:sqlite :postgres)
+             (cons/init:template-option-choices (cons/init:find-template :web) :db)))
+  (is (equal '(:web) (cons/init:templates-with-option :db)))
+  (is (equal '(nil (:db :sqlite) (:db :postgres))
+             (cons/init:template-variants (cons/init:find-template :web)))
+      "`cons template check' builds the web template three ways")
+  (is (equal '(nil) (cons/init:template-variants (cons/init:find-template :lib)))))
+
+(test db-on-another-template-is-refused-naming-the-template-that-takes-it
+  (tempdir:with-temporary-directory (tmp "init-tests")
+    (let ((message (handler-case
+                       (let ((*standard-output* (make-broadcast-stream)))
+                         (cons/init:scaffold "demo" :template :cli :target tmp
+                                                    :options '(:db :sqlite))
+                         nil)
+                     (error (e) (princ-to-string e)))))
+      (is (stringp message) "--db on the cli template signalled")
+      (is (search "does not take --db" (or message "")) "the message says why: ~A" message)
+      (is (search "web" (or message "")) "and names the template that does: ~A" message)
+      (is (null (probe-file (merge-pathnames "demo/" tmp)))
+          "nothing was written before the refusal"))))
+
+(test an-unknown-db-choice-is-refused-with-the-choices
+  (tempdir:with-temporary-directory (tmp "init-tests")
+    (let ((message (handler-case
+                       (let ((*standard-output* (make-broadcast-stream)))
+                         (cons/init:scaffold "demo" :template :web :target tmp
+                                                    :options '(:db :mysql))
+                         nil)
+                     (error (e) (princ-to-string e)))))
+      (is (stringp message) "--db mysql signalled")
+      (is (search "sqlite postgres" (or message "")) "the message lists the choices: ~A" message))))
+
+(test a-choice-adds-its-dependencies-files-and-markers-and-replaces-a-file-of-files
+  ;; A small template on disk, so the test is about the mechanism and not the web template.
+  (tempdir:with-temporary-directory (tmp "tmpl")
+    (flet ((write-file (relpath content)
+             (let ((path (merge-pathnames relpath tmp)))
+               (ensure-directories-exist path)
+               (with-open-file (out path :direction :output)
+                 (write-string content out)))))
+      (write-file "template.lisp"
+                  "(:name \"tiny\" :target-kind :lib :dependencies (\"alexandria\")
+ :options ((:db (:sqlite :dependencies (\"mnemosyne\") :files \"options/db/\"
+                 :markers ((\"{{db-url}}\" . \"sqlite://data/{{name}}.db\"))))))")
+      (write-file "files/{{name}}.asd" "(defsystem \"{{name}}\" :depends-on ({{deps}}))")
+      (write-file "files/src/main.lisp" ";; base")
+      (write-file "options/db/src/main.lisp" ";; db {{db-url}}")
+      (write-file "options/db/src/db.lisp" ";; only with --db")
+      (let ((out-dir (merge-pathnames "out/" tmp)))
+        (let ((*standard-output* (make-broadcast-stream)))
+          (cons/init:scaffold "plain" :template tmp :target out-dir)
+          (cons/init:scaffold "mine" :template tmp :target out-dir :options '(:db :sqlite)))
+        (let ((plain (merge-pathnames "plain/" out-dir))
+              (mine (merge-pathnames "mine/" out-dir)))
+          (is (equal ";; base" (%file plain "src/main.lisp")) "without the option, files/ only")
+          (is (null (%file plain "src/db.lisp")))
+          (is (not (search "mnemosyne" (%file plain "plain.asd"))))
+          (is (equal ";; db sqlite://data/mine.db" (%file mine "src/main.lisp"))
+              "the choice's file replaced the base one, and its marker, which holds {{name}}, was filled")
+          (is (equal ";; only with --db" (%file mine "src/db.lisp")) "the choice's own file was added")
+          (is (search "\"alexandria\"" (%file mine "mine.asd")))
+          (is (search "\"mnemosyne\"" (%file mine "mine.asd")) "the choice's dependency was added"))))))
+
+(test web-with-db-writes-one-pool-and-the-database-url
+  (with-scaffold (root "shop" :template :web :options '(:db :sqlite))
+    (let ((db (%file root "src/db.lisp")))
+      (is-true db "src/db.lisp was written")
+      (is (search "(defparameter +dialect+ :sqlite" (or db "")))
+      (is (search "\"sqlite://data/shop.db\"" (or db "")))
+      (let ((first (search "conn:make-pool" (or db ""))))
+        (is (and first (not (search "conn:make-pool" db :start2 (1+ first)))) "one pool"))
+      (is (search "dbc:wrap-connection" (or db ""))))
+    (is (search "DATABASE_URL=sqlite://data/shop.db" (%file root ".env.example")))
+    (is (search "data/" (%file root ".gitignore")) "the SQLite file's directory is ignored"))
+  (with-scaffold (root "shop" :template :web :options '(:db :postgres))
+    (let ((db (%file root "src/db.lisp")))
+      (is (search "(defparameter +dialect+ :postgres" (or db "")))
+      (is (search "(defparameter +default-database-url+ nil" (or db ""))
+          "a Postgres app has no default database and needs DATABASE_URL"))
+    (is (search "# DATABASE_URL=postgres://" (%file root ".env.example"))))
+  (with-scaffold (root "shop" :template :web)
+    (is (null (%file root "src/db.lisp")) "the plain web app has no database")))

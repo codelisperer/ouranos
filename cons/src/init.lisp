@@ -195,6 +195,8 @@ what it will do for one someone else wrote (design §4)."
   (target-kind nil :read-only t)     ; a keyword naming a TARGET-KIND
   (dependencies '() :read-only t)
   (description "" :read-only t)
+  ;; ((OPTION (CHOICE . PLIST) ...) ...), from the manifest's :OPTIONS; see %CHOICE-FOR.
+  (options '() :read-only t)
   (directory nil :read-only t))      ; holds template.lisp and files/
 
 (defun template-files-root (template)
@@ -246,7 +248,81 @@ declarative by construction rather than by convention -- there is no hook to put
                     :target-kind kind
                     :dependencies (getf manifest :dependencies)
                     :description (or (getf manifest :description) "")
+                    :options (%check-options (getf manifest :options) dir)
                     :directory dir)))
+
+;;; --- options: `cons init --db sqlite' and the like (#711) ---------------------------------
+;;;
+;;; A manifest's :OPTIONS is a list of (OPTION (CHOICE . PLIST) ...). Each CHOICE's plist may
+;;; give :DEPENDENCIES, added to the template's; :FILES, a directory beside files/ whose files
+;;; are added to the project, replacing a file of files/ at the same path; and :MARKERS, a list
+;;; of ("{{marker}}" . value) pairs filled in before the template's own markers, so a value
+;;; may contain {{name}}. Data only, like the rest of the manifest.
+
+(defun %check-options (options dir)
+  "OPTIONS, from the manifest in DIR, after checking its shape and that each :FILES exists."
+  (dolist (option options options)
+    (unless (and (consp option) (keywordp (first option)) (rest option))
+      (error "~Atemplate.lisp: each of :options is (OPTION (CHOICE ...) ...), not ~S."
+             (namestring dir) option))
+    (dolist (choice (rest option))
+      (unless (and (consp choice) (keywordp (first choice)) (evenp (length (rest choice))))
+        (error "~Atemplate.lisp: option ~(~A~) has a choice that is not (CHOICE . PLIST): ~S."
+               (namestring dir) (first option) choice))
+      (let ((files (getf (rest choice) :files)))
+        (when (and files (not (uiop:directory-exists-p (merge-pathnames files dir))))
+          (error "~Atemplate.lisp: option ~(~A~) ~(~A~) names files ~A, which does not exist."
+                 (namestring dir) (first option) (first choice) files))))))
+
+(defun template-option-choices (template option)
+  "The choices TEMPLATE offers for OPTION, as keywords, or NIL when it does not take OPTION."
+  (mapcar #'first (rest (assoc option (template-options template)))))
+
+(defun template-variants (template)
+  "Every way TEMPLATE can be generated: NIL (no options), then one options plist per choice of
+each of its options, such as (:DB :SQLITE). `cons template check' builds each one (#711)."
+  (cons nil (loop for (option . choices) in (template-options template)
+                  append (loop for (choice) in choices collect (list option choice)))))
+
+(defun templates-with-option (option)
+  "The names of the built-in templates that take OPTION."
+  (loop for tm in (templates)
+        when (assoc option (template-options tm)) collect (template-name tm)))
+
+(defun %choice-for (template option value)
+  "The plist of TEMPLATE's choice VALUE for OPTION. Signals when TEMPLATE does not take OPTION,
+naming the templates that do, or when VALUE is not one of its choices."
+  (let ((entry (assoc option (template-options template))))
+    (unless entry
+      (error "Template ~(~A~) does not take --~(~A~); ~:[no template does~;~:*the templates that do: ~{~(~A~)~^ ~}~]."
+             (template-name template) option (templates-with-option option)))
+    (let ((choice (assoc value (rest entry))))
+      (unless choice
+        (error "--~(~A~) ~(~A~) is not a choice of template ~(~A~); expected one of ~{~(~A~)~^ ~}."
+               option value (template-name template) (mapcar #'first (rest entry))))
+      (rest choice))))
+
+(defun %chosen (template options)
+  "The choice plists OPTIONS (a plist such as (:DB :SQLITE)) selects from TEMPLATE, in order."
+  (loop for (option value) on options by #'cddr
+        when value collect (%choice-for template option value)))
+
+(defun %project-files (template chosen)
+  "The files to write for TEMPLATE with the CHOSEN choice plists: a list of (RELPATH . SOURCE),
+sorted by RELPATH. A choice's file replaces a files/ file at the same RELPATH."
+  (let ((files '()))
+    (flet ((add-tree (root)
+             (dolist (rel (%tree-files root))
+               (let* ((key (substitute #\/ #\\ rel))
+                      (entry (assoc key files :test #'string=)))
+                 (if entry
+                     (setf (cdr entry) (merge-pathnames rel root))
+                     (push (cons key (merge-pathnames rel root)) files))))))
+      (add-tree (template-files-root template))
+      (dolist (choice chosen)
+        (let ((dir (getf choice :files)))
+          (when dir (add-tree (merge-pathnames dir (template-directory template)))))))
+    (sort files #'string< :key #'car)))
 
 (defun builtin-templates ()
   "Every template shipped with cons, discovered rather than listed: adding one is adding a
@@ -368,9 +444,13 @@ generated project instead."
 ;;; --- the scaffolder -------------------------------------------------------
 
 (defun scaffold (name &key (template :lib) (target (uiop:getcwd))
-                           (author *default-author*))
+                           (author *default-author*) options)
   "Scaffold a new project NAME under TARGET/NAME/ from TEMPLATE. Writes the full
 \"just works\" skeleton and returns the project root pathname.
+
+OPTIONS is a plist of the template's options, such as (:DB :SQLITE) for `cons init --db sqlite'
+(#711). An option the template does not take, or a choice it does not offer, signals before
+anything is written.
 
 TEMPLATE names what files you start with; the TARGET KIND it declares decides whether the
 project has an entry point and what its cons.lisp offers. `cons init --template agent` and
@@ -378,30 +458,36 @@ project has an entry point and what its cons.lisp offers. `cons init --template 
 reason."
   (let* ((tmpl (resolve-template template))
          (kind (template-kind tmpl))
+         (chosen (%chosen tmpl options))
+         (dependencies (remove-duplicates
+                        (append (template-dependencies tmpl)
+                                (loop for c in chosen append (getf c :dependencies)))
+                        :test #'string= :from-end t))
          (root (ensure-directories-exist
                 (merge-pathnames (format nil "~A/" name) target)))
          ;; What the TEMPLATE supplies: files and dependencies. What the KIND supplies:
          ;; the entry-point-shaped parts of the generated cons.lisp and README. A template
          ;; asks for the latter by marker without knowing what its kind will put there.
-         (subs (list (cons "{{spec-params}}"   (target-kind-spec-params kind))
+         (subs (append (loop for c in chosen append (getf c :markers))
+                      (list (cons "{{spec-params}}"   (target-kind-spec-params kind))
                      (cons "{{targets-extra}}" (target-kind-extra-targets kind))
                      (cons "{{run-line}}"      (target-kind-run-line kind))
-                     (cons "{{deps}}" (%render-deps (template-dependencies tmpl)))
+                     (cons "{{deps}}" (%render-deps dependencies))
                      (cons "{{author}}" author)
                      (cons "{{dev-port}}" (princ-to-string (dev-port name)))
-                     (cons "{{name}}" name))))
+                     (cons "{{name}}" name)))))
     (unless (target-kind-implemented-p kind)
       ;; Not an error: files plus an honest warning beat the kind not existing (design §3).
       (format t "~&NOTE: target kind ~(~A~) is declared but its build/ship path is not implemented yet.~%"
               (target-kind-name kind)))
-    (format t "Scaffolding ~A (~(~A~)) in ~A~%" name (template-name tmpl) root)
-    (let ((files-root (template-files-root tmpl)))
-      (dolist (relpath (%tree-files files-root))
-        (let ((destination (%substitute-path relpath subs)))
-          (%copy-file (merge-pathnames relpath files-root)
-                      (merge-pathnames destination root)
-                      subs)
-          (format t "  create ~A~%" destination))))
+    (format t "Scaffolding ~A (~(~A~)~{ --~(~A~) ~(~A~)~}) in ~A~%"
+            name (template-name tmpl)
+            (loop for (option value) on options by #'cddr when value append (list option value))
+            root)
+    (loop for (relpath . source) in (%project-files tmpl chosen)
+          for destination = (%substitute-path relpath subs)
+          do (%copy-file source (merge-pathnames destination root) subs)
+             (format t "  create ~A~%" destination))
     ;; The AI-conformance pack (AGENTS.md + .cursor/rules + .claude/skills) so an IDE
     ;; assistant generates spec-conformant code. CLAUDE.md comes from the template, so
     ;; install without :with-claude (it would be skipped anyway, but be explicit).
@@ -420,7 +506,7 @@ reason."
     (handler-case
         (cons/env-scan:sync name
                             :path (merge-pathnames cons/env-scan:*example-name* root)
-                            :dependencies (template-dependencies tmpl))
+                            :dependencies dependencies)
       (error (e)
         (format t "  (skipped .env.example aggregation: ~A)~%" e)))
     (format t "Done. Next: cd ~A && cons ~A~%" name

@@ -82,7 +82,7 @@ supplies the web-app *template*, `cons` supplies the machinery.
 
 | Command | Status |
 |---|---|
-| `cons init NAME --template web` | scaffold a new project — **works** |
+| `cons init NAME --template web` | scaffold a new project — **works**. `--db sqlite` or `--db postgres` adds one database pool shared by a session store and a user store (#711) |
 | `cons setup` | write the project's ASDF source-registry `(:tree)` drop-in (per-OS) — **not** prereq provisioning, which is `scripts/setup.sh` |
 | `cons version` | prints the version — **works** |
 | `cons build` / `test` / `serve` / `run` / `add` | the intended surface — **planned / in progress** |

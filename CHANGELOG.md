@@ -869,6 +869,30 @@ its tag.
 
 ### Added
 
+- **cons: `cons init NAME --template web --db sqlite` or `--db postgres` scaffolds a web app
+  with a database, and every web app gets a test suite that starts it** (#711).
+  - With `--db`, the generated `src/db.lisp` makes one mnemosyne pool from `DATABASE_URL` and
+    gives that pool to a session store (`hyperion/session-db:make-db-store`), to a user store
+    (`hyperion/auth-db:make-db-auth`), and to `hyperion/db-connection:wrap-connection`, which
+    lends each request its own connection in `*db*`. The page counts visits in the session.
+    SQLite uses `data/NAME.db` when `DATABASE_URL` is unset; Postgres requires it.
+    `.env.example` carries the line, and the generated `.gitignore` covers `data/`.
+  - The web template now declares `aion/uv` and `aion/log`, its `start` logs which server
+    `hyperion/server:default-server` chose and why (`server chosen server=uv
+    reason=preferred`), and it no longer passes `:workers`, so `:uv` gets
+    `default-workers` (#710).
+  - The generated `tests/NAME-tests.lisp` starts the app on a free port, sends GET / over a
+    socket and checks that `hyperion/server-uv`'s handler answered. With `--db` it also checks
+    that two requests with the session cookie count two visits and that the session is in the
+    database. A Postgres app's tests skip when `DATABASE_URL` is unset.
+  - A template manifest may offer `:options`; each choice adds dependencies, files that
+    replace or add to `files/`, and markers (`cons/docs/templates-design.md` §4). New in
+    `cons/init`: `template-options`, `template-option-choices`, `templates-with-option`,
+    `template-variants`, and `scaffold`'s `:options`. `cons template check` builds every
+    variant.
+  - The docstrings of `make-db-store`, `make-db-auth` and `wrap-connection`, and the hyperion
+    user guide, now say to give every store the same pool, never one shared connection.
+
 - **praxeon/actor: an agent can send its thread's observations in place of the messages they
   were distilled from** (#317, step C). `(praxeon/actor:attach-thread-memory agent store subject
   thread observer &key facts-budget replace-at read-tool)` gives an agent a thread memory:
