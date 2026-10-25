@@ -143,10 +143,10 @@ directory that was searched; GIVEN is what the caller passed."))
    (directory :initarg :directory :reader default-locale-not-loaded-directory))
   (:report (lambda (c stream)
              (format stream (concatenate 'string
-                                         "The default locale ~(~A~) has no ~(~A~).json in ~A, "
+                                         "There is no ~(~A~).json, for the default locale, in ~A, "
                                          "which has ~{~(~A~)~^, ~}. A key missing from the "
                                          "request's locale renders as its [section/key] marker.")
-                     (default-locale-not-loaded-default c) (default-locale-not-loaded-default c)
+                     (default-locale-not-loaded-default c)
                      (uiop:native-namestring (default-locale-not-loaded-directory c))
                      (default-locale-not-loaded-locales c))))
   (:documentation "LOAD-DICTIONARY loaded locales, but not the one passed as :DEFAULT, which
@@ -180,7 +180,8 @@ is not among the locales found."
   "The built-in JSON translation source: per-locale `<code>.json` files under DIR. An
 alias for LOAD-DICTIONARY -- the DICTIONARY *is* the JSON source (implements the
 translation-source protocol). Swap it for an app-supplied DB source later; only this
-call changes."
+call changes. Like LOAD-DICTIONARY, it signals EMPTY-DICTIONARY when DIR holds no locale
+files, and warns DEFAULT-LOCALE-NOT-LOADED when DEFAULT has no file (#294)."
   (load-dictionary dir :default default))
 
 (defun %walk (data locale-string path)

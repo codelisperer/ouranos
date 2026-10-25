@@ -52,13 +52,14 @@ its tag.
   - An app that chose `:uv` by hand (`HYPERION_SERVER`, else `:uv` when
     `aion/uv:library-path` loads, else Hunchentoot) can call `default-server` instead.
 
-- **hyperion/i18n: `load-dictionary` signals `empty-dictionary` when its directory holds no
-  locale files** (#294). Before, a wrong, missing or empty directory returned a dictionary
-  with no locales, and every string rendered as its `[section/key]` marker. The condition's
-  message gives the absolute directory searched, says when it does not exist, when the path
-  given was relative and what it was resolved against, and when the path lacks its trailing
-  slash. `load-dictionary` also warns `default-locale-not-loaded` when the `:default` locale
-  has no file, and still returns the dictionary. An app that relied on an empty dictionary
+- **hyperion/i18n: `load-dictionary` and `make-json-source` signal `empty-dictionary` when
+  their directory holds no locale files** (#294). `make-json-source` calls `load-dictionary`,
+  so everything below applies to both. Before, a wrong, missing or empty directory returned a
+  dictionary with no locales, and every string rendered as its `[section/key]` marker. The
+  condition's message gives the absolute directory searched, says when it does not exist, when
+  the path given was relative and what it was resolved against, and when the path lacks its
+  trailing slash. Both also warn `default-locale-not-loaded` when the `:default` locale has no
+  file, and still return the dictionary. An app that relied on an empty dictionary
   can build one with `make-dictionary` and an empty hash table.
 
 - **praxeon/retrieval and praxeon/memory-db on SQLite: similarity search works at real corpus

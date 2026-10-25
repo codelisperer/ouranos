@@ -335,6 +335,10 @@ the one it was written for. The condition gives the absolute directory searched.
 (test load-dictionary-warns-when-the-default-locale-is-not-loaded
   (with-locale-directory (dir ("es.json" "{\"home\": {\"hi\": \"Hola\"}}"))
     (signals i18n:default-locale-not-loaded (i18n:load-dictionary dir :default :en))
+    (let ((w (handler-case (progn (i18n:load-dictionary dir :default :en) nil)
+               (i18n:default-locale-not-loaded (w) (princ-to-string w)))))
+      (is (and w (search "no en.json, for the default locale" w) (search "which has es" w))
+          "the warning names the missing file once and the locales found: ~A" w))
     (let ((d (handler-bind ((i18n:default-locale-not-loaded #'muffle-warning))
                (i18n:load-dictionary dir :default :en))))
       (is (equal "Hola" (i18n:translate d :es :home/hi)) "the dictionary is still returned")))
