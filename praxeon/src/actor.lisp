@@ -106,7 +106,8 @@ client rendering `agent-history' still shows the whole conversation."
   ;; TAINT-SCOPE says how long untrusted content keeps a turn untrusted. :TURN (the default):
   ;; until the user's next message. :CONVERSATION: while the history sent to the model still
   ;; holds a call whose result may be untrusted (the whole history, whether or not a budget
-  ;; trims what is sent), so a later turn starts untrusted too.
+  ;; trims what is sent), or the recorded CONVERSATION-TAINT is :UNTRUSTED (#948), so a later
+  ;; turn starts untrusted too.
   (guard nil)
   (untrusted-inputs '() :type list)
   ;; The ids of the calls whose result was untrusted when it ran, by the means's registration or
@@ -118,6 +119,11 @@ client rendering `agent-history' still shows the whole conversation."
   ;; prompt in place of the messages they were distilled from, once enough has been observed.
   (thread-memory nil)
   (taint-scope :turn)
+  ;; #948: whether untrusted content has entered this conversation, recorded as it happens, so
+  ;; :CONVERSATION works for an app that rebuilds the history from text with no tool calls in
+  ;; it. :UNTRUSTED, :CLEAN, or NIL when not recorded. The app stores it beside its transcript
+  ;; and passes it to MAKE-AGENT as :CONVERSATION-TAINT. See %CONVERSATION-TAINTED-P.
+  (conversation-taint nil)
   (history '() :type list))               ; list of praxeon/llm messages
 
 (defvar *principal* nil
@@ -197,11 +203,21 @@ Returns NAME."
 ;;; agent rebuilt from its history), the guard is rebuilt from the history in the safe
 ;;; direction: every reader call in the turn counts as having run, and no URL is allowed.
 
-(defstruct (turn-guard (:constructor %make-turn-guard (key &optional untrusted)))
+(defstruct (turn-guard (:constructor %make-turn-guard (key &optional untrusted agent)))
   key
   (untrusted nil)
+  ;; The agent whose turn this is, so %TAINT-GUARD can record the conversation's taint (#948).
+  (agent nil)
   (counts (make-hash-table :test #'equal))
   (urls '() :type list))
+
+(defun %taint-guard (guard)
+  "Mark GUARD's turn untrusted, and record that untrusted content has entered its agent's
+conversation (#948). Every place that makes a turn untrusted calls this."
+  (setf (turn-guard-untrusted guard) t)
+  (when (turn-guard-agent guard)
+    (setf (agent-conversation-taint (turn-guard-agent guard)) :untrusted))
+  guard)
 
 (defvar *current-guard* nil
   "The guard of the turn whose call is running, or NIL outside a call.")
@@ -288,24 +304,72 @@ longer registered, whose result cannot be judged, or one recorded as untrusted w
           append (remove :tool-use content :key (lambda (p) (getf p :type)) :test-not #'eq)))
 
 (defun %rebuild-guard (agent key messages)
-  (let ((guard (%make-turn-guard key (%history-untrusted-p agent))))
+  (let ((guard (%make-turn-guard key nil agent)))
+    (when (%history-untrusted-p agent)
+      (%taint-guard guard))
     (dolist (p (%tool-uses (rest messages)))
       (when (gethash (getf p :name) (agent-means agent))
         (incf (gethash (getf p :name) (turn-guard-counts guard) 0)))
       (when (%untrusted-call-p agent p)
-        (setf (turn-guard-untrusted guard) t)))
+        (%taint-guard guard)))
     guard))
 
+(define-condition conversation-taint-unrecorded (warning)
+  ((agent :initarg :agent :reader conversation-taint-unrecorded-agent))
+  (:report (lambda (c stream)
+             (let ((agent (conversation-taint-unrecorded-agent c)))
+               (format stream (concatenate
+                               'string
+                               "praxeon/actor: agent ~S (conversation ~S) has :taint-scope "
+                               ":conversation and a history with earlier turns but no tool calls, "
+                               "and its conversation-taint was not recorded, so whether untrusted "
+                               "content entered the conversation cannot be told. The turn is "
+                               "treated as untrusted. To fix it, store (agent-conversation-taint "
+                               "agent) beside the transcript after each turn, and pass it to "
+                               "make-agent as :conversation-taint when the agent is rebuilt.")
+                       (agent-name agent) (agent-conversation agent)))))
+  (:documentation "Signalled, as a warning, when an agent under :TAINT-SCOPE :CONVERSATION was
+given a history whose earlier turns hold no tool calls, such as one rebuilt from a text
+transcript, and no recorded CONVERSATION-TAINT (#948). The turn is treated as untrusted
+whatever a handler does: muffling the warning does not make the turn trusted."))
+
+(defun %conversation-tainted-p (agent earlier)
+  "Under :CONVERSATION, whether untrusted content entered AGENT's conversation before the
+current turn, whose earlier messages are EARLIER. True when the recorded CONVERSATION-TAINT is
+:UNTRUSTED, or EARLIER holds a call whose result may be untrusted. When neither can tell,
+because EARLIER holds turns but no tool calls and nothing was recorded, warns
+CONVERSATION-TAINT-UNRECORDED, logs it, records :UNTRUSTED and returns true: the safe direction.
+When nothing was recorded and EARLIER can be judged, records what it shows, so the app has a
+value to store."
+  (let* ((uses (%tool-uses earlier))
+         (scanned (some (lambda (p) (%untrusted-call-p agent p)) uses)))
+    (case (agent-conversation-taint agent)
+      (:untrusted t)
+      (:clean (and scanned t))
+      (t (cond ((or uses (null earlier))
+                (setf (agent-conversation-taint agent) (if scanned :untrusted :clean))
+                (and scanned t))
+               (t
+                ;; Recorded before the warning, so the warning and the log line come once per
+                ;; agent, and a handler that unwinds still leaves the conversation untrusted.
+                (setf (agent-conversation-taint agent) :untrusted)
+                (log:warn "praxeon/actor: conversation taint not recorded; treating it as untrusted"
+                          :agent (agent-name agent) :conversation (agent-conversation agent)
+                          :earlier-messages (length earlier))
+                (warn 'conversation-taint-unrecorded :agent agent)
+                t))))))
+
 (defun %history-untrusted-p (agent &optional (before (first (%current-turn-messages agent))))
-  "True when AGENT's taint scope is :CONVERSATION and its history, before the message BEFORE,
-holds a call whose result may be untrusted: that content is still sent to the model."
+  "True when AGENT's taint scope is :CONVERSATION and untrusted content entered its conversation
+before the message BEFORE: its history before BEFORE holds a call whose result may be untrusted,
+or its recorded CONVERSATION-TAINT says so (#948). See %CONVERSATION-TAINTED-P."
   (let ((scope (agent-taint-scope agent)))
     (unless (member scope '(:turn :conversation))
       (error "praxeon/actor: :taint-scope must be :turn or :conversation, not ~S" scope))
     (and (eq scope :conversation)
-         (some (lambda (p) (%untrusted-call-p agent p))
-               (%tool-uses (ldiff (agent-history agent)
-                                  (member before (agent-history agent) :test #'eq)))))))
+         (%conversation-tainted-p agent (ldiff (agent-history agent)
+                                               (member before (agent-history agent)
+                                                       :test #'eq))))))
 
 (defun untrusted-window-predicate (agent)
   "A function of a list of messages from AGENT's history, true when they hold content from
@@ -324,10 +388,12 @@ the user's, so the default takes it as trusted."
         (some (lambda (m) (member m (agent-untrusted-inputs agent) :test #'eq)) messages)
         ;; Under :CONVERSATION, untrusted content earlier in the history keeps every later turn
         ;; untrusted, so it keeps every later window untrusted too (#906's review).
+        ;; The recorded taint counts too (#948): a history rebuilt from text has no calls to find.
         (and (eq (agent-taint-scope agent) :conversation)
-             (let ((at (member (first messages) (agent-history agent) :test #'eq)))
-               (and at (some (lambda (p) (%untrusted-call-p agent p))
-                             (%tool-uses (ldiff (agent-history agent) at)))))))))
+             (or (eq (agent-conversation-taint agent) :untrusted)
+                 (let ((at (member (first messages) (agent-history agent) :test #'eq)))
+                   (and at (some (lambda (p) (%untrusted-call-p agent p))
+                                 (%tool-uses (ldiff (agent-history agent) at))))))))))
 
 (defun %turn-guard (agent)
   "AGENT's guard for its current turn, rebuilt from the history when the stored one belongs
@@ -364,7 +430,7 @@ Outside a call, does nothing."
 result is untrusted only sometimes, such as a delegated agent that read a page. Outside a
 call, does nothing."
   (when *current-guard*
-    (setf (turn-guard-untrusted *current-guard*) t))
+    (%taint-guard *current-guard*))
   (when *call-taint*
     (setf (car *call-taint*) t)))
 
@@ -713,14 +779,14 @@ untrusted, the turn becomes untrusted (#317's taint ruling)."
         ;; An untrusted observation in the block makes the turn untrusted, as an untrusted
         ;; context item does, under either scope (#317's taint ruling).
         (when untrusted
-          (setf (turn-guard-untrusted (%turn-guard agent)) t))))
+          (%taint-guard (%turn-guard agent)))))
     ;; AN UNTRUSTED ITEM IN THE PROMPT MAKES THE TURN UNTRUSTED, under either taint scope
     ;; (#317's taint ruling). Stricter than the rule for a raw untrusted result, which :TURN stops
     ;; counting after the user's next message: an item such as a condensed observation is a
     ;; model's summary of untrusted content, and it can make an injected instruction read like
     ;; the member's own wish, so its source is harder to see than the original's.
     (when (some #'ctx:ctx-item-untrusted assembled)
-      (setf (turn-guard-untrusted (%turn-guard agent)) t))
+      (%taint-guard (%turn-guard agent)))
     (let* ((messages (if facts
                          (prompt:attach-context trimmed facts)
                          trimmed))
@@ -1244,8 +1310,14 @@ CONTINUE-TURN."
     (%append-history agent message)
     (when *delegated*
       (push message (agent-untrusted-inputs agent)))
-    (setf (agent-guard agent) (%make-turn-guard message (or *decided-after-untrusted*
-                                                            (%history-untrusted-p agent message)))))
+    ;; The first turn of a conversation starts it clean, under either scope (#948).
+    (when (and (null (agent-conversation-taint agent))
+               (eq message (first (agent-history agent))))
+      (setf (agent-conversation-taint agent) :clean))
+    (let ((guard (%make-turn-guard message nil agent)))
+      (setf (agent-guard agent) guard)
+      (when (or *decided-after-untrusted* (%history-untrusted-p agent message))
+        (%taint-guard guard))))
   (%turn-loop agent max-steps permit (%output-limit agent max-tokens)))
 
 (defun %turn-loop (agent max-steps permit limit)

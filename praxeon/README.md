@@ -257,6 +257,27 @@ The agent's `taint-scope` slot (`agent-taint-scope`) says how long untrusted con
   it, and accepts that the user is refused spending calls for the rest of the conversation
   after one page was read.
 
+**An app that rebuilds the agent from a stored text transcript** (#948) has no tool calls in
+the history it passes, so `:conversation` cannot find the earlier read there. Praxeon also
+records the conversation's taint as it happens, in `agent-conversation-taint`: `:untrusted`
+once untrusted content has entered the conversation, `:clean` from a first turn until then,
+and `nil` when nothing was recorded. Store that value beside the transcript after each turn,
+and pass it back when the agent is rebuilt:
+
+```lisp
+(praxeon/actor:make-agent :name "assistant" :taint-scope :conversation
+                          :conversation-taint (stored-taint conversation-id))
+```
+
+`:conversation` counts a turn untrusted when the recorded value is `:untrusted`, or when the
+history holds an untrusted call. Once recorded `:untrusted`, an agent stays so; an app that
+deliberately starts the conversation over sets it to `:clean`. When an agent under
+`:conversation` has earlier turns, no tool calls in them and nothing recorded, praxeon cannot
+tell whether untrusted content came before. It then treats the turn as untrusted, records
+`:untrusted`, logs it once for that agent, and signals the warning
+`praxeon/actor:conversation-taint-unrecorded`, whose message names this fix. Muffling the
+warning does not make the turn trusted.
+
 `praxeon/web-page:user-or-search-urls` is a ready-made `:allow` for `read-web-page`:
 
 ```lisp

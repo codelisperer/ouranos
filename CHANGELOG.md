@@ -52,6 +52,23 @@ its tag.
   - An app that chose `:uv` by hand (`HYPERION_SERVER`, else `:uv` when
     `aion/uv:library-path` loads, else Hunchentoot) can call `default-server` instead.
 
+- **praxeon/actor: `:taint-scope :conversation` works for an app that rebuilds the agent from a
+  text transcript, and warns when it cannot tell** (#948). Before, `:conversation` looked only
+  for untrusted tool calls in the history, so a history rebuilt from text, which has none,
+  made it behave like `:turn` without saying so. Now:
+  - The agent records the conversation's taint in the new slot `agent-conversation-taint`:
+    `:untrusted` once untrusted content has entered the conversation, `:clean` from a first
+    turn until then, `nil` when not recorded. `make-agent` takes `:conversation-taint`.
+  - **An app that stores text transcripts** stores this value with each transcript and passes it
+    to `make-agent` when it rebuilds the agent.
+  - Under `:conversation`, an agent with earlier turns, no tool calls in them and nothing recorded
+    is treated as untrusted. Praxeon records `:untrusted`, logs it once for that agent, and
+    signals the warning `praxeon/actor:conversation-taint-unrecorded`, whose message names the
+    fix. Muffling the warning does not make the turn trusted.
+  - Once an agent records `:untrusted`, it stays untrusted under `:conversation` even if the app
+    removes the untrusted call from the history. Set the slot to `:clean` to start over.
+  - `untrusted-window-predicate` reads the recorded value too, so an observer agrees with the turn.
+
 - **praxeon/retrieval and praxeon/memory-db on SQLite: similarity search works at real corpus
   sizes, and the stored embeddings change form** (#425). A SQLite store kept each embedding as
   text and parsed every one on every search, so at width 1024 `retrieve-similar` took about a
