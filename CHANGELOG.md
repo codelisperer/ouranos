@@ -2170,6 +2170,12 @@ its tag.
 
 ### Fixed
 
+- **aion/http-client: on Windows, a pinned https request to an IPv6 address written in a long
+  form verifies the certificate against the address's canonical form** (#921). The Windows path
+  removed the brackets from the URL's host and passed the rest on as it was, so
+  `https://[0:0:0:0:0:0:0:1]/` was verified against `0:0:0:0:0:0:0:1`. It now uses the same
+  name as Linux and macOS (since #915): the address as usocket writes it, here `::1`.
+
 - **aion/http-client: an https request to an IPv6 address such as `https://[::1]/` verifies the
   certificate against the address, and a request to any IP address sends no SNI name** (#915).
   On Linux and macOS, a request through a pinned connection (`:connect-address`, which
