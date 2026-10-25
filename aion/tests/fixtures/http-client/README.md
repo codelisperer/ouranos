@@ -31,3 +31,26 @@ the test server on Windows, which serves TLS through aion/tls (#536). mbedTLS 4.
     openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:P-256 -nodes \
       -keyout pinned-test-ec.key -out pinned-test-ec.crt \
       -days 36500 -subj "/CN=pinned.test" -addext "subjectAltName=DNS:pinned.test"
+
+`pinned-test.key` is in PKCS#8 form (`-----BEGIN PRIVATE KEY-----`). That form is the reason for
+the refusal above (#914): mbedTLS 4.1.1 cannot check an RSA key in PKCS#8 form against its
+certificate. `pinned-test-pkcs1.key` is the same key in PKCS#1 form
+(`-----BEGIN RSA PRIVATE KEY-----`), which mbedTLS accepts. The aion/tls tests use the two to show
+the difference. Made with:
+
+    openssl rsa -in pinned-test.key -traditional -out pinned-test-pkcs1.key
+
+`cn-and-san-test.crt` and `cn-only-test.crt`, each with its key, are for #917, a certificate's
+common name against its subject alternative names. `cn-and-san-test` has the common name `cn.test`
+and the single alternative name `DNS:san.test`, so a client that falls back to the common name
+accepts it for `cn.test` and one that follows RFC 6125 does not. `cn-only-test` has the common
+name `cn-only.test` and no extensions at all, so only its common name can match. Both are valid
+until 2126.
+
+Made with:
+
+    openssl req -x509 -newkey rsa:2048 -nodes -keyout cn-and-san-test.key \
+      -out cn-and-san-test.crt -days 36500 -subj "/CN=cn.test" \
+      -addext "subjectAltName=DNS:san.test"
+    openssl req -x509 -newkey rsa:2048 -nodes -keyout cn-only-test.key -out cn-only-test.crt \
+      -days 36500 -subj "/CN=cn-only.test"

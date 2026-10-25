@@ -83,6 +83,11 @@ freed while it is in use."))
   "A server config presenting CHAIN, whose first certificate must be KEY's. Refuses a key that
 does not match the certificate, before anything is served with it.
 
+KEY must be an EC key, in either form, or an RSA key in PKCS#1 form (a PEM file beginning
+-----BEGIN RSA PRIVATE KEY-----). mbedTLS 4.1.1 cannot use an RSA key in PKCS#8 form (-----BEGIN
+PRIVATE KEY-----, what `openssl req -newkey rsa' writes) here, and UNSUPPORTED-PRIVATE-KEY is
+signalled. Convert one with `openssl rsa -in KEY -traditional -out KEY-PKCS1' (#914).
+
 SESSION-TICKETS, a count, makes the server send that many TLS 1.3 session tickets after each
 handshake, as OpenSSL servers and CDNs do; NIL, the default, sends none. Tickets are issued but
 nothing here resumes a session from one: this exists so a client's handling of tickets can be

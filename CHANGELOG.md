@@ -14,6 +14,25 @@ its tag.
 
 ### An app may have to act
 
+- **MCP resources and retrieval passages are untrusted by default, so in a prompt they refuse
+  `:requires-user-intent` means for the turn** (#907, after #906). `praxeon/mcp:add-resource` and
+  `praxeon/retrieval:passage->ctx-item` put outside content into an agent's context with nothing
+  marking it, so text in a resource or a document could steer a spending or writing means. Now:
+  - `add-resource` takes `:untrusted`, default T, and sets the context item's `untrusted`. For a
+    server the app fully controls, pass `:untrusted nil`, as to `grant-tools`.
+  - `make-corpus` takes `:untrusted`, default T, read by `corpus-untrusted`. Every passage a
+    retrieve function returns (`retrieve`, `retrieve-similar`, `retrieve-hybrid`,
+    `retrieve-exact`, `retrieve-keyword`, `retrieve-whole`) has `passage-untrusted`, copied from
+    its corpus, and `passage->ctx-item` copies it to the item. `passage->ctx-item` takes
+    `:untrusted` to override it.
+  - `register-corpus-search` registers its means with `:untrusted` set to the corpus's
+    `corpus-untrusted`, so after a search of an untrusted corpus a `:requires-user-intent` means
+    is refused for the rest of the turn.
+  - **An app whose agent has `:requires-user-intent` means and uses resources or corpora of its
+    own documents** passes `:untrusted nil` to `add-resource` or `make-corpus` for those, or its
+    spending and writing means are refused once such an item is in the prompt or the agent has
+    searched.
+
 - **praxeon/retrieval and praxeon/memory-db on SQLite: similarity search works at real corpus
   sizes, and the stored embeddings change form** (#425). A SQLite store kept each embedding as
   text and parsed every one on every search, so at width 1024 `retrieve-similar` took about a
@@ -849,6 +868,19 @@ its tag.
   `claude-opus-5-5` where they named `claude-opus-4-8`.
 
 ### Added
+
+- **praxeon/actor: every deliberation step records how many of the prompt's estimated tokens came
+  from each source** (#317, step D). `praxeon/actor:request-messages` returns a third value, and
+  `praxeon/actor:prompt-breakdown` computes it: a plist of estimated tokens under `:system`,
+  `:observations` (the thread's observations sent in place of observed messages), `:facts`
+  (recalled subject facts), `:context` (the other context items and the block's framing),
+  `:tool-results` and `:messages`. Every part except `:system` adds up exactly to the estimate.
+  `deliberate` returns it as a third value, and each `:usage` event carries it as `:breakdown`.
+  Every step also logs one info line through `aion/log`, "praxeon/actor: prompt tokens", with
+  the breakdown beside the provider's four counts. The line holds counts only, no prompt text.
+  `praxeon/ceiling:meter` takes `:breakdown-fn`, and `record-usage` takes `:breakdown`; either
+  one keeps the plist on the usage line as `:breakdown`, and it is not charged. These are
+  estimates, characters over `*chars-per-token*`, not the provider's count.
 
 - **praxeon/actor: an agent can send its thread's observations in place of the messages they
   were distilled from** (#317, step C). `(praxeon/actor:attach-thread-memory agent store subject
@@ -2169,6 +2201,28 @@ its tag.
   "Long-running calls".
 
 ### Fixed
+
+- **aion/http-client: a pinned https request refuses a certificate whose common name matches
+  the host when its subject alternative names do not** (#917). On Linux and macOS, cl+ssl checks
+  a certificate's common name whenever none of its alternative names match, which RFC 6125
+  section 6.4.4 does not allow. A request with `:connect-address`, which `fetch-public` always
+  uses, now checks the host against the certificate's DNS and IP alternative names only, and uses
+  the common name only for a certificate that has none. A request without `:connect-address`
+  goes through dexador and cl+ssl's own check, and still accepts the common name; fixing that
+  would mean patching cl+ssl for the whole image. Windows is not affected, because it does not
+  use cl+ssl.
+
+- **aion/tls: a server key that is an RSA key in PKCS#8 form is refused with
+  `aion/tls:unsupported-private-key`, which says how to convert it** (#914). mbedTLS 4.1.1
+  cannot check an RSA key in PKCS#8 form (a PEM file beginning `-----BEGIN PRIVATE KEY-----`,
+  which `openssl req -newkey rsa` writes) against its certificate. Before, `make-server-config`
+  signalled "the private key is not the key of the certificate it was given with", even for the
+  right key, and `certificate-chain-matches-key-p` returned false. Now both signal
+  `unsupported-private-key`, a `tls-error`, whose message gives the conversion:
+  `openssl rsa -in KEY -traditional -out KEY-PKCS1`. A server key must be an EC key, in either
+  form, or an RSA key in PKCS#1 form (`-----BEGIN RSA PRIVATE KEY-----`). A key that does not
+  match its certificate is reported as before. The restriction is lifted when a TF-PSA-Crypto
+  release carrying upstream commit 841da2ad is pinned.
 
 - **aion/http-client: an https request to an IPv6 address such as `https://[::1]/` verifies the
   certificate against the address, and a request to any IP address sends no SNI name** (#915).
