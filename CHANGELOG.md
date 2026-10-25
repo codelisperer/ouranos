@@ -2170,6 +2170,13 @@ its tag.
 
 ### Fixed
 
+- **aion/uv: `ensure-available` keeps signalling `libuv-abi-mismatch` after a failed ABI check,
+  instead of treating libuv as available from the second call on** (#940). `load-libuv` marks
+  libuv loaded before `verify-abi` runs, and `ensure-available` checked the ABI only while libuv
+  was not loaded, so a libuv that loaded but failed the check was used on every later call in
+  the same image. The check now runs until it has passed. New:
+  `aion/uv/ffi:abi-verified-p`, true once `verify-abi` has passed against the libuv now loaded.
+
 - **aion/http-client: an https request to an IPv6 address such as `https://[::1]/` verifies the
   certificate against the address, and a request to any IP address sends no SNI name** (#915).
   On Linux and macOS, a request through a pinned connection (`:connect-address`, which
