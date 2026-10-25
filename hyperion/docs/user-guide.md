@@ -176,6 +176,12 @@ resolution. **Adding a language is dropping a file** — no code change.
      (i18n:load-dictionary
       (asdf:system-relative-pathname :myapp "resources/i18n/") :default :en))
    ```
+   If the directory holds no `.json` file, because it is wrong, missing or empty, this
+   signals `i18n:empty-dictionary`, whose message gives the absolute directory it searched.
+   A relative path is resolved against `*default-pathname-defaults*`, which in a dumped
+   image is the directory the binary was started from, so resolve it from the system as
+   above. If the `:default` locale has no file, it warns `i18n:default-locale-not-loaded`
+   and returns the dictionary (#294).
 3. **Look up** by a flat `:section/key` with an explicit locale; `{named}`
    placeholders interpolate from keyword args:
    ```lisp

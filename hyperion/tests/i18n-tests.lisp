@@ -265,3 +265,82 @@ called outside the middleware signals."
     (let ((i18n:*translation-source* nil))
       (signals i18n:no-translation-source
         (funcall (third (funcall streaming '(:path-info "/"))) (lambda (s) (push s written)))))))
+
+;;; --- load-dictionary refuses a directory with no locales (#294) ------------------------
+
+(defmacro with-locale-directory ((dir &rest files) &body body)
+  "Bind DIR to a new temporary directory holding FILES, each (NAME CONTENT), and delete it
+afterwards."
+  `(let ((,dir (aion/fs:make-temporary-directory "hyperion-i18n-test")))
+     (unwind-protect
+          (progn
+            (loop for (name content) in (list ,@(mapcar (lambda (f) `(list ,@f)) files))
+                  do (with-open-file (out (merge-pathnames name ,dir) :direction :output)
+                       (write-string content out)))
+            ,@body)
+       (ignore-errors (aion/fs:delete-tree ,dir)))))
+
+(test load-dictionary-reads-each-locale-file
+  (with-locale-directory (dir ("en.json" "{\"home\": {\"hi\": \"Hello\"}}")
+                              ("es.json" "{\"home\": {\"hi\": \"Hola\"}}"))
+    (let ((d (i18n:load-dictionary dir :default :en)))
+      (is (equal "Hola" (i18n:translate d :es :home/hi)))
+      (is (equal '(:en :es) (sort (copy-list (i18n:supported-locales d)) #'string<))))))
+
+(test load-dictionary-signals-for-an-empty-directory-and-names-it
+  (with-locale-directory (dir ("notes.txt" "not a locale"))
+    (let ((c (handler-case (progn (i18n:load-dictionary dir) nil)
+               (i18n:empty-dictionary (c) c))))
+      (is (typep c 'i18n:empty-dictionary) "an empty directory signals")
+      (when c
+        (is (equal (uiop:native-namestring dir)
+                   (uiop:native-namestring (i18n:empty-dictionary-directory c)))
+            "the condition names the directory that was searched")
+        (is (search (uiop:native-namestring dir) (princ-to-string c))
+            "and so does its message: ~A" c)))))
+
+(test load-dictionary-signals-for-a-missing-directory
+  (with-locale-directory (dir)
+    (let* ((missing (merge-pathnames "no-such-dir/" dir))
+           (c (handler-case (progn (i18n:load-dictionary missing) nil)
+                (i18n:empty-dictionary (c) c))))
+      (is (typep c 'i18n:empty-dictionary))
+      (is (search "does not exist" (princ-to-string c)) "the message says so: ~A" c))))
+
+(test load-dictionary-resolves-a-relative-directory-and-says-against-what
+  "The consuming app's case: a relative path, resolved against a working directory other than
+the one it was written for. The condition gives the absolute directory searched."
+  (with-locale-directory (dir)
+    (let* ((*default-pathname-defaults* dir)
+           (c (handler-case (progn (i18n:load-dictionary #p"resources/i18n/") nil)
+                (i18n:empty-dictionary (c) c))))
+      (is (typep c 'i18n:empty-dictionary))
+      (when c
+        (is (equal (uiop:native-namestring (merge-pathnames "resources/i18n/" dir))
+                   (uiop:native-namestring (i18n:empty-dictionary-directory c))))
+        (is (search "It is relative" (princ-to-string c)) "~A" c)))))
+
+(test load-dictionary-says-when-the-directory-lacks-its-trailing-slash
+  (with-locale-directory (dir)
+    (let* ((sub (merge-pathnames "i18n/" dir))
+           (without-slash (string-right-trim "/\\" (uiop:native-namestring sub))))
+      (ensure-directories-exist sub)
+      (with-open-file (out (merge-pathnames "en.json" sub) :direction :output)
+        (write-string "{}" out))
+      (let ((c (handler-case (progn (i18n:load-dictionary without-slash) nil)
+                 (i18n:empty-dictionary (c) c))))
+        (is (typep c 'i18n:empty-dictionary) "the parent directory has no locale files")
+        (is (search "end it with a slash" (princ-to-string c)) "~A" c)))))
+
+(test load-dictionary-warns-when-the-default-locale-is-not-loaded
+  (with-locale-directory (dir ("es.json" "{\"home\": {\"hi\": \"Hola\"}}"))
+    (signals i18n:default-locale-not-loaded (i18n:load-dictionary dir :default :en))
+    (let ((d (handler-bind ((i18n:default-locale-not-loaded #'muffle-warning))
+               (i18n:load-dictionary dir :default :en))))
+      (is (equal "Hola" (i18n:translate d :es :home/hi)) "the dictionary is still returned")))
+  (with-locale-directory (dir ("en.json" "{}"))
+    (let ((warned nil))
+      (handler-bind ((i18n:default-locale-not-loaded
+                       (lambda (w) (setf warned t) (muffle-warning w))))
+        (i18n:load-dictionary dir :default :en))
+      (is (not warned) "no warning when the default is loaded"))))

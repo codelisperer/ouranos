@@ -447,6 +447,9 @@
    #:translate-current #:translate-plural-current
    #:no-translation-source #:no-translation-source-key
    #:make-json-source #:load-dictionary #:make-dictionary
+   #:empty-dictionary #:empty-dictionary-directory #:empty-dictionary-given
+   #:default-locale-not-loaded #:default-locale-not-loaded-default
+   #:default-locale-not-loaded-locales #:default-locale-not-loaded-directory
    #:dictionary #:dictionary-p #:interpolate #:locale-supported-p #:*default-locale*
    ;; locale store
    #:read-locale #:persist-locale #:cookie-store #:make-cookie-store #:lang-cookie
