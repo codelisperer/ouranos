@@ -213,6 +213,15 @@ both upcased for the standard readtable."
                                  (let ((n (dep-name d))) (when n (visit n)))))
                               (t (push name others))))))))
          (visit system)
+         ;; NOTHING OF THE PROJECT'S OWN, NOTHING JUDGED. When ROOT matches no system's
+         ;; directory -- a mistyped root, or one that names some other directory -- every
+         ;; system is a dependency, every warning is muffled, and a `cons --strict' load passed
+         ;; whatever the code held. Under FORCE-OWN, which only --strict sets, that is refused,
+         ;; naming the root and the system (#960). A plain load of a library from outside the
+         ;; project is still allowed: it promises nothing about the project's code.
+         (when (and force-own (null own))
+           (error "Strict loading found no system of the project under ~A: ~A is not in that directory, so every warning would be muffled and nothing would be judged. Give the directory that holds the project's .asd files."
+                  root (asdf :coerce-name system)))
          (dolist (name (reverse others)) (quiet name))
          (own-load system)
          (when with-tests

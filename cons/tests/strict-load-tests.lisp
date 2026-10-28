@@ -85,6 +85,27 @@ NAME/tests holding it, named by NAME's test-op. Returns DIR."
       (is (search "WARNING" (string-upcase printed))
           "the warning must be printed, not only counted: ~S" printed))))
 
+(test a-strict-load-whose-root-holds-none-of-its-systems-is-refused
+  "#960: with a root that is not the project's directory, no system counts as the project's own,
+every warning is muffled, and a strict load judged nothing and passed a full WARNING. Under
+:FORCE-OWN, which `cons --strict' sets, that is now refused, naming the root. Controls: the same
+load without :FORCE-OWN still passes, as a plain load of an outside library must; and the right
+root fails the WARNING, as before."
+  (%with-strict-project (dir name "wrongroot" *strict-warning-source*)
+    (tempdir:with-temporary-directory (elsewhere "elsewhere")
+      (multiple-value-bind (err printed) (%strict-load name elsewhere :force-own t)
+        (declare (ignore printed))
+        (is (typep err 'error) "a strict load under the wrong root must not pass")
+        (is (search "found no system of the project" (princ-to-string err)) "~A" err)
+        (is (search (namestring elsewhere) (princ-to-string err)) "the root is named: ~A" err))
+      (is (null (%strict-load name elsewhere))
+          "control: without :FORCE-OWN the load of a system outside the root passes")))
+  (%with-strict-project (dir name "rightroot" *strict-warning-source*)
+    (let ((err (%strict-load name dir :force-own t)))
+      (is (typep err 'error))
+      (is (not (search "found no system of the project" (princ-to-string err)))
+          "control: under the right root it fails on the WARNING itself: ~A" err))))
+
 (test a-style-warning-does-not-fail-the-load
   (%with-strict-project (dir name "style" *strict-style-source*)
     (multiple-value-bind (err printed) (%strict-load name dir)
