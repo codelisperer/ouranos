@@ -39,6 +39,14 @@ Per backend:
   open conns      load.py's idle test: resident memory and threads while IDLE connections
                   are open at once.
 
+A backward step of the wall clock during a run makes the generator's error count wrong (#962).
+wrk and ab both time requests with gettimeofday, and wrk subtracts two such readings as unsigned
+numbers, so every request in flight when the clock steps back is counted as a timeout. WSL2 steps
+its clock back by up to a few milliseconds every 20 to 30 seconds. compare.py watches for steps
+during each run (ClockWatch) and, when there was one, prints the steps beside the error count
+and marks the count as not valid. The rate stays valid: a step of a few milliseconds changes a 10 s run's
+length by well under 0.1%.
+
 Requires: sbcl and Quicklisp as for run.sh; a built vendor/libuv for :uv; cc; and wrk or ab.
 Woo is Unix-only.
 """
@@ -53,6 +61,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 
@@ -108,11 +117,58 @@ def accepted_connections():
         return None
 
 
+class ClockWatch:
+    """Watches for the wall clock stepping backwards while the generator runs (#962). Every
+    millisecond it reads CLOCK_MONOTONIC, the wall clock, then CLOCK_MONOTONIC again, and keeps
+    the wall clock's offset from the midpoint. A step back shows as the offset falling between
+    two samples; slewing moves it by under a microsecond per millisecond, so a fall of more than
+    STEP_NS is a step. A sample whose two monotonic reads are more than SAMPLE_NS apart is
+    skipped, because the thread may have been preempted between the reads. Use as a context
+    manager; afterwards STEPS holds each step's size in nanoseconds."""
+
+    STEP_NS = 100_000
+    SAMPLE_NS = 50_000
+
+    def __init__(self):
+        self.steps = []
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, daemon=True)
+
+    def _run(self):
+        last = None
+        while not self._stop.is_set():
+            m1 = time.monotonic_ns()
+            wall = time.time_ns()
+            m2 = time.monotonic_ns()
+            if m2 - m1 <= self.SAMPLE_NS:
+                offset = wall - (m1 + m2) // 2
+                if last is not None and last - offset > self.STEP_NS:
+                    self.steps.append(last - offset)
+                last = offset
+            time.sleep(0.001)
+
+    def __enter__(self):
+        self._thread.start()
+        return self
+
+    def __exit__(self, *exc):
+        self._stop.set()
+        self._thread.join()
+
+
 def drive(gen, url, connections, seconds):
-    """Requests per second, errors, and the share of requests sent on a kept-alive connection,
-    from GEN driving URL. A server that closed after each response would make the generator
-    reconnect every time, and its rate would measure connection setup rather than serving, so
-    the share is reported. The share is None where it cannot be measured."""
+    """Requests per second, errors, the share of requests sent on a kept-alive connection, and
+    the wall clock's backward steps during the run in nanoseconds, from GEN driving URL. A server
+    that closed after each response would make the generator reconnect every time, and its rate
+    would measure connection setup rather than serving, so the share is reported. The share is
+    None where it cannot be measured. The errors are not valid when the list of steps is not
+    empty (#962)."""
+    with ClockWatch() as clock:
+        rps, errors, share = _drive(gen, url, connections, seconds)
+    return rps, errors, share, clock.steps
+
+
+def _drive(gen, url, connections, seconds):
     if gen == "wrk":
         threads = str(max(1, min(connections, os.cpu_count() or 4)))
         before = accepted_connections()
@@ -207,9 +263,9 @@ def measure(backend, gen, args):
         row = {"backend": backend}
         for path in ("/ping", "/tile"):
             before, started = cpu(url), time.monotonic()
-            rps, errors, kept = drive(gen, url + path, args.connections, args.seconds)
+            rps, errors, kept, steps = drive(gen, url + path, args.connections, args.seconds)
             process, loops, conns = busy(before, cpu(url), time.monotonic() - started)
-            row[path] = {"rps": rps, "errors": errors, "kept": kept,
+            row[path] = {"rps": rps, "errors": errors, "kept": kept, "steps": steps,
                          "cpu_process": process, "cpu_loops": loops, "conns": conns}
         row["latency"] = load.latency(url, "/tile", args.requests, reuse=True)
         row["idle"] = load.idle_connections(url, proc.pid, args.idle)
@@ -231,7 +287,11 @@ def cell(m, top):
         return (f"limited by the generator ({m['rps']:,.0f}, "
                 f"{m['rps'] / top:.0%} of its ceiling {top:,.0f})")
     notes = []
-    if m["errors"]:
+    if m["steps"]:
+        worst = max(m["steps"]) / 1000
+        notes.append(f"{m['errors']} errors, a count that is not valid: the clock stepped back "
+                     f"{len(m['steps'])} time(s) during the run, up to {worst:,.0f} µs")
+    elif m["errors"]:
         notes.append(f"{m['errors']} errors")
     if m["kept"] is None:
         notes.append("kept-alive share not measured")
