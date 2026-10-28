@@ -128,6 +128,36 @@ To check it took, ask a plain REPL — with no `CL_SOURCE_REGISTRY` set — wher
 (asdf:system-source-file (asdf:find-system :aion))   ;; => your checkout's aion/aion.asd
 ```
 
+### A second checkout on the same machine
+
+The drop-in is read by every Lisp process you run, so it can name only one checkout. When
+it already names another checkout that still exists, bootstrap does not change it. It stops
+with exit code 3 before building anything, names both checkouts, and prints the command for
+each way forward on your OS:
+
+- `OURANOS_BOOTSTRAP_LOCAL=1` builds this checkout and leaves the drop-in as it is. Bootstrap
+  and the processes it starts use this checkout through `CL_SOURCE_REGISTRY`, and it prints
+  the value to set in each shell that should use this checkout afterwards, for example
+  `export CL_SOURCE_REGISTRY='/home/you/ouranos-scratch//:'` (on Windows, in PowerShell,
+  `$env:CL_SOURCE_REGISTRY='C:\Users\you\ouranos-scratch//;'`).
+- `OURANOS_BOOTSTRAP_FORCE=1` rewrites the drop-in to name this checkout, so every process
+  on the machine uses it from then on.
+
+Both are environment variables, like `OURANOS_NO_WARM`:
+
+```sh
+OURANOS_BOOTSTRAP_LOCAL=1 sbcl --dynamic-space-size 4096 --script bootstrap.lisp
+```
+
+```powershell
+$env:OURANOS_BOOTSTRAP_LOCAL='1'; sbcl --dynamic-space-size 4096 --script bootstrap.lisp; Remove-Item Env:OURANOS_BOOTSTRAP_LOCAL
+```
+
+If the checkout the drop-in names has been moved or deleted, bootstrap rewrites the drop-in
+and says which path it replaced, so moving your clone needs nothing more than running
+bootstrap again. A drop-in that is not a single `(:tree "...")` form, such as one edited by
+hand, is refused in the same way as one naming another checkout.
+
 Bootstrap also builds the native webview launcher, which a desktop app needs to open its
 window. It is gitignored, so a fresh clone does not have it. When the machine has a C++
 toolchain, bootstrap builds it and prints:

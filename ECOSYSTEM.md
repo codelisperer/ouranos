@@ -107,7 +107,10 @@ design over convenience** unless the maintainer flags time pressure.
   `~/quicklisp/local-projects` and `(push … asdf:*central-registry*)`. A **consuming repo**
   (e.g. a consuming app, a separate repo) onboards the same way — its own
   `NN-<name>.conf` `(:tree <its-root>)` drop-in (`conf.d` is additive, so cross-repo deps
-  resolve). Generalizing that drop-in write is what `cons setup` does today.
+  resolve). Generalizing that drop-in write is what `cons setup` does today. Bootstrap does
+  not change a drop-in that names another checkout that still exists: it stops, and a second
+  checkout is built with `OURANOS_BOOTSTRAP_LOCAL=1` (through `CL_SOURCE_REGISTRY`) or takes
+  the drop-in over with `OURANOS_BOOTSTRAP_FORCE=1` (#955).
 - **Desktop apps = CL-native, out-of-process OS webview (not Tauri/Electron)** — a
   desktop app boots Hyperion on `127.0.0.1:<port>` in-process and `uiop:launch-program`s
   a small per-OS `webview.h` shim (WebView2/WKWebView/WebKitGTK) pointed at it;
