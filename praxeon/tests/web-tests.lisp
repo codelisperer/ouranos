@@ -251,11 +251,11 @@ rendering changed for the rest of the process."
   ;; the bug fully present. Measured: under the reverted fix this test failed `f.\', one of two.
   ;; So the non-dev case runs against a :pretty image and the dev case against a :compact one.
   (let ((out:*output-style* :pretty))
-    (web::%build-app nil "Guest" "Guest" #'identity nil nil nil nil nil nil nil nil nil nil nil nil :poll)
+    (web::%build-app nil "Guest" "Guest" #'identity nil nil nil nil nil nil nil nil nil nil nil nil :poll nil)
     (is (eq :pretty out:*output-style*)
         "a :pretty host survives a non-dev agent surface, which the defect would set :compact"))
   (let ((out:*output-style* :compact))
-    (web::%build-app nil "Guest" "Guest" #'identity nil nil t nil nil nil nil nil nil nil nil nil :poll)
+    (web::%build-app nil "Guest" "Guest" #'identity nil nil t nil nil nil nil nil nil nil nil nil :poll nil)
     (is (eq :compact out:*output-style*)
         "and a :compact host survives a :dev one, which the defect would set :pretty")))
 
@@ -339,8 +339,9 @@ used to add nothing for it, so the page showed no count at all."
 ;;; chat uses it, for both the user's bubble and the model's.
 
 (test a-javascript-link-in-a-chat-message-is-not-an-href
-  (dolist (html (list (web::%user-bubble "look [here](javascript:alert(1)) and [there](https://example.com)")
-                      (web::%assistant-bubble "Model" "look [here](javascript:alert(1)) and [there](https://example.com)")))
+  (dolist (html (let ((text "look [here](javascript:alert(1)) and [there](https://example.com)"))
+                  (list (praxeon/chat-ui:user-bubble text)
+                        (praxeon/chat-ui:assistant-bubble "Model" text))))
     (is (null (search "href=\"javascript" html)) "a javascript: href reached the bubble: ~S" html)
     (is (null (search "javascript:" html)) "the script URL must not appear at all: ~S" html)
     (is (search "href=\"https://example.com\"" html)
@@ -651,6 +652,132 @@ collects (principal . grant) for each agent made."
   (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
     (declare (ignore pub))
     (is (eql 404 (nth-value 0 (%open (%echo-app) (%grant-token priv)))))))
+
+;;; The embed surface (#67): GET /embed/panel and GET /embed.js. The panel is the one route that
+;;; another site may frame, so the headers are read through the wrapper the server adds, and the
+;;; other routes are checked to still refuse framing.
+
+(defparameter *embed-origins* '("https://app.example.com" "http://localhost:3000"))
+
+(defun %embed-app (&rest keys)
+  "A grant app with embedding allowed from *EMBED-ORIGINS*, wrapped in the security headers as
+hyperion/server:start wraps it. KEYS go to MAKE-APP."
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (declare (ignore priv))
+    (hyperion/security-headers:wrap-security-headers
+     (apply #'%grant-app pub :embed-origins *embed-origins* keys))))
+
+(defun %header (headers name)
+  (loop for (k v) on headers by #'cddr
+        when (string-equal (string k) name) return v))
+
+(defun %script-tags (html)
+  "Each <script ...> opening tag in HTML."
+  (loop for start = (search "<script" html) then (search "<script" html :start2 (1+ start))
+        while start
+        collect (subseq html start (1+ (position #\> html :start start)))))
+
+(test the-embed-panel-may-be-framed-by-the-named-origins-and-no-other-route-may
+  (let ((app (%embed-app)))
+    (multiple-value-bind (status headers) (%call app :get "/embed/panel")
+      (is (eql 200 status) "the panel needs no session")
+      (is (equal "frame-ancestors https://app.example.com http://localhost:3000; base-uri 'self'; object-src 'none'"
+                 (%header headers "content-security-policy")))
+      (is (null (%header headers "x-frame-options")) "X-Frame-Options was sent: ~S" headers)
+      (is (null (loop for (k) on headers by #'cddr
+                      thereis (string-equal (string k) "x-frame-options")))
+          "an X-Frame-Options entry with no value is still on the response"))
+    (dolist (path '("/embed.js" "/" "/api/progress"))
+      (let ((headers (nth-value 1 (%call app :get path))))
+        (is (equal "DENY" (%header headers "x-frame-options")) "~A" path)
+        (is (search "frame-ancestors 'none'" (%header headers "content-security-policy"))
+            "~A" path)))))
+
+(defun %unquoted (html)
+  "HTML with its double quotes removed and &quot; written as a double quote, so a search does not
+depend on whether Spinneret quoted an attribute."
+  (let ((text (remove #\" html)))
+    (with-output-to-string (out)
+      (loop with i = 0
+            for at = (search "&quot;" text :start2 i)
+            do (write-string text out :start i :end (or at (length text)))
+               (if at (progn (write-char #\" out) (setf i (+ at 6))) (loop-finish))))))
+
+(test the-embed-panel-waits-for-a-session-before-it-sends-anything
+  (dolist (transport '(:poll :sse))
+    (let* ((html (%unquoted (nth-value 2 (%call (%embed-app :transport transport)
+                                                :get "/embed/panel"))))
+           (live (search "<template id=px-live>" html))
+           (live-end (and live (search "</template>" html :start2 live))))
+      (is-true (and live live-end) "~A: no #px-live template in ~S" transport html)
+      (when (and live live-end)
+        (let ((inside (subseq html live live-end))
+              ;; The page's own markup outside the template, without its scripts, which name
+              ;; these elements.
+              (outside (concatenate 'string (subseq html 0 live)
+                                    (subseq html live-end (search "<script>" html
+                                                                  :start2 live-end)))))
+          (if (eq transport :sse)
+              (is (search "<div id=px-events data-px-events=/api/events data-px-ticket=/embed/stream-ticket>"
+                          inside)
+                  "~A" inside)
+              (is (search "hx-get=/api/progress" inside) "~A" inside))
+          (is (null (search "/api/progress" outside)) "~A: the poller is live" transport)
+          (is (null (search "px-events" outside)) "~A: the stream element is live" transport)))
+      (is (search "data-px-origins=[\"https://app.example.com\",\"http://localhost:3000\"]" html)
+          "~A: the allowed origins are not in the page" transport)
+      (is (search "data-px-session=/embed/session" html))
+      (let* ((box (search "<textarea" html))
+             (tag (and box (subseq html box (position #\> html :start box)))))
+        (is-true (and tag (search "id=msg" tag) (search "disabled" tag))
+                 "~A: the message box is enabled: ~S" transport tag))
+      (is (search "id=px-send disabled>Send</button>" html)
+          "~A: the Send button is enabled" transport))))
+
+(test the-embed-pages-load-only-htmx-and-do-not-touch-a-host-s-loader
+  "The embedding requirement on #67: nothing loads an AMD or UMD loader or assigns window.htmx,
+so a host page's own htmx is never replaced."
+  (let* ((app (%embed-app))
+         (panel (nth-value 2 (%call app :get "/embed/panel")))
+         (loader (nth-value 2 (%call app :get "/embed.js"))))
+    (is (equal (list (hyperion/assets:url :htmx))
+               (loop for tag in (%script-tags panel)
+                     for at = (search "src=" tag)
+                     when at collect (string-trim "\"'>" (subseq tag (+ at 4)))))
+        "scripts with a src: ~S" (%script-tags panel))
+    (dolist (text (list panel loader))
+      (is (null (search "define.amd" text)))
+      (is (null (search "window.htmx=" (remove #\Space text)))))
+    (multiple-value-bind (status headers body) (%call app :get "/embed.js")
+      (is (eql 200 status))
+      (is (eql 0 (search "text/javascript" (%header headers "content-type"))))
+      (is (search "/embed/panel" body))
+      (is (search "praxeon:grant" body)))))
+
+(test the-embed-routes-exist-only-with-embed-origins
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (declare (ignore priv))
+    (let ((app (%grant-app pub)))
+      (is (eql 404 (nth-value 0 (%call app :get "/embed/panel"))))
+      (is (eql 404 (nth-value 0 (%call app :get "/embed.js")))))))
+
+(test make-app-refuses-embed-origins-it-cannot-use
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (declare (ignore priv))
+    (signals error (%echo-app :embed-origins '("https://app.example.com")))
+    (dolist (origins '("https://app.example.com"   ; a string, not a list
+                       ("https://App.example.com") ; a browser writes the host in lowercase
+                       ("https://app.example.com/")
+                       ("https://app.example.com/path")
+                       ("app.example.com")
+                       ("javascript:alert(1)")
+                       ("https://")
+                       ("https://app.example.com:")
+                       ("https://app.example.com:123456")
+                       ("https://app.example.com https://evil.example")
+                       ("https://app.example.com;script-src *")))
+      (signals error (%grant-app pub :embed-origins origins)))
+    (is-true (%grant-app pub :embed-origins '("https://app.example.com" "http://localhost:3000")))))
 
 (test make-app-refuses-grants-without-an-audience
   "A verifier given no audience accepts a grant minted for any service, so the service has to be
