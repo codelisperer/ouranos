@@ -632,6 +632,11 @@ store, it signals CREDENTIAL-STORE-UNAVAILABLE saying so instead: that is the ma
 when it is locked. On Linux a locked keyring still answers, so this can be true for an item
 FETCH-CREDENTIAL would refuse to read until the keyring is unlocked.
 
+WHAT THE ANSWER REVEALS is whether the credential exists, and never its value. Existence is
+metadata the store already keeps unencrypted -- a target name in Credential Manager, an item
+attribute in the Secret Service -- so answering from it discloses nothing the value protects
+(the hub's ruling on #1035).
+
 Signals CREDENTIAL-STORE-UNAVAILABLE where this system has no store or it cannot be reached,
 and CREDENTIAL-ERROR for any other failure. A name that is empty signals, as elsewhere."
   (%check-names service account)
@@ -642,8 +647,9 @@ and CREDENTIAL-ERROR for any other failure. A name that is empty signals, as els
 The order is the store's. An app keeping its own list of which keys it has saved, which can
 drift from the store, asks this instead.
 
-Reads what CREDENTIAL-EXISTS-P reads and prompts as little; see its docstring. Only SERVICE's
-own items are listed, so this never reads the names of credentials another program stored.
+Reads what CREDENTIAL-EXISTS-P reads and prompts as little, and like it reveals only which
+accounts exist and never a value; see its docstring. Only SERVICE's own items are listed, so
+this never reads the names of credentials another program stored.
 
 Nothing here is logged. hades/credentials depends on no logging facade, and an account name is
 the kind of thing a log must not carry, so the names are returned to the caller and written
