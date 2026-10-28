@@ -1042,6 +1042,107 @@ its tag.
   case, as the standard reader folds them. `write-data` and `write-data-to-string` write only
   what `read-data` accepts, and refuse anything else before writing a character, including a symbol whose name would read back as a number or as CL's `t` or `nil`. An app that
   reads data it did not write with `cl:read`, even with `*read-eval*` nil, should move to it.
+- **hyperion/kit: a list toolbar and a properties panel** (#981, part four). `hyperion/kit` now
+  also depends on `hyperion/list`.
+  - `hyperion/kit/toolbar:list-toolbar` takes a `hyperion/list` state and writes a GET form with
+    `role="search"`: a search field for a `:text` filter (`:search`), a select for each
+    `:values` filter (`:filters`, with an "All" option first), a select of sort keys
+    (`:sorts`), and an Active/Trash segmented control for a `:values` filter (`:trash`). The
+    list's other parameters and the page's own parameters are hidden fields, and the page is
+    left out, so a new search starts on page 1. With an htmx target the form re-requests the
+    list 300ms after typing stops, when a select changes, and on submit. It signals when a name
+    is not a filter or sort key of the right kind.
+  - `hyperion/kit/toolbar:toolbar-js`, included once per page, makes the toolbar's requests
+    carry the same parameters `list-href` writes for the same change: it sends them to the
+    page's own path, leaves out a filter set to All and the default sort key, and drops the
+    direction when the sort key changes.
+  - `hyperion/kit/panel:selectable-row` returns the attributes, for Spinneret's `:attrs`, of a
+    row that loads an item's properties into a `panel-region` on a click or on Enter.
+    `properties-panel` writes the panel, an `<aside>` named by its title with a close button.
+    `panel-js` marks the chosen row with `aria-current="true"`, and the close button or Escape
+    empties the panel and returns focus to that row.
+  - `hyperion/list` exports `list-param-name`, the query-parameter name a spec reads for a
+    filter or setting; `list-carried-params`, the hidden fields a GET form for the list needs;
+    and the spec readers `list-spec-sorts`, `list-spec-default-sort`, `list-spec-filters` and
+    `list-spec-hx-target`.
+  - `kit.css` styles the toolbar, the chosen row and the panel.
+
+- **hyperion/kit: dialogs, a destructive-action confirm and an undo notice** (#981, part
+  three). The new package `hyperion/kit/dialog`; `hyperion/kit` now also depends on
+  `parenscript`, which `hyperion` already loads.
+  - `dialog` writes a closed native `<dialog>` named by its title through `aria-labelledby`,
+    with a close button. `dialog-opener` writes the button that opens it; with `:href`, htmx
+    loads the dialog's contents first and the dialog opens when they have settled.
+  - `confirm-dialog` writes a dialog whose form posts to `:action-href` with htmx. Cancel is on
+    the left and has the initial focus, so Enter cancels; the action is on the right, labelled
+    by `:action-label` and styled as danger. The action is disabled while its request is in
+    flight, so a double click posts once. The dialog closes when the request succeeds. It
+    signals unless `:action-href` and `:action-label` are given.
+  - `notice-region` writes an empty `role="status"` live region, and `undo-notice` writes a
+    notice with Undo and Dismiss buttons and no timer. With `:oob t` a handler can return the
+    notice with any response and htmx appends it to the region.
+  - `dialog-js` returns the script for all of them, to include once per page. Escape closes a
+    dialog, and closing it returns focus to the button that opened it, including in browsers
+    where clicking a button does not focus it. The browser itself focuses the dialog's
+    `autofocus` element when it opens.
+  - `kit.css` styles the dialogs and notices.
+
+- **hyperion/kit: a page header, breadcrumbs, an empty state, a segmented control and a toggle
+  group for collection pages** (#981, part two). A new opt-in system, `hyperion/kit`. Each
+  component writes into Spinneret's `*html*`, like `hyperion/list:pager`, and is styled by
+  `(hyperion/assets:url :kit)` in the `--hy-*` tokens of `hyperion/appearance`.
+  - `hyperion/kit/page:page-header` takes a title, which becomes the page's `<h1>`, and
+    optionally `:subtitle`, `:breadcrumbs` and `:actions`. `:actions` is a function that writes
+    the action buttons.
+  - `hyperion/kit/page:breadcrumbs` takes `(label . href)` items and writes an ordered list in a
+    `<nav>` with an `aria-label`. The last item is the current page: it has
+    `aria-current="page"` and is not a link. The separators are drawn by CSS, so a screen
+    reader does not read them.
+  - `hyperion/kit/page:empty-state` writes a heading, one line of text and an optional primary
+    link.
+  - A breadcrumb href or an empty state's `:action-href` becomes a link only when it has no
+    scheme or its scheme is `http` or `https`. Any other, such as `javascript:` or `data:`, is
+    left out of the page, and the label is written as plain text. Nothing is signalled.
+  - `hyperion/kit/toggle:segmented-control` (exactly one option pressed) and
+    `hyperion/kit/toggle:toggle-group` (any number pressed) write buttons with `aria-pressed`
+    in a `role="group"` with an `aria-label`. Each button loads its href with htmx.
+    `segmented-control` signals when `:selected` does not name exactly one option.
+  - `hyperion/assets` serves the new stylesheet `kit.css` under the key `:kit`, so
+    `(hyperion/assets:assets)` now has five entries.
+
+- **hyperion/appearance: theme, contrast and look as one visitor setting, and the `--hy-*`
+  appearance tokens** (#981, part one). A page's appearance is three attributes on `<html>`:
+  `data-theme` (`light` or `dark`), `data-contrast` (`normal` or `high`) and the new
+  `data-look` (`flat` or `gradient`). The default for theme and for contrast is the system:
+  with the attribute absent, `prefers-color-scheme` and `prefers-contrast: more` decide. With
+  `data-look` absent the look is flat.
+  - `make-appearance` and `appearance-from-strings` build the setting, and `html-attributes`
+    returns the attributes for `<html>`, leaving out any setting that follows the system.
+  - `read-appearance` and `persist-appearance` are a store protocol.
+    `make-cookie-appearance-store` keeps the setting in one cookie, named `appearance` by
+    default, for example `dark.system.gradient`. An app that stores it elsewhere supplies its
+    own store.
+  - `make-appearance-table` takes token values for the light, dark, light high-contrast and dark
+    high-contrast schemes, merged over hyperion's defaults. Each scheme has a `:gradient` plist
+    for the values the gradient look changes. `appearance-css` writes CSS for every combination,
+    plus `--hy-space-1` to `--hy-space-7` (a 4px base).
+  - The tokens are `--hy-surface`, `--hy-surface-raised`, `--hy-header`, `--hy-button`,
+    `--hy-button-primary` and `--hy-button-danger`, each with a `-text` token. Their names are
+    the same in both looks. A background token is a colour in the flat look and may be a
+    `linear-gradient` in the gradient look, so use it with `background:`, not
+    `background-color:`.
+  - In the gradient look, the CSS also applies the tokens to Bulma's `.button.is-primary`,
+    `.button.is-danger`, `.navbar`, `.modal-card-head`, `.card-header`, `.box` and `.card`,
+    with `background:`, so a plain colour given as a gradient-look value replaces Bulma's own
+    background. The outlined, light and inverted button variants keep Bulma's colours.
+  - A browser without the `prefers-contrast` media feature (Chrome before 96, Firefox before
+    101) shows the light, flat look on a page that sets no `data-contrast`.
+  - The type scale is Bulma's `--bulma-size-1` to `--bulma-size-7`, set through
+    `hyperion/assets:theme`.
+  - `appearance-contrast-failures` checks every text token against its background in all eight
+    combinations, at WCAG AA (4.5:1). For a gradient it checks every stop and 19 points between
+    each pair of stops. Hyperion's own table passes. An app calls the check in its own tests on
+    its own table. `contrast-ratio` and `relative-luminance` are exported.
 
 - **praxeon/actor: every deliberation step records how many of the prompt's estimated tokens came
   from each source** (#317, step D). `praxeon/actor:request-messages` returns a third value, and
