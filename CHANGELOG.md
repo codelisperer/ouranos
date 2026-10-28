@@ -1042,6 +1042,29 @@ its tag.
   case, as the standard reader folds them. `write-data` and `write-data-to-string` write only
   what `read-data` accepts, and refuse anything else before writing a character, including a symbol whose name would read back as a number or as CL's `t` or `nil`. An app that
   reads data it did not write with `cl:read`, even with `*read-eval*` nil, should move to it.
+- **hyperion/kit: a page header, breadcrumbs, an empty state, a segmented control and a toggle
+  group for collection pages** (#981, part two). A new opt-in system, `hyperion/kit`. Each
+  component writes into Spinneret's `*html*`, like `hyperion/list:pager`, and is styled by
+  `(hyperion/assets:url :kit)` in the `--hy-*` tokens of `hyperion/appearance`.
+  - `hyperion/kit/page:page-header` takes a title, which becomes the page's `<h1>`, and
+    optionally `:subtitle`, `:breadcrumbs` and `:actions`. `:actions` is a function that writes
+    the action buttons.
+  - `hyperion/kit/page:breadcrumbs` takes `(label . href)` items and writes an ordered list in a
+    `<nav>` with an `aria-label`. The last item is the current page: it has
+    `aria-current="page"` and is not a link. The separators are drawn by CSS, so a screen
+    reader does not read them.
+  - `hyperion/kit/page:empty-state` writes a heading, one line of text and an optional primary
+    link.
+  - A breadcrumb href or an empty state's `:action-href` becomes a link only when it has no
+    scheme or its scheme is `http` or `https`. Any other, such as `javascript:` or `data:`, is
+    left out of the page, and the label is written as plain text. Nothing is signalled.
+  - `hyperion/kit/toggle:segmented-control` (exactly one option pressed) and
+    `hyperion/kit/toggle:toggle-group` (any number pressed) write buttons with `aria-pressed`
+    in a `role="group"` with an `aria-label`. Each button loads its href with htmx.
+    `segmented-control` signals when `:selected` does not name exactly one option.
+  - `hyperion/assets` serves the new stylesheet `kit.css` under the key `:kit`, so
+    `(hyperion/assets:assets)` now has five entries.
+
 - **hyperion/appearance: theme, contrast and look as one visitor setting, and the `--hy-*`
   appearance tokens** (#981, part one). A page's appearance is three attributes on `<html>`:
   `data-theme` (`light` or `dark`), `data-contrast` (`normal` or `high`) and the new
