@@ -21,6 +21,19 @@ its tag.
   counts. A server that refuses either returns an error the turn reports as before. To keep the
   old request for such a server, define `praxeon/llm:supports-streaming-p` to return `NIL` for
   a subclass of `openai-compatible`; that also means a cancel cannot stop a call in progress.
+- **`hyperion/logging:wrap`'s "request start" line logs the query's parameter names, not the
+  raw query string** (#1007). The line is written at DEBUG, and `wrap` runs outside every
+  middleware an app adds, so with DEBUG on, every query string, with any token or personal data
+  in it, went into the log, and an app could not stop it.
+  - The `query` field is gone. The line has `query-keys` instead: the parameter names in the order
+    they first appear, each once, at most 20, each cut to 40 characters, such as `(page q)`.
+  - A part with no value is usually a token, so it is never named, and the line counts such
+    parts as `bare-parts`. That is a part with no `=`, as in `/reset?3f9a…`, or one whose value
+    is empty or only `=` signs, as in `?abc123secret=` or a base64 token with its padding.
+  - A query whose names have a malformed `%` escape or are not UTF-8 is logged as
+    `query-keys=unparsed`, with no text from it.
+  - Log tooling that searched for `query` should search for `query-keys`.
+  - No setting brings the raw query back.
 
 - **`scripts/build-desktop-app.lisp` stops, instead of warning and exiting 0, when the bundle
   needs hyperion-view or a library the runtime links against and it is missing** (#956). For an
