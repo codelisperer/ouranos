@@ -186,11 +186,22 @@ jobs:
       # that let a child borrow what a sibling built -- the exact borrowing verify-tree
       # runs isolated images to prevent. What is wanted from bootstrap is the ASDF
       # source-registry drop-in and bin/cons.
+      #
+      # The Linux leg bootstraps in tree-local mode (#955), so that mode has a real user in CI
+      # and not only the checkers fixtures: bootstrap writes no drop-in, and the next step
+      # gives every later step the CL_SOURCE_REGISTRY that bootstrap gave its own children.
+      # macOS and Windows write the drop-in, as a person's first bootstrap does.
       - name: Bootstrap the tree
         id: bootstrap-the-tree
         env:
           OURANOS_NO_WARM: "1"
+          OURANOS_BOOTSTRAP_LOCAL: ${{ runner.os == 'Linux' && '1' || '' }}
         run: sbcl --dynamic-space-size 4096 --script bootstrap.lisp
+
+      - name: Use this tree through CL_SOURCE_REGISTRY (Linux, tree-local)
+        id: use-this-tree-through-cl-source-registry-linux-tree-local
+        if: runner.os == 'Linux'
+        run: echo "CL_SOURCE_REGISTRY=$GITHUB_WORKSPACE//:" >> "$GITHUB_ENV"
 
       # THE STEP THAT THE FIRST CI RUN OF THIS FILE PROVED IS NOT OPTIONAL.
       #

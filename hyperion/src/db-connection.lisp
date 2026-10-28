@@ -71,7 +71,11 @@ life, and a few of them would leave none for ordinary requests.
 
 When no connection becomes free within the pool's checkout timeout, the request is answered
 with *BUSY-RESPONSE* and APP is not called. Give the pool at least as many connections as the
-server has worker threads, or requests will wait for each other's connections."
+server has worker threads, or requests will wait for each other's connections.
+
+Give the same POOL to every database-backed store the app makes, HYPERION/AUTH-DB:MAKE-DB-AUTH
+and HYPERION/SESSION-DB:MAKE-DB-STORE among them (#711). Two stores made over one connection
+each lock only their own operations, so two handler threads can use that connection at once."
   (check-type variable (and symbol (not null)))
   ;; A pool, not a backend. WITH-CONNECTION accepts either, and a backend here would open and
   ;; close a connection for every request with no limit, no timeout and no 503.

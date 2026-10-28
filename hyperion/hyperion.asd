@@ -108,6 +108,7 @@
                              (:file "i18n")     ; locale dictionaries + negotiation
                              (:file "page-meta") ; Open Graph + Twitter-card tags (#821); after i18n
                              (:file "consent")  ; cookie/tracking consent (GDPR/ePrivacy)
+                             (:file "appearance") ; theme, contrast and look, and the --hy-* tokens (#981)
                              (:file "static")   ; static asset serving
                              (:file "markdown") ; Markdown -> HTML (safe by default)
                              (:file "js")       ; Parenscript (poller + helpers)
@@ -287,7 +288,8 @@
                              (:static-file "bulma.min.css")))
                ;; The tree's own component stylesheets (#489), embedded the same way.
                (:module "assets/components"
-                :components ((:static-file "calendar.css")))
+                :components ((:static-file "calendar.css")
+                             (:static-file "kit.css")))
                (:file "src/assets"))
   :in-order-to ((test-op (test-op "hyperion/assets/tests"))))
 
@@ -310,6 +312,35 @@
   :depends-on ("hyperion/calendar" "hyperion" "aion/tz" "spinneret" "fiveam")
   :components ((:file "tests/calendar-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/calendar/tests :run-tests)))
+
+(defsystem "hyperion/kit"
+  :description "Generic collection-page components: page header, breadcrumbs, empty state, segmented control, toggle group, dialogs, the destructive confirm, the undo notice, the list toolbar and the properties panel (#981)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; Its stylesheet is served by hyperion/assets, which this system does not depend on, the
+  ;; same arrangement as hyperion/calendar.
+  ;; hyperion for hyperion/output, which compiles the components' Parenscript the way
+  ;; hyperion/js does. hyperion/list for the toolbar, which reads a list's spec and state.
+  :depends-on ("hyperion" "hyperion/list" "spinneret" "parenscript")
+  :serial t
+  :components ((:module "src/kit"
+                :serial t
+                :components ((:file "page")
+                             (:file "toggle")
+                             (:file "dialog")
+                             (:file "toolbar")
+                             (:file "panel"))))
+  :in-order-to ((test-op (test-op "hyperion/kit/tests"))))
+
+(defsystem "hyperion/kit/tests"
+  :description "Tests for hyperion/kit: each component's roles, names and pressed state, read from the markup it writes."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  ;; plump parses the markup, so a test reads elements and attributes, not strings.
+  :depends-on ("hyperion/kit" "hyperion/list" "spinneret" "plump" "fiveam")
+  :components ((:file "tests/kit-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/kit/tests :run-tests)))
 
 (defsystem "hyperion/list"
   :description "Paging, sorting and filtering a list from the query string, against a spec the app declares: the state, the mnemosyne clauses, links, and the pager and sort-heading components (#488)."
@@ -388,10 +419,13 @@
   ;; the consumer -- here the consumer is the test).
   :depends-on ("hyperion/assets" "hyperion"   ; assets-tests.lisp calls router: and server:
                "hyperion/test-ports" "fiveam" "ironclad" "clack-handler-hunchentoot"
+               ;; kit-browser-tests runs hyperion/kit's dialogs in the smoke page's browser (#981).
+               "hyperion/kit" "hyperion/list" "spinneret"
                (:require "sb-bsd-sockets"))
   :serial t
   :components ((:file "tests/assets-tests")
-               (:file "tests/htmx-smoke-tests"))
+               (:file "tests/htmx-smoke-tests")
+               (:file "tests/kit-browser-tests"))   ; uses the smoke page's browser helpers
   :perform (test-op (o c) (uiop:symbol-call :hyperion/assets/tests :run-tests)))
 
 ;;; Durable session store, backed by mnemosyne. A separate system so hyperion core keeps
@@ -733,5 +767,6 @@
                              (:file "import-tests")
                              (:file "markdown-tests")
                              (:file "html-attributes-tests")
-                             (:file "page-meta-tests"))))  ; after i18n-tests, whose %ATTR-P it uses
+                             (:file "page-meta-tests")  ; after i18n-tests, whose %ATTR-P it uses
+                             (:file "appearance-tests"))))
   :perform (test-op (op c) (uiop:symbol-call :hyperion/tests :run-tests)))
