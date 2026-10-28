@@ -90,7 +90,9 @@ that can be arbitrarily large."
     (:text (estimate-tokens (or (getf part :text) "")))
     (:tool-use (+ (estimate-tokens (or (getf part :name) ""))
                   (%data-tokens (getf part :input))))
-    (:tool-result (%data-tokens (getf part :content)))))
+    (:tool-result (%data-tokens (getf part :content)))
+    ;; A constant, not the bytes over *CHARS-PER-TOKEN*: see LLM:*IMAGE-PART-TOKENS* (#995).
+    (:image llm:*image-part-tokens*)))
 
 (defun message-tokens (message)
   "Estimated token cost of MESSAGE, including *MESSAGE-OVERHEAD-TOKENS*."

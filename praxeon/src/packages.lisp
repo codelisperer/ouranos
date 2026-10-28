@@ -61,6 +61,8 @@
    #:output-truncated-text #:output-truncated-tool-calls
    #:tool-choice-unsupported #:tool-choice-unsupported-provider
    #:tool-choice-unsupported-requested
+   #:image-part-invalid #:image-part-invalid-limit
+   #:image-input-unsupported #:image-input-unsupported-provider #:image-input-unsupported-model
    #:missing-provenance #:missing-provenance-operation #:missing-provenance-subject
    #:embedding-dimension-mismatch #:embedding-dimension-mismatch-provider
    #:embedding-dimension-mismatch-expected #:embedding-dimension-mismatch-actual
@@ -165,8 +167,11 @@
    ;; neutral messages + content parts
    #:msg #:role #:content
    #:text-part #:tool-use-part #:tool-result-part
+   #:image-part #:image-part-p #:image-part-description
+   #:*max-image-part-bytes* #:*image-part-tokens*
    ;; neutral tools + completions
    #:tool-choice #:supports-tool-choice-p #:check-tool-choice
+   #:supports-image-input-p #:check-image-input
    #:supports-response-format-p #:complete-with-schema
    #:anthropic-request-body #:openai-request-body
    #:generate-structured #:validate-arguments #:validate-against-schema
