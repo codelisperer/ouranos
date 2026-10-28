@@ -25,7 +25,8 @@
                     (#:srv #:hyperion/server)
                     (#:out #:hyperion/output)
                     (#:actor #:praxeon/actor)
-                    (#:llm #:praxeon/llm))
+                    (#:llm #:praxeon/llm)
+                    (#:ceiling #:praxeon/ceiling))
   (:export #:praxeon-web))
 
 (cl:in-package #:praxeon/web/tests)
@@ -143,11 +144,13 @@ a question that has nothing to do with the network."
 ;;; socket: the property under test is what the app answers, and a server would add a port and
 ;;; a thread to every one of them.
 
-(defun %call (app method path &key query json form)
+(defun %call (app method path &key query json form authorization)
   "Call APP, a Clack app, with a request for METHOD and PATH, and return (values STATUS HEADERS
 BODY). QUERY is the query string. JSON or FORM, a string, is the body, sent as application/json
-or as a urlencoded form."
-  (let* ((headers (make-hash-table :test 'equal))
+or as a urlencoded form. AUTHORIZATION is the Authorization header's value."
+  (let* ((headers (let ((h (make-hash-table :test 'equal)))
+                    (when authorization (setf (gethash "authorization" h) authorization))
+                    h))
          (env (list :request-method method :path-info path :query-string query
                     :headers headers
                     :content-type (cond (json "application/json")
@@ -189,15 +192,27 @@ string."
            (when (and (< v (length html)) (char= (char html v) #\")) (incf v))
            (eql v (search "#px-cursor" html :start2 v))))))
 
-(defun %cursor-in (html)
-  "The index in HTML's px-cursor field, or NIL. Spinneret leaves an attribute value unquoted when
-it can, so the value is read after `value=' with or without a quote."
+(defun %cursor-value-in (html)
+  "The value of HTML's px-cursor field, \"EPOCH:INDEX\", or NIL. Spinneret leaves an attribute
+value unquoted when it can, so the value is read after `value=' with or without a quote."
   (let* ((at (search "px-cursor" html))
          (v (and at (search "value=" html :start2 at)))
          (start (and v (+ v 6))))
     (when (and start (< start (length html)) (char= (char html start) #\"))
       (incf start))
-    (and start (parse-integer html :start start :junk-allowed t))))
+    (and start (subseq html start (position-if (lambda (c) (find c "\" >")) html :start start)))))
+
+(defun %cursor-in (html)
+  "The index in HTML's px-cursor field, or NIL."
+  (let* ((value (%cursor-value-in html))
+         (colon (and value (position #\: value))))
+    (and value (parse-integer value :start (if colon (1+ colon) 0) :junk-allowed t))))
+
+(defun %epoch-in (html)
+  "The epoch in HTML's px-cursor field, or NIL."
+  (let* ((value (%cursor-value-in html))
+         (colon (and value (position #\: value))))
+    (and colon (subseq value 0 colon))))
 
 ;;; --------------------------------------------------------------------------
 ;;; The output style is the app's, not the image's (pre-publication issue 469)
@@ -233,11 +248,11 @@ rendering changed for the rest of the process."
   ;; the bug fully present. Measured: under the reverted fix this test failed `f.\', one of two.
   ;; So the non-dev case runs against a :pretty image and the dev case against a :compact one.
   (let ((out:*output-style* :pretty))
-    (web::%build-app nil "Guest" "Guest" #'identity nil nil nil nil nil nil nil nil)
+    (web::%build-app nil "Guest" "Guest" #'identity nil nil nil nil nil nil nil nil nil nil nil nil)
     (is (eq :pretty out:*output-style*)
         "a :pretty host survives a non-dev agent surface, which the defect would set :compact"))
   (let ((out:*output-style* :compact))
-    (web::%build-app nil "Guest" "Guest" #'identity nil nil t nil nil nil nil nil)
+    (web::%build-app nil "Guest" "Guest" #'identity nil nil t nil nil nil nil nil nil nil nil nil)
     (is (eq :compact out:*output-style*)
         "and a :compact host survives a :dev one, which the defect would set :pretty")))
 
@@ -528,3 +543,442 @@ goes with a single :AGENT."
   (signals error (web:make-app :agent (actor:make-agent :name "one")
                                :conversation-key (lambda (env) (declare (ignore env)) "k")
                                :make-agent (lambda (k) (actor:make-agent :name k)))))
+
+;;; --------------------------------------------------------------------------
+;;; Signed grants open sessions (#67 step two)
+;;; --------------------------------------------------------------------------
+;;;
+;;; A service made with :GRANT-VERIFIER takes a grant at POST /embed/session and answers a
+;;; session id, and every other route needs that id in `Authorization: Session <id>'. These
+;;; tests mint real Ed25519 grants with `aion/signature'; none of them uses a verifier that
+;;; accepts everything, because a test whose verifier always says yes cannot see a forgery.
+
+(defun %grant-token (private-key &key (principal "p1") (audience "svc") (expires-in 120)
+                                      (capabilities '("search")))
+  (let ((o (make-hash-table :test 'equal)))
+    (setf (gethash "principal" o) principal
+          (gethash "group" o) "g1"
+          (gethash "capabilities" o) (coerce capabilities 'vector)
+          (gethash "token_cap" o) 1000
+          (gethash "call_cap" o) 10
+          (gethash "expires_at" o) (+ (get-universal-time) expires-in)
+          (gethash "audience" o) audience)
+    (ceiling:encode-grant-token (com.inuoe.jzon:stringify o) private-key)))
+
+(defun %grant-app (public-key &rest keys &key (made (list nil)) &allow-other-keys)
+  "An echo app that takes grants for audience \"svc\". MADE is a one-element list; the car
+collects (principal . grant) for each agent made."
+  (remf keys :made)
+  (apply #'%echo-app
+         :grant-verifier (ceiling:make-ed25519-verifier public-key)
+         :audience "svc"
+         :make-agent (lambda (principal grant)
+                       (push (cons principal grant) (car made))
+                       (actor:make-agent :name principal))
+         keys))
+
+(defun %open (app token)
+  "POST TOKEN to APP's /embed/session. Returns (values STATUS SESSION-ID-or-NIL BODY)."
+  (multiple-value-bind (status headers body)
+      (%call app :post "/embed/session" :authorization (format nil "Grant ~A" token))
+    (declare (ignore headers))
+    (values status
+            (and (eql status 200) (gethash "session" (com.inuoe.jzon:parse body)))
+            body)))
+
+(test a-grant-opens-a-session-that-reaches-the-principal-s-conversation
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (let* ((made (list nil))
+           (app (%grant-app pub :made made)))
+      (multiple-value-bind (status session) (%open app (%grant-token priv))
+        (is (eql 200 status))
+        (is (and (stringp session) (= 64 (length session)))
+            "the session id should be 256 bits as hex: ~S" session)
+        (let ((auth (format nil "Session ~A" session)))
+          (is (eql 200 (nth-value 0 (%call app :post "/api/message" :authorization auth
+                                           :json "{\"message\":\"hi\"}"))))
+          (is (search "echo: hi" (nth-value 2 (%call app :get "/api/progress" :query "after=0"
+                                                     :authorization auth)))
+              "the session's conversation does not show the turn")
+          (is (equal '("p1") (mapcar #'car (car made))) "one agent, for the grant's principal")
+          (is (equal '("search") (ceiling:grant-capabilities (cdr (first (car made)))))
+              "the agent was made with the grant, so its means can follow the capabilities"))))))
+
+(test a-route-without-an-open-session-is-refused-401
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (declare (ignore priv))
+    (let ((app (%grant-app pub)))
+      (is (eql 401 (nth-value 0 (%call app :get "/"))) "no Authorization header")
+      (is (eql 401 (nth-value 0 (%call app :get "/api/progress" :query "after=0"
+                                       :authorization "Session not-a-session"))))
+      (is (eql 401 (nth-value 0 (%call app :post "/api/message" :json "{\"message\":\"hi\"}"
+                                       :authorization "Bearer x")))
+          "a header with another scheme"))))
+
+(test a-grant-that-does-not-verify-opens-no-session
+  "Each case names why it was refused, in the 401's body."
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (let ((app (%grant-app pub))
+          (other (aion/signature:generate-key-pair)))
+      (flet ((refused (token reason)
+               (multiple-value-bind (status session body) (%open app token)
+                 (is (eql 401 status) "~A: status ~S" reason status)
+                 (is (null session) "~A: a session was opened" reason)
+                 (is (search reason body) "~A: the body was ~S" reason body))))
+        (refused (%grant-token other) "signature does not verify")
+        (refused (%grant-token priv :expires-in -10) "expired")
+        (refused (%grant-token priv :audience "another-service") "audience")
+        (refused (%grant-token priv :principal "") "no principal")
+        (refused "not a token" "base64url")))))
+
+(test two-principals-have-two-conversations
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (let* ((app (%grant-app pub))
+           (a (format nil "Session ~A" (nth-value 1 (%open app (%grant-token priv :principal "a")))))
+           (b (format nil "Session ~A" (nth-value 1 (%open app (%grant-token priv :principal "b")))))
+           (a2 (format nil "Session ~A" (nth-value 1 (%open app (%grant-token priv :principal "a"))))))
+      (%call app :post "/api/message" :authorization a :json "{\"message\":\"from-a\"}")
+      (let ((seen-by-b (nth-value 2 (%call app :get "/api/progress" :query "after=0" :authorization b)))
+            (seen-by-a2 (nth-value 2 (%call app :get "/api/progress" :query "after=0" :authorization a2))))
+        (is (null (search "from-a" seen-by-b)) "b sees a's conversation: ~S" seen-by-b)
+        (is (search "echo: from-a" seen-by-a2)
+            "a second session for principal a does not reach a's conversation")))))
+
+(test the-session-route-exists-only-on-a-service-that-takes-grants
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (declare (ignore pub))
+    (is (eql 404 (nth-value 0 (%open (%echo-app) (%grant-token priv)))))))
+
+(test make-app-refuses-grants-without-an-audience
+  "A verifier given no audience accepts a grant minted for any service, so the service has to be
+told its own name."
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (declare (ignore priv))
+    (let ((verifier (ceiling:make-ed25519-verifier pub))
+          (make (lambda (p g) (declare (ignore g)) (actor:make-agent :name p))))
+      (signals error (web:make-app :grant-verifier verifier :make-agent make))
+      (signals error (web:make-app :grant-verifier verifier :make-agent make :audience ""))
+      (signals error (web:make-app :grant-verifier verifier :audience "svc"
+                                   :agent (actor:make-agent :name "one")))
+      (finishes (web:make-app :grant-verifier verifier :make-agent make :audience "svc")))))
+
+(test a-session-ends-when-idle-or-too-old
+  (let* ((now 1000)
+         (table (praxeon/web-session:make-session-table :idle-seconds 60 :max-seconds 300
+                                                         :clock (lambda () now)))
+         (id (praxeon/web-session:open-session table :grant)))
+    (setf now 1059)
+    (is (eq :grant (praxeon/web-session:session-grant table id)) "59 seconds idle is not 60")
+    (setf now 1118)
+    (is (eq :grant (praxeon/web-session:session-grant table id)) "and using it reset the idle time")
+    (setf now 1178)
+    (is (null (praxeon/web-session:session-grant table id)) "60 seconds idle ends it")
+    (is (zerop (praxeon/web-session:session-count table)) "an ended session is removed")
+    (let ((old (praxeon/web-session:open-session table :grant)))
+      (loop repeat 5 do (incf now 59) (praxeon/web-session:session-grant table old))
+      (is (eq :grant (praxeon/web-session:session-grant table old)) "295 seconds in, still open")
+      (incf now 10)
+      (is (null (praxeon/web-session:session-grant table old))
+          "past the maximum lifetime it ends, however recently it was used"))))
+
+;;; --- making a key's agent, turn ids, and expiry (#67 step two) ----------------
+
+(defun %counting-make-agent (made &key gate)
+  "A MAKE-AGENT that counts in MADE, a hash table guarded by its own synchronization, the agents
+made for each key. With GATE, a semaphore, the agent for key a is made only once it is signalled."
+  (lambda (key)
+    (incf (gethash key made 0))
+    (when (and gate (equal key "a"))
+      (sb-thread:wait-on-semaphore gate :timeout 10))
+    (actor:make-agent :name key)))
+
+(defun %slow-keyed-app (made gate)
+  "An echo app with one conversation per `who' key, whose agent for key a is made only after GATE
+is signalled. MADE counts the agents made for each key."
+  (%echo-app :conversation-key (lambda (env) (hyperion/http:query-param env "who"))
+             :make-agent (%counting-make-agent made :gate gate)))
+
+(defun %made-for (made key) (gethash key made 0))
+
+(test two-first-requests-with-one-key-make-one-agent
+  "Two requests with a new key that arrive while its agent is being made share the conversation
+that agent starts: one agent is made, not two with one of them lost."
+  (let* ((made (make-hash-table :test 'equal :synchronized t))
+         (gate (sb-thread:make-semaphore))
+         (app (%slow-keyed-app made gate))
+         (get-a (lambda () (nth-value 0 (%call app :get "/" :query "who=a"))))
+         ;; THREAD-LIFETIME: joined below -- each is one request, ended by signalling GATE.
+         (first (sb-thread:make-thread get-a :name "px-web-test-first")))
+    (is-true (await (lambda () (= 1 (%made-for made "a")))) "the first request never made a's agent")
+    ;; THREAD-LIFETIME: joined below, as the first.
+    (let ((second (sb-thread:make-thread get-a :name "px-web-test-second")))
+      (sleep 0.2)
+      (sb-thread:signal-semaphore gate 2)
+      (is (eql 200 (sb-thread:join-thread first :default nil :timeout 10)))
+      (is (eql 200 (sb-thread:join-thread second :default nil :timeout 10))))
+    (is (= 1 (%made-for made "a")) "~D agents were made for key a" (%made-for made "a"))
+    (%say app "hello" :query "who=a")
+    (is (search "echo: hello" (%poll app 0 :query "who=a"))
+        "the key's conversation does not work after it was made")))
+
+(test a-slow-first-request-holds-up-only-its-own-key
+  "While key a's agent is being made, a request with key b is answered: making an agent does not
+hold the lock every key's requests go through."
+  (let* ((made (make-hash-table :test 'equal :synchronized t))
+         (gate (sb-thread:make-semaphore))
+         (app (%slow-keyed-app made gate))
+         ;; THREAD-LIFETIME: joined below; it ends when GATE is signalled.
+         (slow (sb-thread:make-thread
+                (lambda () (nth-value 0 (%call app :get "/" :query "who=a")))
+                :name "px-web-test-slow")))
+    (unwind-protect
+         (progn
+           (is-true (await (lambda () (= 1 (%made-for made "a")))) "a's agent was never started")
+           ;; THREAD-LIFETIME: joined below with a timeout; it ends by itself unless it is blocked.
+           (let ((other (sb-thread:make-thread
+                         (lambda () (nth-value 0 (%call app :get "/" :query "who=b")))
+                         :name "px-web-test-other")))
+             (is (eql 200 (sb-thread:join-thread other :default nil :timeout 3))
+                 "key b waited for key a's agent to be made")))
+      (sb-thread:signal-semaphore gate)
+      (sb-thread:join-thread slow :default nil :timeout 10))))
+
+(test every-item-carries-the-turn-it-belongs-to
+  "Each transcript item names its turn, numbered from 1 in each conversation, so a reader can tell
+which turn a :TURN-ENDED item ends. A conversation that starts with an agent's history numbers its
+first new turn after the history's."
+  (let ((conv (web::make-conversation
+               :agent-name "Echo"
+               :responder (lambda (agent message locale)
+                            (declare (ignore agent locale))
+                            (format nil "echo: ~A" message)))))
+    (web::%turn conv "one" nil)
+    (web::%turn conv "two" nil)
+    (is (equal '(1 1 1 2 2 2) (mapcar (lambda (i) (getf i :turn)) (web::%items-since conv 0)))
+        "the turns were ~S" (web::%items-since conv 0)))
+  (let* ((agent (actor:make-agent
+                 :name "restored"
+                 :history (list (llm:msg "user" "earlier question")
+                                (llm:msg "assistant" "earlier answer"))))
+         (conv (web::%new-conversation nil agent "Restored"
+                                       (lambda (agent message locale)
+                                         (declare (ignore agent locale))
+                                         (format nil "echo: ~A" message)))))
+    (web::%turn conv "next" nil)
+    (is (equal '(1 1 2 2 2)
+               (mapcar (lambda (i) (getf i :turn)) (web::%items-since conv 0)))
+        "the turns were ~S" (web::%items-since conv 0))))
+
+(test the-htmx-path-gives-the-message-and-the-turn-one-id
+  "The message %RUN-TURN-ASYNC publishes on the request thread and the items its turn thread
+publishes carry the same turn id."
+  (let ((conv (web::make-conversation
+               :agent-name "Echo"
+               :responder (lambda (agent message locale)
+                            (declare (ignore agent locale))
+                            (format nil "echo: ~A" message)))))
+    (sb-thread:join-thread (web::%run-turn-async conv "first" nil) :default nil :timeout 10)
+    (sb-thread:join-thread (web::%run-turn-async conv "second" nil) :default nil :timeout 10)
+    (let ((items (web::%items-since conv 0)))
+      (is (equal '((:user 1) (:assistant 1) (:turn-ended 1) (:user 2) (:assistant 2) (:turn-ended 2))
+                 (mapcar (lambda (i) (list (getf i :kind) (getf i :turn))) items))
+          "the items were ~S" items))))
+
+(defun %expiring-app (made clock &key gate entered turn-thread)
+  "An app with one conversation per `who' key and conversations that expire after 1800 idle
+seconds by CLOCK. The message \"slow\" signals ENTERED and then waits for GATE, both
+semaphores, before it is answered. TURN-THREAD, a cons, gets the slow turn's thread in its car."
+  (web:make-app
+   :agent-name "Echo"
+   :responder (lambda (agent message locale)
+                (declare (ignore agent locale))
+                (when (and gate (string= message "slow"))
+                  (when turn-thread (setf (car turn-thread) sb-thread:*current-thread*))
+                  (sb-thread:signal-semaphore entered)
+                  (sb-thread:wait-on-semaphore gate :timeout 10))
+                (format nil "echo: ~A" message))
+   :conversation-key (lambda (env) (hyperion/http:query-param env "who"))
+   :make-agent (%counting-make-agent made)
+   :conversation-idle-seconds 1800
+   :clock clock))
+
+(test an-idle-conversation-is-dropped-and-the-next-request-starts-a-new-one
+  "A key's conversation that no request has reached for the idle limit is dropped when another
+key's conversation is made, and the key's next request makes a new agent with an empty
+transcript. One reached within the limit is kept."
+  (let* ((now 1000)
+         (made (make-hash-table :test 'equal :synchronized t))
+         (app (%expiring-app made (lambda () now))))
+    (%say app "hello" :query "who=a")
+    (setf now 2799)
+    (%call app :get "/" :query "who=b")
+    (is (search "echo: hello" (%poll app 0 :query "who=a"))
+        "a conversation 1799 seconds idle was dropped")
+    (is (= 1 (%made-for made "a")))
+    ;; The poll above reached a's conversation at 2799, so its idle time starts again there.
+    (setf now 4598)
+    (%call app :get "/" :query "who=c")
+    (is (search "echo: hello" (%poll app 0 :query "who=a"))
+        "a request did not count as using the conversation")
+    (setf now 6398)
+    (%call app :get "/" :query "who=d")
+    (let ((after (%poll app 0 :query "who=a")))
+      (is (null (search "echo: hello" after)) "the idle conversation was kept: ~S" after))
+    (is (= 2 (%made-for made "a")) "a new agent should have been made for key a")))
+
+(test a-conversation-with-a-running-turn-is-not-dropped
+  "A turn can run longer than the idle limit, and the conversation it runs in is kept until it
+ends."
+  (let* ((now 0)
+         (made (make-hash-table :test 'equal :synchronized t))
+         (gate (sb-thread:make-semaphore))
+         (entered (sb-thread:make-semaphore))
+         (app (%expiring-app made (lambda () now) :gate gate :entered entered)))
+    (unwind-protect
+         (progn
+           (%call app :post "/api/message" :query "who=a" :form "message=slow")
+           (is-true (sb-thread:wait-on-semaphore entered :timeout 10) "the turn never started")
+           (setf now 2000)
+           (%call app :get "/" :query "who=b")
+           (sb-thread:signal-semaphore gate)
+           (is-true (await (lambda () (search "echo: slow" (%poll app 0 :query "who=a"))))
+                    "the running turn's conversation was dropped")
+           (is (= 1 (%made-for made "a")) "a second agent was made for key a"))
+      (sb-thread:signal-semaphore gate))))
+
+(test the-reply-to-a-turn-that-ran-past-the-idle-limit-is-kept
+  "A turn that runs past the idle limit with no request reaching its conversation meanwhile, and
+ends before the next one, leaves its conversation and reply in place: the idle time counts from
+when the turn ended."
+  (let* ((now 0)
+         (made (make-hash-table :test 'equal :synchronized t))
+         (gate (sb-thread:make-semaphore))
+         (entered (sb-thread:make-semaphore))
+         (turn (list nil))
+         (app (%expiring-app made (lambda () now) :gate gate :entered entered :turn-thread turn)))
+    (unwind-protect
+         (progn
+           (%call app :post "/api/message" :query "who=a" :form "message=slow")
+           (is-true (sb-thread:wait-on-semaphore entered :timeout 10) "the turn never started")
+           (setf now 2000)
+           (sb-thread:signal-semaphore gate)
+           ;; Joined, so the turn has let go of its lock before the next request looks.
+           (sb-thread:join-thread (car turn) :timeout 10 :default nil)
+           (is (search "echo: slow" (%poll app 0 :query "who=a"))
+               "the reply to the turn was dropped with its conversation")
+           (is (= 1 (%made-for made "a")) "a second agent was made for key a"))
+      (sb-thread:signal-semaphore gate))))
+
+(test make-app-refuses-an-idle-limit-that-is-not-a-number-of-seconds
+  (dolist (bad '(0 -5 1.5 "1800" nil))
+    (signals error (web:make-app :conversation-key (lambda (env) (declare (ignore env)) "k")
+                                 :make-agent (lambda (k) (actor:make-agent :name k))
+                                 :conversation-idle-seconds bad))))
+
+;;; --- #1011's review: a replaced conversation, sweeping, a changed grant ---------------
+
+(defun %poll-cursor (app cursor &key query)
+  "The body of a poll of APP that sends CURSOR, a cursor value as the page holds it."
+  (nth-value 2 (%call app :get "/api/progress"
+                      :query (format nil "after=~A~@[&~A~]" cursor query))))
+
+(test a-page-whose-conversation-was-replaced-shows-the-new-one
+  "A page open on a conversation that expired holds a cursor into the old transcript. Its next poll
+replaces the transcript with the new conversation's, under a notice, instead of reading the new
+transcript from the old index and showing nothing."
+  (let* ((now 1000)
+         (made (make-hash-table :test 'equal :synchronized t))
+         (app (%expiring-app made (lambda () now))))
+    (dotimes (i 4) (%say app (format nil "old ~D" i) :query "who=a"))
+    (let ((old (%cursor-value-in (nth-value 2 (%call app :get "/" :query "who=a")))))
+      (is (eql 12 (%cursor-in (format nil "px-cursor value=~A>" old))) "four turns, three items each")
+      (setf now 2800)
+      (%say app "new" :query "who=a")
+      (let ((reply (%poll-cursor app old :query "who=a")))
+        (is (search "innerHTML:#chat" reply) "the transcript is not replaced: ~S" reply)
+        (is (search "This is a new conversation" reply))
+        (is (search "echo: new" reply) "the new conversation's turn is not shown")
+        (is (null (search "old 0" reply)) "the old transcript is shown again")
+        (is (and (%epoch-in reply) (string/= (%epoch-in reply) (%epoch-in (format nil "px-cursor value=~A>" old))))
+            "the cursor sent back still has the old epoch")
+        (is (eql 3 (%cursor-in reply)))
+        (let ((next (%poll-cursor app (%cursor-value-in reply) :query "who=a")))
+          (is (null (search "innerHTML:#chat" next)) "a poll with the new cursor is reset again"))))))
+
+(test a-returning-key-after-the-idle-limit-gets-a-new-conversation
+  "The key's own request finds its conversation stale, even when the sweep ran too recently to run
+again: here 10 seconds before, when the conversation had been idle for 1790."
+  (let* ((now 1000)
+         (made (make-hash-table :test 'equal :synchronized t))
+         (app (%expiring-app made (lambda () now))))
+    (%say app "hello" :query "who=a")
+    (setf now 2790)
+    (%call app :get "/" :query "who=b")
+    (setf now 2800)
+    (is (null (search "echo: hello" (%poll app 0 :query "who=a"))) "1800 seconds idle is stale")
+    (is (= 2 (%made-for made "a")))))
+
+(test stale-conversations-are-swept-on-any-request
+  "A conversation whose key never returns is removed by a later request with another key that the
+table already holds."
+  (let ((now 1000)
+        (made (make-hash-table :test 'equal :synchronized t)))
+    (multiple-value-bind (app count) (%expiring-app made (lambda () now))
+      (%say app "a" :query "who=a")
+      (%say app "b" :query "who=b")
+      (is (= 2 (funcall count)))
+      (setf now 2700)
+      (%poll app 0 :query "who=b")
+      (is (= 2 (funcall count)) "a, 1700 seconds idle, is not stale yet")
+      (setf now 2800)
+      (%poll app 0 :query "who=b")
+      (is (= 1 (funcall count)) "a, 1800 seconds idle, was not swept")
+      (is (= 1 (%made-for made "b")) "b was in use and should have been kept"))))
+
+(test a-session-with-a-smaller-grant-runs-its-next-turn-without-the-lost-capability
+  "Two sessions of one principal, opened with different grants. Each turn runs on an agent made
+from the grant of the session that sent it, and the conversation goes on across the change."
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (let* ((made (list nil))
+           (app (web:make-app
+                 :grant-verifier (ceiling:make-ed25519-verifier pub) :audience "svc"
+                 :make-agent (lambda (principal grant)
+                               (declare (ignore principal))
+                               (push (ceiling:grant-capabilities grant) (car made))
+                               (actor:make-agent
+                                :name (format nil "~{~A~^+~}" (ceiling:grant-capabilities grant))))
+                 :responder (lambda (agent message locale)
+                              (declare (ignore locale))
+                              (push message (actor:agent-history agent))
+                              (format nil "~A-ran-as-~A-with-~D-in-history" message
+                                      (actor:agent-name agent)
+                                      (length (actor:agent-history agent))))))
+           (wide (nth-value 1 (%open app (%grant-token priv :capabilities '("search" "write")))))
+           (narrow (nth-value 1 (%open app (%grant-token priv :capabilities '("search"))))))
+      (flet ((say (session text)
+               (nth-value 2 (%call app :post "/api/message"
+                                   :authorization (format nil "Session ~A" session)
+                                   :json (format nil "{\"message\":\"~A\"}" text)))))
+        (is (search "one-ran-as-search+write-with-1-in-history" (say wide "one")))
+        (is (search "two-ran-as-search-with-2-in-history" (say narrow "two"))
+            "the narrower grant did not take effect, or the history was not carried")
+        (is (search "three-ran-as-search-with-3-in-history" (say narrow "three")))
+        (is (= 2 (length (car made))) "a grant with the same terms made another agent")
+        (let ((all (nth-value 2 (%call app :get "/api/progress" :query "after=0"
+                                       :authorization (format nil "Session ~A" narrow)))))
+          (is (search "one-ran-as-search+write" all) "the transcript did not go on"))))))
+
+(test the-dev-routes-exist-only-in-a-dev-app
+  (let ((prod (%echo-app))
+        (dev (%echo-app :dev t)))
+    (is (eql 404 (nth-value 0 (%call prod :get "/api/dev-error"))))
+    (is (eql 404 (nth-value 0 (%call prod :get "/api/reload-epoch"))))
+    (is (eql 200 (nth-value 0 (%call dev :get "/api/dev-error"))))
+    (is (eql 200 (nth-value 0 (%call dev :get "/api/reload-epoch"))))))
+
+(test a-signed-grant-of-the-wrong-shape-is-refused-401
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (let ((app (%grant-app pub)))
+      (is (eql 401 (nth-value 0 (%open app (ceiling:encode-grant-token "[1,2]" priv)))))
+      (is (eql 401 (nth-value 0 (%open app (ceiling:encode-grant-token
+                                            "{\"principal\":5,\"audience\":\"svc\"}" priv))))))))
