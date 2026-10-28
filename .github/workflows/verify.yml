@@ -257,6 +257,14 @@ jobs:
         id: build-the-pinned-libgit2
         run: sbcl --dynamic-space-size 4096 --script scripts/build-libgit2.lisp
 
+      # pdfium is fetched, not built (#997): pdfium.pin names a release of
+      # bblanchon/pdfium-binaries and the sha256 of each platform's archive, which
+      # fetch-pdfium.lisp checks before it unpacks anything. Needed before the verify step,
+      # which sets OURANOS_WITH_PDFIUM=1 and runs aion/pdfium's suite.
+      - name: Fetch the pinned pdfium
+        id: fetch-the-pinned-pdfium
+        run: sbcl --dynamic-space-size 4096 --script scripts/fetch-pdfium.lisp
+
       # --- the native webview launcher (pre-publication issue 276) ---------------------------------------
       #
       # WHY AT ALL. hyperion-view is the launcher every desktop app shells out to, and
@@ -531,6 +539,7 @@ jobs:
           OURANOS_WITH_UV: "1"
           OURANOS_WITH_TLS: "1"
           OURANOS_WITH_LIBGIT: "1"
+          OURANOS_WITH_PDFIUM: "1"
         run: |
           set -o pipefail
           # On Linux the gate runs with a throwaway Secret Service (the step above).
@@ -655,6 +664,14 @@ jobs:
         id: build-the-pinned-libgit2
         run: sbcl --dynamic-space-size 4096 --script scripts/build-libgit2.lisp
 
+      # pdfium is fetched, not built (#997): pdfium.pin names a release of
+      # bblanchon/pdfium-binaries and the sha256 of each platform's archive, which
+      # fetch-pdfium.lisp checks before it unpacks anything. Needed before the verify step,
+      # which sets OURANOS_WITH_PDFIUM=1 and runs aion/pdfium's suite.
+      - name: Fetch the pinned pdfium
+        id: fetch-the-pinned-pdfium
+        run: sbcl --dynamic-space-size 4096 --script scripts/fetch-pdfium.lisp
+
       # The launcher, for the SAME reason OURANOS_WITH_UV=1 is set below (pre-publication issue 276). Without it
       # this job would run verify-tree over a tree missing five checks that the matrix leg
       # has -- 4436 against 4446 at one commit, with nothing in either output saying why.
@@ -728,6 +745,7 @@ jobs:
           OURANOS_WITH_UV: "1"
           OURANOS_WITH_TLS: "1"
           OURANOS_WITH_LIBGIT: "1"
+          OURANOS_WITH_PDFIUM: "1"
           # The same credential-store tests as the matrix leg, against the same kind of
           # throwaway keyring, so this gate is not a smaller tree than the one it is compared to.
           OURANOS_TEST_REAL_CREDENTIAL_STORE: "1"
