@@ -46,14 +46,22 @@ file but not its directory."
 
 (defun open-database ()
   "Open the pool and both stores over it, creating their tables when they do not exist.
-Signals when the database is already open. If a store cannot be made, the pool is closed."
+Signals when the database is already open. If a store cannot be made, the pool is closed, and
+*POOL*, *SESSIONS* and *USERS* are all NIL again."
   (when *pool* (error "{{name}}: the database is already open. Call CLOSE-DATABASE first."))
-  (let ((url (database-url)))
+  (let ((url (database-url))
+        (made nil))
     (%ensure-sqlite-directory url)
     (setf *pool* (conn:make-pool (url:backend-from-url url) :size *pool-size*))
-    (handler-bind ((error (lambda (e) (declare (ignore e)) (close-database))))
-      (setf *sessions* (session-db:make-db-store *pool* :dialect +dialect+ :ensure t)
-            *users* (auth:make-db-auth *pool* :dialect +dialect+ :ensure t)))))
+    ;; The pool is closed only when making the stores did not finish, as in START. A handler
+    ;; on ERROR would run as soon as an error was signalled, before anything had decided to
+    ;; unwind, so a store constructor that signals a condition and handles it itself would have
+    ;; its pool closed under it (#944).
+    (unwind-protect
+         (prog1 (setf *sessions* (session-db:make-db-store *pool* :dialect +dialect+ :ensure t)
+                      *users* (auth:make-db-auth *pool* :dialect +dialect+ :ensure t))
+           (setf made t))
+      (unless made (close-database)))))
 
 (defun close-database ()
   "Close the pool, and with it every connection the stores and requests used."
