@@ -122,6 +122,7 @@
                              (:file "sqlite-busy")
                              (:file "sqlite-rewrite")  ; map-query and the in-place re-encode (#425)
                              (:file "pool")         ; uses sqlite-busy's helpers (#325)
+                             (:file "timeouts")     ; Postgres connect and statement timeouts (#959)
                              (:file "sqlite-library")
                              (:file "smoke"))))
   :perform (test-op (o c) (uiop:symbol-call :mnemosyne/tests :run-tests)))
