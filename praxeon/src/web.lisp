@@ -43,7 +43,9 @@
                     (#:i18n #:hyperion/i18n)    ; per-request locale (optional dict)
                     (#:assets #:hyperion/assets)
                     (#:sse #:hyperion/sse)
-                    (#:router #:hyperion/router))
+                    (#:router #:hyperion/router)
+                    (#:ui #:praxeon/chat-ui)    ; the widget's parts, shared with the embed panel
+                    (#:jzon #:com.inuoe.jzon))
   ;; Re-export the pieces that are now pure Hyperion, so consumers (elise) that
   ;; call praxeon/web:stop/default-server/mark-reloaded/unwatch/reload! are unchanged.
   ;; REQUEST-SHUTDOWN comes with SERVE-FOREVER: it is how the thing that blocked is asked to
@@ -205,22 +207,6 @@ oldest item still held, so a tab that was away that long shows what is left and 
 ;;; The hot-reload poller is now hyperion/js:dev-reload-js (Parenscript, generated
 ;;; per-request; see the :dev branch of %PAGE). It was praxeon's *dev-reload-js*.
 
-(defparameter *chat-css*
-  "html,body{height:100%;margin:0}body{display:flex;flex-direction:column;background:#fff}.px-head{flex:0 0 auto;padding:.55rem 1rem;border-bottom:1px solid #e3e8ee;background:#f6f8fa}.px-head .title{margin-bottom:.1rem}#chat{flex:1 1 auto;overflow-y:auto;padding:1rem 1rem .35rem;background:#fff}.px-foot{flex:0 0 auto;padding:.6rem 1rem .8rem;border-top:1px solid #d7dee6;background:#e9edf2;box-shadow:0 -1px 5px rgba(12,22,44,.07)}#status{min-height:1.15em;margin:.15rem 0 .45rem}#msg{resize:vertical;min-height:2.6em;max-height:40vh}.message.px-user .message-header{background-color:#4a72b0}.message.px-user .message-body{background-color:#eef3fb;border-color:#c3d5ef}.message.px-assistant .message-header{background-color:#7a8699}.message.px-assistant .message-body{background-color:#f5f6f8;border-color:#d5dae2}"
-  "Full-height chat layout: fixed header, scrolling transcript, fixed bottom input.")
-
-(defun %chat-js ()
-  "The chat interaction JS, composed at render time from Hyperion's generic,
-selector-parametrized Parenscript helpers (the CL->JS dogfood): keep #chat pinned
-to the bottom, and make #msg an auto-growing box where Enter sends and Shift+Enter
-inserts a newline. Generated per render (not baked at load) so it honors the
-current output style -- pretty in dev, compact in prod. Each helper is its own
-IIFE, joined with ';' so they run as separate statements."
-  (format nil "~A;~%~A;~%~A;"
-          (hjs:stick-to-bottom-js "#chat")
-          (hjs:autogrow-textarea-js "#msg")
-          (hjs:enter-submits-js "#msg")))
-
 (defun %agent-model-label (agent)
   "A provider-neutral \"model · vendor\" label for AGENT, or NIL. The vendor is the
 provider's class name; the model id comes from llm:model-of -- so this reads only
@@ -274,27 +260,18 @@ is single-language (LOCALES is NIL or a singleton)."
                 (:a :class "mr-2"
                     :href (format nil "/?lang=~(~A~)" (symbol-name loc)) label))))))))
 
-(defparameter *gate-js*
-  "(function(){var g=document.getElementById('px-gate');if(!g)return;try{if(sessionStorage.getItem('px-gate-ack')==='1'){g.classList.remove('is-active');return;}}catch(e){}var b=document.getElementById('px-gate-accept');if(b)b.addEventListener('click',function(){try{sessionStorage.setItem('px-gate-ack','1');}catch(e){}g.classList.remove('is-active');var m=document.getElementById('msg');if(m)m.focus();});})();"
-  "Entry-gate dismissal: on accept, remember in sessionStorage (per browser session)
-and hide; on load, if already acknowledged this session, hide immediately.")
-
-(defun %gate-modal (gate)
-  "An acknowledgment gate: a Bulma modal, active by default, the visitor must accept
-before using the app. GATE is a plist (:title :body :accept). Active-by-default is
-fail-safe -- with JS disabled it stays up, so the app is never used un-acknowledged."
+(defun %transport-html (events-url ticket-url)
+  "The element that keeps the transcript up to date: with EVENTS-URL, #px-events, which
+CHAT-UI:EVENTS-JS opens a stream from (asking TICKET-URL for a ticket first, when given);
+without it, the poller."
   (spinneret:with-html-string
-    (:div :id "px-gate" :class "modal is-active"
-      (:div :class "modal-background")
-      (:div :class "modal-card"
-        (:header :class "modal-card-head"
-          (:p :class "modal-card-title" (getf gate :title)))
-        (:section :class "modal-card-body"
-          (:p (getf gate :body)))
-        (:footer :class "modal-card-foot is-justify-content-flex-end"
-          (:button :id "px-gate-accept" :class "button is-primary"
-                   (getf gate :accept)))))
-    (:script :type "text/javascript" (:raw *gate-js*))))
+    (if events-url
+        (:div :id "px-events" :data-px-events events-url :data-px-ticket ticket-url)
+        (:div :hx-get "/api/progress"
+              :hx-trigger (format nil "~A, px-poll from:body"
+                                  (hh:trigger-string (list :every-ms *poll-interval-ms*)))
+              :hx-include "#px-cursor" :hx-sync "this:queue last"
+              :hx-target "#chat" :hx-swap (hh:swap-string :before-end)))))
 
 (defun %page (title intro footer &optional dev model chat-html theme-css
                                            locale locales gate (cursor "0")
@@ -308,7 +285,7 @@ answering) show in the footer bar. When DEV, embed the hot-reload poller (see
 *RELOAD-EPOCH*). CHAT-HTML is pre-rendered bubbles injected into #chat so a reload
 restores the transcript, and CURSOR is the index of the first transcript item they do not
 include, which the first poll sends. With EVENTS-URL the page reads its updates from that
-Server-Sent Events stream instead of polling (%EVENTS-JS), and with TICKET-URL it asks there for
+Server-Sent Events stream instead of polling (CHAT-UI:EVENTS-JS), and with TICKET-URL it asks there for
 a ticket before each stream. THEME-CSS is an app-supplied CSS string appended after
 the base stylesheet -- the app's hook to recolor .px-user/.px-assistant etc."
   (spinneret:with-html-string
@@ -325,7 +302,7 @@ the base stylesheet -- the app's hook to recolor .px-user/.px-assistant etc."
       (:script :src (assets:url :htmx))
       ;; (:raw ...) is REQUIRED: Spinneret escapes tag content, and entities inside
       ;; <style>/<script> are NOT decoded by the browser -- escaping would break them.
-      (:style (:raw *chat-css*))
+      (:style (:raw ui:*chat-css*))
       (when theme-css (:style (:raw theme-css))))   ; app theme overrides the base
      (:body
       ;; header: title + which model is answering
@@ -337,7 +314,7 @@ the base stylesheet -- the app's hook to recolor .px-user/.px-assistant etc."
                                (format nil "🤖 ~A  " model)))
             (:span :id "tokens" :class "has-text-grey-light"))  ; per-turn + conversation cost (OOB)
         (%lang-switcher locale locales))                        ; EN · ES, when localized
-      ;; transcript -- scrolls; *chat-js* keeps it pinned to the bottom
+      ;; transcript -- scrolls; CHAT-JS keeps it pinned to the bottom
       (:div :id "chat" :class "content"
         (when chat-html (:raw chat-html)))   ; rehydrate prior transcript
       ;; fixed bottom bar: status, the poller, the multiline input, the footer note
@@ -351,51 +328,72 @@ the base stylesheet -- the app's hook to recolor .px-user/.px-assistant etc."
         ;; the interval. `queue last' keeps that poll and the timed one from running
         ;; together: both would send the same cursor and append the same items twice.
         (:raw (%cursor-input cursor))
-        (if events-url
-            (:div :id "px-events" :data-px-events events-url :data-px-ticket ticket-url)
-            (:div :hx-get "/api/progress"
-                  :hx-trigger (format nil "~A, px-poll from:body"
-                                      (hh:trigger-string (list :every-ms *poll-interval-ms*)))
-                  :hx-include "#px-cursor" :hx-sync "this:queue last"
-                  :hx-target "#chat" :hx-swap (hh:swap-string :before-end)))
-        ;; The message comes back through the poll, like every other item, so the
-        ;; POST's own response has nothing to swap.
-        (:form :hx-post "/api/message" :hx-swap "none"
-               :onsubmit "setTimeout(() => this.reset(), 0)"
-          (:div :class "field has-addons"
-            (:div :class "control is-expanded"
-              (:textarea :id "msg" :class "textarea" :name "message" :rows "1"
-                         :placeholder "Say something…  (Enter to send · Shift+Enter for a newline)"
-                         :autofocus t))
-            (:div :class "control"
-              (:button :class "button is-primary" "Send"))))
+        (:raw (%transport-html events-url ticket-url))
+        (:raw (ui:composer))
         (when footer
           (:p :class "has-text-grey-dark is-size-7 mt-2" footer)))
       ;; the acknowledgment gate (modal, active by default) -- shown until accepted
-      (when gate (:raw (%gate-modal gate)))
+      (when gate (:raw (ui:gate-modal gate)))
       ;; scripts at end of body so #chat / #msg exist when they run
-      (:script (:raw (%chat-js)))
-      (when events-url (:script (:raw (%events-js))))
+      (:script (:raw (ui:chat-js)))
+      (when events-url (:script (:raw (ui:events-js))))
       (when dev (:script :type "text/javascript" (:raw (hjs:dev-reload-js))))))))
 
-(defun %user-bubble (msg)
+(defun %embed-panel (title footer theme-css gate origins events-url ticket-url)
+  "The embed panel (GET /embed/panel): the chat in a frame on another site's page, served
+without a session. The composer is disabled, and the element that keeps the transcript up to
+date waits in the <template> #px-live, because both need a session, which the panel gets from
+its host (CHAT-UI:EMBED-PANEL-JS). ORIGINS, the origins allowed to frame it, are where it takes
+a grant from. The cursor starts at 0, so the first update brings the whole transcript."
   (spinneret:with-html-string
-    (:article :class "message px-user"
-      (:div :class "message-header" (:p "you"))
-      ;; Render as Markdown so paragraphs/blank lines and formatting are preserved
-      ;; faithfully. Safe by default -- md:render escapes raw HTML in user input.
-      (:div :class "message-body content" (:raw (md:render msg))))))
+    (:doctype)
+    (:html
+     (:head
+      (:meta :charset "utf-8")
+      (:meta :name "viewport" :content "width=device-width, initial-scale=1")
+      (:title title)
+      (:link :rel "stylesheet" :href (assets:url :bulma))
+      (:script :src (assets:url :htmx))
+      (:style (:raw ui:*chat-css*))
+      (when theme-css (:style (:raw theme-css))))
+     (:body
+      (:div :id "px-embed" :hidden t
+            :data-px-origins (jzon:stringify (coerce origins 'vector))
+            :data-px-session "/embed/session")
+      (:div :class "px-head"
+        (:h1 :class "title is-5" title)
+        (:p :class "is-size-7" (:span :id "tokens" :class "has-text-grey-light")))
+      (:div :id "chat" :class "content")
+      (:div :class "px-foot"
+        (:div :id "status" :class "has-text-grey is-italic is-size-7")
+        (:raw (%cursor-input "0"))
+        (:template :id "px-live" (:raw (%transport-html events-url ticket-url)))
+        (:raw (ui:composer :disabled t))
+        (when footer
+          (:p :class "has-text-grey-dark is-size-7 mt-2" footer)))
+      (when gate (:raw (ui:gate-modal gate)))
+      (:script (:raw (ui:chat-js)))
+      (when events-url (:script (:raw (ui:events-js))))
+      (:script (:raw (ui:embed-panel-js)))))))
 
-(defun %assistant-bubble (name msg)
-  ;; px-user / px-assistant are *neutral* style hooks with default colors in
-  ;; *chat-css*; an app recolors them via its own :theme-css (see START), so
-  ;; app-specific look stays at the app level -- this layer is app-agnostic.
-  (spinneret:with-html-string
-    (:article :class "message px-assistant"
-      (:div :class "message-header" (:p name))
-      ;; LLM replies are Markdown (lists, code fences, emphasis); render them.
-      ;; Safe by default -- any raw HTML the model emits is escaped, not executed.
-      (:div :class "message-body content" (:raw (md:render msg))))))
+(defun %embed-origin-p (origin)
+  "True when ORIGIN is an origin as a browser writes one: http:// or https://, then a host of
+lowercase letters, digits, dots and hyphens, then an optional port, and nothing else."
+  (let ((rest (cond ((not (stringp origin)) nil)
+                    ((eql 0 (search "https://" origin)) (subseq origin 8))
+                    ((eql 0 (search "http://" origin)) (subseq origin 7)))))
+    (when rest
+      (let* ((colon (position #\: rest))
+             (host (subseq rest 0 colon))
+             (port (and colon (subseq rest (1+ colon)))))
+        (and (plusp (length host))
+             (every (lambda (c) (or (char<= #\a c #\z) (digit-char-p c) (find c ".-"))) host)
+             (or (null colon)
+                 (and (<= 1 (length port) 5) (every #'digit-char-p port))))))))
+
+(defun %embed-csp (origins)
+  "The panel's Content-Security-Policy: the default's, with frame-ancestors naming ORIGINS."
+  (format nil "frame-ancestors ~{~A~^ ~}; base-uri 'self'; object-src 'none'" origins))
 
 (defun %text-of (content)
   "The plain text of a neutral message CONTENT -- a string, or the text parts of a
@@ -430,10 +428,10 @@ numbered from 1; a reply before the first user message is turn 0."
 is an item of its own. One that ended in an error shows the error in the agent's bubble, as the
 page did before items existed."
   (ecase (getf item :kind)
-    (:user (%user-bubble (getf item :text)))
-    (:assistant (%assistant-bubble (conversation-agent-name conv) (getf item :text)))
+    (:user (ui:user-bubble (getf item :text)))
+    (:assistant (ui:assistant-bubble (conversation-agent-name conv) (getf item :text)))
     (:turn-ended (if (eq (getf item :outcome) :error)
-                     (%assistant-bubble (conversation-agent-name conv)
+                     (ui:assistant-bubble (conversation-agent-name conv)
                                         (format nil "error: ~A" (getf item :message)))
                      ""))))
 
@@ -739,66 +737,6 @@ CONV counts it, so it is not dropped as idle."
       (%add-stream conv -1)
       (when on-close (funcall on-close)))))
 
-(defun %events-js ()
-  "The page's stream client, for a page with a #px-events element. It opens an EventSource on the
-element's data-px-events URL, from the cursor in #px-cursor, and gives each event's data to
-htmx.swap, which appends the items to #chat and makes the out-of-band swaps.
-
-The browser reconnects a dropped stream by itself, sending Last-Event-ID. When the server refuses
-the stream instead, which is what a spent ticket gets, the EventSource closes, and this opens a new
-one after two seconds, from the cursor the page has reached. With data-px-ticket, the URL a stream
-ticket is asked for, each stream first gets a ticket there, sending the hx-headers of the nearest
-element that has them, and passes it as `ticket'."
-  (out:js-string
-   '(funcall
-     (lambda ()
-       (let ((el (chain document (get-element-by-id "px-events"))))
-         (when el
-           ;; LET* because the later bindings call the earlier ones: Parenscript renames a
-           ;; parallel LET's bindings.
-           (let* ((url (chain el (get-attribute "data-px-events")))
-                  (ticket-url (chain el (get-attribute "data-px-ticket")))
-                  (cursor (lambda ()
-                            (let ((c (chain document (get-element-by-id "px-cursor"))))
-                              (if c (@ c value) ""))))
-                  (session-headers
-                    (lambda ()
-                      (let ((h (chain el (closest "[hx-headers]"))))
-                        (if h
-                            (chain *json* (parse (chain h (get-attribute "hx-headers"))))
-                            (create)))))
-                  (begin nil)
-                  (connect
-                    (lambda (ticket)
-                      (let ((source (new (*event-source
-                                          (+ url "?after=" (encode-u-r-i-component (funcall cursor))
-                                             (if ticket
-                                                 (+ "&ticket=" (encode-u-r-i-component ticket))
-                                                 ""))))))
-                        (setf (@ source onmessage)
-                              (lambda (e)
-                                (chain htmx (swap "#chat" (@ e data)
-                                                  (create swap-style "beforeend")))))
-                        (setf (@ source onerror)
-                              (lambda ()
-                                ;; 2 is CLOSED: the server refused the stream, so the browser
-                                ;; will not retry it.
-                                (when (= (@ source ready-state) 2)
-                                  (set-timeout begin 2000))))))))
-             (setf begin
-                   (lambda ()
-                     (if ticket-url
-                         (chain (fetch ticket-url (create method "POST"
-                                                          headers (funcall session-headers)))
-                                (then (lambda (r)
-                                        (if (@ r ok)
-                                            (chain r (json))
-                                            (chain *promise (reject r)))))
-                                (then (lambda (j) (funcall connect (@ j ticket))))
-                                (catch (lambda () (set-timeout begin 5000))))
-                         (funcall connect nil))))
-             (funcall begin))))))))
-
 (defun %handle-message (env conv dictionary &optional grant)
   (let ((message (%request-message env))
         ;; The POST carries no ?lang=; the locale rides the lang cookie set on GET
@@ -915,7 +853,7 @@ answer a session id for it, or 401 with the reason."
                       dictionary gate conversation-key make-agent
                       grant-verifier audience (sessions (ws:make-session-table))
                       (conversation-idle-seconds 1800) (clock #'get-universal-time)
-                      (transport :poll))
+                      (transport :poll) embed-origins)
   "A Clack app exposing an agent: GET / (chat page), POST /api/message (HTMX or JSON),
 GET /api/progress (live-progress poll). One agent holds one conversation, so turns
 are serialized; the HTMX turn runs on a background thread so no handler blocks.
@@ -934,9 +872,10 @@ MAKE-AGENT is a function of a key that returns a fresh agent for it. The first r
 key makes that key's conversation; later requests with an EQUAL key share it. A request whose
 key is NIL is answered 403. A key's conversation, and its agent, are dropped once no request
 has reached them for CONVERSATION-IDLE-SECONDS (30 minutes by default, the same as a session's
-idle limit), no turn of theirs is running, and their last turn ended at least that long ago. The key's next request finds it stale and starts a
-new one, and every request sweeps out all stale conversations if a minute (or the idle limit, if
-that is shorter) has passed since the last sweep. A page still open on a dropped conversation
+idle limit), no turn of theirs is running, and their last turn ended at least that long ago.
+The key's next request finds it stale and starts a new one, and every request sweeps out all
+stale conversations if a minute (or the idle limit, if that is shorter) has passed since the
+last sweep. A page still open on a dropped conversation
 holds a cursor from it; its next poll replaces the page's transcript with the new conversation's
 and a notice that a new conversation has started. CLOCK returns the time in seconds; a test
 passes its own. Pass AGENT or
@@ -976,6 +915,18 @@ page first calls POST /embed/stream-ticket with it, and opens the stream with th
 session is open. The stream ends when its session does, and an open stream does not count as
 using the session, so a page left open ends its session after the idle limit like any other.
 
+EMBEDDING (#67). With EMBED-ORIGINS, a list of origins such as \"https://app.example.com\", other
+sites' pages can show the chat in a frame, and two more routes exist:
+  - GET /embed.js, the loader a host page includes with a <script src> tag (see
+    `praxeon/chat-ui:embed-loader-js' for its data attributes).
+  - GET /embed/panel, the chat for the frame. It needs no session, and its only content before
+    it has one is the empty chat and a disabled composer. It may be framed by EMBED-ORIGINS and by
+    nothing else: its Content-Security-Policy names them in frame-ancestors, and it sends no
+    X-Frame-Options, which cannot name another origin. It takes a grant only from a page on one
+    of them, exchanges it at POST /embed/session, and sends the session on every request.
+Every other route keeps the default headers, so it still cannot be framed. EMBED-ORIGINS needs
+GRANT-VERIFIER, and each origin is written as a browser writes one: lowercase, with no path.
+
 Returns the Clack app, and as a second value a function of no arguments that returns how many
 conversations the app holds."
   (cond ((and conversation-key (not make-agent))
@@ -990,6 +941,11 @@ conversations the app holds."
          (error "praxeon/web: :CONVERSATION-IDLE-SECONDS must be a whole number of seconds, at least 1, not ~S." conversation-idle-seconds))
         ((not (member transport '(:poll :sse)))
          (error "praxeon/web: :TRANSPORT must be :POLL or :SSE, not ~S." transport))
+        ((and embed-origins (not grant-verifier))
+         (error "praxeon/web: :EMBED-ORIGINS needs :GRANT-VERIFIER. The embed panel gets its session from a grant its host page passes it."))
+        ((and embed-origins
+              (not (and (listp embed-origins) (every #'%embed-origin-p embed-origins))))
+         (error "praxeon/web: :EMBED-ORIGINS must be a list of origins written as a browser writes them, such as \"https://app.example.com\" (lowercase, with no path), not ~S." embed-origins))
         ((and grant-verifier (or agent conversation-key (not make-agent)))
          (error "praxeon/web: :GRANT-VERIFIER takes :MAKE-AGENT, a function of a principal and its grant, and not :AGENT or :CONVERSATION-KEY: the conversation is the session's principal's.")))
   ;; dev renders pretty (readable view-source); prod compacts. The style is bound around each
@@ -1092,6 +1048,31 @@ conversations the app holds."
                               (lambda (env) (%open-session env grant-verifier audience sessions))
                               :name :embed-session))
               (assets:mount)
+              (when embed-origins
+                (router:route :get "/embed/panel"
+                              (lambda (env)
+                                (let ((locale (%negotiate-locale env dictionary)))
+                                  (list 200
+                                        (list :content-type "text/html; charset=utf-8"
+                                              :cache-control "no-store"
+                                              :x-frame-options nil
+                                              :content-security-policy (%embed-csp embed-origins))
+                                        (list (%embed-panel
+                                               (%resolve-content title locale)
+                                               (%resolve-content footer locale)
+                                               theme-css
+                                               (and gate (if (functionp gate) (funcall gate locale) gate))
+                                               embed-origins
+                                               (and (eq transport :sse) "/api/events")
+                                               (and (eq transport :sse) "/embed/stream-ticket"))))))
+                              :name :embed-panel))
+              (when embed-origins
+                (router:route :get "/embed.js"
+                              (lambda (env)
+                                (declare (ignore env))
+                                (list 200 '(:content-type "text/javascript; charset=utf-8")
+                                      (list (ui:embed-loader-js))))
+                              :name :embed-loader))
               (router:route :get "/"
                             (lambda (env)
                               (let ((conv (funcall conversation-for env)))
@@ -1218,7 +1199,8 @@ other request; it is allowed on :UV, where each open page holds one of the serve
 
 (defun %build-app (agent agent-name title responder intro footer dev theme-css
                    dictionary gate conversation-key make-agent
-                   grant-verifier audience sessions conversation-idle-seconds transport)
+                   grant-verifier audience sessions conversation-idle-seconds transport
+                   embed-origins)
   "The app START and SERVE-FOREVER serve: MAKE-APP, called with the arguments they share.
 
 BOTH ENTRY POINTS GO THROUGH HERE. START and SERVE-FOREVER differ in how they BLOCK, not
@@ -1235,19 +1217,19 @@ forget one."
             :grant-verifier grant-verifier :audience audience
             :sessions (or sessions (ws:make-session-table))
             :conversation-idle-seconds (or conversation-idle-seconds 1800)
-            :transport transport))
+            :transport transport :embed-origins embed-origins))
 
 (defun start (&key agent (agent-name "Praxeon") (title "Praxeon")
                    (responder #'actor:run-turn) intro footer dev theme-css
                    dictionary gate conversation-key make-agent
-                   grant-verifier audience sessions conversation-idle-seconds
+                   grant-verifier audience sessions conversation-idle-seconds embed-origins
                    (transport :auto) (server (default-server)) (port *default-port*)
                    (host "127.0.0.1") debug)
   "Start a web server exposing AGENT and return a handler; stop it with STOP.
 Builds the agent/chat Clack app and hands it to hyperion/server:start. SERVER is
 the Clack backend (DEFAULT-SERVER, re-exported from Hyperion). RESPONDER, INTRO,
 FOOTER, THEME-CSS, DICTIONARY, CONVERSATION-KEY, MAKE-AGENT, GRANT-VERIFIER, AUDIENCE,
-SESSIONS, CONVERSATION-IDLE-SECONDS and DEV pass through to MAKE-APP -- DICTIONARY turns
+SESSIONS, CONVERSATION-IDLE-SECONDS, EMBED-ORIGINS and DEV pass through to MAKE-APP -- DICTIONARY turns
 on per-request locale negotiation (title/intro/footer may be locale functions); DEV
 t embeds the hot-reload poller so the page auto-refreshes on (MARK-RELOADED). TRANSPORT is
 :AUTO, :POLL or :SSE: :AUTO streams the page's updates on :HUNCHENTOOT and polls on the
@@ -1258,13 +1240,13 @@ SERVE-FOREVER instead."
   (srv:start (%build-app agent agent-name title responder intro footer dev theme-css
                          dictionary gate conversation-key make-agent
                          grant-verifier audience sessions conversation-idle-seconds
-                         (%resolve-transport transport server))
+                         (%resolve-transport transport server) embed-origins)
              :server server :port port :host host :debug debug))
 
 (defun serve-forever (&key agent (agent-name "Praxeon") (title "Praxeon")
                            (responder #'actor:run-turn) intro footer dev theme-css
                            dictionary gate conversation-key make-agent
-                           grant-verifier audience sessions conversation-idle-seconds
+                           grant-verifier audience sessions conversation-idle-seconds embed-origins
                            (transport :auto) (server (default-server)) (port *default-port*)
                            (host "127.0.0.1") debug (log t)
                            (name agent-name) (banner :derive) (signals t) on-ready)
@@ -1290,7 +1272,7 @@ here rather than porting the symptom."
   (srv:serve-forever (%build-app agent agent-name title responder intro footer dev
                                  theme-css dictionary gate conversation-key make-agent
                                  grant-verifier audience sessions conversation-idle-seconds
-                                 (%resolve-transport transport server))
+                                 (%resolve-transport transport server) embed-origins)
                      :server server :port port :host host :debug debug :log log
                      :name name :banner banner :signals signals :on-ready on-ready))
 
