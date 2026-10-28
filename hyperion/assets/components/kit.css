@@ -1,0 +1,122 @@
+/* kit.css --- styles for hyperion/kit: the page header, breadcrumbs, empty state, segmented
+   control and toggle group (#981).
+   Coloured with the --hy-* tokens of hyperion/appearance (serve appearance-css). Each token
+   falls back to a Bulma custom property, so the components still read on a page that does
+   not serve the tokens. Backgrounds use `background`, because in the gradient look a token
+   may be a linear-gradient. */
+
+.hy-page-header {
+  background: var(--hy-header, var(--bulma-scheme-main-bis));
+  color: var(--hy-header-text, var(--bulma-text-strong));
+  padding: var(--hy-space-5, 24px) var(--hy-space-5, 24px) var(--hy-space-4, 16px);
+}
+
+.hy-page-header-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--hy-space-3, 12px);
+}
+
+.hy-page-title {
+  font-size: var(--bulma-size-3, 2rem);
+  font-weight: 600;
+  line-height: 1.2;
+  margin: 0;
+  color: inherit;
+}
+
+.hy-page-subtitle {
+  margin: var(--hy-space-1, 4px) 0 0;
+  font-size: var(--bulma-size-6, 1rem);
+}
+
+.hy-page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hy-space-2, 8px);
+}
+
+/* Breadcrumbs: the separator is generated content, which screen readers skip. */
+.hy-breadcrumbs ol {
+  display: flex;
+  flex-wrap: wrap;
+  list-style: none;
+  margin: 0 0 var(--hy-space-2, 8px);
+  padding: 0;
+  font-size: var(--bulma-size-7, 0.75rem);
+}
+
+.hy-breadcrumbs li + li::before {
+  content: "/";
+  padding: 0 var(--hy-space-2, 8px);
+  opacity: 0.7;
+}
+
+.hy-breadcrumbs a {
+  color: inherit;
+  text-decoration: underline;
+}
+
+.hy-breadcrumbs [aria-current="page"] {
+  font-weight: 600;
+}
+
+/* Empty state */
+.hy-empty-state {
+  background: var(--hy-surface-raised, var(--bulma-scheme-main-bis));
+  color: var(--hy-surface-raised-text, var(--bulma-text));
+  text-align: center;
+  padding: var(--hy-space-7, 48px) var(--hy-space-5, 24px);
+  border-radius: var(--bulma-radius-large, 8px);
+}
+
+.hy-empty-title {
+  font-size: var(--bulma-size-4, 1.5rem);
+  font-weight: 600;
+  margin: 0 0 var(--hy-space-2, 8px);
+  color: inherit;
+}
+
+.hy-empty-text {
+  margin: 0 0 var(--hy-space-4, 16px);
+}
+
+/* Segmented control and toggle group: a row of buttons. The pressed state is drawn from
+   aria-pressed, so the markup and the look cannot disagree. */
+.hy-segmented,
+.hy-toggle-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0;
+}
+
+.hy-toggle-group {
+  gap: var(--hy-space-2, 8px);
+}
+
+.hy-segmented > .button,
+.hy-toggle-group > .button {
+  background: var(--hy-button, var(--bulma-scheme-main));
+  color: var(--hy-button-text, var(--bulma-text));
+}
+
+.hy-segmented > .button:not(:first-child) {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  margin-left: -1px;
+}
+
+.hy-segmented > .button:not(:last-child) {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.hy-segmented > .button[aria-pressed="true"],
+.hy-toggle-group > .button[aria-pressed="true"] {
+  background: var(--hy-button-primary, var(--bulma-primary));
+  color: var(--hy-button-primary-text, var(--bulma-primary-invert));
+  border-color: transparent;
+  z-index: 1;
+}

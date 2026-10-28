@@ -288,7 +288,8 @@
                              (:static-file "bulma.min.css")))
                ;; The tree's own component stylesheets (#489), embedded the same way.
                (:module "assets/components"
-                :components ((:static-file "calendar.css")))
+                :components ((:static-file "calendar.css")
+                             (:static-file "kit.css")))
                (:file "src/assets"))
   :in-order-to ((test-op (test-op "hyperion/assets/tests"))))
 
@@ -311,6 +312,30 @@
   :depends-on ("hyperion/calendar" "hyperion" "aion/tz" "spinneret" "fiveam")
   :components ((:file "tests/calendar-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/calendar/tests :run-tests)))
+
+(defsystem "hyperion/kit"
+  :description "Generic collection-page components: page header, breadcrumbs, empty state, segmented control and toggle group (#981)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; Its stylesheet is served by hyperion/assets, which this system does not depend on, the
+  ;; same arrangement as hyperion/calendar.
+  :depends-on ("spinneret")
+  :serial t
+  :components ((:module "src/kit"
+                :serial t
+                :components ((:file "page")
+                             (:file "toggle"))))
+  :in-order-to ((test-op (test-op "hyperion/kit/tests"))))
+
+(defsystem "hyperion/kit/tests"
+  :description "Tests for hyperion/kit: each component's roles, names and pressed state, read from the markup it writes."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  ;; plump parses the markup, so a test reads elements and attributes, not strings.
+  :depends-on ("hyperion/kit" "spinneret" "plump" "fiveam")
+  :components ((:file "tests/kit-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/kit/tests :run-tests)))
 
 (defsystem "hyperion/list"
   :description "Paging, sorting and filtering a list from the query string, against a spec the app declares: the state, the mnemosyne clauses, links, and the pager and sort-heading components (#488)."
