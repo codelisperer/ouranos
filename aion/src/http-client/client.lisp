@@ -456,6 +456,21 @@ way fails CI, not a provider call; upstream.sexp's Quicklisp entry points here t
                 headers)
         headers)))
 
+(defun %idempotent-method-p (method)
+  "Whether METHOD may be sent twice with the same effect as once (RFC 9110 9.2.2)."
+  (member method '(:get :head :options :trace :put :delete)))
+
+(defun %pooled-p (req)
+  "Whether dexador may send REQ on a connection it pooled from an earlier request.
+
+A request that is not idempotent never is: %DEX-ARGS turns the pool and keep-alive off for it
+(the hub's review of #974). Otherwise a POST could go out on a pooled connection, the server
+could act on it and then drop the connection, dexador would reconnect inside its own retry, and
+a refusal of that reconnect would look like a failure to connect, which WITH-RETRY's default
+policy resends. Not used on Windows, where dexador's WinHTTP backend opens a new session for
+every request, so no connection is reused."
+  (%idempotent-method-p (request-method req)))
+
 (defun %dex-args (req)
   "The dexador keyword arguments REQ implies, apart from the URL and the stream."
   (append (list :method (request-method req)
@@ -475,7 +490,10 @@ way fails CI, not a provider call; upstream.sexp's Quicklisp entry points here t
           (when (request-connect-timeout req)
             (list :connect-timeout (request-connect-timeout req)))
           (when (request-read-timeout req)
-            (list :read-timeout (request-read-timeout req)))))
+            (list :read-timeout (request-read-timeout req)))
+          ;; See %POOLED-P: a request that is not idempotent always gets a new connection.
+          (unless (%pooled-p req)
+            (list :use-connection-pool nil :keep-alive nil))))
 
 (defvar *%connected* nil
   "Bound to NIL by %HTTP around one round trip, and set to T by the pinned path
@@ -518,17 +536,20 @@ uses WinHTTP (#974; a refused connection measured as 12029). From the error code
     ((12002 12030 12152) :response)
     (t nil)))
 
-(defun %transport-phase (e pinned)
+(defun %transport-phase (e pinned &key pooled)
   "HTTP-ERROR-PHASE for E, a transport failure. On the pinned path, which makes the connection
 itself, from where it failed: a socket failure before USOCKET:SOCKET-CONNECT returned is
 :CONNECT, one after it :RESPONSE. On the dexador path, from E's type
-(%DEXADOR-CONNECT-FAILURE-P), and on Windows, where dexador uses WinHTTP, from its error code
-(%WINHTTP-PHASE). Anything that is not a socket or stream failure, a TLS failure included, has
-no phase, so AION/RETRY does not retry it."
+(%DEXADOR-CONNECT-FAILURE-P), but only for a request that could not have used a pooled
+connection: with POOLED true, dexador may have sent the request on a pooled connection and then
+failed to reconnect, so a failure to connect does not show the request was not acted on, and it
+is :RESPONSE (%POOLED-P). On Windows, where dexador uses WinHTTP with a new session for every
+request, from its error code (%WINHTTP-PHASE). Anything that is not a socket or stream failure,
+a TLS failure included, has no phase, so AION/RETRY does not retry it."
   (cond #+os-windows ((and (not pinned) (typep e 'winhttp::win-error)) (%winhttp-phase e))
         ((not (%io-failure-p e)) nil)
         (pinned (if *%connected* :response :connect))
-        ((%dexador-connect-failure-p e) :connect)
+        ((and (not pooled) (%dexador-connect-failure-p e)) :connect)
         (t :response)))
 
 (defun %http (req)
@@ -568,7 +589,8 @@ has no response to hand back, so it signals HTTP-ERROR directly."
                     (dexador.error:response-body e)))
         (error (e)
           (error 'http-error :detail (format nil "transport error: ~A" e)
-                             :phase (%transport-phase e (request-connect-address req))))))))
+                             :phase (%transport-phase e (request-connect-address req)
+                                                      :pooled (%pooled-p req))))))))
 
 (defun send-request (request interceptors &key (perform #'%http))
   "Run REQUEST through INTERCEPTORS around one HTTP round-trip and return the processed

@@ -981,8 +981,17 @@ its tag.
   protocol: `transient-p` covers failures after which the request was not acted on, and
   `transient-or-unknown-p` adds those after which it may have been, for idempotent calls.
   `with-retry` signals `retry-would-block` on an aion/uv loop thread, which binds the new
-  `aion/dynamic:*blocking-forbidden*`. Nothing in the tree retries yet; praxeon and hermes adopt
-  it, opt-in, in a later change.
+  `aion/dynamic:*blocking-forbidden*`.
+  - The wait happens after the failed attempt has unwound, so its `unwind-protect` cleanups
+    have run and its locks are free while the runner waits.
+  - `:retryable` takes a function, the name of one, or a list of condition types. A symbol
+    that names no function is refused when the policy is made.
+  - When a `:retryable` function, or a `transience` or `retry-after` method, signals while the
+    runner asks about a failure, the error is logged and the failure is not retried. The caller
+    sees the original condition.
+  - A `with-retry` inside another multiplies the attempts.
+
+  Nothing in the tree retries yet; praxeon and hermes adopt it, opt-in, in a later change.
 - **aion/http-client: `http-error` carries `http-error-retry-after` and `http-error-phase`**
   (#79). `ensure-2xx` reads the response's Retry-After header, in seconds or as an HTTP date,
   into `http-error-retry-after`. A transport failure has `http-error-phase` `:connect` when no
@@ -991,7 +1000,13 @@ its tag.
   failure, has no phase, so it is never retried. On the pinned path (`:connect-address`,
   `fetch-public`) the phase comes from where the call failed, not from the condition's type,
   and a connection that ends before the response does (a `malformed-response` saying "the
-  connection ended") is `:response`. On Windows, where dexador uses WinHTTP, the phase comes
+  connection ended") is `:response`.
+  - **Pooled connections.** Through dexador on Linux and macOS, a failure to connect is
+    `:connect` only for a request that could not have used dexador's connection pool. Otherwise
+    dexador may have sent the request on a pooled connection that then dropped, before its
+    reconnect failed. So a request whose method is not idempotent, such as POST or PATCH, is
+    now sent with `:use-connection-pool nil` and `:keep-alive nil`. A pooled request's failure
+    to connect, such as a GET's, is `:response`. On Windows, where dexador uses WinHTTP, the phase comes
   from WinHTTP's error code: 12029 and 12007 are `:connect`; 12002, 12030 and 12152 are
   `:response`. aion/http-client now depends on `aion/retry` and defines the `transience` and
   `retry-after` methods for `http-error`: 408, 425, 429, 503, 529 and `:connect` are
