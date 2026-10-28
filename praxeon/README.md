@@ -257,6 +257,33 @@ The agent's `taint-scope` slot (`agent-taint-scope`) says how long untrusted con
   it, and accepts that the user is refused spending calls for the rest of the conversation
   after one page was read.
 
+**An app that rebuilds the agent from a stored text transcript** (#948) has no tool calls in
+the history it passes, so `:conversation` cannot find the earlier read there. Praxeon also
+records the conversation's taint as it happens, in `agent-conversation-taint`: `:untrusted`
+once the agent has read untrusted content, `:delegated` when the only such content is a task a
+coordinating agent gave it, `:clean` from a first turn until either, and `nil` when nothing was
+recorded. Any other value is an error, as an unknown `:taint-scope` is. Store that value
+beside the transcript after each turn, and pass it back when the agent is rebuilt:
+
+```lisp
+(praxeon/actor:make-agent :name "assistant" :taint-scope :conversation
+                          :conversation-taint (stored-taint conversation-id))
+```
+
+`:conversation` counts a turn untrusted when the recorded value is `:untrusted` or `:delegated`,
+or when the history holds an untrusted call. A sub-agent given a task by `register-agent-as-means`
+records `:delegated`, because the task is another model's text and stays in its history. Its
+later turns are untrusted, but they do not make the coordinator untrusted; a sub-agent that
+read a page does. Once recorded, the taint stays. An app that deliberately starts the
+conversation over sets it to `:clean` and also removes the untrusted calls from the history,
+because `:conversation` finds those there too.
+
+When an agent under `:conversation` has earlier turns, no tool calls in them and nothing
+recorded, praxeon cannot tell whether untrusted content came before. It then treats the turn as untrusted, records
+`:untrusted`, logs it once for that agent, and signals the warning
+`praxeon/actor:conversation-taint-unrecorded`, whose message names this fix. Muffling the
+warning does not make the turn trusted.
+
 `praxeon/web-page:user-or-search-urls` is a ready-made `:allow` for `read-web-page`:
 
 ```lisp
