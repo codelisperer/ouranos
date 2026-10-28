@@ -1019,6 +1019,36 @@ its tag.
 
 ### Added
 
+- **hyperion/server-uv serves HTTPS with one certificate: `start` takes `:tls`** (#125). Load the
+  opt-in system `hyperion/server-uv/tls`, make a set with
+  `hyperion/server-uv/tls:make-certificate-set`, and pass it as `:tls`:
+  - **The certificate and the key.** `:certificate` is a pathname or octets, PEM or DER. `:key` is
+    a pathname, octets, or an `aion/secret:secret` holding the PEM text, such as
+    `hades/credentials:fetch-credential` returns. A DER key is given as a pathname or octets.
+  - **Refusals.** A key that is not the leaf certificate's key, or a leaf that has expired, is
+    refused with `certificate-set-error`, which says why.
+  - **Ownership.** The server owns the set once `start` returns, and `stop` frees it.
+  - **Protocol.** TLS 1.2 is the minimum and 1.3 is enabled, renegotiation is off, and ALPN
+    accepts only `http/1.1`.
+  - **Handshake timeout.** A handshake that has not finished within
+    `*handshake-timeout-ms*` (10000; read when `start` is called) ends the connection.
+  - **Logging.** A failed handshake is logged at info with the count of failures, mbedTLS's
+    description of the error and the remote address, never certificate or key material.
+  - **Report.** `server-tls-report` returns where the certificate and key came from, the SHA-256
+    of the certificate file and of the leaf, the leaf's validity, and the counts of completed,
+    failed and timed-out handshakes.
+  - **New in `aion/tls`:**
+    - `make-server-config` and `make-client-config` take `:alpn`, read back with
+      `config-alpn`;
+    - `engine-alpn-protocol` returns the protocol a handshake agreed on;
+    - `certificate-validity` reads a certificate's dates from its DER;
+    - every config turns renegotiation off explicitly.
+  - **For other transports.** `hyperion/server-uv` exports its transport protocol:
+    - the class `transport`;
+    - `transport-write`, `transport-receive`, `transport-saturated-p`,
+      `transport-shutdown-write`, `transport-free` and `transport-attach`;
+    - `server-tls`.
+
 - **aion/uv/net: a connection has a `connection-data` slot for the code that owns it** (#125).
   Nothing in `aion/uv/net` reads or sets it. `hyperion/server-uv` keeps each connection's
   transport there: every octet the server sends or receives now goes through that transport,

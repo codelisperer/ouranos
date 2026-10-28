@@ -773,3 +773,27 @@ the loop at +MAX-IDLE-READS+ with the response still buffered."
     (is-true (tls:ip-literal-p ip) "~A" ip))
   (dolist (name '("example.com" "pinned.test" "1.2.3" "1.2.3.4.5" "a.b.c.d"))
     (is-false (tls:ip-literal-p name) "~A" name)))
+
+;;; --- a certificate's validity, read from its DER (#125) ---------------------------------
+
+(test certificate-validity-reads-the-dates-the-certificate-was-issued-with
+  "Both encodings RFC 5280 uses: UTCTime for a year before 2050, GeneralizedTime from 2050."
+  (let ((key (tls:generate-private-key)))
+    (unwind-protect
+         (dolist (dates (list (list (encode-universal-time 0 0 12 1 3 2026 0)
+                                    (encode-universal-time 30 15 9 2 4 2027 0))
+                              (list (encode-universal-time 0 0 0 1 1 2049 0)
+                                    (encode-universal-time 59 59 23 31 12 2051 0))))
+           (destructuring-bind (not-before not-after) dates
+             (let ((chain (tls:make-certificate-chain
+                           (tls:issue-certificate :subject "CN=dates" :subject-key key
+                                                  :not-before not-before :not-after not-after))))
+               (unwind-protect
+                    (multiple-value-bind (before after)
+                        (tls:certificate-validity (tls:certificate-chain-der chain))
+                      (is (= not-before before) "not-before ~D, read ~D" not-before before)
+                      (is (= not-after after) "not-after ~D, read ~D" not-after after))
+                 (tls:free-certificate-chain chain)))))
+      (tls:free-private-key key)))
+  (signals error (tls:certificate-validity (coerce #(1 2 3) '(vector (unsigned-byte 8)))))
+  (signals error (tls:certificate-validity (coerce #(#x30 #x82 #xff) '(vector (unsigned-byte 8))))))

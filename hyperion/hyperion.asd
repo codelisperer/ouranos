@@ -220,6 +220,29 @@
   :components ((:file "src/server-uv"))
   :in-order-to ((test-op (test-op "hyperion/server-uv/tests"))))
 
+(defsystem "hyperion/server-uv/tls"
+  :description "HTTPS for hyperion/server-uv: certificate sets and a TLS transport over the mbedTLS aion/tls binds (#125)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  ;; Opt-in, like aion/tls: hyperion/server-uv itself loads no TLS library, and only an app
+  ;; that serves HTTPS loads this (ADR-0011). ironclad is already loaded through aion/tls's
+  ;; aion/random; it hashes the certificate for the report.
+  :depends-on ("hyperion/server-uv" "aion/tls" "aion/secret" "aion/log" "aion/uv"
+               "aion/uv/net" "ironclad")
+  :serial t
+  :components ((:file "src/server-uv-tls"))
+  :in-order-to ((test-op (test-op "hyperion/server-uv/tls/tests"))))
+
+(defsystem "hyperion/server-uv/tls/tests"
+  :description "Tests for HTTPS in hyperion/server-uv: real handshakes over real sockets, each with a refusing control."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion/server-uv/tls" "hyperion/server-uv" "aion/tls" "aion/secret"
+               "aion/log" "aion/fs" "hyperion/test-ports" "ironclad" "fiveam" (:require "sb-bsd-sockets"))
+  :serial t
+  :components ((:file "tests/server-uv-tls-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/server-uv/tls/tests '#:run-tests)))
+
 (defsystem "hyperion/clack-handler-uv"
   :description "A Clack handler for hyperion/server-uv: (clack:clackup app :server :uv) (#373, ADR-0020)."
   :author "Bob <eternal.recursion@proton.me>"

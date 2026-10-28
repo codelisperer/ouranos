@@ -16,6 +16,7 @@
 (defconstant +transport-stream+ 0)
 (defconstant +preset-default+ 0)
 (defconstant +verify-none+ 0)
+(defconstant +renegotiation-disabled+ 0)
 (defconstant +verify-optional+ 1)
 (defconstant +verify-required+ 2)
 (defconstant +err-want-read+ (- #x6900))
@@ -98,6 +99,11 @@
 (cffi:defcfun ("mbedtls_ssl_get_verify_result" %ssl-get-verify-result) :uint32 (ssl :pointer))
 (cffi:defcfun ("mbedtls_ssl_get_peer_cert" %ssl-get-peer-cert) :pointer (ssl :pointer))
 (cffi:defcfun ("mbedtls_ssl_get_ciphersuite" %ssl-get-ciphersuite) :string (ssl :pointer))
+(cffi:defcfun ("mbedtls_ssl_conf_renegotiation" %ssl-conf-renegotiation) :void
+  (conf :pointer) (renegotiation :int))
+(cffi:defcfun ("mbedtls_ssl_conf_alpn_protocols" %ssl-conf-alpn-protocols) :int
+  (conf :pointer) (protos :pointer))
+(cffi:defcfun ("mbedtls_ssl_get_alpn_protocol" %ssl-get-alpn-protocol) :pointer (ssl :pointer))
 
 (cffi:defcfun ("mbedtls_x509_crt_parse" %x509-crt-parse) :int
   (crt :pointer) (buf :pointer) (len :size))

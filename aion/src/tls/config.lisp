@@ -59,7 +59,11 @@ that silently vanished from the list would change what we offer without saying s
    ;; and mbedTLS verifies against trusted CAs (#536).
    (verifier :initarg :verifier :initform nil :reader config-verifier)
    ;; For a server config made with :SESSION-TICKETS, its ticket context; freed with it.
-   (tickets :initform nil :accessor %tickets))
+   (tickets :initform nil :accessor %tickets)
+   ;; For a config made with :ALPN, the protocol names it offers, and the foreign
+   ;; NULL-terminated array of C strings mbedTLS keeps a pointer to; freed with it (#125).
+   (alpn :initform nil :reader config-alpn)
+   (alpn-array :initform nil :accessor %alpn-array))
   (:documentation "An mbedtls_ssl_config, owned by this object, for :SERVER or :CLIENT use.
 It holds references to the certificate chains and key it was made with, which must not be
 freed while it is in use."))
@@ -75,11 +79,42 @@ freed while it is in use."))
                                       +transport-stream+ +preset-default+)
                 "mbedtls_ssl_config_defaults")
         (%conf-version-range p +tls-1.2+ +tls-1.3+)
+        ;; Off by default in mbedTLS 4.1.1 already; set here so that a change of default
+        ;; cannot turn it on (#125). It only exists in TLS 1.2.
+        (%ssl-conf-renegotiation p +renegotiation-disabled+)
         (setf (%suites config) (%ciphersuite-array *ciphersuites*))
         (%ssl-conf-ciphersuites p (%suites config)))
       config)))
 
-(defun make-server-config (chain key &key session-tickets)
+(defun %set-alpn (config protocols)
+  "Make CONFIG offer, or for a server accept, the application protocols PROTOCOLS, a list of
+strings such as (\"http/1.1\"), in preference order. A server whose list shares nothing with
+a client's list that names protocols ends the handshake with the no_application_protocol
+alert, as RFC 7301 requires."
+  (when protocols
+    (dolist (p protocols)
+      (unless (and (stringp p) (< 0 (length p) 256) (every (lambda (c) (< 31 (char-code c) 127)) p))
+        (error "aion/tls: ~S is not an application protocol name" p)))
+    (let ((array (cffi:foreign-alloc :pointer :count (1+ (length protocols)))))
+      (loop for p in protocols for i from 0
+            do (setf (cffi:mem-aref array :pointer i) (cffi:foreign-string-alloc p)))
+      (setf (cffi:mem-aref array :pointer (length protocols)) (cffi:null-pointer))
+      (setf (%alpn-array config) array
+            (slot-value config 'alpn) (copy-list protocols))
+      (%check (%ssl-conf-alpn-protocols (%pointer config) array)
+              "mbedtls_ssl_conf_alpn_protocols"))))
+
+(defun %free-alpn (config)
+  (let ((array (%alpn-array config)))
+    (when array
+      (setf (%alpn-array config) nil)
+      (loop for i from 0
+            for p = (cffi:mem-aref array :pointer i)
+            until (cffi:null-pointer-p p)
+            do (cffi:foreign-string-free p))
+      (cffi:foreign-free array))))
+
+(defun make-server-config (chain key &key session-tickets alpn)
   "A server config presenting CHAIN, whose first certificate must be KEY's. Refuses a key that
 does not match the certificate, before anything is served with it.
 
@@ -91,7 +126,10 @@ signalled. Convert one with `openssl rsa -in KEY -traditional -out KEY-PKCS1' (#
 SESSION-TICKETS, a count, makes the server send that many TLS 1.3 session tickets after each
 handshake, as OpenSSL servers and CDNs do; NIL, the default, sends none. Tickets are issued but
 nothing here resumes a session from one: this exists so a client's handling of tickets can be
-tested against this tree's own server (#536)."
+tested against this tree's own server (#536).
+
+ALPN, a list of protocol names such as (\"http/1.1\"), is what the server accepts when a
+client offers application protocols (#125). A client that offers none is not affected."
   (unless (certificate-chain-matches-key-p chain key)
     (error "aion/tls: the private key is not the key of the certificate it was given with"))
   (let ((config (%make-config :server (list chain key))))
@@ -99,6 +137,7 @@ tested against this tree's own server (#536)."
       (%ssl-conf-authmode (%pointer config) +verify-none+)
       (%check (%ssl-conf-own-cert (%pointer config) (%pointer chain) (%pointer key))
               "mbedtls_ssl_conf_own_cert")
+      (%set-alpn config alpn)
       (when session-tickets
         (check-type session-tickets (integer 1 16))
         (cffi:with-foreign-object (out :pointer)
@@ -107,14 +146,16 @@ tested against this tree's own server (#536)."
           (setf (%tickets config) (cffi:mem-ref out :pointer)))))
     config))
 
-(defun make-client-config (trusted)
+(defun make-client-config (trusted &key alpn)
   "A client config that trusts the CA certificates in the CERTIFICATE-CHAIN TRUSTED and
 requires the server's certificate to verify against them. There is no option to skip
 verification: a client that does not check who it is talking to is not using TLS for the
-reason TLS exists."
+reason TLS exists. ALPN, a list of protocol names, is offered to the server in that order."
   (let ((config (%make-config :client (list trusted))))
-    (%ssl-conf-authmode (%pointer config) +verify-required+)
-    (%ssl-conf-ca-chain (%pointer config) (%pointer trusted) (cffi:null-pointer))
+    (handler-bind ((error (lambda (e) (declare (ignore e)) (free-config config))))
+      (%ssl-conf-authmode (%pointer config) +verify-required+)
+      (%ssl-conf-ca-chain (%pointer config) (%pointer trusted) (cffi:null-pointer))
+      (%set-alpn config alpn))
     config))
 
 (defun make-verifying-client-config (verify)
@@ -149,6 +190,7 @@ said. The name the server is asked for (SNI) is still the engine's HOSTNAME."
     (when tickets
       (setf (%tickets config) nil)
       (%ticket-free tickets))
+    (%free-alpn config)
     (when suites
       (setf (%suites config) nil)
       (cffi:foreign-free suites)))

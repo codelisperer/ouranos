@@ -263,6 +263,12 @@ record is full, and the loop writes the rest."
   "The negotiated protocol version, as +TLS-1.2+ or +TLS-1.3+."
   (%version-number (%ssl engine)))
 
+(defun engine-alpn-protocol (engine)
+  "The application protocol the handshake agreed on, such as \"http/1.1\", or NIL when the
+client offered none (#125)."
+  (let ((p (%ssl-get-alpn-protocol (%ssl engine))))
+    (unless (cffi:null-pointer-p p) (cffi:foreign-string-to-lisp p))))
+
 (defun engine-ciphersuite (engine)
   "mbedTLS's name for the negotiated cipher suite."
   (%ssl-get-ciphersuite (%ssl engine)))

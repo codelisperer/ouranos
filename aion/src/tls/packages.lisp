@@ -27,15 +27,15 @@
    #:free-private-key
    #:certificate-chain #:make-certificate-chain #:certificate-chain-der
    #:certificate-chain-matches-key-p #:free-certificate-chain
-   #:issue-certificate
+   #:issue-certificate #:certificate-validity
    ;; configurations
    #:config #:make-server-config #:make-client-config #:make-verifying-client-config #:config-verifier #:free-config
-   #:config-endpoint #:config-ciphersuites
+   #:config-endpoint #:config-ciphersuites #:config-alpn
    #:+tls-1.2+ #:+tls-1.3+ #:*ciphersuites* #:ciphersuite-name
    ;; the engine
    #:engine #:make-engine #:free-engine #:engine-feed #:engine-take-output
    #:engine-output-pending-p #:engine-handshake #:engine-handshake-done-p
    #:engine-read #:engine-write #:engine-close-notify
-   #:engine-version #:engine-ciphersuite #:engine-peer-certificate-der #:engine-peer-certificate-chain-der #:ip-literal-p
+   #:engine-version #:engine-ciphersuite #:engine-alpn-protocol #:engine-peer-certificate-der #:engine-peer-certificate-chain-der #:ip-literal-p
    ;; the blocking stream
    #:tls-stream #:make-tls-stream #:tls-stream-engine))

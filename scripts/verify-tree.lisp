@@ -328,6 +328,13 @@ OURANOS_WITH_TLS=1, for the reasons WITH-UV-P gives for libuv.")
 (defparameter +tls-test-systems+ '(:aion/tls/tests)
   "Their suites: real handshakes over the mbedTLS this tree builds.")
 
+(defparameter +uv-tls-systems+ '(:hyperion/server-uv/tls)
+  "Opt-in systems that need both libuv and mbedTLS: HTTPS in hyperion/server-uv (#125). Loaded
+only when OURANOS_WITH_UV=1 and OURANOS_WITH_TLS=1 are both set.")
+
+(defparameter +uv-tls-test-systems+ '(:hyperion/server-uv/tls/tests)
+  "Their suites: real TLS handshakes with hyperion/server-uv over real sockets.")
+
 (defun with-tls-p ()
   "Should this run include the mbedTLS systems? OURANOS_WITH_TLS=1 says yes. An opt-in, not
 a probe for vendor/mbedtls/, for the reason WITH-UV-P gives."
@@ -502,6 +509,9 @@ the section reports and why."
   (dolist (s +tls-systems+)
     (format t "          ~(~a~)~%" s))
   (format t "          OURANOS_WITH_TLS is unset. Set it to 1 to include them (needs scripts/build-mbedtls.lisp to have run).~%")
+  (format t "          With it, and OURANOS_WITH_UV, these also run:~%")
+  (dolist (s +uv-tls-systems+)
+    (format t "          ~(~a~)~%" s))
   (format t "          Their checks are NOT in the total below, and no figure here says how many.~%"))
 
 (defun report-libgit-declined (name)
@@ -519,6 +529,9 @@ the section reports and why."
                :hyperion/clack-handler-uv))
     (format t "          ~(~a~)~%" s))
   (format t "          OURANOS_WITH_UV is unset. Set it to 1 to include them (needs scripts/build-libuv.lisp to have run).~%")
+  (format t "          With it, and OURANOS_WITH_TLS, these also run:~%")
+  (dolist (s +uv-tls-systems+)
+    (format t "          ~(~a~)~%" s))
   (format t "          Their checks are NOT in the total below, and no figure here says how many.~%"))
 
 ;;; --- the platform axis (pre-publication issue 182) ----------------------------------------------
@@ -554,6 +567,7 @@ inventing a suite name that does not exist would fail the gate for the wrong rea
   (append +systems+
           (when (with-uv-p) +uv-systems+)
           (when (with-tls-p) +tls-systems+)
+          (when (and (with-uv-p) (with-tls-p)) +uv-tls-systems+)
           (when (with-libgit-p) +libgit-systems+)
           (platform-required-systems)))
 
@@ -561,6 +575,7 @@ inventing a suite name that does not exist would fail the gate for the wrong rea
   (append +test-systems+
           (when (with-uv-p) +uv-test-systems+)
           (when (with-tls-p) +tls-test-systems+)
+          (when (and (with-uv-p) (with-tls-p)) +uv-tls-test-systems+)
           (when (with-libgit-p) +libgit-test-systems+)
           (platform-required-test-systems)))
 

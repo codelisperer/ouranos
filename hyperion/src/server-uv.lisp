@@ -61,7 +61,10 @@
            #:stream-write-failed #:stream-write-failed-reason
            #:*stream-write-timeout-seconds*
            #:*file-chunk-bytes* #:*file-write-observer*
-           #:server #:server-p #:server-host #:server-port
+           #:server #:server-p #:server-host #:server-port #:server-tls
+           #:transport #:transport-write #:transport-receive #:transport-saturated-p
+           #:transport-shutdown-write #:transport-free #:transport-attach
+           #:tls-transport-maker #:tls-release
            #:server-loops #:server-loop-connections #:*default-loops* #:*default-scheme*
            #:*dispatch* #:*max-body-octets* #:*max-head-octets* #:*max-chunk-overhead-octets*
            #:*max-requests-per-connection* #:*keep-alive-timeout-ms* #:*inline-dispatch*))
@@ -276,6 +279,26 @@ none yet, as when a TLS record is still incomplete."))
 (defgeneric transport-free (transport conn)
   (:documentation "Release whatever TRANSPORT holds for CONN. Called once, from %FINISH,
 before the handle is closed."))
+
+(defgeneric transport-attach (transport conn &key finish peer-ended)
+  (:documentation "Called once when CONN is accepted, on its loop thread, before anything is
+read. FINISH, a function of no arguments, ends the connection at once, as an error does;
+PEER-ENDED, also of no arguments, ends it as the peer's end-of-stream does. A TLS transport
+calls FINISH for a handshake that fails or takes too long, and PEER-ENDED for close_notify.")
+  (:method ((transport transport) conn &key finish peer-ended)
+    (declare (ignore conn finish peer-ended))
+    nil))
+
+(defgeneric tls-transport-maker (tls)
+  (:documentation "For START's :TLS: a function of an accepted connection that returns its
+TRANSPORT. The methods are in the system hyperion/server-uv/tls, which this file does not load,
+so that a server without TLS loads no TLS library.")
+  (:method (tls)
+    (error "hyperion/server-uv: :TLS ~S needs the system hyperion/server-uv/tls loaded, which provides MAKE-CERTIFICATE-SET" tls)))
+
+(defgeneric tls-release (tls)
+  (:documentation "Free what START's :TLS holds, once STOP has ended every connection.")
+  (:method (tls) (declare (ignore tls)) nil))
 
 (defmethod transport-write ((transport plaintext-transport) conn octets &key on-complete on-error)
   (net:write-bytes conn octets :on-complete on-complete :on-error on-error))
@@ -1863,7 +1886,9 @@ connections it owns, CONN -> CONN-STATE, touched only on its thread."
   ;; Connections accepted by the first loop and not yet adopted by the loop they were
   ;; handed to (:HANDOFF), in the CAR. They are in no shard's LIVE table meanwhile, so a
   ;; drain counts them here.
-  (handoffs (list 0)))
+  (handoffs (list 0))
+  ;; START's :TLS, or NIL for plain HTTP (#125). STOP releases it with TLS-RELEASE.
+  (tls nil))
 
 (defun server-loops (server)
   "SERVER's loops, first to last."
@@ -1879,7 +1904,7 @@ connections it owns, CONN -> CONN-STATE, touched only on its thread."
 spread of connections across its loops (#463)."
   (loop for shard across (server-shards server) collect (shard-accepted shard)))
 
-(defun start (app &key (host "127.0.0.1") (port 8080) workers loops scheme)
+(defun start (app &key (host "127.0.0.1") (port 8080) workers loops scheme tls)
   "Serve APP -- a Ring handler, (lambda (env) -> (status headers body)) -- on HOST:PORT.
 
 Returns a SERVER; STOP it. PORT 0 asks the OS to choose, and SERVER-PORT reports what it
@@ -1897,7 +1922,12 @@ concurrency an app written for one loop never had, so START refuses it.
 
 TCP_NODELAY is on for every accepted connection (aion/uv/net's default). That is the
 structural fix for the residual p99 straggler ADR-0011 recorded and could not reach through
-Clack -- owning the socket is what makes it available at all."
+Clack -- owning the socket is what makes it available at all.
+
+TLS, when given, makes the server speak HTTPS: a certificate set from
+HYPERION/SERVER-UV/TLS:MAKE-CERTIFICATE-SET, which needs that system loaded (#125). The server
+owns the set from the moment START returns, and STOP frees it. If START signals, the caller
+still owns it."
   (check-type workers (or null (integer 1)))
   (let* ((loops-from (if loops :start-argument nil))
          (requested (or loops (multiple-value-bind (n source) (%default-loop-count workers)
@@ -1907,7 +1937,7 @@ Clack -- owning the socket is what makes it available at all."
                         (%resolve-scheme (or scheme *default-scheme*) requested)))
          (loops (if (eq scheme :single) 1 requested))
          (drain (list nil))
-         (transport-maker *%transport-maker*)
+         (transport-maker (if tls (tls-transport-maker tls) *%transport-maker*))
          (handoffs (list 0))
          (shards (coerce (loop for i below loops
                                collect (%make-shard :index i :loop (uv:make-loop)))
@@ -1929,7 +1959,10 @@ Clack -- owning the socket is what makes it available at all."
                                               :drain drain)))
                  (setf (gethash conn (shard-live shard)) state)
                  (when transport-maker
-                   (setf (net:connection-data conn) (funcall transport-maker conn)))
+                   (setf (net:connection-data conn) (funcall transport-maker conn))
+                   (transport-attach (%transport conn) conn
+                                     :finish (lambda () (%finish conn state))
+                                     :peer-ended (lambda () (%peer-ended conn state))))
                  (net:start-reading
                   conn
                   (lambda (octets connection)
@@ -2011,7 +2044,7 @@ Clack -- owning the socket is what makes it available at all."
                                                 :scheme scheme)
                (prog1 (%make-server :shards shards :host bound-host :port bound-port
                                     :scheme scheme :workers workers-pool :drain drain
-                                    :handoffs handoffs)
+                                    :handoffs handoffs :tls tls)
                  (setf started t))))
         ;; START has not returned a SERVER, so the caller has nothing to STOP: release what
         ;; was made here. Closing a loop closes its listener and stops its thread if it runs.
@@ -2208,6 +2241,12 @@ once (#463)."
     (when (server-workers server)
       (%stop-workers (server-workers server) (if overdue 0.1 *stop-wait-seconds*))
       (setf (server-workers server) nil))
+    ;; Every connection has been through %FINISH, which freed its transport, unless a shard is
+    ;; stuck and kept for a later STOP; its connections may still hold the TLS state.
+    (when (and (server-tls server) (null (server-shards server)))
+      (let ((tls (server-tls server)))
+        (setf (server-tls server) nil)
+        (tls-release tls)))
     server))
 
 (defun %stop-workers (workers &optional (wait *stop-wait-seconds*))

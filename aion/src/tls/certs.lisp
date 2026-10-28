@@ -222,6 +222,74 @@ report, and, for a server, the one it presents."
     (let ((p (%crt-der crt len)))
       (%foreign-octets p (cffi:mem-ref len :size)))))
 
+;;; --- a certificate's validity, read from its DER (#125) -----------------------------------
+;;;
+;;; mbedTLS parses the validity into mbedtls_x509_crt, but that structure's layout depends on
+;;; the build, so it is read here from the DER instead. Only the path to the validity is
+;;; walked: Certificate SEQUENCE, tbsCertificate SEQUENCE, the optional [0] version, the
+;;; serial number, the signature algorithm, the issuer, then validity SEQUENCE { notBefore,
+;;; notAfter }, each a UTCTime or a GeneralizedTime (RFC 5280 4.1).
+
+(defun %der-element (der start)
+  "The DER element at START in DER: (values TAG CONTENT-START CONTENT-END)."
+  (let ((end (length der)))
+    (flet ((byte-at (i)
+             (if (< i end) (aref der i) (error "aion/tls: the certificate's DER ends early"))))
+      (let* ((tag (byte-at start))
+             (first (byte-at (1+ start))))
+        (if (< first 128)
+            (values tag (+ start 2) (+ start 2 first))
+            (let ((count (logand first 127)) (length 0))
+              (when (or (zerop count) (> count 4))
+                (error "aion/tls: the certificate's DER has a length form this reader does not take"))
+              (dotimes (i count) (setf length (+ (* length 256) (byte-at (+ start 2 i)))))
+              (let ((content (+ start 2 count)))
+                (when (> (+ content length) end)
+                  (error "aion/tls: the certificate's DER ends early"))
+                (values tag content (+ content length)))))))))
+
+(defun %der-time (der tag start end)
+  "The universal time of the UTCTime (tag #x17) or GeneralizedTime (#x18) from START to END."
+  (let* ((text (map 'string #'code-char (subseq der start end)))
+         (digits (string-right-trim "Z" text)))
+    (unless (and (char= #\Z (char text (1- (length text))))
+                 (every #'digit-char-p digits)
+                 (= (length digits) (if (= tag #x17) 12 14)))
+      (error "aion/tls: ~S is not a certificate time this reader takes" text))
+    (flet ((num (from to) (parse-integer digits :start from :end to)))
+      (let* ((long (= tag #x18))
+             (year (if long (num 0 4) (let ((yy (num 0 2))) (if (< yy 50) (+ 2000 yy) (+ 1900 yy)))))
+             (at (if long 4 2)))
+        (encode-universal-time (num (+ at 8) (+ at 10)) (num (+ at 6) (+ at 8))
+                               (num (+ at 4) (+ at 6)) (num (+ at 2) (+ at 4))
+                               (num at (+ at 2)) year 0)))))
+
+(defun certificate-validity (der)
+  "The validity of the certificate in DER octets: (values NOT-BEFORE NOT-AFTER), universal
+times. Signals when DER is not a certificate this reader can walk."
+  (multiple-value-bind (tag cert-start) (%der-element der 0)
+    (unless (= tag #x30) (error "aion/tls: this is not a DER certificate"))
+    (multiple-value-bind (tag tbs-start) (%der-element der cert-start)
+      (unless (= tag #x30) (error "aion/tls: this is not a DER certificate"))
+      (let ((at tbs-start))
+        (flet ((skip ()
+                 (multiple-value-bind (tag start end) (%der-element der at)
+                   (declare (ignore start))
+                   (setf at end)
+                   tag)))
+          ;; The version, [0] EXPLICIT, is present in a version 2 or 3 certificate.
+          (when (= (%der-element der at) #xa0) (skip))
+          (skip)                        ; serialNumber
+          (skip)                        ; signature
+          (skip)                        ; issuer
+          (multiple-value-bind (tag start) (%der-element der at)
+            (unless (= tag #x30) (error "aion/tls: the certificate has no validity where expected"))
+            (multiple-value-bind (t1 s1 e1) (%der-element der start)
+              (multiple-value-bind (t2 s2 e2) (%der-element der e1)
+                (unless (and (member t1 '(#x17 #x18)) (member t2 '(#x17 #x18)))
+                  (error "aion/tls: the certificate's validity is not two times"))
+                (values (%der-time der t1 s1 e1) (%der-time der t2 s2 e2))))))))))
+
 (defun certificate-chain-der (chain)
   "The DER octets of CHAIN's first certificate."
   (%crt-pointer-der (%pointer chain)))
