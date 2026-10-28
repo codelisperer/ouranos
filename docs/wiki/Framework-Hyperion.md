@@ -210,8 +210,9 @@ high-contrast form of each). `appearance-css` generates the rules for all eight 
 checks which look is active. In the gradient look a background token may be a
 `linear-gradient`. Because of that, components set `background:`, not `background-color:`.
 `appearance-contrast-failures` checks every text token against its background in every
-combination, sampling along each gradient. An app runs it in its own tests, so a gradient that
-drops text below WCAG AA fails the build, not a visitor.
+combination, sampling along each gradient, and a button's text on hover and when pressed as well
+as at rest. An app runs it in its own tests, so a gradient that drops text below WCAG AA fails
+the build, not a visitor.
 
 ### Collection-page components (`hyperion/kit`)
 
@@ -276,12 +277,13 @@ returned, drops any other value, and stores the choices on the state. `filter-ch
 them, and `list-href` and the toolbar's selects use that same list, so a value the user cannot
 choose is never shown, linked to or passed to the query.
 
-A master/detail page uses `hyperion/kit/panel`. The app writes its own rows and gives each the
-attributes `selectable-row` returns, so a click or Enter loads the item's `properties-panel`
-into a `panel-region` beside the list. `panel-js` moves `aria-current` to the chosen row, and
-closing the panel, with its button or Escape, returns focus to that row. The browser test
-checks the toolbar's URLs against `list-href` and the panel's focus handling on a small list
-page.
+A master/detail page uses `hyperion/kit/panel`. The app writes its own rows, gives each the
+attributes `selectable-row` returns, and puts `row-activator`'s button in the first cell. The
+button loads the item's `properties-panel` into a `panel-region` beside the list, and is what a
+keyboard reaches; a click elsewhere in the row does the same, unless it comes from a control
+inside the row. `panel-js` moves `aria-current` to the chosen row, and closing the panel, with
+its button or Escape, returns focus to that row's button. The browser test checks the toolbar's
+URLs against `list-href` and the panel's focus handling on a small list page.
 
 ### The hot-reload dev loop — the signature feature
 
