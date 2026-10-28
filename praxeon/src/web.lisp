@@ -973,7 +973,8 @@ not dropped as idle. Serve :SSE only from a server that can hold a handler for a
 open: see START, which chooses. With grants, an EventSource cannot send the session header, so the
 page first calls POST /embed/stream-ticket with it, and opens the stream with the ticket it gets
 (`praxeon/web-session:issue-ticket'): a ticket can be used once, within 30 seconds, while its
-session is open. The stream ends when its session does.
+session is open. The stream ends when its session does, and an open stream does not count as
+using the session, so a page left open ends its session after the idle limit like any other.
 
 Returns the Clack app, and as a second value a function of no arguments that returns how many
 conversations the app holds."
@@ -1143,7 +1144,10 @@ conversations the app holds."
                                           (if (null id)
                                               (%unauthenticated "open the stream with a ticket from POST /embed/stream-ticket")
                                               (values (funcall session-conversation id)
-                                                      (lambda () (ws:session-grant sessions id)))))
+                                                      ;; Checking does not count as a use, so
+                                                      ;; a page left open with its stream still
+                                                      ;; ends when the session is idle.
+                                                      (lambda () (ws:session-open-p sessions id)))))
                                         (values (funcall conversation-for env) (constantly t)))
                                   (if (not (conversation-p conv))
                                       conv

@@ -1176,6 +1176,31 @@ the same conversation."
         (is (eq :ended how) "the stream did not end with its session: ~S" how)
         (is (= 1 (length events)))))))
 
+(test an-open-stream-does-not-keep-its-session-from-going-idle
+  "A page left open holds its stream, and the stream checks its session on a timer. The check
+must not count as a use, or the session, and the server thread holding the stream, would last
+until the session's maximum age. Once the first event is read, each reading of the clock moves
+it 10 seconds, so the idle limit of 60 seconds passes within a few checks."
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (let* ((now 1000)
+           (ticking nil)
+           (sessions (praxeon/web-session:make-session-table
+                      :idle-seconds 60 :clock (lambda () (if ticking (incf now 10) now))))
+           (app (%grant-app pub :transport :sse :sessions sessions))
+           (session (nth-value 1 (%open app (%grant-token priv))))
+           (ticket (nth-value 1 (%ticket app session)))
+           (web::*stream-check-seconds* 0)
+           ;; A comment on every pass, so %READ-STREAM can stop the stream if it does not end.
+           (hyperion/sse:*keep-alive-seconds* 0))
+      (multiple-value-bind (events how)
+          (%read-stream (nth-value 2 (%stream-of app :query (format nil "ticket=~A" ticket)))
+                        :events 2 :seconds 3
+                        :on-event (lambda (e) (declare (ignore e)) (setf ticking t)))
+        (is (eq :ended how) "the stream kept its idle session open: ~S" how)
+        (is (= 1 (length events)))
+        (is (null (praxeon/web-session:session-grant sessions session))
+            "the session is still open")))))
+
 (test a-ticket-is-spent-by-use-by-time-and-by-its-session-ending
   (let* ((now 1000)
          (table (praxeon/web-session:make-session-table :ticket-seconds 30
