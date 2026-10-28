@@ -888,6 +888,15 @@ its tag.
 
 ### Added
 
+- **praxeon/image: the generate-image means offers the model a `mask`, so it can change only part
+  of an image** (#946). With `:resolve-reference` and a provider that takes a mask
+  (`image-provider-accepts-mask-p`, true for OpenAI), the tool schema offers `mask`: a reference,
+  resolved by the same `:resolve-reference` function as `reference_images`, to a PNG with
+  transparency the size of the first reference image. It is checked as a `:mask` given to
+  `generate-image` is, and refused before any request with `image-input-invalid` when it does
+  not fit. The `:image-usage` event of a request with a mask carries `:mask t`. Google's provider
+  is not offered `mask`, and one the model gives anyway is refused with the reason.
+
 - **praxeon/actor: every deliberation step records how many of the prompt's estimated tokens came
   from each source** (#317, step D). `praxeon/actor:request-messages` returns a third value, and
   `praxeon/actor:prompt-breakdown` computes it: a plist of estimated tokens under `:system`,

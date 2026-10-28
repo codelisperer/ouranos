@@ -408,6 +408,8 @@ failure."
                              :quality (or (getf reported :quality) (%size-name quality)))
                        ;; Present only for an edit, so a ledger can tell edits from generations.
                        (and references (list :references (length references)))
+                       ;; Present only when a mask was sent (#946).
+                       (and mask (list :mask t))
                        (loop for key in '(:input-tokens :output-tokens :cost :estimated)
                              for value = (getf reported key)
                              when value append (list key value))))
@@ -877,6 +879,10 @@ input schema lists.")
 reference in reference_images, exactly as you were told it, and say in the prompt what to
 change or keep.")
 
+(defparameter *mask-description*
+  " To change only part of the first reference image, give in mask the reference of a PNG the
+same size whose transparent pixels mark the part to change.")
+
 (defparameter *sizes* '(:square :portrait :landscape :auto)
   "The shapes the means can offer the model.")
 
@@ -905,10 +911,18 @@ change or keep.")
                   max-references))
     h))
 
-(defun %schema (qualities default-size default-quality &optional max-references)
+(defun %mask-property ()
+  (let ((h (make-hash-table :test 'equal)))
+    (setf (gethash "type" h) "string"
+          (gethash "description" h)
+          "The reference of a PNG image with transparency, the same size as the first image in reference_images, whose transparent pixels mark the part of that image to change. Only with reference_images. Leave out to let the prompt alone say what to change.")
+    h))
+
+(defun %schema (qualities default-size default-quality &optional max-references mask)
   "The JSON input schema: a required PROMPT, an optional SIZE, and an optional QUALITY offering
 only QUALITIES. Each description names the value used when the model gives none. With
-MAX-REFERENCES, an optional REFERENCE_IMAGES array of at most that many strings."
+MAX-REFERENCES, an optional REFERENCE_IMAGES array of at most that many strings, and with MASK
+as well, an optional MASK string (#946)."
   (let ((prompt (make-hash-table :test 'equal))
         (props (make-hash-table :test 'equal))
         (schema (make-hash-table :test 'equal)))
@@ -924,7 +938,9 @@ MAX-REFERENCES, an optional REFERENCE_IMAGES array of at most that many strings.
                  (format nil "Higher quality takes longer and costs more. Default: ~(~A~)."
                          default-quality)))
     (when max-references
-      (setf (gethash "reference_images" props) (%references-property max-references)))
+      (setf (gethash "reference_images" props) (%references-property max-references))
+      (when mask
+        (setf (gethash "mask" props) (%mask-property))))
     (setf (gethash "type" schema) "object"
           (gethash "properties" schema) props
           (gethash "required" schema) (vector "prompt"))
@@ -1007,6 +1023,30 @@ image's stored size before reading it."
                                  *max-reference-total-bytes*))
                        (push image images)))))))))))
 
+(defun %resolve-mask (args resolve)
+  "The REFERENCE-IMAGE the tool ARGS name in mask, through RESOLVE, the resolver reference_images
+uses, so a mask is subject to the same rules as a reference image: the app decides which
+references a model may reach, and the image's size and type are checked when it is made. NIL when
+ARGS name no mask. Refuses the call before any request, as a :NOT-RUN error result, when mask is
+not a string, names a reference RESOLVE does not know, or RESOLVE returns something other than a
+REFERENCE-IMAGE. Whether the mask suits the first reference and the provider is checked by
+GENERATE-IMAGE, which refuses with IMAGE-INPUT-INVALID (#946)."
+  (let ((given (gethash "mask" args)))
+    (flet ((refuse (control &rest args)
+             (error 'cnd:tool-error-result
+                    :outcome :not-run
+                    :text (format nil "generate-image: ~? No image was made." control args))))
+      (cond ((null given) nil)
+            ((not (stringp given))
+             (refuse "mask must be one reference, as a string."))
+            (t
+             (let ((image (funcall resolve given)))
+               (cond ((null image)
+                      (refuse "~S is not an image reference you were given. Use a reference exactly as you were told it." given))
+                     ((not (reference-image-p image))
+                      (refuse "the image ~S could not be read." given))
+                     (t image))))))))
+
 (defun register (agent provider &key on-image (name "generate-image") capability source
                                      (qualities *qualities*) default-quality (default-size :auto)
                                      resolve-reference (max-references 4)
@@ -1029,7 +1069,11 @@ DEFAULT-QUALITY is used when the model names none; it must be in QUALITIES, and 
 When the service is busy, fails on its side or does not answer (IMAGE-REQUEST-FAILED), the
 model is told so in an error result and the turn goes on; the request is not retried.
 
-RESOLVE-REFERENCE lets the model edit an image or make a variation of it. It is a function of one
+RESOLVE-REFERENCE lets the model edit an image or make a variation of it, and, when PROVIDER
+takes a mask (IMAGE-PROVIDER-ACCEPTS-MASK-P), name a mask through the same resolver (#946): the
+schema then offers mask, the reference of a PNG with transparency the size of the first reference
+image. A provider that takes no mask is not offered it, and a mask the model gives anyway is
+refused with IMAGE-INPUT-INVALID before any request, telling the model why. It is a function of one
 string, a reference the model gives in reference_images, that returns a REFERENCE-IMAGE (see
 MAKE-REFERENCE-IMAGE) or NIL when the reference is not one this model may use. The references
 are the app's: the strings ON-IMAGE returned for images made earlier, or ids the app gave the
@@ -1072,9 +1116,10 @@ An app normally calls REGISTER-OPENAI-IMAGE, which registers nothing when there 
                   qualities default-quality default-size resolve-reference max-references
                   requires-user-intent)
   (actor:register-means
-   agent name (if resolve-reference
-                  (concatenate 'string *description* *reference-description*)
-                  *description*)
+   agent name (cond ((null resolve-reference) *description*)
+                    ((image-provider-accepts-mask-p provider)
+                     (concatenate 'string *description* *reference-description* *mask-description*))
+                    (t (concatenate 'string *description* *reference-description*)))
    (lambda (args)
      (let ((prompt (gethash "prompt" args)))
        ;; Refused before any request, as an error result the model can correct: an empty
@@ -1088,6 +1133,7 @@ An app normally calls REGISTER-OPENAI-IMAGE, which registers nothing when there 
             (quality (%choice args "quality" qualities default-quality))
             (references (and resolve-reference
                              (%resolve-references args resolve-reference max-references)))
+            (mask (and resolve-reference (%resolve-mask args resolve-reference)))
             (results
               (handler-bind
                   ((image-request-failed
@@ -1100,11 +1146,12 @@ An app normally calls REGISTER-OPENAI-IMAGE, which registers nothing when there 
                                            :unknown)
                               :text (%retry-text c)))))
                 (generate-image provider prompt :size size :quality quality
-                                                :references references
+                                                :references references :mask mask
                                                 :agent (actor:agent-name agent)))))
        (format nil "~{~A~^~%~}"
                (mapcar (lambda (r) (%summary r (funcall on-image r))) results)))))
-   :schema (%schema qualities default-size default-quality max-references)
+   :schema (%schema qualities default-size default-quality max-references
+                    (image-provider-accepts-mask-p provider))
    :capability capability :source source :requires-user-intent requires-user-intent))
 
 (defun register-openai-image (agent &key on-image (api-key nil api-key-p) model base-url
