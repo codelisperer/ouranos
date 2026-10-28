@@ -14,6 +14,14 @@ its tag.
 
 ### An app may have to act
 
+- **`mnemosyne/migrate:migrate` logs each applied migration at DEBUG and one INFO line per
+  call** (#1046). The per-migration line `"migrate: applied"` (with `id`, `description` and `ms`)
+  is now DEBUG, as is `"migrate: applying"`. A call that had migrations to apply ends with one
+  INFO line, `"migrate: finished"`, with `pending`, `applied` and `ms` for the whole call, and
+  `failed` naming the migration that signalled when one did. A call with nothing to apply logs
+  nothing at INFO, as before. An app that searches its logs at INFO for `"migrate: applied"`
+  should search for `"migrate: finished"` instead, or log `mnemosyne/migrate` at DEBUG.
+
 - **A turn run with an observer now asks `anthropic` and `openai-compatible` providers for a
   stream** (#984), so that it can emit `:text-delta` events. The completion, the events and the
   usage are the same as before. An OpenAI-compatible request that streams also sends
