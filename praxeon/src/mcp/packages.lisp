@@ -73,7 +73,7 @@
    ;; tool calls that become tasks (#532)
    #:connection-tasks #:connection-task-lifetime #:connection-task-backoff-cap #:client-task-store #:*default-poll-seconds*
    #:task #:task-key #:task-connection #:task-principal #:task-tool #:task-means #:task-source
-   #:task-agent #:task-conversation #:task-call-id #:task-started #:task-seen #:task-deadline
+   #:task-agent #:task-private #:task-conversation #:task-call-id #:task-started #:task-seen #:task-deadline
    #:task-interval #:task-next-poll #:task-status #:task-outcome #:task-text #:task-announced-at
    #:task-failures #:task-failure #:task-inputs
    #:task-to-json #:task-from-json

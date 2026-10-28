@@ -43,7 +43,7 @@
   (:use #:cl)
   (:export #:*observer* #:emit #:with-observer
            #:event-type #:event-get #:event-plist
-           #:*withhold-content* #:+content-keys+))
+           #:*withhold-content* #:+content-keys+ #:unless-withheld))
 
 (defpackage #:praxeon/conditions
   (:use #:cl)

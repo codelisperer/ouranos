@@ -80,11 +80,14 @@ that is a non-negative number."
              (or (not poll-p) (ms-p poll)))))))
 
 (defun %task-event (type task &rest more)
-  (apply #'evt:emit type :id (task-call-id task) :key (task-key task)
-                         :connection (task-connection task) :tool (task-tool task)
-                         :source (task-source task) :principal (task-principal task)
-                         :agent (task-agent task) :conversation (task-conversation task)
-                         more))
+  ;; Withheld by the task's own agent, recorded when it started, not by the turn that happens
+  ;; to be polling: POLL-TASKS usually runs outside any turn (the hub's review of #1027).
+  (let ((evt:*withhold-content* (task-private task)))
+    (apply #'evt:emit type :id (task-call-id task) :key (task-key task)
+                           :connection (task-connection task) :tool (task-tool task)
+                           :source (task-source task) :principal (task-principal task)
+                           :agent (task-agent task) :conversation (task-conversation task)
+                           more)))
 
 (defun %start-task (client tool result principal origin started)
   "Record the task RESULT starts, a CreateTaskResult, and return the ACTOR:STARTED-RESULT the
@@ -101,7 +104,9 @@ call returns."
                              :source (getf origin :source) :agent (getf origin :agent)
                              :conversation (getf origin :conversation)
                              :call-id actor:*tool-call-id* :started started :seen now
-                             :status (gethash "status" result))))
+                             :status (gethash "status" result)
+                             ;; The starting turn's privacy, which the task's events follow.
+                             :private evt:*withhold-content*)))
       (%task-timing task result now (connection-task-lifetime connection))
       (handler-case (save-task (client-task-store client) task)
         (error ()

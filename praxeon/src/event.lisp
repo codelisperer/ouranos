@@ -142,10 +142,22 @@ argument, tool result or reply (#983). A private agent's turn binds it (ACTOR:MA
 ;; agent (#158).
 (aion/dynamic:register-inheritable '*withhold-content*)
 
-(defparameter +content-keys+ '(:arguments :content :text :task :message :schema :url)
+(defparameter +content-keys+ '(:arguments :content :text :message :schema :url)
   "The event fields that can hold content: a tool call's :ARGUMENTS, a tool result's :CONTENT, an
-answer's :TEXT, a delegation's :TASK, and an MCP task's :MESSAGE, :SCHEMA and :URL, which come
-from the server and can quote the request.")
+answer's :TEXT, and an MCP task's :MESSAGE, :SCHEMA and :URL, which come from the server and can
+quote the request.
+
+:TASK is not one of them, because it means two things. On :TASK-INPUT-REQUIRED and the other
+MCP task events it is the task object an app passes back to answer, which holds no content of
+the turn and must arrive. On :DELEGATE it is the text a coordinating agent gave its sub-agent,
+which is content, and the emitter withholds it itself with UNLESS-WITHHELD (the hub's review of
+#1027).")
+
+(defun unless-withheld (value)
+  "VALUE, or :WITHHELD under *WITHHOLD-CONTENT*. For content outside +CONTENT-KEYS+: a
+delegation's task text, and a host or a resource name a private agent's tool reads, which a log
+line would otherwise carry (#983)."
+  (if *withhold-content* :withheld value))
 
 (defun %withhold (payload)
   (loop for (key value) on payload by #'cddr

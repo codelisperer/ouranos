@@ -257,7 +257,7 @@ tool call (%REQUEST-ANSWERING-INPUT, #626)."
                          collect content)))
         (log:info "praxeon/mcp: resource read"
                   :connection (connection-name (client-connection client))
-                  :resource (%uri-for-log uri) :contents (length found))
+                  :resource (evt:unless-withheld (%uri-for-log uri)) :contents (length found))
         found))))
 
 ;;; --- a resource in an agent's context --------------------------------------------------
@@ -328,7 +328,8 @@ REMOVE-RESOURCE when the app forgets that user (#150)."
     (remove-resource agent client uri)
     (dolist (item items) (ctx:add-item context item))
     (log:info "praxeon/mcp: resource added to an agent's context"
-              :connection name :resource (%uri-for-log uri) :items (length items)
+              :connection name :resource (evt:unless-withheld (%uri-for-log uri))
+              :items (length items)
               :tokens (reduce #'+ items :key #'ctx:ctx-item-tokens)
               :untrusted (and untrusted t))
     items))

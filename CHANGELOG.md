@@ -1041,13 +1041,27 @@ its tag.
   `abandon-held-turn`, and on every thread the turn continues on:
   - **Logs.** `aion/log:*log-condition-details*` is NIL, so `aion/log:exception` writes a
     condition's type and frame names, never its report or a frame's arguments, even when an app
-    turned the setting on for development. praxeon's own log lines already record only counts,
-    ids, durations and type names. The two "llm request failed" lines changed to the condition's
-    type in #1013, and each line was checked for this change.
+    turned the setting on for development.
+    - This holds for handlers that run inside the turn, such as an app's `handler-bind` around
+      `run-turn`, which runs while the turn's bindings are in force. A `handler-case` outside
+      `run-turn` runs after the turn has unwound, so `log:exception` there with the setting on
+      writes the report, and the report can hold content.
+    - praxeon's own log lines record only counts, ids, durations and type names. The two "llm
+      request failed" lines changed to the condition's type in #1013, and each line was checked
+      for this change.
+    - The host `read-web-page` reads, and the resource an MCP resource line names, are logged as
+      `:withheld` for a private agent, because they say what the user asked about.
   - **Events.** `evt:*withhold-content*` is true, and `evt:emit` replaces every content field
-    (`evt:+content-keys+`: `:arguments`, `:content`, `:text`, `:task`, `:message`, `:schema`,
-    `:url`) with `:withheld`. This covers what the studio's status printer and praxeon/web's
-    progress line show. The other fields still arrive.
+    with `:withheld`. The content fields are `evt:+content-keys+`: `:arguments`, `:content`,
+    `:text`, `:message`, `:schema` and `:url`. This covers what the studio's status printer and
+    praxeon/web's progress line show. The other fields still arrive.
+    - A delegation's `:task` text is withheld by the emitter, through the new
+      `evt:unless-withheld`. `:task` is not a content key, because on the MCP task events it is
+      the task object an app answers with, and that always arrives.
+    - An MCP task records whether the turn that started it withheld content
+      (`mcp:task-private`, and `"private"` in `task-to-json`). Its events, such as
+      `:task-input-required`, withhold the server's message, schema and URL by that record,
+      whichever thread or turn polls the task.
   - **Retaining content.** `:retain-content t` keeps content in events for a private agent, for
     an app that shows a trace and means to. Logs stay without it either way.
 

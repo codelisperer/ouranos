@@ -1565,7 +1565,7 @@ acyclic to stay finite."
        (let ((task (cond ((hash-table-p args) (gethash arg args))
                          ((stringp args) args)
                          (t nil))))
-         (evt:emit :delegate :agent (agent-name sub) :task task)
+         (evt:emit :delegate :agent (agent-name sub) :task (evt:unless-withheld task))
          ;; The sub-turn runs with the COORDINATOR's authority, not with none. A delegated
          ;; subtask that silently lost the permit would be a capability-bearing means becoming
          ;; unreachable one level down -- the same defect pre-publication issue 400 found in RUN-TURN, reached by

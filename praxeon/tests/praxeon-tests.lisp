@@ -9413,6 +9413,12 @@ comes after the correction."
 ;;; backtrace's arguments, and records every event. Handlers inside the turn log each failure
 ;;; with LOG:EXCEPTION, as an app's middleware does. The control finds every marker; the private
 ;;; run finds none.
+;;;
+;;; EACH MARKER HAS A ROUTE IN THE CONTROL, or its absence from the private run would prove
+;;; nothing (the hub's review of #1027). The prompt reaches a log through the failing provider,
+;;; whose report quotes the messages it was sent, as providers' errors do. The refused repair
+;;; reply reaches one through a validator whose problem quotes it and a handler that logs each
+;;; rejection.
 
 (defparameter +983-markers+
   '("MARK983PROMPT" "MARK983ARG" "MARK983RESULT" "MARK983REPLY"
@@ -9425,8 +9431,19 @@ refused.")
   (:documentation "A provider whose every request fails with a report that quotes content."))
 
 (defmethod llm:complete ((p %983-failing-provider) messages &key system tools max-tokens temperature tool-choice)
-  (declare (ignore messages system tools max-tokens temperature tool-choice))
-  (error "the provider refused the request about MARK983PROVIDER"))
+  (declare (ignore system tools max-tokens temperature tool-choice))
+  (error "the provider refused the request about MARK983PROVIDER: ~S" messages))
+
+(defun %983-spec ()
+  "%SPEC with a validator whose problem quotes the headline it refuses, so a refused reply reaches
+the report of STRUCTURED-RESULT-REJECTED."
+  (let ((spec (%spec)))
+    (llm:make-tool-spec :name (llm:tool-spec-name spec) :description (llm:tool-spec-description spec)
+                        :schema (llm:tool-spec-schema spec)
+                        :validators (list (lambda (arguments)
+                                            (let ((h (gethash "headline" arguments)))
+                                              (when (and (stringp h) (search "REPAIR" h))
+                                                (format nil "headline ~S is not allowed" h))))))))
 
 (defun %983-printable (x)
   "X with each hash table turned into an alist, so printing an event shows what an observer that
@@ -9441,7 +9458,7 @@ prints it, such as the studio's STATUS-OBSERVER, would show of a tool call's arg
   "Run the scenario with an agent made with PRIVATE. Returns everything a log sink or an event
 observer received, as one string."
   (let* ((repairing (make-instance 'recording
-                                   :script (list (%call-completion "draft_copy" (%args "headline" "MARK983REPAIR"))
+                                   :script (list (%call-completion "draft_copy" (%args "headline" "MARK983REPAIR" "characters" 13))
                                                  (%call-completion "draft_copy" (%args "headline" "MARK983RESULT"
                                                                                        "characters" 13)))))
          (script (list (llm:make-completion
@@ -9458,9 +9475,13 @@ observer received, as one string."
     (actor:register-means agent "lookup" "looks something up"
                           (lambda (in)
                             (declare (ignore in))
-                            (gethash "headline" (llm:generate-structured
-                                                 repairing '((:role :user :content "brief")) (%spec)
-                                                 :attempts 3))))
+                            ;; An app that logs each rejected attempt, as the structured-output
+                            ;; documentation suggests for watching rejections.
+                            (handler-bind ((llm:structured-result-rejected
+                                             (lambda (c) (aion/log:exception c "structured reply rejected"))))
+                              (gethash "headline" (llm:generate-structured
+                                                   repairing '((:role :user :content "brief")) (%983-spec)
+                                                   :attempts 3)))))
     (actor:register-means agent "boom" "always fails"
                           (lambda (in) (declare (ignore in)) (error "the means failed on MARK983FAIL")))
     (unwind-protect
@@ -9486,27 +9507,60 @@ observer received, as one string."
 (test a-private-agent-keeps-every-marker-out-of-logs-and-events
   (let ((private (%983-run :private t))
         (control (%983-run :private nil)))
-    (dolist (marker '("MARK983ARG" "MARK983RESULT" "MARK983REPLY" "MARK983FAIL" "MARK983PROVIDER"))
+    (dolist (marker +983-markers+)
       (is (search marker control) "control: ~A reaches a log or an event when the agent is not private" marker))
     (dolist (marker +983-markers+)
       (is (null (search marker private)) "~A reached a log record or an event of a private agent" marker))
     (is (search ":WITHHELD" private) "the events still arrive, with their content withheld")
     (is (search "SIMPLE-ERROR" private) "and the failures are still logged, by type")))
 
-(test a-private-agent-that-retains-content-gets-it-in-events-and-never-in-logs
-  (let ((events '())
-        (out (make-string-output-stream))
-        (agent (actor:make-agent :private t :retain-content t
-                                 :provider (make-instance 'scripted
-                                                          :script (list (llm:make-completion
-                                                                         :text "MARK983REPLY" :stop-reason :end))))))
+(defun %983-retaining-run (&key private)
+  "A turn of an agent made with PRIVATE and :RETAIN-CONTENT T whose means fails with a report
+holding MARK983FAIL, logged with details on by a handler inside the turn, then replies
+MARK983REPLY. Returns (values EVENTS-TEXT LOG-TEXT)."
+  (let* ((events '())
+         (out (make-string-output-stream))
+         (agent (actor:make-agent :private private :retain-content t
+                                  :provider (make-instance
+                                             'scripted
+                                             :script (list (llm:make-completion
+                                                            :tool-calls (list (llm:make-tool-call
+                                                                               :id "t1" :name "boom"
+                                                                               :arguments (%args)))
+                                                            :stop-reason :tool-use)
+                                                           (llm:make-completion
+                                                            :text "MARK983REPLY" :stop-reason :end))))))
+    (actor:register-means agent "boom" "always fails"
+                          (lambda (in) (declare (ignore in)) (error "the means failed on MARK983FAIL")))
     (unwind-protect
          (progn (aion/log:setup :env :prod :level :trace :stream out)
-                (evt:with-observer ((lambda (e) (push e events)))
-                  (actor:run-turn agent "MARK983PROMPT")))
+                (let ((aion/log:*log-condition-details* t))
+                  (evt:with-observer ((lambda (e) (push e events)))
+                    (handler-bind ((cnd:means-failure
+                                     (lambda (c)
+                                       (aion/log:exception c "means failed")
+                                       (cnd:substitute-result "recovered" c))))
+                      (actor:run-turn agent "MARK983PROMPT")))))
       (aion/log:setup :env :dev :level :warn :stream *standard-output*))
-    (is (search "MARK983REPLY" (format nil "~S" events)) "the app asked for content in events")
-    (is (null (search "MARK983" (get-output-stream-string out))) "logs stay without it")))
+    (values (format nil "~S" events) (get-output-stream-string out))))
+
+(test a-private-agent-that-retains-content-gets-it-in-events-and-never-in-logs
+  "The failing means would put MARK983FAIL in the log, with details on; for a private agent it
+does not, even one that retains content in events. The control is the same turn with an agent
+that is not private, whose log holds it."
+  (multiple-value-bind (events log) (%983-retaining-run :private t)
+    (is (search "MARK983REPLY" events) "the app asked for content in events")
+    (is (null (search "MARK983" log)) "logs stay without it: ~A" log))
+  (multiple-value-bind (events log) (%983-retaining-run :private nil)
+    (declare (ignore events))
+    (is (search "MARK983FAIL" log) "control: without privacy the failure's report is logged")))
+
+(test unless-withheld-withholds-content-outside-the-content-keys
+  "A delegation's task text, a host and a resource name are withheld by UNLESS-WITHHELD, since
+:TASK is not a content key (the hub's review of #1027)."
+  (is (eq :withheld (let ((evt:*withhold-content* t)) (evt:unless-withheld "the task text"))))
+  (is (equal "the task text" (evt:unless-withheld "the task text")) "control: not withheld")
+  (is (null (member :task evt:+content-keys+)) ":task is not a content key"))
 
 (test withholding-replaces-only-the-content-fields-of-an-event
   (let ((seen nil))
