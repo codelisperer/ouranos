@@ -224,65 +224,75 @@ cl+ssl for the whole image (#917)."
 
 #-os-windows
 (defun %request-pinned (req)
-  "Run REQ over a connection to its CONNECT-ADDRESS, returning what DEX:REQUEST returns.
+  "Run REQ over a connection to its CONNECT-ADDRESS, returning (values BODY STATUS HEADERS).
 
-The socket is opened here, to that address. For https the TLS handshake uses the URL's host
-name, so the server is asked for that name (SNI) and its certificate is verified against that
-name, not against the address. When the URL's host is itself an IP address, no SNI is sent and
-the certificate is verified against the address without its brackets (%TLS-NAMES, #915). In
-both cases a certificate with alternative names must match one of them; its common name counts
-only when it has none (%VERIFY-PEER-NAME, #917).
-DEX:REQUEST then writes the request on this connection, so the Host header is the URL's too."
+The socket is opened here, to that address and nowhere else. For https the TLS handshake uses
+the URL's host name, so the server is asked for that name (SNI) and its certificate is verified
+against that name, not against the address. When the URL's host is itself an IP address, no SNI
+is sent and the certificate is verified against the address without its brackets (%TLS-NAMES,
+#915). In both cases a certificate with alternative names must match one of them; its common
+name counts only when it has none (%VERIFY-PEER-NAME, #917).
+
+The request is written and the response read by http1.lisp, as on Windows (#536), whose limits
+apply, and the Host header is the URL's. Until #985 this handed the connection to DEX:REQUEST,
+which after any failure on it reconnected by resolving the URL's host and sent the request
+again: a second connection that bypassed CONNECT-ADDRESS, and a request sent twice. Now a
+failure is signalled from the one connection, and no request is sent twice.
+
+The socket is lent to FETCH-PUBLIC's deadline watch, and the read timeout is the socket's
+receive timeout. A body read as a stream (MAX-BODY-BYTES) keeps the connection, and closing the
+body closes it; otherwise the body is read here and the connection closed. A non-2xx is returned
+like any other response, while the connection is open, so its body is kept (#527)."
   (let* ((uri (quri:uri (request-url req)))
          (host (quri:uri-host uri))
          (address (or (parse-address (request-connect-address req))
                       (error 'http-error
                              :detail (format nil "connect-address ~S is not an IP address"
                                              (request-connect-address req)))))
-         (socket (usocket:socket-connect address (%port-of uri)
-                                         :element-type '(unsigned-byte 8)
-                                         :timeout (request-connect-timeout req)))
+         (socket (prog1 (usocket:socket-connect address (%port-of uri)
+                                                :element-type '(unsigned-byte 8)
+                                                :timeout (request-connect-timeout req))
+                   ;; From here on a failure happened after the connection was made (#79).
+                   (setf *%connected* t)))
+         (stream nil)
          (body-owns-connection nil))
     (%lend-socket socket)
-    (unwind-protect
-         (let ((stream (usocket:socket-stream socket)))
-           (when (request-read-timeout req)
-             (setf (usocket:socket-option socket :receive-timeout) (request-read-timeout req)))
-           (when (string-equal (quri:uri-scheme uri) "https")
-             (cl+ssl:ensure-initialized)
-             (let ((context (cl+ssl:make-context
-                             :verify-mode cl+ssl:+ssl-verify-peer+
-                             :verify-location (if (request-ca-path req)
-                                                  (uiop:native-namestring (request-ca-path req))
-                                                  :default))))
-               (multiple-value-bind (sni name) (%tls-names host)
-                 (cl+ssl:with-global-context (context :auto-free-p t)
-                   ;; With no SNI name, cl+ssl verifies the chain but not a name. Either way the
-                   ;; name is verified here, alternative names first (#917).
-                   (setf stream (cl+ssl:make-ssl-client-stream stream :hostname sni
-                                                                      :verify :required))
-                   (%verify-peer-name stream name)))))
-           (multiple-value-bind (body status headers)
-               ;; A non-2xx is caught HERE, while the connection is open, and returned like any
-               ;; other response. Caught in %HTTP instead, the HANDLER-CASE there unwound
-               ;; through this UNWIND-PROTECT first, which closed the socket, and the body of
-               ;; every 4xx and 5xx fetched this way was lost -- such as an OAuth token
-               ;; endpoint's {"error":"invalid_grant"} (#527).
-               (handler-case
-                   (apply #'dex:request (request-url req) :stream stream
-                          :use-connection-pool nil :keep-alive nil (%dex-args req))
-                 (dexador.error:http-request-failed (e)
-                   (values (dexador.error:response-body e)
-                           (dexador.error:response-status e)
-                           (ignore-errors (dexador.error:response-headers e)))))
-             ;; A streamed body (MAX-BODY-BYTES) still needs the connection, and
-             ;; %READ-CAPPED closes it when it has read enough. Otherwise the connection is
-             ;; finished with here.
-             (setf body-owns-connection (streamp body))
-             (values body status headers)))
-      (unless body-owns-connection
-        (%take-back-socket)
-        (ignore-errors (usocket:socket-close socket))))))
+    (flet ((close-connection ()
+             (%take-back-socket)
+             (when stream (ignore-errors (close stream)))
+             (ignore-errors (usocket:socket-close socket))))
+      (unwind-protect
+           (progn
+             (setf stream (usocket:socket-stream socket))
+             (when (request-read-timeout req)
+               (setf (usocket:socket-option socket :receive-timeout) (request-read-timeout req)))
+             (when (string-equal (quri:uri-scheme uri) "https")
+               (cl+ssl:ensure-initialized)
+               (let ((context (cl+ssl:make-context
+                               :verify-mode cl+ssl:+ssl-verify-peer+
+                               :verify-location (if (request-ca-path req)
+                                                    (uiop:native-namestring (request-ca-path req))
+                                                    :default))))
+                 (multiple-value-bind (sni name) (%tls-names host)
+                   (cl+ssl:with-global-context (context :auto-free-p t)
+                     ;; With no SNI name, cl+ssl verifies the chain but not a name. Either way the
+                     ;; name is verified here, alternative names first (#917).
+                     (setf stream (cl+ssl:make-ssl-client-stream stream :hostname sni
+                                                                        :verify :required))
+                     (%verify-peer-name stream name)))))
+             (multiple-value-bind (body status headers)
+                 (http1-exchange stream (request-method req) uri (request-headers req)
+                                 (request-content req) :closer #'close-connection)
+               (if (request-max-body-bytes req)
+                   (progn (setf body-owns-connection t)
+                          (values body status headers))
+                   (let ((octets (let ((out (make-array 0 :element-type '(unsigned-byte 8)
+                                                          :adjustable t :fill-pointer 0)))
+                                   (loop for b = (read-byte body nil nil)
+                                         while b do (vector-push-extend b out))
+                                   (coerce out '(simple-array (unsigned-byte 8) (*))))))
+                     (values octets status headers)))))
+        (unless body-owns-connection (close-connection))))))
 
 #+os-windows
 (defvar *server-certificate-verifier* 'aion/windows:verify-server-certificate-chain
@@ -325,6 +335,97 @@ CHAIN), both for the caller to free. A directory is refused: aion/tls reads one 
                               (aion/tls:free-certificate-chain chain))))
         (values (aion/tls:make-client-config chain) chain)))))
 
+;;; --- the read timeout on Windows (#985) ------------------------------------------------
+;;;
+;;; On Windows neither the socket's receive timeout (SO_RCVTIMEO, which USOCKET:SOCKET-OPTION
+;;; :RECEIVE-TIMEOUT sets) nor SBCL's fd-stream timeout ends a read from a socket that receives
+;;; nothing: measured, a read with a timeout of one second was still waiting after twenty. So a
+;;; pinned request's read timeout is kept here instead: when a read has waited longer than the
+;;; timeout, a timer closes the socket, which wakes the read, and the read signals
+;;; SB-SYS:IO-TIMEOUT. It closes rather than shuts down: on Windows a shutdown from another thread
+;;; did not wake a blocked read within ten seconds, and a close woke it at once (measured, #985).
+;;; A read that does not have to wait (LISTEN is true) costs no timer.
+
+#+os-windows
+(defclass %idle-watched-stream (sb-gray:fundamental-binary-input-stream
+                                sb-gray:fundamental-binary-output-stream)
+  ((inner :initarg :inner :reader %inner)
+   (socket :initarg :socket :reader %watched-socket)
+   (seconds :initarg :seconds :reader %watch-seconds)
+   (timed-out :initform nil :accessor %timed-out)))
+
+#+os-windows
+(defun %call-watched (s thunk)
+  "Call THUNK, a read from S's inner stream. When the read would wait, a timer closes S's socket
+after S's seconds; a read woken that way signals SB-SYS:IO-TIMEOUT."
+  (if (listen (%inner s))
+      (funcall thunk)
+      (let ((timer (sb-ext:make-timer
+                    (lambda ()
+                      (setf (%timed-out s) t)
+                      (ignore-errors (usocket:socket-close (%watched-socket s))))
+                    :thread t :name "aion/http-client read timeout")))
+        (sb-ext:schedule-timer timer (%watch-seconds s))
+        (let ((result (unwind-protect (%unless-timed-out s thunk)
+                        (sb-ext:unschedule-timer timer))))
+          (when (%timed-out s)
+            (error 'sb-sys:io-timeout :stream s :direction :input :seconds (%watch-seconds s)))
+          result))))
+
+#+os-windows
+(defun %unless-timed-out (s thunk)
+  "Call THUNK. When it fails because the timer closed the socket, return NIL, so the caller
+signals the timeout instead of whatever the closed socket reported."
+  (handler-case (funcall thunk)
+    (error (e) (if (%timed-out s) nil (error e)))))
+
+#+os-windows
+(defmethod sb-gray:stream-read-byte ((s %idle-watched-stream))
+  (or (%call-watched s (lambda () (read-byte (%inner s) nil nil))) :eof))
+
+#+os-windows
+(defmethod sb-gray:stream-read-sequence ((s %idle-watched-stream) seq &optional (start 0) end)
+  (%call-watched s (lambda () (read-sequence seq (%inner s) :start start :end end))))
+
+#+os-windows
+(defmethod sb-gray:stream-listen ((s %idle-watched-stream))
+  (listen (%inner s)))
+
+#+os-windows
+(defmethod sb-gray:stream-write-byte ((s %idle-watched-stream) byte)
+  (write-byte byte (%inner s)))
+
+#+os-windows
+(defmethod sb-gray:stream-write-sequence ((s %idle-watched-stream) seq &optional (start 0) end)
+  (write-sequence seq (%inner s) :start start :end end)
+  seq)
+
+#+os-windows
+(defmethod sb-gray:stream-force-output ((s %idle-watched-stream))
+  (force-output (%inner s)))
+
+#+os-windows
+(defmethod sb-gray:stream-finish-output ((s %idle-watched-stream))
+  (finish-output (%inner s)))
+
+#+os-windows
+(defmethod stream-element-type ((s %idle-watched-stream))
+  '(unsigned-byte 8))
+
+#+os-windows
+(defmethod close ((s %idle-watched-stream) &key abort)
+  (close (%inner s) :abort abort)
+  (call-next-method))
+
+#+os-windows
+(defun %watch-reads (socket seconds)
+  "SOCKET's stream, with reads ended after SECONDS of waiting, or the stream itself when SECONDS
+is NIL."
+  (let ((stream (usocket:socket-stream socket)))
+    (if seconds
+        (make-instance '%idle-watched-stream :inner stream :socket socket :seconds seconds)
+        stream)))
+
 #+os-windows
 (defun %request-pinned (req)
   "Run REQ over a connection to its CONNECT-ADDRESS, returning (values BODY STATUS HEADERS) as
@@ -337,18 +438,21 @@ a refusal is a CERTIFICATE-REJECTED of the matching subclass. With the request's
 certificates in that file decide instead. The request is written and the response read by
 http1.lisp, whose limits apply, and the Host header is the URL's.
 
-The socket is lent to FETCH-PUBLIC's deadline watch, and the read timeout is the socket's
-receive timeout. A body read as a stream (MAX-BODY-BYTES) keeps the connection, and closing the
-body closes it; otherwise the body is read here and the connection closed."
+The socket is lent to FETCH-PUBLIC's deadline watch. The read timeout is kept by
+%IDLE-WATCHED-STREAM, because Windows ignores the socket's receive timeout. A body read as a
+stream (MAX-BODY-BYTES) keeps the connection, and closing the body closes it; otherwise the body
+is read here and the connection closed."
   (let* ((uri (quri:uri (request-url req)))
          (host (quri:uri-host uri))
          (address (or (parse-address (request-connect-address req))
                       (error 'http-error
                              :detail (format nil "connect-address ~S is not an IP address"
                                              (request-connect-address req)))))
-         (socket (usocket:socket-connect address (%port-of uri)
-                                         :element-type '(unsigned-byte 8)
-                                         :timeout (request-connect-timeout req)))
+         (socket (prog1 (usocket:socket-connect address (%port-of uri)
+                                                :element-type '(unsigned-byte 8)
+                                                :timeout (request-connect-timeout req))
+                   ;; From here on a failure happened after the connection was made (#79).
+                   (setf *%connected* t)))
          (stream nil)
          (own-config nil)
          (own-chain nil)
@@ -363,9 +467,7 @@ body closes it; otherwise the body is read here and the connection closed."
              (when own-chain (ignore-errors (aion/tls:free-certificate-chain own-chain)))))
       (unwind-protect
            (progn
-             (setf stream (usocket:socket-stream socket))
-             (when (request-read-timeout req)
-               (setf (usocket:socket-option socket :receive-timeout) (request-read-timeout req)))
+             (setf stream (%watch-reads socket (request-read-timeout req)))
              (when (string-equal (quri:uri-scheme uri) "https")
                (when (request-ca-path req)
                  (multiple-value-setq (own-config own-chain) (%ca-path-config (request-ca-path req))))
@@ -423,12 +525,16 @@ body closes it; otherwise the body is read here and the connection closed."
       (first addresses))))
 
 (defun %fire (watch)
-  "The deadline has passed: record it, and shut down the socket the fetch is using, which wakes
-a read or write blocked on it."
+  "The deadline has passed: record it, and wake a read or write blocked on the socket the fetch
+is using. Elsewhere the socket is shut down. On Windows it is closed, because a shutdown from
+another thread did not wake a blocked read there: measured, a FETCH-PUBLIC with :DEADLINE 2 to a
+server that never answered was still waiting after 20 seconds (#985)."
   (sb-thread:with-mutex ((%watch-lock watch))
     (setf (%watch-fired watch) t)
     (let ((socket (%watch-socket watch)))
-      (when socket (ignore-errors (usocket:socket-shutdown socket :io))))))
+      (when socket
+        #+os-windows (ignore-errors (usocket:socket-close socket))
+        #-os-windows (ignore-errors (usocket:socket-shutdown socket :io))))))
 
 (defun %fired-p (watch)
   (and watch (sb-thread:with-mutex ((%watch-lock watch)) (%watch-fired watch))))

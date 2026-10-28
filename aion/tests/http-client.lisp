@@ -1288,3 +1288,217 @@ also asked about as ::1, the form %TLS-NAMES gives and the one Linux and macOS v
                                               :connect-address "127.0.0.1" :read-timeout 5)
                            '())
         (is (equal '("::1") seen) "for ~A the verifier was asked about ~S" host seen)))))
+
+;;; --- what aion/retry reads from an HTTP-ERROR (#79) ------------------------------
+
+(defun %refusal (status &optional retry-after)
+  "The HTTP-ERROR ENSURE-2XX signals for a response with STATUS and, when given, a Retry-After
+header RETRY-AFTER."
+  (let ((headers (make-hash-table :test #'equal)))
+    (when retry-after (setf (gethash "retry-after" headers) retry-after))
+    (handler-case (progn (http:send-request (http:make-request :url "u") (list (http:ensure-2xx))
+                                            :perform (%ok :status status :headers headers))
+                         nil)
+      (http:http-error (e) e))))
+
+(test ensure-2xx-reads-retry-after
+  (is (eql 30 (http:http-error-retry-after (%refusal 429 "30"))))
+  (is (eql 30 (aion/retry:retry-after (%refusal 429 "30"))) "and AION/RETRY:RETRY-AFTER reads it")
+  (is (null (http:http-error-retry-after (%refusal 429))) "no header is NIL")
+  (is (null (http:http-error-retry-after (%refusal 503 "later"))) "nor is one it cannot read"))
+
+(test transience-of-an-http-error-follows-its-status
+  (dolist (status '(408 425 429 503 529))
+    (is (eq :transient (aion/retry:transience (%refusal status))) "~D" status))
+  (dolist (status '(500 502 504))
+    (is (eq :unknown (aion/retry:transience (%refusal status))) "~D" status))
+  (dolist (status '(400 401 403 404 409 422))
+    (is (null (aion/retry:transience (%refusal status))) "~D" status)))
+
+(test transience-of-a-transport-failure-follows-how-far-it-got
+  (is (eq :transient (aion/retry:transience (make-condition 'http:http-error :phase :connect))))
+  (is (eq :unknown (aion/retry:transience (make-condition 'http:http-error :phase :response))))
+  (is (null (aion/retry:transience (make-condition 'http:http-error :detail "a refused header")))
+      "a failure this client raised before sending is not transient"))
+
+(test a-refused-connection-is-a-connect-phase-failure
+  ;; A port nothing listens on: bound, then closed, so nothing can answer.
+  (let ((port (let ((s (usocket:socket-listen "127.0.0.1" 0)))
+                (prog1 (usocket:get-local-port s) (usocket:socket-close s)))))
+    (let ((e (handler-case (progn (http:send-request
+                                   (http:make-request :url (format nil "http://127.0.0.1:~D/" port)
+                                                      :connect-timeout 2 :read-timeout 2)
+                                   (list (http:ensure-2xx)))
+                                  nil)
+               (http:http-error (e) e))))
+      ;; Each message names the failure, so a platform whose transport signals a type the
+      ;; classifier does not know shows which one (#974: WinHTTP's 12029 on Windows).
+      (is (typep e 'http:http-error) "got ~S" e)
+      (is (eq :connect (and e (http:http-error-phase e))) "phase ~S for: ~A"
+          (and e (http:http-error-phase e)) e)
+      (is (aion/retry:transient-p e) "so the default policy retries it: ~A" e))))
+
+;;; --- where a pinned connection failed, from the call that failed (review of #974) -------
+
+(defun %pinned-failure (port &key (scheme "http") (read-timeout 2))
+  "The HTTP-ERROR a pinned request to 127.0.0.1:PORT signals."
+  (handler-case (progn (http:send-request
+                        (http:make-request :url (format nil "~A://pinned.test:~D/" scheme port)
+                                           :connect-address "127.0.0.1"
+                                           :connect-timeout 2 :read-timeout read-timeout)
+                        '())
+                       nil)
+    (http:http-error (e) e)))
+
+(defmacro with-silent-listener ((port-var &key reply) &body body)
+  "Run BODY with PORT-VAR bound to a port on 127.0.0.1 whose server accepts one connection,
+writes REPLY (a string) when given, and then sends nothing more until BODY ends."
+  (let ((listener (gensym)) (thread (gensym)))
+    `(let* ((,listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t))
+            (,port-var (usocket:get-local-port ,listener))
+            (,thread (bt:make-thread
+                      (lambda ()
+                        (ignore-errors
+                         (let ((c (usocket:socket-accept ,listener :element-type '(unsigned-byte 8))))
+                           (when ,reply
+                             (write-sequence (sb-ext:string-to-octets ,reply)
+                                             (usocket:socket-stream c))
+                             (finish-output (usocket:socket-stream c)))
+                           (sleep 5)
+                           (usocket:socket-close c)))))))
+       (unwind-protect (progn ,@body)
+         (ignore-errors (bt:destroy-thread ,thread))
+         (usocket:socket-close ,listener)))))
+
+(test a-pinned-connection-that-was-refused-is-a-connect-failure
+  (let* ((port (let ((s (usocket:socket-listen "127.0.0.1" 0)))
+                 (prog1 (usocket:get-local-port s) (usocket:socket-close s))))
+         (e (%pinned-failure port)))
+    (is (typep e 'http:http-error))
+    (is (eq :connect (and e (http:http-error-phase e))))))
+
+(test a-pinned-failure-after-connecting-is-a-response-failure-whatever-its-type
+  ;; The connection is made and the request sent; the server never answers, and the read times
+  ;; out. It happened after the connection was made, so it is :RESPONSE, and a POST is not
+  ;; resent. Before #985 the condition that arrived here was dexador's attempt to reconnect by
+  ;; resolving pinned.test, a USOCKET:NS-HOST-NOT-FOUND-ERROR, which by its type is :CONNECT.
+  (with-silent-listener (port)
+    (let ((e (%pinned-failure port :read-timeout 1)))
+      (is (typep e 'http:http-error) "got ~S" e)
+      (is (eq :response (and e (http:http-error-phase e))) "got ~S: ~A" (and e (http:http-error-phase e)) e)
+      (is (not (aion/retry:transient-p e)) "the default policy does not resend it"))))
+
+#-os-windows
+(test a-tls-failure-on-a-pinned-connection-has-no-phase
+  ;; A server that answers the TLS handshake with plain text. Retrying cannot fix that, so it
+  ;; must not be classed as a transport failure either way.
+  (with-silent-listener (port :reply (format nil "HTTP/1.1 400 Bad Request~C~C~C~C" #\Return #\Linefeed #\Return #\Linefeed))
+    (let ((e (%pinned-failure port :scheme "https")))
+      (is (typep e 'http:http-error) "got ~S" e)
+      (is (null (and e (http:http-error-phase e))) "got ~S: ~A" (and e (http:http-error-phase e)) e)
+      (is (not (aion/retry:transient-or-unknown-p e))))))
+
+;;; --- a pinned request uses one connection (#985) -----------------------------------------
+
+(defmacro with-counting-listener ((port-var count-var) &body body)
+  "Run BODY with PORT-VAR bound to a port on 127.0.0.1 whose server accepts every connection and
+never answers, and COUNT-VAR to a function returning how many connections it accepted."
+  (let ((listener (gensym)) (thread (gensym)) (accepted (gensym)) (held (gensym)))
+    `(let* ((,listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t :backlog 8))
+            (,port-var (usocket:get-local-port ,listener))
+            (,accepted 0)
+            (,held '())
+            (,thread (bt:make-thread
+                      (lambda ()
+                        (ignore-errors
+                         (loop (let ((c (usocket:socket-accept ,listener)))
+                                 (incf ,accepted)
+                                 (push c ,held)))))))
+            (,count-var (lambda () ,accepted)))
+       (unwind-protect (progn ,@body)
+         (ignore-errors (bt:destroy-thread ,thread))
+         (dolist (c ,held) (ignore-errors (usocket:socket-close c)))
+         (usocket:socket-close ,listener)))))
+
+(test a-pinned-request-that-times-out-uses-one-connection
+  "#985: the URL names localhost, which resolves, and the request is pinned to 127.0.0.1. The
+server accepts and never answers. Before #985, dexador reconnected through DNS after the read
+timed out and sent the request again, and this server counted two connections."
+  (with-counting-listener (port accepted)
+    (let ((e (handler-case
+                 (progn (http:send-request
+                         (http:make-request :url (format nil "http://localhost:~D/" port)
+                                            :connect-address "127.0.0.1"
+                                            :connect-timeout 2 :read-timeout 1)
+                         '())
+                        nil)
+               (http:http-error (e) e))))
+      (sleep 0.5)                       ; a second connection, if one were made, has arrived
+      (is (= 1 (funcall accepted)) "the server accepted ~D connections" (funcall accepted))
+      (is (typep e 'http:http-error))
+      (is (eq :response (and e (http:http-error-phase e))))
+      (is (search "timeout" (string-downcase (or (and e (http:http-error-detail e)) "")))
+          "the caller gets the read timeout: ~A" (and e (http:http-error-detail e))))))
+
+(test fetch-public-stops-at-its-deadline-when-the-server-never-answers
+  "#985: a real socket, not a stub. The server accepts and never answers, and there is no read
+timeout, so only the deadline can end the fetch. On Windows the deadline used to shut the socket
+down, which did not wake the read: the fetch was still waiting after 20 seconds. An outer limit
+of 30 seconds makes that a failure here rather than a hang."
+  (with-counting-listener (port accepted)
+    (let* ((start (get-internal-real-time))
+           (result (handler-case
+                       (sb-ext:with-timeout 30
+                         (handler-case
+                             (progn (http:fetch-public (format nil "http://silent.test:~D/" port)
+                                                       :resolve (%resolver '(("silent.test" "127.0.0.1")))
+                                                       :address-policy #'%loopback-allowed
+                                                       :deadline 2)
+                                    :returned)
+                           (http:fetch-deadline-exceeded () :deadline)))
+                     (sb-ext:timeout () :still-waiting)))
+           (seconds (/ (- (get-internal-real-time) start) internal-time-units-per-second)))
+      (is (eq :deadline result) "got ~S after ~,1F s" result seconds)
+      (is (< seconds 10) "and within a few seconds of the deadline: ~,1F s" seconds)
+      (is (= 1 (funcall accepted)) "on one connection: ~D" (funcall accepted)))))
+
+(test a-pinned-request-sends-dexadors-user-agent-and-accept-unless-given
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "ok")))
+    (http:send-request (http:make-request :url (%local s "/" "pinned.test")
+                                          :connect-address "127.0.0.1" :read-timeout 5)
+                       '())
+    (http:send-request (http:make-request :url (%local s "/" "pinned.test")
+                                          :connect-address "127.0.0.1" :read-timeout 5
+                                          :headers '(("User-Agent" . "probe/1")
+                                                     ("Accept" . "text/html")))
+                       '())
+    (destructuring-bind (second first) (server-heads s)
+      (is (string= dexador.util:*default-user-agent* (%head-header first "User-Agent"))
+          "as a request through dexador sent")
+      (is (string= "*/*" (%head-header first "Accept")))
+      (is (string= "probe/1" (%head-header second "User-Agent")) "a caller's own wins")
+      (is (string= "text/html" (%head-header second "Accept"))))))
+
+(test a-pinned-request-frames-its-body-as-dexador-did
+  "#985: string content without a Content-Type is text/plain, and a POST with no content says
+Content-Length: 0, as dexador wrote them; a GET with no content says neither."
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "ok")))
+    (flet ((send (&rest args)
+             (http:send-request (apply #'http:make-request :url (%local s "/" "pinned.test")
+                                       :connect-address "127.0.0.1" :read-timeout 5 args)
+                                '())
+             (first (server-heads s))))
+      (let ((head (send :method :post :content "hello")))
+        (is (string= "text/plain" (%head-header head "Content-Type")))
+        (is (string= "5" (%head-header head "Content-Length"))))
+      (let ((head (send :method :post :content "{}" :headers '(("Content-Type" . "application/json")))))
+        (is (string= "application/json" (%head-header head "Content-Type")) "a caller's own wins"))
+      (let ((head (send :method :post)))
+        (is (string= "0" (%head-header head "Content-Length")))
+        (is (null (%head-header head "Content-Type"))))
+      (let ((head (send :method :get)))
+        (is (null (%head-header head "Content-Length")))))))

@@ -970,6 +970,33 @@ its tag.
 
 ### Added
 
+- **aion/retry: a retry policy as data, and `with-retry`, which retries through restarts**
+  (#79). `make-retry-policy` takes `:max-attempts`, `:base-delay`, `:multiplier`, `:max-delay`,
+  `:jitter` (`:full`, `:equal` or `:none`), `:deadline` and `:retryable`, and `retry-delay`
+  computes the schedule as a pure function. `with-retry` and `call-with-retry` run each attempt
+  inside a `retry` restart, signal `retry-scheduled` before each wait (a handler can take
+  `give-up` or `retry-now`), and let the original condition through unchanged when the policy
+  allows no more attempts. A server's Retry-After is a floor on the wait, and one longer than
+  `:max-delay` stops the retrying. Which conditions are retried by default is the `transience`
+  protocol: `transient-p` covers failures after which the request was not acted on, and
+  `transient-or-unknown-p` adds those after which it may have been, for idempotent calls.
+  `with-retry` signals `retry-would-block` on an aion/uv loop thread, which binds the new
+  `aion/dynamic:*blocking-forbidden*`. Nothing in the tree retries yet; praxeon and hermes adopt
+  it, opt-in, in a later change.
+- **aion/http-client: `http-error` carries `http-error-retry-after` and `http-error-phase`**
+  (#79). `ensure-2xx` reads the response's Retry-After header, in seconds or as an HTTP date,
+  into `http-error-retry-after`. A transport failure has `http-error-phase` `:connect` when no
+  connection was made, so the request was not sent, and `:response` for a socket or stream
+  failure after it was made. A TLS failure, and anything else that is not a socket or stream
+  failure, has no phase, so it is never retried. On the pinned path (`:connect-address`,
+  `fetch-public`) the phase comes from where the call failed, not from the condition's type,
+  and a connection that ends before the response does (a `malformed-response` saying "the
+  connection ended") is `:response`. On Windows, where dexador uses WinHTTP, the phase comes
+  from WinHTTP's error code: 12029 and 12007 are `:connect`; 12002, 12030 and 12152 are
+  `:response`. aion/http-client now depends on `aion/retry` and defines the `transience` and
+  `retry-after` methods for `http-error`: 408, 425, 429, 503, 529 and `:connect` are
+  `:transient`; 500, 502, 504 and `:response` are `:unknown`.
+
 - **praxeon/image: the generate-image means offers the model a `mask`, so it can change only part
   of an image** (#946). With `:resolve-reference` and a provider that takes a mask
   (`image-provider-accepts-mask-p`, true for OpenAI), the tool schema offers `mask`: a reference,
@@ -2351,6 +2378,31 @@ its tag.
   "Long-running calls".
 
 ### Fixed
+
+- **aion/http-client: a failure on a pinned connection no longer reconnects through DNS or sends
+  the request again** (#985). A request with `:connect-address`, which `fetch-public` always
+  makes, handed its connection to dexador on Linux and macOS. After any failure on it, such as a
+  read timeout or a reset, dexador opened a second connection by resolving the URL's host name,
+  bypassing the address `fetch-public` had checked, and sent the request again, a POST included.
+  The pinned path now writes the request and reads the response itself on every platform, as it
+  already did on Windows (#536), so it uses exactly one connection. Visible differences on Linux
+  and macOS: the request asks for `Accept-Encoding: identity` instead of gzip; a pinned
+  `send-request` does not follow redirects itself (`fetch-public` follows them, as before);
+  responses are read under http1.lisp's limits and refused with `malformed-response` outside
+  HTTP/1.1's grammar; an alist `:content` whose values are pathnames (dexador's multipart) is not
+  supported there. As through dexador, the default `User-Agent` and `Accept: */*` are sent,
+  string or octet content without a Content-Type is `text/plain`, and a request without content
+  other than GET or HEAD sends `Content-Length: 0`. Those four are now also what the Windows
+  pinned path sends.
+
+- **aion/http-client: on Windows, a pinned request's `:read-timeout` and `fetch-public`'s
+  `:deadline` end a read from a server that never answers** (#985). Neither did before: the
+  socket's receive timeout had no effect on Windows, and the deadline shut the socket down,
+  which did not wake the read there. Measured, a `fetch-public` with `:deadline 2` to such a
+  server was still waiting after 20 seconds, so a user-supplied URL could hold a Windows caller
+  for as long as the server kept the connection open. The read timeout now ends the read with
+  an `http-error` whose phase is `:response` and whose detail says "I/O timeout", and the
+  deadline closes the socket on Windows, so the fetch ends with `fetch-deadline-exceeded`.
 
 - **cons: in a project made with `cons init --template web --db`, `open-database` closes the
   pool only when making the session or user store did not finish** (#944). It used to close the
