@@ -198,7 +198,8 @@
 (defsystem "aion/uv/tests"
   :description "Tests for aion/uv. Requires a built libuv (scripts/build-libuv.lisp)."
   :depends-on ("aion/uv" "fiveam"
-               "aion/platform")   ; *search-source-tree*, which the loader tests bind (#472)
+               "aion/platform"    ; *search-source-tree*, which the loader tests bind (#472)
+               "aion/dynamic")    ; *blocking-forbidden*, which a loop callback must see bound (#79)
   :serial t
   :components ((:module "tests"
                 :serial t
@@ -320,7 +321,8 @@
 
 (defsystem "aion/retry/tests"
   :description "Tests for aion/retry: the schedule, the runner's restarts, Retry-After, the deadline."
-  :depends-on ("aion/retry" "fiveam")
+  :depends-on ("aion/retry" "fiveam"
+               "aion/dynamic")   ; binds *blocking-forbidden* to test the refusal
   :serial t
   :components ((:module "tests"
                 :serial t
@@ -358,6 +360,7 @@
   ;; aion/tls and aion/windows directly (#536).
   :depends-on ("aion/http-client" "fiveam" "usocket" "bordeaux-threads" "aion/test-threads" "quri"
                "aion/test-http"
+               "aion/retry"   ; TRANSIENCE and RETRY-AFTER of an HTTP-ERROR (#79)
                (:feature (:not :os-windows) "cl+ssl")
                (:feature :os-windows "aion/tls") (:feature :os-windows "aion/windows"))
   :serial t
