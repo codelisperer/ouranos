@@ -88,7 +88,11 @@ saying what its stamp says, what the pin says, and to run COMMAND. Used where a 
 to carry a vendored library (#1001)."
   (let ((version (pin-field pin "version"))
         (sha (pin-field pin "sha256")))
-    (ecase (if (and version sha) (stamp-state vendor-dir version sha) :missing)
+    (unless (and version sha)
+      (return-from stamp-refusal
+        (format nil "~A is missing or does not name a version and a sha256, so whether ~A was built from it cannot be checked. Restore the pin, then rebuild:~%  ~A"
+                (file-namestring pin) (namestring vendor-dir) command)))
+    (ecase (stamp-state vendor-dir version sha)
       (:current nil)
       (:stale (format nil "~A was built from ~A, and ~A names ~A. Rebuild it:~%  ~A"
                       (namestring vendor-dir) (or (stamp-version vendor-dir) "another release")

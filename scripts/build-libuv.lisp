@@ -463,11 +463,13 @@ and is only on PATH inside the toolchain environment, so it goes through vcvarsa
            ;; BEFORE the fetch rather than inside the compile -- see `require-toolchain'.
            (progn
              (require-toolchain)
-             ;; The old stamp goes first: a compile that fails after overwriting the library
-             ;; must not leave a stamp saying the library is current (#1001).
-             (ouranos-built-from:delete-stamp *vendor*)
              (let* ((srcdir (ensure-source version url sha))
-                    (library (compile-library srcdir)))
+                    ;; The old stamp goes just before the compile: a compile that fails after
+                    ;; overwriting the library must not leave a stamp saying the library is
+                    ;; current (#1001). Not before the download, so a --force run that cannot
+                    ;; download leaves a current library and its stamp as they were.
+                    (library (progn (ouranos-built-from:delete-stamp *vendor*)
+                                    (compile-library srcdir))))
                (verify-built library)
                (ouranos-built-from:write-stamp *vendor* version sha)
                (format t "~&OK. aion/uv will load this in preference to any system libuv.~%")

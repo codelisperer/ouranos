@@ -65,16 +65,22 @@ builds. The last case is the control: the same tree, stamped for the pin, is reu
       (is (eq :reuse (decide)) "control: a library stamped for the pin is reused")
       (finishes (ouranos-built-from:delete-stamp (%fresh-tree)) "no stamp to delete is not an error"))))
 
-(test build-libuv-deletes-the-old-stamp-before-it-compiles
+(test build-libuv-source-calls-delete-stamp-between-the-download-and-the-compile
   "#1001: a compile that fails after overwriting the library must not leave the previous stamp
-saying the library is current. build-libuv.lisp decides with BUILD-DECISION and deletes the
-stamp before COMPILE-LIBRARY runs; the stamp is written again only after the build succeeds."
+saying the library is current, and a download that fails must not lose a current one.
+
+This reads the ORDER OF THE CALLS IN build-libuv.lisp's source, not what a run does: the script
+compiles C and downloads a tarball, which a unit test does not. It checks that the script
+decides with BUILD-DECISION, and that DELETE-STAMP comes after ENSURE-SOURCE (the download) and
+before COMPILE-LIBRARY, with WRITE-STAMP after the compile."
   (let* ((text (uiop:read-file-string (merge-pathnames "build-libuv.lisp" *scripts*)))
+         (download (search "(ensure-source version url sha)" text))
          (delete (search "(ouranos-built-from:delete-stamp" text))
          (compile (search "(compile-library srcdir)" text))
          (write (search "(ouranos-built-from:write-stamp" text)))
     (is (search "(ouranos-built-from:build-decision" text) "it decides with BUILD-DECISION")
-    (is (and delete compile (< delete compile)) "the stamp is deleted before the compile")
+    (is (and download delete (< download delete)) "the stamp is deleted after the download")
+    (is (and delete compile (< delete compile)) "and before the compile")
     (is (and compile write (< compile write)) "and written after it")))
 
 (test a-bundle-refuses-a-vendored-library-whose-stamp-does-not-name-the-pin
@@ -99,4 +105,8 @@ command to run; a stamp for the pin gives NIL, which is the control."
           "another release: ~S" stale))
     (ouranos-built-from:write-stamp vendor "1.53.0" sha)
     (is (null (ouranos-built-from:stamp-refusal vendor pin command))
-        "control: a library stamped for the pin is carried")))
+        "control: a library stamped for the pin is carried")
+    (let ((no-pin (ouranos-built-from:stamp-refusal vendor (merge-pathnames "absent.pin" tree)
+                                                    command)))
+      (is (and no-pin (search "absent.pin is missing" no-pin) (null (search "NIL" no-pin)))
+          "a missing pin is named, not printed as NIL: ~S" no-pin))))
