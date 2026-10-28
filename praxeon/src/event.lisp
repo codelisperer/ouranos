@@ -154,10 +154,24 @@ which is content, and the emitter withholds it itself with UNLESS-WITHHELD (the 
 #1027).")
 
 (defun unless-withheld (value)
-  "VALUE, or :WITHHELD under *WITHHOLD-CONTENT*. For content outside +CONTENT-KEYS+: a
-delegation's task text, and a host or a resource name a private agent's tool reads, which a log
-line would otherwise carry (#983)."
+  "VALUE, or :WITHHELD under *WITHHOLD-CONTENT*. For event content outside +CONTENT-KEYS+, such
+as a delegation's task text (#983). A log line uses UNLESS-WITHHELD-FROM-LOGS instead."
   (if *withhold-content* :withheld value))
+
+(defvar *withhold-from-logs* nil
+  "When true, UNLESS-WITHHELD-FROM-LOGS returns :WITHHELD, so a log line carries no host or
+resource name that says what the user asked about (#983). It is true during a turn of a private
+agent, whether or not the agent retains content in events: :RETAIN-CONTENT is about events, and
+logs never carry content. MCP:ADD-RESOURCE binds it from the agent it is given, because an app
+usually calls it outside any turn (the hub's review of #1027).")
+
+;; Inheritable for the reason *WITHHOLD-CONTENT* is.
+(aion/dynamic:register-inheritable '*withhold-from-logs*)
+
+(defun unless-withheld-from-logs (value)
+  "VALUE, or :WITHHELD under *WITHHOLD-FROM-LOGS*. For a log field that can say what the user
+asked about, such as the host READ-WEB-PAGE reads or the resource an MCP resource line names."
+  (if *withhold-from-logs* :withheld value))
 
 (defun %withhold (payload)
   (loop for (key value) on payload by #'cddr

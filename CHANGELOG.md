@@ -1050,7 +1050,10 @@ its tag.
       request failed" lines changed to the condition's type in #1013, and each line was checked
       for this change.
     - The host `read-web-page` reads, and the resource an MCP resource line names, are logged as
-      `:withheld` for a private agent, because they say what the user asked about.
+      `:withheld` for a private agent, because they say what the user asked about. This follows
+      the new `evt:*withhold-from-logs*`, which a private agent's turn binds whether or not the
+      agent retains content, and `mcp:add-resource` binds from the agent it is given, so a call
+      outside a turn is covered. `actor:agent-private` is now exported.
   - **Events.** `evt:*withhold-content*` is true, and `evt:emit` replaces every content field
     with `:withheld`. The content fields are `evt:+content-keys+`: `:arguments`, `:content`,
     `:text`, `:message`, `:schema` and `:url`. This covers what the studio's status printer and

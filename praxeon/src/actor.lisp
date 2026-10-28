@@ -1292,6 +1292,11 @@ and ends the turn when nothing handles it, as before."
 withholds, or AGENT is private and does not retain content."
   (or evt:*withhold-content* (and (agent-private agent) (not (agent-retain-content agent)))))
 
+(defun %withhold-from-logs-for (agent)
+  "What EVT:*WITHHOLD-FROM-LOGS* is during a turn of AGENT: true when an enclosing turn already
+withholds, or AGENT is private. RETAIN-CONTENT does not change it, because it is about events."
+  (or evt:*withhold-from-logs* (and (agent-private agent) t)))
+
 (defun %condition-details-for (agent)
   "What AION/LOG:*LOG-CONDITION-DETAILS* is during a turn of AGENT: NIL when AGENT is private,
 and otherwise what it already was, which an enclosing private turn has made NIL."
@@ -1302,6 +1307,7 @@ and otherwise what it already was, which an enclosing private turn has made NIL.
   (let ((a (gensym "AGENT")))
     `(let* ((,a ,agent)
             (evt:*withhold-content* (%withhold-content-for ,a))
+            (evt:*withhold-from-logs* (%withhold-from-logs-for ,a))
             (aion/log:*log-condition-details* (%condition-details-for ,a)))
        ,@body)))
 
