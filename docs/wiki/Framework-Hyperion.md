@@ -285,6 +285,17 @@ inside the row. `panel-js` moves `aria-current` to the chosen row, and closing t
 its button or Escape, returns focus to that row's button. The browser test checks the toolbar's
 URLs against `list-href` and the panel's focus handling on a small list page.
 
+A page that shows a second view beside its own content, such as a chat or a help pane, uses
+`hyperion/kit/dock`. `dock-panel` writes a section that htmx fills from a route the app mounts,
+inside a column, tab or drawer the page already has. It has no width or position of its own, so
+it resizes with that element. It loads with the page, even inside a tab that is not shown, or,
+with `:load :on-open`, the first time it receives the event `hy-dock-open`, which
+`dock-launcher`'s button sends when it opens the panel. Loading on that event replaced htmx's
+`intersect` trigger, because headless Chrome never reported a hidden panel as visible after it
+was shown, so `intersect` could not be tested. The browser test puts three panels in a page that
+has its own htmx and checks their widths, the tab switches, the launcher, how many times each
+panel's contents were requested, and that `window.htmx` is still the page's own.
+
 ### The hot-reload dev loop — the signature feature
 
 The property everything else follows from: **state ≠ server.**

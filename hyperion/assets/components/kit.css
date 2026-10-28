@@ -288,6 +288,28 @@
   padding: var(--hy-space-4, 16px);
 }
 
+/* The dock panel fills the element the page puts it in, and has no width or position of its
+   own, so it resizes with that element. */
+.hy-dock {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.hy-dock[hidden] {
+  display: none;
+}
+
+.hy-dock-loading {
+  padding: var(--hy-space-4, 16px);
+  color: var(--bulma-text-weak);
+}
+
 /* Hover, press and keyboard focus for the buttons above. Their `background` replaces the one
    Bulma changes on hover, so they would otherwise show no hover at all. A translucent grey
    layer over the token's background darkens a light button and lightens a dark one, and works
