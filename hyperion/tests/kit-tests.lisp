@@ -11,6 +11,7 @@
                     (#:dlg #:hyperion/kit/dialog)
                     (#:tb #:hyperion/kit/toolbar)
                     (#:panel #:hyperion/kit/panel)
+                    (#:dock #:hyperion/kit/dock)
                     (#:list #:hyperion/list)
                     (#:spin #:spinneret))
   (:export #:run-tests))
@@ -709,3 +710,51 @@ panel on a click that did not come from a control inside it."
     (is (equal "Fermer" (%attr close "aria-label")))
     (is (%attr close "data-hy-panel-close"))
     (is (%by-id dom "b"))))
+
+;;; The dock panel (#67).
+
+(test the-dock-panel-is-a-named-region-that-loads-its-contents-from-a-route
+  (let* ((dom (%dom (lambda () (dock:dock-panel "/chat/panel" "Assistant"))))
+         (section (%one dom "section"))
+         (loading (%one dom "p")))
+    (is (equal "hy-dock" (%attr section "id")))
+    (is (equal "Assistant" (%attr section "aria-label")))
+    (is (equal "/chat/panel" (%attr section "hx-get")))
+    (is (equal "load" (%attr section "hx-trigger")))
+    (is (equal "innerHTML" (%attr section "hx-swap")))
+    (is (null (%attr section "hidden")))
+    (is (null (%attr section "style")) "the panel sets no size of its own")
+    (is (equal "status" (%attr loading "role")))
+    (is (equal "Loading…" (%text loading)))))
+
+(test a-dock-panel-can-wait-until-it-is-opened-and-start-hidden
+  (let* ((dom (%dom (lambda () (dock:dock-panel "/help" "Help" :id "help" :load :on-open
+                                                               :hidden t
+                                                               :loading-text "Chargement…"))))
+         (section (%one dom "section")))
+    (is (equal "help" (%attr section "id")))
+    (is (equal "hy-dock-open once" (%attr section "hx-trigger")))
+    (is-true (%attr section "hidden"))
+    (is (equal "Chargement…" (%text (%one dom "p"))))))
+
+(test the-dock-panel-refuses-what-it-cannot-write
+  (signals error (%dom (lambda () (dock:dock-panel nil "Help"))))
+  (signals error (%dom (lambda () (dock:dock-panel "/help" nil))))
+  (signals error (%dom (lambda () (dock:dock-panel "/help" "Help" :load :later)))))
+
+(test the-dock-launcher-controls-its-panel-and-says-whether-it-is-open
+  (let ((closed (%one (%dom (lambda () (dock:dock-launcher "Chat" :dock-id "chat"))) "button"))
+        (open (%one (%dom (lambda () (dock:dock-launcher "Chat" :open t))) "button")))
+    (is (equal "button" (%attr closed "type")))
+    (is (equal "chat" (%attr closed "aria-controls")))
+    (is (equal "false" (%attr closed "aria-expanded")))
+    (is-true (%attr closed "data-hy-dock-toggle"))
+    (is (equal "Chat" (%text closed)))
+    (is (equal "hy-dock" (%attr open "aria-controls")))
+    (is (equal "true" (%attr open "aria-expanded")))))
+
+(test the-dock-script-leaves-a-host-page-s-htmx-and-loaders-alone
+  (let ((js (remove #\Space (dock:dock-js))))
+    (is (null (search "window.htmx=" js)))
+    (is (null (search "define" js)))
+    (is (null (search "<script" js)))))
