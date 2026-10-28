@@ -1042,6 +1042,29 @@ its tag.
   case, as the standard reader folds them. `write-data` and `write-data-to-string` write only
   what `read-data` accepts, and refuse anything else before writing a character, including a symbol whose name would read back as a number or as CL's `t` or `nil`. An app that
   reads data it did not write with `cl:read`, even with `*read-eval*` nil, should move to it.
+- **hyperion/appearance: text-size roles, a UI font and a prose font, and a focus-ring colour**
+  (#981). `appearance-css` writes seven text-size tokens: `--hy-text-caps` 0.6875rem,
+  `--hy-text-meta` 0.75rem, `--hy-text-dense` 0.8125rem, `--hy-text-body` 0.875rem,
+  `--hy-text-heading` 1rem, `--hy-text-title` 1.25rem and `--hy-text-prose` 1.0625rem. It also
+  writes two font tokens: `--hy-font-ui`, a system-ui stack, and `--hy-font-prose`, a serif
+  stack. Bulma's `--bulma-size-1` to `--bulma-size-7` are unchanged.
+  - `make-appearance-table` takes `:type-scale` and `:fonts`, plists merged over
+    `*default-type-scale*` and `*default-fonts*`. It signals on an unknown role or font, a value
+    that is not a string, or a value containing `;`, `{`, `}`, `<` or a newline.
+  - `--hy-focus-ring` is a new colour token in every scheme and contrast setting:
+    `#485fc7` light, `#7a9cff` dark, `#0033cc` light high-contrast and `#ffd400` dark
+    high-contrast. `appearance-contrast-failures` checks it at 3:1
+    (`*minimum-ring-contrast*`) against `:surface`, `:surface-raised` and `:header`
+    (`*ring-backgrounds*`) in every look, and each failure now carries `:required`, the ratio it
+    was held to. An app whose table sets one of those backgrounds may now get ring failures it
+    did not get before.
+  - In the gradient look, primary and danger buttons get hover (a grey layer over the
+    background), press (`filter: brightness(0.92)`) and `:focus-visible` (a 2px
+    `--hy-focus-ring` outline) rules.
+  - `kit.css` uses the text roles instead of Bulma's sizes. A selectable row's focus outline is
+    `--hy-focus-ring`, and the segmented-control, toggle-group, toolbar and confirm buttons get
+    hover, press and focus rules.
+
 - **hyperion/kit: a list toolbar and a properties panel** (#981, part four). `hyperion/kit` now
   also depends on `hyperion/list`.
   - `hyperion/kit/toolbar:list-toolbar` takes a `hyperion/list` state and writes a GET form with
@@ -1145,8 +1168,9 @@ its tag.
     background. The outlined, light and inverted button variants keep Bulma's colours.
   - A browser without the `prefers-contrast` media feature (Chrome before 96, Firefox before
     101) shows the light, flat look on a page that sets no `data-contrast`.
-  - The type scale is Bulma's `--bulma-size-1` to `--bulma-size-7`, set through
-    `hyperion/assets:theme`.
+  - The text roles are their own tokens: see the entry for the text roles, fonts and focus ring.
+    Bulma's `--bulma-size-1` to `--bulma-size-7`, set through `hyperion/assets:theme`, are
+    unchanged.
   - `appearance-contrast-failures` checks every text token against its background in all eight
     combinations, at WCAG AA (4.5:1). For a gradient it checks every stop and 19 points between
     each pair of stops. Hyperion's own table passes. An app calls the check in its own tests on
