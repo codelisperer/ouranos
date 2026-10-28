@@ -30,6 +30,7 @@ its tag.
     signals `db-statement-timeout` (a `db-error`), from `exec`, `query` and `map-query`.
   - `mnemosyne/docs/user-guide.md` describes both, and the server-side fallback
     `ALTER ROLE ... SET statement_timeout`.
+
 - **`scripts/build-desktop-app.lisp` stops, instead of warning and exiting 0, when the bundle
   needs hyperion-view or a library the runtime links against and it is missing** (#956). For an
   app that loads `hyperion/desktop`, a `hyperion/hyperion-view/hyperion-view(.exe)` that was not

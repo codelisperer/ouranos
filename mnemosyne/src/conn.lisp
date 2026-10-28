@@ -231,14 +231,24 @@ given to the socket the way aion/http-client gives one to usocket. The thread is
 than left to finish, because a server that completed the TCP handshake and then never answers
 would hold it forever: the operating system's connect limit covers only the handshake.
 
-Stopping it unwinds out of whatever cl-postgres was doing. During the TCP connect, the startup
-message or authentication, that leaves only the socket, which nothing references afterwards; SBCL
-closes its file descriptor when the socket object is collected, not at once. During the TLS
-handshake the thread is inside OpenSSL through cl+ssl, and the stop takes effect when that
-foreign call returns to Lisp. Measured on Linux against a server that answered the SSL request
-and then sent nothing: the timeout fired after 1 s and the thread had ended within 5 s, while
-the server still held the connection. The SSL stream is left for the collector in the same way. The stop is only delivered while THUNK runs: once THUNK has
-returned, the thread hands its result over or closes it before it can be stopped."
+Stopping it unwinds out of whatever cl-postgres was doing, and what becomes of the socket
+depends on how far it had got. During the TCP connect it is left for the collector: nothing
+references it afterwards, and SBCL closes its file descriptor when the socket object is
+collected, not at once. From the startup message onwards, authentication and the TLS handshake
+included, cl-postgres has established the UNWIND-PROTECT in its INITIATE-CONNECTION whose
+cleanup calls ENSURE-SOCKET-IS-CLOSED unless the connection finished, so the unwind closes the
+socket. Inside the TLS handshake the thread is in OpenSSL through cl+ssl, and the stop takes
+effect when that foreign call returns to Lisp; measured on Linux against a server that answered
+the SSL request and then sent nothing, the timeout fired after 1 s and the thread had ended
+within 5 s.
+
+The stop is delivered only while THUNK runs, so once THUNK has returned the thread hands its
+result over, or closes it, before it can be stopped. ONE WINDOW IS NARROWED AND NOT CLOSED: a
+stop that arrives between the connect returning and WITH-LOCAL-INTERRUPTS exiting unwinds with
+the connection still on the stack, so V is never set and ON-LATE never sees it. That connection
+is closed by cl-postgres's unwind-protect above only while it is still being made; one already
+established is dropped, and its socket waits for the collector. Closing this would need the
+connect to be stoppable without unwinding it, which TERMINATE-THREAD is not."
   (if (null seconds)
       (funcall thunk)
       (let ((state (list :running))   ; CAR moves once, to :DONE or :ABANDONED, by CAS
@@ -260,7 +270,9 @@ returned, the thread hands its result over or closes it before it can be stopped
                  (progv symbols bound
                    ;; A stop is taken only inside THUNK. One that arrives after THUNK returned
                    ;; waits until the result has been handed over or, when the caller has given
-                   ;; up, closed by ON-LATE, so a connected session is never dropped half way.
+                   ;; up, closed by ON-LATE. The window where a stop can still lose a connection
+                   ;; is narrowed to the instant between the connect returning and the exit from
+                   ;; WITH-LOCAL-INTERRUPTS; it is not closed. See the docstring.
                    (sb-sys:without-interrupts
                      (let ((v nil) (e nil))
                        (handler-case (sb-sys:with-local-interrupts (setf v (funcall thunk)))

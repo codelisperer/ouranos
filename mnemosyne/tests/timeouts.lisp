@@ -48,8 +48,7 @@ sends a byte."
       (is (<= 0.9 elapsed 5) "it waited about the timeout, not the operating system's limit: ~,2F s"
           elapsed)
       (loop repeat 50 while (%connect-threads) do (sleep 0.1))
-      (is (null (%connect-threads))
-          "the thread that was connecting is gone, while the server still holds the connection")
+      (is (null (%connect-threads)) "the thread that was connecting is gone")
       (when (typep condition 'conn:db-connect-timeout)
         (is (equal "127.0.0.1" (conn:db-connect-timeout-host condition)))
         (is (eql port (conn:db-connect-timeout-port condition)))
