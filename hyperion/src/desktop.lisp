@@ -480,7 +480,11 @@ DIALOGS -- when true, the default, the window offers the app's own page native o
   folder dialogs through window.hyperionDialog (#986; see DIALOG-ONCLICK). THE PAGE RECEIVES THE
   PATH THE USER CHOOSES. The function is offered only to the app's own origin, in the top-level
   frame, so a page from elsewhere does not get it, but an app that shows third-party content in
-  its window should pass :DIALOGS NIL. Ignored by the :browser shell.
+  its window should pass :DIALOGS NIL. Ignored by the :browser shell. The origin is taken from
+  the URL as written, so a URL with a user name or with its scheme's default port written out
+  (http://host:80/) never matches the page's own origin, and the page gets no dialog; RUN-APP's
+  own URL has neither. hyperion-view refuses to start with --dialogs when it cannot make the
+  launch's token, so while the window runs, DIALOGS-AVAILABLE-P is true only of one that has them.
 ON-READY is called with the URL before the shell launches; ON-CLOSE after it exits.
 SIDECARS -- a list of names declared with HYPERION/SIDECAR:DEFINE-SIDECAR (#700). They start
   once the embedded server is listening, with its port for \"{port}\", and before ON-READY; they

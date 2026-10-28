@@ -903,15 +903,21 @@ its tag.
     `run-app` started with: iframes, and pages from any other origin, do not get it. A call
     without the token hyperion-view makes at each launch is refused by hyperion-view itself, and a
     call made outside a user action (a click or a key) is refused where the webview can tell: on
-    Windows (WebView2) and on macOS 13.3 and later. One dialog is shown at a time; a second call
-    gets `{error: "busy"}`. An app that shows third-party content in its window should pass
-    `:dialogs nil`.
+    Windows (WebView2) and on macOS 13.3 and later. The answer is delivered only while the window
+    still shows the app's origin, so a page the window has gone to since the call does not receive
+    the path. One dialog is shown at a time; a second call gets `{error: "busy"}`. A `folder` that
+    begins with two slashes or two backslashes (a network share) is refused, because opening the
+    dialog there makes Windows send the user's credentials to that host. An app that shows
+    third-party content in its window should pass `:dialogs nil`.
   - **Only Windows shows a dialog in this change.** On macOS and Linux the function exists and
     answers `{error: "unavailable"}`, and `dialogs-available-p` is NIL; their dialogs follow in
     separate changes.
   - hyperion-view gains `--dialogs`, `--exit-after SECONDS` (closes the window after SECONDS, for
     tests), and two modes that make no window: `--dialog-request TOKEN PARAMS` prints how a call is
-    checked, and `--dialog-origin URL` prints the origin the function is offered to. A
+    checked, and `--dialog-origin URL` prints the origin the function is offered to. With
+    `--dialogs`, hyperion-view exits 2 if it cannot make the launch's token. For tests,
+    `HYPERION_VIEW_FAKE_DIALOG=1` answers every call with `{path: "fake-path"}` after three seconds,
+    shows no dialog and skips the user-action check, and says so on stderr. A
     hyperion-view built before this change refuses `--dialogs` as an unknown option, so rebuild it
     with `hyperion/hyperion-view/build.ps1` (it now links `uuid.lib` and `bcrypt.lib`).
 

@@ -29,12 +29,14 @@
   text)
 
 (defun %dialog-pattern-p (pattern)
-  "\"*\", or \"*.\" and 1 to 16 letters, digits, _, + or -."
+  "\"*\", or \"*.\" and 1 to 16 ASCII letters, digits, _, + or -. ASCII only, as hyperion-view
+checks it: CHAR-DOWNCASE would let a character such as KELVIN SIGN through here that the view
+refuses."
   (and (stringp pattern)
        (or (string= pattern "*")
            (and (<= 3 (length pattern) 18)
                 (string= "*." (subseq pattern 0 2))
-                (every (lambda (c) (or (and (char<= #\a (char-downcase c) #\z)) (char<= #\0 c #\9)
+                (every (lambda (c) (or (char<= #\a c #\z) (char<= #\A c #\Z) (char<= #\0 c #\9)
                                        (find c "_+-")))
                        (subseq pattern 2))))))
 
@@ -42,7 +44,12 @@
   (unless (member kind +dialog-kinds+)
     (%dialog-refuse "the dialog KIND must be one of ~{~S~^, ~}, not ~S" +dialog-kinds+ kind))
   (when title (%dialog-text "the dialog's TITLE" title 200))
-  (when folder (%dialog-text "the dialog's FOLDER" folder 4096))
+  (when folder
+    (%dialog-text "the dialog's FOLDER" folder 4096)
+    ;; A network share: opening the dialog there makes Windows send the user's credentials to
+    ;; that host. hyperion-view refuses it too.
+    (when (and (>= (length folder) 2) (find (char folder 0) "/\\") (find (char folder 1) "/\\"))
+      (%dialog-refuse "FOLDER is a network share, which is refused: ~S" folder)))
   (when name
     (unless (eq kind :save) (%dialog-refuse "NAME is for a :SAVE dialog only"))
     (%dialog-text "the dialog's NAME" name 260)
@@ -83,7 +90,9 @@
 KIND is :OPEN, :OPEN-MANY, :SAVE or :FOLDER. TITLE is the dialog's title. FILTERS is a list of
 (LABEL PATTERN ...), each PATTERN \"*\" or \"*.EXT\", such as ((\"Databases\" \"*.accdb\" \"*.mdb\")
 (\"All files\" \"*\")); a :FOLDER dialog takes none. FOLDER is where it opens; without it, the
-folder last used for that KIND, else Documents. NAME is a :SAVE dialog's suggested file name.
+folder last used for that KIND, else Documents. A FOLDER beginning with two slashes or two
+backslashes names a network share and is refused, because opening the dialog there makes Windows
+send the user's credentials to that host. NAME is a :SAVE dialog's suggested file name.
 Signals an error for anything hyperion-view would refuse."
   (%check-dialog-request kind title filters folder name)
   (with-output-to-string (out)
@@ -112,6 +121,8 @@ THE PAGE RECEIVES THE PATH; see this file's header."
   (declare (ignore kind title filters folder name))
   (let ((json (apply #'dialog-request-json (loop for (k v) on request by #'cddr
                                                  unless (eq k :target) append (list k v)))))
-    (format nil "if(window.hyperionDialog){window.hyperionDialog(~A).then(function(r){if(r&&(r.path||r.paths)){htmx.ajax('POST',~A,{target:~A,values:r.paths?{paths:JSON.stringify(r.paths)}:{path:r.path}});}});}"
+    ;; EL is taken before the promise: inside .then(function(r){...}), `this' is the window, not
+    ;; the button.
+    (format nil "var el=this;if(window.hyperionDialog){window.hyperionDialog(~A).then(function(r){if(r&&(r.path||r.paths)){htmx.ajax('POST',~A,{target:~A,values:r.paths?{paths:JSON.stringify(r.paths)}:{path:r.path}});}});}"
             json (%json-string post)
-            (if (string= target "this") "this" (%json-string target)))))
+            (if (string= target "this") "el" (%json-string target)))))

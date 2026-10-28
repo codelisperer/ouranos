@@ -1010,24 +1010,44 @@ static int exercise_placement(webview_t w, const char *path) {
 // save-as or folder dialog owned by this window and resolves to {path}, {paths}, {cancelled} or
 // {error}. The page then sends the path to the app's own route.
 //
-// THE GATE, so a page on another origin cannot ask for a path from the user's machine:
+// THE GATE, so a page on another origin cannot ask for a path from the user's machine or receive
+// one:
 // - The binding exists only in the top-level frame while it shows the app's own origin. The
 //   script below runs at the start of every document, deletes the raw binding webview.h defines
 //   everywhere, and defines hyperionDialog only when location.origin is the origin of the URL
-//   this view was started with. Any other origin, and any iframe, has neither.
+//   this view was started with. Any other origin, and any iframe, has neither. A URL with a user
+//   name or with its scheme's default port written out (http://h:80/) never matches
+//   location.origin, so the page there gets no function.
 // - The per-launch TOKEN is held only in that function's closure, and the native side refuses a
 //   call without it (PARSE-DIALOG-REQUEST), so a script that reaches window.external.invoke
 //   directly cannot open a dialog.
 // - A call made outside a user action is refused, through navigator.userActivation, whose getter
 //   is taken at document start so a page cannot replace it. WebView2 (Windows) and WebKit on macOS
 //   13.3 and later have it; where a WebKitGTK does not, only the origin rule and "busy" apply.
+// - THE REPLY GOES ONLY TO THE APP'S ORIGIN. webview.h's own reply (webview_return) runs
+//   window._rpc[seq].resolve in whatever document is on top when it is sent, so a page on another
+//   origin, navigated to while the dialog was open, could define window._rpc and receive the path.
+//   So the page's call carries an id, and every answer is sent by DIALOG_REPLY: a script that does
+//   nothing unless location.origin is still the app's, and then hands the answer to the function
+//   the guard defined for that id. webview_return is never called for this binding.
 // - One dialog at a time: a call while one is open is answered {"error": "busy"}.
+//
+// Every answer is sent with webview_eval, which on Windows calls ExecuteScript directly, and the
+// dialog itself is started by a message posted to the window. Nothing here uses webview.h's
+// dispatch, which posts a thread message: a modal loop, the dialog's own or the one Windows runs
+// while the window is moved or resized, discards thread messages, so a job or an answer sent that
+// way can be lost and leave "busy" set for good.
+//
+// HYPERION_VIEW_FAKE_DIALOG=1 is for the CI-only window tests. It skips the user-action check and
+// answers {"path":"fake-path"} three seconds after a call, from a window timer, without showing a
+// dialog, so a test can see "busy" and where the answer goes. It says so on stderr.
 //
 // Only Windows shows a dialog in this step. macOS and Linux answer {"error": "unavailable"} after
 // the same checks, and their dialogs follow in their own lanes' changes.
 
 static std::string g_dialog_token;
 static std::string g_app_origin;
+static bool g_fake_dialog = false;
 #if defined(_WIN32)
 static bool g_dialog_busy = false;  // only Windows shows a dialog in this change
 #endif
@@ -1081,11 +1101,25 @@ static std::string dialog_guard_script() {
          "isActive=d&&d.get;}catch(e){}"
          "var token=" +
          dialog_json_quote(g_dialog_token) +
-         ";"
+         ",checkActivation=" + (g_fake_dialog ? "false" : "true") +
+         ",next=1,pending={};"
+         "Object.defineProperty(window,'__hyperion_dialog_reply',{value:function(id,r){"
+         "var p=pending[id];if(p){delete pending[id];p(r);}},writable:false,configurable:false});"
          "Object.defineProperty(window,'hyperionDialog',{value:function(request){"
-         "if(isActive&&!isActive.call(ua))return Promise.resolve({error:'no-user-action'});"
-         "return raw(token,request||{});},writable:false,configurable:false});"
+         "if(checkActivation&&isActive&&!isActive.call(ua))return Promise.resolve({error:'no-user-action'});"
+         "var id=next++;"
+         "return new Promise(function(resolve){pending[id]=resolve;raw(token,id,request||{});});"
+         "},writable:false,configurable:false});"
          "})();";
+}
+
+// Send RESULT, a JSON object, to the page's call ID, but only if the top-level document is still
+// on the app's origin. ID is the digits PARSE-DIALOG-REQUEST checked.
+static void dialog_reply(webview_t w, const std::string &id, const std::string &result) {
+  std::string js = "(function(){if(location.origin!==" + dialog_json_quote(g_app_origin) +
+                   ")return;var f=window.__hyperion_dialog_reply;"
+                   "if(typeof f==='function')f(" + id + "," + result + ");})();";
+  webview_eval(w, js.c_str());
 }
 
 #if defined(_WIN32)
@@ -1116,7 +1150,7 @@ static const GUID kDialogGuidFolder = {0x3c6e5c1a, 0x9b2d, 0x4f61, {0x8a, 0x10, 
 
 // Show the dialog R asks for, owned by OWNER, on this thread, and return the JSON the page gets.
 // Runs on the webview's UI thread, which webview.h has already made a COM single-threaded
-// apartment, and from WEBVIEW_DISPATCH, not inside WebView2's message handler: a modal loop
+// apartment, from the window procedure, not inside WebView2's message handler: a modal loop
 // inside a WebView2 event handler is a reentrancy WebView2 documents as unsupported.
 static std::string show_file_dialog(HWND owner, const dialog_request &r) {
   bool save = r.kind == "save";
@@ -1179,10 +1213,12 @@ static std::string show_file_dialog(HWND owner, const dialog_request &r) {
     if (SUCCEEDED(dialog->QueryInterface(IID_IFileOpenDialog, reinterpret_cast<void **>(&open)))) {
       if (SUCCEEDED(open->GetResults(&items)) && SUCCEEDED(items->GetCount(&count))) {
         result = "{\"paths\":[";
+        bool first = true;  // the comma goes before every item written except the first
         for (DWORD i = 0; i < count; i++) {
           IShellItem *item = nullptr;
           if (SUCCEEDED(items->GetItemAt(i, &item))) {
-            result += (i ? "," : "") + dialog_json_quote(shell_item_path(item));
+            result += (first ? "" : ",") + dialog_json_quote(shell_item_path(item));
+            first = false;
             item->Release();
           }
         }
@@ -1205,51 +1241,102 @@ static std::string show_file_dialog(HWND owner, const dialog_request &r) {
 }
 
 struct dialog_job {
-  std::string seq;
+  std::string id;
   dialog_request request;
 };
 
-static void run_dialog_job(webview_t w, void *arg) {
-  dialog_job *job = static_cast<dialog_job *>(arg);
-  std::string result =
-      show_file_dialog(static_cast<HWND>(webview_get_window(w)), job->request);
+static webview_t g_dialog_view = nullptr;
+static UINT g_dialog_message = 0;  // registered in INSTALL_DIALOGS; carries a DIALOG_JOB
+static WNDPROC g_dialog_previous_proc = nullptr;
+static dialog_job *g_fake_job = nullptr;
+static const UINT_PTR kFakeDialogTimer = 0x4859;
+
+static void finish_dialog_job(dialog_job *job, const std::string &result) {
   g_dialog_busy = false;
-  webview_return(w, job->seq.c_str(), 0, result.c_str());
+  dialog_reply(g_dialog_view, job->id, result);
   delete job;
+}
+
+static LRESULT CALLBACK dialog_window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+  if (g_dialog_message != 0 && msg == g_dialog_message) {
+    dialog_job *job = reinterpret_cast<dialog_job *>(lp);
+    if (g_fake_dialog) {
+      g_fake_job = job;
+      SetTimer(hwnd, kFakeDialogTimer, 3000, nullptr);
+    } else {
+      finish_dialog_job(job, show_file_dialog(hwnd, job->request));
+    }
+    return 0;
+  }
+  if (msg == WM_TIMER && wp == kFakeDialogTimer) {
+    KillTimer(hwnd, kFakeDialogTimer);
+    if (g_fake_job != nullptr) {
+      dialog_job *job = g_fake_job;
+      g_fake_job = nullptr;
+      finish_dialog_job(job, "{\"path\":\"fake-path\"}");
+    }
+    return 0;
+  }
+  return CallWindowProcW(g_dialog_previous_proc, hwnd, msg, wp, lp);
 }
 #endif
 
 // The native end of the binding. Every call is checked first, on every OS: the token, then the
-// request (PARSE-DIALOG-REQUEST).
+// call's id and the request (PARSE-DIALOG-REQUEST). A call that fails the token or the id gets no
+// answer, since there is no id to send one to.
 static void dialog_binding(const char *seq, const char *req, void *arg) {
+  (void)seq;  // answered through DIALOG_REPLY, never webview_return; see the gate above
   webview_t w = static_cast<webview_t>(arg);
   dialog_request request;
   std::string why = parse_dialog_request(req, g_dialog_token, &request);
   if (!why.empty()) {
-    webview_return(w, seq, 0, ("{\"error\":" + dialog_json_quote(why) + "}").c_str());
+    if (!request.id.empty())
+      dialog_reply(w, request.id, "{\"error\":" + dialog_json_quote(why) + "}");
     return;
   }
 #if defined(_WIN32)
   if (g_dialog_busy) {
-    webview_return(w, seq, 0, "{\"error\":\"busy\"}");
+    dialog_reply(w, request.id, "{\"error\":\"busy\"}");
     return;
   }
+  HWND hwnd = static_cast<HWND>(webview_get_window(w));
+  dialog_job *job = new dialog_job{request.id, request};
   g_dialog_busy = true;
-  webview_dispatch(w, run_dialog_job, new dialog_job{seq, request});
+  if (!PostMessageW(hwnd, g_dialog_message, 0, reinterpret_cast<LPARAM>(job))) {
+    delete job;
+    g_dialog_busy = false;
+    dialog_reply(w, request.id, "{\"error\":\"failed\"}");
+  }
 #else
-  webview_return(w, seq, 0, "{\"error\":\"unavailable\"}");
+  dialog_reply(w, request.id, "{\"error\":\"unavailable\"}");
 #endif
 }
 
-// Install the binding and its guard on W, for pages from URL's origin. False, and nothing
-// installed, when no token can be made or URL has no origin.
-static bool install_dialogs(webview_t w, const char *url) {
+// Make the launch's token and the app's origin from URL, before any window exists. False when no
+// token can be made or URL has no origin; the view then refuses to start, so a running view
+// started with --dialogs always has them, and RUN-APP's DIALOGS-AVAILABLE-P is not true of a
+// window that has none.
+static bool prepare_dialogs(const char *url) {
   g_dialog_token = random_token();
   g_app_origin = url_origin(url);
-  if (g_dialog_token.empty() || g_app_origin.empty()) return false;
+  const char *fake = std::getenv("HYPERION_VIEW_FAKE_DIALOG");
+  g_fake_dialog = fake != nullptr && std::strcmp(fake, "1") == 0;
+  if (g_fake_dialog)
+    std::fprintf(stderr, "hyperion-view: HYPERION_VIEW_FAKE_DIALOG=1: no dialog is shown; calls get fake-path and need no user action\n");
+  return !g_dialog_token.empty() && !g_app_origin.empty();
+}
+
+// Install the binding and its guard on W. After PREPARE_DIALOGS, before the first navigation.
+static void install_dialogs(webview_t w) {
+#if defined(_WIN32)
+  g_dialog_view = w;
+  g_dialog_message = RegisterWindowMessageW(L"hyperion-view-dialog-job");
+  HWND hwnd = static_cast<HWND>(webview_get_window(w));
+  g_dialog_previous_proc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
+      hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(dialog_window_proc)));
+#endif
   webview_bind(w, "__hyperion_dialog_raw", dialog_binding, w);
   webview_init(w, dialog_guard_script().c_str());
-  return true;
 }
 
 // HYPERION_VIEW_NO_WINDOW=1 stops hyperion-view just before it would create a window, with exit
@@ -1676,6 +1763,10 @@ int main(int argc, char **argv) {
   // the application name once, early.
   set_app_name(title);
 
+  if (dialogs && !prepare_dialogs(url)) {
+    std::fprintf(stderr, "hyperion-view: --dialogs: no random token, or no origin in %s\n", url);
+    return 2;
+  }
   if (window_forbidden()) return 3;
   webview_t w = webview_create(0, nullptr);
   webview_set_title(w, title);
@@ -1692,8 +1783,7 @@ int main(int argc, char **argv) {
   // After webview_create (NSApp exists), before webview_run ([NSApp run]).
   install_main_menu(title);
   // Before the first navigation, so the guard runs at the start of the app's first page.
-  if (dialogs && !install_dialogs(w, url))
-    std::fprintf(stderr, "hyperion-view: --dialogs: no random token or no origin in %s; dialogs are off\n", url);
+  if (dialogs) install_dialogs(w);
   if (exit_after > 0) {
     // webview_dispatch is the one webview.h call that is safe from another thread.
     std::thread([w, exit_after]() {

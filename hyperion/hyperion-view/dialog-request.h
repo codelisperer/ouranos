@@ -22,6 +22,7 @@ struct dialog_filter {
 };
 
 struct dialog_request {
+  std::string id;      // the page's id for the call: 1 to 9 digits, no leading zero
   std::string kind;    // "open", "open-many", "save" or "folder"
   std::string title;   // may be empty: the OS's own title is used
   std::string folder;  // may be empty: the dialog's remembered folder, else Documents
@@ -87,11 +88,24 @@ inline bool dialog_pattern_ok(const std::string &pattern) {
   return true;
 }
 
+// ID is 1 to 9 decimal digits with no leading zero, so it can be written into a script as is.
+inline bool dialog_id_ok(const std::string &id) {
+  if (id.empty() || id.size() > 9 || id[0] == '0') return false;
+  for (char c : id)
+    if (c < '0' || c > '9') return false;
+  return true;
+}
+
 // PARAMS, the JSON array a binding call carries, as a request in *OUT. PARAMS must be
-// [TOKEN, REQUEST] with TOKEN equal to EXPECTED_TOKEN: a call without the launch's token is
-// refused here, on the native side, whatever the page's script did. Returns "" when the request
-// is good, otherwise the reason: "token", "malformed", "kind", "title", "folder", "name",
-// "filters", "filter-label", "filter-patterns" or "pattern".
+// [TOKEN, ID, REQUEST] with TOKEN equal to EXPECTED_TOKEN: a call without the launch's token is
+// refused here, on the native side, whatever the page's script did. ID is the page's number for
+// the call, which the answer is sent to. Returns "" when the request is good, otherwise the
+// reason: "token", "id", "malformed", "kind", "title", "folder", "name", "filters",
+// "filter-label", "filter-patterns" or "pattern". OUT->ID is set once the token and the id are
+// good, so a refusal for any later reason can still be answered.
+//
+// A FOLDER beginning with two slashes or two backslashes is refused: it names a network share,
+// and opening the dialog there makes Windows send the user's credentials to that host.
 inline std::string parse_dialog_request(const std::string &params,
                                         const std::string &expected_token,
                                         dialog_request *out) {
@@ -101,13 +115,17 @@ inline std::string parse_dialog_request(const std::string &params,
   if (!dialog_json_member(params, nullptr, 0, &raw) || !dialog_json_string(raw, &token) ||
       expected_token.empty() || token != expected_token)
     return "token";
+  std::string id;
+  if (!dialog_json_member(params, nullptr, 1, &id) || !dialog_id_ok(id)) return "id";
+  out->id = id;
   std::string request;
-  if (!dialog_json_member(params, nullptr, 1, &request) || request.empty() ||
+  if (!dialog_json_member(params, nullptr, 2, &request) || request.empty() ||
       request.front() != '{')
     return "malformed";
-  if (dialog_json_member(params, nullptr, 2, &raw)) return "malformed";
+  if (dialog_json_member(params, nullptr, 3, &raw)) return "malformed";
 
   dialog_request r;
+  r.id = id;
   if (!dialog_json_member(request, "kind", 0, &raw) || !dialog_json_string(raw, &r.kind))
     return "kind";
   if (r.kind != "open" && r.kind != "open-many" && r.kind != "save" && r.kind != "folder")
@@ -116,7 +134,9 @@ inline std::string parse_dialog_request(const std::string &params,
       (!dialog_json_string(raw, &r.title) || !dialog_text_ok(r.title, kMaxDialogTitle)))
     return "title";
   if (dialog_json_member(request, "folder", 0, &raw) &&
-      (!dialog_json_string(raw, &r.folder) || !dialog_text_ok(r.folder, kMaxDialogFolder)))
+      (!dialog_json_string(raw, &r.folder) || !dialog_text_ok(r.folder, kMaxDialogFolder) ||
+       (r.folder.size() >= 2 && (r.folder[0] == '/' || r.folder[0] == '\\') &&
+        (r.folder[1] == '/' || r.folder[1] == '\\'))))
     return "folder";
   if (dialog_json_member(request, "name", 0, &raw) &&
       (r.kind != "save" || !dialog_json_string(raw, &r.name) ||

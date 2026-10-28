@@ -274,7 +274,9 @@ defines `window.hyperionDialog(request)` in the app's page. REQUEST is
 - `kind` is `"open"`, `"open-many"`, `"save"` or `"folder"`.
 - `title` is the dialog's title, at most 200 bytes.
 - `folder` is the folder it opens in. Without it, Windows uses the folder last used for that kind
-  of dialog by this app, and the first time, Documents.
+  of dialog by this app, and the first time, Documents. A folder that begins with two slashes or
+  two backslashes names a network share and is refused, because opening the dialog there makes
+  Windows send the user's credentials to that host.
 - `name` is the file name a save dialog suggests, with no `/` or `\`.
 - `filters` is a list of `[label, "*.ext;*.ext"]`, at most 32; a folder dialog takes none.
 
@@ -301,14 +303,29 @@ JSON array):
 - A call made outside a user action is refused with `{error: "no-user-action"}`, through
   `navigator.userActivation`. WebView2 and WebKit on macOS 13.3 and later have it. A WebKitGTK
   without it relies on the origin rule and the token alone.
-- One dialog at a time: a second call while one is open gets `{error: "busy"}`.
+- The answer goes only to the app's origin. Each call carries an id, and hyperion-view sends the
+  answer with a script that does nothing unless the window still shows the app's origin, and then
+  hands it to the function the guard keeps for that id. webview.h's own reply would run in whatever
+  page is on top when the dialog closes, so a page on another origin, navigated to meanwhile, could
+  receive the path; this binding does not use it.
+- One dialog at a time: a second call while one is open gets `{error: "busy"}`. The dialog is
+  started by a message posted to the window, and every answer is sent with `webview_eval`.
+  webview.h's dispatch posts thread messages, which a modal loop discards, so a job or an answer
+  sent that way could be lost and leave "busy" set.
+- The origin is taken from the URL as written: a URL with a user name, or with its scheme's default
+  port written out (`http://host:80/`), never matches `location.origin`, so its page gets no
+  function. `run-app`'s own URL has neither.
 
 An app that shows third-party content in its window should still pass `:dialogs nil`.
 
-On Windows the dialog is `IFileOpenDialog` or `IFileSaveDialog`, shown from `webview_dispatch`
+On Windows the dialog is `IFileOpenDialog` or `IFileSaveDialog`, shown from the window procedure
 rather than inside WebView2's message handler. macOS and Linux answer `{error: "unavailable"}`
 after the same checks, and `dialogs-available-p` is NIL there, so the page should show a field
 for a pasted path instead. Their dialogs come in separate changes for those platforms.
+
+For tests, `HYPERION_VIEW_FAKE_DIALOG=1` makes every call answer `{path: "fake-path"}` three
+seconds later, from a window timer, with no dialog shown and no user-action check; hyperion-view
+says so on stderr.
 
 Testing without a window: `hyperion-view --dialog-request TOKEN PARAMS` prints `ok KIND ...` or
 `refuse REASON` for a call, and `hyperion-view --dialog-origin URL` prints the origin the function
