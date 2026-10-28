@@ -444,6 +444,22 @@ PBKDF2 passwords, a temp-password flag for forced-change-at-first-login, and a r
 (auth:authenticate *auth* "ada@example.com" "pw")     ; => USER or NIL
 ```
 
+**A test suite may lower the password cost; production must not** (#1045). Passwords are
+hashed with PBKDF2 at `auth:*pbkdf2-iterations*`, 100000 by default, and one hash or one verify
+takes about a quarter of a second at that count. A test that creates a user and signs in pays
+that twice. An app's test runner can set the count for the whole run:
+
+```lisp
+(setf auth:*pbkdf2-iterations* 1000)   ; in the test runner only
+```
+
+Use `setf` rather than `let` when tests start threads, because a `let` binding is not seen by
+other threads. Every hash stores the count it was made with, and `auth:verify-password` uses
+that stored count, so hashes made at either count verify under the other. Do not lower the count
+in a running app: it is what makes a stolen hash expensive to guess. Hyperion's own
+`hyperion/auth-db/tests` runs at 1000, which took it from about 29 s to 8 s on an Apple Silicon
+Mac.
+
 **An app serving with `:workers` gives the store its pool** (#371):
 `(auth:make-db-auth pool :dialect :postgres)`, usually the pool it also gives
 `hyperion/db-connection:wrap-connection`. Each operation then borrows a connection, which during

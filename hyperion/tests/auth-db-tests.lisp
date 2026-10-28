@@ -15,8 +15,35 @@
 (in-package #:hyperion/auth-db/tests)
 
 (def-suite auth-db :description "mnemosyne-backed identity store: users + password auth.")
-(defun run-tests () (run! 'auth-db))
+;;; Read when this file loads, before RUN-TESTS lowers it, so a test can check the default.
+(defparameter +default-pbkdf2-iterations+ auth:*pbkdf2-iterations*)
+
+(defun run-tests ()
+  "Run the suite with the PBKDF2 count lowered to 1000, the way an app's test suite may (#1045):
+about 29 s at the default and 8 s at 1000 on an Apple Silicon Mac. SETF rather than LET, so a
+thread a test starts sees the same count; the count is put back afterwards."
+  (let ((before auth:*pbkdf2-iterations*))
+    (setf auth:*pbkdf2-iterations* 1000)
+    (unwind-protect (run! 'auth-db)
+      (setf auth:*pbkdf2-iterations* before))))
 (in-suite auth-db)
+
+(test the-default-pbkdf2-count-is-100000
+  "A suite that lowers the count must not change what production uses (#1045)."
+  (is (= 100000 +default-pbkdf2-iterations+)))
+
+(test a-hash-records-its-count-and-verifies-after-the-count-changes
+  "VERIFY-PASSWORD reads the count stored in the hash, so a test image's lower setting and the
+default agree about every hash either one made (#1045)."
+  (let ((low (let ((auth:*pbkdf2-iterations* 1000)) (auth:hash-password "pw")))
+        (high (let ((auth:*pbkdf2-iterations* 2000)) (auth:hash-password "pw"))))
+    (is (search ":1000$" low) "~A" low)
+    (is (search ":2000$" high) "~A" high)
+    (let ((auth:*pbkdf2-iterations* 2000))
+      (is-true (auth:verify-password "pw" low))
+      (is-false (auth:verify-password "px" low)))
+    (let ((auth:*pbkdf2-iterations* 1000))
+      (is-true (auth:verify-password "pw" high)))))
 
 (defmacro with-auth ((var) &body body)
   (let ((c (gensym)))

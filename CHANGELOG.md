@@ -14,6 +14,14 @@ its tag.
 
 ### An app may have to act
 
+- **`mnemosyne/migrate:migrate` logs each applied migration at DEBUG and one INFO line per
+  call** (#1046). The per-migration line `"migrate: applied"` (with `id`, `description` and `ms`)
+  is now DEBUG, as is `"migrate: applying"`. A call that had migrations to apply ends with one
+  INFO line, `"migrate: finished"`, with `pending`, `applied` and `ms` for the whole call, and
+  `failed` naming the migration that signalled when one did. A call with nothing to apply logs
+  nothing at INFO, as before. An app that searches its logs at INFO for `"migrate: applied"`
+  should search for `"migrate: finished"` instead, or log `mnemosyne/migrate` at DEBUG.
+
 - **A turn run with an observer now asks `anthropic` and `openai-compatible` providers for a
   stream** (#984), so that it can emit `:text-delta` events. The completion, the events and the
   usage are the same as before. An OpenAI-compatible request that streams also sends
@@ -1083,6 +1091,14 @@ its tag.
   `claude-opus-5-5` where they named `claude-opus-4-8`.
 
 ### Added
+
+- **`hyperion/auth-db:*pbkdf2-iterations*` is exported, so an app's test suite can lower the
+  password hashing cost** (#1045). It was internal, reachable only as
+  `hyperion/auth-db::*pbkdf2-iterations*`. The default stays 100000. A test runner can
+  `(setf auth:*pbkdf2-iterations* 1000)` for its run; production must not lower it. Each hash
+  stores its count, so hashes made at either count verify under the other. `hyperion/auth-db/tests`
+  now runs at 1000, about 29 s to 8 s on an Apple Silicon Mac. See `hyperion/docs/user-guide.md`,
+  "Identity and roles".
 
 - **praxeon: a turn can stream the model's text as it is written, and be cancelled so the
   provider stops generating** (#984).
