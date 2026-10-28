@@ -352,9 +352,12 @@ server that imposes two rules hit head-on while building the web surface:
 True SSE therefore needs a thread-per-connection server (Hunchentoot), or a Woo-specific
 `ev_async` integration that would be fragile and non-portable — **defeating the "backend is
 configurable" goal**, which outranks the transport upgrade. So the shipped design is: `POST
-/api/message` echoes the user's bubble immediately and runs the turn on a **background
-thread** (keeping the event loop free), while a poller hits `GET /api/progress` every ~700 ms
-to append new bubbles and OOB-update the status line. Every handler stays quick, so it works
+/api/message` publishes the user's message to the conversation's transcript, runs the turn on a
+**background thread** (keeping the event loop free), and asks the page to poll at once through
+`HX-Trigger`. A poller hits `GET /api/progress` every ~700 ms with its cursor into the
+transcript, appends the items after it, and OOB-updates the status line and the cursor. Since
+#67 the transcript is a `hyperion/channel` that every tab reads from its own cursor, so two tabs
+on one conversation both see every message. Every handler stays quick, so it works
 **identically on Woo and Hunchentoot with no per-server code.**
 
 The upshot: **polling is the portable floor, not a ceiling.** Because the event data is

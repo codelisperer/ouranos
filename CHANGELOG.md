@@ -14,6 +14,19 @@ its tag.
 
 ### An app may have to act
 
+- **praxeon/web: the chat page's message and poll routes now work from a cursor, and the
+  page's own message comes back through the poll** (part of #67). A page built on `make-app`'s
+  routes, rather than on its `GET /`, has to change:
+  - `GET /api/progress` takes `after`, the index of the first transcript item the page has not
+    shown, and returns the items from there plus an out-of-band `<input id="px-cursor">` holding
+    the next index. Without `after` it returns no items and the newest index. `GET /` renders the
+    field and sends it with each poll (`hx-include="#px-cursor"`).
+  - `POST /api/message` from the page returns an empty body and the header `HX-Trigger: px-poll`.
+    It no longer returns the user's bubble; the poll returns it, so every tab on the conversation
+    shows it. The page's poll runs on `px-poll` as well as on its timer.
+  - The JSON path (`Accept: application/json`) still answers `{"reply": ...}`. Its turns now
+    appear on a page open on the same conversation, and count towards its token total.
+
 - **MCP resources and retrieval passages are untrusted by default, so in a prompt they refuse
   `:requires-user-intent` means for the turn** (#907, after #906). `praxeon/mcp:add-resource` and
   `praxeon/retrieval:passage->ctx-item` put outside content into an agent's context with nothing
@@ -909,6 +922,18 @@ its tag.
   `claude-opus-5-5` where they named `claude-opus-4-8`.
 
 ### Added
+
+- **praxeon/web: one conversation per key, a transcript every tab reads in full, and an item
+  that marks the end of each turn** (part of #67). `make-app`, `start` and `serve-forever` take
+  `:conversation-key`, a function of the Clack env that returns the request's key (normally the
+  signed-in principal's id), and `:make-agent`, a function of a key that returns a fresh agent.
+  Requests with an `equal` key share a conversation; a request whose key is NIL is answered 403.
+  Without `:conversation-key` there is one conversation over `:agent`, as before, and `make-app`
+  refuses `:conversation-key` without `:make-agent`, or with `:agent`. Each conversation
+  publishes its transcript to a `hyperion/channel` as items (`:user`, `:assistant`, and one
+  `:turn-ended` with `:outcome :ok` or `:error` per turn), so two tabs on one conversation both
+  see every message; before, whichever tab polled first took it. A turn's reply is now rendered
+  by the poll that reads it. `praxeon/web` no longer depends on `sb-concurrency`.
 
 - **praxeon/actor: every deliberation step records how many of the prompt's estimated tokens came
   from each source** (#317, step D). `praxeon/actor:request-messages` returns a third value, and
