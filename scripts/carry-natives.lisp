@@ -190,10 +190,38 @@ test turns it off, as the control for the relink.")
       (uiop:run-program args :output :string :error-output :string :ignore-error-status t)
     (values (concatenate 'string out err) code)))
 
+(defun %macho-p (file)
+  "Whether FILE starts with a Mach-O or universal (fat) header, read from its first four bytes,
+so the answer does not depend on otool being installed."
+  (with-open-file (in file :element-type '(unsigned-byte 8) :if-does-not-exist nil)
+    (and in
+         (let ((magic (make-array 4 :element-type '(unsigned-byte 8))))
+           (and (= 4 (read-sequence magic in))
+                (member (coerce magic 'list)
+                        '((#xfe #xed #xfa #xce) (#xce #xfa #xed #xfe)
+                          (#xfe #xed #xfa #xcf) (#xcf #xfa #xed #xfe)
+                          (#xca #xfe #xba #xbe) (#xbe #xba #xfe #xca))
+                        :test #'equal)
+                t)))))
+
+(defun %otool (flag file)
+  "The output of `otool FLAG FILE'. Signals CARRY-REFUSED when FILE is a Mach-O and otool exits
+non-zero. Without the Xcode Command Line Tools, /usr/bin/otool is a stub that does exactly that,
+and reading its silence as \"nothing to change\" would ship the file unchanged (#958's review).
+NIL for a file that is not a Mach-O and that otool cannot read."
+  (multiple-value-bind (out code) (%run-tool (list "otool" flag (uiop:native-namestring file)))
+    (cond ((eql code 0) out)
+          ((%macho-p file)
+           (error 'carry-refused
+                  :path file
+                  :reason (format nil "otool ~A exited ~A on it, so it cannot be checked or relinked. otool comes with the Xcode Command Line Tools (xcode-select --install): ~A"
+                                  flag code (string-trim '(#\Newline #\Space) out)))))))
+
 (defun %install-name (file)
-  "FILE's own install name, as otool -D prints it, or NIL for a file that has none."
-  (multiple-value-bind (out code) (%run-tool (list "otool" "-D" (uiop:native-namestring file)))
-    (and (eql code 0)
+  "FILE's own install name, as otool -D prints it, or NIL for a file that has none. Signals
+CARRY-REFUSED when FILE is a Mach-O that otool cannot read (%OTOOL)."
+  (let ((out (%otool "-D" file)))
+    (and out
          (second (uiop:split-string (string-trim '(#\Newline) out) :separator '(#\Newline))))))
 
 (defvar *stamp* t
@@ -232,9 +260,10 @@ Signals CARRY-REFUSED when install_name_tool or codesign fails."
 
 (defun %macho-dependencies (file)
   "The install names FILE's load commands name, as otool -L lists them, without FILE's own
-install name (otool -D). NIL for a file that is not a Mach-O."
-  (multiple-value-bind (out code) (%run-tool (list "otool" "-L" (uiop:native-namestring file)))
-    (when (eql code 0)
+install name (otool -D). NIL for a file that is not a Mach-O. Signals CARRY-REFUSED when FILE
+is a Mach-O that otool cannot read (%OTOOL)."
+  (let ((out (%otool "-L" file)))
+    (when out
       (let ((own (%install-name file)))
         (loop for line in (rest (uiop:split-string out :separator '(#\Newline)))
               for trimmed = (string-trim '(#\Space #\Tab) line)

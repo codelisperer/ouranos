@@ -186,9 +186,18 @@ echo
 echo "--- check 1b: carried libraries have no absolute install name outside the bundle ---"
 for f in "$DIR"/*.dylib; do
   [ -f "$f" ] || continue
-  ID=$(otool -D "$f" | tail -n +2)
+  # Fails rather than passes when the id cannot be read: without the Command Line Tools,
+  # /usr/bin/otool is a stub that exits non-zero and prints nothing (#958's review).
+  if ! OUT=$(otool -D "$f" 2>&1); then
+    echo "  FAIL -- otool -D could not read $(basename "$f"): $OUT"
+    FAILED=1
+    continue
+  fi
+  ID=$(printf '%s\n' "$OUT" | tail -n +2)
   case "$ID" in
-    "") ;;
+    "")
+      echo "  FAIL -- otool -D printed no install name for $(basename "$f")"
+      FAILED=1 ;;
     "$DIR"/*) echo "  ok -- $(basename "$f"): $ID" ;;
     /*)
       echo "  WARN -- $(basename "$f") has the install name $ID, a path outside the bundle."

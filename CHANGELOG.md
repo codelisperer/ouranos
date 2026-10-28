@@ -2242,9 +2242,12 @@ its tag.
   set each carried dylib whose install name is an absolute path to
   `@executable_path/<file name>` and re-sign it ad hoc, through the new
   `ouranos-carry:stamp-install-name` in `scripts/carry-natives.lisp`. An install name that is
-  already relative, such as `./libpdfium.dylib`, is left as it is.
+  already relative, such as `./libpdfium.dylib`, is left as it is. When `otool` exits
+  non-zero on a Mach-O, as `/usr/bin/otool` does on a Mac without the Xcode Command Line Tools,
+  the build stops with `carry-refused` instead of carrying the file unchanged; the relink of
+  carried libraries that need each other stops the same way.
   `scripts/verify-bundle-macos.sh` warns, in its new check 1b, about any carried dylib whose
-  install name is an absolute path outside the bundle.
+  install name is an absolute path outside the bundle, and fails when it cannot read one.
 
 - **aion/http-client: a pinned https request refuses a certificate whose common name matches
   the host when its subject alternative names do not** (#917). On Linux and macOS, cl+ssl checks

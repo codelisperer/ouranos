@@ -519,6 +519,56 @@ off, the carried copy keeps the build path."
                      (search "libfixa.dylib" install-name))
                 "control: without the stamp the install name is the build path, got ~S" install-name))))))
 
+(defun %with-otool-stub (function)
+  "Call FUNCTION with PATH starting at a fresh directory whose `otool' exits 1 and prints
+nothing, as /usr/bin/otool does on a Mac without the Command Line Tools."
+  (let* ((tree (%fresh-tree))
+         (bin (ensure-directories-exist (merge-pathnames "bin/" tree)))
+         (stub (merge-pathnames "otool" bin))
+         (path (uiop:getenv "PATH")))
+    (%write stub (format nil "#!/bin/sh~%exit 1~%"))
+    (uiop:run-program (list "chmod" "+x" (uiop:native-namestring stub)))
+    (setf (uiop:getenv "PATH") (concatenate 'string (uiop:native-namestring bin) ":" path))
+    (unwind-protect (funcall function)
+      (setf (uiop:getenv "PATH") path)
+      (aion/fs:delete-tree tree :if-does-not-exist :ignore))))
+
+(defun %refusal-of (function &rest args)
+  "The CARRY-REFUSED that FUNCTION signals on ARGS, or NIL when it returns."
+  (handler-case (progn (apply function args) nil)
+    (error (e) (and (typep e (find-symbol "CARRY-REFUSED" "OURANOS-CARRY")) e))))
+
+(test a-mach-o-that-otool-cannot-read-is-refused-not-skipped
+  "#958's review: when otool exits non-zero on a Mach-O, the stamp and the relink signal
+CARRY-REFUSED instead of treating the file as having nothing to change. Controls: under the same
+stub, a file that is not a Mach-O is skipped without an error; under the real otool, the same
+dylib is stamped."
+  (let ((why (%relink-skip-reason)))
+    (if why
+        (skip why)
+        (let* ((tree (%fresh-tree))
+               (dir (ensure-directories-exist (merge-pathnames "lib/" tree)))
+               (stamp (%carry-fn "STAMP-INSTALL-NAME"))
+               (dependencies (fdefinition (find-symbol "%MACHO-DEPENDENCIES" "OURANOS-CARRY")))
+               (quiet (make-broadcast-stream)))
+          (unwind-protect
+               (if (not (%dylib-pair dir))
+                   (fail "the fixture dylibs were not built")
+                   (let ((dylib (merge-pathnames "libfixa.dylib" dir))
+                         (text (%write (merge-pathnames "notes.txt" dir) "not a library")))
+                     (%with-otool-stub
+                      (lambda ()
+                        (let ((refused (%refusal-of stamp dylib :report quiet)))
+                          (is (not (null refused)) "the stamp did not refuse a dylib otool could not read")
+                          (is (search "otool -D exited 1" (princ-to-string refused)) "~A" refused))
+                        (is (not (null (%refusal-of dependencies dylib)))
+                            "the relink's reading of load commands did not refuse")
+                        (is (null (%refusal-of stamp text :report quiet))
+                            "control: a file that is not a Mach-O is skipped without an error")))
+                     (is (equal "@executable_path/libfixa.dylib" (funcall stamp dylib :report quiet))
+                         "control: the real otool reads it and the stamp runs")))
+            (aion/fs:delete-tree tree :if-does-not-exist :ignore))))))
+
 (test carried-dylibs-that-link-each-other-fail-without-the-relink
   "The control: the same carry with the relink off. A still names B's build path, which has
 been deleted, so A cannot load. Without this, the test above could pass on a machine where B
