@@ -641,6 +641,13 @@ through every call.")
   (setf (gethash (string-downcase name) *stores*) constructor)
   name)
 
+(defun %setting (name)
+  "The environment variable NAME's value, or NIL when it is unset or empty (#124). Every blob
+setting is read through this, so a variable set to the empty string, as a blank line in a .env
+file sets it, means the same as one that is not set: the setting's default applies."
+  (let ((v (uiop:getenv name)))
+    (and v (plusp (length v)) v)))
+
 (defun store-from-env ()
   "The store named by MNEMOSYNE_BLOB_IMPL (default \"filesystem\"), or *STORE* if bound.
 
@@ -648,7 +655,7 @@ The MNEMOSYNE_ prefix is historical: the blob store began in mnemosyne and moved
 the deployed variable names were kept. MNEMOSYNE_BLOB_IMPL, MNEMOSYNE_BLOB_ROOT and the
 MNEMOSYNE_S3_* variables are hermes settings."
   (or *store*
-      (let* ((name (string-downcase (or (uiop:getenv "MNEMOSYNE_BLOB_IMPL") "filesystem")))
+      (let* ((name (string-downcase (or (%setting "MNEMOSYNE_BLOB_IMPL") "filesystem")))
              (ctor (gethash name *stores*)))
         (unless ctor
           (error 'blob-configuration-error

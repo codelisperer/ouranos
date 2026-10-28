@@ -61,22 +61,22 @@ at boot with the variable's name instead of on the first upload a member attempt
 
 The MNEMOSYNE_ prefix on these variables is historical: the blob store began in mnemosyne and
 moved to hermes, and the deployed names were kept rather than renamed. They are hermes settings."
-  (let ((endpoint (or endpoint (uiop:getenv "MNEMOSYNE_S3_ENDPOINT") "s3.amazonaws.com"))
-        (region (or region (uiop:getenv "MNEMOSYNE_S3_REGION") "us-east-1"))
-        (access-key (or access-key (uiop:getenv "MNEMOSYNE_S3_ACCESS_KEY")))
-        (secret-key (or secret-key (uiop:getenv "MNEMOSYNE_S3_SECRET_KEY"))))
+  (let ((endpoint (or endpoint (%setting "MNEMOSYNE_S3_ENDPOINT") "s3.amazonaws.com"))
+        (region (or region (%setting "MNEMOSYNE_S3_REGION") "us-east-1"))
+        (access-key (or access-key (%setting "MNEMOSYNE_S3_ACCESS_KEY")))
+        (secret-key (or secret-key (%setting "MNEMOSYNE_S3_SECRET_KEY"))))
     (make-instance 's3-store
                    :endpoint (%require-setting endpoint "MNEMOSYNE_S3_ENDPOINT")
                    :region region
                    :access-key (%require-setting access-key "MNEMOSYNE_S3_ACCESS_KEY")
                    :secret-key (%require-setting secret-key "MNEMOSYNE_S3_SECRET_KEY")
-                   :session-token (or session-token (uiop:getenv "MNEMOSYNE_S3_SESSION_TOKEN"))
+                   :session-token (or session-token (%setting "MNEMOSYNE_S3_SESSION_TOKEN"))
                    :secure (%secure-setting secure secure-p)
                    :path-style (or path-style
-                                   (let ((v (uiop:getenv "MNEMOSYNE_S3_PATH_STYLE")))
+                                   (let ((v (%setting "MNEMOSYNE_S3_PATH_STYLE")))
                                      (and v (string-equal v "true"))))
                    :public-base-url (or public-base-url
-                                        (uiop:getenv "MNEMOSYNE_S3_PUBLIC_BASE_URL"))
+                                        (%setting "MNEMOSYNE_S3_PUBLIC_BASE_URL"))
                    :upload-acl (%upload-acl-setting upload-acl))))
 
 (defun %secure-setting (value supplied-p)
@@ -91,7 +91,7 @@ This reads oppositely from MNEMOSYNE_S3_PATH_STYLE beside it, where unset means 
 deliberate: for path-style the safe default is off, and for secure it is on."
   (if supplied-p
       (and value t)
-      (let ((v (uiop:getenv "MNEMOSYNE_S3_SECURE")))
+      (let ((v (%setting "MNEMOSYNE_S3_SECURE")))
         (cond ((or (null v) (zerop (length v))) t)
               ((string-equal v "true") t)
               ((string-equal v "false") nil)
@@ -107,7 +107,7 @@ with ACLs enabled. Leave it :NONE for an AWS bucket with ACLs disabled, the defa
 AWS bucket, which refuses an upload naming `private' with 400 AccessControlListNotSupported,
 and for Cloudflare R2, which does not implement the header (the maintainer's ruling on #796)."
   (let ((value (or value
-                   (let ((v (uiop:getenv "MNEMOSYNE_S3_UPLOAD_ACL")))
+                   (let ((v (%setting "MNEMOSYNE_S3_UPLOAD_ACL")))
                      (and v (plusp (length v))
                           (cond ((string-equal v "private") :private)
                                 ((string-equal v "none") :none)

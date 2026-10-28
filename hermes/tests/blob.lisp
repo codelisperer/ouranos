@@ -1306,7 +1306,9 @@ client to send no ACL header."
 
 (defmacro with-environment-variable ((name value) &body body)
   "Run BODY with the environment variable NAME set to VALUE, then restore it. NIL sets it to the
-empty string, which MAKE-S3-STORE reads as unset, so no unsetenv (and no sb-posix) is needed."
+empty string, which every blob setting reads as unset (%SETTING, #124), so no unsetenv (and no
+sb-posix) is needed. A variable that was unset before is restored as the empty string, which
+is the same to the blob store."
   (let ((old (gensym "OLD")))
     `(let ((,old (uiop:getenv ,name)))
        (unwind-protect
@@ -2266,3 +2268,24 @@ BLOB-BACKEND-ERROR."
                 (is (eql 0 (search "https://" (b:blob-url (b:store-from-env) "media" "a/b.png"
                                                           :expires-in 60)))
                     "control: the same settings without MNEMOSYNE_S3_SECURE give https")))))))))
+
+(test an-empty-blob-setting-means-the-same-as-an-unset-one
+  ;; WITH-ENVIRONMENT-VARIABLE restores an unset variable as "", so after a test that sets
+  ;; MNEMOSYNE_BLOB_IMPL or MNEMOSYNE_S3_ENDPOINT, every later reader sees "". Before #124's
+  ;; review, STORE-FROM-ENV looked up a store named "" and MAKE-S3-STORE refused an empty endpoint.
+  (let ((b:*store* nil))
+    (with-environment-variable ("MNEMOSYNE_BLOB_IMPL" "")
+      (with-environment-variable ("MNEMOSYNE_BLOB_ROOT" "")
+        (is (typep (b:store-from-env) 'b:filesystem-store)
+            "an empty MNEMOSYNE_BLOB_IMPL is the default, filesystem")))
+    (with-environment-variable ("MNEMOSYNE_S3_ENDPOINT" "")
+      (with-environment-variable ("MNEMOSYNE_S3_REGION" "")
+        (with-environment-variable ("MNEMOSYNE_S3_SESSION_TOKEN" "")
+          (let ((store (b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x")))
+            (is (string= "s3.amazonaws.com" (b::s3-endpoint store)) "an empty endpoint is the default")
+            (is (string= "us-east-1" (b::s3-region store)) "an empty region is the default")
+            (is (null (b::s3-session-token store)) "an empty session token is no token")))))
+    ;; An empty required credential is still missing.
+    (with-environment-variable ("MNEMOSYNE_S3_ACCESS_KEY" "")
+      (signals b:blob-configuration-error
+        (b:make-s3-store :endpoint "s3.amazonaws.com" :secret-key "x")))))

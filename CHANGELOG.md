@@ -898,6 +898,12 @@ its tag.
   such as an `"s3-local"` store, can set the variable and use `"s3"` instead. The `MNEMOSYNE_`
   prefix on the blob variables is historical; the `make-s3-store` and `store-from-env`
   docstrings now say they are hermes settings.
+- **hermes/blob: a blob setting set to the empty string means the same as an unset one** (#124).
+  `MNEMOSYNE_BLOB_IMPL`, `MNEMOSYNE_BLOB_ROOT`, `MNEMOSYNE_BLOB_BASE_URL` and every
+  `MNEMOSYNE_S3_*` variable now fall back to their defaults when empty, as a blank line in a
+  `.env` file sets them. Before, an empty `MNEMOSYNE_BLOB_IMPL` made `store-from-env` look for a
+  store named `""` and signal, and an empty `MNEMOSYNE_S3_ENDPOINT` failed `make-s3-store`. An
+  empty `MNEMOSYNE_S3_SESSION_TOKEN` is now no token, where it used to be sent as an empty one.
 
 - **praxeon/actor: every deliberation step records how many of the prompt's estimated tokens came
   from each source** (#317, step D). `praxeon/actor:request-messages` returns a third value, and
