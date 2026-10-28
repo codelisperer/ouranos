@@ -1386,3 +1386,96 @@ never updates. Ending the session then ends the stream, and the thread the serve
                         "the stream went on after its session ended")))
         (ignore-errors (sb-bsd-sockets:socket-close s))
         (ignore-errors (srv:stop handler))))))
+
+;;; The embed hand-off in a real browser (#67). A host page on one local port includes
+;;; /embed.js from the service on another, so the two are different origins, as on the web.
+;;; --dump-dom prints only the host's document, and the panel is a cross-origin frame the host
+;;; cannot read, so the test watches the hand-off from the servers instead: the host's grant URL
+;;; is asked, the service opens a session, and a request arrives with that session. The browser
+;;; helpers are hyperion's htmx smoke test's; they are not exported, and exporting them belongs
+;;; with that suite's own changes.
+
+(defun %host-app (service-port priv grants)
+  "A host page at /host that embeds the service whose port is the car of SERVICE-PORT, with a
+grant URL at /grant that mints grants with PRIV and counts its calls in the car of GRANTS."
+  (lambda (env)
+    (let ((path (getf env :path-info)))
+      (cond ((and (eq :post (getf env :request-method)) (string= path "/grant"))
+             (sb-ext:atomic-incf (car grants))
+             (list 200 '(:content-type "application/json" :cache-control "no-store")
+                   (list (format nil "{\"grant\":\"~A\"}" (%grant-token priv)))))
+            ((string= path "/host")
+             (list 200 '(:content-type "text/html; charset=utf-8")
+                   (list (format nil "<!doctype html><html><head><title>host</title></head><body><div id=box style=\"width:400px;height:500px\"></div><script src=\"http://127.0.0.1:~D/embed.js\" data-grant-url=\"/grant\" data-container=\"#box\"></script></body></html>" (car service-port)))))
+            (t (list 404 '(:content-type "text/plain") (list "not found")))))))
+
+(defun %start-on-a-port (app)
+  "Start APP on a free local port. Returns (values HANDLER PORT)."
+  (let ((port nil))
+    (values (hyperion/test-ports:call-with-port
+             (lambda (p)
+               (prog1 (srv:start app :port p :host "127.0.0.1" :log nil)
+                 (setf port p))))
+            port)))
+
+(test the-embed-panel-gets-a-session-from-its-host-page-in-a-real-browser
+  "Allowed: the panel asks, the host's grant URL is called, the service opens a session, and a
+poll arrives with it. Not allowed: from a host origin missing from :EMBED-ORIGINS, the browser
+does not run the framed panel, so no grant is asked for and no session is opened."
+  (let ((browser (hyperion/assets/tests::%smoke-browser)))
+    (if (null browser)
+        (skip "No Chrome or Edge found; set HYPERION_SMOKE_BROWSER to run the embed hand-off")
+        (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+          (let* ((service-port (list nil))
+                 (allowed-grants (list 0))
+                 (refused-grants (list 0))
+                 (seen (list nil))
+                 (lock (sb-thread:make-mutex :name "embed-browser-log"))
+                 (handlers '()))
+            (unwind-protect
+                 (multiple-value-bind (allowed allowed-port)
+                     (%start-on-a-port (%host-app service-port priv allowed-grants))
+                   (push allowed handlers)
+                   (multiple-value-bind (refused refused-port)
+                       (%start-on-a-port (%host-app service-port priv refused-grants))
+                     (push refused handlers)
+                     (let ((app (%grant-app pub :embed-origins
+                                            (list (format nil "http://127.0.0.1:~D" allowed-port)))))
+                       (multiple-value-bind (service port)
+                           (%start-on-a-port
+                            (lambda (env)
+                              (let ((res (funcall app env))
+                                    (auth (gethash "authorization" (getf env :headers))))
+                                (sb-thread:with-mutex (lock)
+                                  (push (list (getf env :request-method) (getf env :path-info)
+                                              (getf env :query-string)
+                                              (and auth (subseq auth 0 (position #\Space auth)))
+                                              (first res))
+                                        (car seen)))
+                                res)))
+                         (push service handlers)
+                         (setf (car service-port) port)))
+                     (flet ((browse (host-port)
+                              (sb-thread:with-mutex (lock) (setf (car seen) nil))
+                              (hyperion/assets/tests::%run-browser
+                               browser (format nil "http://127.0.0.1:~D/host" host-port))
+                              (sb-thread:with-mutex (lock) (reverse (car seen))))
+                            (saw (log path scheme)
+                              (find-if (lambda (r) (and (equal path (second r))
+                                                        (equal scheme (fourth r))
+                                                        (eql 200 (fifth r))))
+                                       log)))
+                       (let ((log (browse allowed-port)))
+                         (is-true (saw log "/embed/panel" nil) "the panel was not loaded: ~S" log)
+                         (is (plusp (car allowed-grants)) "the host's grant URL was not asked")
+                         (is-true (saw log "/embed/session" "Grant") "no session was opened: ~S" log)
+                         (is-true (saw log "/api/progress" "Session")
+                                  "no request arrived with the session: ~S" log)
+                         (is (notany (lambda (r) (and (third r) (search "grant" (third r)))) log)
+                             "a grant was put in a URL: ~S" log))
+                       (let ((log (browse refused-port)))
+                         (is (zerop (car refused-grants))
+                             "the grant URL was asked from a frame the service does not allow")
+                         (is (notany (lambda (r) (equal "/embed/session" (second r))) log)
+                             "a session was asked for from a refused frame: ~S" log)))))
+              (dolist (h handlers) (ignore-errors (srv:stop h)))))))))
