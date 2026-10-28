@@ -391,6 +391,7 @@
                "aion/random"                 ; a session id (web-session.lisp, #67)
                "hyperion/assets"             ; vendored htmx/Bulma, embedded (no CDN)
                "spinneret" "com.inuoe.jzon"  ; still used directly by the chat UI
+               "parenscript"                 ; the page's stream client (#67)
                ;; The HTTP backend is the APP's choice, not hyperion's (pre-publication issue 139) -- and it is
                ;; declared as the CLACK HANDLER system, not the bare server, because that
                ;; is what `clackup` resolves :woo / :hunchentoot through. Depending on the

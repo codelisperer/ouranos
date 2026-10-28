@@ -12,15 +12,16 @@
 ;;;;                       page's cursor, the cursor moved past them, and the current
 ;;;;                       "… thinking / → tool" status (OOB). Same praxeon/event data
 ;;;;                       the CLI status-observer shows.
+;;;;   - GET  /api/events  with :transport :sse, the same updates as a Server-Sent Events
+;;;;                       stream, and the page reads that instead of polling (#67).
 ;;;;
-;;;; Why polling, not SSE? The server backend is CONFIGURABLE via Clack, and the
-;;;; default on Unix/macOS is Woo -- a single-threaded async (libev) server. Woo's
-;;;; socket can only be written from its own event-loop thread and must never be
-;;;; blocked, so long-lived SSE streams don't fit it. Polling keeps every handler
-;;;; quick and the LLM turn on a background thread, so it works identically on Woo
-;;;; and on Hunchentoot (the Windows default, thread-per-connection). The event
-;;;; contract is transport-neutral, so an SSE renderer can be added for threaded
-;;;; backends later without touching the agent loop.
+;;;; Polling or a stream. An SSE stream holds a handler thread for as long as the page is
+;;;; open. Hunchentoot runs each connection on its own thread, so it can. Woo runs every
+;;;; handler on one event-loop thread that must never block, so it cannot, and the native
+;;;; :uv server can only with a worker pool, where each open page takes one of its
+;;;; workers. START therefore streams on Hunchentoot and polls elsewhere, unless the app
+;;;; says otherwise with :TRANSPORT. Both read the same transcript, so a page shows the
+;;;; same thing either way.
 
 (cl:defpackage #:praxeon/web
   (:use #:cl)
@@ -41,6 +42,7 @@
                     (#:md #:hyperion/markdown)  ; safe Markdown -> HTML for bubbles
                     (#:i18n #:hyperion/i18n)    ; per-request locale (optional dict)
                     (#:assets #:hyperion/assets)
+                    (#:sse #:hyperion/sse)
                     (#:router #:hyperion/router))
   ;; Re-export the pieces that are now pure Hyperion, so consumers (elise) that
   ;; call praxeon/web:stop/default-server/mark-reloaded/unwatch/reload! are unchanged.
@@ -48,6 +50,8 @@
   ;; stop, so an app that has one and not the other still has to reach past this layer.
   (:import-from #:hyperion/server #:stop #:default-server #:request-shutdown)
   (:import-from #:hyperion/dev #:mark-reloaded #:unwatch #:reload!)
+  ;; Parenscript matches its own macros by symbol identity, so these are the real ones.
+  (:import-from #:parenscript #:chain #:@ #:create #:new)
   (:export #:start #:serve-forever #:stop #:request-shutdown
            #:make-app #:default-server #:*default-port*
            #:mark-reloaded
@@ -58,6 +62,15 @@
 (defparameter *default-port* 8080)
 (defparameter *poll-interval-ms* 700
   "How often the browser polls /api/progress for live updates.")
+
+(defparameter *stream-interval-ms* 100
+  "How often an open /api/events stream looks for new transcript items and a changed status.
+The transcript has no blocking wait, so the stream looks; this costs a lock and a comparison,
+and nothing is sent unless something changed.")
+
+(defparameter *stream-check-seconds* 5
+  "How often an open /api/events stream checks that its session is still open, and ends when it
+is not.")
 
 ;;; Dev hot-reload (*reload-epoch*/mark-reloaded) and backend selection
 ;;; (default-server) now come from Hyperion (hyperion/dev, hyperion/server) and
@@ -120,6 +133,9 @@ translator agent, or a locale-aware guardrail. Overridable via :responder."
   ;; make the principal's agent from another grant.
   (built-with nil)
   (rebuild nil)
+  ;; How many /api/events streams are reading this conversation. One that is being read is not
+  ;; idle, though no request reaches it while the stream stays open.
+  (streams 0)
   ;; When its last turn ended, by CLOCK, or NIL before the first ends. A conversation's idle time
   ;; counts from this or from its last request, whichever is later, so the reply to a turn that
   ;; ran longer than the idle limit is still there when the page next asks for it.
@@ -281,7 +297,8 @@ fail-safe -- with JS disabled it stays up, so the app is never used un-acknowled
     (:script :type "text/javascript" (:raw *gate-js*))))
 
 (defun %page (title intro footer &optional dev model chat-html theme-css
-                                           locale locales gate (cursor "0"))
+                                           locale locales gate (cursor "0")
+                                           events-url ticket-url)
   "The chat page: a full-height chat window -- fixed header, a transcript that
 scrolls and auto-sticks to the bottom, and an input bar pinned at the bottom with
 an auto-growing multiline box (Enter sends, Shift+Enter for a newline). Bulma-
@@ -290,7 +307,9 @@ transcript; FOOTER (a disclaimer / crisis resources) and MODEL (which model is
 answering) show in the footer bar. When DEV, embed the hot-reload poller (see
 *RELOAD-EPOCH*). CHAT-HTML is pre-rendered bubbles injected into #chat so a reload
 restores the transcript, and CURSOR is the index of the first transcript item they do not
-include, which the first poll sends. THEME-CSS is an app-supplied CSS string appended after
+include, which the first poll sends. With EVENTS-URL the page reads its updates from that
+Server-Sent Events stream instead of polling (%EVENTS-JS), and with TICKET-URL it asks there for
+a ticket before each stream. THEME-CSS is an app-supplied CSS string appended after
 the base stylesheet -- the app's hook to recolor .px-user/.px-assistant etc."
   (spinneret:with-html-string
     (:doctype)
@@ -332,11 +351,13 @@ the base stylesheet -- the app's hook to recolor .px-user/.px-assistant etc."
         ;; the interval. `queue last' keeps that poll and the timed one from running
         ;; together: both would send the same cursor and append the same items twice.
         (:raw (%cursor-input cursor))
-        (:div :hx-get "/api/progress"
-              :hx-trigger (format nil "~A, px-poll from:body"
-                                  (hh:trigger-string (list :every-ms *poll-interval-ms*)))
-              :hx-include "#px-cursor" :hx-sync "this:queue last"
-              :hx-target "#chat" :hx-swap (hh:swap-string :before-end))
+        (if events-url
+            (:div :id "px-events" :data-px-events events-url :data-px-ticket ticket-url)
+            (:div :hx-get "/api/progress"
+                  :hx-trigger (format nil "~A, px-poll from:body"
+                                      (hh:trigger-string (list :every-ms *poll-interval-ms*)))
+                  :hx-include "#px-cursor" :hx-sync "this:queue last"
+                  :hx-target "#chat" :hx-swap (hh:swap-string :before-end)))
         ;; The message comes back through the poll, like every other item, so the
         ;; POST's own response has nothing to swap.
         (:form :hx-post "/api/message" :hx-swap "none"
@@ -354,6 +375,7 @@ the base stylesheet -- the app's hook to recolor .px-user/.px-assistant etc."
       (when gate (:raw (%gate-modal gate)))
       ;; scripts at end of body so #chat / #msg exist when they run
       (:script (:raw (%chat-js)))
+      (when events-url (:script (:raw (%events-js))))
       (when dev (:script :type "text/javascript" (:raw (hjs:dev-reload-js))))))))
 
 (defun %user-bubble (msg)
@@ -607,16 +629,25 @@ responder (e.g. for Elise's translator)."
 ;;; --------------------------------------------------------------------------
 ;;; The Clack app
 ;;; --------------------------------------------------------------------------
-(defun %request-cursor (env)
-  "The cursor the poll sent as `after', as (values INDEX EPOCH). INDEX is NIL when the poll sent
-no cursor, or one whose index is not a non-negative integer. EPOCH is NIL for a bare index, which
-is what a page rendered before cursors had epochs sends."
-  (let* ((raw (http:query-param env "after"))
-         (colon (and raw (position #\: raw :from-end t)))
+(defun %parse-cursor (raw)
+  "RAW, a cursor value as a page holds it, as (values INDEX EPOCH). INDEX is NIL when RAW is NIL,
+or its index is not a non-negative integer. EPOCH is NIL for a bare index, which is what a page
+rendered before cursors had epochs sends."
+  (let* ((colon (and raw (position #\: raw :from-end t)))
          (n (and raw (ignore-errors (parse-integer raw :start (if colon (1+ colon) 0))))))
     (if (and (integerp n) (>= n 0))
         (values n (and colon (subseq raw 0 colon)))
         (values nil nil))))
+
+(defun %request-cursor (env)
+  "The cursor the poll sent as `after', as (values INDEX EPOCH): see %PARSE-CURSOR."
+  (%parse-cursor (http:query-param env "after")))
+
+(defun %stream-cursor (env)
+  "The cursor an /api/events request starts from, as (values INDEX EPOCH). A browser that
+reconnects a stream by itself sends the id of the last event it received as Last-Event-ID, and
+that comes before `after' in the URL, which is where the page was when it first opened the stream."
+  (%parse-cursor (or (http:request-header env "last-event-id") (http:query-param env "after"))))
 
 (defparameter *conversation-restarted-notice*
   "The earlier conversation ended because it was not used for a while. This is a new conversation."
@@ -630,24 +661,143 @@ newest item, so that page carries on from there instead of repeating the transcr
 
 When EPOCH is not CONV's, the page's cursor belongs to a conversation that has since been
 replaced, so its index means nothing here. The response then replaces the whole of #chat, out of
-band, with a notice that a new conversation has started and CONV's transcript so far."
+band, with a notice that a new conversation has started and CONV's transcript so far.
+
+Returns the HTML, and as a second value the index just past the items it holds."
   (let ((reset (and after epoch (string/= epoch (conversation-epoch conv)))))
     (multiple-value-bind (items next)
         (cond (reset (%items-since conv -1))
               (after (%items-since conv after))
               (t (values nil (chan:channel-length (conversation-events conv)))))
-      (with-output-to-string (s)
-        (if reset
-            (write-string (spinneret:with-html-string
-                            (:div :hx-swap-oob "innerHTML:#chat"
-                              (:div :class "notification is-light px-notice"
-                                *conversation-restarted-notice*)
-                              (:raw (%items-html conv items))))
-                          s)
-            (write-string (%items-html conv items) s))
-        (write-string (%cursor-input (%cursor-value conv next) t) s)
-        (write-string (%status-oob (%get-status conv)) s)
-        (write-string (%tokens-oob (%get-turn-tokens conv) (%get-tokens conv)) s)))))
+      (values
+       (with-output-to-string (s)
+         (if reset
+             (write-string (spinneret:with-html-string
+                             (:div :hx-swap-oob "innerHTML:#chat"
+                               (:div :class "notification is-light px-notice"
+                                 *conversation-restarted-notice*)
+                               (:raw (%items-html conv items))))
+                           s)
+             (write-string (%items-html conv items) s))
+         (write-string (%cursor-input (%cursor-value conv next) t) s)
+         (write-string (%status-oob (%get-status conv)) s)
+         (write-string (%tokens-oob (%get-turn-tokens conv) (%get-tokens conv)) s))
+       next))))
+
+(defun %stream-state (conv)
+  "What an open stream compares to decide whether to send: the length of CONV's transcript, its
+status line and its token counts."
+  (list (chan:channel-length (conversation-events conv)) (%get-status conv)
+        (%get-turn-tokens conv) (%get-tokens conv)))
+
+(defun %add-stream (conv n)
+  (sb-thread:with-mutex ((conversation-state-lock conv))
+    (incf (conversation-streams conv) n)))
+
+(defun %streamed-p (conv)
+  (sb-thread:with-mutex ((conversation-state-lock conv))
+    (plusp (conversation-streams conv))))
+
+(defun %stream-body (conv after epoch style live-p &optional on-close)
+  "The body of an /api/events response, a function of the writer: CONV's updates as Server-Sent
+Events, starting from AFTER and EPOCH (%STREAM-CURSOR).
+
+Each event's data is what a poll from the same cursor answers (%PROGRESS-FRAGMENT): the new
+items, and the cursor, status line and token count out of band. Its id is the cursor past those
+items, so a browser that reconnects by itself sends it back as Last-Event-ID and resumes where it
+stopped, with nothing lost or repeated. An event is sent at once, and then whenever an item is
+published or the status line or token count changes; a comment is sent when nothing has been for
+`hyperion/sse:*keep-alive-seconds*', so a proxy does not close the connection as idle.
+
+The stream ends when LIVE-P, called every *STREAM-CHECK-SECONDS*, returns false, or when the
+writer signals because the browser has gone. ON-CLOSE is then called. STYLE is the app's output
+style, bound here because the body runs after the handler has returned. While the stream is open,
+CONV counts it, so it is not dropped as idle."
+  (lambda (writer)
+    (%add-stream conv 1)
+    (unwind-protect
+         (out:with-output-style (style)
+           (let ((last nil)
+                 (sent-at (get-universal-time))
+                 (checked-at (get-universal-time)))
+             (loop
+               (let ((state (%stream-state conv)))
+                 (cond ((not (equal state last))
+                        (multiple-value-bind (html next) (%progress-fragment conv after epoch)
+                          (funcall writer (sse:encode-event html :id (%cursor-value conv next)))
+                          (setf after next
+                                epoch (conversation-epoch conv)
+                                last state
+                                sent-at (get-universal-time))))
+                       ((>= (- (get-universal-time) sent-at) sse:*keep-alive-seconds*)
+                        (funcall writer (sse:comment))
+                        (setf sent-at (get-universal-time)))))
+               (when (>= (- (get-universal-time) checked-at) *stream-check-seconds*)
+                 (unless (funcall live-p) (return))
+                 (setf checked-at (get-universal-time)))
+               (sleep (/ *stream-interval-ms* 1000)))))
+      (%add-stream conv -1)
+      (when on-close (funcall on-close)))))
+
+(defun %events-js ()
+  "The page's stream client, for a page with a #px-events element. It opens an EventSource on the
+element's data-px-events URL, from the cursor in #px-cursor, and gives each event's data to
+htmx.swap, which appends the items to #chat and makes the out-of-band swaps.
+
+The browser reconnects a dropped stream by itself, sending Last-Event-ID. When the server refuses
+the stream instead, which is what a spent ticket gets, the EventSource closes, and this opens a new
+one after two seconds, from the cursor the page has reached. With data-px-ticket, the URL a stream
+ticket is asked for, each stream first gets a ticket there, sending the hx-headers of the nearest
+element that has them, and passes it as `ticket'."
+  (out:js-string
+   '(funcall
+     (lambda ()
+       (let ((el (chain document (get-element-by-id "px-events"))))
+         (when el
+           ;; LET* because the later bindings call the earlier ones: Parenscript renames a
+           ;; parallel LET's bindings.
+           (let* ((url (chain el (get-attribute "data-px-events")))
+                  (ticket-url (chain el (get-attribute "data-px-ticket")))
+                  (cursor (lambda ()
+                            (let ((c (chain document (get-element-by-id "px-cursor"))))
+                              (if c (@ c value) ""))))
+                  (session-headers
+                    (lambda ()
+                      (let ((h (chain el (closest "[hx-headers]"))))
+                        (if h
+                            (chain *json* (parse (chain h (get-attribute "hx-headers"))))
+                            (create)))))
+                  (begin nil)
+                  (connect
+                    (lambda (ticket)
+                      (let ((source (new (*event-source
+                                          (+ url "?after=" (encode-u-r-i-component (funcall cursor))
+                                             (if ticket
+                                                 (+ "&ticket=" (encode-u-r-i-component ticket))
+                                                 ""))))))
+                        (setf (@ source onmessage)
+                              (lambda (e)
+                                (chain htmx (swap "#chat" (@ e data)
+                                                  (create swap-style "beforeend")))))
+                        (setf (@ source onerror)
+                              (lambda ()
+                                ;; 2 is CLOSED: the server refused the stream, so the browser
+                                ;; will not retry it.
+                                (when (= (@ source ready-state) 2)
+                                  (set-timeout begin 2000))))))))
+             (setf begin
+                   (lambda ()
+                     (if ticket-url
+                         (chain (fetch ticket-url (create method "POST"
+                                                          headers (funcall session-headers)))
+                                (then (lambda (r)
+                                        (if (@ r ok)
+                                            (chain r (json))
+                                            (chain *promise (reject r)))))
+                                (then (lambda (j) (funcall connect (@ j ticket))))
+                                (catch (lambda () (set-timeout begin 5000))))
+                         (funcall connect nil))))
+             (funcall begin))))))))
 
 (defun %handle-message (env conv dictionary &optional grant)
   (let ((message (%request-message env))
@@ -696,14 +846,16 @@ last reached it."
 
 (defun %entry-stale-p (entry now idle-seconds)
   "Whether, by NOW, IDLE-SECONDS have passed since a request last reached ENTRY and since its
-conversation's last turn ended, and none of its turns is running."
+conversation's last turn ended, none of its turns is running, and no /api/events stream is
+reading it."
   (let* ((conv (%entry-conversation entry))
-         (running (and conv (sb-thread:mutex-owner (conversation-turn-lock conv))))
-         ;; Read after RUNNING: a turn sets ENDED-AT before it lets go of the turn lock, so a
-         ;; turn that ended between the two reads has its end seen here.
+         (busy (and conv (or (sb-thread:mutex-owner (conversation-turn-lock conv))
+                             (%streamed-p conv))))
+         ;; Read after BUSY: a turn sets ENDED-AT before it lets go of the turn lock, so a turn
+         ;; that ended between the two reads has its end seen here.
          (ended-at (and conv (sb-thread:with-mutex ((conversation-state-lock conv))
                                (conversation-ended-at conv)))))
-    (and (not running)
+    (and (not busy)
          (>= (- now (max (%entry-used-at entry) (or ended-at 0))) idle-seconds))))
 
 (defun %expire-conversations (table now idle-seconds)
@@ -762,7 +914,8 @@ answer a session id for it, or 401 with the reason."
                       (responder #'%default-responder) intro footer dev theme-css
                       dictionary gate conversation-key make-agent
                       grant-verifier audience (sessions (ws:make-session-table))
-                      (conversation-idle-seconds 1800) (clock #'get-universal-time))
+                      (conversation-idle-seconds 1800) (clock #'get-universal-time)
+                      (transport :poll))
   "A Clack app exposing an agent: GET / (chat page), POST /api/message (HTMX or JSON),
 GET /api/progress (live-progress poll). One agent holds one conversation, so turns
 are serialized; the HTMX turn runs on a background thread so no handler blocks.
@@ -812,6 +965,17 @@ this one. GRANT-VERIFIER goes with MAKE-AGENT, and not with AGENT or CONVERSATIO
 GET /api/reload-epoch and GET /api/dev-error, which the hot-reload poller reads, exist only when
 DEV is true, and need no session.
 
+TRANSPORT is how the page gets its updates: :POLL (the default), from GET /api/progress, or :SSE,
+from GET /api/events, a Server-Sent Events stream that the server keeps open while the page is.
+The stream sends what the poll would answer, whenever it changes, with the cursor as each event's
+id, so a browser that reconnects resumes where it stopped. A conversation with an open stream is
+not dropped as idle. Serve :SSE only from a server that can hold a handler for as long as a page is
+open: see START, which chooses. With grants, an EventSource cannot send the session header, so the
+page first calls POST /embed/stream-ticket with it, and opens the stream with the ticket it gets
+(`praxeon/web-session:issue-ticket'): a ticket can be used once, within 30 seconds, while its
+session is open. The stream ends when its session does, and an open stream does not count as
+using the session, so a page left open ends its session after the idle limit like any other.
+
 Returns the Clack app, and as a second value a function of no arguments that returns how many
 conversations the app holds."
   (cond ((and conversation-key (not make-agent))
@@ -824,6 +988,8 @@ conversations the app holds."
          (error "praxeon/web: :GRANT-VERIFIER needs :AUDIENCE, the name grants for this service are minted with. Without it a grant minted for another service would open a session here."))
         ((not (typep conversation-idle-seconds '(integer 1)))
          (error "praxeon/web: :CONVERSATION-IDLE-SECONDS must be a whole number of seconds, at least 1, not ~S." conversation-idle-seconds))
+        ((not (member transport '(:poll :sse)))
+         (error "praxeon/web: :TRANSPORT must be :POLL or :SSE, not ~S." transport))
         ((and grant-verifier (or agent conversation-key (not make-agent)))
          (error "praxeon/web: :GRANT-VERIFIER takes :MAKE-AGENT, a function of a principal and its grant, and not :AGENT or :CONVERSATION-KEY: the conversation is the session's principal's.")))
   ;; dev renders pretty (readable view-source); prod compacts. The style is bound around each
@@ -869,25 +1035,38 @@ conversations the app holds."
              (if shared
                  1
                  (sb-thread:with-mutex (table-lock) (hash-table-count table)))))
+         ;; A stream that ends counts as a request reaching its conversation, so a page that
+         ;; reconnects at once finds the same one.
+         (touch
+           (lambda (conv)
+             (unless shared
+               (sb-thread:with-mutex (table-lock)
+                 (let ((e (gethash (conversation-key conv) table)))
+                   (when (and e (eq (%entry-conversation e) conv))
+                     (setf (%entry-used-at e) (funcall clock))))))))
+         ;; With grants: session ID's principal's conversation and the session's grant, or the
+         ;; response that refuses it.
+         (session-conversation
+           (lambda (id)
+             (let ((grant (ws:session-grant sessions id)))
+               (if (null grant)
+                   (%unauthenticated "send an open session as: Authorization: Session <id>")
+                   (let* ((principal (ceiling:grant-principal grant))
+                          (rebuild (lambda (g) (funcall make-agent principal g))))
+                     (values (funcall keyed principal
+                                      (lambda ()
+                                        (%new-conversation principal (funcall rebuild grant)
+                                                           agent-name responder
+                                                           :built-with (%grant-terms grant)
+                                                           :rebuild rebuild
+                                                           :clock clock)))
+                             grant))))))
          ;; CONVERSATION-FOR returns the request's conversation, or the response that refuses it,
          ;; and with grants the session's grant as a second value.
          (conversation-for
            (cond
              (grant-verifier
-              (lambda (env)
-                (let ((grant (ws:session-grant sessions (%authorization env "Session"))))
-                  (if (null grant)
-                      (%unauthenticated "send an open session as: Authorization: Session <id>")
-                      (let* ((principal (ceiling:grant-principal grant))
-                             (rebuild (lambda (g) (funcall make-agent principal g))))
-                        (values (funcall keyed principal
-                                         (lambda ()
-                                           (%new-conversation principal (funcall rebuild grant)
-                                                              agent-name responder
-                                                              :built-with (%grant-terms grant)
-                                                              :rebuild rebuild
-                                                              :clock clock)))
-                                grant))))))
+              (lambda (env) (funcall session-conversation (%authorization env "Session"))))
              (conversation-key
               (lambda (env)
                 (let ((key (funcall conversation-key env)))
@@ -939,7 +1118,10 @@ conversations the app holds."
                                                            (and gate (if (functionp gate)
                                                                          (funcall gate locale)
                                                                          gate))
-                                                           (%cursor-value conv next)))))))))
+                                                           (%cursor-value conv next)
+                                                           (and (eq transport :sse) "/api/events")
+                                                           (and (eq transport :sse) grant-verifier
+                                                                "/embed/stream-ticket")))))))))
                             :name :chat)
               (router:route :get "/api/progress"
                             (lambda (env)
@@ -950,6 +1132,44 @@ conversations the app holds."
                                       (list 200 '(:content-type "text/html; charset=utf-8")
                                             (list (%progress-fragment conv after epoch)))))))
                             :name :progress)
+              ;; The stream, for a page that does not poll. With grants it is opened with a ticket,
+              ;; because an EventSource cannot send the session header.
+              (when (eq transport :sse)
+                (router:route :get "/api/events"
+                              (lambda (env)
+                                (multiple-value-bind (conv live-p)
+                                    (if grant-verifier
+                                        (let ((id (ws:redeem-ticket sessions
+                                                                    (http:query-param env "ticket"))))
+                                          (if (null id)
+                                              (%unauthenticated "open the stream with a ticket from POST /embed/stream-ticket")
+                                              (values (funcall session-conversation id)
+                                                      ;; Checking does not count as a use, so
+                                                      ;; a page left open with its stream still
+                                                      ;; ends when the session is idle.
+                                                      (lambda () (ws:session-open-p sessions id)))))
+                                        (values (funcall conversation-for env) (constantly t)))
+                                  (if (not (conversation-p conv))
+                                      conv
+                                      (multiple-value-bind (after epoch) (%stream-cursor env)
+                                        (list 200 (copy-list sse:*headers*)
+                                              (%stream-body conv after epoch style live-p
+                                                            (lambda () (funcall touch conv))))))))
+                              :name :events))
+              (when (and (eq transport :sse) grant-verifier)
+                (router:route :post "/embed/stream-ticket"
+                              (lambda (env)
+                                (let ((ticket (ws:issue-ticket sessions
+                                                               (%authorization env "Session"))))
+                                  (if (null ticket)
+                                      (%unauthenticated "send an open session as: Authorization: Session <id>")
+                                      (list 200 '(:content-type "application/json"
+                                                  :cache-control "no-store")
+                                            (list (http:json
+                                                   (list "ticket" ticket
+                                                         "ticket_seconds"
+                                                         (ws:session-table-ticket-seconds sessions))))))))
+                              :name :stream-ticket))
               ;; The dev page's poller reads these two, and only a dev app has them.
               (when dev
                 (router:route :get "/api/reload-epoch"
@@ -984,9 +1204,21 @@ conversations the app holds."
 ;;; --------------------------------------------------------------------------
 ;;; Lifecycle
 ;;; --------------------------------------------------------------------------
+(defun %resolve-transport (transport server)
+  "The transport MAKE-APP is given, from START's TRANSPORT and SERVER. :AUTO streams on
+:HUNCHENTOOT, which runs each connection on its own thread, and polls on every other server. :SSE
+is refused on :WOO, whose handlers run on its one event-loop thread, so a stream would stop every
+other request; it is allowed on :UV, where each open page holds one of the server's workers."
+  (ecase transport
+    (:auto (if (eq server :hunchentoot) :sse :poll))
+    (:poll :poll)
+    (:sse (when (eq server :woo)
+            (error "praxeon/web: :TRANSPORT :SSE cannot be served by Woo, which runs every handler on its one event-loop thread, so an open stream would hold up every other request. Use :SERVER :HUNCHENTOOT, or :TRANSPORT :POLL."))
+          :sse)))
+
 (defun %build-app (agent agent-name title responder intro footer dev theme-css
                    dictionary gate conversation-key make-agent
-                   grant-verifier audience sessions conversation-idle-seconds)
+                   grant-verifier audience sessions conversation-idle-seconds transport)
   "The app START and SERVE-FOREVER serve: MAKE-APP, called with the arguments they share.
 
 BOTH ENTRY POINTS GO THROUGH HERE. START and SERVE-FOREVER differ in how they BLOCK, not
@@ -1002,13 +1234,14 @@ forget one."
             :conversation-key conversation-key :make-agent make-agent
             :grant-verifier grant-verifier :audience audience
             :sessions (or sessions (ws:make-session-table))
-            :conversation-idle-seconds (or conversation-idle-seconds 1800)))
+            :conversation-idle-seconds (or conversation-idle-seconds 1800)
+            :transport transport))
 
 (defun start (&key agent (agent-name "Praxeon") (title "Praxeon")
                    (responder #'actor:run-turn) intro footer dev theme-css
                    dictionary gate conversation-key make-agent
                    grant-verifier audience sessions conversation-idle-seconds
-                   (server (default-server)) (port *default-port*)
+                   (transport :auto) (server (default-server)) (port *default-port*)
                    (host "127.0.0.1") debug)
   "Start a web server exposing AGENT and return a handler; stop it with STOP.
 Builds the agent/chat Clack app and hands it to hyperion/server:start. SERVER is
@@ -1016,20 +1249,23 @@ the Clack backend (DEFAULT-SERVER, re-exported from Hyperion). RESPONDER, INTRO,
 FOOTER, THEME-CSS, DICTIONARY, CONVERSATION-KEY, MAKE-AGENT, GRANT-VERIFIER, AUDIENCE,
 SESSIONS, CONVERSATION-IDLE-SECONDS and DEV pass through to MAKE-APP -- DICTIONARY turns
 on per-request locale negotiation (title/intro/footer may be locale functions); DEV
-t embeds the hot-reload poller so the page auto-refreshes on (MARK-RELOADED).
+t embeds the hot-reload poller so the page auto-refreshes on (MARK-RELOADED). TRANSPORT is
+:AUTO, :POLL or :SSE: :AUTO streams the page's updates on :HUNCHENTOOT and polls on the
+others, and :SSE is refused on :WOO (%RESOLVE-TRANSPORT).
 
 RETURNS IMMEDIATELY, which is what makes it the REPL entry. A binary's `main' wants
 SERVE-FOREVER instead."
   (srv:start (%build-app agent agent-name title responder intro footer dev theme-css
                          dictionary gate conversation-key make-agent
-                         grant-verifier audience sessions conversation-idle-seconds)
+                         grant-verifier audience sessions conversation-idle-seconds
+                         (%resolve-transport transport server))
              :server server :port port :host host :debug debug))
 
 (defun serve-forever (&key agent (agent-name "Praxeon") (title "Praxeon")
                            (responder #'actor:run-turn) intro footer dev theme-css
                            dictionary gate conversation-key make-agent
                            grant-verifier audience sessions conversation-idle-seconds
-                           (server (default-server)) (port *default-port*)
+                           (transport :auto) (server (default-server)) (port *default-port*)
                            (host "127.0.0.1") debug (log t)
                            (name agent-name) (banner :derive) (signals t) on-ready)
   "Start a web server exposing AGENT and BLOCK until interrupted. Returns NIL.
@@ -1038,7 +1274,7 @@ The blocking counterpart to START, and what a binary's `main' should call. Every
 makes a foreground server behave -- the banner, Ctrl-C, the shutdown hooks, restoring the
 previous signal handlers -- belongs to `hyperion/server:serve-forever' and is simply
 delegated to. NAME titles the derived banner and defaults to AGENT-NAME, since that is the
-name the app already answers to.
+name the app already answers to. TRANSPORT is as for START.
 
 WHY IT LIVES HERE RATHER THAN IN EACH APP (pre-publication issue 151). A praxeon app that wants to block used to
 have to reach past praxeon/web into hyperion/server, build the Clack app itself with
@@ -1053,7 +1289,8 @@ process. The gap was one layer above where it showed, which is the argument for 
 here rather than porting the symptom."
   (srv:serve-forever (%build-app agent agent-name title responder intro footer dev
                                  theme-css dictionary gate conversation-key make-agent
-                                 grant-verifier audience sessions conversation-idle-seconds)
+                                 grant-verifier audience sessions conversation-idle-seconds
+                                 (%resolve-transport transport server))
                      :server server :port port :host host :debug debug :log log
                      :name name :banner banner :signals signals :on-ready on-ready))
 
