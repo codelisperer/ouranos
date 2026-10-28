@@ -2277,6 +2277,12 @@ its tag.
   other than GET or HEAD sends `Content-Length: 0`. Those four are now also what the Windows
   pinned path sends.
 
+- **aion/http-client: a pinned request's `:read-timeout` ends the read on Windows** (#985). On
+  Windows the socket's receive timeout had no effect, so a pinned request to a server that
+  accepted and never answered waited until the server closed the connection, or for ever. A
+  `fetch-public` call without `:deadline` is one. The read timeout now ends such a read with an
+  `http-error` whose phase is `:response` and whose detail says "I/O timeout".
+
 - **aion/http-client: a pinned https request refuses a certificate whose common name matches
   the host when its subject alternative names do not** (#917). On Linux and macOS, cl+ssl checks
   a certificate's common name whenever none of its alternative names match, which RFC 6125
