@@ -574,3 +574,19 @@ FACEBOOK_PAGE_TOKEN_<id> (and FACEBOOK_APP_ID / FACEBOOK_APP_SECRET for the heal
     (is (string= "image/jpeg"
                  (h:facebook-post-image-type (h:make-facebook-post :page +page-id+ :image-octets one
                                                                    :image-type "IMAGE/JPEG"))))))
+
+(test facebook-a-failure-while-the-request-is-built-shows-no-secret
+  "#994: SENT holds the access token and appsecret_proof in plain text, so every function it is
+passed to is below %FACEBOOK-CALL's HANDLER-CASE. A failure while the body is built is reported
+redacted, with no frame holding the token, exactly as one while it is sent."
+  (with-graph (server fb (%fb-always 200 "{\"id\":\"1\"}"))
+    ;; %MULTIPART is given octets it cannot write: the error comes from building the body.
+    (let* ((broken (make-array 3 :element-type t :initial-element :not-an-octet))
+           (post (hermes::%make-facebook-post +page-id+ nil "x" nil broken "image/png"))
+           (c (handler-case (progn (h:deliver fb post) nil)
+                (h:hermes-error (e) e))))
+      (is (typep c 'h:delivery-failure) "got ~S" c)
+      (is (%no-secret-p c) "the report shows no secret")
+      (is (%no-secret-p (with-output-to-string (out)
+                          (let ((*print-escape* nil)) (print-object c out))))
+          "nor does printing it"))))

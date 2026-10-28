@@ -272,33 +272,42 @@ unwound first (see this file's header)."
                                                                    (mapcar #'cdr params)))))))
          (redact (lambda (text) (%redact-all text hidden)))
          (url (format nil "~A/~A/~A" (facebook-graph-base p) +facebook-graph-api-version+ path))
-         (req (if (eq method :get)
-                  (make-request :method :get :url (format nil "~A?~A" url (%query sent))
-                                :headers (when token-text
-                                           (list (cons "Authorization"
-                                                       (format nil "OAuth ~A" token-text))))
-                                :connect-timeout +facebook-connect-timeout+
-                                :read-timeout +facebook-read-timeout+
-                                :max-body-bytes +facebook-max-response-bytes+)
-                  (let ((boundary (and file (format nil "hermes-~A" (aion/random:random-hex 128)))))
-                    (make-request :method :post :url url
-                                  :content (if file (%multipart sent file boundary) sent)
-                                  :headers (when file
-                                             (list (cons "Content-Type"
-                                                         (format nil "multipart/form-data; boundary=~A"
-                                                                 boundary))))
-                                  :connect-timeout +facebook-connect-timeout+
-                                  :read-timeout +facebook-read-timeout+
-                                  :max-body-bytes +facebook-max-response-bytes+))))
          (resp (handler-case
-                   (apply #'send-request req '()
-                          (when *facebook-perform* (list :perform *facebook-perform*)))
+                   ;; THE REQUEST IS BUILT IN HERE, not in a binding above (the hub's review of
+                   ;; #994). SENT holds the access token and appsecret_proof in plain text, so
+                   ;; every function it is passed to must be below this HANDLER-CASE: an error
+                   ;; raised while the request is built is then caught here, and the frames
+                   ;; holding SENT have unwound before anything is signalled, exactly as for an
+                   ;; error raised while it is sent.
+                   (let ((req (if (eq method :get)
+                                  (make-request :method :get
+                                                :url (format nil "~A?~A" url (%query sent))
+                                                :headers (when token-text
+                                                           (list (cons "Authorization"
+                                                                       (format nil "OAuth ~A" token-text))))
+                                                :connect-timeout +facebook-connect-timeout+
+                                                :read-timeout +facebook-read-timeout+
+                                                :max-body-bytes +facebook-max-response-bytes+)
+                                  (let ((boundary (and file (format nil "hermes-~A"
+                                                                    (aion/random:random-hex 128)))))
+                                    (make-request :method :post :url url
+                                                  :content (if file (%multipart sent file boundary) sent)
+                                                  :headers (when file
+                                                             (list (cons "Content-Type"
+                                                                         (format nil "multipart/form-data; boundary=~A"
+                                                                                 boundary))))
+                                                  :connect-timeout +facebook-connect-timeout+
+                                                  :read-timeout +facebook-read-timeout+
+                                                  :max-body-bytes +facebook-max-response-bytes+)))))
+                     (apply #'send-request req '()
+                            (when *facebook-perform* (list :perform *facebook-perform*))))
                  (http-error (c)
                    (error 'delivery-failure
                           :provider :facebook :status (http-error-status c)
                           :detail (funcall redact (or (http-error-detail c) (http-error-body c)))))
                  ;; As in telegram.lisp: anything else is reported, redacted, after this
-                 ;; HANDLER-CASE has unwound the frames that hold the request.
+                 ;; HANDLER-CASE has unwound the frames that hold the request, whether it was
+                 ;; raised while the request was built or while it was sent.
                  (cl:error (c)
                    (error 'delivery-failure
                           :provider :facebook
