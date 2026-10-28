@@ -92,6 +92,12 @@ excuse one here. `fiveam` is in both and for different reasons.
 | `hyperion` | web | In-tree. |
 | `spinneret` | web | HTML as s-expressions, in the generated page. |
 | `hyperion/server-uv` | web | In-tree. The native HTTP server the generated app starts, on libuv (#472, ADR-0017). It needs a built libuv: `scripts/build-libuv.lisp`, or a system copy. Before #472 the template used `clack-handler-hunchentoot`. |
+| `aion/uv` | web | In-tree. Declared by the generated app so that the libuv binding is part of the project's own load, rather than arriving only through `hyperion/server-uv` (#711). |
+| `aion/log` | web | In-tree. The generated `start` logs which server `default-server` chose and why (#711). |
+| `mnemosyne` | web | In-tree. Only with `cons init --db sqlite\|postgres`: the one connection pool the generated `src/db.lisp` makes from `DATABASE_URL` (#711). |
+| `hyperion/db-connection` | web | In-tree. Only with `--db`: `wrap-connection`, which lends each request a connection from that pool (#711). |
+| `hyperion/session-db` | web | In-tree. Only with `--db`: the session store, over the same pool (#711). |
+| `hyperion/auth-db` | web | In-tree. Only with `--db`: the user store, over the same pool (#711). |
 
 **This table is checked, not maintained by hand.** `cons/tests/init-tests.lisp` scaffolds
 each template into a temporary directory, reads the `.asd` the generator actually wrote, and

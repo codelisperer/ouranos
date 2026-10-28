@@ -50,12 +50,94 @@ workers and answers GET / with 200 and its own page (#472)."
           (is (eql 0 code) "the child sbcl exited 0: ~A" context)
           (is (equal "UV" (%template-field output "TEMPLATE-BACKEND"))
               "START chose the :uv backend: ~A" context)
+          (is (equal "PREFERRED" (%template-field output "TEMPLATE-REASON"))
+              "default-server chose :uv because it is preferred and libuv loaded: ~A" context)
+          (is (search "server chosen" (concatenate 'string output error-output))
+              "START logged the server it chose and why (#711): ~A" context)
+          (is (search "reason=preferred" (concatenate 'string output error-output))
+              "the log line carries the reason: ~A" context)
           (is (equal "2" (%template-field output "TEMPLATE-WORKERS"))
               "the :uv server has a pool of 2 workers: ~A" context)
           (is (equal "HTTP/1.1 200 OK" (%template-field output "TEMPLATE-STATUS"))
               "GET / answered 200: ~A" context)
           (is (equal "T" (%template-field output "TEMPLATE-PAGE"))
               "the page is the scaffolded one: ~A" context))))))
+
+;;; --- the generated project's own tests pass (#711) ------------------------------------------
+;;;
+;;; `cons init' writes a tests/ suite into the web project. These tests scaffold the plain web
+;;; template, web --db sqlite and web --db postgres, and run each project's own suite in a fresh
+;;; sbcl (template-suite-child.lisp), which prints how many checks passed, failed and were
+;;; skipped. The Postgres project's suite runs against MNEMOSYNE_TEST_PG_URL, the URL the gate
+;;; gives the mnemosyne suites, on every leg where that is set; where it is not set the test is
+;;; skipped, and so is counted as a skip rather than as a pass.
+
+(defun %run-suite-child (root)
+  "Run template-suite-child.lisp in a fresh sbcl on the project at ROOT.
+Returns (values STDOUT STDERR EXIT-CODE)."
+  (uiop:run-program
+   (list "sbcl" "--dynamic-space-size" "4096" "--non-interactive" "--no-sysinit" "--no-userinit"
+         "--eval" (format nil "(defparameter cl-user::*project-root* ~S)"
+                          (uiop:native-namestring root))
+         "--eval" (format nil "(defparameter cl-user::*project-name* ~S)" +template-project+)
+         "--load" (uiop:native-namestring
+                   (asdf:system-relative-pathname :hyperion/server-uv/tests
+                                                  "tests/template-suite-child.lisp")))
+   :output :string :error-output :string :ignore-error-status t))
+
+(defun %check-generated-suite (options checks &key (skipped 0))
+  "Scaffold the web template with OPTIONS, run the project's own suite in a fresh sbcl, and check
+that it ran CHECKS checks, of which SKIPPED were skipped and the rest passed."
+  (cons/tempdir:with-temporary-directory (work "uvsuite")
+    (let ((root (let ((*standard-output* (make-broadcast-stream)))
+                  (cons/init:scaffold +template-project+ :template :web :target work
+                                                         :options options))))
+      (multiple-value-bind (output error-output code) (%run-suite-child root)
+        (let ((context (format nil "exit ~A~%--- stdout~%~A~%--- stderr (last 3000)~%~A"
+                               code output
+                               (subseq error-output (max 0 (- (length error-output) 3000))))))
+          (flet ((field= (expected key)
+                   (equal (princ-to-string expected) (%template-field output key))))
+            (is (eql 0 code) "the child sbcl exited 0: ~A" context)
+            (is (field= checks "SUITE-CHECKS") "the project's suite ran ~D checks: ~A"
+                checks context)
+            (is (field= (- checks skipped) "SUITE-PASSED") "~D passed: ~A"
+                (- checks skipped) context)
+            (is (field= 0 "SUITE-FAILED") "none failed: ~A" context)
+            (is (field= skipped "SUITE-SKIPPED") "~D skipped: ~A" skipped context)))))))
+
+(test the-web-projects-own-tests-pass
+  "The plain web project's suite starts the app, checks server-uv answered GET /, and checks
+that a second START is refused: 4 checks."
+  (%check-generated-suite nil 4))
+
+(test the-web-sqlite-projects-own-tests-pass
+  "web --db sqlite: the page from server-uv; two visits counted in a session that the database
+holds, through the one pool; a second START refused with the pool still open; a START that
+fails closes the pool it opened; a user store that recovers from an error keeps the pool open;
+and a store that cannot be made leaves the database closed (#944): 18 checks."
+  (%check-generated-suite '(:db :sqlite) 18))
+
+(defparameter +default-store-tables+
+  (format nil "~{~A~^,~}" '("hyperion_sessions" "hyperion_users" "hyperion_role_events"
+                           "hyperion_email_tokens" "hyperion_email_events"))
+  "The tables a generated Postgres project's stores create, under their default names.")
+
+(test the-web-postgres-project-builds-and-its-own-tests-pass
+  "web --db postgres is scaffolded and built on every leg. Against the gate's Postgres its suite
+runs the same 18 checks as SQLite. Without a Postgres URL, the project's six tests skip
+themselves, which this checks, and then this test records a skip."
+  (let ((url (uiop:getenv "MNEMOSYNE_TEST_PG_URL")))
+    (if (and url (plusp (length url)))
+        ;; The child drops the default-named tables that were not there before it ran.
+        (%with-environment `(("DATABASE_URL" . ,url)
+                             ("TEMPLATE_DROP_NEW_TABLES" . ,+default-store-tables+))
+                           (lambda () (%check-generated-suite '(:db :postgres) 18)))
+        (progn
+          (%with-environment '(("DATABASE_URL" . nil))
+                             (lambda () (%check-generated-suite '(:db :postgres) 6 :skipped 6)))
+          (skip (concatenate 'string "MNEMOSYNE_TEST_PG_URL is not set -- the Postgres project "
+                             "was built, and its tests were not run"))))))
 
 ;;; --- cons bin carries libuv, and the binary serves away from the tree (#513) --------------
 ;;;

@@ -52,6 +52,7 @@
 (load (merge-pathnames "lazy-natives.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))  ; the tree's own libraries (#481)
 (load (merge-pathnames "bundle-sources.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))  ; a library that travels with its source (#429)
 (load (merge-pathnames "tree-natives.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))  ; carrying them (#513)
+(load (merge-pathnames "missing-natives.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))  ; a native file not found (#956)
 
 ;;; --- argv -------------------------------------------------------------------
 (defun argv-value (name &optional default)
@@ -63,6 +64,29 @@
 (defparameter *name*    (or (argv-value "--name")    (error "build-desktop-app: --name is required")))
 (defparameter *version* (or (argv-value "--version") "0.0.0"))
 (defparameter *out*     (argv-value "--out" "dist"))
+;;; --allow-missing-natives: go on, with a warning, when hyperion-view or a library the runtime
+;;; links against is missing. Without it the build stops and names the file (#956).
+(defparameter *allow-missing-natives*
+  (ouranos-missing-natives:allow-missing-p (rest sb-ext:*posix-argv*)))
+(defun allow-missing-args ()
+  "--allow-missing-natives again, for a build that re-runs itself as a child (#956): the child is
+the one that carries the files and would otherwise stop."
+  (and *allow-missing-natives* (list ouranos-missing-natives:+allow-option+)))
+(defparameter *missing-natives* '()
+  "The native files this build went on without, newest first, for the summary line.")
+
+(defun %missing-native (name path build-command)
+  "NAME, at PATH, should be carried and is not there. Stop the build, naming it and BUILD-COMMAND,
+unless --allow-missing-natives was given; then warn and record it for the summary (#956)."
+  (cond (*allow-missing-natives*
+         (format *error-output* "~&~A" (ouranos-missing-natives:allowed-message
+                                         name (human-path:human-path path)))
+         (push name *missing-natives*))
+        (t
+         (format *error-output* "~&~A" (ouranos-missing-natives:refusal-message
+                                         name (human-path:human-path path) build-command))
+         (finish-output *error-output*)
+         (sb-ext:exit :code 3))))
 
 ;;; The release settings (#408), parsed and checked here, before anything is built, so a bad one
 ;;; stops the build at once. They are set in the image just before the dump.
@@ -282,7 +306,8 @@ itself already finished, and its exit code is what the caller returns."
                                       "--name" *name* "--version" *version* "--out" *out*)
                                 (%window-icon-args)
                                 (carry-args)
-                                (release-args))
+                                (release-args)
+                                (allow-missing-args))
                         :output t :error-output t :ignore-error-status t
                         ;; The child's own runtime now says @executable_path, so it cannot
                         ;; rediscover which files to carry -- it is told.
@@ -295,7 +320,14 @@ itself already finished, and its exit code is what the caller returns."
                                                         (sb-ext:posix-environ)))))))
           (%remove-patched-runtime patched)
           (sb-ext:exit :code code))
-        (format t "~&build-desktop-app: continuing UNPATCHED -- this bundle will not run on a Mac without those libraries.~%"))))
+        ;; Unpatched, the image still points at the build machine's copies, and none of them is
+        ;; carried: OURANOS_CARRY_DYLIBS is set only for the child above. Each is therefore a
+        ;; missing file the bundle needs, refused unless --allow-missing-natives (#963's review).
+        (progn
+          (format t "~&build-desktop-app: the runtime could not be patched, so the libraries it links against are not carried.~%")
+          (dolist (dep *runtime-linked-deps*)
+            (%missing-native (file-namestring dep) dep
+                             "fix the install_name_tool or codesign error above, so the runtime can be patched (ADR-0014)"))))))
 
 ;;; --- Windows: the executable's icon (#72) ----------------------------------------
 ;;;
@@ -366,7 +398,8 @@ Returns the child's exit code."
                "--name" *name* "--version" *version* "--out" *out*)
          (%window-icon-args)
          (carry-args)
-         (release-args))
+         (release-args)
+         (allow-missing-args))
         :output t :error-output t :ignore-error-status t
         ;; A copied runtime sits in <out>/.runtime, away from SBCL's own directory, so it is
         ;; told where its contribs are. OURANOS_PATCHED_RUNTIME marks the child, which then
@@ -585,17 +618,28 @@ a later step does: a resource update rewrites the file and drops an Authenticode
 ;;; The native webview launcher belongs BESIDE the image -- that is the first place
 ;;; hyperion/desktop:default-launcher looks in a shipped app. Built separately, per OS,
 ;;; by hyperion/hyperion-view/build.{sh,ps1} (which CI runs before this script).
+;;; Needed only when the image loads hyperion/desktop: an app that does not opens no window, as
+;;; the sqlite and uv probes do not (#956).
 (let* ((exe (if (uiop:os-windows-p) "hyperion-view.exe" "hyperion-view"))
        (src (merge-pathnames (format nil "hyperion/hyperion-view/~A" exe) *root*))
        (dst (merge-pathnames exe *bundle*)))
-  (if (probe-file src)
-      (progn (uiop:copy-file src dst)
-             ;; copy-file does not carry the executable bit on Unix.
-             (unless (uiop:os-windows-p)
-               (ignore-errors (uiop:run-program (list "chmod" "+x" (namestring dst))
-                                                :ignore-error-status t)))
-             (format t "~&build-desktop-app: launcher -> ~A~%" (human-path:human-path dst)))
-      (warn "build-desktop-app: no hyperion-view at ~A -- run hyperion/hyperion-view/build.{sh,ps1} first; the app will not open a window." (human-path:human-path src))))
+  (ecase (ouranos-missing-natives:decide :needed (and (find-package "HYPERION/DESKTOP") t)
+                                         :present (probe-file src)
+                                         :allow *allow-missing-natives*)
+    (:carry
+     (uiop:copy-file src dst)
+     ;; copy-file does not carry the executable bit on Unix.
+     (unless (uiop:os-windows-p)
+       (ignore-errors (uiop:run-program (list "chmod" "+x" (namestring dst))
+                                        :ignore-error-status t)))
+     (format t "~&build-desktop-app: launcher -> ~A~%" (human-path:human-path dst)))
+    (:not-needed
+     (format t "~&build-desktop-app: no launcher carried -- this image does not load hyperion/desktop.~%"))
+    ((:refuse :allowed-missing)
+     (%missing-native "hyperion-view" src
+                      (if (uiop:os-windows-p)
+                          "powershell -File hyperion/hyperion-view/build.ps1"
+                          "./hyperion/hyperion-view/build.sh")))))
 
 ;;; --- native libraries (ADR-0013) ----------------------------------------------
 ;;; A dumped image is self-contained Lisp, not self-contained native code: every CFFI
@@ -629,7 +673,8 @@ nothing."
         (let ((source (probe-file dep)))            ; resolves the symlink
           (cond
             ((null source)
-             (format t "~&  MISSING   ~A -- linked by the runtime but not on this machine~%" dep))
+             (%missing-native (file-namestring dep) dep
+                              (format nil "install ~A, which the SBCL runtime links against, on this machine" dep)))
             (t
              (let ((dst (merge-pathnames (file-namestring dep) *bundle*)))
                (uiop:copy-file source dst)
@@ -675,6 +720,7 @@ nothing."
     (sb-ext:exit :code 3)))
 (ouranos-tree-natives:carry-native-libraries :already-carried *tree-carried*)
 (carry-runtime-linked-libraries)
+(format t "~&~A~%" (ouranos-missing-natives:missing-summary (reverse *missing-natives*)))
 
 ;;; VERSION is what a fresh install reports before the app has ever run, and what the
 ;;; installer reads. The authoritative value is the one baked into the image by the app
