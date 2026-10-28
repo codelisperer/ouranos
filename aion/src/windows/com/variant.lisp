@@ -278,7 +278,9 @@ and for an element type this does not read; a NULL array is the empty vector."
                  (%safearray-check (ffi:safe-array-get-ubound psa 1 hi) "SafeArrayGetUBound")
                  (max 0 (1+ (- (cffi:mem-ref hi :int32) (cffi:mem-ref lo :int32)))))))
     ;; The array says how wide its elements are; reading them at another width would read
-    ;; garbage, so the two must agree (#966's review).
+    ;; garbage, so the two must agree (#966's review). This check has no test: oleaut32 sets the
+    ;; element size from the element type when it creates an array, and no mismatched array
+    ;; could be built to test it with.
     (let ((stored (ffi:safe-array-get-elemsize psa))
           (expected (cond ((= element-type ffi:+vt-bstr+) (cffi:foreign-type-size :pointer))
                           ((= element-type ffi:+vt-variant+)
