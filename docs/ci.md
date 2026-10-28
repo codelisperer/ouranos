@@ -65,6 +65,22 @@ sbcl --dynamic-space-size 4096 --script scripts/build-libuv.lisp
 sbcl --dynamic-space-size 4096 --script scripts/verify-tree.lisp
 ```
 
+### Which tree the steps use: the drop-in or `CL_SOURCE_REGISTRY`
+
+A runner starts with no ASDF drop-in, so bootstrap's refusal to change a drop-in naming
+another checkout (#955) cannot fire there. The legs still differ on purpose:
+
+- **Linux** bootstraps with `OURANOS_BOOTSTRAP_LOCAL=1`. Bootstrap writes no drop-in, and the
+  next step puts `CL_SOURCE_REGISTRY=$GITHUB_WORKSPACE//:` in `$GITHUB_ENV`, so every later
+  step finds the tree the same way bootstrap's own child processes did. This keeps tree-local
+  mode in use by a real build, not only by the checkers tests.
+- **macOS and Windows** write the drop-in, as a person's first bootstrap does, so that path
+  is exercised too.
+
+Use tree-local mode for any job or script that bootstraps on a machine where another
+checkout may already own the drop-in, such as a self-hosted runner or a scratch build. Use
+the drop-in for a runner that is thrown away after the job.
+
 ### `resolve` is not `fetch` — the step the first CI run proved is not optional
 
 `asdf:load-system` **resolves** dependencies; `ql:quickload` **fetches** them.
