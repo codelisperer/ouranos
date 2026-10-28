@@ -187,6 +187,13 @@ with `scripts/build-desktop-app.lisp --window-icon <file>`, giving the format th
 `.exe`'s own icon in Explorer, and from `build-dmg.sh --icon`, which sets the `.app`'s icon in
 Finder.
 
+**A missing launcher stops the build (#956).** For an app that loads `hyperion/desktop`,
+`scripts/build-desktop-app.lisp` copies `hyperion/hyperion-view/hyperion-view(.exe)` into the
+bundle, and stops with exit code 3 when it has not been built, naming the command that builds it.
+On macOS it does the same for a library the SBCL runtime links against that is not on the build
+machine. Pass `--allow-missing-natives` to build without them on purpose: the build warns, goes on,
+and its summary line names what is missing.
+
 **Where the window opens (#485).** On Windows and macOS, hyperion-view opens the window centred
 in the work area of its monitor, shrunk to fit when the requested size is larger. On macOS the
 work area is the screen's visible frame, which leaves out the menu bar and the Dock, and the

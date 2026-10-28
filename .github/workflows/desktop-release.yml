@@ -401,6 +401,14 @@ jobs:
       - name: Build the pinned SQLite
         run: sbcl --dynamic-space-size 4096 --script scripts/build-sqlite.lisp
 
+      # The probe loads praxeon's retrieval, which loads aion/http-client, and on Windows that
+      # system depends on aion/tls (#913). build-desktop-app refuses to bundle an image that
+      # loads aion/tls when it cannot find the mbedTLS library to carry (#939). Linux and macOS
+      # do not load aion/tls here; the step runs on every OS anyway, as the build job's does,
+      # so a later dependency change does not need a matching edit to this job.
+      - name: Build the pinned mbedTLS
+        run: sbcl --dynamic-space-size 4096 --script scripts/build-mbedtls.lisp
+
       - name: Dump the probe
         shell: bash
         run: |
