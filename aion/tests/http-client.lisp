@@ -1288,3 +1288,176 @@ also asked about as ::1, the form %TLS-NAMES gives and the one Linux and macOS v
                                               :connect-address "127.0.0.1" :read-timeout 5)
                            '())
         (is (equal '("::1") seen) "for ~A the verifier was asked about ~S" host seen)))))
+
+;;; --- a response read as it arrives, and cancelling it (#984) --------------------------------
+
+(defun %octets-of (string) (sb-ext:string-to-octets string :external-format :utf-8))
+
+(defun %events-of (text)
+  "Every event READ-EVENT finds in TEXT, as lists (DATA EVENT ID)."
+  (let ((in (make-instance 'http::%octets-input :octets (%octets-of text))))
+    (loop for (data event id) = (multiple-value-list (http:read-event in))
+          while data collect (list data event id))))
+
+(test read-event-reads-data-event-and-id-and-skips-comments
+  "Data lines are joined with newlines; a comment, an event with no data and a CR before the LF are
+dropped; the event and id fields belong to their own event only."
+  (is (equal '(("one" "start" "7") ("two" nil nil) ("a
+b" nil nil) ("é" nil nil))
+             (%events-of (format nil ": hello~%event: start~%id: 7~%data: one~%~%data:two~%~%~
+                                      event: empty~%~%data: a~C~%data: b~C~%~C~%data: é"
+                                 #\Return #\Return #\Return)))))
+
+(test read-event-refuses-an-event-over-its-limit
+  "An event longer than *MAX-EVENT-OCTETS* signals HTTP-ERROR rather than being read whole."
+  (let ((http:*max-event-octets* 16))
+    (signals http:http-error (%events-of (format nil "data: ~A~%~%" (make-string 40 :initial-element #\x))))
+    (is (equal '(("short" nil nil)) (%events-of (format nil "data: short~%~%"))))))
+
+(defun %sse-server-handler (first-sent next-allowed)
+  "A handler that sends one event, sets FIRST-SENT's car, waits until NEXT-ALLOWED's car is true
+(at most 10 seconds), then sends a second event and ends the stream."
+  (lambda (path head stream)
+    (declare (ignore path head))
+    (ignore-errors
+     (aion/test-http:write-head stream 200 '(("Content-Type" . "text/event-stream")
+                                             ("Connection" . "close")))
+     (write-sequence (%octets-of (format nil "data: first~%~%")) stream)
+     (finish-output stream)
+     (setf (car first-sent) t)
+     (loop repeat 100 until (car next-allowed) do (sleep 0.1))
+     (write-sequence (%octets-of (format nil "data: second~%~%")) stream)
+     (finish-output stream))))
+
+(test a-streamed-response-gives-each-event-before-the-next-is-sent
+  "OPEN-RESPONSE-STREAM returns once the head has arrived, and READ-EVENT returns the first event
+while the server is still holding back the second."
+  (let ((first-sent (list nil)) (next-allowed (list nil)))
+    (with-server (s (%sse-server-handler first-sent next-allowed))
+      (multiple-value-bind (body status headers)
+          (http:open-response-stream (http:make-request :url (%local s "/events") :read-timeout 15))
+        (unwind-protect
+             (progn
+               (is (= 200 status))
+               (is (equal "text/event-stream" (http:header-value headers "content-type")))
+               (is (equal "first" (http:read-event body)))
+               (is (null (car next-allowed)) "the second event had not been allowed yet")
+               (setf (car next-allowed) t)
+               (is (equal "second" (http:read-event body)))
+               (is (null (http:read-event body)) "then the stream ends"))
+          (setf (car next-allowed) t)
+          (close body)))
+      (is (search "Accept-Encoding: identity" (first (server-heads s)))
+          "the request asks for an uncompressed body"))))
+
+(test a-streamed-error-response-is-returned-with-its-body
+  "A non-2xx is returned with its status, and its body can be read."
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 429 '() "{\"error\":\"slow down\"}")))
+    (multiple-value-bind (body status)
+        (http:open-response-stream (http:make-request :url (%local s "/") :read-timeout 5))
+      (unwind-protect
+           (progn
+             (is (= 429 status))
+             (is (equal "{\"error\":\"slow down\"}"
+                        (sb-ext:octets-to-string
+                         (coerce (loop for b = (read-byte body nil nil) while b collect b)
+                                 '(vector (unsigned-byte 8)))
+                         :external-format :utf-8))))
+        (close body)))))
+
+(defun %silent-handler (closed-at)
+  "A handler that sends one event and then sends nothing, the way a provider's connection is quiet
+while the model thinks, for at most 10 seconds. A thread of its own reads the connection, and
+when the read returns, because the client closed the connection or shut it down, stores the time
+in CLOSED-AT's car. The handler returns once that happens or the 10 seconds pass."
+  (lambda (path head stream)
+    (declare (ignore path head))
+    (ignore-errors
+     (aion/test-http:write-head stream 200 '(("Content-Type" . "text/event-stream")
+                                             ("Connection" . "close")))
+     (write-sequence (%octets-of (format nil "data: first~%~%")) stream)
+     (finish-output stream)
+     (let* ((ending (list nil))
+            ;; THREAD-LIFETIME: blocks reading the connection until the client closes it, or
+            ;; until this handler returns and the server closes it. The JOIN below waits for it.
+            (watcher (bt:make-thread
+                      (lambda ()
+                        (ignore-errors (read-byte stream nil nil))
+                        (unless (car ending) (setf (car closed-at) (get-internal-real-time))))
+                      :name "test server close watcher")))
+       (loop repeat 100 until (car closed-at) do (sleep 0.1))
+       (setf (car ending) t)
+       (unless (car closed-at)
+         ;; The client has not closed it: close it from here, so the watcher's read returns.
+         (ignore-errors (close stream :abort t)))
+       (aion/test-threads:join watcher :timeout 15)))))
+
+(test cancelling-a-streamed-request-closes-its-connection
+  "A thread blocked reading a stream that the server keeps open is woken by CANCEL-REQUEST from
+another thread, with REQUEST-CANCELLED, and the server sees the connection close within two
+seconds of the cancel. The server sends nothing after the first event, so the reader is blocked
+in a read when the cancel comes: a cancel that only marked the request would leave it there, and
+the connection open, until the server gave up after 10 seconds."
+  (let ((closed-at (list nil))
+        (cancel (http:make-request-cancel)))
+    (with-server (s (%silent-handler closed-at))
+      (let* ((outcome (list nil))
+             (first (list nil))
+             ;; THREAD-LIFETIME: reads the stream until the cancel below wakes it with
+             ;; REQUEST-CANCELLED, or until the server ends the stream after 10 seconds; it then
+             ;; closes the body and returns. The JOIN waits for it.
+             (reader (bt:make-thread
+                      (lambda ()
+                        (multiple-value-bind (body)
+                            (http:open-response-stream
+                             (http:make-request :url (%local s "/") :read-timeout 30)
+                             :cancel cancel)
+                          (unwind-protect
+                               (handler-case
+                                   (progn (setf (car first) (http:read-event body))
+                                          (http:read-event body)
+                                          (setf (car outcome) :ended))
+                                 (http:request-cancelled () (setf (car outcome) :cancelled)))
+                            (close body))))
+                      :name "streamed request reader")))
+        (loop repeat 50 until (car first) do (sleep 0.1))
+        (is (equal "first" (car first)) "the first event arrived before the cancel")
+        (sleep 0.3)
+        (is (null (car closed-at)) "the connection was open before the cancel")
+        (let ((cancelled-at (get-internal-real-time)))
+          (http:cancel-request cancel)
+          (is (http:request-cancelled-p cancel))
+          (aion/test-threads:join reader :timeout 15)
+          (is (eq :cancelled (car outcome)) "the reader was woken with REQUEST-CANCELLED")
+          (loop repeat 30 until (car closed-at) do (sleep 0.1))
+          (is-true (car closed-at) "the server saw the connection close")
+          (when (car closed-at)
+            (is (< (/ (- (car closed-at) cancelled-at) internal-time-units-per-second) 2)
+                "within two seconds of the cancel")))))))
+
+(test a-request-cancelled-before-it-is-opened-never-connects
+  "OPEN-RESPONSE-STREAM with a handle that was already cancelled signals REQUEST-CANCELLED and
+sends nothing."
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "x")))
+    (let ((cancel (http:make-request-cancel)))
+      (http:cancel-request cancel)
+      (signals http:request-cancelled
+        (http:open-response-stream (http:make-request :url (%local s "/") :read-timeout 5)
+                                   :cancel cancel))
+      (sleep 0.2)
+      (is (zerop (%requests s)) "no request reached the server"))))
+
+(test closing-a-streamed-body-closes-its-connection
+  "Closing the body before the response has ended closes the connection, so the server stops."
+  (let ((closed-at (list nil)))
+    (with-server (s (%silent-handler closed-at))
+      (multiple-value-bind (body)
+          (http:open-response-stream (http:make-request :url (%local s "/") :read-timeout 5))
+        (is (equal "first" (http:read-event body)))
+        (close body))
+      (loop repeat 30 until (car closed-at) do (sleep 0.1))
+      (is-true (car closed-at) "the server saw the connection close"))))

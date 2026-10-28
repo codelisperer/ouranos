@@ -322,7 +322,8 @@
                              (:file "client")
                              (:file "openssl") ; a patch to cl+ssl for OpenSSL 4 (#706)
                              (:file "http1")   ; the pinned exchange on Windows (#536)
-                             (:file "fetch"))))
+                             (:file "fetch")
+                             (:file "stream"))))  ; a streamed response, cancellable (#984)
   :in-order-to ((test-op (test-op "aion/http-client/tests"))))
 
 (defsystem "aion/http-client/tests"
