@@ -174,6 +174,7 @@ the values :OK and the number of calls. The second value is how many calls there
     (setf waits '())
     (multiple-value-bind (thunk calls) (failing 1 :asked 1)
       (r:call-with-retry (r:make-retry-policy :base-delay 4 :jitter :none) thunk)
+      (is (= 2 (funcall calls)))
       (is (equal '(4) waits) "the computed delay when it is longer than the server's"))))
 
 (test a-retry-after-longer-than-max-delay-stops-the-retrying
@@ -203,8 +204,10 @@ the values :OK and the number of calls. The second value is how many calls there
     (is (eql 0 (r:parse-retry-after "0")))
     (is (eql 37 (r:parse-retry-after "Sun, 06 Nov 1994 08:49:37 GMT" now)))
     (is (eql 0 (r:parse-retry-after "Sun, 06 Nov 1994 08:48:00 GMT" now)) "a date in the past is 0")
+    (is (eql 120 (r:parse-retry-after (format nil "~C120 " #\Tab))) "tabs and spaces around it")
     (dolist (bad '(nil "" "-5" "1.5" "soon" "Sunday, 06-Nov-94 08:49:37 GMT"
-                   "Sun Nov  6 08:49:37 1994" "Sun, 06 Nov 1994 25:49:37 GMT"))
+                   "Sun Nov  6 08:49:37 1994" "Sun, 06 Nov 1994 25:49:37 GMT"
+                   "Sun, 06 Nov 94 08:49:37 GMT"))
       (is (null (r:parse-retry-after bad now)) "~S is not a Retry-After" bad))))
 
 ;;; --- a thread that must not block -------------------------------------------------------
@@ -221,3 +224,66 @@ the values :OK and the number of calls. The second value is how many calls there
       (is (search "an aion/uv loop" (princ-to-string c))))
     (is (eql 1 (r:with-retry ((r:make-retry-policy :max-attempts 1)) (incf calls)))
         "a policy with one attempt never waits, so it may run there")))
+
+;;; --- review of #974 ---------------------------------------------------------------------
+
+(test the-jitter-is-seeded-in-each-process-not-in-the-image
+  ;; A state made when the system loads would be saved by SAVE-LISP-AND-DIE, and every process
+  ;; started from the image would draw the same jitter.
+  (is (member 'r::%forget-random-state sb-ext:*init-hooks*)
+      "an image that starts drops the state it was saved with")
+  (r::%forget-random-state)
+  (is (null r::*random-state-for-jitter*) "control: no state until the first draw")
+  (let ((x (r::%random-unit)))
+    (is (and (realp x) (<= 0 x) (< x 1)))
+    (is (random-state-p r::*random-state-for-jitter*) "the first draw seeds it")))
+
+(defmacro with-captured-log ((stream) &body body)
+  "Run BODY with the log at :INFO going to STREAM, then put back the appenders, level and layout
+that were there before. As hermes/tests/blob.lisp does."
+  (let ((appenders (gensym "APPENDERS")) (level (gensym "LEVEL")) (layout (gensym "LAYOUT")))
+    `(let ((,appenders (copy-list (log4cl:logger-appenders log4cl:*root-logger*)))
+           (,level (log4cl:logger-log-level log4cl:*root-logger*))
+           (,layout aion/log:*layout*))
+       (unwind-protect
+            (progn (aion/log:setup :env :dev :level :info :stream ,stream)
+                   ,@body)
+         (log4cl:remove-all-appenders log4cl:*root-logger*)
+         (dolist (appender ,appenders)
+           (log4cl:add-appender log4cl:*root-logger* appender))
+         (log4cl:set-log-level log4cl:*root-logger* ,level)
+         (setf aion/log:*layout* ,layout)))))
+
+(defun %log-of (policy thunk)
+  "The log lines CALL-WITH-RETRY writes for POLICY and THUNK, whose failure is ignored."
+  (let ((out (make-string-output-stream)))
+    (with-recorded-waits (waits)
+      (declare (ignorable waits))
+      (with-captured-log (out)
+        (ignore-errors (r:call-with-retry policy thunk))))
+    (get-output-stream-string out)))
+
+(test each-retry-and-each-retry-not-taken-is-logged-at-info
+  (let ((log (%log-of (r:make-retry-policy :name "billing" :max-attempts 2 :jitter :none
+                                           :base-delay 1)
+                      (failing 5))))
+    (is (search "retrying" log))
+    (is (search "policy=billing" log))
+    (is (search "wait-ms=1000" log))
+    (is (search "reason=attempts" log) "running out of attempts says so: ~A" log))
+  (let ((log (%log-of (r:make-retry-policy :max-delay 30) (failing 1 :asked 60))))
+    (is (search "retry-after longer than max-delay" log))
+    (is (search "retry-after-s=60" log) "with the server's value: ~A" log)))
+
+(test a-retry-after-that-would-end-past-the-deadline-stops-the-retrying
+  (with-recorded-waits (waits)
+    (multiple-value-bind (thunk calls) (failing 1 :asked 5)
+      (signals flaky (r:call-with-retry (r:make-retry-policy :base-delay 0.1 :jitter :none
+                                                             :max-delay 30 :deadline 2)
+                                        thunk))
+      (is (= 1 (funcall calls)) "the server's 5 s would end past the 2 s deadline")
+      (is (null waits))))
+  (let ((log (%log-of (r:make-retry-policy :base-delay 0.1 :max-delay 30 :deadline 2)
+                      (failing 1 :asked 5))))
+    (is (search "reason=deadline" log))
+    (is (search "retry-after-s=5" log) "the log line carries the server's value: ~A" log)))

@@ -904,7 +904,11 @@ its tag.
 - **aion/http-client: `http-error` carries `http-error-retry-after` and `http-error-phase`**
   (#79). `ensure-2xx` reads the response's Retry-After header, in seconds or as an HTTP date,
   into `http-error-retry-after`. A transport failure has `http-error-phase` `:connect` when no
-  connection was made, so the request was not sent, and `:response` otherwise. aion/http-client
+  connection was made, so the request was not sent, and `:response` for a socket or stream
+  failure after it was made. A TLS failure, and anything else that is not a socket or stream
+  failure, has no phase, so it is never retried. On the pinned path (`:connect-address`,
+  `fetch-public`) the phase comes from where the call failed, not from the condition's type.
+  aion/http-client
   now depends on `aion/retry` and defines the `transience` and `retry-after` methods for
   `http-error`: 408, 425, 429, 503, 529 and `:connect` are `:transient`; 500, 502, 504 and
   `:response` are `:unknown`.

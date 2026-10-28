@@ -48,9 +48,10 @@ ENSURE-2XX with AION/RETRY:PARSE-RETRY-AFTER, or NIL (#79).
 
 PHASE says how far a transport failure got, for AION/RETRY:TRANSIENCE (#79): :CONNECT when no
 connection was made (refused, a connect timeout, a name that does not resolve), so the request
-was not sent; :RESPONSE for any other transport failure, such as a read timeout, after which the
-server may have acted on the request. It is NIL for a failure with a status, and for one this
-client raised itself before sending, such as a refused header."))
+was not sent; :RESPONSE for a socket or stream failure after the connection was made, such as a
+read timeout, after which the server may have acted on the request. It is NIL for a failure with
+a status, for one this client raised itself before sending, such as a refused header, and for a
+failure that is not of the socket or stream, such as a TLS failure (%TRANSPORT-PHASE)."))
 
 (defparameter +transient-statuses+ '(408 425 429 503 529)
   "Statuses after which the request was not acted on and may succeed later: request timeout, too
@@ -476,16 +477,39 @@ way fails CI, not a provider call; upstream.sexp's Quicklisp entry points here t
           (when (request-read-timeout req)
             (list :read-timeout (request-read-timeout req)))))
 
-(defun %connect-failure-p (e)
-  "Whether E, a condition from the transport, means no connection was made, so the request was
-not sent. Measured on Linux (#79): dexador reports a refused connection and a connect timeout
-as USOCKET:TIMEOUT-ERROR and a name that does not resolve as USOCKET:NS-HOST-NOT-FOUND-ERROR,
-and a read timeout as SB-SYS:IO-TIMEOUT. Only types that can come from making the connection
-count; USOCKET:SOCKET-ERROR as a whole does not, because a connection reset while reading the
-response is one too."
+(defvar *%connected* nil
+  "Bound to NIL by %HTTP around one round trip, and set to T by the pinned path
+(%REQUEST-PINNED) as soon as its USOCKET:SOCKET-CONNECT returns, so a transport failure there is
+known to have happened before or after the connection was made (#79).")
+
+(defun %io-failure-p (e)
+  "Whether E is a failure of the socket or the stream: a usocket condition, a name that did not
+resolve, or a stream error such as a read timeout (SB-SYS:IO-TIMEOUT) or an early end of file.
+A TLS failure is not: cl+ssl's conditions are plain errors, and a refused certificate must never
+be classed as something a retry could fix."
+  (typep e '(or usocket:socket-condition usocket:ns-condition stream-error)))
+
+(defun %dexador-connect-failure-p (e)
+  "Whether E, from the dexador path, means no connection was made. Measured on Linux (#79):
+dexador reports a refused connection and a connect timeout as USOCKET:TIMEOUT-ERROR, a name that
+does not resolve as USOCKET:NS-HOST-NOT-FOUND-ERROR, and a read timeout as SB-SYS:IO-TIMEOUT.
+Only types that can come from making the connection count; USOCKET:SOCKET-ERROR as a whole does
+not, because a connection reset while reading the response is one too. Used only where the call
+that failed is not known; the pinned path knows, see *%CONNECTED*."
   (typep e '(or usocket:timeout-error usocket:connection-refused-error
                 usocket:host-unreachable-error usocket:network-unreachable-error
                 usocket:ns-error)))
+
+(defun %transport-phase (e pinned)
+  "HTTP-ERROR-PHASE for E, a transport failure. On the pinned path, which makes the connection
+itself, from where it failed: a socket failure before USOCKET:SOCKET-CONNECT returned is
+:CONNECT, one after it :RESPONSE. On the dexador path, from E's type
+(%DEXADOR-CONNECT-FAILURE-P). Anything that is not a socket or stream failure, a TLS failure
+included, has no phase, so AION/RETRY does not retry it."
+  (cond ((not (%io-failure-p e)) nil)
+        (pinned (if *%connected* :response :connect))
+        ((%dexador-connect-failure-p e) :connect)
+        (t :response)))
 
 (defun %http (req)
   "Perform the single dexador round-trip for REQ, returning a RESPONSE.
@@ -494,7 +518,8 @@ A non-2xx is captured as a RESPONSE rather than signalled -- dexador would signa
 would decide the meaning of a status before any LEAVE stage got to. A transport-level failure
 has no response to hand back, so it signals HTTP-ERROR directly."
   (let ((limit (request-max-body-bytes req))
-        (url (request-url req)))
+        (url (request-url req))
+        (*%connected* nil))
     (flet ((response (status headers body)
              (let ((declared (and limit (%content-length headers))))
                (when (and declared (> declared limit))
@@ -523,7 +548,7 @@ has no response to hand back, so it signals HTTP-ERROR directly."
                     (dexador.error:response-body e)))
         (error (e)
           (error 'http-error :detail (format nil "transport error: ~A" e)
-                             :phase (if (%connect-failure-p e) :connect :response)))))))
+                             :phase (%transport-phase e (request-connect-address req))))))))
 
 (defun send-request (request interceptors &key (perform #'%http))
   "Run REQUEST through INTERCEPTORS around one HTTP round-trip and return the processed

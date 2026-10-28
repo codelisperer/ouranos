@@ -322,7 +322,8 @@
 (defsystem "aion/retry/tests"
   :description "Tests for aion/retry: the schedule, the runner's restarts, Retry-After, the deadline."
   :depends-on ("aion/retry" "fiveam"
-               "aion/dynamic")   ; binds *blocking-forbidden* to test the refusal
+               "aion/dynamic"   ; binds *blocking-forbidden* to test the refusal
+               "aion/log" "log4cl")   ; captures the log lines the runner writes
   :serial t
   :components ((:module "tests"
                 :serial t

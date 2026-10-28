@@ -239,9 +239,11 @@ DEX:REQUEST then writes the request on this connection, so the Host header is th
                       (error 'http-error
                              :detail (format nil "connect-address ~S is not an IP address"
                                              (request-connect-address req)))))
-         (socket (usocket:socket-connect address (%port-of uri)
-                                         :element-type '(unsigned-byte 8)
-                                         :timeout (request-connect-timeout req)))
+         (socket (prog1 (usocket:socket-connect address (%port-of uri)
+                                                :element-type '(unsigned-byte 8)
+                                                :timeout (request-connect-timeout req))
+                   ;; From here on a failure happened after the connection was made (#79).
+                   (setf *%connected* t)))
          (body-owns-connection nil))
     (%lend-socket socket)
     (unwind-protect
@@ -346,9 +348,11 @@ body closes it; otherwise the body is read here and the connection closed."
                       (error 'http-error
                              :detail (format nil "connect-address ~S is not an IP address"
                                              (request-connect-address req)))))
-         (socket (usocket:socket-connect address (%port-of uri)
-                                         :element-type '(unsigned-byte 8)
-                                         :timeout (request-connect-timeout req)))
+         (socket (prog1 (usocket:socket-connect address (%port-of uri)
+                                                :element-type '(unsigned-byte 8)
+                                                :timeout (request-connect-timeout req))
+                   ;; From here on a failure happened after the connection was made (#79).
+                   (setf *%connected* t)))
          (stream nil)
          (own-config nil)
          (own-chain nil)

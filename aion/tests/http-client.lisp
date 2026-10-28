@@ -1332,3 +1332,64 @@ header RETRY-AFTER."
       (is (typep e 'http:http-error))
       (is (eq :connect (and e (http:http-error-phase e))))
       (is (aion/retry:transient-p e) "so the default policy retries it"))))
+
+;;; --- where a pinned connection failed, from the call that failed (review of #974) -------
+
+(defun %pinned-failure (port &key (scheme "http") (read-timeout 2))
+  "The HTTP-ERROR a pinned request to 127.0.0.1:PORT signals."
+  (handler-case (progn (http:send-request
+                        (http:make-request :url (format nil "~A://pinned.test:~D/" scheme port)
+                                           :connect-address "127.0.0.1"
+                                           :connect-timeout 2 :read-timeout read-timeout)
+                        '())
+                       nil)
+    (http:http-error (e) e)))
+
+(defmacro with-silent-listener ((port-var &key reply) &body body)
+  "Run BODY with PORT-VAR bound to a port on 127.0.0.1 whose server accepts one connection,
+writes REPLY (a string) when given, and then sends nothing more until BODY ends."
+  (let ((listener (gensym)) (thread (gensym)))
+    `(let* ((,listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t))
+            (,port-var (usocket:get-local-port ,listener))
+            (,thread (bt:make-thread
+                      (lambda ()
+                        (ignore-errors
+                         (let ((c (usocket:socket-accept ,listener :element-type '(unsigned-byte 8))))
+                           (when ,reply
+                             (write-sequence (sb-ext:string-to-octets ,reply)
+                                             (usocket:socket-stream c))
+                             (finish-output (usocket:socket-stream c)))
+                           (sleep 5)
+                           (usocket:socket-close c)))))))
+       (unwind-protect (progn ,@body)
+         (ignore-errors (bt:destroy-thread ,thread))
+         (usocket:socket-close ,listener)))))
+
+(test a-pinned-connection-that-was-refused-is-a-connect-failure
+  (let* ((port (let ((s (usocket:socket-listen "127.0.0.1" 0)))
+                 (prog1 (usocket:get-local-port s) (usocket:socket-close s))))
+         (e (%pinned-failure port)))
+    (is (typep e 'http:http-error))
+    (is (eq :connect (and e (http:http-error-phase e))))))
+
+(test a-pinned-failure-after-connecting-is-a-response-failure-whatever-its-type
+  ;; The connection is made and the request sent; the server never answers, and the read times
+  ;; out. On Linux the condition that arrives is not the read timeout: dexador then reconnects by
+  ;; resolving pinned.test, which resolves nowhere, and that USOCKET:NS-HOST-NOT-FOUND-ERROR is
+  ;; what reaches the caller (#985). By its type it would be :CONNECT; it happened after the
+  ;; connection was made, so it is :RESPONSE, and a POST is not resent.
+  (with-silent-listener (port)
+    (let ((e (%pinned-failure port :read-timeout 1)))
+      (is (typep e 'http:http-error) "got ~S" e)
+      (is (eq :response (and e (http:http-error-phase e))) "got ~S: ~A" (and e (http:http-error-phase e)) e)
+      (is (not (aion/retry:transient-p e)) "the default policy does not resend it"))))
+
+#-os-windows
+(test a-tls-failure-on-a-pinned-connection-has-no-phase
+  ;; A server that answers the TLS handshake with plain text. Retrying cannot fix that, so it
+  ;; must not be classed as a transport failure either way.
+  (with-silent-listener (port :reply (format nil "HTTP/1.1 400 Bad Request~C~C~C~C" #\Return #\Linefeed #\Return #\Linefeed))
+    (let ((e (%pinned-failure port :scheme "https")))
+      (is (typep e 'http:http-error) "got ~S" e)
+      (is (null (and e (http:http-error-phase e))) "got ~S: ~A" (and e (http:http-error-phase e)) e)
+      (is (not (aion/retry:transient-or-unknown-p e))))))

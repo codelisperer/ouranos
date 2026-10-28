@@ -60,7 +60,10 @@ belongs with the condition type; the default is NIL.")
     (when (and (= 6 (length parts)) (string= "GMT" (sixth parts)))
       (let* ((day (ignore-errors (parse-integer (second parts))))
              (month (position (third parts) +months+ :test #'string=))
-             (year (ignore-errors (parse-integer (fourth parts))))
+             ;; Four digits: IMF-fixdate has no two-digit year, which ENCODE-UNIVERSAL-TIME would
+             ;; otherwise read as a year within 50 of now.
+             (year (and (= 4 (length (fourth parts)))
+                        (ignore-errors (parse-integer (fourth parts)))))
              (clock (uiop:split-string (fifth parts) :separator ":"))
              (hms (and (= 3 (length clock))
                        (mapcar (lambda (p) (ignore-errors (parse-integer p))) clock))))
@@ -79,7 +82,7 @@ VALUE is delay-seconds (\"120\") or an HTTP-date in the preferred format (\"Sun,
 NIL, an empty string, a negative number, the two obsolete date formats and anything else give
 NIL, which the runner treats as no request to wait."
   (when (and (stringp value) (plusp (length value)))
-    (let ((v (string-trim " " value)))
+    (let ((v (string-trim '(#\Space #\Tab) value)))
       (cond ((and (plusp (length v)) (every #'digit-char-p v))
              (parse-integer v))
             (t (let ((time (%parse-http-date v)))
@@ -192,13 +195,27 @@ must not block (AION/DYNAMIC:*BLOCKING-FORBIDDEN*, which aion/uv binds on its lo
 the policy allows a retry."))
 
 (defvar *random-lock* (sb-thread:make-mutex :name "aion/retry random"))
-(defvar *random-state-for-jitter* (make-random-state t)
-  "The state the jitter draws from. Jitter needs spread, not secrecy, so this is CL:RANDOM and
-not aion/random, which would put a crypto library on every retrying system's load path.")
+(defvar *random-state-for-jitter* nil
+  "The state the jitter draws from, or NIL until the first draw in this process seeds it. Jitter
+needs spread, not secrecy, so this is CL:RANDOM and not aion/random, which would put a crypto
+library on every retrying system's load path.
+
+Seeded on first use, not when the system loads, and reset to NIL whenever an image starts
+(%FORGET-RANDOM-STATE in SB-EXT:*INIT-HOOKS*). A state made at load time would be saved into an
+image built with SAVE-LISP-AND-DIE, and every process started from that image would then draw
+the same jitter, so two replicas refused together would retry together.")
+
+(defun %forget-random-state ()
+  "Drop the jitter's random state, so the next draw seeds a new one. Run when an image starts."
+  (sb-thread:with-mutex (*random-lock*)
+    (setf *random-state-for-jitter* nil)))
+
+(pushnew '%forget-random-state sb-ext:*init-hooks*)
 
 (defun %random-unit ()
   (sb-thread:with-mutex (*random-lock*)
-    (random 1d0 *random-state-for-jitter*)))
+    (random 1d0 (or *random-state-for-jitter*
+                    (setf *random-state-for-jitter* (make-random-state t))))))
 
 (defvar *random-function* #'%random-unit
   "A function of no arguments returning a real in [0, 1), for the jitter. Tests bind it.")
@@ -244,7 +261,8 @@ for CONDITION, logging why at :info when the reason is the policy's limits."
                                                  :policy (retry-policy-name policy)
                                                  :attempt attempt
                                                  :condition (%type-name condition)
-                                                 :wait-ms (%ms wait) :deadline-s deadline)
+                                                 :wait-ms (%ms wait) :deadline-s deadline
+                                                 :retry-after-s asked)
                      nil)
                     (t wait))))))))))
 
