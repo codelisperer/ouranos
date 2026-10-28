@@ -181,11 +181,16 @@ MAKE-APP."
                  :json (format nil "{\"message\":\"~A\"}" text))))
 
 (defun %poll (app after &key query)
-  "The body of a poll of APP from cursor AFTER (none when NIL). QUERY is added to the query
-string."
-  (nth-value 2 (%call app :get "/api/progress"
-                      :query (format nil "~@[after=~D~]~:[~;&~]~@[~A~]"
-                                     after (and after query) query))))
+  "The body of a poll of APP from index AFTER (none when NIL), sent as a page sends it, with the
+conversation's epoch, which a poll with no cursor reads first. QUERY is added to the query string."
+  (let ((cursor (and after
+                     (format nil "~A:~D"
+                             (%epoch-in (nth-value 2 (%call app :get "/api/progress"
+                                                            :query query)))
+                             after))))
+    (nth-value 2 (%call app :get "/api/progress"
+                        :query (format nil "~@[after=~A~]~:[~;&~]~@[~A~]"
+                                       cursor (and cursor query) query)))))
 
 (defun %sends-the-cursor-p (html)
   "Whether HTML has an hx-include of #px-cursor, quoted or not."
@@ -558,14 +563,14 @@ goes with a single :AGENT."
 ;;; accepts everything, because a test whose verifier always says yes cannot see a forgery.
 
 (defun %grant-token (private-key &key (principal "p1") (audience "svc") (expires-in 120)
-                                      (capabilities '("search")))
+                                      (capabilities '("search")) expires-at)
   (let ((o (make-hash-table :test 'equal)))
     (setf (gethash "principal" o) principal
           (gethash "group" o) "g1"
           (gethash "capabilities" o) (coerce capabilities 'vector)
           (gethash "token_cap" o) 1000
           (gethash "call_cap" o) 10
-          (gethash "expires_at" o) (+ (get-universal-time) expires-in)
+          (gethash "expires_at" o) (or expires-at (+ (get-universal-time) expires-in))
           (gethash "audience" o) audience)
     (ceiling:encode-grant-token (com.inuoe.jzon:stringify o) private-key)))
 
@@ -810,6 +815,106 @@ told its own name."
       (incf now 10)
       (is (null (praxeon/web-session:session-grant table old))
           "past the maximum lifetime it ends, however recently it was used"))))
+
+;;; --- a session lasts no longer than its grant (#1011's review) -------------------
+
+(test a-session-ends-when-its-grant-expires
+  (let* ((now 1000)
+         (table (praxeon/web-session:make-session-table :idle-seconds 60 :max-seconds 300
+                                                         :clock (lambda () now)))
+         (id (praxeon/web-session:open-session table :grant :expires-at 1100)))
+    (loop repeat 3 do (incf now 33) (praxeon/web-session:session-grant table id))
+    (is (eq :grant (praxeon/web-session:session-grant table id)) "1099 is before the expiry")
+    (setf now 1100)
+    (is (null (praxeon/web-session:session-grant table id))
+        "the session outlived its grant, though it was used and its own limits had not passed")
+    (signals error (praxeon/web-session:open-session table :grant :expires-at "1100"))))
+
+(test a-session-is-refused-401-once-its-grant-has-expired
+  "The app's clock is set well before the real time, so a grant that expired in real time is
+still current by it. That the grant opens a session shows its expiry is checked against the app's
+clock, and that the session works for 299 seconds shows the session table uses it too."
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (let* ((now (- (get-universal-time) 10000))
+           (app (%grant-app pub :clock (lambda () now))))
+      (multiple-value-bind (status session body)
+          (%open app (%grant-token priv :expires-at (+ now 300)))
+        (is (eql 200 status) "a grant current by the app's clock was refused: ~S" body)
+        (is (eql 300 (and session (gethash "max_seconds" (com.inuoe.jzon:parse body))))
+            "max_seconds should be what the grant has left: ~S" body)
+        (let ((auth (format nil "Session ~A" session)))
+          (setf now (+ now 299))
+          (is (eql 200 (nth-value 0 (%call app :get "/api/progress" :authorization auth))))
+          (setf now (+ now 1))
+          (is (eql 401 (nth-value 0 (%call app :get "/api/progress" :authorization auth)))
+              "the session went on after its grant expired"))))))
+
+(test a-turn-whose-grant-expired-while-it-waited-does-not-run
+  (let* ((now 1000)
+         (rebuilt 0)
+         (ran 0)
+         (conv (web::%new-conversation "p1" (actor:make-agent :name "p1") "Echo"
+                                       (lambda (agent message locale)
+                                         (declare (ignore agent locale))
+                                         (incf ran)
+                                         message)
+                                       :built-with '(() 0 0)
+                                       :rebuild (lambda (g) (declare (ignore g))
+                                                  (incf rebuilt)
+                                                  (actor:make-agent :name "p1"))
+                                       :clock (lambda () now)))
+         (grant (ceiling::%make-grant :principal "p1" :capabilities '("write")
+                                      :expires-at 1000 :audience "svc")))
+    (multiple-value-bind (reply error) (web::%turn conv "hi" "en" :grant grant)
+      (is (null reply))
+      (is (typep error 'ceiling:grant-invalid) "the turn ran on an expired grant: ~S" error))
+    (is (zerop rebuilt) "an agent was made from an expired grant")
+    (is (zerop ran) "the turn ran on the agent already there")))
+
+(test a-verifier-needs-a-key
+  "A key that failed to load is found when the verifier or the app is made. At request time it
+would look like a forged grant."
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (declare (ignore priv))
+    (signals error (ceiling:make-ed25519-verifier nil))
+    (signals error (ceiling:make-ed25519-verifier "not a key"))
+    (let ((verifier (ceiling:make-ed25519-verifier pub)))
+      (setf (ceiling:ed25519-verifier-public-key verifier) nil)
+      (signals error (web:make-app :grant-verifier verifier :audience "svc"
+                                   :make-agent (lambda (p g) (declare (ignore g))
+                                                 (actor:make-agent :name p)))))))
+
+(test ended-sessions-are-swept-with-conversations
+  "Sessions that have ended are removed on the same sweep as stale conversations, at most once a
+minute, and not only when a new session opens."
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (let* ((now (get-universal-time))
+           (clock (lambda () now))
+           (sessions (praxeon/web-session:make-session-table :idle-seconds 30 :clock clock))
+           (app (%grant-app pub :clock clock :sessions sessions))
+           (a (nth-value 1 (%open app (%grant-token priv :principal "a"))))
+           (b (format nil "Session ~A" (nth-value 1 (%open app (%grant-token priv :principal "b"))))))
+      (is-true a)
+      (flet ((use (at) (setf now at) (%call app :get "/api/progress" :authorization b)))
+        (let ((t0 now))
+          (use (+ t0 1))
+          (use (+ t0 25))
+          (use (+ t0 50))
+          (is (= 2 (praxeon/web-session:session-count sessions))
+              "a ended at 30 seconds, but no sweep has run since")
+          (use (+ t0 62))
+          (is (= 1 (praxeon/web-session:session-count sessions))
+              "the sweep did not remove the ended session"))))))
+
+(test a-cursor-with-no-epoch-is-treated-as-an-old-one
+  "A bare index cannot say which conversation it was taken from, so the poll replaces the
+transcript rather than reading the current one from that index."
+  (let ((app (%echo-app)))
+    (dotimes (i 2) (%say app (format nil "turn ~D" i)))
+    (let ((reply (%poll-cursor app "6")))
+      (is (search "innerHTML:#chat" reply) "a bare index was read as this conversation's: ~S" reply)
+      (is (search "echo: turn 0" reply) "the transcript was not sent again: ~S" reply)
+      (is (%epoch-in reply) "the cursor sent back has no epoch: ~S" reply))))
 
 ;;; --- making a key's agent, turn ids, and expiry (#67 step two) ----------------
 
@@ -1067,7 +1172,7 @@ table already holds."
       (is (= 1 (funcall count)) "a, 1800 seconds idle, was not swept")
       (is (= 1 (%made-for made "b")) "b was in use and should have been kept"))))
 
-(test a-session-with-a-smaller-grant-runs-its-next-turn-without-the-lost-capability
+(test a-session-with-a-smaller-grant-runs-its-next-turn-on-an-agent-made-from-that-grant
   "Two sessions of one principal, opened with different grants. Each turn runs on an agent made
 from the grant of the session that sent it, and the conversation goes on across the change."
   (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)

@@ -549,7 +549,13 @@ call caps. Two grants with the same terms make the same agent."
 (defun %apply-grant (conv grant)
   "When GRANT's terms differ from those CONV's agent was made from, make the agent again from
 GRANT and move the conversation onto it (`praxeon/actor:move-conversation'), so a grant with fewer
-capabilities or a lower cap takes effect at the next turn. Caller holds CONV's turn lock."
+capabilities or a lower cap takes effect at the next turn. Caller holds CONV's turn lock.
+
+Signals `praxeon/ceiling:grant-invalid' when GRANT has expired by CONV's clock, which happens to
+a turn that waited behind another for longer than the grant had left. The turn then ends in that
+error, and runs on no agent, neither one made from the expired grant nor the one already there."
+  (when (and grant (<= (ceiling:grant-expires-at grant) (funcall (conversation-clock conv))))
+    (error 'ceiling:grant-invalid :reason "the session's grant has expired"))
   (when (and grant (conversation-rebuild conv))
     (let ((terms (%grant-terms grant)))
       (unless (equal terms (conversation-built-with conv))
@@ -630,7 +636,8 @@ responder (e.g. for Elise's translator)."
 (defun %parse-cursor (raw)
   "RAW, a cursor value as a page holds it, as (values INDEX EPOCH). INDEX is NIL when RAW is NIL,
 or its index is not a non-negative integer. EPOCH is NIL for a bare index, which is what a page
-rendered before cursors had epochs sends."
+rendered before cursors had epochs sends; %PROGRESS-FRAGMENT treats it as a cursor from an
+earlier conversation."
   (let* ((colon (and raw (position #\: raw :from-end t)))
          (n (and raw (ignore-errors (parse-integer raw :start (if colon (1+ colon) 0))))))
     (if (and (integerp n) (>= n 0))
@@ -657,12 +664,12 @@ past them; and the status line and token count, out of band. With no AFTER, whic
 loaded before the cursor existed sends, no items are returned and the cursor is moved to the
 newest item, so that page carries on from there instead of repeating the transcript.
 
-When EPOCH is not CONV's, the page's cursor belongs to a conversation that has since been
-replaced, so its index means nothing here. The response then replaces the whole of #chat, out of
+When EPOCH is not CONV's, or is NIL because the cursor is a bare index, the page's cursor may
+belong to a conversation that has since been replaced, so its index means nothing here. The response then replaces the whole of #chat, out of
 band, with a notice that a new conversation has started and CONV's transcript so far.
 
 Returns the HTML, and as a second value the index just past the items it holds."
-  (let ((reset (and after epoch (string/= epoch (conversation-epoch conv)))))
+  (let ((reset (and after (or (null epoch) (string/= epoch (conversation-epoch conv))))))
     (multiple-value-bind (items next)
         (cond (reset (%items-since conv -1))
               (after (%items-since conv after))
@@ -823,7 +830,8 @@ Authorization header, or NIL."
 
 (defun %open-session (env verifier audience sessions)
   "POST /embed/session: verify the grant in ENV's `Authorization: Grant <token>' header and
-answer a session id for it, or 401 with the reason."
+answer a session id for it, or 401 with the reason. The session ends when the grant expires, if
+not before, and max_seconds says how long it can last at most."
   (let ((token (%authorization env "Grant")))
     (if (null token)
         (%unauthenticated "send the grant as: Authorization: Grant <token>")
@@ -840,18 +848,23 @@ answer a session id for it, or 401 with the reason."
                     ((zerop (length (ceiling:grant-principal grant)))
                      (%unauthenticated "the grant names no principal"))
                     (t
-                     (list 200 '(:content-type "application/json" :cache-control "no-store")
-                           (list (http:json
-                                  (list "session" (ws:open-session sessions grant)
-                                        "idle_seconds" (ws:session-table-idle-seconds sessions)
-                                        "max_seconds" (ws:session-table-max-seconds sessions))))))))
+                     (let ((expires-at (ceiling:grant-expires-at grant)))
+                       (list 200 '(:content-type "application/json" :cache-control "no-store")
+                             (list (http:json
+                                    (list "session" (ws:open-session sessions grant
+                                                                     :expires-at expires-at)
+                                          "idle_seconds" (ws:session-table-idle-seconds sessions)
+                                          "max_seconds"
+                                          (min (ws:session-table-max-seconds sessions)
+                                               (- expires-at
+                                                  (funcall (ws:session-table-clock sessions))))))))))))
           (ceiling:grant-invalid (e)
             (%unauthenticated (ceiling:grant-invalid-reason e)))))))
 
 (defun make-app (&key agent (agent-name "Praxeon") (title "Praxeon")
                       (responder #'%default-responder) intro footer dev theme-css
                       dictionary gate conversation-key make-agent
-                      grant-verifier audience (sessions (ws:make-session-table))
+                      grant-verifier audience sessions
                       (conversation-idle-seconds 1800) (clock #'get-universal-time)
                       (transport :poll) embed-origins)
   "A Clack app exposing an agent: GET / (chat page), POST /api/message (HTMX or JSON),
@@ -878,7 +891,8 @@ stale conversations if a minute (or the idle limit, if that is shorter) has pass
 last sweep. A page still open on a dropped conversation
 holds a cursor from it; its next poll replaces the page's transcript with the new conversation's
 and a notice that a new conversation has started. CLOCK returns the time in seconds; a test
-passes its own. Pass AGENT or
+passes its own. It is also the clock of the session table that MAKE-APP makes when SESSIONS is not
+given, and the one grants' expiry is checked against (`praxeon/ceiling:*clock*'). Pass AGENT or
 CONVERSATION-KEY with MAKE-AGENT, not both: an agent holds one conversation's history, so one
 agent cannot serve several keys.
 
@@ -887,6 +901,11 @@ name this service is minted for), a request is authenticated by a session:
   - POST /embed/session with `Authorization: Grant <token>' verifies the grant (see
     `praxeon/ceiling:decode-grant-token') and answers {\"session\": ID, \"idle_seconds\": N,
     \"max_seconds\": N}. The grant must be for AUDIENCE and name a principal.
+  - A session ends when its grant expires, when it has not been used for idle_seconds, or when
+    the session table's limit has passed since it opened, whichever comes first; max_seconds is
+    the earlier of the last two. A session gives no more access than its grant, for no longer.
+  - A turn whose session's grant has expired by the time it runs ends in an error, without
+    running.
   - Every other route needs `Authorization: Session <ID>', and is answered 401 without a
     session that is open in SESSIONS (a `praxeon/web-session' table).
   - The conversation is the session's principal's. MAKE-AGENT is called with the principal and
@@ -945,6 +964,9 @@ conversations the app holds."
         ((and embed-origins
               (not (and (listp embed-origins) (every #'%embed-origin-p embed-origins))))
          (error "praxeon/web: :EMBED-ORIGINS must be a list of origins written as a browser writes them, such as \"https://app.example.com\" (lowercase, with no path), not ~S." embed-origins))
+        ((and (typep grant-verifier 'ceiling:ed25519-verifier)
+              (null (ceiling:ed25519-verifier-public-key grant-verifier)))
+         (error "praxeon/web: :GRANT-VERIFIER has no public key. A verifier with no key would refuse every grant as forged."))
         ((and grant-verifier (or agent conversation-key (not make-agent)))
          (error "praxeon/web: :GRANT-VERIFIER takes :MAKE-AGENT, a function of a principal and its grant, and not :AGENT or :CONVERSATION-KEY: the conversation is the session's principal's.")))
   ;; dev renders pretty (readable view-source); prod compacts. The style is bound around each
@@ -953,6 +975,7 @@ conversations the app holds."
   ;; `hyperion/output:*output-style*' there would change how the host renders. The turn thread
   ;; does not render; it publishes items, and the poll that reads them renders them here.
   (let* ((style (if dev :pretty :compact))
+         (sessions (or sessions (ws:make-session-table :clock clock)))
          (new-conversation
            (lambda (key agent) (%new-conversation key agent agent-name responder :clock clock)))
          (shared (unless (or conversation-key grant-verifier) (funcall new-conversation nil agent)))
@@ -972,6 +995,9 @@ conversations the app holds."
                             (let ((now (funcall clock)))
                               (when (or (null swept-at) (>= (- now swept-at) sweep-seconds))
                                 (%expire-conversations table now conversation-idle-seconds)
+                                ;; Sessions are swept with conversations, so an ended session
+                                ;; does not stay in memory until the next one opens.
+                                (when grant-verifier (ws:prune-sessions sessions))
                                 (setf swept-at now))
                               (let ((e (gethash key table)))
                                 ;; A returning key's stale entry is replaced here, whether or not
@@ -1044,7 +1070,9 @@ conversations the app holds."
               ;; The session exchange exists only on a service that takes grants.
               (when grant-verifier
                 (router:route :post "/embed/session"
-                              (lambda (env) (%open-session env grant-verifier audience sessions))
+                              (lambda (env)
+                                (let ((ceiling:*clock* clock))
+                                  (%open-session env grant-verifier audience sessions)))
                               :name :embed-session))
               (assets:mount)
               (when embed-origins
@@ -1211,7 +1239,7 @@ forget one."
             :dev dev :theme-css theme-css :dictionary dictionary :gate gate
             :conversation-key conversation-key :make-agent make-agent
             :grant-verifier grant-verifier :audience audience
-            :sessions (or sessions (ws:make-session-table))
+            :sessions sessions
             :conversation-idle-seconds (or conversation-idle-seconds 1800)
             :transport transport :embed-origins embed-origins))
 
