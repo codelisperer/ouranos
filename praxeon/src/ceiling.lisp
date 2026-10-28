@@ -223,6 +223,7 @@ line and collapsed only here, where a sum has to be a number."
             (* (%weight :cache-write) (or cache-write 0)))))
 
 (defun record-usage (ledger &key (input 0) (output 0) cache-read cache-write
+                                 estimated-input estimated-output
                                  (model "") (means "") breakdown)
   "Charge one completion's tokens to LEDGER and record the line. Returns the usage line.
 
@@ -244,17 +245,32 @@ how to say no leaves that unanswerable.
 
 BREAKDOWN, when given, is the prompt's estimated tokens by source, the plist
 PRAXEON/ACTOR:PROMPT-BREAKDOWN returns and each :USAGE event carries (#317, step D). It is kept
-on the line as :BREAKDOWN and charges nothing: what is charged is the provider's counts above."
+on the line as :BREAKDOWN and charges nothing: what is charged is the provider's counts above.
+
+ESTIMATED-INPUT and ESTIMATED-OUTPUT are praxeon's own counts, charged in place of INPUT or
+OUTPUT when that one is NIL (#984). A model call stopped by a cancel is the case they exist for:
+the provider had generated output it never reported a count for, and charging nothing for it
+would let a cancelled turn spend without limit. The line keeps the reported count as it was,
+NIL, and records the estimate charged in its place as :ESTIMATED-INPUT or :ESTIMATED-OUTPUT,
+with :ESTIMATED T, so a report can show it as an estimate apart from the reported counts. An
+estimate given beside a reported count is not charged and not recorded."
   (bt:with-lock-held ((ledger-lock ledger))
-    (let ((line (list :principal (grant-principal (ledger-grant ledger))
-                      :group (grant-group (ledger-grant ledger))
-                      :model model :means means
-                      :input input :output output
-                      :cache-read cache-read :cache-write cache-write
-                      :charged (chargeable-tokens :input input :output output
-                                                  :cache-read cache-read
-                                                  :cache-write cache-write)
-                      :at (%now))))
+    (let* ((input-estimate (and (null input) estimated-input))
+           (output-estimate (and (null output) estimated-output))
+           (line (list :principal (grant-principal (ledger-grant ledger))
+                       :group (grant-group (ledger-grant ledger))
+                       :model model :means means
+                       :input input :output output
+                       :cache-read cache-read :cache-write cache-write
+                       :charged (chargeable-tokens :input (or input input-estimate)
+                                                   :output (or output output-estimate)
+                                                   :cache-read cache-read
+                                                   :cache-write cache-write)
+                       :at (%now))))
+      (when (or input-estimate output-estimate)
+        (setf line (append line (list :estimated t)
+                           (and input-estimate (list :estimated-input input-estimate))
+                           (and output-estimate (list :estimated-output output-estimate)))))
       (when breakdown
         (setf line (append line (list :breakdown breakdown))))
       ;; :CHARGED is on the line as well as the four raw counts, because the weights are
@@ -264,6 +280,23 @@ on the line as :BREAKDOWN and charges nothing: what is charged is the provider's
       (incf (ledger-calls ledger))
       (push line (ledger-usage ledger))
       line)))
+
+(defun record-usage-event (ledger event &key (model "") (means ""))
+  "Charge the :USAGE event EVENT, a plist as PRAXEON/EVENT emits it, to LEDGER with
+RECORD-USAGE, and return the usage line. The four counts are passed as the event has them. For
+an event with :CANCELLED T, from a model call a cancel stopped (#984), its :ESTIMATED-INPUT and
+:ESTIMATED-OUTPUT are passed too, so whichever count the provider had not reported is charged as
+an estimate. Another event's :ESTIMATED-INPUT is the prompt estimate beside a reported count, and
+is not charged. The event's :BREAKDOWN goes on the line."
+  (let ((cancelled (getf event :cancelled)))
+    (record-usage ledger :input (getf event :input)
+                         :output (getf event :output)
+                         :cache-read (getf event :cache-read)
+                         :cache-write (getf event :cache-write)
+                         :estimated-input (and cancelled (getf event :estimated-input))
+                         :estimated-output (and cancelled (getf event :estimated-output))
+                         :breakdown (getf event :breakdown)
+                         :model model :means means)))
 
 (defun usage-report (ledger)
   "Every usage line for this session, oldest first -- what the caller returns IN-BAND for
@@ -339,7 +372,8 @@ cheaper model -- unpredictable output quality is a compliance problem, not a UX 
          (turn:halt-with tn (format nil "grant does not permit ~A" capability))))))
 
 (defun meter (ledger &key (model "") (means "")
-                          input-fn output-fn cache-read-fn cache-write-fn breakdown-fn)
+                          input-fn output-fn cache-read-fn cache-write-fn breakdown-fn
+                          estimated-input-fn estimated-output-fn)
   "A leave stage that charges the turn's usage to LEDGER.
 
 The four functions are read at leave time -- the CL shell knows what the provider reported,
@@ -357,7 +391,11 @@ is the one compatibility promise here and also the reason pre-publication issue 
 read as complete.
 
 BREAKDOWN-FN, when supplied, returns the turn's prompt breakdown for RECORD-USAGE's BREAKDOWN, for
-example the :BREAKDOWN of the turn's last :USAGE event (#317, step D)."
+example the :BREAKDOWN of the turn's last :USAGE event (#317, step D).
+
+ESTIMATED-INPUT-FN and ESTIMATED-OUTPUT-FN, when supplied, return the estimates RECORD-USAGE
+charges when INPUT-FN or OUTPUT-FN returns NIL, such as the :ESTIMATED-OUTPUT of a :USAGE event
+with :CANCELLED T (#984)."
   (turn:leave-stage
    "meter"
    (lambda (tn)
@@ -368,5 +406,7 @@ example the :BREAKDOWN of the turn's last :USAGE event (#317, step D)."
                      :cache-read (and cache-read-fn (funcall cache-read-fn))
                      :cache-write (and cache-write-fn (funcall cache-write-fn))
                      :breakdown (and breakdown-fn (funcall breakdown-fn))
+                     :estimated-input (and estimated-input-fn (funcall estimated-input-fn))
+                     :estimated-output (and estimated-output-fn (funcall estimated-output-fn))
                      :model model :means means))
      tn)))

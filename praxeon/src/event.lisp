@@ -45,14 +45,26 @@
 ;;;;                           INPUT-TIMEOUT, and the client answered cancel (#563)
 ;;;;   (:type :task-finished .. :outcome .. :ms ..)
 ;;;;                        -- a task ended: :OK, :ERROR, :CANCELLED, :EXPIRED or :UNKNOWN
+;;;;   (:type :text-delta   :text .. :step N)
+;;;;                        -- a piece of the model's text at step N, as the provider sends it,
+;;;;                           while an observer is bound and the provider streams (#984). The
+;;;;                           pieces of a step joined are its text; :ANSWER still carries it whole
+;;;;   (:type :turn-ended   :reason :cancelled :step N)
+;;;;                        -- the turn was cancelled with PRAXEON/ACTOR:CANCEL-TURN and ended at
+;;;;                           step N (#984)
 ;;;;   (:type :usage        :input .. :output .. :cache-read .. :cache-write ..
-;;;;                        :estimated-input .. :breakdown ..)
+;;;;                        :estimated-input .. :breakdown ..
+;;;;                        [:estimated-output .. :cancelled t])
 ;;;;                        -- the token counts the provider reported for a step (#161). Each
 ;;;;                           count is as reported: NIL means the provider did not report it,
 ;;;;                           0 that it reported none. ESTIMATED-INPUT is the estimate the
 ;;;;                           history budget was enforced against. BREAKDOWN splits that
 ;;;;                           estimate by source (PRAXEON/ACTOR:PROMPT-BREAKDOWN, #317). Not
-;;;;                           emitted when the provider reported no counts at all
+;;;;                           emitted when the provider reported no counts at all, except for a
+;;;;                           model call a cancel stopped, which always has one, with
+;;;;                           :CANCELLED T and ESTIMATED-OUTPUT, praxeon's count of the output
+;;;;                           that arrived (PRAXEON/LLM:*CANCEL*). Its :OUTPUT is usually NIL,
+;;;;                           because providers report the output count at the end (#984)
 ;;;;   (:type :image-usage  :id .. :principal .. :agent .. :provider .. :model .. :count ..
 ;;;;                        :size .. :quality .. [:input-tokens ..] [:output-tokens ..] [:cost ..]
 ;;;;                        [:estimated t] [:references ..])
