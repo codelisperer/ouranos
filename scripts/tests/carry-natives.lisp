@@ -434,11 +434,11 @@ invalidated by install_name_tool, and arm64 will not load the result, so re-sign
                                        :ignore-error-status t :output nil :error-output nil))))
                 (list libb liba)))))
 
-(defun %carry-pair-then-load (&key (relink t))
+(defun %carry-pair-then-load (&key (relink t) (stamp t))
   "Carry the fixture pair into a bundle directory, delete the directory they were built in, and
-load the carried libfixa.dylib in a fresh image, calling into it. RELINK NIL is the control.
-Returns (values LOAD-OUTPUT LOAD-CODE REPORT OTOOL-OF-CARRIED-A CODESIGN-CODE), or NIL when the
-pair could not be compiled."
+load the carried libfixa.dylib in a fresh image, calling into it. RELINK NIL and STAMP NIL are
+the controls. Returns (values LOAD-OUTPUT LOAD-CODE REPORT OTOOL-OF-CARRIED-A CODESIGN-CODE
+INSTALL-NAME-OF-CARRIED-A), or NIL when the pair could not be compiled."
   (%load-carry-natives)
   (let* ((tree (%fresh-tree))
          (app (ensure-directories-exist (merge-pathnames "app/" tree)))
@@ -447,13 +447,19 @@ pair could not be compiled."
     (unwind-protect
          (when (%dylib-pair app)
            (%write (merge-pathnames "LICENSE" app) "test license")
-           (progv (list (find-symbol "*RELINK*" "OURANOS-CARRY")) (list relink)
+           (progv (list (find-symbol "*RELINK*" "OURANOS-CARRY") (find-symbol "*STAMP*" "OURANOS-CARRY"))
+               (list relink stamp)
              (funcall (%carry-fn "CARRY-DECLARED-LIBRARIES")
                       (list (merge-pathnames "libfixb.dylib" app) (merge-pathnames "libfixa.dylib" app))
                       bundle :report report))
            (aion/fs:delete-tree app)
            (let* ((carried-a (uiop:native-namestring (merge-pathnames "libfixa.dylib" bundle)))
                   (otool (uiop:run-program (list "otool" "-L" carried-a) :output :string :ignore-error-status t))
+                  (install-name (second (uiop:split-string
+                                         (string-trim '(#\Newline)
+                                                      (uiop:run-program (list "otool" "-D" carried-a)
+                                                                        :output :string :ignore-error-status t))
+                                         :separator '(#\Newline))))
                   (sign-code (nth-value 2 (uiop:run-program (list "codesign" "--verify" "--strict" carried-a)
                                                             :ignore-error-status t :output nil :error-output nil)))
                   (out (make-string-output-stream))
@@ -466,7 +472,8 @@ pair could not be compiled."
                                             "--eval" (format nil "(cffi:load-foreign-library ~S)" carried-a)
                                             "--eval" "(format t \"~&FIXA ~A~%\" (cffi:foreign-funcall \"fixa\" :int))")
                                       :output out :error-output out :ignore-error-status t))))
-             (values (get-output-stream-string out) code (get-output-stream-string report) otool sign-code)))
+             (values (get-output-stream-string out) code (get-output-stream-string report) otool sign-code
+                     install-name)))
       (aion/fs:delete-tree tree :if-does-not-exist :ignore))))
 
 (defun %relink-skip-reason ()
@@ -487,6 +494,80 @@ with the directory they were built in gone."
           (is (search "@loader_path/libfixb.dylib" (or otool "")) "A still names B by path:~%~A" otool)
           (is (eql 0 sign-code) "the relinked A does not verify: codesign --verify --strict exited ~A" sign-code)
           (is (search "now names @loader_path/libfixb.dylib" (or report "")) "the build did not report the relink:~%~A" report)))))
+
+(test a-carried-dylib-with-an-absolute-install-name-is-stamped-relative
+  "#957: the fixture's dylibs are built with their absolute build path as their install name, as
+the tree's libuv and Homebrew's libraries are. The carried copy of A has the install name
+@executable_path/libfixa.dylib, verifies, and still loads and calls B. Control: with the stamp
+off, the carried copy keeps the build path."
+  (let ((why (%relink-skip-reason)))
+    (if why
+        (skip why)
+        (progn
+          (multiple-value-bind (out code report otool sign-code install-name) (%carry-pair-then-load)
+            (declare (ignore otool))
+            (is (equal "@executable_path/libfixa.dylib" install-name) "install name: ~S" install-name)
+            (is (eql 0 sign-code) "the stamped A does not verify: codesign --verify --strict exited ~A"
+                sign-code)
+            (is (search "FIXA 43" (or out "")) "the stamped A did not load (exit ~A):~%~A" code out)
+            (is (search "install name is now @executable_path/libfixa.dylib" (or report ""))
+                "the build did not report the stamp:~%~A" report))
+          (multiple-value-bind (out code report otool sign-code install-name)
+              (%carry-pair-then-load :stamp nil)
+            (declare (ignore out code report otool sign-code))
+            (is (and install-name (char= #\/ (char install-name 0))
+                     (search "libfixa.dylib" install-name))
+                "control: without the stamp the install name is the build path, got ~S" install-name))))))
+
+(defun %with-otool-stub (function)
+  "Call FUNCTION with PATH starting at a fresh directory whose `otool' exits 1 and prints
+nothing, as /usr/bin/otool does on a Mac without the Command Line Tools."
+  (let* ((tree (%fresh-tree))
+         (bin (ensure-directories-exist (merge-pathnames "bin/" tree)))
+         (stub (merge-pathnames "otool" bin))
+         (path (uiop:getenv "PATH")))
+    (%write stub (format nil "#!/bin/sh~%exit 1~%"))
+    (uiop:run-program (list "chmod" "+x" (uiop:native-namestring stub)))
+    (setf (uiop:getenv "PATH") (concatenate 'string (uiop:native-namestring bin) ":" path))
+    (unwind-protect (funcall function)
+      (setf (uiop:getenv "PATH") path)
+      (aion/fs:delete-tree tree :if-does-not-exist :ignore))))
+
+(defun %refusal-of (function &rest args)
+  "The CARRY-REFUSED that FUNCTION signals on ARGS, or NIL when it returns."
+  (handler-case (progn (apply function args) nil)
+    (error (e) (and (typep e (find-symbol "CARRY-REFUSED" "OURANOS-CARRY")) e))))
+
+(test a-mach-o-that-otool-cannot-read-is-refused-not-skipped
+  "#958's review: when otool exits non-zero on a Mach-O, the stamp and the relink signal
+CARRY-REFUSED instead of treating the file as having nothing to change. Controls: under the same
+stub, a file that is not a Mach-O is skipped without an error; under the real otool, the same
+dylib is stamped."
+  (let ((why (%relink-skip-reason)))
+    (if why
+        (skip why)
+        (let* ((tree (%fresh-tree))
+               (dir (ensure-directories-exist (merge-pathnames "lib/" tree)))
+               (stamp (%carry-fn "STAMP-INSTALL-NAME"))
+               (dependencies (fdefinition (find-symbol "%MACHO-DEPENDENCIES" "OURANOS-CARRY")))
+               (quiet (make-broadcast-stream)))
+          (unwind-protect
+               (if (not (%dylib-pair dir))
+                   (fail "the fixture dylibs were not built")
+                   (let ((dylib (merge-pathnames "libfixa.dylib" dir))
+                         (text (%write (merge-pathnames "notes.txt" dir) "not a library")))
+                     (%with-otool-stub
+                      (lambda ()
+                        (let ((refused (%refusal-of stamp dylib :report quiet)))
+                          (is (not (null refused)) "the stamp did not refuse a dylib otool could not read")
+                          (is (search "otool -D exited 1" (princ-to-string refused)) "~A" refused))
+                        (is (not (null (%refusal-of dependencies dylib)))
+                            "the relink's reading of load commands did not refuse")
+                        (is (null (%refusal-of stamp text :report quiet))
+                            "control: a file that is not a Mach-O is skipped without an error")))
+                     (is (equal "@executable_path/libfixa.dylib" (funcall stamp dylib :report quiet))
+                         "control: the real otool reads it and the stamp runs")))
+            (aion/fs:delete-tree tree :if-does-not-exist :ignore))))))
 
 (test carried-dylibs-that-link-each-other-fail-without-the-relink
   "The control: the same carry with the relink off. A still names B's build path, which has

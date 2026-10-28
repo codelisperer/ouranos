@@ -42,6 +42,7 @@
            #:carry-declared-libraries
            #:carry-refused
            #:open-carried-libraries #:runtime-directory
+           #:stamp-install-name
            #:sqlite-file-name
            #:tree-sqlite-carry))
 
@@ -189,14 +190,81 @@ test turns it off, as the control for the relink.")
       (uiop:run-program args :output :string :error-output :string :ignore-error-status t)
     (values (concatenate 'string out err) code)))
 
+(defun %macho-p (file)
+  "Whether FILE starts with a Mach-O or universal (fat) header, read from its first four bytes,
+so the answer does not depend on otool being installed."
+  (with-open-file (in file :element-type '(unsigned-byte 8) :if-does-not-exist nil)
+    (and in
+         (let ((magic (make-array 4 :element-type '(unsigned-byte 8))))
+           (and (= 4 (read-sequence magic in))
+                (member (coerce magic 'list)
+                        '((#xfe #xed #xfa #xce) (#xce #xfa #xed #xfe)
+                          (#xfe #xed #xfa #xcf) (#xcf #xfa #xed #xfe)
+                          (#xca #xfe #xba #xbe) (#xbe #xba #xfe #xca))
+                        :test #'equal)
+                t)))))
+
+(defun %otool (flag file)
+  "The output of `otool FLAG FILE'. Signals CARRY-REFUSED when FILE is a Mach-O and otool exits
+non-zero. Without the Xcode Command Line Tools, /usr/bin/otool is a stub that does exactly that,
+and reading its silence as \"nothing to change\" would ship the file unchanged (#958's review).
+NIL for a file that is not a Mach-O and that otool cannot read."
+  (multiple-value-bind (out code) (%run-tool (list "otool" flag (uiop:native-namestring file)))
+    (cond ((eql code 0) out)
+          ((%macho-p file)
+           (error 'carry-refused
+                  :path file
+                  :reason (format nil "otool ~A exited ~A on it, so it cannot be checked or relinked. otool comes with the Xcode Command Line Tools (xcode-select --install): ~A"
+                                  flag code (string-trim '(#\Newline #\Space) out)))))))
+
+(defun %install-name (file)
+  "FILE's own install name, as otool -D prints it, or NIL for a file that has none. Signals
+CARRY-REFUSED when FILE is a Mach-O that otool cannot read (%OTOOL)."
+  (let ((out (%otool "-D" file)))
+    (and out
+         (second (uiop:split-string (string-trim '(#\Newline) out) :separator '(#\Newline))))))
+
+(defvar *stamp* t
+  "Whether STAMP-INSTALL-NAME changes anything. Only a test turns it off, as the control for
+the stamp.")
+
+(defun stamp-install-name (file &key (report *standard-output*))
+  "On macOS, when FILE, a dylib just copied into a bundle, has an absolute install name, set it
+to @executable_path/<file name> and re-sign FILE ad hoc (#957). Returns the new install name
+when it changed FILE, otherwise NIL.
+
+A dylib built outside a bundle keeps the path it was built at as its install name, such as the
+tree's vendor/libuv/lib/libuv.1.dylib or a Homebrew prefix. Nothing loads a carried copy by that
+name, but the shipped file would then carry a path from the build machine. @executable_path/ is
+where the copy is, beside the executable, and the form the runtime's own load commands use
+(ADR-0014). An install name that is already relative, such as ./libpdfium.dylib, names no
+machine and is left as it is. Changing the install name invalidates the signature, and arm64
+does not load an invalidly signed dylib, so FILE is re-signed with `codesign --force -s -'.
+
+Signals CARRY-REFUSED when install_name_tool or codesign fails."
+  (when (and *stamp* (uiop:os-macosx-p))
+    (let ((id (%install-name file))
+          (path (uiop:native-namestring file)))
+      (when (and id (plusp (length id)) (char= (char id 0) #\/))
+        (let ((new (concatenate 'string "@executable_path/" (file-namestring file))))
+          (multiple-value-bind (out code) (%run-tool (list "install_name_tool" "-id" new path))
+            (unless (eql code 0)
+              (error 'carry-refused :path file
+                                    :reason (format nil "install_name_tool could not set its install name to ~A: ~A" new out))))
+          (multiple-value-bind (out code) (%run-tool (list "codesign" "--force" "-s" "-" path))
+            (unless (eql code 0)
+              (error 'carry-refused :path file
+                                    :reason (format nil "codesign could not re-sign it after its install name changed: ~A" out))))
+          (format report "~&            install name is now ~A~%" new)
+          new)))))
+
 (defun %macho-dependencies (file)
   "The install names FILE's load commands name, as otool -L lists them, without FILE's own
-install name (otool -D). NIL for a file that is not a Mach-O."
-  (multiple-value-bind (out code) (%run-tool (list "otool" "-L" (uiop:native-namestring file)))
-    (when (eql code 0)
-      (let ((own (second (uiop:split-string
-                          (string-trim '(#\Newline) (%run-tool (list "otool" "-D" (uiop:native-namestring file))))
-                          :separator '(#\Newline)))))
+install name (otool -D). NIL for a file that is not a Mach-O. Signals CARRY-REFUSED when FILE
+is a Mach-O that otool cannot read (%OTOOL)."
+  (let ((out (%otool "-L" file)))
+    (when out
+      (let ((own (%install-name file)))
         (loop for line in (rest (uiop:split-string out :separator '(#\Newline)))
               for trimmed = (string-trim '(#\Space #\Tab) line)
               for dep = (subseq trimmed 0 (or (position #\Space trimmed) (length trimmed)))
@@ -309,6 +377,7 @@ OPEN-CARRIED-LIBRARIES opens at startup."
                (unless (uiop:os-windows-p)
                  (uiop:run-program (list "chmod" "+x" (uiop:native-namestring dst)) :ignore-error-status t))
                (format report "~&  carry     ~A  <- ~A~%" name (uiop:native-namestring truename))
+               (stamp-install-name dst :report report)
                (dolist (license licenses)
                  (%copy-license license (pathname-name name) bundle report))
                (cond

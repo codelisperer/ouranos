@@ -77,6 +77,10 @@ failure shipped. The clean-room run is the acceptance test, not a nicety.
 - The same mechanism works unchanged on all three platforms, because it asks the OS loader
   for nothing but an absolute path. Only the file names differ (`libuv.so.1` /
   `libuv.1.dylib` / `libuv.dll`). macOS needs no `install_name_tool`, Windows no manifest.
+  Loading still needs none. Since #957 the bundler does run `install_name_tool -id` on a
+  carried dylib whose own install name is an absolute path, setting it to
+  `@executable_path/<name>`, so that the shipped file does not name a path on the build
+  machine. Nothing loads the library by that name.
 - `aion/uv` computes the image directory itself, in `src/uv/library.lisp` — a near-duplicate
   of `hyperion/desktop:image-directory`. It cannot share that code: `aion/uv` sits far to the
   left of `hyperion` in the DAG, and deliberately does not depend even on `aion` core. This

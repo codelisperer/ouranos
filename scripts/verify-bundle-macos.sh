@@ -177,6 +177,35 @@ for m in $MACHOS; do
   fi
 done
 
+# --- check 1b: carried libraries keep no build-machine install name (#957) -------------
+# A dylib built outside the bundle keeps the path it was built at as its own install name.
+# Nothing loads the carried copy by that name, so this warns rather than fails, but the
+# shipped file would carry a path from the build machine. The bundler stamps such a name
+# @executable_path/<name> (scripts/carry-natives.lisp, STAMP-INSTALL-NAME).
+echo
+echo "--- check 1b: carried libraries have no absolute install name outside the bundle ---"
+for f in "$DIR"/*.dylib; do
+  [ -f "$f" ] || continue
+  # Fails rather than passes when the id cannot be read: without the Command Line Tools,
+  # /usr/bin/otool is a stub that exits non-zero and prints nothing (#958's review).
+  if ! OUT=$(otool -D "$f" 2>&1); then
+    echo "  FAIL -- otool -D could not read $(basename "$f"): $OUT"
+    FAILED=1
+    continue
+  fi
+  ID=$(printf '%s\n' "$OUT" | tail -n +2)
+  case "$ID" in
+    "")
+      echo "  FAIL -- otool -D printed no install name for $(basename "$f")"
+      FAILED=1 ;;
+    "$DIR"/*) echo "  ok -- $(basename "$f"): $ID" ;;
+    /*)
+      echo "  WARN -- $(basename "$f") has the install name $ID, a path outside the bundle."
+      echo "          The current bundler stamps it @executable_path/$(basename "$f") (#957)." ;;
+    *) echo "  ok -- $(basename "$f"): $ID" ;;
+  esac
+done
+
 # --- check 2: run it, and confirm the libraries came from the bundle -------------------
 echo
 echo "--- check 2: the bundle runs, loading ITS OWN libraries ---"
