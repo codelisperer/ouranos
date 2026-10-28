@@ -335,6 +335,97 @@ CHAIN), both for the caller to free. A directory is refused: aion/tls reads one 
                               (aion/tls:free-certificate-chain chain))))
         (values (aion/tls:make-client-config chain) chain)))))
 
+;;; --- the read timeout on Windows (#985) ------------------------------------------------
+;;;
+;;; On Windows neither the socket's receive timeout (SO_RCVTIMEO, which USOCKET:SOCKET-OPTION
+;;; :RECEIVE-TIMEOUT sets) nor SBCL's fd-stream timeout ends a read from a socket that receives
+;;; nothing: measured, a read with a timeout of one second was still waiting after twenty. So a
+;;; pinned request's read timeout is kept here instead: when a read has waited longer than the
+;;; timeout, a timer closes the socket, which wakes the read, and the read signals
+;;; SB-SYS:IO-TIMEOUT. It closes rather than shuts down: on Windows a shutdown from another thread
+;;; did not wake a blocked read within ten seconds, and a close woke it at once (measured, #985).
+;;; A read that does not have to wait (LISTEN is true) costs no timer.
+
+#+os-windows
+(defclass %idle-watched-stream (sb-gray:fundamental-binary-input-stream
+                                sb-gray:fundamental-binary-output-stream)
+  ((inner :initarg :inner :reader %inner)
+   (socket :initarg :socket :reader %watched-socket)
+   (seconds :initarg :seconds :reader %watch-seconds)
+   (timed-out :initform nil :accessor %timed-out)))
+
+#+os-windows
+(defun %call-watched (s thunk)
+  "Call THUNK, a read from S's inner stream. When the read would wait, a timer closes S's socket
+after S's seconds; a read woken that way signals SB-SYS:IO-TIMEOUT."
+  (if (listen (%inner s))
+      (funcall thunk)
+      (let ((timer (sb-ext:make-timer
+                    (lambda ()
+                      (setf (%timed-out s) t)
+                      (ignore-errors (usocket:socket-close (%watched-socket s))))
+                    :thread t :name "aion/http-client read timeout")))
+        (sb-ext:schedule-timer timer (%watch-seconds s))
+        (let ((result (unwind-protect (%unless-timed-out s thunk)
+                        (sb-ext:unschedule-timer timer))))
+          (when (%timed-out s)
+            (error 'sb-sys:io-timeout :stream s :direction :input :seconds (%watch-seconds s)))
+          result))))
+
+#+os-windows
+(defun %unless-timed-out (s thunk)
+  "Call THUNK. When it fails because the timer closed the socket, return NIL, so the caller
+signals the timeout instead of whatever the closed socket reported."
+  (handler-case (funcall thunk)
+    (error (e) (if (%timed-out s) nil (error e)))))
+
+#+os-windows
+(defmethod sb-gray:stream-read-byte ((s %idle-watched-stream))
+  (or (%call-watched s (lambda () (read-byte (%inner s) nil nil))) :eof))
+
+#+os-windows
+(defmethod sb-gray:stream-read-sequence ((s %idle-watched-stream) seq &optional (start 0) end)
+  (%call-watched s (lambda () (read-sequence seq (%inner s) :start start :end end))))
+
+#+os-windows
+(defmethod sb-gray:stream-listen ((s %idle-watched-stream))
+  (listen (%inner s)))
+
+#+os-windows
+(defmethod sb-gray:stream-write-byte ((s %idle-watched-stream) byte)
+  (write-byte byte (%inner s)))
+
+#+os-windows
+(defmethod sb-gray:stream-write-sequence ((s %idle-watched-stream) seq &optional (start 0) end)
+  (write-sequence seq (%inner s) :start start :end end)
+  seq)
+
+#+os-windows
+(defmethod sb-gray:stream-force-output ((s %idle-watched-stream))
+  (force-output (%inner s)))
+
+#+os-windows
+(defmethod sb-gray:stream-finish-output ((s %idle-watched-stream))
+  (finish-output (%inner s)))
+
+#+os-windows
+(defmethod stream-element-type ((s %idle-watched-stream))
+  '(unsigned-byte 8))
+
+#+os-windows
+(defmethod close ((s %idle-watched-stream) &key abort)
+  (close (%inner s) :abort abort)
+  (call-next-method))
+
+#+os-windows
+(defun %watch-reads (socket seconds)
+  "SOCKET's stream, with reads ended after SECONDS of waiting, or the stream itself when SECONDS
+is NIL."
+  (let ((stream (usocket:socket-stream socket)))
+    (if seconds
+        (make-instance '%idle-watched-stream :inner stream :socket socket :seconds seconds)
+        stream)))
+
 #+os-windows
 (defun %request-pinned (req)
   "Run REQ over a connection to its CONNECT-ADDRESS, returning (values BODY STATUS HEADERS) as
@@ -347,9 +438,10 @@ a refusal is a CERTIFICATE-REJECTED of the matching subclass. With the request's
 certificates in that file decide instead. The request is written and the response read by
 http1.lisp, whose limits apply, and the Host header is the URL's.
 
-The socket is lent to FETCH-PUBLIC's deadline watch, and the read timeout is the socket's
-receive timeout. A body read as a stream (MAX-BODY-BYTES) keeps the connection, and closing the
-body closes it; otherwise the body is read here and the connection closed."
+The socket is lent to FETCH-PUBLIC's deadline watch. The read timeout is kept by
+%IDLE-WATCHED-STREAM, because Windows ignores the socket's receive timeout. A body read as a
+stream (MAX-BODY-BYTES) keeps the connection, and closing the body closes it; otherwise the body
+is read here and the connection closed."
   (let* ((uri (quri:uri (request-url req)))
          (host (quri:uri-host uri))
          (address (or (parse-address (request-connect-address req))
@@ -375,9 +467,7 @@ body closes it; otherwise the body is read here and the connection closed."
              (when own-chain (ignore-errors (aion/tls:free-certificate-chain own-chain)))))
       (unwind-protect
            (progn
-             (setf stream (usocket:socket-stream socket))
-             (when (request-read-timeout req)
-               (setf (usocket:socket-option socket :receive-timeout) (request-read-timeout req)))
+             (setf stream (%watch-reads socket (request-read-timeout req)))
              (when (string-equal (quri:uri-scheme uri) "https")
                (when (request-ca-path req)
                  (multiple-value-setq (own-config own-chain) (%ca-path-config (request-ca-path req))))
