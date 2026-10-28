@@ -1040,7 +1040,8 @@ static int exercise_placement(webview_t w, const char *path) {
 //
 // HYPERION_VIEW_FAKE_DIALOG=1 is for the CI-only window tests. It skips the user-action check and
 // answers {"path":"fake-path"} three seconds after a call, from a window timer, without showing a
-// dialog, so a test can see "busy" and where the answer goes. It says so on stderr.
+// dialog, so a test can see "busy" and where the answer goes. It is honoured only when
+// GITHUB_ACTIONS is set too, and says so on stderr.
 //
 // Only Windows shows a dialog in this step. macOS and Linux answer {"error": "unavailable"} after
 // the same checks, and their dialogs follow in their own lanes' changes.
@@ -1312,17 +1313,26 @@ static void dialog_binding(const char *seq, const char *req, void *arg) {
 #endif
 }
 
-// Make the launch's token and the app's origin from URL, before any window exists. False when no
-// token can be made or URL has no origin; the view then refuses to start, so a running view
-// started with --dialogs always has them, and RUN-APP's DIALOGS-AVAILABLE-P is not true of a
-// window that has none.
+// Make the launch's token, the app's origin from URL and, on Windows, the window message that
+// carries a dialog job, before any window exists. False when any of them cannot be made; the
+// view then refuses to start, so a running view started with --dialogs always has them, and
+// RUN-APP's DIALOGS-AVAILABLE-P is not true of a window that has none. Without the message,
+// PostMessage would send message 0, the job would be lost and "busy" would stay set.
+//
+// HYPERION_VIEW_FAKE_DIALOG=1 is honoured only when GITHUB_ACTIONS is also set, so a stray
+// variable on a user's machine cannot put a shipped app into fake mode.
 static bool prepare_dialogs(const char *url) {
   g_dialog_token = random_token();
   g_app_origin = url_origin(url);
   const char *fake = std::getenv("HYPERION_VIEW_FAKE_DIALOG");
-  g_fake_dialog = fake != nullptr && std::strcmp(fake, "1") == 0;
+  const char *ci = std::getenv("GITHUB_ACTIONS");
+  g_fake_dialog = fake != nullptr && std::strcmp(fake, "1") == 0 && ci != nullptr && ci[0] != '\0';
   if (g_fake_dialog)
     std::fprintf(stderr, "hyperion-view: HYPERION_VIEW_FAKE_DIALOG=1: no dialog is shown; calls get fake-path and need no user action\n");
+#if defined(_WIN32)
+  g_dialog_message = RegisterWindowMessageW(L"hyperion-view-dialog-job");
+  if (g_dialog_message == 0) return false;
+#endif
   return !g_dialog_token.empty() && !g_app_origin.empty();
 }
 
@@ -1330,7 +1340,6 @@ static bool prepare_dialogs(const char *url) {
 static void install_dialogs(webview_t w) {
 #if defined(_WIN32)
   g_dialog_view = w;
-  g_dialog_message = RegisterWindowMessageW(L"hyperion-view-dialog-job");
   HWND hwnd = static_cast<HWND>(webview_get_window(w));
   g_dialog_previous_proc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
       hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(dialog_window_proc)));
@@ -1764,7 +1773,7 @@ int main(int argc, char **argv) {
   set_app_name(title);
 
   if (dialogs && !prepare_dialogs(url)) {
-    std::fprintf(stderr, "hyperion-view: --dialogs: no random token, or no origin in %s\n", url);
+    std::fprintf(stderr, "hyperion-view: --dialogs: no random token, no origin in %s, or no window message for a dialog job\n", url);
     return 2;
   }
   if (window_forbidden()) return 3;

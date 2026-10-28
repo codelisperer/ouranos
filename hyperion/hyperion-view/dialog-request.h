@@ -88,6 +88,19 @@ inline bool dialog_pattern_ok(const std::string &pattern) {
   return true;
 }
 
+// FOLDER is a local drive path: a letter, a colon, then a backslash or a slash ("C:\Users",
+// "c:/data"). Anything else is refused. The dialog opens the folder with
+// SHCreateItemFromParsingName, which also accepts shell parsing names, so "\\host\share",
+// "file://host/share" and "\??\UNC\host\share" all reach a network share, and opening one makes
+// Windows send the user's credentials to that host. Allowing only a drive path is simpler to check
+// than listing every form that reaches the network.
+inline bool dialog_folder_ok(const std::string &folder) {
+  if (folder.size() < 3) return false;
+  char d = folder[0];
+  return ((d >= 'A' && d <= 'Z') || (d >= 'a' && d <= 'z')) && folder[1] == ':' &&
+         (folder[2] == '\\' || folder[2] == '/');
+}
+
 // ID is 1 to 9 decimal digits with no leading zero, so it can be written into a script as is.
 inline bool dialog_id_ok(const std::string &id) {
   if (id.empty() || id.size() > 9 || id[0] == '0') return false;
@@ -104,8 +117,8 @@ inline bool dialog_id_ok(const std::string &id) {
 // "filter-label", "filter-patterns" or "pattern". OUT->ID is set once the token and the id are
 // good, so a refusal for any later reason can still be answered.
 //
-// A FOLDER beginning with two slashes or two backslashes is refused: it names a network share,
-// and opening the dialog there makes Windows send the user's credentials to that host.
+// FOLDER must be a local drive path (DIALOG_FOLDER_OK); any other folder is refused, because the
+// forms that reach a network share would make Windows send the user's credentials to that host.
 inline std::string parse_dialog_request(const std::string &params,
                                         const std::string &expected_token,
                                         dialog_request *out) {
@@ -135,8 +148,7 @@ inline std::string parse_dialog_request(const std::string &params,
     return "title";
   if (dialog_json_member(request, "folder", 0, &raw) &&
       (!dialog_json_string(raw, &r.folder) || !dialog_text_ok(r.folder, kMaxDialogFolder) ||
-       (r.folder.size() >= 2 && (r.folder[0] == '/' || r.folder[0] == '\\') &&
-        (r.folder[1] == '/' || r.folder[1] == '\\'))))
+       !dialog_folder_ok(r.folder)))
     return "folder";
   if (dialog_json_member(request, "name", 0, &raw) &&
       (r.kind != "save" || !dialog_json_string(raw, &r.name) ||

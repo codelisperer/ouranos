@@ -274,9 +274,11 @@ defines `window.hyperionDialog(request)` in the app's page. REQUEST is
 - `kind` is `"open"`, `"open-many"`, `"save"` or `"folder"`.
 - `title` is the dialog's title, at most 200 bytes.
 - `folder` is the folder it opens in. Without it, Windows uses the folder last used for that kind
-  of dialog by this app, and the first time, Documents. A folder that begins with two slashes or
-  two backslashes names a network share and is refused, because opening the dialog there makes
-  Windows send the user's credentials to that host.
+  of dialog by this app, and the first time, Documents. It must be a local drive path: a letter, a
+  colon, then `\` or `/` (`C:\Users`, `c:/data`). Any other folder is refused. Windows opens the
+  folder as a shell parsing name, so `\\host\share`, `file://host/share` and `\??\UNC\host\share`
+  all reach a network share, and opening one makes Windows send the user's credentials to that
+  host.
 - `name` is the file name a save dialog suggests, with no `/` or `\`.
 - `filters` is a list of `[label, "*.ext;*.ext"]`, at most 32; a folder dialog takes none.
 
@@ -325,7 +327,8 @@ for a pasted path instead. Their dialogs come in separate changes for those plat
 
 For tests, `HYPERION_VIEW_FAKE_DIALOG=1` makes every call answer `{path: "fake-path"}` three
 seconds later, from a window timer, with no dialog shown and no user-action check; hyperion-view
-says so on stderr.
+says so on stderr. It is honoured only when `GITHUB_ACTIONS` is set too, so a stray variable on a
+user's machine cannot put a shipped app into fake mode.
 
 Testing without a window: `hyperion-view --dialog-request TOKEN PARAMS` prints `ok KIND ...` or
 `refuse REASON` for a call, and `hyperion-view --dialog-origin URL` prints the origin the function

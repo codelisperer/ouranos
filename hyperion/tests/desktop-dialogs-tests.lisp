@@ -34,11 +34,13 @@
     (refused :title (make-string 201 :initial-element #\a))
     (refused :title (make-string 101 :initial-element (code-char #xe9)))   ; 202 bytes
     (refused :title 12)
-    (refused :folder (make-string 4097 :initial-element #\a))
-    ;; A network share: opening the dialog there would send the user's credentials to its host.
-    (refused :folder "\\\\server\\share")
-    (refused :folder "//server/share")
-    (refused :folder "/\\server")
+    (refused :folder (concatenate 'string "C:\\" (make-string 4094 :initial-element #\a)))
+    ;; Only a local drive path: every other form a folder can take includes ones that reach a
+    ;; network share, which would send the user's credentials to its host.
+    (dolist (folder '("\\\\server\\share" "//server/share" "/\\server" "file://host/share"
+                      "FILE:///C:/x" "\\??\\UNC\\h\\s" "\\\\?\\C:\\x" "Users\\me" "/home/me"
+                      "C:" "C:x" "1:\\x" ""))
+      (refused :folder folder))
     (refused :filters (list (list "Odd" (format nil "*.~C" (code-char #x212A)))))   ; KELVIN SIGN
     (refused :kind :open :name "a.txt")
     (refused :kind :save :name "dir/a.txt")
@@ -54,7 +56,10 @@
     (dolist (pattern '("*." "a.txt" "*.t t" "*.*" "*.12345678901234567"))
       (refused :filters (list (list "Odd" pattern)))))
   (is (stringp (hyperion/desktop:dialog-request-json :folder "C:\\Users\\me" :filters '(("K" "*.K")))))
-  (is (stringp (hyperion/desktop:dialog-request-json :folder "/home/me")))
+  (is (stringp (hyperion/desktop:dialog-request-json :folder "c:/data")) "a drive path with a slash")
+  (is (stringp (hyperion/desktop:dialog-request-json
+                :folder (concatenate 'string "C:\\" (make-string 4093 :initial-element #\a))))
+      "a drive path of 4096 bytes")
   (is (stringp (hyperion/desktop:dialog-request-json
                 :kind :save :name "a.txt" :title (make-string 200 :initial-element #\a)
                 :filters (list (cons "Many" (loop for i below 32 collect (format nil "*.e~D" i))))))

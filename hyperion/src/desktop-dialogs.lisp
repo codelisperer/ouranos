@@ -46,10 +46,14 @@ refuses."
   (when title (%dialog-text "the dialog's TITLE" title 200))
   (when folder
     (%dialog-text "the dialog's FOLDER" folder 4096)
-    ;; A network share: opening the dialog there makes Windows send the user's credentials to
-    ;; that host. hyperion-view refuses it too.
-    (when (and (>= (length folder) 2) (find (char folder 0) "/\\") (find (char folder 1) "/\\"))
-      (%dialog-refuse "FOLDER is a network share, which is refused: ~S" folder)))
+    ;; Only a local drive path, as hyperion-view checks it (dialog_folder_ok): the dialog opens
+    ;; FOLDER as a shell parsing name, so \\host\share, file://host/share and \??\UNC\host\share
+    ;; all reach a network share, which makes Windows send the user's credentials to that host.
+    (unless (and (>= (length folder) 3)
+                 (or (char<= #\A (char folder 0) #\Z) (char<= #\a (char folder 0) #\z))
+                 (char= (char folder 1) #\:)
+                 (find (char folder 2) "\\/"))
+      (%dialog-refuse "FOLDER must be a local drive path such as C:\\Users, not ~S" folder)))
   (when name
     (unless (eq kind :save) (%dialog-refuse "NAME is for a :SAVE dialog only"))
     (%dialog-text "the dialog's NAME" name 260)
@@ -90,9 +94,10 @@ refuses."
 KIND is :OPEN, :OPEN-MANY, :SAVE or :FOLDER. TITLE is the dialog's title. FILTERS is a list of
 (LABEL PATTERN ...), each PATTERN \"*\" or \"*.EXT\", such as ((\"Databases\" \"*.accdb\" \"*.mdb\")
 (\"All files\" \"*\")); a :FOLDER dialog takes none. FOLDER is where it opens; without it, the
-folder last used for that KIND, else Documents. A FOLDER beginning with two slashes or two
-backslashes names a network share and is refused, because opening the dialog there makes Windows
-send the user's credentials to that host. NAME is a :SAVE dialog's suggested file name.
+folder last used for that KIND, else Documents. FOLDER must be a local drive path: a letter, a
+colon, then a backslash or a slash (\"C:\\\\Users\", \"c:/data\"). Anything else is refused,
+because the other forms a folder can take include ones that reach a network share, and opening
+one makes Windows send the user's credentials to that host. NAME is a :SAVE dialog's suggested file name.
 Signals an error for anything hyperion-view would refuse."
   (%check-dialog-request kind title filters folder name)
   (with-output-to-string (out)

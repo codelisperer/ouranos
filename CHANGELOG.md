@@ -905,9 +905,10 @@ its tag.
     call made outside a user action (a click or a key) is refused where the webview can tell: on
     Windows (WebView2) and on macOS 13.3 and later. The answer is delivered only while the window
     still shows the app's origin, so a page the window has gone to since the call does not receive
-    the path. One dialog is shown at a time; a second call gets `{error: "busy"}`. A `folder` that
-    begins with two slashes or two backslashes (a network share) is refused, because opening the
-    dialog there makes Windows send the user's credentials to that host. An app that shows
+    the path. One dialog is shown at a time; a second call gets `{error: "busy"}`. A `folder` must be a
+    local drive path (`C:\Users`, `c:/data`), and any other folder is refused, because other forms
+    (`\\host\share`, `file://host/share`) reach a network share, and opening one makes Windows
+    send the user's credentials to that host. An app that shows
     third-party content in its window should pass `:dialogs nil`.
   - **Only Windows shows a dialog in this change.** On macOS and Linux the function exists and
     answers `{error: "unavailable"}`, and `dialogs-available-p` is NIL; their dialogs follow in
@@ -915,9 +916,10 @@ its tag.
   - hyperion-view gains `--dialogs`, `--exit-after SECONDS` (closes the window after SECONDS, for
     tests), and two modes that make no window: `--dialog-request TOKEN PARAMS` prints how a call is
     checked, and `--dialog-origin URL` prints the origin the function is offered to. With
-    `--dialogs`, hyperion-view exits 2 if it cannot make the launch's token. For tests,
-    `HYPERION_VIEW_FAKE_DIALOG=1` answers every call with `{path: "fake-path"}` after three seconds,
-    shows no dialog and skips the user-action check, and says so on stderr. A
+    `--dialogs`, hyperion-view exits 2 if it cannot make the launch's token or the URL has no
+    origin. For tests, `HYPERION_VIEW_FAKE_DIALOG=1`, honoured only when `GITHUB_ACTIONS` is set
+    too, answers every call with `{path: "fake-path"}` after three seconds, shows no dialog, skips
+    the user-action check, and says so on stderr. A
     hyperion-view built before this change refuses `--dialogs` as an unknown option, so rebuild it
     with `hyperion/hyperion-view/build.ps1` (it now links `uuid.lib` and `bcrypt.lib`).
 

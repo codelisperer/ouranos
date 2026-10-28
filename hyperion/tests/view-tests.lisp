@@ -1033,6 +1033,15 @@ the launcher, so it runs everywhere."
 ;;; before a dialog is shown, and prints `ok KIND ...' or `refuse REASON'. They are the same on
 ;;; every OS, so these run everywhere.
 
+(defun %json-quote (text)
+  "TEXT as a JSON string, escaping backslashes and double quotes."
+  (with-output-to-string (out)
+    (write-char #\" out)
+    (loop for c across text
+          do (when (find c "\\\"") (write-char #\\ out))
+             (write-char c out))
+    (write-char #\" out)))
+
 (defun %dialog-request (token params)
   "The line `hyperion-view --dialog-request TOKEN PARAMS' prints. In PARAMS, ' stands for \"."
   (multiple-value-bind (code out)
@@ -1086,10 +1095,15 @@ the launcher, so it runs everywhere."
       (refused "malformed" (format nil "{'kind':'open','title':'a~Cb'}" (code-char 127)))
       (refused "title" (format nil "{'kind':'open','title':'~A'}" (make-string 201 :initial-element #\a)))
       (refused "folder" (format nil "{'kind':'open','folder':'~A'}" (make-string 4097 :initial-element #\a)))
-      ;; A network share: opening the dialog there would send the user's credentials to its host.
-      (refused "folder" "{'kind':'open','folder':'\\\\\\\\server\\\\share'}")
-      (refused "folder" "{'kind':'open','folder':'//server/share'}")
-      (refused "folder" "{'kind':'open','folder':'/\\\\server'}")
+      ;; Only a local drive path: every other form a folder can take includes ones that reach a
+      ;; network share, which would send the user's credentials to its host.
+      (dolist (folder '("\\\\server\\share" "//server/share" "/\\server" "file://host/share"
+                        "FILE:///C:/x" "\\??\\UNC\\h\\s" "\\\\?\\C:\\x" "Users\\me" "/home/me"
+                        "C:" "C:x" "1:\\x" ""))
+        (refused "folder" (format nil "{'kind':'open','folder':~A}" (%json-quote folder))))
+      (is (equal "ok open folder=\"c:/data\""
+                 (%dialog-request "t" "['t',1,{'kind':'open','folder':'c:/data'}]"))
+          "a drive path with a slash is accepted")
       (refused "name" "{'kind':'open','name':'a.txt'}")
       (refused "name" "{'kind':'save','name':'dir/a.txt'}")
       (refused "name" "{'kind':'save','name':'dir\\\\a.txt'}")
@@ -1130,6 +1144,18 @@ the launcher, so it runs everywhere."
     (is (eql 2 (run-launcher "http://127.0.0.1:1/" "--exit-after")) "--exit-after with nothing")
     (is (eql 3 (run-launcher "http://127.0.0.1:1/" "--dialogs" "--exit-after" "5"))
         "a good launch with --dialogs still makes no window under HYPERION_VIEW_NO_WINDOW=1")))
+
+(test dialogs-refuse-to-start-without-an-origin
+  ;; With --dialogs and a URL that has no origin, the view exits 2 before it would make a window,
+  ;; rather than running a window whose page has no dialog while RUN-APP says it has one. The
+  ;; check comes before HYPERION_VIEW_NO_WINDOW's, so this makes no window either way.
+  (with-launcher
+    (multiple-value-bind (code out err) (run-launcher "127.0.0.1:1/" "--dialogs")
+      (declare (ignore out))
+      (is (eql 2 code) "exit 2, got ~S" code)
+      (is (search "--dialogs" err) "and the reason names --dialogs: ~S" err))
+    (is (eql 3 (run-launcher "127.0.0.1:1/"))
+        "the same URL without --dialogs gets as far as the window, which is refused")))
 
 ;;; --- native dialogs on a real window, on CI only (#986) ------------------------------------
 ;;;
@@ -1263,7 +1289,9 @@ top-level page only, and refuses a call made outside a user action."
 (test a-dialog-call-is-answered-once-at-a-time-and-only-to-the-apps-origin-on-a-real-window
   "On a GitHub Actions Windows runner, with HYPERION_VIEW_FAKE_DIALOG=1: a call without the token
 starts nothing, a second call while one is open gets busy, and an answer is not delivered to a page
-on another origin."
+on another origin. The fake dialog is a window timer, not a modal loop, so this does not show that
+a job posted while a real dialog's modal loop runs is kept; that rests on PostMessage to the window,
+which a modal loop dispatches."
   #-win32 (skip "Only Windows answers a dialog call in this change; elsewhere every call is unavailable")
   #+win32
   (with-launcher
