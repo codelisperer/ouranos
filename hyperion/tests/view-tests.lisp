@@ -1026,3 +1026,194 @@ the launcher, so it runs everywhere."
            (is-true (%real-window-allowed-p) "GITHUB_ACTIONS=true did not allow a window"))
       (setf (uiop:getenv "CI") (or ci "")
             (uiop:getenv "GITHUB_ACTIONS") (or gha "")))))
+
+;;; --- native dialogs (#986): the checks on a page's call, with no window ---------------------
+;;;
+;;; `hyperion-view --dialog-request TOKEN PARAMS' runs the checks the binding runs on every call
+;;; before a dialog is shown, and prints `ok KIND ...' or `refuse REASON'. They are the same on
+;;; every OS, so these run everywhere.
+
+(defun %dialog-request (token params)
+  "The line `hyperion-view --dialog-request TOKEN PARAMS' prints. In PARAMS, ' stands for \"."
+  (multiple-value-bind (code out)
+      (run-launcher "--dialog-request" token (substitute #\" #\' params))
+    (is (eql 0 code) "--dialog-request ~S ~S exited ~S" token params code)
+    (string-right-trim '(#\Return #\Newline) out)))
+
+(test a-dialog-call-without-the-launchs-token-is-refused-natively
+  ;; The page's hyperionDialog holds the token in a closure. A script that calls the binding
+  ;; another way, without it, is refused here, before anything else is read.
+  (with-launcher
+    (is (equal "ok open" (%dialog-request "t0k3n" "['t0k3n',{'kind':'open'}]")) "the token")
+    (is (equal "refuse token" (%dialog-request "t0k3n" "['other',{'kind':'open'}]")) "another token")
+    (is (equal "refuse token" (%dialog-request "t0k3n" "['',{'kind':'open'}]")) "an empty token")
+    (is (equal "refuse token" (%dialog-request "t0k3n" "[{'kind':'open'}]")) "no token at all")
+    (is (equal "refuse token" (%dialog-request "t0k3n" "[1,{'kind':'open'}]")) "a number")
+    (is (equal "refuse token" (%dialog-request "" "['',{'kind':'open'}]"))
+        "a launch with no token refuses every call")))
+
+(test a-good-dialog-request-is-read-whole
+  (with-launcher
+    (is (equal "ok save title=\"Save as\" folder=\"C:\\\\Users\" name=\"a.txt\" filter=\"Text\":*.txt;*.md filter=\"All files\":*"
+               (%dialog-request "t" "['t',{'kind':'save','title':'Save as','folder':'C:\\\\Users','name':'a.txt','filters':[['Text','*.txt;*.md'],['All files','*']]}]")))
+    (is (equal "ok open-many filter=\"Databases\":*.accdb;*.MDB"
+               (%dialog-request "t" "['t',{'kind':'open-many','filters':[['Databases','*.accdb;*.MDB']]}]")))
+    (is (equal "ok folder" (%dialog-request "t" "['t',{'kind':'folder'}]")))
+    (is (equal "ok open title=\"a\\\"b\\\\c\""
+               (%dialog-request "t" "['t',{'kind':'open','title':'a\\'b\\\\c'}]"))
+        "a quote and a backslash in a title come through escaped once")))
+
+(test each-bad-dialog-request-is-refused-with-its-reason
+  (with-launcher
+    (flet ((refused (reason request)
+             (is (equal (format nil "refuse ~A" reason)
+                        (%dialog-request "t" (format nil "['t',~A]" request)))
+                 "~A for ~A" reason request)))
+      (is (equal "refuse malformed" (%dialog-request "t" "{'kind':'open'}")) "not an array")
+      (is (equal "refuse malformed" (%dialog-request "t" "['t',{'kind':'open'},1]")) "a third value")
+      (is (equal "refuse malformed" (%dialog-request "t" "['t','open']")) "a request that is not an object")
+      (refused "kind" "{}")
+      (refused "kind" "{'kind':'delete'}")
+      (refused "kind" "{'kind':1}")
+      (refused "title" "{'kind':'open','title':'a\\u0001b'}")
+      (refused "title" "{'kind':'open','title':'a\\tb'}")
+      ;; A raw DEL, which is how JSON.stringify sends one, is refused before the title is checked:
+      ;; webview.h's JSON reader does not return the request at all.
+      (refused "malformed" (format nil "{'kind':'open','title':'a~Cb'}" (code-char 127)))
+      (refused "title" (format nil "{'kind':'open','title':'~A'}" (make-string 201 :initial-element #\a)))
+      (refused "folder" (format nil "{'kind':'open','folder':'~A'}" (make-string 4097 :initial-element #\a)))
+      (refused "name" "{'kind':'open','name':'a.txt'}")
+      (refused "name" "{'kind':'save','name':'dir/a.txt'}")
+      (refused "name" "{'kind':'save','name':'dir\\\\a.txt'}")
+      (refused "filters" "{'kind':'folder','filters':[['All','*']]}")
+      (refused "filters" "{'kind':'open','filters':'*.txt'}")
+      (refused "filters" "{'kind':'open','filters':['*.txt']}")
+      (refused "filters" "{'kind':'open','filters':[['All','*','x']]}")
+      (refused "filters" (format nil "{'kind':'open','filters':[~{~A~^,~}]}"
+                                 (loop repeat 33 collect "['All','*']")))
+      (refused "filter-label" "{'kind':'open','filters':[['','*']]}")
+      (refused "filter-label" "{'kind':'open','filters':[[1,'*']]}")
+      (refused "filter-patterns" "{'kind':'open','filters':[['All','']]}")
+      (refused "filter-patterns" (format nil "{'kind':'open','filters':[['Many','~{~A~^;~}']]}"
+                                         (loop for i below 33 collect (format nil "*.e~D" i))))
+      (dolist (pattern '("*." "a.txt" "*.t t" "*.*" "*.txt;" "*.12345678901234567"))
+        (refused "pattern" (format nil "{'kind':'open','filters':[['Odd','~A']]}" pattern))))))
+
+(test dialog-request-takes-a-token-and-params-and-nothing-else
+  (with-launcher
+    (is (eql 2 (run-launcher "--dialog-request" "t")) "no params")
+    (is (eql 2 (run-launcher "--dialog-request" "t" "[]" "x")) "a third value")
+    (is (eql 2 (run-launcher "http://127.0.0.1:1/" "--dialog-request" "t" "[]")) "after a URL")
+    (is (eql 2 (run-launcher "--dialog-origin")) "--dialog-origin with no URL")))
+
+(test the-dialogs-are-offered-to-the-origin-of-the-url-the-view-started-with
+  (with-launcher
+    (flet ((origin (url) (string-right-trim '(#\Return #\Newline)
+                                            (nth-value 1 (run-launcher "--dialog-origin" url)))))
+      (is (equal "http://127.0.0.1:8080" (origin "http://127.0.0.1:8080/app?x=1#y")))
+      (is (equal "http://localhost:1" (origin "HTTP://LocalHost:1")))
+      (is (equal "https://example.test" (origin "https://example.test?q")))
+      (is (equal "" (origin "127.0.0.1:8080/")) "no scheme, no origin, so no dialogs"))))
+
+(test exit-after-takes-seconds-from-1-to-3600
+  (with-launcher
+    (dolist (bad '("0" "3601" "x" "-1"))
+      (is (eql 2 (run-launcher "http://127.0.0.1:1/" "--exit-after" bad)) "--exit-after ~A" bad))
+    (is (eql 2 (run-launcher "http://127.0.0.1:1/" "--exit-after")) "--exit-after with nothing")
+    (is (eql 3 (run-launcher "http://127.0.0.1:1/" "--dialogs" "--exit-after" "5"))
+        "a good launch with --dialogs still makes no window under HYPERION_VIEW_NO_WINDOW=1")))
+
+;;; --- native dialogs on a real window, on CI only (#986) ------------------------------------
+;;;
+;;; The view is started on a page served here, with --dialogs, and closes itself after a few
+;;; seconds. The page and its frames report what they can see to /report on the server, and the
+;;; test reads those requests. What it checks: the app's top-level page has hyperionDialog and
+;;; not the raw binding; a frame from another origin, a frame from the app's own origin, and a
+;;; top-level page from another origin have neither; a direct call to the binding without the
+;;; token is refused by hyperion-view; and a call made outside a user action is refused. No
+;;; dialog is shown, because every call the page makes is one of those refusals.
+
+(defun %percent-decode (text)
+  (let ((octets (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+    (loop with i = 0 while (< i (length text))
+          do (let ((c (char text i)))
+               (cond ((and (char= c #\%) (<= (+ i 3) (length text)))
+                      (vector-push-extend (parse-integer text :start (1+ i) :end (+ i 3) :radix 16)
+                                          octets)
+                      (incf i 3))
+                     (t (vector-push-extend (char-code c) octets) (incf i)))))
+    (sb-ext:octets-to-string (coerce octets '(vector (unsigned-byte 8))) :external-format :utf-8)))
+
+(defun %dialog-page (port path)
+  "The HTML the test server answers for PATH. The app's origin is 127.0.0.1:PORT, and the other
+origin is localhost:PORT."
+  (flet ((reporter (key)
+           (format nil "<!doctype html><script>fetch('/report?~A='+encodeURIComponent(typeof window.hyperionDialog+','+typeof window.__hyperion_dialog_raw+','+location.origin));</script>" key)))
+    (cond
+      ((string= path "/")
+       (format nil "<!doctype html><html><body><iframe src=\"http://localhost:~D/child\"></iframe><iframe src=\"/same\"></iframe><script>
+function send(k,v){return fetch('/report?'+k+'='+encodeURIComponent(v));}
+var sent=send('top',typeof window.hyperionDialog+','+typeof window.__hyperion_dialog_raw+','+location.origin);
+var seq=900001;
+var noToken=new Promise(function(res,rej){window._rpc[seq]={resolve:res,reject:rej};
+window.external.invoke(JSON.stringify({id:seq,method:'__hyperion_dialog_raw',params:['not-the-token',{kind:'open'}]}));})
+.then(function(r){return send('notoken',JSON.stringify(r));});
+var noUser=(window.hyperionDialog?window.hyperionDialog({kind:'open'}):Promise.resolve({error:'absent'}))
+.then(function(r){return send('nouser',JSON.stringify(r));});
+Promise.all([sent,noToken,noUser]).then(function(){setTimeout(function(){location.href='http://localhost:~D/away';},1000);});
+</script></body></html>" port port))
+      ((string= path "/child") (reporter "child"))
+      ((string= path "/same") (reporter "same"))
+      ((string= path "/away") (reporter "away"))
+      (t nil))))
+
+(defun %dialog-reports (server)
+  "An alist of what the pages reported to SERVER, KEY to VALUE."
+  (loop for request in (reverse (aion/test-http:server-requests server))
+        for path = (aion/test-http:request-path request)
+        when (and (> (length path) 8) (string= "/report?" path :end2 8))
+          collect (let* ((query (subseq path 8))
+                         (eq (position #\= query)))
+                    (cons (subseq query 0 eq) (%percent-decode (subseq query (1+ eq)))))))
+
+(test a-dialog-binding-reaches-only-the-apps-own-top-level-page-on-a-real-window
+  "On a GitHub Actions runner, a real view started with --dialogs offers hyperionDialog to the app's
+top-level page only, refuses a call without the token natively, and refuses one made outside a
+user action."
+  #-(or win32 darwin) (skip "Linux shows no dialog yet, and its runner has no display for a window")
+  #+(or win32 darwin)
+  (with-launcher
+    (if (not (%real-window-allowed-p))
+        (skip "Runs only on GitHub Actions (GITHUB_ACTIONS is not set here): it creates a window")
+        (let ((port nil))
+          (aion/test-http:with-server
+              (server (lambda (request stream)
+                        (let ((page (%dialog-page port (aion/test-http:request-path request))))
+                          (if page
+                              (aion/test-http:write-response
+                               stream 200 '(("Content-Type" . "text/html; charset=utf-8")) page)
+                              (aion/test-http:write-response stream 404 '() "")))))
+            (setf port (aion/test-http:server-port server))
+            (let ((url (aion/test-http:server-url server "/"))
+                  (other (format nil "http://localhost:~D" port)))
+              (multiple-value-bind (code out)
+                  #+win32 (%run-hidden-launcher url "Dialogs" "--dialogs" "--exit-after" "20")
+                  #+darwin (%run-shown-launcher 60 url "Dialogs" "--dialogs" "--exit-after" "20")
+                (declare (ignore out))
+                (is (eql 0 code) "the view exited ~S" code)
+                (let ((reports (%dialog-reports server)))
+                  (flet ((report (key) (cdr (assoc key reports :test #'string=))))
+                    (is (equal (format nil "function,undefined,~A" (subseq url 0 (1- (length url))))
+                               (report "top"))
+                        "the app's page has hyperionDialog and not the raw binding: ~S" reports)
+                    (is (equal (format nil "undefined,undefined,~A" other) (report "child"))
+                        "a frame from another origin has neither: ~S" reports)
+                    (is (equal (format nil "undefined,undefined,~A" (subseq url 0 (1- (length url))))
+                               (report "same"))
+                        "a frame from the app's own origin has neither: ~S" reports)
+                    (is (equal "{\"error\":\"token\"}" (report "notoken"))
+                        "a call to the binding without the token is refused natively: ~S" reports)
+                    (is (equal "{\"error\":\"no-user-action\"}" (report "nouser"))
+                        "a call outside a user action is refused: ~S" reports)
+                    (is (equal (format nil "undefined,undefined,~A" other) (report "away"))
+                        "a top-level page from another origin has neither: ~S" reports))))))))))

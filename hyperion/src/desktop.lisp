@@ -27,7 +27,9 @@
            #:shipped-image-p #:install-directory
            #:launcher-not-found #:*remote-backend*
            ;; the :browser shell opens http and https URLs only, with no shell (#851)
-           #:unsupported-browser-url #:unsupported-browser-url-url))
+           #:unsupported-browser-url #:unsupported-browser-url-url
+           ;; native open, save-as and folder dialogs shown by hyperion-view (#986)
+           #:dialogs-available-p #:dialog-request-json #:dialog-onclick))
 
 (in-package #:hyperion/desktop)
 
@@ -395,6 +397,31 @@ are none, and NIL with a warning in a shipped image, which never starts a sideca
          nil)
         (t (sidecar:start-sidecars names :port (and handler (hyperion/server:handler-port handler))))))
 
+;;; --- native dialogs (#986): whether the page has them; the rest is in desktop-dialogs.lisp ---
+
+(defvar *dialogs-available* nil
+  "True while RUN-APP shows a hyperion-view window that offers native dialogs.")
+
+(defparameter +dialog-platforms+ '(:windows)
+  "The operating systems whose hyperion-view shows a dialog. Elsewhere the view answers
+{\"error\": \"unavailable\"} (#986: macOS and Linux follow in their own changes).")
+
+(defun %dialog-platform-p ()
+  (and (member (cond ((uiop:os-windows-p) :windows) ((uiop:os-macosx-p) :macos) (t :linux))
+               +dialog-platforms+)
+       t))
+
+(defun dialogs-available-p ()
+  "Whether the app's page can show a native dialog now: RUN-APP is showing a hyperion-view
+window with :DIALOGS true, on an operating system whose view shows one. Under the :BROWSER shell,
+with :DIALOGS NIL, or on an operating system without a dialog yet, the page has no
+window.hyperionDialog, and the app shows its own field for a pasted path instead."
+  *dialogs-available*)
+
+(defun %dialog-arguments (dialogs)
+  "The argument RUN-APP passes the launcher for DIALOGS: --dialogs, or none."
+  (and dialogs (list "--dialogs")))
+
 (defun run-app (app &key (title "App") (width 1200) (height 800)
                          (backend :embedded)
                          (port :auto)
@@ -403,7 +430,7 @@ are none, and NIL with a warning in a shipped image, which never starts a sideca
                          (request-guard :same-origin)
                          (launcher (default-launcher))
                          icon placement-file (workers nil workers-p) (loops nil loops-p)
-                         on-ready on-close sidecars)
+                         on-ready on-close sidecars (dialogs t))
   "Run a Hyperion APP as a native desktop window, blocking until the window closes.
 See hyperion/docs/desktop.md.
 
@@ -449,6 +476,11 @@ LOOPS -- the number of event loops the embedded server runs, passed to HYPERION/
   core, up to 4, on macOS and Linux, and a window used by one person never needs more than one.
   Pass :LOOPS NIL for :uv's own default. Windows runs one loop whatever is asked. On other
   servers it defaults to NIL.
+DIALOGS -- when true, the default, the window offers the app's own page native open, save-as and
+  folder dialogs through window.hyperionDialog (#986; see DIALOG-ONCLICK). THE PAGE RECEIVES THE
+  PATH THE USER CHOOSES. The function is offered only to the app's own origin, in the top-level
+  frame, so a page from elsewhere does not get it, but an app that shows third-party content in
+  its window should pass :DIALOGS NIL. Ignored by the :browser shell.
 ON-READY is called with the URL before the shell launches; ON-CLOSE after it exits.
 SIDECARS -- a list of names declared with HYPERION/SIDECAR:DEFINE-SIDECAR (#700). They start
   once the embedded server is listening, with its port for \"{port}\", and before ON-READY; they
@@ -479,6 +511,7 @@ process exiting from another thread, it stops the launcher on the way out (#355)
            (when on-ready (funcall on-ready url))
            (ecase shell
              (:webview
+              (setf *dialogs-available* (and dialogs (%dialog-platform-p)))
               (%wait-for-window
                (uiop:launch-program
                 (append (list (namestring launcher) url title
@@ -489,7 +522,8 @@ process exiting from another thread, it stops the launcher on the way out (#355)
                         ;; would still cost a silent failed load on every start. A bundle's
                         ;; own copy comes first (#74); see %ICON-ARGUMENTS.
                         (%icon-arguments icon)
-                        (%placement-arguments placement-file)))))
+                        (%placement-arguments placement-file)
+                        (%dialog-arguments dialogs)))))
              (:browser
               (open-in-browser url)
               (%wait-for-interrupt))))
@@ -497,5 +531,6 @@ process exiting from another thread, it stops the launcher on the way out (#355)
       ;; the sidecars and the server (#708's review).
       (unwind-protect (when on-close (funcall on-close))
         (when set (ignore-errors (sidecar:stop-sidecars set)))
-        (when handler (ignore-errors (hyperion/server:stop handler))))))
+        (when handler (ignore-errors (hyperion/server:stop handler)))
+        (setf *dialogs-available* nil))))
     url))
