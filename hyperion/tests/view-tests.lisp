@@ -1192,7 +1192,10 @@ the launcher, so it runs everywhere."
   "The HTML the test server answers for PATH. The app's origin is 127.0.0.1:PORT, and the other
 origin is localhost:PORT."
   (flet ((reporter (key)
-           (format nil "<!doctype html><script>~A send('~A',typeof window.hyperionDialog+','+typeof window.__hyperion_dialog_raw+','+location.origin);</script>" +dialog-send-js+ key)))
+           ;; After its report has arrived, a frame tells the page holding it, which waits for
+           ;; both frames before it navigates away and so destroys them (run 40638207128 lost
+           ;; the cross-origin frame's report that way). postMessage works across origins.
+           (format nil "<!doctype html><script>~A send('~A',typeof window.hyperionDialog+','+typeof window.__hyperion_dialog_raw+','+location.origin).then(function(){if(window.parent!==window)window.parent.postMessage('~A','*');});</script>" +dialog-send-js+ key key)))
     (cond
       ;; The first run's top-level page.
       ((string= path "/")
@@ -1200,7 +1203,8 @@ origin is localhost:PORT."
 var sent=send('top',typeof window.hyperionDialog+','+typeof window.__hyperion_dialog_raw+','+location.origin);
 var noUser=(window.hyperionDialog?window.hyperionDialog({kind:'open'}):Promise.resolve({error:'absent'}))
 .then(function(r){return send('nouser',JSON.stringify(r));});
-Promise.all([sent,noUser]).then(function(){return send('navigating','1');}).then(function(){setTimeout(function(){location.href='http://localhost:~D/away';},100);});
+var framesIn=new Promise(function(resolve){var seen={};window.addEventListener('message',function(e){seen[e.data]=true;if(seen.child&&seen.same)resolve();});setTimeout(resolve,10000);});
+Promise.all([sent,noUser,framesIn]).then(function(){return send('navigating','1');}).then(function(){setTimeout(function(){location.href='http://localhost:~D/away';},100);});
 </script></body></html>" port +dialog-send-js+ port))
       ((string= path "/child") (reporter "child"))
       ((string= path "/same") (reporter "same"))
