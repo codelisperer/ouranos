@@ -74,10 +74,15 @@ its tag.
   - **`:conversation` now refuses more than before:** a sub-agent given a task by
     `register-agent-as-means` records `:delegated`, because the task is another model's text and
     stays in its history. Under `:conversation`, the sub-agent's later turns are untrusted, so a
-    spending means is refused in them. The delegated turn itself is treated as before.
+    spending means is refused in them. The delegated turn itself is treated as before, except
+    when the app rebuilds the sub-agent partway through that turn and passes `:delegated` back:
+    the rebuilt turn is then untrusted too, which refuses more, not less.
     `:delegated` is kept apart from `:untrusted` so that delegating to the same sub-agent again
     does not make the coordinator untrusted; the coordinator is marked only when the sub-agent
-    read untrusted content, as before.
+    read untrusted content, as before. A coordinator that delegated after its own turn had
+    become untrusted leaves the sub-agent recording `:untrusted`, because that task was written
+    after the coordinator read untrusted content, so a later delegation to it marks the
+    coordinator.
 
 - **praxeon/retrieval and praxeon/memory-db on SQLite: similarity search works at real corpus
   sizes, and the stored embeddings change form** (#425). A SQLite store kept each embedding as
