@@ -57,6 +57,7 @@
 (defconstant +vt-int+ 22)     (defconstant +vt-uint+ 23)
 (defconstant +vt-decimal+ 14)
 (defconstant +vt-byref+ #x4000)
+(defconstant +vt-array+ #x2000)
 
 ;;; DECIMAL, and it does NOT live in the union with everything else.
 ;;;
@@ -133,6 +134,57 @@
 
 (cffi:defcfun ("VariantClear" variant-clear) wffi:hresult
   (pvarg :pointer))
+
+;;; --- SAFEARRAY (#964) ------------------------------------------------------------
+;;;
+;;; A VARIANT of type VT_ARRAY|VT_x holds a SAFEARRAY* in its union. The array belongs to the
+;;; VARIANT: VariantClear destroys it, so a reader copies the elements out and frees nothing.
+;;; SafeArrayAccessData locks the array and gives the address of its data; every call must be
+;;; matched by SafeArrayUnaccessData, or the array stays locked and VariantClear fails.
+
+(cffi:defcstruct safearraybound
+  (c-elements wffi:dword)
+  (l-lbound :int32))
+
+(cffi:defcfun ("SafeArrayGetDim" safe-array-get-dim) :uint32
+  (psa :pointer))
+
+(cffi:defcfun ("SafeArrayGetVartype" safe-array-get-vartype) wffi:hresult
+  (psa :pointer)
+  (pvt :pointer))
+
+(cffi:defcfun ("SafeArrayGetLBound" safe-array-get-lbound) wffi:hresult
+  (psa :pointer)
+  (n-dim :uint32)
+  (pl-lbound :pointer))
+
+(cffi:defcfun ("SafeArrayGetUBound" safe-array-get-ubound) wffi:hresult
+  (psa :pointer)
+  (n-dim :uint32)
+  (pl-ubound :pointer))
+
+(cffi:defcfun ("SafeArrayGetElemsize" safe-array-get-elemsize) :uint32
+  (psa :pointer))
+
+(cffi:defcfun ("SafeArrayAccessData" safe-array-access-data) wffi:hresult
+  (psa :pointer)
+  (ppv-data :pointer))
+
+(cffi:defcfun ("SafeArrayUnaccessData" safe-array-unaccess-data) wffi:hresult
+  (psa :pointer))
+
+(cffi:defcfun ("SafeArrayCreateVector" safe-array-create-vector) :pointer
+  (vt wffi:word)
+  (l-lbound :int32)
+  (c-elements wffi:dword))
+
+(cffi:defcfun ("SafeArrayCreate" safe-array-create) :pointer
+  (vt wffi:word)
+  (c-dims :uint32)
+  (rgsabound :pointer))
+
+(cffi:defcfun ("SafeArrayDestroy" safe-array-destroy) wffi:hresult
+  (psa :pointer))
 
 (cffi:defcfun ("VariantChangeType" variant-change-type) wffi:hresult
   (pvargdest :pointer)

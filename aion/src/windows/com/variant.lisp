@@ -224,6 +224,71 @@ would discard digits the database went to the trouble of storing."
          (magnitude (/ (+ (* hi (expt 2 64)) lo) (expt 10 scale))))
     (if (logtest sign #x80) (- magnitude) magnitude)))
 
+;;; --- SAFEARRAY (#964) ----------------------------------------------------------------
+
+(defparameter +array-element-readers+
+  `((,ffi:+vt-ui1+ . :uint8) (,ffi:+vt-i1+ . :int8) (,ffi:+vt-i2+ . :int16)
+    (,ffi:+vt-ui2+ . :uint16) (,ffi:+vt-i4+ . :int32) (,ffi:+vt-ui4+ . :uint32)
+    (,ffi:+vt-int+ . :int32) (,ffi:+vt-uint+ . :uint32) (,ffi:+vt-i8+ . :int64)
+    (,ffi:+vt-ui8+ . :uint64) (,ffi:+vt-r4+ . :float) (,ffi:+vt-r8+ . :double))
+  "The element types of a one-dimensional SAFEARRAY read as numbers, with the CFFI type of
+each element. VT_BSTR and VT_VARIANT elements are read by %SAFEARRAY-ELEMENT; any other element
+type is refused.")
+
+(defun %safearray-check (hr what)
+  (when (minusp hr)
+    (error 'com-error :detail (format nil "~A failed with HRESULT #x~8,'0X" what (ldb (byte 32 0) hr)))))
+
+(defun %safearray-element (data index element-type)
+  "Element INDEX of the array whose data starts at DATA, of the VT ELEMENT-TYPE."
+  (cond ((= element-type ffi:+vt-bstr+)
+         (let ((bstr (cffi:mem-aref data :pointer index)))
+           (if (cffi:null-pointer-p bstr)
+               ""
+               (cffi:foreign-string-to-lisp bstr :encoding :utf-16le
+                                                 :count (* 2 (ffi:sys-string-len bstr))))))
+        ((= element-type ffi:+vt-variant+)
+         (variant-to-lisp (cffi:mem-aptr data '(:struct ffi:variant) index)))
+        (t (cffi:mem-aref data (cdr (assoc element-type +array-element-readers+)) index))))
+
+(defun safearray-to-lisp (psa element-type)
+  "The one-dimensional SAFEARRAY PSA, whose elements are of the VT ELEMENT-TYPE, as a Lisp vector,
+copied out: an (UNSIGNED-BYTE 8) vector for VT_UI1, the type ADO, DAO and Automation byte[]
+values arrive as, and a simple vector of numbers, strings or converted VARIANTs for the other
+element types +ARRAY-ELEMENT-READERS+ names and for VT_BSTR and VT_VARIANT (#964).
+
+The array belongs to the VARIANT holding it and is freed when that is cleared, so nothing here
+frees it. It is locked with SafeArrayAccessData only while the elements are copied, and unlocked
+whatever happens. Signals COM-ERROR, naming the reason, for an array of more than one dimension
+and for an element type this does not read; a NULL array is the empty vector."
+  (when (cffi:null-pointer-p psa)
+    (return-from safearray-to-lisp
+      (if (= element-type ffi:+vt-ui1+)
+          (make-array 0 :element-type '(unsigned-byte 8))
+          (vector))))
+  (let ((dims (ffi:safe-array-get-dim psa)))
+    (unless (= dims 1)
+      (error 'com-error :detail (format nil "a SAFEARRAY of ~D dimensions has no Lisp mapping; only one-dimensional arrays are read" dims))))
+  (unless (or (assoc element-type +array-element-readers+)
+              (= element-type ffi:+vt-bstr+) (= element-type ffi:+vt-variant+))
+    (error 'com-error :detail (format nil "no Lisp mapping for a SAFEARRAY of VARIANT type ~D" element-type)))
+  (let ((count (cffi:with-foreign-objects ((lo :int32) (hi :int32))
+                 (%safearray-check (ffi:safe-array-get-lbound psa 1 lo) "SafeArrayGetLBound")
+                 (%safearray-check (ffi:safe-array-get-ubound psa 1 hi) "SafeArrayGetUBound")
+                 (max 0 (1+ (- (cffi:mem-ref hi :int32) (cffi:mem-ref lo :int32)))))))
+    (cffi:with-foreign-object (pdata :pointer)
+      (%safearray-check (ffi:safe-array-access-data psa pdata) "SafeArrayAccessData")
+      (unwind-protect
+           (let ((data (cffi:mem-ref pdata :pointer)))
+             (if (= element-type ffi:+vt-ui1+)
+                 (let ((out (make-array count :element-type '(unsigned-byte 8))))
+                   (dotimes (i count out)
+                     (setf (aref out i) (cffi:mem-aref data :uint8 i))))
+                 (let ((out (make-array count)))
+                   (dotimes (i count out)
+                     (setf (svref out i) (%safearray-element data i element-type))))))
+        (%safearray-check (ffi:safe-array-unaccess-data psa) "SafeArrayUnaccessData")))))
+
 (defun variant-to-lisp (variant)
   "Read VARIANT as a Lisp value. Does not clear it -- the owner does that.
 
@@ -236,7 +301,11 @@ second that rounding left out as an exact rational SECOND value (see
 OLE-DATE-TO-UNIVERSAL-TIME). A date before 1900-01-01 gives a NEGATIVE integer, which CL does
 not define as universal time and DECODE-UNIVERSAL-TIME rejects. For those dates, or for the
 calendar date and time with nothing lost, read the double with OLE-DATE-TO-PARTS. VT_CY and
-VT_DECIMAL are returned as exact rationals, never floats."
+VT_DECIMAL are returned as exact rationals, never floats.
+
+VT_ARRAY of one dimension is returned as a vector, copied out (SAFEARRAY-TO-LISP): VT_ARRAY|VT_UI1,
+the type of an ADO or DAO long-binary value and of an Automation byte[], as an (UNSIGNED-BYTE 8)
+vector (#964)."
   (let ((vt (%vt variant))
         (p (%value-pointer variant)))
     (cond
@@ -275,6 +344,10 @@ VT_DECIMAL are returned as exact rationals, never floats."
       ;; Money, exactly. Both of these return RATIONALS on purpose.
       ((= vt ffi:+vt-cy+) (%currency-to-rational (cffi:mem-ref p :int64)))
       ((= vt ffi:+vt-decimal+) (%decimal-to-rational variant))
+      ;; An array the VARIANT owns. A VT_ARRAY|VT_BYREF one points at another's array and is
+      ;; not mapped: it fails this test and reaches the T clause.
+      ((= (logand vt (logior ffi:+vt-array+ ffi:+vt-byref+)) ffi:+vt-array+)
+       (safearray-to-lisp (cffi:mem-ref p :pointer) (logand vt (lognot ffi:+vt-array+))))
       (t
        ;; Named rather than silently returned as NIL: an unhandled vt is a gap in this
        ;; function, and returning NIL for it would look like the server returned nothing.
