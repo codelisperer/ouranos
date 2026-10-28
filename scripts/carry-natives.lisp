@@ -361,23 +361,11 @@ one of these names is the app carrying its own SQLite.")
 ;;; from, in this form. A library whose stamp does not match sqlite.pin was built from another
 ;;; release, for example before a pin bump, and is not carried.
 
-(defun %pin-field (pin name)
-  "The value of NAME in the pin file PIN (`name value' lines, # comments), or NIL."
-  (with-open-file (in pin :if-does-not-exist nil)
-    (when in
-      (loop for line = (read-line in nil nil)
-            while line
-            for tr = (string-trim '(#\Space #\Tab #\Return) line)
-            unless (or (zerop (length tr)) (char= #\# (char tr 0)))
-              do (let ((sp (position-if (lambda (c) (member c '(#\Space #\Tab))) tr)))
-                   (when (and sp (string= name (subseq tr 0 sp)))
-                     (return (string-trim '(#\Space #\Tab) (subseq tr sp)))))))))
-
 (defun %sqlite-built-from-pin-p (sqlite-dir root)
   "Whether SQLITE-DIR/BUILT-FROM names the version and sha256 in ROOT/sqlite.pin."
   (let* ((pin (merge-pathnames "sqlite.pin" root))
-         (version (%pin-field pin "version"))
-         (sha (%pin-field pin "sha256")))
+         (version (ouranos-built-from:pin-field pin "version"))
+         (sha (ouranos-built-from:pin-field pin "sha256")))
     (and version sha (ouranos-built-from:stamp-matches-p sqlite-dir version sha))))
 
 (defun tree-sqlite-carry (vendor carries &key (loaded (%sqlite-loaded-p)) platform)
