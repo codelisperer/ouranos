@@ -152,7 +152,7 @@ per the M1 decision the native window is stood up **first**, not last.
 
 | Feature | How |
 |---|---|
-| File open/save/folder | `hyperion/desktop/dialog` → CFFI `tinyfiledialogs`; an HTMX POST → server calls the picker → returns the path. (macOS main-thread caveat — see Open decisions.) |
+| File open/save/folder | hyperion-view shows the OS dialog, owned by the window, when the page calls `window.hyperionDialog`; the page posts the path to the app's route (#986, below). Windows now; macOS and Linux answer "unavailable" until their changes land. |
 | Menus, clipboard, notifications, drag-drop | **In the page** (HTMX / `navigator.clipboard` / `Notification`) — no FFI. |
 | System tray, macOS menu bar | Genuinely native per-OS; deferred until an app needs them. |
 
@@ -264,6 +264,77 @@ the swap first. The steps, and why the rename can fail, are in
 **Honest cost (from ADR-0008):** this glue — updater self-replace, installers, native
 FFIs, CI matrix — is the ~90%; the webview is the easy ~10%. **OS code-signing +
 notarization** is an unavoidable tax, identical for Tauri/Electron.
+
+## Native file dialogs (#986)
+
+`run-app` starts hyperion-view with `--dialogs` unless it is given `:dialogs nil`. The view then
+defines `window.hyperionDialog(request)` in the app's page. REQUEST is
+`{kind, title, folder, name, filters}`:
+
+- `kind` is `"open"`, `"open-many"`, `"save"` or `"folder"`.
+- `title` is the dialog's title, at most 200 bytes.
+- `folder` is the folder it opens in. Without it, Windows uses the folder last used for that kind
+  of dialog by this app, and the first time, Documents. It must be a local drive path: a letter, a
+  colon, then `\` or `/` (`C:\Users`, `c:/data`). Any other folder is refused. Windows opens the
+  folder as a shell parsing name, so `\\host\share`, `file://host/share` and `\??\UNC\host\share`
+  all reach a network share, and opening one makes Windows send the user's credentials to that
+  host.
+- `name` is the file name a save dialog suggests, with no `/` or `\`.
+- `filters` is a list of `[label, "*.ext;*.ext"]`, at most 32; a folder dialog takes none.
+
+The promise resolves to `{path}`, `{paths}` (open-many), `{cancelled: true}` or
+`{error: reason}`. Build the request in Lisp with `dialog-request-json`, or the whole button with
+`dialog-onclick`, which posts the choice to a route with htmx as the field `path` (or `paths`, a
+JSON array):
+
+```lisp
+(:button :onclick (desktop:dialog-onclick "/import" :kind :open
+                                          :filters '(("Databases" "*.accdb" "*.mdb")))
+  "Open a database")
+```
+
+**The page receives the path.** These rules keep that path inside the app's own page:
+
+- The function is defined only in the top-level frame, and only while that frame shows the origin
+  of the URL the view was started with. An iframe, of any origin, and a page the window navigates
+  to on another origin, have neither `hyperionDialog` nor the raw binding underneath it. A script
+  that runs at the start of every document enforces this.
+- Each launch makes a random token, and only the page's `hyperionDialog` holds it. hyperion-view
+  refuses a call that does not carry it, so a script that reaches the binding another way cannot
+  open a dialog.
+- A call made outside a user action is refused with `{error: "no-user-action"}`, through
+  `navigator.userActivation`. WebView2 and WebKit on macOS 13.3 and later have it. A WebKitGTK
+  without it relies on the origin rule and the token alone.
+- The answer goes only to the app's origin. Each call carries an id, and hyperion-view sends the
+  answer with a script that does nothing unless the window still shows the app's origin, and then
+  hands it to the function the guard keeps for that id. webview.h's own reply would run in whatever
+  page is on top when the dialog closes, so a page on another origin, navigated to meanwhile, could
+  receive the path; this binding does not use it.
+- One dialog at a time: a second call while one is open gets `{error: "busy"}`. The dialog is
+  started by a message posted to the window, and every answer is sent with `webview_eval`.
+  webview.h's dispatch posts thread messages, which a modal loop discards, so a job or an answer
+  sent that way could be lost and leave "busy" set.
+- The origin is taken from the URL as written: a URL with a user name, or with its scheme's default
+  port written out (`http://host:80/`), never matches `location.origin`, so its page gets no
+  function. `run-app`'s own URL has neither.
+
+An app that shows third-party content in its window should still pass `:dialogs nil`.
+
+On Windows the dialog is `IFileOpenDialog` or `IFileSaveDialog`, shown from the window procedure
+rather than inside WebView2's message handler. macOS and Linux answer `{error: "unavailable"}`
+after the same checks, and `dialogs-available-p` is NIL there, so the page should show a field
+for a pasted path instead. Their dialogs come in separate changes for those platforms.
+
+For tests, `HYPERION_VIEW_FAKE_DIALOG=1` makes every call answer `{path: "fake-path"}` three
+seconds later, from a window timer, with no dialog shown and no user-action check; hyperion-view
+says so on stderr. It is honoured only when `GITHUB_ACTIONS` is set too, so a stray variable on a
+user's machine cannot put a shipped app into fake mode.
+
+Testing without a window: `hyperion-view --dialog-request TOKEN PARAMS` prints `ok KIND ...` or
+`refuse REASON` for a call, and `hyperion-view --dialog-origin URL` prints the origin the function
+is offered to. `hyperion/view/tests` runs both on every OS. On a GitHub Actions runner it also
+starts a real window with `--dialogs --exit-after 20` and checks the frame and origin rules, the
+token refusal and the user-action refusal.
 
 ## Milestones
 

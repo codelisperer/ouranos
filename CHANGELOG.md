@@ -910,6 +910,41 @@ its tag.
 
 ### Added
 
+- **hyperion/desktop: a desktop app's page can show the native open, save-as and folder dialogs,
+  on Windows, and the page receives the path the user chooses** (#986). `run-app` takes
+  `:dialogs`, default T, and passes `--dialogs` to hyperion-view, which then defines
+  `window.hyperionDialog(request)` in the app's page. It resolves to `{path}`, `{paths}` for
+  `:open-many`, `{cancelled: true}`, or `{error}`. `hyperion/desktop:dialog-onclick` renders a
+  button's onclick that shows the dialog and posts the choice to one of the app's routes with htmx,
+  as the field `path`, or `paths` (a JSON array) for `:open-many`.
+  `hyperion/desktop:dialog-request-json` renders the request on its own, and both signal an error
+  for a request hyperion-view would refuse. `hyperion/desktop:dialogs-available-p` says whether the
+  page has the function now; when it does not, show a field for a pasted path instead.
+  - **The page's script receives the path, which says something about the user's machine.** The
+    function exists only in the top-level frame and only while it shows the origin of the URL
+    `run-app` started with: iframes, and pages from any other origin, do not get it. A call
+    without the token hyperion-view makes at each launch is refused by hyperion-view itself, and a
+    call made outside a user action (a click or a key) is refused where the webview can tell: on
+    Windows (WebView2) and on macOS 13.3 and later. The answer is delivered only while the window
+    still shows the app's origin, so a page the window has gone to since the call does not receive
+    the path. One dialog is shown at a time; a second call gets `{error: "busy"}`. A `folder` must be a
+    local drive path (`C:\Users`, `c:/data`), and any other folder is refused, because other forms
+    (`\\host\share`, `file://host/share`) reach a network share, and opening one makes Windows
+    send the user's credentials to that host. An app that shows
+    third-party content in its window should pass `:dialogs nil`.
+  - **Only Windows shows a dialog in this change.** On macOS and Linux the function exists and
+    answers `{error: "unavailable"}`, and `dialogs-available-p` is NIL; their dialogs follow in
+    separate changes.
+  - hyperion-view gains `--dialogs`, `--exit-after SECONDS` (closes the window after SECONDS, for
+    tests), and two modes that make no window: `--dialog-request TOKEN PARAMS` prints how a call is
+    checked, and `--dialog-origin URL` prints the origin the function is offered to. With
+    `--dialogs`, hyperion-view exits 2 if it cannot make the launch's token or the URL has no
+    origin. For tests, `HYPERION_VIEW_FAKE_DIALOG=1`, honoured only when `GITHUB_ACTIONS` is set
+    too, answers every call with `{path: "fake-path"}` after three seconds, shows no dialog, skips
+    the user-action check, and says so on stderr. A
+    hyperion-view built before this change refuses `--dialogs` as an unknown option, so rebuild it
+    with `hyperion/hyperion-view/build.ps1` (it now links `uuid.lib` and `bcrypt.lib`).
+
 - **praxeon/actor: every deliberation step records how many of the prompt's estimated tokens came
   from each source** (#317, step D). `praxeon/actor:request-messages` returns a third value, and
   `praxeon/actor:prompt-breakdown` computes it: a plist of estimated tokens under `:system`,

@@ -17,17 +17,22 @@
 #include <cerrno>
 #include <climits>
 #include <cstdio>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 #include <vector>
 #include "webview.h"
 #include "window-placement.h"
+#include "dialog-request.h"
 
 #if defined(_WIN32)
 #include <windows.h>
 #include <shellapi.h>  // CommandLineToArgvW; webview.h includes windows.h in lean mode, without it
+#include <bcrypt.h>    // BCryptGenRandom, for the dialog binding's token (#986)
+#include <shobjidl.h>  // IFileOpenDialog, IFileSaveDialog (#986)
 #elif defined(__APPLE__)
 #include <dlfcn.h>
 #include <objc/objc-runtime.h>
@@ -999,6 +1004,350 @@ static int exercise_placement(webview_t w, const char *path) {
 }
 #endif
 
+// --- native file dialogs (#986) --------------------------------------------
+//
+// With --dialogs, the app's page gets window.hyperionDialog(request), which shows a native open,
+// save-as or folder dialog owned by this window and resolves to {path}, {paths}, {cancelled} or
+// {error}. The page then sends the path to the app's own route.
+//
+// THE GATE, so a page on another origin cannot ask for a path from the user's machine or receive
+// one:
+// - The binding exists only in the top-level frame while it shows the app's own origin. The
+//   script below runs at the start of every document, deletes the raw binding webview.h defines
+//   everywhere, and defines hyperionDialog only when location.origin is the origin of the URL
+//   this view was started with. Any other origin, and any iframe, has neither. A URL with a user
+//   name or with its scheme's default port written out (http://h:80/) never matches
+//   location.origin, so the page there gets no function.
+// - The per-launch TOKEN is held only in that function's closure, and the native side refuses a
+//   call without it (PARSE-DIALOG-REQUEST), so a script that reaches window.external.invoke
+//   directly cannot open a dialog.
+// - A call made outside a user action is refused, through navigator.userActivation, whose getter
+//   is taken at document start so a page cannot replace it. WebView2 (Windows) and WebKit on macOS
+//   13.3 and later have it; where a WebKitGTK does not, only the origin rule and "busy" apply.
+// - THE REPLY GOES ONLY TO THE APP'S ORIGIN. webview.h's own reply (webview_return) runs
+//   window._rpc[seq].resolve in whatever document is on top when it is sent, so a page on another
+//   origin, navigated to while the dialog was open, could define window._rpc and receive the path.
+//   So the page's call carries an id, and every answer is sent by DIALOG_REPLY: a script that does
+//   nothing unless location.origin is still the app's, and then hands the answer to the function
+//   the guard defined for that id. webview_return is never called for this binding.
+// - One dialog at a time: a call while one is open is answered {"error": "busy"}.
+//
+// Every answer is sent with webview_eval, which on Windows calls ExecuteScript directly, and the
+// dialog itself is started by a message posted to the window. Nothing here uses webview.h's
+// dispatch, which posts a thread message: a modal loop, the dialog's own or the one Windows runs
+// while the window is moved or resized, discards thread messages, so a job or an answer sent that
+// way can be lost and leave "busy" set for good.
+//
+// HYPERION_VIEW_FAKE_DIALOG=1 is for the CI-only window tests. It skips the user-action check and
+// answers {"path":"fake-path"} three seconds after a call, from a window timer, without showing a
+// dialog, so a test can see "busy" and where the answer goes. It is honoured only when
+// GITHUB_ACTIONS is set too, and says so on stderr.
+//
+// Only Windows shows a dialog in this step. macOS and Linux answer {"error": "unavailable"} after
+// the same checks, and their dialogs follow in their own lanes' changes.
+
+static std::string g_dialog_token;
+static std::string g_app_origin;
+static bool g_fake_dialog = false;
+#if defined(_WIN32)
+static bool g_dialog_busy = false;  // only Windows shows a dialog in this change
+#endif
+
+// The origin of URL, as location.origin writes it: the scheme, "://", and the host with its port,
+// in lower case. "" when URL has no scheme.
+static std::string url_origin(const char *url) {
+  std::string u(url);
+  size_t scheme_end = u.find("://");
+  if (scheme_end == std::string::npos) return "";
+  size_t host_end = u.find_first_of("/?#", scheme_end + 3);
+  std::string origin = u.substr(0, host_end == std::string::npos ? u.size() : host_end);
+  for (char &c : origin)
+    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+  return origin;
+}
+
+// 32 hexadecimal characters from the OS's random source, or "" when it cannot give them.
+static std::string random_token() {
+  unsigned char bytes[16];
+#if defined(_WIN32)
+  if (BCryptGenRandom(nullptr, bytes, sizeof bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
+    return "";
+#else
+  std::FILE *f = std::fopen("/dev/urandom", "rb");
+  if (f == nullptr) return "";
+  size_t got = std::fread(bytes, 1, sizeof bytes, f);
+  std::fclose(f);
+  if (got != sizeof bytes) return "";
+#endif
+  std::string out;
+  char buf[3];
+  for (unsigned char b : bytes) {
+    std::snprintf(buf, sizeof buf, "%02x", b);
+    out += buf;
+  }
+  return out;
+}
+
+// The script that defines window.hyperionDialog, run at the start of every document.
+static std::string dialog_guard_script() {
+  return std::string(
+             "(function(){var raw=window.__hyperion_dialog_raw;"
+             "try{delete window.__hyperion_dialog_raw;}catch(e){window.__hyperion_dialog_raw=undefined;}"
+             "if(typeof raw!=='function'||window.top!==window||location.origin!==") +
+         dialog_json_quote(g_app_origin) +
+         ")return;"
+         "var ua=null,isActive=null;"
+         "try{ua=navigator.userActivation;"
+         "var d=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(ua),'isActive');"
+         "isActive=d&&d.get;}catch(e){}"
+         "var token=" +
+         dialog_json_quote(g_dialog_token) +
+         ",checkActivation=" + (g_fake_dialog ? "false" : "true") +
+         ",next=1,pending={};"
+         "Object.defineProperty(window,'__hyperion_dialog_reply',{value:function(id,r){"
+         "var p=pending[id];if(p){delete pending[id];p(r);}},writable:false,configurable:false});"
+         "Object.defineProperty(window,'hyperionDialog',{value:function(request){"
+         "if(checkActivation&&isActive&&!isActive.call(ua))return Promise.resolve({error:'no-user-action'});"
+         "var id=next++;"
+         "return new Promise(function(resolve){pending[id]=resolve;raw(token,id,request||{});});"
+         "},writable:false,configurable:false});"
+         "})();";
+}
+
+// Send RESULT, a JSON object, to the page's call ID, but only if the top-level document is still
+// on the app's origin. ID is the digits PARSE-DIALOG-REQUEST checked.
+static void dialog_reply(webview_t w, const std::string &id, const std::string &result) {
+  std::string js = "(function(){if(location.origin!==" + dialog_json_quote(g_app_origin) +
+                   ")return;var f=window.__hyperion_dialog_reply;"
+                   "if(typeof f==='function')f(" + id + "," + result + ");})();";
+  webview_eval(w, js.c_str());
+}
+
+#if defined(_WIN32)
+static std::string narrow_utf8(const wchar_t *wide) {
+  int len = WideCharToMultiByte(CP_UTF8, 0, wide, -1, nullptr, 0, nullptr, nullptr);
+  if (len <= 0) return "";
+  std::string out(static_cast<size_t>(len), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, wide, -1, &out[0], len, nullptr, nullptr);
+  out.resize(static_cast<size_t>(len - 1));
+  return out;
+}
+
+// The file-system path of ITEM, or "" when it has none.
+static std::string shell_item_path(IShellItem *item) {
+  PWSTR path = nullptr;
+  if (FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) || path == nullptr) return "";
+  std::string out = narrow_utf8(path);
+  CoTaskMemFree(path);
+  return out;
+}
+
+// One client GUID for each kind, so Windows remembers the last folder for open, open-many, save
+// and folder separately, and starts in Documents the first time.
+static const GUID kDialogGuidOpen = {0x3c6e5c1a, 0x9b2d, 0x4f61, {0x8a, 0x10, 0x5e, 0x9a, 0x71, 0x0c, 0x98, 0x61}};
+static const GUID kDialogGuidOpenMany = {0x3c6e5c1a, 0x9b2d, 0x4f61, {0x8a, 0x10, 0x5e, 0x9a, 0x71, 0x0c, 0x98, 0x62}};
+static const GUID kDialogGuidSave = {0x3c6e5c1a, 0x9b2d, 0x4f61, {0x8a, 0x10, 0x5e, 0x9a, 0x71, 0x0c, 0x98, 0x63}};
+static const GUID kDialogGuidFolder = {0x3c6e5c1a, 0x9b2d, 0x4f61, {0x8a, 0x10, 0x5e, 0x9a, 0x71, 0x0c, 0x98, 0x64}};
+
+// Show the dialog R asks for, owned by OWNER, on this thread, and return the JSON the page gets.
+// Runs on the webview's UI thread, which webview.h has already made a COM single-threaded
+// apartment, from the window procedure, not inside WebView2's message handler: a modal loop
+// inside a WebView2 event handler is a reentrancy WebView2 documents as unsupported.
+static std::string show_file_dialog(HWND owner, const dialog_request &r) {
+  bool save = r.kind == "save";
+  IFileDialog *dialog = nullptr;
+  HRESULT hr = save ? CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                       IID_IFileSaveDialog, reinterpret_cast<void **>(&dialog))
+                    : CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                       IID_IFileOpenDialog, reinterpret_cast<void **>(&dialog));
+  if (FAILED(hr) || dialog == nullptr) return "{\"error\":\"failed\"}";
+  DWORD options = 0;
+  dialog->GetOptions(&options);
+  options |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST;
+  if (r.kind == "open") options |= FOS_FILEMUSTEXIST;
+  if (r.kind == "open-many") options |= FOS_FILEMUSTEXIST | FOS_ALLOWMULTISELECT;
+  if (r.kind == "folder") options |= FOS_PICKFOLDERS;
+  if (save) options |= FOS_OVERWRITEPROMPT;
+  dialog->SetOptions(options);
+  dialog->SetClientGuid(r.kind == "open"        ? kDialogGuidOpen
+                        : r.kind == "open-many" ? kDialogGuidOpenMany
+                        : save                  ? kDialogGuidSave
+                                                : kDialogGuidFolder);
+  std::wstring wide;
+  if (!r.title.empty() && widen_utf8(r.title.c_str(), &wide)) dialog->SetTitle(wide.c_str());
+  // The filter specs must outlive SetFileTypes, which copies them; kept here until it returns.
+  std::vector<std::wstring> names, specs;
+  for (const dialog_filter &f : r.filters) {
+    std::string spec;
+    for (size_t i = 0; i < f.patterns.size(); i++) spec += (i ? ";" : "") + f.patterns[i];
+    std::wstring wname, wspec;
+    widen_utf8(f.label.c_str(), &wname);
+    widen_utf8(spec.c_str(), &wspec);
+    names.push_back(wname);
+    specs.push_back(wspec);
+  }
+  if (!names.empty()) {
+    std::vector<COMDLG_FILTERSPEC> types;
+    for (size_t i = 0; i < names.size(); i++) types.push_back({names[i].c_str(), specs[i].c_str()});
+    dialog->SetFileTypes(static_cast<UINT>(types.size()), types.data());
+  }
+  if (!r.folder.empty() && widen_utf8(r.folder.c_str(), &wide)) {
+    IShellItem *folder = nullptr;
+    if (SUCCEEDED(SHCreateItemFromParsingName(wide.c_str(), nullptr, IID_IShellItem,
+                                              reinterpret_cast<void **>(&folder)))) {
+      dialog->SetFolder(folder);
+      folder->Release();
+    }
+  }
+  if (save && !r.name.empty() && widen_utf8(r.name.c_str(), &wide)) dialog->SetFileName(wide.c_str());
+  hr = dialog->Show(owner);
+  std::string result;
+  if (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
+    result = "{\"cancelled\":true}";
+  } else if (FAILED(hr)) {
+    result = "{\"error\":\"failed\"}";
+  } else if (r.kind == "open-many") {
+    IFileOpenDialog *open = nullptr;
+    IShellItemArray *items = nullptr;
+    DWORD count = 0;
+    result = "{\"error\":\"failed\"}";
+    if (SUCCEEDED(dialog->QueryInterface(IID_IFileOpenDialog, reinterpret_cast<void **>(&open)))) {
+      if (SUCCEEDED(open->GetResults(&items)) && SUCCEEDED(items->GetCount(&count))) {
+        result = "{\"paths\":[";
+        bool first = true;  // the comma goes before every item written except the first
+        for (DWORD i = 0; i < count; i++) {
+          IShellItem *item = nullptr;
+          if (SUCCEEDED(items->GetItemAt(i, &item))) {
+            result += (first ? "" : ",") + dialog_json_quote(shell_item_path(item));
+            first = false;
+            item->Release();
+          }
+        }
+        result += "]}";
+      }
+      if (items != nullptr) items->Release();
+      open->Release();
+    }
+  } else {
+    IShellItem *item = nullptr;
+    if (SUCCEEDED(dialog->GetResult(&item))) {
+      result = "{\"path\":" + dialog_json_quote(shell_item_path(item)) + "}";
+      item->Release();
+    } else {
+      result = "{\"error\":\"failed\"}";
+    }
+  }
+  dialog->Release();
+  return result;
+}
+
+struct dialog_job {
+  std::string id;
+  dialog_request request;
+};
+
+static webview_t g_dialog_view = nullptr;
+static UINT g_dialog_message = 0;  // registered in INSTALL_DIALOGS; carries a DIALOG_JOB
+static WNDPROC g_dialog_previous_proc = nullptr;
+static dialog_job *g_fake_job = nullptr;
+static const UINT_PTR kFakeDialogTimer = 0x4859;
+
+static void finish_dialog_job(dialog_job *job, const std::string &result) {
+  g_dialog_busy = false;
+  dialog_reply(g_dialog_view, job->id, result);
+  delete job;
+}
+
+static LRESULT CALLBACK dialog_window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+  if (g_dialog_message != 0 && msg == g_dialog_message) {
+    dialog_job *job = reinterpret_cast<dialog_job *>(lp);
+    if (g_fake_dialog) {
+      g_fake_job = job;
+      SetTimer(hwnd, kFakeDialogTimer, 3000, nullptr);
+    } else {
+      finish_dialog_job(job, show_file_dialog(hwnd, job->request));
+    }
+    return 0;
+  }
+  if (msg == WM_TIMER && wp == kFakeDialogTimer) {
+    KillTimer(hwnd, kFakeDialogTimer);
+    if (g_fake_job != nullptr) {
+      dialog_job *job = g_fake_job;
+      g_fake_job = nullptr;
+      finish_dialog_job(job, "{\"path\":\"fake-path\"}");
+    }
+    return 0;
+  }
+  return CallWindowProcW(g_dialog_previous_proc, hwnd, msg, wp, lp);
+}
+#endif
+
+// The native end of the binding. Every call is checked first, on every OS: the token, then the
+// call's id and the request (PARSE-DIALOG-REQUEST). A call that fails the token or the id gets no
+// answer, since there is no id to send one to.
+static void dialog_binding(const char *seq, const char *req, void *arg) {
+  (void)seq;  // answered through DIALOG_REPLY, never webview_return; see the gate above
+  webview_t w = static_cast<webview_t>(arg);
+  dialog_request request;
+  std::string why = parse_dialog_request(req, g_dialog_token, &request);
+  if (!why.empty()) {
+    if (!request.id.empty())
+      dialog_reply(w, request.id, "{\"error\":" + dialog_json_quote(why) + "}");
+    return;
+  }
+#if defined(_WIN32)
+  if (g_dialog_busy) {
+    dialog_reply(w, request.id, "{\"error\":\"busy\"}");
+    return;
+  }
+  HWND hwnd = static_cast<HWND>(webview_get_window(w));
+  dialog_job *job = new dialog_job{request.id, request};
+  g_dialog_busy = true;
+  if (!PostMessageW(hwnd, g_dialog_message, 0, reinterpret_cast<LPARAM>(job))) {
+    delete job;
+    g_dialog_busy = false;
+    dialog_reply(w, request.id, "{\"error\":\"failed\"}");
+  }
+#else
+  dialog_reply(w, request.id, "{\"error\":\"unavailable\"}");
+#endif
+}
+
+// Make the launch's token, the app's origin from URL and, on Windows, the window message that
+// carries a dialog job, before any window exists. False when any of them cannot be made; the
+// view then refuses to start, so a running view started with --dialogs always has them, and
+// RUN-APP's DIALOGS-AVAILABLE-P is not true of a window that has none. Without the message,
+// PostMessage would send message 0, the job would be lost and "busy" would stay set.
+//
+// HYPERION_VIEW_FAKE_DIALOG=1 is honoured only when GITHUB_ACTIONS is also set, so a stray
+// variable on a user's machine cannot put a shipped app into fake mode.
+static bool prepare_dialogs(const char *url) {
+  g_dialog_token = random_token();
+  g_app_origin = url_origin(url);
+  const char *fake = std::getenv("HYPERION_VIEW_FAKE_DIALOG");
+  const char *ci = std::getenv("GITHUB_ACTIONS");
+  g_fake_dialog = fake != nullptr && std::strcmp(fake, "1") == 0 && ci != nullptr && ci[0] != '\0';
+  if (g_fake_dialog)
+    std::fprintf(stderr, "hyperion-view: HYPERION_VIEW_FAKE_DIALOG=1: no dialog is shown; calls get fake-path and need no user action\n");
+#if defined(_WIN32)
+  g_dialog_message = RegisterWindowMessageW(L"hyperion-view-dialog-job");
+  if (g_dialog_message == 0) return false;
+#endif
+  return !g_dialog_token.empty() && !g_app_origin.empty();
+}
+
+// Install the binding and its guard on W. After PREPARE_DIALOGS, before the first navigation.
+static void install_dialogs(webview_t w) {
+#if defined(_WIN32)
+  g_dialog_view = w;
+  HWND hwnd = static_cast<HWND>(webview_get_window(w));
+  g_dialog_previous_proc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
+      hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(dialog_window_proc)));
+#endif
+  webview_bind(w, "__hyperion_dialog_raw", dialog_binding, w);
+  webview_init(w, dialog_guard_script().c_str());
+}
+
 // HYPERION_VIEW_NO_WINDOW=1 stops hyperion-view just before it would create a window, with exit
 // code 3 and a line on stderr. The view tests set it for every run they make on a developer's
 // machine, so a test that reaches webview_create by mistake fails there instead of opening a
@@ -1037,7 +1386,7 @@ static bool parse_positive_int(const char *text, int *out) {
 static void print_usage(std::FILE *out) {
   std::fprintf(out,
                "usage: hyperion-view URL [TITLE] [WIDTH] [HEIGHT] [--icon PATH]\n"
-               "                     [--placement-file PATH]\n"
+               "                     [--placement-file PATH] [--dialogs] [--exit-after SECONDS]\n"
                "\n"
                "  URL      the address to open      (default http://127.0.0.1:8080/)\n"
                "  TITLE    the window title         (default \"App\")\n"
@@ -1049,6 +1398,18 @@ static void print_usage(std::FILE *out) {
                "           PATH up to date (optional, may appear anywhere). Windows uses it only\n"
                "           if it still fits a monitor; macOS moves it onto the screen it overlaps\n"
                "           most\n"
+               "  --dialogs\n"
+               "           give the page at URL's origin window.hyperionDialog, which shows a\n"
+               "           native open, save-as or folder dialog owned by this window (#986).\n"
+               "           Windows only so far; elsewhere it answers {\"error\":\"unavailable\"}\n"
+               "  --exit-after SECONDS\n"
+               "           close the window after SECONDS, for tests\n"
+               "\n"
+               "  --dialog-request TOKEN PARAMS\n"
+               "           print what a dialog call's PARAMS parse to, or why it is refused, with\n"
+               "           no window\n"
+               "  --dialog-origin URL\n"
+               "           print the origin --dialogs offers the dialog to, with no window\n"
                "\n"
                "  --help, -h   print this and exit\n"
                "\n"
@@ -1135,6 +1496,8 @@ int main(int argc, char **argv) {
 #endif
   const char *icon = nullptr;
   const char *placement_file = nullptr;
+  bool dialogs = false;
+  long exit_after = 0;
   const char *positional[4] = {nullptr, nullptr, nullptr, nullptr};
   int n = 0;
 
@@ -1332,6 +1695,54 @@ int main(int argc, char **argv) {
         return 2;
       }
       icon = argv[++i];
+    } else if (std::strcmp(argv[i], "--dialogs") == 0) {
+      dialogs = true;
+    } else if (std::strcmp(argv[i], "--exit-after") == 0) {
+      // For the CI-only window tests (#986): close the window after SECONDS, so a test that
+      // starts the view and waits for it to exit does not wait forever.
+      long seconds = 0;
+      if (i + 1 >= argc || !parse_long(argv[i + 1], &seconds) || seconds < 1 || seconds > 3600) {
+        std::fprintf(stderr, "hyperion-view: --exit-after needs SECONDS from 1 to 3600\n\n");
+        print_usage(stderr);
+        return 2;
+      }
+      exit_after = seconds;
+      i++;
+    } else if (std::strcmp(argv[i], "--dialog-request") == 0) {
+      // The checks a page's dialog call passes before any dialog is shown, on their own, with no
+      // window: for the tests, which run them on every OS (#986). TOKEN stands for the launch's
+      // token; PARAMS is the JSON array the binding receives, [TOKEN, REQUEST].
+      if (i != 1 || argc != 4) {
+        std::fprintf(stderr, "hyperion-view: --dialog-request takes TOKEN and PARAMS and nothing else\n\n");
+        print_usage(stderr);
+        return 2;
+      }
+      dialog_request r;
+      std::string why = parse_dialog_request(argv[3], argv[2], &r);
+      if (!why.empty()) {
+        std::printf("refuse %s\n", why.c_str());
+        return 0;
+      }
+      std::printf("ok %s", r.kind.c_str());
+      if (!r.title.empty()) std::printf(" title=%s", dialog_json_quote(r.title).c_str());
+      if (!r.folder.empty()) std::printf(" folder=%s", dialog_json_quote(r.folder).c_str());
+      if (!r.name.empty()) std::printf(" name=%s", dialog_json_quote(r.name).c_str());
+      for (const dialog_filter &f : r.filters) {
+        std::printf(" filter=%s:", dialog_json_quote(f.label).c_str());
+        for (size_t k = 0; k < f.patterns.size(); k++)
+          std::printf("%s%s", k ? ";" : "", f.patterns[k].c_str());
+      }
+      std::printf("\n");
+      return 0;
+    } else if (std::strcmp(argv[i], "--dialog-origin") == 0) {
+      // The origin the binding is offered to for URL, with no window (#986).
+      if (i != 1 || argc != 3) {
+        std::fprintf(stderr, "hyperion-view: --dialog-origin takes URL and nothing else\n\n");
+        print_usage(stderr);
+        return 2;
+      }
+      std::printf("%s\n", url_origin(argv[2]).c_str());
+      return 0;
     } else if (std::strcmp(argv[i], "--placement-file") == 0) {
       if (i + 1 >= argc) {
         std::fprintf(stderr, "hyperion-view: --placement-file needs a path\n\n");
@@ -1361,6 +1772,10 @@ int main(int argc, char **argv) {
   // the application name once, early.
   set_app_name(title);
 
+  if (dialogs && !prepare_dialogs(url)) {
+    std::fprintf(stderr, "hyperion-view: --dialogs: no random token, no origin in %s, or no window message for a dialog job\n", url);
+    return 2;
+  }
   if (window_forbidden()) return 3;
   webview_t w = webview_create(0, nullptr);
   webview_set_title(w, title);
@@ -1376,6 +1791,15 @@ int main(int argc, char **argv) {
   set_window_icon(w, icon);
   // After webview_create (NSApp exists), before webview_run ([NSApp run]).
   install_main_menu(title);
+  // Before the first navigation, so the guard runs at the start of the app's first page.
+  if (dialogs) install_dialogs(w);
+  if (exit_after > 0) {
+    // webview_dispatch is the one webview.h call that is safe from another thread.
+    std::thread([w, exit_after]() {
+      std::this_thread::sleep_for(std::chrono::seconds(exit_after));
+      webview_dispatch(w, [](webview_t view, void *) { webview_terminate(view); }, nullptr);
+    }).detach();
+  }
   webview_navigate(w, url);
   webview_run(w);
   webview_destroy(w);
