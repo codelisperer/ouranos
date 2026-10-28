@@ -314,7 +314,7 @@
   :perform (test-op (o c) (uiop:symbol-call :hyperion/calendar/tests :run-tests)))
 
 (defsystem "hyperion/kit"
-  :description "Generic collection-page components: page header, breadcrumbs, empty state, segmented control, toggle group, dialogs, the destructive confirm, the undo notice, the list toolbar and the properties panel (#981)."
+  :description "Generic collection-page components: page header, breadcrumbs, empty state, segmented control, toggle group, dialogs, the destructive confirm, the undo notice, the list toolbar, the properties panel (#981), and the dock panel (#67)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
@@ -330,7 +330,8 @@
                              (:file "toggle")
                              (:file "dialog")
                              (:file "toolbar")
-                             (:file "panel"))))
+                             (:file "panel")
+                             (:file "dock"))))
   :in-order-to ((test-op (test-op "hyperion/kit/tests"))))
 
 (defsystem "hyperion/kit/tests"

@@ -210,8 +210,9 @@ high-contrast form of each). `appearance-css` generates the rules for all eight 
 checks which look is active. In the gradient look a background token may be a
 `linear-gradient`. Because of that, components set `background:`, not `background-color:`.
 `appearance-contrast-failures` checks every text token against its background in every
-combination, sampling along each gradient. An app runs it in its own tests, so a gradient that
-drops text below WCAG AA fails the build, not a visitor.
+combination, sampling along each gradient, and a button's text on hover and when pressed as well
+as at rest. An app runs it in its own tests, so a gradient that drops text below WCAG AA fails
+the build, not a visitor.
 
 ### Collection-page components (`hyperion/kit`)
 
@@ -269,12 +270,31 @@ change, so the address bar shows the same URL a link would. Put the toolbar insi
 the list's htmx target replaces, so its hidden fields follow every change the pager and sort
 headings make. The search field keeps its text and focus across those swaps.
 
-A master/detail page uses `hyperion/kit/panel`. The app writes its own rows and gives each the
-attributes `selectable-row` returns, so a click or Enter loads the item's `properties-panel`
-into a `panel-region` beside the list. `panel-js` moves `aria-current` to the chosen row, and
-closing the panel, with its button or Escape, returns focus to that row. The browser test
-checks the toolbar's URLs against `list-href` and the panel's focus handling on a small list
-page.
+A `:values` filter's choices can depend on the request, for example the projects the signed-in
+user may see: give `:values` a function of the request's env instead of a list.
+`read-list-state` calls it once per request, keeps a value only when it is one of the choices
+returned, drops any other value, and stores the choices on the state. `filter-choices` returns
+them, and `list-href` and the toolbar's selects use that same list, so a value the user cannot
+choose is never shown, linked to or passed to the query.
+
+A master/detail page uses `hyperion/kit/panel`. The app writes its own rows, gives each the
+attributes `selectable-row` returns, and puts `row-activator`'s button in the first cell. The
+button loads the item's `properties-panel` into a `panel-region` beside the list, and is what a
+keyboard reaches; a click elsewhere in the row does the same, unless it comes from a control
+inside the row. `panel-js` moves `aria-current` to the chosen row, and closing the panel, with
+its button or Escape, returns focus to that row's button. The browser test checks the toolbar's
+URLs against `list-href` and the panel's focus handling on a small list page.
+
+A page that shows a second view beside its own content, such as a chat or a help pane, uses
+`hyperion/kit/dock`. `dock-panel` writes a section that htmx fills from a route the app mounts,
+inside a column, tab or drawer the page already has. It has no width or position of its own, so
+it resizes with that element. It loads with the page, even inside a tab that is not shown, or,
+with `:load :on-open`, the first time it receives the event `hy-dock-open`, which
+`dock-launcher`'s button sends when it opens the panel. Loading on that event replaced htmx's
+`intersect` trigger, because headless Chrome never reported a hidden panel as visible after it
+was shown, so `intersect` could not be tested. The browser test puts three panels in a page that
+has its own htmx and checks their widths, the tab switches, the launcher, how many times each
+panel's contents were requested, and that `window.htmx` is still the page's own.
 
 ### The hot-reload dev loop — the signature feature
 

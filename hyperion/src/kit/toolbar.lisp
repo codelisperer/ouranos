@@ -52,17 +52,21 @@ comes when it loses focus, from sending a second request.")
 (defun list-toolbar (state &key search (search-label "Search") search-placeholder
                                 filters sorts (sort-label "Sort by") (all-label "All")
                                 trash (trash-value "trash") (trash-labels '("Active" "Trash"))
-                                (view-label "View")
+                                (view-label "View") (submit-label "Apply")
                                 hx-target (label "List controls") (id "hy-toolbar"))
   "Write the controls above the list whose STATE is given into SPINNERET:*HTML*. Each argument
 names part of the list's spec, and leaving it out leaves out that control.
 
 SEARCH names a :text filter, shown as a search field labelled SEARCH-LABEL. FILTERS is a list
 of (NAME LABEL [VALUE-LABELS]) for :values filters, each shown as a select with an ALL-LABEL
-option first; VALUE-LABELS is an alist from each value to its text, which defaults to the
-value. SORTS is a list of (KEY LABEL) for sort keys, shown as one select labelled SORT-LABEL.
+option first and then the filter's choices for this request (LIST:FILTER-CHOICES);
+VALUE-LABELS is an alist from each value to its text, which defaults to the value. SORTS is a list of (KEY LABEL) for sort keys, shown as one select labelled SORT-LABEL.
 TRASH names a :values filter with TRASH-VALUE among its values, shown as a segmented control
-named VIEW-LABEL with the two TRASH-LABELS, the active view and the trash. LABEL names the search landmark.
+named VIEW-LABEL with the two TRASH-LABELS, the active view and the trash. TRASH-VALUE has to be
+among the filter's choices for each request: when they come from a function of the request, a
+request whose choices leave it out signals. LABEL names the search landmark. SUBMIT-LABEL is the
+text of the button that submits the form, for a page without script; it differs from
+SEARCH-LABEL so a screen reader does not announce two controls with one name.
 
 HX-TARGET is the element the list's htmx requests replace; it defaults to the spec's. ID is
 the form's id, and the controls' ids start with it. Include TOOLBAR-JS once on the page.
@@ -76,8 +80,10 @@ Signals when a name is not a filter or sort key of the right kind."
                              collect (list:list-param-name spec name)))
          (sort-name (and sorts (list:list-param-name spec "sort")))
          (trash-name (and trash
-                          (let ((options (%check-filter spec trash :values)))
-                            (unless (member trash-value (getf options :values) :test #'string=)
+                          (progn
+                            (%check-filter spec trash :values)
+                            (unless (member trash-value (list:filter-choices state trash)
+                                            :test #'string=)
                               (error "hyperion/kit/toolbar: ~S is not a value of filter ~S"
                                      trash-value trash))
                             (list:list-param-name spec trash))))
@@ -111,7 +117,8 @@ Signals when a name is not a filter or sort key of the right kind."
                      (:span :class "select"
                        (:select :name field :id (format nil "~A-~(~A~)" id name)
                          (:option :value "" :selected (null current) all-label)
-                         (dolist (value (getf (%check-filter spec name :values) :values))
+                         ;; The choices READ-LIST-STATE resolved for this request.
+                         (dolist (value (list:filter-choices state name))
                            (:option :value value :selected (equal value current)
                                     (or (cdr (assoc value value-labels :test #'string=))
                                         value)))))))
@@ -126,7 +133,7 @@ Signals when a name is not a filter or sort key of the right kind."
                         do (:option :value (format nil "~(~A~)" key)
                                     :selected (eq key (list:list-state-sort state))
                                     text))))))
-          (:button :type "submit" :class "button hy-toolbar-submit" search-label))
+          (:button :type "submit" :class "button hy-toolbar-submit" submit-label))
         (when trash-name
           (let ((in-trash (equal trash-value (list:filter-value state trash))))
             (toggle:segmented-control

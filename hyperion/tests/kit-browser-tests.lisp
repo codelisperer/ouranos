@@ -222,8 +222,11 @@ toolbar drop it when the sort key changes.")
         (:table
           (:tbody
             (dolist (d rows)
-              (:tr :attrs (hyperion/kit/panel:selectable-row (first d) (format nil "/kit/panel/~D" (first d)))
-                (:td (second d))))))))))
+              (let ((href (format nil "/kit/panel/~D" (first d))))
+                (:tr :attrs (hyperion/kit/panel:selectable-row (first d) href)
+                  (:td (hyperion/kit/panel:row-activator (first d) href (second d)))
+                  ;; A control of the row's own, which must not open the panel.
+                  (:td (:button :type "button" :id (format nil "star-~D" (first d)) "Star")))))))))))
 
 (defparameter *kit-list-scenario* "
 var r = [];
@@ -248,12 +251,14 @@ var steps = [
     pick('select[name=status]', ''); },
   function () { log('all-url', location.search); byId('row-2').click(); },
   function () { log('click-panel', panelTitle()); log('click-current', current());
-    byId('row-1').focus(); key(byId('row-1'), 'Enter'); },
-  function () { log('enter-panel', panelTitle()); log('enter-current', current());
+    log('row-tabindex', byId('row-1').getAttribute('tabindex'));
+    byId('row-1-open').focus(); byId('row-1-open').click(); },
+  function () { log('button-panel', panelTitle()); log('button-current', current());
     q('#hy-panel [data-hy-panel-close]').focus(); key(document.activeElement, 'Escape');
     log('esc-empty', !q('#hy-panel .hy-properties')); log('esc-focus', act()); byId('row-2').click(); },
   function () { q('#hy-panel [data-hy-panel-close]').click();
-    log('x-empty', !q('#hy-panel .hy-properties')); log('x-focus', act());
+    log('x-empty', !q('#hy-panel .hy-properties')); log('x-focus', act()); byId('star-3').click(); },
+  function () { log('star-empty', !q('#hy-panel .hy-properties')); log('star-current', current());
     log('htmx', !!window.htmx); log('done', 'yes'); }
 ];
 var i = 0;
@@ -309,9 +314,11 @@ same parameters compare equal."
 
 (test the-list-toolbar-and-the-properties-panel-in-a-real-browser
   "The toolbar's requests carry the parameters LIST-HREF writes for the same change, and the
-search field keeps focus and its text across the swap; a row loads its panel on a click and on
-Enter and becomes the current row; Escape and the close button empty the panel and put focus
-back on the current row."
+search field keeps focus and its text across the swap; a row loads its panel on a click on the
+row and from its button, and becomes the current row, and a click on another control in the row
+loads nothing; Escape and the close button empty the panel and put focus back on the current
+row's button. The button is a <button>, so the browser presses it on Enter and Space; a script
+cannot test that with a keydown it makes, because a browser does not activate a button for one."
   (let ((browser (%smoke-browser)))
     (if (null browser)
         (skip "No Chrome or Edge found; set HYPERION_SMOKE_BROWSER to run the kit list page")
@@ -357,12 +364,136 @@ back on the current row."
                    (is (same-query "all-url" h4) "All leaves the filter out: ~S, ~S" (saw "all-url") h4)
                    (is (equal "Meeting_notes" (saw "click-panel")))
                    (is (equal "row-2" (saw "click-current")))
-                   (is (equal "Memo_to_staff" (saw "enter-panel")) "Enter on a row loads its panel")
-                   (is (equal "row-1" (saw "enter-current")) "and makes it the current row")
+                   (is (equal "null" (saw "row-tabindex")) "the row is not a tab stop")
+                   (is (equal "Memo_to_staff" (saw "button-panel")) "the row's button loads its panel")
+                   (is (equal "row-1" (saw "button-current")) "and makes it the current row")
                    (is (equal "true" (saw "esc-empty")) "Escape closes the panel")
-                   (is (equal "row-1" (saw "esc-focus")) "focus back on the current row")
+                   (is (equal "row-1-open" (saw "esc-focus")) "focus back on the current row's button")
                    (is (equal "true" (saw "x-empty")) "the close button closes it")
-                   (is (equal "row-2" (saw "x-focus")))
+                   (is (equal "row-2-open" (saw "x-focus")))
+                   (is (equal "true" (saw "star-empty")) "a control inside a row does not load its panel")
+                   (is (equal "row-2" (saw "star-current")) "nor change the current row")
                    (is (equal "true" (saw "htmx")))))
+            (ignore-errors (hyperion/server:stop handler))
+            (is (ports:await-released port) "the port was still accepting after teardown"))))))
+
+;;; The dock panel (#67), in a host page that already has htmx: a panel in a 340px column, one in
+;;; a tab that is not shown, and one a launcher opens. The page records whether each loaded, how
+;;; wide the first is before and after its column is resized, that htmx processed the loaded
+;;; contents, and that window.htmx is still the object the page loaded.
+
+(defparameter *dock-scenario* "
+var r = [];
+function log(k, v) { r.push(k + '=' + v); document.getElementById('results').textContent = r.join(' '); }
+function byId(id) { return document.getElementById(id); }
+function width(id) { return Math.round(byId(id).getBoundingClientRect().width); }
+function show(tab) { byId('tab-a').hidden = tab !== 'a'; byId('tab-b').hidden = tab !== 'b'; }
+function state(id) { return byId('open-' + id).getAttribute('aria-expanded') + ',' + byId('dock-' + id).hidden; }
+var steps = [
+  function () { log('a-loaded', !!byId('a-content')); log('b-loaded-hidden', !!byId('b-content'));
+    log('c-waits', !byId('c-content')); log('a-width', width('dock-a')); byId('a-ping').click(); },
+  function () { log('a-ping', byId('a-out').textContent); byId('col-a').style.width = '500px'; },
+  function () { log('a-resized', width('dock-a')); show('b'); },
+  function () { log('b-width', width('dock-b')); show('a'); },
+  function () { log('a-kept', !!byId('a-content')); show('b'); },
+  function () { log('b-kept', !!byId('b-content')); log('c-before', state('c')); log('c-closed-width', width('dock-c')); byId('open-c').click(); },
+  function () { log('c-open', state('c')); },
+  function () { log('c-loaded', !!byId('c-content')); byId('open-c').click(); },
+  function () { log('c-closed', state('c')); byId('open-c').click(); },
+  function () { log('c-reopened', state('c'));
+    log('htmx-same', window.htmx === window.hostHtmx && !!window.htmx); log('done', 'yes'); }
+];
+var i = 0;
+function next() {
+  if (i < steps.length) {
+    try { steps[i++](); } catch (e) { log('error-' + i, e.message.replace(/ /g, '_')); }
+    setTimeout(next, 300);
+  }
+}
+document.addEventListener('DOMContentLoaded', function () { setTimeout(next, 300); });
+"
+  "The steps the dock page runs, logged as key=value and read back by %KIT-RESULTS.")
+
+(defun %dock-page ()
+  (spinneret:with-html-string
+    (:doctype)
+    (:html
+      (:head (:meta :charset "utf-8")
+             (:link :rel "stylesheet" :href (assets:url :kit))
+             (:script :src (assets:url :htmx))
+             ;; The host's own reference to its htmx, taken before anything of the dock runs.
+             (:script (:raw "window.hostHtmx = window.htmx;"))
+             (:script (:raw (hyperion/kit/dock:dock-js))))
+      (:body
+        (:div :id "tab-a"
+          (:div :id "col-a" :style "width:340px;height:300px"
+            (hyperion/kit/dock:dock-panel "/frag/dock/a" "Panel A" :id "dock-a")))
+        (:div :id "tab-b" :hidden t
+          (:div :style "width:340px;height:300px"
+            (hyperion/kit/dock:dock-panel "/frag/dock/b" "Panel B" :id "dock-b")))
+        (hyperion/kit/dock:dock-launcher "Open C" :dock-id "dock-c" :id "open-c")
+        (:div :style "width:340px;height:300px"
+          (hyperion/kit/dock:dock-panel "/frag/dock/c" "Panel C" :id "dock-c"
+                                        :load :on-open :hidden t))
+        (:pre :id "results")
+        (:script (:raw *dock-scenario*))))))
+
+(defun %dock-app (loads)
+  "The dock page's routes. LOADS is an alist of (name . count), counting how many times each
+panel's contents were asked for."
+  (flet ((contents (name)
+           (lambda (env)
+             (declare (ignore env))
+             (incf (cdr (assoc name loads :test #'string=)))
+             (%html (format nil "<div id=\"~A-content\">~:*~A loaded <button type=\"button\" id=\"~:*~A-ping\" hx-get=\"/frag/ping\" hx-target=\"#~:*~A-out\">ping</button><span id=\"~:*~A-out\"></span></div>" name)))))
+    (router:to-app
+     (router:router
+      (assets:mount)
+      (router:route :get "/dock" (lambda (env) (declare (ignore env)) (%html (%dock-page))))
+      (router:route :get "/frag/dock/a" (contents "a"))
+      (router:route :get "/frag/dock/b" (contents "b"))
+      (router:route :get "/frag/dock/c" (contents "c"))
+      (router:route :get "/frag/ping" (lambda (env) (declare (ignore env)) (%html "pong")))))))
+
+(test the-dock-panel-in-a-real-browser
+  "A panel fills its column and resizes with it, and the contents it loads are live htmx; a
+panel in a tab that is not shown loads with the page and stays loaded across tab switches; the
+launcher opens and closes its panel, says so in aria-expanded, and loads it on the first open
+only; and the page's window.htmx is still the object it loaded."
+  (let ((browser (%smoke-browser)))
+    (if (null browser)
+        (skip "No Chrome or Edge found; set HYPERION_SMOKE_BROWSER to run the dock page")
+        (let* ((loads (list (cons "a" 0) (cons "b" 0) (cons "c" 0)))
+               (app (%dock-app loads))
+               (port nil)
+               (handler (ports:call-with-port
+                         (lambda (p)
+                           (prog1 (hyperion/server:start app :port p :host "127.0.0.1" :log nil)
+                             (setf port p))))))
+          (unwind-protect
+               (let* ((dom (%run-browser browser (format nil "http://127.0.0.1:~D/dock" port)))
+                      (results (%kit-results dom)))
+                 (flet ((saw (key) (cdr (assoc key results :test #'string=))))
+                   (is (equal "yes" (saw "done")) "the page ran every step: ~S" results)
+                   (is (null (remove-if-not (lambda (p) (search "error" (car p))) results))
+                       "a step threw: ~S" results)
+                   (is (equal "true" (saw "a-loaded")))
+                   (is (equal "true" (saw "b-loaded-hidden")) "a panel in a hidden tab did not load")
+                   (is (equal "true" (saw "c-waits")) "the launcher's panel loaded before it opened")
+                   (is (equal "340" (saw "a-width")) "the panel is not as wide as its column")
+                   (is (equal "pong" (saw "a-ping")) "htmx did not process the loaded contents")
+                   (is (equal "500" (saw "a-resized")) "the panel did not follow its column")
+                   (is (equal "340" (saw "b-width")))
+                   (is (equal "true" (saw "a-kept")))
+                   (is (equal "true" (saw "b-kept")))
+                   (is (equal "false,true" (saw "c-before")))
+                   (is (equal "0" (saw "c-closed-width")) "a closed panel still takes up space")
+                   (is (equal "true,false" (saw "c-open")) "the launcher did not open its panel")
+                   (is (equal "true" (saw "c-loaded")) "opening did not load the panel")
+                   (is (equal "false,true" (saw "c-closed")) "the launcher did not close it")
+                   (is (equal "true,false" (saw "c-reopened")))
+                   (is (equal "true" (saw "htmx-same")) "window.htmx was replaced")
+                   (is (equal '(("a" . 1) ("b" . 1) ("c" . 1)) loads)
+                       "each panel's contents should be asked for once: ~S" loads)))
             (ignore-errors (hyperion/server:stop handler))
             (is (ports:await-released port) "the port was still accepting after teardown"))))))

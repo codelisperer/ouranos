@@ -95,7 +95,7 @@ defaults left that token out of the gradient look."
       (dolist (contrast '(:normal :high))
         (let ((flat (appr:token-values table theme contrast :flat))
               (gradient (appr:token-values table theme contrast :gradient)))
-          (is (= 12 (/ (length flat) 2)))
+          (is (= 13 (/ (length flat) 2)) "six background tokens, six text tokens and the ring")
           (is (every #'stringp (loop for (nil v) on flat by #'cddr collect v))
               "~A ~A has a flat token that is not a colour" theme contrast)
           (dolist (token backgrounds)
@@ -180,13 +180,31 @@ flat and gradient: 48 pairs, and for a gradient every sample along it."
   (let ((failures (appr:appearance-contrast-failures
                    (appr:make-appearance-table
                     :dark '(:gradient (:header (:gradient "#2a2e36" "#d0d0d0")))))))
-    (is (= 1 (length failures)))
+    ;; The header text fails, and so does the focus ring, which is also checked on the header.
+    (is (equal '(:header-text :focus-ring) (mapcar (lambda (f) (getf f :text)) failures)))
     (let ((f (first failures)))
+      (is (eql 4.5d0 (getf f :required)))
       (is (equal '(:dark :normal :gradient :header-text :header)
                  (list (getf f :theme) (getf f :contrast) (getf f :look)
                        (getf f :text) (getf f :background))))
       (is (equal "#D0D0D0" (string-upcase (getf f :colour))))
       (is (< (getf f :ratio) 4.5d0)))))
+
+(test a-button-is-checked-on-hover-and-when-pressed-as-well-as-at-rest
+  "White on #767676 passes at rest, at 4.54:1. The hover layer lightens the fill and pressing
+dims the text, and each brings it below 4.5:1, which only a check of those states can find."
+  (let* ((failures (appr:appearance-contrast-failures
+                    (appr:make-appearance-table
+                     :light '(:button-primary "#767676" :button-primary-text "#ffffff"))))
+         (mine (remove-if-not (lambda (f) (and (eq :button-primary-text (getf f :text))
+                                               (eq :light (getf f :theme))
+                                               (eq :normal (getf f :contrast))
+                                               (eq :flat (getf f :look))))
+                              failures)))
+    (is (equal '(:hover :pressed) (mapcar (lambda (f) (getf f :state)) mine)) "~S" mine)
+    (is (every (lambda (f) (< (getf f :ratio) 4.5d0)) mine))
+    (is (equal "rgba(128, 128, 128, 0.14)" appr::*hover-overlay*)
+        "the layer the check models is the one the CSS draws")))
 
 (test a-gradient-whose-stops-pass-can-still-fail-between-them
   "#767676 passes on white and on black, and fails on the grey halfway between them, which
@@ -198,9 +216,10 @@ only the samples between the stops can find."
                              :gradient (:surface (:gradient "#ffffff" "#000000")))))))
     (is (>= (appr:contrast-ratio "#767676" "#ffffff") 4.5d0))
     (is (>= (appr:contrast-ratio "#767676" "#000000") 4.5d0))
+    ;; The focus ring fails on the same grey; this test is about the text.
     (is (equal '((:light :gradient :surface-text))
                (mapcar (lambda (f) (list (getf f :theme) (getf f :look) (getf f :text)))
-                       failures)))))
+                       (remove :focus-ring failures :key (lambda (f) (getf f :text))))))))
 
 (test a-plain-colour-in-the-gradient-look-replaces-bulma-s-background
   "An app may give a plain colour as a gradient-look value. The gradient look's rules set it with
@@ -213,3 +232,94 @@ background would stay under the token's text colour, which the contrast check ne
     (is (search (format nil ".button.is-primary:not(.is-outlined):not(.is-light):not(.is-inverted) {~%  background: var(--hy-button-primary);") css))
     (is (null (search "background-image" css)) "a rule still sets background-image")
     (is (null (appr:appearance-contrast-failures table)))))
+
+;;; --- text roles, fonts and the focus ring (#981, comment 6462400814) -----------------
+
+(test the-text-roles-and-fonts-are-written-once-on-the-bare-root-rule
+  (let* ((css (appr:appearance-css))
+         (root (subseq css 0 (search "}" css))))
+    (loop for (role size) in '(("caps" "0.6875rem") ("meta" "0.75rem") ("dense" "0.8125rem")
+                               ("body" "0.875rem") ("heading" "1rem") ("title" "1.25rem")
+                               ("prose" "1.0625rem"))
+          do (is (search (format nil "--hy-text-~A: ~A;" role size) root) "--hy-text-~A" role)
+             (is (= 1 (%count-matches css (format nil "--hy-text-~A:" role)))
+                 "--hy-text-~A is written more than once" role))
+    (is (search "--hy-font-ui: system-ui," root))
+    (is-true (let ((at (search "--hy-font-prose:" root)))
+               (and at (search "serif;" root :start2 at)))
+             "the prose font is not a serif")
+    (is (null (search "--bulma-size" css)) "Bulma's sizes are Bulma's, not set here")))
+
+(test an-app-changes-one-text-role-or-font-and-keeps-the-rest
+  (let ((css (appr:appearance-css (appr:make-appearance-table
+                                   :type-scale '(:body "1rem")
+                                   :fonts '(:prose "\"Literata\", serif")))))
+    (is (search "--hy-text-body: 1rem;" css))
+    (is (search "--hy-text-title: 1.25rem;" css))
+    (is (search "--hy-font-prose: \"Literata\", serif;" css))
+    (is (search "--hy-font-ui: system-ui," css)))
+  (signals error (appr:make-appearance-table :type-scale '(:huge "3rem")))
+  (signals error (appr:make-appearance-table :type-scale '(:body 14)))
+  (signals error (appr:make-appearance-table :fonts '(:ui "Arial; } body { display: none")))
+  ;; A line break of either kind would end the declaration it is written into. The value holds
+  ;; nothing else that is refused, so only the line break can be what signals.
+  (dolist (break (list #\Newline #\Return))
+    (signals error (appr:make-appearance-table
+                    :fonts (list :ui (format nil "Arial~Csans-serif" break)))))
+  (signals error (appr:make-appearance-table :fonts '(:mono "monospace"))))
+
+(test the-focus-ring-is-defined-in-every-combination
+  (let ((table (appr:make-appearance-table))
+        (css (appr:appearance-css)))
+    (dolist (theme '(:light :dark))
+      (dolist (contrast '(:normal :high))
+        (dolist (look '(:flat :gradient))
+          (is (stringp (getf (appr:token-values table theme contrast look) :focus-ring))
+              "~A ~A ~A has no focus ring colour" theme contrast look))))
+    (is (= (%count-matches css "--hy-surface:") (%count-matches css "--hy-focus-ring:"))
+        "a rule that sets the surface does not set the focus ring")))
+
+(test the-focus-ring-is-checked-at-three-to-one-against-every-surface
+  "A ring colour between 3:1 and 4.5:1 on every light surface passes, which shows the ring is
+held to 3:1 and not to the text's 4.5:1. One below 3:1 on any surface fails, on each surface it
+fails on."
+  (let* ((between "#7a7a7a")
+         (surfaces (loop for token in appr:*ring-backgrounds*
+                         append (appr:background-samples
+                                 (getf (appr:token-values (appr:make-appearance-table)
+                                                          :light :normal :gradient)
+                                       token))))
+         (ratios (mapcar (lambda (c) (appr:contrast-ratio between c)) surfaces)))
+    (is-true (and (every (lambda (r) (>= r 3d0)) ratios) (some (lambda (r) (< r 4.5d0)) ratios))
+             "the test's own colour is not between 3:1 and 4.5:1: ~S" ratios)
+    (is (null (appr:appearance-contrast-failures
+               (appr:make-appearance-table :light (list :focus-ring between)))))
+    (let ((failures (appr:appearance-contrast-failures
+                     (appr:make-appearance-table :light '(:focus-ring "#d8dbe0")))))
+      (is (equal '(:surface :surface-raised :header :surface :surface-raised :header)
+                 (mapcar (lambda (f) (getf f :background)) failures))
+          "~S" failures)
+      (is-true (every (lambda (f) (and (eq :focus-ring (getf f :text))
+                                       (eql 3d0 (getf f :required))))
+                      failures))))
+  (signals error (appr:make-appearance-table :light '(:focus-ring (:gradient "#000000" "#111111"))))
+  (signals error (appr:make-appearance-table
+                  :light '(:gradient (:focus-ring (:gradient "#000000" "#111111"))))))
+
+(test gradient-buttons-have-hover-press-and-focus-rules
+  "The gradient look's `background:' on a button replaces the colour Bulma changes on hover, so
+the look gives hover, press and focus itself. Hover draws a grey layer over the token, which
+works whether the token is a colour or a gradient; focus draws the focus ring."
+  (let ((css (appr:appearance-css)))
+    (dolist (token '("button-primary" "button-danger"))
+      (let ((scope (format nil ":root[data-look=\"gradient\"] .button.is-~A:not(.is-outlined):not(.is-light):not(.is-inverted)"
+                           (subseq token 7))))
+        (is (search (format nil "~A:hover {~%  background: linear-gradient(rgba(128, 128, 128, 0.14), rgba(128, 128, 128, 0.14)), var(--hy-~A);"
+                            scope token)
+                    css)
+            "~A has no hover over its token" token)
+        (is (search (format nil "~A:active {" scope) css))
+        (is (search (format nil "~A:focus-visible {~%  outline: 2px solid var(--hy-focus-ring);" scope)
+                    css)
+            "~A has no focus ring" token)))
+    (is (null (search ".navbar:hover" css)) "only buttons get hover rules")))

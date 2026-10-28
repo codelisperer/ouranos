@@ -25,7 +25,8 @@
 (cl:defpackage #:hyperion/kit/dialog
   (:use #:cl)
   (:local-nicknames (#:spin #:spinneret)
-                    (#:out #:hyperion/output))
+                    (#:out #:hyperion/output)
+                    (#:page #:hyperion/kit/page))  ; SAFE-HREF-P, for the confirm's action
   ;; Parenscript matches its own macros by symbol identity, so these are the real ones, as
   ;; in hyperion/js.
   (:import-from #:parenscript #:chain #:@)
@@ -83,9 +84,14 @@ The action posts to ACTION-HREF with htmx and closes the dialog when the request
 It is disabled while its request is in flight, so a double click posts once.
 HX-TARGET receives the response, swapped by HX-SWAP (\"outerHTML\" by default); with no
 HX-TARGET the response is not swapped anywhere. Signals unless ACTION-HREF and ACTION-LABEL
-are given."
+are given, and when ACTION-HREF has a scheme other than http or https (PAGE:SAFE-HREF-P): the
+form's action is where a browser without htmx sends it, and javascript: there would run as
+script. A confirm has no sensible form without its action, so this signals instead of writing
+the button as text, as the page components do with a link."
   (unless (and (stringp action-href) (stringp action-label))
     (error "A confirm needs ACTION-HREF and ACTION-LABEL, the request it sends and the words that name it."))
+  (unless (page:safe-href-p action-href)
+    (error "A confirm's ACTION-HREF must be http, https or relative, not ~S." action-href))
   (dialog id title
           :close-label close-label
           :body (lambda ()
@@ -151,24 +157,24 @@ the document. Include it once with (:script (:raw (dialog-js)))."
      (lambda ()
        (unless (@ window hy-kit-dialogs)
          (setf (@ window hy-kit-dialogs) t)
-;; LET* because CLOSE-DIALOG calls RETURN-FOCUS: Parenscript renames a parallel LET's
-         ;; bindings, and the call would name a function that does not exist.
+         ;; LET* because CLOSE-DIALOG calls RETURN-FOCUS: Parenscript renames a parallel LET's
+         ;; bindings, so CLOSE-DIALOG would call RETURN-FOCUS under a name nothing defines.
          (let* ((find-up (lambda (el selector)
-                          (if (and el (@ el closest)) (chain el (closest selector)) nil)))
-               ;; showModal() focuses the dialog's autofocus element itself.
-               (open-dialog (lambda (d)
-                              (unless (@ d open) (chain d (show-modal)))))
-               (return-focus (lambda (d)
-                               (let ((o (@ d hy-opener)))
-                                 (setf (@ d hy-pending) nil)
-                                 (when (and o (@ o is-connected))
-                                   (chain o (focus))))))
-               ;; The routes this script owns return focus straight after close(). The close
-               ;; event is fired later, as a separate task, and catches the routes it does not
-               ;; own, such as a form with method="dialog".
-               (close-dialog (lambda (d)
-                               (chain d (close))
-                               (return-focus d))))
+                           (if (and el (@ el closest)) (chain el (closest selector)) nil)))
+                ;; showModal() focuses the dialog's autofocus element itself.
+                (open-dialog (lambda (d)
+                               (unless (@ d open) (chain d (show-modal)))))
+                (return-focus (lambda (d)
+                                (let ((o (@ d hy-opener)))
+                                  (setf (@ d hy-pending) nil)
+                                  (when (and o (@ o is-connected))
+                                    (chain o (focus))))))
+                ;; The routes this script owns return focus straight after close(). The close
+                ;; event is fired later, as a separate task, and catches the routes it does not
+                ;; own, such as a form with method="dialog".
+                (close-dialog (lambda (d)
+                                (chain d (close))
+                                (return-focus d))))
            ;; An opener records itself on its dialog. One with hx-get waits for htmx to
            ;; settle the loaded contents before the dialog opens.
            (chain document
