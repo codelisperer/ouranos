@@ -58,12 +58,12 @@
            do (format s "~2,'0x" b)))))
 
 (test every-declared-asset-is-present
-  "The three vendored assets and the calendar stylesheet (#489) exist, are keyed as
-expected, and carry bytes."
-  (is (= 4 (length (assets:assets))))
-  (is (equal '(:calendar) (mapcar #'assets:asset-key
-                                  (remove-if-not #'assets:first-party-p (assets:assets)))))
-  (dolist (key '(:htmx :alpine :bulma :calendar))
+  "The three vendored assets, the calendar stylesheet (#489) and the kit stylesheet (#981)
+exist, are keyed as expected, and carry bytes."
+  (is (= 5 (length (assets:assets))))
+  (is (equal '(:calendar :kit) (mapcar #'assets:asset-key
+                                       (remove-if-not #'assets:first-party-p (assets:assets)))))
+  (dolist (key '(:htmx :alpine :bulma :calendar :kit))
     (let ((a (assets:asset key)))
       (is (not (null a)) "no asset ~S" key)
       (is (plusp (length (assets:asset-bytes a))) "~S is empty" key))))

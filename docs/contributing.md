@@ -14,9 +14,18 @@ sbcl --dynamic-space-size 4096 --script bootstrap.lisp   # → bin/cons
 ```
 
 It builds `bin/cons` and writes `~/.config/common-lisp/source-registry.conf.d/50-ouranos.conf`
-— an ASDF `(:tree <repo-root>)` drop-in covering every framework in the tree (rewritten each
-bootstrap; self-heals if the repo moves). No symlinking into `~/quicklisp/local-projects`,
-no `asdf:*central-registry*`.
+— an ASDF `(:tree <repo-root>)` drop-in covering every framework in the tree. No symlinking
+into `~/quicklisp/local-projects`, no `asdf:*central-registry*`.
+
+Bootstrap rewrites the drop-in when it names this checkout or a checkout that no longer
+exists, so moving the repository needs only a second bootstrap. When it names another
+checkout that still exists, bootstrap stops with exit code 3 before building, because every
+process on the machine reads that file (#955). To bootstrap a worktree or a scratch clone,
+set `OURANOS_BOOTSTRAP_LOCAL=1`: bootstrap leaves the drop-in alone, builds against this
+checkout through `CL_SOURCE_REGISTRY`, and prints the value to export. To move the whole
+machine to this checkout instead, set `OURANOS_BOOTSTRAP_FORCE=1`. The refusal prints both
+commands for your OS. [Getting started](getting-started.md#a-second-checkout-on-the-same-machine)
+has the details.
 
 ## The one hard rule — the dependency DAG
 
@@ -298,4 +307,7 @@ Per-framework `<framework>/docs/editor-setup.md` has more detail.
   (`--dynamic-space-size 4096`) and let it finish; cached after.
 - **A system isn't found** — re-run the seed once (it writes the drop-in); confirm
   `~/.config/common-lisp/source-registry.conf.d/50-ouranos.conf` exists and points at your
-  checkout.
+  checkout. If you bootstrapped with `OURANOS_BOOTSTRAP_LOCAL=1`, there is no drop-in for that
+  checkout: set the `CL_SOURCE_REGISTRY` value bootstrap printed.
+- **Bootstrap exits 3 and names two trees** — the drop-in names another checkout. Choose
+  `OURANOS_BOOTSTRAP_LOCAL=1` or `OURANOS_BOOTSTRAP_FORCE=1`, as the message says.

@@ -611,3 +611,191 @@ step C, under #906's rule."
     (actor:attach-thread-memory ag store "member-1" "conv-7" observer)
     (is (equal '(:ok :not-run) (%outcomes (%results (lambda () (actor:run-turn ag "What did it say?"))))))
     (is (= 0 (funcall runs)))))
+
+;;; --- :conversation over a history rebuilt from text (#948) --------------------------------
+
+(defun %rebuilt-paying-agent (taint &key (scope :conversation))
+  "An agent rebuilt as an app that keeps text transcripts rebuilds it: a history of one earlier
+turn with no tool calls, and CONVERSATION-TAINT TAINT. A page reader is registered, and its model
+then asks to pay."
+  (let ((ag (actor:make-agent
+             :name "rebuilt" :taint-scope scope :conversation-taint taint
+             :provider (make-instance 'scripted
+                                      :script (list (%calls (list "pay" (%args "item" "x")))
+                                                    (llm:make-completion :text "Done."
+                                                                         :stop-reason :end))))))
+    (wp:register ag (make-instance '%stub-reader))
+    (setf (actor:agent-history ag) (list (llm:msg "user" "Read docs.example.com")
+                                         (llm:msg "assistant" "I read it.")))
+    ag))
+
+(defun %paying-turn (agent)
+  "Run AGENT's paying turn, approving every held call and muffling CONVERSATION-TAINT-UNRECORDED.
+Returns how many times the payment ran, and the warnings, oldest first."
+  (let ((runs (%confirmed-spender agent))
+        (warnings '()))
+    (handler-bind ((actor:conversation-taint-unrecorded
+                     (lambda (w) (push w warnings) (muffle-warning w))))
+      (%approving agent "Now pay"))
+    (values (funcall runs) (reverse warnings))))
+
+(test a-rebuilt-history-with-a-recorded-untrusted-taint-starts-untrusted
+  (let ((ag (%rebuilt-paying-agent :untrusted)))
+    (multiple-value-bind (runs warnings) (%paying-turn ag)
+      (is (= 0 runs) "the payment was refused")
+      (is (null warnings) "the taint was recorded, so nothing is missing")
+      (is-true (actor:turn-untrusted-p ag)))))
+
+(test a-rebuilt-history-recorded-clean-starts-trusted
+  "The control for the tests around it: the same rebuilt agent, recorded :CLEAN, pays."
+  (let ((ag (%rebuilt-paying-agent :clean)))
+    (multiple-value-bind (runs warnings) (%paying-turn ag)
+      (is (= 1 runs))
+      (is (null warnings))
+      (is-false (actor:turn-untrusted-p ag))
+      (is (eq :clean (actor:agent-conversation-taint ag))))))
+
+(test an-unrecorded-taint-warns-and-the-turn-is-untrusted-even-when-muffled
+  "The case #948 found: :CONVERSATION over a text history with nothing recorded. It warns, and
+the turn is untrusted whatever the handler did with the warning, so the payment is refused."
+  (let ((ag (%rebuilt-paying-agent nil)))
+    (multiple-value-bind (runs warnings) (%paying-turn ag)
+      (is (= 1 (length warnings)) "one warning")
+      (is (search ":conversation-taint" (princ-to-string (first warnings)))
+          "it names the fix: ~A" (first warnings))
+      (is (= 0 runs) "the payment was refused after the warning was muffled")
+      (is-true (actor:turn-untrusted-p ag))
+      (is (eq :untrusted (actor:agent-conversation-taint ag))
+          "and the conversation is recorded untrusted, for the app to store"))))
+
+(test an-unrecorded-taint-warns-once-per-agent
+  "The first warning records the conversation untrusted, so a second turn on the same agent,
+over a history again with no tool calls, does not warn again."
+  (let ((ag (%rebuilt-paying-agent nil)))
+    (%paying-turn ag)
+    (setf (actor:agent-history ag) (list (llm:msg "user" "Read docs.example.com")
+                                         (llm:msg "assistant" "I read it."))
+          (scripted-script (actor:agent-provider ag))
+          (list (llm:make-completion :text "Fine." :stop-reason :end)))
+    (multiple-value-bind (runs warnings) (%paying-turn ag)
+      (declare (ignore runs))
+      (is (null warnings) "the second turn does not warn again"))))
+
+(test the-turn-scope-ignores-the-recorded-taint
+  (let ((ag (%rebuilt-paying-agent :untrusted :scope :turn)))
+    (multiple-value-bind (runs warnings) (%paying-turn ag)
+      (is (= 1 runs))
+      (is (null warnings)))))
+
+(test a-conversation-that-read-a-page-records-it-and-a-rebuilt-agent-keeps-it
+  "The store-and-restore cycle: an agent that read a page records :UNTRUSTED; an agent rebuilt
+from the text with that value refuses the payment. A fresh agent that reads nothing records
+:CLEAN."
+  (let ((ag (%read-then-pay-agent :conversation)))
+    (%confirmed-spender ag)
+    (%approving ag "Read docs.example.com")
+    (is (eq :untrusted (actor:agent-conversation-taint ag)))
+    (multiple-value-bind (runs warnings)
+        (%paying-turn (%rebuilt-paying-agent (actor:agent-conversation-taint ag)))
+      (is (= 0 runs))
+      (is (null warnings))))
+  (let ((ag (%guard-agent)))
+    (setf (actor:agent-taint-scope ag) :conversation)
+    (actor:run-turn ag "Hello")
+    (is (eq :clean (actor:agent-conversation-taint ag)))))
+
+(test the-window-predicate-reads-the-recorded-taint
+  (let ((tainted (%rebuilt-paying-agent :untrusted))
+        (clean (%rebuilt-paying-agent :clean)))
+    (is-true (funcall (actor:untrusted-window-predicate tainted) (actor:agent-history tainted)))
+    (is-false (funcall (actor:untrusted-window-predicate clean) (actor:agent-history clean))
+              "control: recorded clean")))
+
+(defun %delegated-then-paying (delegate)
+  "A sub-agent under :CONVERSATION that answers one task, then asks to pay. With DELEGATE a
+coordinator gives it the task; otherwise the user does. Returns how many times the payment ran
+on the sub-agent's next turn, and the taint it recorded before that turn."
+  (let* ((sub (actor:make-agent
+               :name "helper" :taint-scope :conversation
+               :provider (make-instance 'scripted
+                                        :script (list (llm:make-completion :text "Found it."
+                                                                           :stop-reason :end)
+                                                      (%calls (list "pay" (%args "item" "x")))
+                                                      (llm:make-completion :text "Done."
+                                                                           :stop-reason :end)))))
+         (runs (%confirmed-spender sub)))
+    (if delegate
+        (let ((coordinator (%guard-agent (%calls (list "helper" (%args "task" "look it up"))))))
+          (actor:register-agent-as-means coordinator sub :name "helper")
+          (actor:run-turn coordinator "Ask the helper."))
+        (actor:run-turn sub "look it up"))
+    (let ((recorded (actor:agent-conversation-taint sub)))
+      (%approving sub "Now pay")
+      (values (funcall runs) recorded))))
+
+(test a-delegated-task-records-the-conversation-untrusted
+  "A delegated task is the coordinating model's text and stays in the sub-agent's history, so under
+:CONVERSATION the sub-agent's later turns are untrusted and its payment is refused (#948's
+review). It records :DELEGATED, not :UNTRUSTED (#949's review). Control: the same task from the
+user records :CLEAN and the payment runs."
+  (multiple-value-bind (runs recorded) (%delegated-then-paying t)
+    (is (eq :delegated recorded))
+    (is (= 0 runs) "the payment after a delegated task was refused"))
+  (multiple-value-bind (runs recorded) (%delegated-then-paying nil)
+    (is (eq :clean recorded) "control: the user's own task")
+    (is (= 1 runs) "control: the payment ran")))
+
+(defun %coordinator-after-two-delegations (sub-reads)
+  "A coordinator under :TURN that delegates once in each of two turns to a sub-agent under
+:CONVERSATION. With SUB-READS the sub-agent's first task reads a page, an untrusted result. The
+reader is registered after the delegation means, so that means is not registered untrusted and
+only what happens at run time can mark the coordinator. Returns whether the coordinator's second
+turn is untrusted, and the sub-agent's recorded taint."
+  (flet ((answer (text) (llm:make-completion :text text :stop-reason :end))
+         (delegate () (%calls (list "helper" (%args "task" "look it up")))))
+    (let* ((sub (actor:make-agent
+                 :name "helper" :taint-scope :conversation
+                 :provider (make-instance
+                            'scripted
+                            :script (append (when sub-reads
+                                              (list (%calls (list "fetch" (%args "url" "x")))))
+                                            (list (answer "Found it.") (answer "Again."))))))
+           (coordinator (actor:make-agent
+                         :name "coordinator"
+                         :provider (make-instance 'scripted
+                                                  :script (list (delegate) (answer "Done.")
+                                                                (delegate) (answer "Done."))))))
+      (actor:register-agent-as-means coordinator sub :name "helper")
+      (actor:register-means sub "fetch" "Fetch a page."
+                            (lambda (args) (declare (ignore args)) "page") :untrusted t)
+      (actor:run-turn coordinator "Ask the helper.")
+      (actor:run-turn coordinator "Ask it again.")
+      (values (actor:turn-untrusted-p coordinator) (actor:agent-conversation-taint sub)))))
+
+(test a-second-delegation-marks-the-coordinator-only-when-the-sub-agent-read-something
+  "#949's review: a sub-agent untrusted only because a task was delegated to it earlier does not
+make its coordinator untrusted, so delegating twice leaves the coordinator's second turn clean.
+Control: when the sub-agent's first task read a page, its conversation is untrusted by what it
+read, and the second delegation marks the coordinator."
+  (multiple-value-bind (untrusted taint) (%coordinator-after-two-delegations nil)
+    (is (eq :delegated taint))
+    (is-false untrusted "the coordinator's second turn is clean"))
+  (multiple-value-bind (untrusted taint) (%coordinator-after-two-delegations t)
+    (is (eq :untrusted taint) "control: the sub-agent read a page")
+    (is-true untrusted "control: the second delegation marks the coordinator")))
+
+(test an-unknown-conversation-taint-is-refused
+  "As an unknown :TAINT-SCOPE is. Control: :CLEAN on the same agent answers."
+  (flet ((turn (taint)
+           (let ((ag (actor:make-agent
+                      :name "rebuilt" :taint-scope :conversation :conversation-taint taint
+                      :provider (make-instance 'scripted
+                                               :script (list (llm:make-completion
+                                                              :text "Hi." :stop-reason :end))))))
+             (setf (actor:agent-history ag) (list (llm:msg "user" "Earlier.")
+                                                  (llm:msg "assistant" "Yes.")))
+             (handler-case (actor:run-turn ag "Hello.")
+               (error (e) (princ-to-string e))))))
+    (let ((refused (turn :maybe)))
+      (is (and (stringp refused) (search ":conversation-taint must be" refused)) "~A" refused))
+    (is (equal "Hi." (turn :clean)) "control: a known value")))

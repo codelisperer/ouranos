@@ -138,6 +138,29 @@ from seeing a bundle without its libuv fail."
   ;; fails, handles are being allocated at the wrong size and nothing else is trustworthy.
   (is-true (aion/uv/ffi:verify-abi)))
 
+(test a-failed-abi-check-is-not-forgotten-by-the-next-ensure-available
+  "#940: LOAD-LIBUV marks libuv loaded before VERIFY-ABI runs. ENSURE-AVAILABLE used to check
+the ABI only while libuv was not loaded, so after one failed check every later call returned T and
+the binding was used against a libuv it does not match. Here the check is made to fail by adding
+one wrong expectation to +HANDLE-TYPE-CHECKS+, with libuv loaded: both calls must signal. Control:
+with the real expectations back, ENSURE-AVAILABLE returns T and libuv counts as verified."
+  (uv:ensure-available)
+  (is-true (aion/uv/ffi:abi-verified-p))
+  (unwind-protect
+       (let ((aion/uv/ffi::+handle-type-checks+
+               (cons (cons aion/uv/ffi::+uv-timer+ "not-a-handle-type")
+                     aion/uv/ffi::+handle-type-checks+)))
+         ;; A failed check from an earlier call, as LOAD-LIBUV and a failed VERIFY-ABI leave it:
+         ;; loaded, and not verified.
+         (signals aion/uv/ffi:libuv-abi-mismatch (aion/uv/ffi:verify-abi))
+         (is-true (aion/uv/ffi:libuv-loaded-p))
+         (is-false (aion/uv/ffi:abi-verified-p))
+         (signals aion/uv/ffi:libuv-abi-mismatch (uv:ensure-available))
+         (signals aion/uv/ffi:libuv-abi-mismatch (uv:ensure-available)))
+    ;; Verified again against the real expectations, so the tests after this one run as before.
+    (uv:ensure-available))
+  (is-true (aion/uv/ffi:abi-verified-p)))
+
 ;;; --- the typed core (pure Coalton, no libuv involved) ---------------------------
 
 (test decode-file-events
