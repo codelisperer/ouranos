@@ -290,3 +290,58 @@ split lines on, are escaped as well. The values parse back unchanged."
                (is (search "second" (second (uiop:split-string text :separator '(#\Newline))))
                    "~A: the second event must be on the second line: ~S" env text)))
         (log:setup :env :dev :level :info)))))
+
+;;; --- EXCEPTION writes the type and frame names, not the report or arguments (#1013) ------
+
+(declaim (notinline %fail-with-a-secret))
+(defun %fail-with-a-secret (arg)
+  "Signal an error whose report holds SECRET-VALUE, from a frame called with ARG."
+  (when (stringp arg)
+    (cl:error "the row held SECRET-VALUE")))
+
+(defun %exception-line (&key details)
+  "The ERROR line EXCEPTION writes for the error %FAIL-WITH-A-SECRET signals when called with
+\"SECRET-ARG\", logged while that frame is still on the stack, with *LOG-CONDITION-DETAILS* bound
+to DETAILS."
+  (let ((out (make-string-output-stream)))
+    (unwind-protect
+         (progn
+           (log:setup :env :prod :level :info :stream out)
+           (let ((log:*log-condition-details* details))
+             (handler-case
+                 (handler-bind ((cl:error (lambda (c) (log:exception c "request failed" :path "/x"))))
+                   (%fail-with-a-secret "SECRET-ARG"))
+               (cl:error () nil)))
+           (get-output-stream-string out))
+      (log:setup :env :dev :level :info))))
+
+(test exception-writes-the-type-and-frame-names-and-no-report-or-arguments
+  (let ((line (%exception-line)))
+    (is (search "COMMON-LISP::SIMPLE-ERROR" line) "the condition's type: ~A" line)
+    (is (search "\"error-type\"" line) "in the error-type field: ~A" line)
+    (is (search "%FAIL-WITH-A-SECRET" line) "the frame's function name: ~A" line)
+    (is (search "request failed" line) "and the message: ~A" line)
+    (is (null (search "SECRET-VALUE" line)) "not the condition's report: ~A" line)
+    (is (null (search "SECRET-ARG" line)) "not the frame's argument: ~A" line)
+    (is (null (search "\"error\":" line)) "and no error field at all: ~A" line)))
+
+(test exception-writes-the-report-and-arguments-only-under-the-development-setting
+  (let ((line (%exception-line :details t)))
+    (is (search "SECRET-VALUE" line) "the report, when an app turns the setting on: ~A" line)
+    (is (search "SECRET-ARG" line) "and the frame's argument: ~A" line)
+    (is (search "COMMON-LISP::SIMPLE-ERROR" line) "with the type as well: ~A" line))
+  (is (null log:*log-condition-details*) "the setting is off by default"))
+
+(test the-debug-level-does-not-turn-the-details-on
+  (let ((out (make-string-output-stream)))
+    (unwind-protect
+         (progn
+           (log:setup :env :prod :level :debug :stream out)
+           (handler-case
+               (handler-bind ((cl:error (lambda (c) (log:exception c "request failed"))))
+                 (%fail-with-a-secret "SECRET-ARG"))
+             (cl:error () nil))
+           (let ((line (get-output-stream-string out)))
+             (is (null (search "SECRET-VALUE" line)) "~A" line)
+             (is (null (search "SECRET-ARG" line)) "~A" line)))
+      (log:setup :env :dev :level :info))))

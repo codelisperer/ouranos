@@ -46,4 +46,5 @@
     a condition with a backtrace; LEVEL! changes levels at runtime (also live from the REPL
     via log4cl).")
   (:export #:setup #:level! #:with-context #:*context* #:*layout*
-           #:trace #:debug #:info #:warn #:error #:fatal #:exception))
+           #:trace #:debug #:info #:warn #:error #:fatal #:exception
+           #:*log-condition-details* #:condition-type))

@@ -14,6 +14,22 @@ its tag.
 
 ### An app may have to act
 
+- **`aion/log:exception` no longer writes the condition's report or the backtrace's frame
+  arguments, by default** (#1013). Both can hold outside data: a database driver's report can
+  quote row values, and a frame's arguments can hold a request body, and `hyperion/logging:wrap`
+  logs every error that escapes a route this way, at ERROR.
+  - **What it writes now.** Its line has `error-type`, the condition's fully qualified type such
+    as `COMMON-LISP::SIMPLE-ERROR`, and `backtrace`, the names of up to 40 frames with no
+    arguments. The `error` field is gone. Log tooling that searched for `error` should search for
+    `error-type`.
+  - **The old detail is a development setting.** `aion/log:*log-condition-details*`, NIL by
+    default, brings back the report as `error` and the frames' arguments. The `:debug` level does
+    not turn it on.
+  - **Other log lines with a report.** These now carry the condition's type through the new
+    `aion/log:condition-type` instead of its report:
+    - `hyperion/server-uv`'s nine error and debug lines that had `:condition` (for example "server-uv: handler signalled"), and its "a loop could not be closed" line, whose `:error` became `:condition`;
+    - `praxeon`'s "llm request failed" lines, whose `:error` became `:condition`.
+
 - **MCP resources and retrieval passages are untrusted by default, so in a prompt they refuse
   `:requires-user-intent` means for the turn** (#907, after #906). `praxeon/mcp:add-resource` and
   `praxeon/retrieval:passage->ctx-item` put outside content into an agent's context with nothing
