@@ -1328,10 +1328,17 @@ expand into one role:\"tool\" message each)."
 
 ;;; --- response translation: OpenAI JSON -> neutral -----------------------
 (defun %parse-json-args (s)
-  "Parse an OpenAI tool-call arguments JSON string into a hash-table."
+  "Parse an OpenAI tool-call arguments JSON string into a hash-table. No arguments, or an empty
+string, is an empty object. A string that is not JSON signals PROVIDER-REQUEST-FAILED, whose report
+gives its length and never its text: arguments cut off by the token limit (finish_reason
+\"length\") would otherwise reach the tool as an empty object, as if the model had asked for
+nothing, where an Anthropic reply cut off the same way signals."
   (if (and (stringp s) (plusp (length s)))
       (handler-case (jzon:parse s)
-        (error () (make-hash-table :test #'equal)))
+        (error ()
+          (error 'praxeon/conditions:provider-request-failed
+                 :detail (format nil "OpenAI-compatible response: a tool call's arguments are not JSON, ~D characters"
+                                 (length s)))))
       (make-hash-table :test #'equal)))
 
 (defun %parse-openai (parsed)

@@ -1257,6 +1257,10 @@ its tag.
     with `[` or `]` in it. `http://evil.com\@127.0.0.1/` goes to `evil.com` in some clients, so
     it is refused rather than reported as loopback.
   - The egress hook (#988) is to receive this same value.
+  - An OpenAI-compatible tool call whose arguments are not JSON, such as arguments cut off when a
+    reply ends with `finish_reason: "length"`, signals `provider-request-failed`, whether the
+    reply was streamed or not. Before, the tool was called with an empty object. Arguments that
+    are empty or missing are still an empty object.
 
 - **praxeon/image: the generate-image means offers the model a `mask`, so it can change only part
   of an image** (#946). With `:resolve-reference` and a provider that takes a mask

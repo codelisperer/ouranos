@@ -189,6 +189,14 @@ connection. Returns the completion, or the condition COMPLETE signalled."
                       (llm:complete (funcall provider-at s) (list (llm:msg "user" "hi"))))
         (error (c) c)))))
 
+(defun %streamed-outcome-plain (provider-at whole)
+  "Complete without streaming against a server answering WHOLE. Returns the completion, or the
+condition COMPLETE signalled."
+  (multiple-value-bind (handler) (%provider-server whole '())
+    (aion/test-http:with-server (s handler)
+      (handler-case (llm:complete (funcall provider-at s) (list (llm:msg "user" "hi")))
+        (error (c) c)))))
+
 (defun %ended-early-p (outcome)
   "Whether OUTCOME is the PROVIDER-REQUEST-FAILED for a stream that ended before its end event."
   (and (typep outcome 'cnd:provider-request-failed)
@@ -215,6 +223,39 @@ length and not the data, rather than being dropped and the reply returned withou
     (is (typep outcome 'cnd:provider-request-failed) "got ~A" outcome)
     (is (search "not JSON" (princ-to-string outcome)))
     (is (null (search "content_block_delta" (princ-to-string outcome))))))
+
+(test an-anthropic-stream-with-its-end-and-a-piece-of-tool-arguments-missing-is-a-failed-request
+  "A stream that ends with message_stop but lost the second piece of a tool call's arguments, so
+the arguments put together are not JSON, signals PROVIDER-REQUEST-FAILED saying so, with their
+length and not their text."
+  (let* ((events (append (subseq +anthropic-events+ 0 8) (subseq +anthropic-events+ 9)))
+         (outcome (%streamed-outcome #'%streaming-anthropic events)))
+    (is (equal "message_stop" (car (car (last events)))) "the stream keeps its end event")
+    (is (typep outcome 'cnd:provider-request-failed) "got ~A" outcome)
+    (is (search "streamed arguments are not JSON" (princ-to-string outcome)) "got ~A" outcome)
+    (is (null (search "wea" (princ-to-string outcome))))))
+
+(defparameter +openai-cut-by-length+
+  "{\"choices\":[{\"index\":0,\"finish_reason\":\"length\",
+     \"message\":{\"role\":\"assistant\",\"content\":\"\",
+       \"tool_calls\":[{\"id\":\"call_1\",\"type\":\"function\",
+                        \"function\":{\"name\":\"lookup\",\"arguments\":\"{\\\"q\\\":\\\"wea\"}}]}}]}"
+  "An OpenAI reply that reached the token limit halfway through a tool call's arguments.")
+
+(test an-openai-tool-call-cut-off-by-the-token-limit-is-a-failed-request
+  "A reply that ends cleanly with finish_reason length, while a tool call's arguments are cut off,
+signals PROVIDER-REQUEST-FAILED, sent whole or as a stream, rather than handing the tool an empty
+object. Arguments that are empty are still an empty object."
+  (let ((whole (%streamed-outcome-plain #'%streaming-openai +openai-cut-by-length+))
+        (streamed (%streamed-outcome
+                   #'%streaming-openai
+                   (append (subseq +openai-events+ 0 4)
+                           '((nil . "{\"choices\":[{\"index\":0,\"delta\":{},\"finish_reason\":\"length\"}]}")
+                             (nil . "[DONE]"))))))
+    (dolist (outcome (list whole streamed))
+      (is (typep outcome 'cnd:provider-request-failed) "got ~A" outcome)
+      (is (search "arguments are not JSON" (princ-to-string outcome)) "got ~A" outcome)))
+  (is (zerop (hash-table-count (praxeon/llm::%parse-json-args "")))))
 
 (test an-openai-stream-cut-off-in-its-text-or-a-tool-call-is-a-failed-request
   "A stream that closes with neither a finish reason nor [DONE] signals PROVIDER-REQUEST-FAILED,
