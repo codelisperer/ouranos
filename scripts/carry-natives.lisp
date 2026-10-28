@@ -34,6 +34,8 @@
 ;;;; library is then reported as not open.
 
 (require :asdf)
+;;; The BUILT-FROM stamp's one format, shared with the scripts that write it (#977).
+(load (merge-pathnames "built-from.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
 
 (defpackage #:ouranos-carry
   (:use #:cl)
@@ -375,11 +377,8 @@ one of these names is the app carrying its own SQLite.")
   "Whether SQLITE-DIR/BUILT-FROM names the version and sha256 in ROOT/sqlite.pin."
   (let* ((pin (merge-pathnames "sqlite.pin" root))
          (version (%pin-field pin "version"))
-         (sha (%pin-field pin "sha256"))
-         (stamp (probe-file (merge-pathnames "BUILT-FROM" sqlite-dir))))
-    (and version sha stamp
-         (string= (uiop:read-file-string stamp)
-                  (format nil "version ~A~%sha256 ~A~%" version (string-downcase sha))))))
+         (sha (%pin-field pin "sha256")))
+    (and version sha (ouranos-built-from:stamp-matches-p sqlite-dir version sha))))
 
 (defun tree-sqlite-carry (vendor carries &key (loaded (%sqlite-loaded-p)) platform)
   "What build-desktop-app.lisp carries for SQLite, as (values TREE-CARRIES NOTE).

@@ -256,15 +256,10 @@ bare numbers are hidden from screen readers, so nothing is read twice."
                (setf start (1+ pos))))
     found))
 
-(defun %luminance (hex)
-  (flet ((channel (i)
-           (let ((c (/ (parse-integer hex :start i :end (+ i 2) :radix 16) 255d0)))
-             (if (<= c 0.03928d0) (/ c 12.92d0) (expt (/ (+ c 0.055d0) 1.055d0) 2.4d0)))))
-    (+ (* 0.2126d0 (channel 1)) (* 0.7152d0 (channel 3)) (* 0.0722d0 (channel 5)))))
-
 (defun %contrast (a b)
-  (let ((la (%luminance a)) (lb (%luminance b)))
-    (/ (+ (max la lb) 0.05d0) (+ (min la lb) 0.05d0))))
+  "WCAG contrast between A and B, by hyperion/appearance's formula, so the calendar and the
+appearance tokens are measured the same way (#981)."
+  (hyperion/appearance:contrast-ratio a b))
 
 (test the-default-text-colours-meet-4.5-to-1
   "Every text colour the stylesheet declares, against every background it declares and

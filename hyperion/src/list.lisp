@@ -35,6 +35,8 @@
   (:export
    ;; the spec
    #:make-list-spec #:list-spec #:list-spec-p #:list-spec-id
+   #:list-spec-sorts #:list-spec-default-sort #:list-spec-filters #:list-spec-hx-target
+   #:list-param-name
    ;; the state
    #:read-list-state #:list-state #:list-state-p #:list-state-spec #:list-state-page
    #:list-state-page-size #:list-state-sort #:list-state-direction #:list-state-filters
@@ -42,7 +44,7 @@
    ;; the query
    #:list-clauses #:filter-where
    ;; links
-   #:list-href #:list-params
+   #:list-href #:list-params #:list-carried-params
    ;; remembered state
    #:load-list-state #:save-list-state #:session-list-store #:make-session-list-store
    ;; components
@@ -145,6 +147,12 @@ Signals an error for a malformed spec, because a spec is code."
 (defun %param (spec name)
   "The query-parameter name for NAME (a string) in SPEC."
   (concatenate 'string (list-spec-prefix spec) name))
+
+(defun list-param-name (spec name)
+  "The query-parameter name the list SPEC reads for NAME: a filter's keyword, or one of the
+strings \"page\", \"size\", \"sort\" and \"dir\". It is NAME's lowercase name with the spec's
+prefix, so a form field named by it is read as that filter or setting."
+  (%param spec (if (stringp name) name (%lower name))))
 
 (defun %sort-entry (spec key) (assoc key (list-spec-sorts spec)))
 
@@ -334,6 +342,22 @@ of the list's parameters restores the stored ones, and the default view must sta
        (list (cons (%param spec "dir") (%lower (list-state-direction state)))))
      (loop for (name . value) in (list-state-filters state)
            collect (cons (%param spec (%lower name)) value)))))
+
+(defun list-carried-params (state &key except)
+  "The (name . value) pairs a GET form for this list carries as hidden fields, so that
+submitting it changes only its own fields, as LIST-HREF does: first the request's parameters
+that the list does not own, then STATE's own parameters except the page and the names in
+EXCEPT, parameter names as LIST-PARAM-NAME gives them. The page is left out, so the form's
+request starts on page 1."
+  (let* ((spec (list-state-spec state))
+         (own (%own-param-names spec))
+         (page (%param spec "page")))
+    (append
+     (remove-if (lambda (pair) (member (car pair) own :test #'string=))
+                (http:form-alist (list-state-query-string state)))
+     (remove-if (lambda (pair) (or (string= (car pair) page)
+                                   (member (car pair) except :test #'string=)))
+                (list-params state)))))
 
 (defun list-href (state &rest changes &key (page nil page-p) (size nil size-p)
                                            (sort nil sort-p) (dir nil dir-p) filters)
