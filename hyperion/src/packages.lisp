@@ -491,6 +491,17 @@
    ;; component
    #:consent-banner))
 
+;;; --- In-page notices, and htmx error responses shown in them (#980) -------
+(cl:defpackage #:hyperion/notice
+  (:use #:cl)
+  (:local-nicknames (#:spin #:spinneret)
+                    (#:i18n #:hyperion/i18n))
+  (:documentation
+   "Notices on the page the user is on: an error, a warning or a success, in a region with
+    aria-live (assertive for errors, polite otherwise). The region's script shows an htmx 2
+    error response there instead of letting htmx drop it. Not stored; see notice.lisp.")
+  (:export #:notice #:notice-oob #:notice-region #:notices-script))
+
 ;;; --- Link-preview tags: Open Graph, Twitter cards, canonical (#821) ------
 (cl:defpackage #:hyperion/page-meta
   (:use #:cl)
