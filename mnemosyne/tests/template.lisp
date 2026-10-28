@@ -101,9 +101,11 @@ section 10). A test that relies on foreign keys sets it on its copy, and SQLite 
                                                "CREATE TABLE parent (id integer PRIMARY KEY)"
                                                "DROP TABLE parent")
                             (be:make-migration "20261028_105_child" "child"
-                                               (concatenate 'string
+                                               (concatenate
+                                                'string
                                                 "CREATE TABLE child (id integer PRIMARY KEY, "
-                                                "parent_id integer NOT NULL REFERENCES parent (id))")
+                                                "parent_id integer NOT NULL "
+                                                "REFERENCES parent (id))")
                                                "DROP TABLE child")))
     (tmpl:with-sqlite-template-copy (c tm)
       (is (= 0 (%count c "PRAGMA foreign_keys")))
