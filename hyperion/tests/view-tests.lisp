@@ -1200,7 +1200,7 @@ origin is localhost:PORT."
 var sent=send('top',typeof window.hyperionDialog+','+typeof window.__hyperion_dialog_raw+','+location.origin);
 var noUser=(window.hyperionDialog?window.hyperionDialog({kind:'open'}):Promise.resolve({error:'absent'}))
 .then(function(r){return send('nouser',JSON.stringify(r));});
-Promise.all([sent,noUser]).then(function(){setTimeout(function(){location.href='http://localhost:~D/away';},1000);});
+Promise.all([sent,noUser]).then(function(){return send('navigating','1');}).then(function(){setTimeout(function(){location.href='http://localhost:~D/away';},100);});
 </script></body></html>" port +dialog-send-js+ port))
       ((string= path "/child") (reporter "child"))
       ((string= path "/same") (reporter "same"))
@@ -1253,10 +1253,12 @@ send('trapready',location.origin);
        ,@body)))
 
 (defun %run-dialog-view (url)
-  "Start the view on URL with --dialogs, closing itself after 20 seconds, as a real window: hidden
-on Windows, shown on macOS. Returns its exit code."
-  #+win32 (values (%run-hidden-launcher url "Dialogs" "--dialogs" "--exit-after" "20"))
-  #+darwin (values (%run-shown-launcher 60 url "Dialogs" "--dialogs" "--exit-after" "20"))
+  "Start the view on URL with --dialogs, closing itself after 40 seconds, as a real window: hidden
+on Windows, shown on macOS. Returns its exit code. Forty, not twenty: on the Windows runner the
+first run's last report, from the page it navigates to, had not arrived by twenty seconds, while
+every earlier report had (run 40633167094)."
+  #+win32 (values (%run-hidden-launcher url "Dialogs" "--dialogs" "--exit-after" "40"))
+  #+darwin (values (%run-shown-launcher 80 url "Dialogs" "--dialogs" "--exit-after" "40"))
   #-(or win32 darwin) (error "no real-window run for ~A here" url))
 
 (test a-dialog-binding-reaches-only-the-apps-own-top-level-page-on-a-real-window
@@ -1283,6 +1285,8 @@ top-level page only, and refuses a call made outside a user action."
                   "a frame from the app's own origin has neither: ~S" reports)
               (is (equal "{\"error\":\"no-user-action\"}" (report "nouser"))
                   "a call outside a user action is refused: ~S" reports)
+              (is (equal "1" (report "navigating"))
+                  "the page started its navigation to the other origin: ~S" reports)
               (is (equal (format nil "undefined,undefined,~A" other) (report "away"))
                   "a top-level page from another origin has neither: ~S" reports)))))))
 
