@@ -121,13 +121,19 @@ page shows a second post of a double click."
                       (%html (format nil "<p id=\"posted\" hx-swap-oob=\"true\">restored-~D</p>"
                                      (incf undos)))))))))
 
+(defun %unescape (text)
+  "TEXT with the character references a DOM dump writes in text turned back into characters."
+  (loop for (from to) in '(("&lt;" "<") ("&gt;" ">") ("&quot;" "\"") ("&#39;" "'") ("&amp;" "&"))
+        do (setf text (uiop:frob-substrings text (list from) to)))
+  text)
+
 (defun %kit-results (dom)
   "The key=value pairs the page logged in #results, as an alist of strings."
   (let* ((at (search "id=\"results\"" dom))
          (start (and at (1+ (position #\> dom :start at))))
          (end (and start (position #\< dom :start start))))
     (when end
-      (loop for pair in (uiop:split-string (subseq dom start end) :separator " ")
+      (loop for pair in (uiop:split-string (%unescape (subseq dom start end)) :separator " ")
             for eq = (position #\= pair)
             when eq collect (cons (subseq pair 0 eq) (subseq pair (1+ eq)))))))
 
@@ -178,5 +184,185 @@ arrives in the status region, and dismiss and undo remove it."
                        "a double click on Undo posts once, because htmx drops a second request from a button whose first is in flight: ~S"
                        (saw "undone"))
                    (is (equal "true" (saw "htmx")) "htmx is still loaded")))
+            (ignore-errors (hyperion/server:stop handler))
+            (is (ports:await-released port) "the port was still accepting after teardown"))))))
+
+;;; --- the list toolbar and the properties panel --------------------------------------
+
+(defparameter *kit-list-spec*
+  (hyperion/list:make-list-spec :id "drafts"
+                                :sorts '((:title :column :title)
+                                         (:updated :column :id :direction :desc))
+                                :tiebreak :id
+                                :filters '((:q :text t) (:status :values ("draft" "sent")))
+                                :hx-target "#drafts"))
+
+(defparameter *kit-list-start* "sort=updated&dir=asc"
+  "The query the list page is first loaded with. It names a direction, so the test can see the
+toolbar drop it when the sort key changes.")
+
+(defparameter *kit-drafts*
+  '((1 "Memo to staff" "draft") (2 "Meeting notes" "sent") (3 "Menu" "sent") (4 "Budget" "draft")))
+
+(defun %kit-list-section (state)
+  "The element the list's requests replace: the toolbar, then the rows."
+  (let* ((q (hyperion/list:filter-value state :q))
+         (status (hyperion/list:filter-value state :status))
+         (rows (remove-if-not (lambda (d) (and (or (null q) (search q (second d)))
+                                               (or (null status) (equal status (third d)))))
+                              *kit-drafts*))
+         (rows (if (eq :title (hyperion/list:list-state-sort state))
+                   (sort (copy-list rows) #'string< :key #'second)
+                   rows)))
+    (spinneret:with-html-string
+      (:section :id "drafts"
+        (hyperion/kit/toolbar:list-toolbar state :search :q
+                                           :filters '((:status "Status"))
+                                           :sorts '((:title "Title") (:updated "Updated")))
+        (:table
+          (:tbody
+            (dolist (d rows)
+              (:tr :attrs (hyperion/kit/panel:selectable-row (first d) (format nil "/kit/panel/~D" (first d)))
+                (:td (second d))))))))))
+
+(defparameter *kit-list-scenario* "
+var r = [];
+function log(k, v) { r.push(k + '=' + v); document.getElementById('results').textContent = r.join(' '); }
+function act() { var a = document.activeElement; return a ? (a.id || a.tagName.toLowerCase()) : 'none'; }
+function byId(id) { return document.getElementById(id); }
+function q(sel) { return document.querySelector(sel); }
+function rows() { return document.querySelectorAll('#drafts tr').length; }
+function panelTitle() { var t = q('#hy-panel h2'); return t ? t.textContent.replace(/ /g, '_') : 'none'; }
+function current() { var c = q('[data-hy-row][aria-current=true]'); return c ? c.id : 'none'; }
+function key(el, k) { el.dispatchEvent(new KeyboardEvent('keydown', {key: k, bubbles: true, cancelable: true})); }
+function pick(sel, v) { var s = q(sel); s.value = v; s.dispatchEvent(new Event('change', {bubbles: true})); }
+var steps = [
+  function () { log('start-rows', rows()); var s = byId('hy-toolbar-search'); s.focus(); s.value = 'Me';
+    s.dispatchEvent(new Event('input', {bubbles: true})); },
+  function () { },
+  function () { log('search-url', location.search); log('search-rows', rows());
+    log('search-focus', act()); log('search-value', byId('hy-toolbar-search').value);
+    pick('select[name=status]', 'sent'); },
+  function () { log('status-url', location.search); log('status-rows', rows()); pick('select[name=sort]', 'title'); },
+  function () { log('sort-url', location.search); log('sort-first', q('#drafts tr td').textContent.trim().replace(/ /g, '_'));
+    pick('select[name=status]', ''); },
+  function () { log('all-url', location.search); byId('row-2').click(); },
+  function () { log('click-panel', panelTitle()); log('click-current', current());
+    byId('row-1').focus(); key(byId('row-1'), 'Enter'); },
+  function () { log('enter-panel', panelTitle()); log('enter-current', current());
+    q('#hy-panel [data-hy-panel-close]').focus(); key(document.activeElement, 'Escape');
+    log('esc-empty', !q('#hy-panel .hy-properties')); log('esc-focus', act()); byId('row-2').click(); },
+  function () { q('#hy-panel [data-hy-panel-close]').click();
+    log('x-empty', !q('#hy-panel .hy-properties')); log('x-focus', act());
+    log('htmx', !!window.htmx); log('done', 'yes'); }
+];
+var i = 0;
+function next() {
+  if (i < steps.length) {
+    try { steps[i++](); } catch (e) { log('error-' + i, e.message.replace(/ /g, '_')); }
+    setTimeout(next, 400);
+  }
+}
+document.addEventListener('DOMContentLoaded', function () { setTimeout(next, 100); });
+"
+  "The steps the list page runs, logged as key=value for %KIT-RESULTS. The search waits two
+steps, for the toolbar's 300ms delay and then the response.")
+
+(defun %kit-list-page (state)
+  (spinneret:with-html-string
+    (:doctype)
+    (:html
+      (:head (:meta :charset "utf-8")
+             (:script :src (assets:url :htmx))
+             (:script (:raw (hyperion/kit/toolbar:toolbar-js)))
+             (:script (:raw (hyperion/kit/panel:panel-js))))
+      (:body
+        (:raw (%kit-list-section state))
+        (hyperion/kit/panel:panel-region)
+        (:pre :id "results")
+        (:script (:raw *kit-list-scenario*))))))
+
+
+
+(defun %kit-list-app ()
+  (router:to-app
+   (router:router
+    (assets:mount)
+    (router:route :get "/kit/list"
+                  (lambda (env)
+                    (let ((state (hyperion/list:read-list-state *kit-list-spec* env)))
+                      (%html (if (http:request-header env "hx-request")
+                                 (%kit-list-section state)
+                                 (%kit-list-page state))))))
+    (router:route :get "/kit/panel/:id"
+                  (lambda (env)
+                    (let ((draft (assoc (parse-integer (router:path-param env "id")) *kit-drafts*)))
+                      (%html (spinneret:with-html-string
+                               (hyperion/kit/panel:properties-panel
+                                (second draft)
+                                :body (lambda () (spinneret:with-html (:p (third draft)))))))))))))
+
+(defun %query-alist (search)
+  "SEARCH, a location.search or a LIST-HREF result, as a sorted alist, so two orders of the
+same parameters compare equal."
+  (sort (http:form-alist (string-left-trim "?" search)) #'string< :key #'car))
+
+(test the-list-toolbar-and-the-properties-panel-in-a-real-browser
+  "The toolbar's requests carry the parameters LIST-HREF writes for the same change, and the
+search field keeps focus and its text across the swap; a row loads its panel on a click and on
+Enter and becomes the current row; Escape and the close button empty the panel and put focus
+back on the current row."
+  (let ((browser (%smoke-browser)))
+    (if (null browser)
+        (skip "No Chrome or Edge found; set HYPERION_SMOKE_BROWSER to run the kit list page")
+        (let* ((app (%kit-list-app))
+               (port nil)
+               (handler (ports:call-with-port
+                         (lambda (p)
+                           (prog1 (hyperion/server:start app :port p :host "127.0.0.1" :log nil)
+                             (setf port p))))))
+          (unwind-protect
+               (let* ((dom (%run-browser browser (format nil "http://127.0.0.1:~D/kit/list?~A"
+                                                         port *kit-list-start*)))
+                      (results (%kit-results dom))
+                      (s0 (hyperion/list:read-list-state *kit-list-spec*
+                                                         (list :query-string *kit-list-start*)))
+                      (h1 (hyperion/list:list-href s0 :filters '(:q "Me")))
+                      (s1 (hyperion/list:read-list-state *kit-list-spec*
+                                                         (list :query-string (subseq h1 1))))
+                      (h2 (hyperion/list:list-href s1 :filters '(:status "sent")))
+                      (s2 (hyperion/list:read-list-state *kit-list-spec*
+                                                         (list :query-string (subseq h2 1))))
+                      (h3 (hyperion/list:list-href s2 :sort :title))
+                      (s3 (hyperion/list:read-list-state *kit-list-spec*
+                                                         (list :query-string (subseq h3 1))))
+                      (h4 (hyperion/list:list-href s3 :filters '(:status nil))))
+                 (flet ((saw (key) (cdr (assoc key results :test #'string=)))
+                        (same-query (key href)
+                          (equal (%query-alist (or (cdr (assoc key results :test #'string=)) ""))
+                                 (%query-alist href))))
+                   (is (equal "yes" (saw "done")) "the page ran every step: ~S" results)
+                   (is (null (remove-if-not (lambda (p) (search "error" (car p))) results))
+                       "a step threw: ~S" results)
+                   (is (equal "4" (saw "start-rows")))
+                   (is (same-query "search-url" h1) "search: ~S, LIST-HREF ~S" (saw "search-url") h1)
+                   (is (equal "3" (saw "search-rows")))
+                   (is (equal "hy-toolbar-search" (saw "search-focus")) "focus stayed in the field")
+                   (is (equal "Me" (saw "search-value")))
+                   (is (same-query "status-url" h2) "status: ~S, LIST-HREF ~S" (saw "status-url") h2)
+                   (is (equal "2" (saw "status-rows")))
+                   (is (same-query "sort-url" h3) "a new sort key drops the direction: ~S, ~S"
+                       (saw "sort-url") h3)
+                   (is (equal "Meeting_notes" (saw "sort-first")))
+                   (is (same-query "all-url" h4) "All leaves the filter out: ~S, ~S" (saw "all-url") h4)
+                   (is (equal "Meeting_notes" (saw "click-panel")))
+                   (is (equal "row-2" (saw "click-current")))
+                   (is (equal "Memo_to_staff" (saw "enter-panel")) "Enter on a row loads its panel")
+                   (is (equal "row-1" (saw "enter-current")) "and makes it the current row")
+                   (is (equal "true" (saw "esc-empty")) "Escape closes the panel")
+                   (is (equal "row-1" (saw "esc-focus")) "focus back on the current row")
+                   (is (equal "true" (saw "x-empty")) "the close button closes it")
+                   (is (equal "row-2" (saw "x-focus")))
+                   (is (equal "true" (saw "htmx")))))
             (ignore-errors (hyperion/server:stop handler))
             (is (ports:await-released port) "the port was still accepting after teardown"))))))
