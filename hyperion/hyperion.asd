@@ -314,18 +314,21 @@
   :perform (test-op (o c) (uiop:symbol-call :hyperion/calendar/tests :run-tests)))
 
 (defsystem "hyperion/kit"
-  :description "Generic collection-page components: page header, breadcrumbs, empty state, segmented control and toggle group (#981)."
+  :description "Generic collection-page components: page header, breadcrumbs, empty state, segmented control, toggle group, dialogs, the destructive confirm and the undo notice (#981)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
   ;; Its stylesheet is served by hyperion/assets, which this system does not depend on, the
   ;; same arrangement as hyperion/calendar.
-  :depends-on ("spinneret")
+  ;; hyperion for hyperion/output, which compiles DIALOG-JS's Parenscript the way
+  ;; hyperion/js does.
+  :depends-on ("hyperion" "spinneret" "parenscript")
   :serial t
   :components ((:module "src/kit"
                 :serial t
                 :components ((:file "page")
-                             (:file "toggle"))))
+                             (:file "toggle")
+                             (:file "dialog"))))
   :in-order-to ((test-op (test-op "hyperion/kit/tests"))))
 
 (defsystem "hyperion/kit/tests"
@@ -414,10 +417,13 @@
   ;; the consumer -- here the consumer is the test).
   :depends-on ("hyperion/assets" "hyperion"   ; assets-tests.lisp calls router: and server:
                "hyperion/test-ports" "fiveam" "ironclad" "clack-handler-hunchentoot"
+               ;; kit-browser-tests runs hyperion/kit's dialogs in the smoke page's browser (#981).
+               "hyperion/kit" "spinneret"
                (:require "sb-bsd-sockets"))
   :serial t
   :components ((:file "tests/assets-tests")
-               (:file "tests/htmx-smoke-tests"))
+               (:file "tests/htmx-smoke-tests")
+               (:file "tests/kit-browser-tests"))   ; uses the smoke page's browser helpers
   :perform (test-op (o c) (uiop:symbol-call :hyperion/assets/tests :run-tests)))
 
 ;;; Durable session store, backed by mnemosyne. A separate system so hyperion core keeps

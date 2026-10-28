@@ -227,10 +227,38 @@ The components so far:
 - `empty-state`;
 - `segmented-control` and `toggle-group`, which are buttons with `aria-pressed` in a labelled
   group. They need no script for the keyboard, because a `<button>` already takes Enter and
-  Space.
+  Space;
+- `dialog`, `dialog-opener`, `confirm-dialog`, `notice-region` and `undo-notice`, described
+  below.
 
 The tests parse the HTML the components write and check roles, names and pressed state. They
 do not search the HTML as a string.
+
+Dialogs (`hyperion/kit/dialog`) use the browser's own `<dialog>`, opened with `showModal()`.
+The browser makes the rest of the page inert, keeps focus inside the dialog and focuses the
+field marked `autofocus`. `dialog-js`, included once per page, adds what not every browser
+does: Escape closes the dialog, and closing it by any route returns focus to the button that
+opened it. Browsers return focus to whatever had it when the dialog opened, and in Safari and
+Firefox on macOS clicking a button does not focus it, so without the script focus would not
+go back to the opener there. An opener with an `href` loads the dialog's contents with htmx
+first and opens the dialog when they have settled, so the field the browser focuses is the
+loaded one.
+
+`confirm-dialog` is the one layout for a destructive action: Cancel on the left with the
+initial focus, so Enter does not destroy anything, and the action on the right, named by what
+it does ("Delete 3 drafts", never "OK") and styled as danger. It closes when its request
+succeeds.
+
+`undo-notice` is shown instead of a confirm when the action can be undone. It goes into a
+`notice-region`, a `role="status"` region that is on the page before any notice arrives,
+because a live region added together with its message is not announced reliably. It has no
+timer. A handler returns it out of band with `:oob t` alongside its own response.
+
+The tests for these come in two parts. `hyperion/kit/tests` parses the markup. In
+`hyperion/assets/tests`, `kit-browser-tests` serves a page with each kind of dialog and runs it
+in the same headless browser as the htmx smoke page. A script on that page presses the
+controls and records which element has focus and whether each dialog is open, and the test
+reads that record back from the page.
 
 ### The hot-reload dev loop — the signature feature
 

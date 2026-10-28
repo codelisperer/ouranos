@@ -8,6 +8,7 @@
   (:use #:cl #:fiveam)
   (:local-nicknames (#:page #:hyperion/kit/page)
                     (#:toggle #:hyperion/kit/toggle)
+                    (#:dlg #:hyperion/kit/dialog)
                     (#:spin #:spinneret))
   (:export #:run-tests))
 
@@ -332,3 +333,133 @@ and add no element and no attribute."
     (is (equal "/l?q=\"x" (%attr (%one dom "button") "hx-get")) "a quote in an href")
     (is (notany (lambda (e) (%attr e "onmouseover"))
                 (append (%all dom "a") (%all dom "button") (%all dom "div") (%all dom "h1"))))))
+
+;;; --- dialogs, the confirm and the undo notice ----------------------------------
+;;;
+;;; What these components do in a browser (focus, Escape, closing on success) is checked by
+;;; kit-browser-tests in hyperion/assets/tests. These check the markup that behaviour reads.
+
+(defun %by-id (dom id)
+  (plump:get-element-by-id dom id))
+
+(test a-dialog-is-named-by-its-title-and-has-a-named-close-button
+  (let* ((dom (%dom (lambda () (dlg:dialog "create" "New draft" :close-label "Fermer"))))
+         (d (%one dom "dialog"))
+         (close (%one dom "button")))
+    (is (equal "create" (%attr d "id")))
+    (is (null (%attr d "open")) "a dialog is written closed")
+    (is (equal "create-title" (%attr d "aria-labelledby")))
+    (is (equal "New draft" (%text (%by-id dom "create-title"))))
+    (is (equal "button" (%attr close "type")) "the close button never submits a form")
+    (is (equal "Fermer" (%attr close "aria-label")))
+    (is (%attr close "data-hy-dialog-close"))
+    (is (%by-id dom "create-body") "the body has the id an opener loads into")))
+
+(test a-dialog-writes-the-body-it-is-given
+  (let ((dom (%dom (lambda ()
+                     (dlg:dialog "create" "New draft"
+                                 :body (lambda () (spin:with-html (:input :id "name"))))))))
+    (is (eq (%by-id dom "create-body") (plump:parent (%by-id dom "name"))))))
+
+(test an-opener-names-its-dialog-and-loads-only-with-an-href
+  (let ((plain (%one (%dom (lambda () (dlg:dialog-opener "create" "New draft"))) "button"))
+        (loads (%one (%dom (lambda () (dlg:dialog-opener "create" "New draft" :href "/new")))
+                     "button")))
+    (is (equal "dialog" (%attr plain "aria-haspopup")))
+    (is (equal "create" (%attr plain "aria-controls")))
+    (is (equal "create" (%attr plain "data-hy-dialog-open")))
+    (is (equal "button" (%attr plain "type")))
+    (is (equal "New draft" (%text plain)))
+    (is (null (%attr plain "hx-get")) "no href, no request")
+    (is (equal "/new" (%attr loads "hx-get")))
+    (is (equal "#create-body" (%attr loads "hx-target")))
+    (is (equal "innerHTML" (%attr loads "hx-swap")))))
+
+(defun %confirm (&rest args)
+  (%dom (lambda ()
+          (apply #'dlg:confirm-dialog "confirm" "Delete 3 drafts?" "They go to the trash."
+                 (append args '(:action-href "/drafts/delete" :action-label "Delete 3 drafts"))))))
+
+(test the-confirm-puts-cancel-first-with-focus-and-the-named-action-last
+  (let* ((dom (%confirm))
+         (form (%one dom "form"))
+         (buttons (%all form "button"))
+         (cancel (first buttons))
+         (action (car (last buttons))))
+    (is (= 2 (length buttons)))
+    (is (equal "confirm-cancel" (%attr cancel "id")))
+    (is (equal "button" (%attr cancel "type")) "Cancel never submits")
+    (is (%attr cancel "autofocus") "Cancel has the initial focus, so Enter cancels")
+    (is (%attr cancel "data-hy-dialog-close"))
+    (is (equal "confirm-action" (%attr action "id")))
+    (is (equal "submit" (%attr action "type")))
+    (is (equal "Delete 3 drafts" (%text action)))
+    (is (search "is-danger" (%attr action "class")))
+    (is (null (%attr action "autofocus")))
+    (is (equal "They go to the trash." (%text (%one dom "p"))))))
+
+(test the-confirm-posts-and-closes-on-success
+  (let ((form (%one (%confirm) "form"))
+        (targeted (%one (%confirm :hx-target "#drafts") "form"))
+        (swapped (%one (%confirm :hx-target "#drafts" :hx-swap "innerHTML") "form")))
+    (is (equal "/drafts/delete" (%attr form "hx-post")))
+    (is (equal "/drafts/delete" (%attr form "action")) "the form still posts without htmx")
+    (is (%attr form "data-hy-close-on-success"))
+    (is (equal "find [type=submit]" (%attr form "hx-disabled-elt"))
+        "the action is disabled while its request is in flight")
+    (is (equal "none" (%attr form "hx-swap")) "with no target the response goes nowhere")
+    (is (equal "#drafts" (%attr targeted "hx-target")))
+    (is (equal "outerHTML" (%attr targeted "hx-swap")))
+    (is (equal "innerHTML" (%attr swapped "hx-swap")))))
+
+(test the-confirm-refuses-to-be-written-without-its-action
+  (signals error (spin:with-html-string
+                   (dlg:confirm-dialog "c" "Delete?" "Sure?" :action-href "/d")))
+  (signals error (spin:with-html-string
+                   (dlg:confirm-dialog "c" "Delete?" "Sure?" :action-label "Delete"))))
+
+(test the-notice-region-is-a-polite-status-region-that-starts-empty
+  (let ((region (%one (%dom (lambda () (dlg:notice-region))) "div")))
+    (is (equal dlg:*notice-region-id* (%attr region "id")))
+    (is (equal "status" (%attr region "role")))
+    (is (equal "polite" (%attr region "aria-live")))
+    (is (zerop (length (plump:children region))))))
+
+(test an-undo-notice-has-its-text-an-undo-and-a-named-dismiss
+  (let* ((dom (%dom (lambda () (dlg:undo-notice "Moved to trash" :undo-href "/undo"
+                                                                  :dismiss-label "Fermer"))))
+         (notice (find-if (lambda (d) (%attr d "data-hy-notice")) (%all dom "div")))
+         (buttons (%all notice "button")))
+    (is (search "Moved to trash" (%text notice)))
+    (is (= 2 (length buttons)))
+    (is (equal "/undo" (%attr (first buttons) "hx-post")))
+    (is (equal "closest [data-hy-notice]" (%attr (first buttons) "hx-target")))
+    (is (equal "outerHTML" (%attr (first buttons) "hx-swap")))
+    (is (equal "Undo" (%text (first buttons))))
+    (is (equal "Fermer" (%attr (second buttons) "aria-label")))
+    (is (%attr (second buttons) "data-hy-dismiss")))
+  (is (= 1 (length (%all (%dom (lambda () (dlg:undo-notice "Saved"))) "button")))
+      "no undo href, only the dismiss button"))
+
+(defun %children (node)
+  (coerce (plump:child-elements node) 'list))
+
+(test an-out-of-band-undo-notice-is-appended-to-its-region
+  (let* ((dom (%dom (lambda () (dlg:undo-notice "Moved" :undo-href "/u" :oob t :region "n2"))))
+         (wrapper (first (%children dom))))
+    (is (equal "beforeend:#n2" (%attr wrapper "hx-swap-oob")))
+    (is (= 1 (length (%children wrapper))))
+    (is (%attr (first (%children wrapper)) "data-hy-notice")
+        "the notice is the wrapper's one child, which is what beforeend appends"))
+  (is (null (%attr (first (%children (%dom (lambda () (dlg:undo-notice "Moved")))))
+                   "hx-swap-oob"))))
+
+(test the-dialog-script-is-guarded-and-listens-for-htmx
+  "The compiled script sets a window flag before installing its listeners, so a page can
+include it twice, and listens for the two htmx events the opener and the confirm need. What
+the listeners do is checked in a browser by kit-browser-tests."
+  (let ((js (dlg:dialog-js)))
+    (is (search "hyKitDialogs" js) "guarded so a page can include it twice")
+    (is (search "showModal" js))
+    (is (search "htmx:afterSettle" js))
+    (is (search "htmx:afterRequest" js))))

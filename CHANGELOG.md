@@ -1042,6 +1042,26 @@ its tag.
   case, as the standard reader folds them. `write-data` and `write-data-to-string` write only
   what `read-data` accepts, and refuse anything else before writing a character, including a symbol whose name would read back as a number or as CL's `t` or `nil`. An app that
   reads data it did not write with `cl:read`, even with `*read-eval*` nil, should move to it.
+- **hyperion/kit: dialogs, a destructive-action confirm and an undo notice** (#981, part
+  three). The new package `hyperion/kit/dialog`; `hyperion/kit` now also depends on
+  `parenscript`, which `hyperion` already loads.
+  - `dialog` writes a closed native `<dialog>` named by its title through `aria-labelledby`,
+    with a close button. `dialog-opener` writes the button that opens it; with `:href`, htmx
+    loads the dialog's contents first and the dialog opens when they have settled.
+  - `confirm-dialog` writes a dialog whose form posts to `:action-href` with htmx. Cancel is on
+    the left and has the initial focus, so Enter cancels; the action is on the right, labelled
+    by `:action-label` and styled as danger. The action is disabled while its request is in
+    flight, so a double click posts once. The dialog closes when the request succeeds. It
+    signals unless `:action-href` and `:action-label` are given.
+  - `notice-region` writes an empty `role="status"` live region, and `undo-notice` writes a
+    notice with Undo and Dismiss buttons and no timer. With `:oob t` a handler can return the
+    notice with any response and htmx appends it to the region.
+  - `dialog-js` returns the script for all of them, to include once per page. Escape closes a
+    dialog, and closing it returns focus to the button that opened it, including in browsers
+    where clicking a button does not focus it. The browser itself focuses the dialog's
+    `autofocus` element when it opens.
+  - `kit.css` styles the dialogs and notices.
+
 - **hyperion/kit: a page header, breadcrumbs, an empty state, a segmented control and a toggle
   group for collection pages** (#981, part two). A new opt-in system, `hyperion/kit`. Each
   component writes into Spinneret's `*html*`, like `hyperion/list:pager`, and is styled by
