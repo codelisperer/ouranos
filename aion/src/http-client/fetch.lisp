@@ -360,6 +360,10 @@ CHAIN), both for the caller to free. A directory is refused: aion/tls reads one 
 after S's seconds; a read woken that way signals SB-SYS:IO-TIMEOUT."
   (if (listen (%inner s))
       (funcall thunk)
+      ;; THREAD-LIFETIME: a timer made with :THREAD T starts its thread only when it fires.
+      ;; That thread sets the flag, closes the socket and ends. A read that finishes first
+      ;; unschedules the timer below, and then no thread is made.
+      ;; INTERRUPTS: not needed -- SBCL makes the thread, which runs one socket close and ends.
       (let ((timer (sb-ext:make-timer
                     (lambda ()
                       (setf (%timed-out s) t)
