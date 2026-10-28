@@ -176,6 +176,11 @@ the constructor carries on and makes the store, so the pool stays open and usabl
                    "the session store reads the database through the pool"))
           ({{name}}::close-database)))))))
 
+(define-condition %users-store-not-made (error) ()
+  (:report "{{name}}: the user store cannot be made")
+  (:documentation "The error the replaced user-store constructor signals, so that a test can
+tell it apart from an error OPEN-DATABASE met before it reached the stores."))
+
 (test a-store-that-cannot-be-made-leaves-the-database-closed
   "When a store cannot be made, OPEN-DATABASE signals, closes the pool it made, and leaves
 *POOL*, *SESSIONS* and *USERS* all NIL."
@@ -184,9 +189,9 @@ the constructor carries on and makes the store, so the pool stays open and usabl
      (%with-users-store-made-by
       (lambda (original &rest args)
         (declare (ignore original args))
-        (error "{{name}}: the user store cannot be made"))
+        (error '%users-store-not-made))
       (lambda ()
-        (signals error ({{name}}::open-database))
+        (signals %users-store-not-made ({{name}}::open-database))
         (is (null {{name}}:*pool*) "the pool was closed")
         (is (null {{name}}:*sessions*) "no session store is left set")
         (is (null {{name}}:*users*) "no user store is left set"))))))

@@ -55,8 +55,10 @@ Signals when the database is already open. If a store cannot be made, the pool i
     (setf *pool* (conn:make-pool (url:backend-from-url url) :size *pool-size*))
     ;; The pool is closed only when making the stores did not finish, as in START. A handler
     ;; on ERROR would run as soon as an error was signalled, before anything had decided to
-    ;; unwind, so a store constructor that signals a condition and handles it itself would have
-    ;; its pool closed under it (#944).
+    ;; unwind. A HANDLER-CASE inside a store constructor was never affected, because it handles
+    ;; the error before an outer handler sees it. The case it broke is an error that reaches a
+    ;; handler further out, which then declines it or resumes the constructor through a
+    ;; restart: the pool was already closed under the constructor (#944).
     (unwind-protect
          (prog1 (setf *sessions* (session-db:make-db-store *pool* :dialect +dialect+ :ensure t)
                       *users* (auth:make-db-auth *pool* :dialect +dialect+ :ensure t))
