@@ -1274,18 +1274,20 @@ control character and no DEL."
 #+os-windows
 (test a-pinned-connection-to-an-ipv6-literal-asks-about-the-bare-address
   "F3: QURI keeps the brackets of https://[::1]/; the verifier is asked about ::1, the name a
-certificate's IP address entry holds."
+certificate's IP address entry holds. The same address written out in full, [0:0:0:0:0:0:0:1], is
+also asked about as ::1, the form %TLS-NAMES gives and the one Linux and macOS verify (#921)."
   (with-server (s (lambda (path head stream)
                     (declare (ignore path head))
                     (%write-response stream 200 '() "v6"))
                   :tls t)
-    (let* ((seen '())
-           (http::*server-certificate-verifier*
-             (lambda (chain host) (declare (ignore chain)) (push host seen) :trusted)))
-      (http:send-request (http:make-request :url (format nil "https://[::1]:~D/" (server-port s))
-                                            :connect-address "127.0.0.1" :read-timeout 5)
-                         '())
-      (is (equal '("::1") seen) "the verifier was asked about ~S" seen))))
+    (dolist (host '("[::1]" "[0:0:0:0:0:0:0:1]"))
+      (let* ((seen '())
+             (http::*server-certificate-verifier*
+               (lambda (chain host) (declare (ignore chain)) (push host seen) :trusted)))
+        (http:send-request (http:make-request :url (format nil "https://~A:~D/" host (server-port s))
+                                              :connect-address "127.0.0.1" :read-timeout 5)
+                           '())
+        (is (equal '("::1") seen) "for ~A the verifier was asked about ~S" host seen)))))
 
 ;;; --- what aion/retry reads from an HTTP-ERROR (#79) ------------------------------
 

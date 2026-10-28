@@ -373,10 +373,12 @@ body closes it; otherwise the body is read here and the connection closed."
              (when (string-equal (quri:uri-scheme uri) "https")
                (when (request-ca-path req)
                  (multiple-value-setq (own-config own-chain) (%ca-path-config (request-ca-path req))))
-               ;; QURI keeps an IPv6 literal's brackets, as in [::1]; the name the certificate
-               ;; is judged for, and the one aion/tls decides SNI from, is the bare address.
+               ;; The name the certificate is judged for, and the one aion/tls decides SNI from:
+               ;; %TLS-NAMES's second value, as on Linux and macOS. For an IP address that is the
+               ;; address without the brackets QURI keeps, in one canonical form, so
+               ;; [0:0:0:0:0:0:0:1] is judged as ::1 on every platform (#921).
                (setf stream (aion/tls:make-tls-stream stream (or own-config (%verifying-config))
-                                                      :hostname (string-trim "[]" host))))
+                                                      :hostname (nth-value 1 (%tls-names host)))))
              (multiple-value-bind (body status headers)
                  (http1-exchange stream (request-method req) uri (request-headers req)
                                  (request-content req) :closer #'close-connection)

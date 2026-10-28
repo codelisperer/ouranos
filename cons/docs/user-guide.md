@@ -76,6 +76,7 @@ rlwrap sbcl
 
 ```sh
 cons init my-app --template web    # scaffold a project (lib | cli | web | agent)
+cons init my-app --template web --db sqlite   # ... with a database (sqlite | postgres)
 cons conform                       # install the AI-conformance pack into a project
 cons setup                         # write this project's ASDF (:tree) drop-in, per-OS
 cons env                           # which config keys does this project need?
