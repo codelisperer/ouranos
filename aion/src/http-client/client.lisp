@@ -500,13 +500,30 @@ that failed is not known; the pinned path knows, see *%CONNECTED*."
                 usocket:host-unreachable-error usocket:network-unreachable-error
                 usocket:ns-error)))
 
+#+os-windows
+(defun %winhttp-phase (e)
+  "HTTP-ERROR-PHASE for E, a WINHTTP::WIN-ERROR, which is what dexador signals on Windows, where it
+uses WinHTTP (#974; a refused connection measured as 12029). From the error code:
+- 12029 (ERROR_WINHTTP_CANNOT_CONNECT) and 12007 (ERROR_WINHTTP_NAME_NOT_RESOLVED): no connection
+  was made, so :CONNECT;
+- 12002 (ERROR_WINHTTP_TIMEOUT), 12030 (ERROR_WINHTTP_CONNECTION_ERROR) and 12152
+  (ERROR_WINHTTP_INVALID_SERVER_RESPONSE): :RESPONSE. 12002 is also the code for a connect
+  timeout, but WinHTTP does not say which, so it is counted as the case that must not be resent;
+- any other code, a TLS failure included: no phase."
+  (case (winhttp::win-error-code e)
+    ((12029 12007) :connect)
+    ((12002 12030 12152) :response)
+    (t nil)))
+
 (defun %transport-phase (e pinned)
   "HTTP-ERROR-PHASE for E, a transport failure. On the pinned path, which makes the connection
 itself, from where it failed: a socket failure before USOCKET:SOCKET-CONNECT returned is
 :CONNECT, one after it :RESPONSE. On the dexador path, from E's type
-(%DEXADOR-CONNECT-FAILURE-P). Anything that is not a socket or stream failure, a TLS failure
-included, has no phase, so AION/RETRY does not retry it."
-  (cond ((not (%io-failure-p e)) nil)
+(%DEXADOR-CONNECT-FAILURE-P), and on Windows, where dexador uses WinHTTP, from its error code
+(%WINHTTP-PHASE). Anything that is not a socket or stream failure, a TLS failure included, has
+no phase, so AION/RETRY does not retry it."
+  (cond #+os-windows ((and (not pinned) (typep e 'winhttp::win-error)) (%winhttp-phase e))
+        ((not (%io-failure-p e)) nil)
         (pinned (if *%connected* :response :connect))
         ((%dexador-connect-failure-p e) :connect)
         (t :response)))

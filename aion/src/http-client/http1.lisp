@@ -44,6 +44,13 @@ http1.lisp's limits, read on a pinned connection where this client reads the res
 (defun %malformed (fmt &rest args)
   (error 'malformed-response :detail (apply #'format nil fmt args)))
 
+(defun %ended (fmt &rest args)
+  "Signal MALFORMED-RESPONSE for a connection that ended before the response did, with phase
+:RESPONSE. It ended after the connection was made and the request sent, so the server may have
+acted on the request, and AION/RETRY must not resend it as if no connection had been made. On
+Windows a read timeout on the socket also arrives here, as the end of the stream (#974)."
+  (error 'malformed-response :detail (apply #'format nil fmt args) :phase :response))
+
 ;;; --- reading lines -------------------------------------------------------------------
 
 (defun %read-line-octets (stream budget what)
@@ -55,7 +62,7 @@ line is longer than BUDGET octets. Returns (values LINE OCTETS-READ)."
         (n 0))
     (loop
       (let ((b (read-byte stream nil nil)))
-        (unless b (%malformed "the connection ended inside the ~A" what))
+        (unless b (%ended "the connection ended inside the ~A" what))
         (incf n)
         (when (> n budget) (%malformed "the ~A is longer than ~D octets" what budget))
         (cond ((= b 10) (return (values (coerce line 'simple-string) n)))
@@ -180,7 +187,7 @@ closes the connection."))
   (if (zerop (%left s))
       :eof
       (let ((b (read-byte (%source s) nil nil)))
-        (unless b (%malformed "the connection ended ~D octets before the Content-Length" (%left s)))
+        (unless b (%ended "the connection ended ~D octets before the Content-Length" (%left s)))
         (decf (%left s))
         b)))
 
@@ -222,7 +229,7 @@ trailer and mark S done."
     (when (%done s) (return :eof))
     (when (plusp (%left s))
       (let ((b (read-byte (%source s) nil nil)))
-        (unless b (%malformed "the connection ended inside a chunk"))
+        (unless b (%ended "the connection ended inside a chunk"))
         (decf (%left s))
         (return b)))
     (%next-chunk s)))

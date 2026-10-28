@@ -907,9 +907,11 @@ its tag.
   connection was made, so the request was not sent, and `:response` for a socket or stream
   failure after it was made. A TLS failure, and anything else that is not a socket or stream
   failure, has no phase, so it is never retried. On the pinned path (`:connect-address`,
-  `fetch-public`) the phase comes from where the call failed, not from the condition's type.
-  aion/http-client
-  now depends on `aion/retry` and defines the `transience` and `retry-after` methods for
+  `fetch-public`) the phase comes from where the call failed, not from the condition's type,
+  and a connection that ends before the response does (a `malformed-response` saying "the
+  connection ended") is `:response`; on Windows a read timeout arrives that way. On Windows,
+  where dexador uses WinHTTP, the phase comes from WinHTTP's error code: 12029 and 12007 are
+  `:connect`; 12002, 12030 and 12152 are `:response`. aion/http-client now depends on `aion/retry` and defines the `transience` and `retry-after` methods for
   `http-error`: 408, 425, 429, 503, 529 and `:connect` are `:transient`; 500, 502, 504 and
   `:response` are `:unknown`.
 

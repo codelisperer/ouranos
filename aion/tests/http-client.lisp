@@ -1329,9 +1329,12 @@ header RETRY-AFTER."
                                    (list (http:ensure-2xx)))
                                   nil)
                (http:http-error (e) e))))
-      (is (typep e 'http:http-error))
-      (is (eq :connect (and e (http:http-error-phase e))))
-      (is (aion/retry:transient-p e) "so the default policy retries it"))))
+      ;; Each message names the failure, so a platform whose transport signals a type the
+      ;; classifier does not know shows which one (#974: WinHTTP's 12029 on Windows).
+      (is (typep e 'http:http-error) "got ~S" e)
+      (is (eq :connect (and e (http:http-error-phase e))) "phase ~S for: ~A"
+          (and e (http:http-error-phase e)) e)
+      (is (aion/retry:transient-p e) "so the default policy retries it: ~A" e))))
 
 ;;; --- where a pinned connection failed, from the call that failed (review of #974) -------
 
