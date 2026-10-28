@@ -1,5 +1,5 @@
 /* kit.css --- styles for hyperion/kit: the page header, breadcrumbs, empty state, segmented
-   control, toggle group, dialogs and undo notices (#981).
+   control, toggle group, dialogs, undo notices, list toolbar and properties panel (#981).
    Coloured with the --hy-* tokens of hyperion/appearance (serve appearance-css). Each token
    falls back to a Bulma custom property, so the components still read on a page that does
    not serve the tokens. Backgrounds use `background`, because in the gradient look a token
@@ -196,4 +196,81 @@
   border: 1px solid var(--bulma-border, #ccc);
   border-radius: var(--bulma-radius, 4px);
   padding: var(--hy-space-2, 8px) var(--hy-space-3, 12px);
+}
+
+/* List toolbar: the search form and the trash toggle on one wrapping row. */
+.hy-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--hy-space-3, 12px);
+  margin-bottom: var(--hy-space-4, 16px);
+}
+
+.hy-toolbar-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--hy-space-2, 8px);
+}
+
+.hy-toolbar-search {
+  width: min(20rem, 100%);
+}
+
+.hy-toolbar-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hy-space-1, 4px);
+  font-size: var(--bulma-size-7, 0.75rem);
+}
+
+.hy-toolbar-submit {
+  background: var(--hy-button, var(--bulma-scheme-main));
+  color: var(--hy-button-text, var(--bulma-text));
+}
+
+/* Rows that open the properties panel. The chosen row is drawn from aria-current. */
+.hy-row {
+  cursor: pointer;
+}
+
+.hy-row[aria-current="true"] {
+  background: var(--hy-surface-raised, var(--bulma-scheme-main-ter));
+  color: var(--hy-surface-raised-text, var(--bulma-text-strong));
+}
+
+.hy-row:focus-visible {
+  outline: 2px solid var(--bulma-focus-color, var(--bulma-link));
+  outline-offset: -2px;
+}
+
+.hy-properties {
+  background: var(--hy-surface-raised, var(--bulma-scheme-main));
+  color: var(--hy-surface-raised-text, var(--bulma-text));
+  border: 1px solid var(--bulma-border, #ccc);
+  border-radius: var(--bulma-radius-large, 8px);
+}
+
+.hy-properties-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--hy-space-3, 12px);
+  background: var(--hy-header, var(--bulma-scheme-main-bis));
+  color: var(--hy-header-text, var(--bulma-text-strong));
+  padding: var(--hy-space-3, 12px) var(--hy-space-4, 16px);
+  border-radius: var(--bulma-radius-large, 8px) var(--bulma-radius-large, 8px) 0 0;
+}
+
+.hy-properties-title {
+  font-size: var(--bulma-size-5, 1.25rem);
+  font-weight: 600;
+  margin: 0;
+  color: inherit;
+}
+
+.hy-properties-body {
+  padding: var(--hy-space-4, 16px);
 }

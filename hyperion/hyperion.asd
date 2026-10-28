@@ -314,21 +314,23 @@
   :perform (test-op (o c) (uiop:symbol-call :hyperion/calendar/tests :run-tests)))
 
 (defsystem "hyperion/kit"
-  :description "Generic collection-page components: page header, breadcrumbs, empty state, segmented control, toggle group, dialogs, the destructive confirm and the undo notice (#981)."
+  :description "Generic collection-page components: page header, breadcrumbs, empty state, segmented control, toggle group, dialogs, the destructive confirm, the undo notice, the list toolbar and the properties panel (#981)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
   ;; Its stylesheet is served by hyperion/assets, which this system does not depend on, the
   ;; same arrangement as hyperion/calendar.
-  ;; hyperion for hyperion/output, which compiles DIALOG-JS's Parenscript the way
-  ;; hyperion/js does.
-  :depends-on ("hyperion" "spinneret" "parenscript")
+  ;; hyperion for hyperion/output, which compiles the components' Parenscript the way
+  ;; hyperion/js does. hyperion/list for the toolbar, which reads a list's spec and state.
+  :depends-on ("hyperion" "hyperion/list" "spinneret" "parenscript")
   :serial t
   :components ((:module "src/kit"
                 :serial t
                 :components ((:file "page")
                              (:file "toggle")
-                             (:file "dialog"))))
+                             (:file "dialog")
+                             (:file "toolbar")
+                             (:file "panel"))))
   :in-order-to ((test-op (test-op "hyperion/kit/tests"))))
 
 (defsystem "hyperion/kit/tests"
@@ -336,7 +338,7 @@
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   ;; plump parses the markup, so a test reads elements and attributes, not strings.
-  :depends-on ("hyperion/kit" "spinneret" "plump" "fiveam")
+  :depends-on ("hyperion/kit" "hyperion/list" "spinneret" "plump" "fiveam")
   :components ((:file "tests/kit-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/kit/tests :run-tests)))
 
@@ -418,7 +420,7 @@
   :depends-on ("hyperion/assets" "hyperion"   ; assets-tests.lisp calls router: and server:
                "hyperion/test-ports" "fiveam" "ironclad" "clack-handler-hunchentoot"
                ;; kit-browser-tests runs hyperion/kit's dialogs in the smoke page's browser (#981).
-               "hyperion/kit" "spinneret"
+               "hyperion/kit" "hyperion/list" "spinneret"
                (:require "sb-bsd-sockets"))
   :serial t
   :components ((:file "tests/assets-tests")

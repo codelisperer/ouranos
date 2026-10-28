@@ -9,6 +9,9 @@
   (:local-nicknames (#:page #:hyperion/kit/page)
                     (#:toggle #:hyperion/kit/toggle)
                     (#:dlg #:hyperion/kit/dialog)
+                    (#:tb #:hyperion/kit/toolbar)
+                    (#:panel #:hyperion/kit/panel)
+                    (#:list #:hyperion/list)
                     (#:spin #:spinneret))
   (:export #:run-tests))
 
@@ -27,14 +30,14 @@
   "Start tags that end an open <p>, from HTML5's rules for optional end tags.")
 
 (defun %close-optional-tags (html)
-  "HTML with the </li> and </p> end tags that Spinneret leaves out written back in, by
-HTML5's rules: an <li> ends at the next <li> or at its list's end, and a <p> ends at a block
-start tag or at its parent's end. Plump does not apply these rules, and without them it
+  "HTML with the </li>, </option> and </p> end tags that Spinneret leaves out written back in,
+by HTML5's rules: an <li> ends at the next <li> or at its list's end, an <option> at the next
+<option> or at its select's end, and a <p> ends at a block start tag or at its parent's end. Plump does not apply these rules, and without them it
 nests the next item inside the open one."
   (let ((stack '()) (out (make-string-output-stream)) (i 0))
     (labels ((close-to (pred)
-               ;; Close open li/p elements above the first element satisfying PRED.
-               (loop while (and stack (member (first stack) '("li" "p") :test #'string=)
+               ;; Close open li/option/p elements above the first element satisfying PRED.
+               (loop while (and stack (member (first stack) '("li" "option" "p") :test #'string=)
                                 (not (funcall pred (first stack))))
                      do (format out "</~A>" (pop stack))))
              (name-of (tag start)
@@ -55,6 +58,10 @@ nests the next item inside the open one."
                               (close-to (lambda (open) (member open '("ol" "ul") :test #'string=)))
                               (when (and stack (string= (first stack) "li"))
                                 (write-string "</li>" out) (pop stack)))
+                             ((string= name "option")
+                              (close-to (lambda (open) (string= open "select")))
+                              (when (and stack (string= (first stack) "option"))
+                                (write-string "</option>" out) (pop stack)))
                              ((member name *closes-p* :test #'string=)
                               (when (and stack (string= (first stack) "p"))
                                 (write-string "</p>" out) (pop stack))))
@@ -90,8 +97,11 @@ tags written back in first."
 
 (test the-test-parser-closes-what-spinneret-leaves-open
   "The helper every other test reads through: an unclosed <li> ends at the next one or at
-the list's end, and an unclosed <p> ends at a block or at its parent's end."
+the list's end, an unclosed <option> at the next one or at the select's end, and an unclosed
+<p> ends at a block or at its parent's end."
   (is (equal "<ol><li>a</li><li>b</li></ol>" (%close-optional-tags "<ol><li>a<li>b</ol>")))
+  (is (equal "<select><option>a</option><option>b</option></select>"
+             (%close-optional-tags "<select><option>a<option>b</select>")))
   (is (equal "<div><p>t</p><div>x</div><p>u <a href=/>l</a></p></div>"
              (%close-optional-tags "<div><p>t<div>x</div><p>u <a href=/>l</a></div>"))))
 
@@ -463,3 +473,157 @@ the listeners do is checked in a browser by kit-browser-tests."
     (is (search "showModal" js))
     (is (search "htmx:afterSettle" js))
     (is (search "htmx:afterRequest" js))))
+;;; --- the list toolbar -------------------------------------------------------------
+
+(defparameter *drafts*
+  (list:make-list-spec :id "drafts"
+                       :sorts '((:title :column :title) (:updated :column :updated_at :direction :desc))
+                       :tiebreak :id
+                       :filters '((:q :text t) (:status :values ("draft" "sent"))
+                                  (:where :values ("active" "trash")))
+                       :page-sizes '(25 50) :hx-target "#drafts"))
+
+(defun %drafts (query)
+  (list:read-list-state *drafts* (list :query-string query)))
+
+(defun %toolbar (query &rest args)
+  (%dom (lambda ()
+          (apply #'tb:list-toolbar (%drafts query)
+                 (or args '(:search :q :filters ((:status "Status" (("draft" . "Draft"))))
+                            :sorts ((:title "Title") (:updated "Updated")) :trash :where))))))
+
+(defun %fields (dom)
+  "The (name . value) of every hidden field in DOM, in order."
+  (loop for i in (%all dom "input")
+        when (equal "hidden" (%attr i "type"))
+          collect (cons (%attr i "name") (%attr i "value"))))
+
+(test the-toolbar-is-a-named-search-form-that-works-without-script
+  (let* ((dom (%toolbar "q=memo"))
+         (form (%one dom "form")))
+    (is (equal "search" (%attr form "role")))
+    (is (equal "List controls" (%attr form "aria-label")))
+    (is (equal "get" (%attr form "method")) "submitting it loads the page with its fields")
+    (is (null (%attr form "action")) "to the page it is on")
+    (is (equal "submit" (%attr (car (last (%all form "button"))) "type")))))
+
+(test the-toolbar-carries-the-rest-of-the-list-and-starts-on-page-one
+  (is (equal '(("tab" . "2") ("size" . "50") ("dir" . "asc"))
+             (%fields (%toolbar "tab=2&page=3&size=50&sort=updated&dir=asc&q=memo&status=sent")))
+      "page, and the fields the toolbar shows, are not hidden fields")
+  (is (%attr (find "dir" (%all (%toolbar "sort=updated&dir=asc") "input")
+                   :key (lambda (i) (%attr i "name")) :test #'equal)
+             "data-hy-dir")
+      "the direction is marked for the script that drops it on a new sort key"))
+
+(test the-search-field-shows-the-current-search-and-survives-a-swap
+  (let ((search (find "search" (%all (%toolbar "q=memo") "input")
+                      :key (lambda (i) (%attr i "type")) :test #'equal)))
+    (is (equal "q" (%attr search "name")))
+    (is (equal "memo" (%attr search "value")))
+    (is (equal "Search" (%attr search "aria-label")))
+    (is (equal "hy-toolbar-search" (%attr search "id")) "htmx restores focus by id")
+    (is (%attr search "hx-preserve"))))
+
+(test a-filter-select-starts-with-all-and-marks-the-current-value
+  (let* ((select (find "status" (%all (%toolbar "status=draft") "select")
+                       :key (lambda (s) (%attr s "name")) :test #'equal))
+         (options (%all select "option")))
+    (is (equal '("" "draft" "sent") (mapcar (lambda (o) (%attr o "value")) options)))
+    (is (equal '("All" "Draft" "sent") (mapcar #'%text options)) "labels, or the value itself")
+    (is (equal '(nil t nil) (mapcar (lambda (o) (and (%attr o "selected") t)) options))))
+  (is (%attr (first (%all (find "status" (%all (%toolbar "") "select")
+                                :key (lambda (s) (%attr s "name")) :test #'equal)
+                          "option"))
+             "selected")
+      "All is selected when the filter is not set"))
+
+(test the-sort-select-marks-the-current-key
+  (let ((select (find "sort" (%all (%toolbar "sort=title") "select")
+                      :key (lambda (s) (%attr s "name")) :test #'equal)))
+    (is (%attr select "data-hy-sort"))
+    (is (equal "title" (%attr select "data-hy-default")) "the key LIST-HREF leaves out")
+    (is (equal '("title" "updated") (mapcar (lambda (o) (%attr o "value")) (%all select "option"))))
+    (is (equal "title" (%attr (find-if (lambda (o) (%attr o "selected")) (%all select "option"))
+                              "value")))))
+
+(test the-trash-toggle-links-are-the-lists-own
+  (let* ((state (%drafts "q=memo&where=trash"))
+         (buttons (%all (%dom (lambda () (tb:list-toolbar state :trash :where))) "button"))
+         (active (find "active" buttons :key (lambda (b) (%attr b "data-value")) :test #'equal))
+         (trash (find "trash" buttons :key (lambda (b) (%attr b "data-value")) :test #'equal)))
+    (is (equal (list:list-href state :filters '(:where nil)) (%attr active "hx-get")))
+    (is (equal (list:list-href state :filters '(:where "trash")) (%attr trash "hx-get")))
+    (is (equal "true" (%attr trash "aria-pressed")))
+    (is (equal "false" (%attr active "aria-pressed")))
+    (is (equal "#drafts" (%attr trash "hx-target")))))
+
+(test the-toolbar-uses-htmx-only-with-a-target
+  (let ((with (%one (%toolbar "") "form"))
+        (without (%one (%dom (lambda ()
+                               (tb:list-toolbar
+                                (list:read-list-state
+                                 (list:make-list-spec :id "x" :filters '((:q :text t)))
+                                 '(:query-string ""))
+                                :search :q)))
+                       "form")))
+    (is (equal "#drafts" (%attr with "hx-target")))
+    (is (equal "true" (%attr with "hx-push-url")))
+    (is (search "delay:300ms" (%attr with "hx-trigger")))
+    (is (null (%attr without "hx-get")))
+    (is (null (%attr without "hx-trigger")))))
+
+(test the-toolbar-refuses-names-the-spec-does-not-have
+  (flet ((writes (&rest args)
+           (spin:with-html-string (apply #'tb:list-toolbar (%drafts "") args))))
+    (signals error (writes :search :status) "a values filter as the search")
+    (signals error (writes :filters '((:q "Q"))) "a text filter as a select")
+    (signals error (writes :filters '((:nope "N"))))
+    (signals error (writes :sorts '((:nope "N"))))
+    (signals error (writes :trash :status) "a filter without the trash value")))
+
+(test the-toolbar-script-is-guarded-and-rewrites-the-request
+  "What the script does to a request is checked in a browser by kit-browser-tests."
+  (let ((js (tb:toolbar-js)))
+    (is (search "hyKitToolbar" js))
+    (is (search "htmx:configRequest" js))
+    (is (search "location.pathname" js))))
+
+;;; --- rows and the properties panel ------------------------------------------------
+
+(test a-selectable-row-loads-its-panel-and-says-which-it-controls
+  (let* ((row (%one (%dom (lambda ()
+                            (spin:with-html
+                              (:table (:tr :attrs (panel:selectable-row 7 "/drafts/7/panel")
+                                        (:td "Memo"))))))
+                    "tr")))
+    (is (equal "row-7" (%attr row "id")))
+    (is (equal "0" (%attr row "tabindex")) "a tab stop, so Enter can reach it")
+    (is (equal "/drafts/7/panel" (%attr row "hx-get")))
+    (is (equal "#hy-panel" (%attr row "hx-target")))
+    (is (equal "hy-panel" (%attr row "aria-controls")))
+    (is (search "keydown[key=='Enter'" (%attr row "hx-trigger")))
+    (is (null (%attr row "aria-current")))))
+
+(test the-selected-row-is-current
+  (is (equal "true" (getf (panel:selectable-row 7 "/p" :selected t) :aria-current)))
+  (is (equal "side" (getf (panel:selectable-row 7 "/p" :panel-id "side") :aria-controls))))
+
+(test the-panel-region-is-a-named-empty-landmark
+  (let ((region (%one (%dom (lambda () (panel:panel-region :label "Draft details"))) "section")))
+    (is (equal panel:*panel-id* (%attr region "id")))
+    (is (equal "Draft details" (%attr region "aria-label")))
+    (is (zerop (length (plump:children region))))))
+
+(test the-properties-panel-is-named-by-its-title-and-has-a-close-button
+  (let* ((dom (%dom (lambda ()
+                      (panel:properties-panel "Memo" :close-label "Fermer"
+                                              :body (lambda () (spin:with-html (:p :id "b" "x")))))))
+         (aside (%one dom "aside"))
+         (close (%one dom "button")))
+    (is (equal "hy-properties-title" (%attr aside "aria-labelledby")))
+    (is (equal "Memo" (%text (%by-id dom "hy-properties-title"))))
+    (is (equal "button" (%attr close "type")))
+    (is (equal "Fermer" (%attr close "aria-label")))
+    (is (%attr close "data-hy-panel-close"))
+    (is (%by-id dom "b"))))

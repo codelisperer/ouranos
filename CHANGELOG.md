@@ -910,6 +910,31 @@ its tag.
 
 ### Added
 
+- **hyperion/kit: a list toolbar and a properties panel** (#981, part four). `hyperion/kit` now
+  also depends on `hyperion/list`.
+  - `hyperion/kit/toolbar:list-toolbar` takes a `hyperion/list` state and writes a GET form with
+    `role="search"`: a search field for a `:text` filter (`:search`), a select for each
+    `:values` filter (`:filters`, with an "All" option first), a select of sort keys
+    (`:sorts`), and an Active/Trash segmented control for a `:values` filter (`:trash`). The
+    list's other parameters and the page's own parameters are hidden fields, and the page is
+    left out, so a new search starts on page 1. With an htmx target the form re-requests the
+    list 300ms after typing stops, when a select changes, and on submit. It signals when a name
+    is not a filter or sort key of the right kind.
+  - `hyperion/kit/toolbar:toolbar-js`, included once per page, makes the toolbar's requests
+    carry the same parameters `list-href` writes for the same change: it sends them to the
+    page's own path, leaves out a filter set to All and the default sort key, and drops the
+    direction when the sort key changes.
+  - `hyperion/kit/panel:selectable-row` returns the attributes, for Spinneret's `:attrs`, of a
+    row that loads an item's properties into a `panel-region` on a click or on Enter.
+    `properties-panel` writes the panel, an `<aside>` named by its title with a close button.
+    `panel-js` marks the chosen row with `aria-current="true"`, and the close button or Escape
+    empties the panel and returns focus to that row.
+  - `hyperion/list` exports `list-param-name`, the query-parameter name a spec reads for a
+    filter or setting; `list-carried-params`, the hidden fields a GET form for the list needs;
+    and the spec readers `list-spec-sorts`, `list-spec-default-sort`, `list-spec-filters` and
+    `list-spec-hx-target`.
+  - `kit.css` styles the toolbar, the chosen row and the panel.
+
 - **hyperion/kit: dialogs, a destructive-action confirm and an undo notice** (#981, part
   three). The new package `hyperion/kit/dialog`; `hyperion/kit` now also depends on
   `parenscript`, which `hyperion` already loads.
