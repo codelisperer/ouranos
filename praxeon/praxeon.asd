@@ -344,6 +344,9 @@
                              (:file "image-tests")
                              ;; #758: the Google provider, after image-tests, whose image helpers it uses
                              (:file "image-google-tests")
+                             ;; #1034: where each provider sends, after image-tests, whose
+                             ;; providers it makes
+                             (:file "endpoint-tests")
                              (:file "web-page-tests")
                              ;; #827: untrusted content in a turn, using the stub reader pattern
                              (:file "reader-guard-tests"))))
