@@ -19,7 +19,11 @@ its tag.
   every grant as "signature does not verify", so the fault looked like forged grants. Now the
   call signals an error when the verifier is made. `praxeon/ceiling:*clock*`, a function
   returning a universal time, is what a grant's expiry is checked against; it defaults to
-  `get-universal-time`, and `praxeon/web:make-app` binds it to its own `:clock`.
+  `get-universal-time`. `praxeon/web:make-app` binds it to its own `:clock` around
+  `POST /embed/session` and around each turn, so the ledger's `:at` stamps use the app's clock
+  too. A `:sessions` table passed to `make-app` must be made with the same `:clock`, or
+  `make-app` signals an error. A JSON turn whose grant expires while it waits is answered 401,
+  not 500, so the client mints a new grant.
 
 - **praxeon/web: the chat page's message and poll routes now work from a cursor, and the
   page's own message comes back through the poll** (part of #67). A page built on `make-app`'s

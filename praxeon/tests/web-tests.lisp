@@ -876,13 +876,75 @@ clock, and that the session works for 299 seconds shows the session table uses i
 would look like a forged grant."
   (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
     (declare (ignore priv))
-    (signals error (ceiling:make-ed25519-verifier nil))
-    (signals error (ceiling:make-ed25519-verifier "not a key"))
-    (let ((verifier (ceiling:make-ed25519-verifier pub)))
-      (setf (ceiling:ed25519-verifier-public-key verifier) nil)
-      (signals error (web:make-app :grant-verifier verifier :audience "svc"
-                                   :make-agent (lambda (p g) (declare (ignore g))
-                                                 (actor:make-agent :name p)))))))
+    (flet ((refusal (thunk)
+             (handler-case (progn (funcall thunk) nil)
+               (error (e) (princ-to-string e)))))
+      (is (search "needs an Ed25519 public key" (refusal (lambda () (ceiling:make-ed25519-verifier nil)))))
+      (is (search "needs an Ed25519 public key"
+                  (refusal (lambda () (ceiling:make-ed25519-verifier "not a key")))))
+      (let ((verifier (ceiling:make-ed25519-verifier pub)))
+        (setf (ceiling:ed25519-verifier-public-key verifier) nil)
+        (is (search "has no public key"
+                    (refusal (lambda ()
+                               (web:make-app :grant-verifier verifier :audience "svc"
+                                             :make-agent (lambda (p g) (declare (ignore g))
+                                                           (actor:make-agent :name p)))))))))))
+
+(test a-json-turn-whose-grant-expired-while-it-waited-is-answered-401
+  "A JSON client whose grant expired while its turn waited behind another gets 401, the answer
+that tells it to mint a new grant, and not 500, which it would take for a fault of the server."
+  (let* ((conv (web::%new-conversation "p1" (actor:make-agent :name "p1") "Echo"
+                                       (lambda (agent message locale)
+                                         (declare (ignore agent locale))
+                                         message)
+                                       :built-with '(() 0 0)
+                                       :rebuild (lambda (g) (declare (ignore g))
+                                                  (actor:make-agent :name "p1"))
+                                       :clock (lambda () 1000)))
+         (grant (ceiling::%make-grant :principal "p1" :capabilities '("write")
+                                      :expires-at 1000 :audience "svc"))
+         (env (hyperion/http:cache-body-string
+               (list :request-method :post :path-info "/api/message"
+                     :headers (make-hash-table :test 'equal)
+                     :content-type "application/json")
+               "{\"message\":\"hi\"}")))
+    (destructuring-bind (status headers body) (web::%handle-message env conv nil grant)
+      (is (eql 401 status) "answered ~S: ~S" status body)
+      (is (equal "Session" (getf headers :www-authenticate))))))
+
+(test a-turn-runs-with-the-apps-clock-as-the-ledgers-clock
+  "The ledger stamps a usage line with `praxeon/ceiling:*clock*' on the turn's thread, so a turn
+runs with it bound to the app's :CLOCK, both on the request's thread (a JSON turn) and on a
+turn thread of its own (an htmx turn)."
+  (let* ((seen (list '()))
+         (app (web:make-app :agent (actor:make-agent :name "a")
+                            :responder (lambda (agent message locale)
+                                         (declare (ignore agent message locale))
+                                         (push (funcall ceiling:*clock*) (car seen))
+                                         "ok")
+                            :clock (lambda () 4242))))
+    (is (eql 200 (%say app "hi")))
+    (is (equal '(4242) (car seen)) "the JSON turn's clock read ~S" (car seen))
+    (%call app :post "/api/message" :form "message=again")
+    (loop repeat 50 until (= 2 (length (car seen))) do (sleep 0.1))
+    (is (equal '(4242 4242) (car seen)) "the htmx turn's clock read ~S" (car seen))))
+
+(test an-app-refuses-a-session-table-on-another-clock
+  "A :SESSIONS table made with a different clock from :CLOCK is refused when the app is made,
+because a session's expiry and its max_seconds would be computed from two times."
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (declare (ignore priv))
+    (let ((refusal (handler-case
+                       (%grant-app pub :clock (lambda () 2000)
+                                       :sessions (praxeon/web-session:make-session-table
+                                                  :clock (lambda () 1000)))
+                     (error (e) (princ-to-string e))))
+          (clock (lambda () 2000)))
+      (is (and (stringp refusal) (search "different clock" refusal)) "got ~S" refusal)
+      (is (functionp (%grant-app pub :clock clock
+                                     :sessions (praxeon/web-session:make-session-table
+                                                :clock clock)))
+          "the same clock is accepted"))))
 
 (test ended-sessions-are-swept-with-conversations
   "Sessions that have ended are removed on the same sweep as stale conversations, at most once a

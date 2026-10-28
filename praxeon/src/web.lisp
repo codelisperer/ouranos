@@ -577,7 +577,10 @@ this one nor publishes its reply first. Turns run in the order they take the loc
 always the order their messages were published in, because an SBCL mutex is not first-come,
 first-served. TURN says which message each item belongs to; it does not say which turn ran
 first. The progress observer records the status and token count while the turn runs."
-  (let ((turn (or turn (%publish-message conv message))))
+  (let ((turn (or turn (%publish-message conv message)))
+        ;; The ledger stamps its usage lines with this clock, and they are written on the turn's
+        ;; thread, so it is bound here as well as around the session exchange.
+        (ceiling:*clock* (conversation-clock conv)))
     (sb-thread:with-mutex ((conversation-turn-lock conv))
       (unwind-protect
            (handler-case
@@ -756,11 +759,16 @@ CONV counts it, so it is not dropped as idle."
       ;; published like any other, so a page open on the same conversation shows it.
       ((http:wants-json env)
        (multiple-value-bind (reply e) (%turn conv message locale :grant grant)
-         (if e
-             (list 500 '(:content-type "application/json")
-                   (list (http:json (list "error" (format nil "~A" e)))))
-             (list 200 '(:content-type "application/json")
-                   (list (http:json (list "reply" reply)))))))
+         (cond ((typep e 'ceiling:grant-invalid)
+                ;; The grant expired while the turn waited: a 401, so the client mints a new
+                ;; grant rather than taking it for a fault of the server.
+                (%unauthenticated (ceiling:grant-invalid-reason e)))
+               (e
+                (list 500 '(:content-type "application/json")
+                      (list (http:json (list "error" (format nil "~A" e))))))
+               (t
+                (list 200 '(:content-type "application/json")
+                      (list (http:json (list "reply" reply))))))))
       ;; HTMX client: run the turn in the background, and ask the page to poll now. The
       ;; user's message reaches the page through that poll, so every tab gets it the same way.
       (t
@@ -892,7 +900,10 @@ last sweep. A page still open on a dropped conversation
 holds a cursor from it; its next poll replaces the page's transcript with the new conversation's
 and a notice that a new conversation has started. CLOCK returns the time in seconds; a test
 passes its own. It is also the clock of the session table that MAKE-APP makes when SESSIONS is not
-given, and the one grants' expiry is checked against (`praxeon/ceiling:*clock*'). Pass AGENT or
+given. MAKE-APP binds `praxeon/ceiling:*clock*' to it around the session exchange and around each
+turn, so a grant's expiry is checked against it and the ledger's usage lines are stamped with it.
+A SESSIONS table passed in must have been made with the same CLOCK (EQ), or MAKE-APP signals an
+error: a session's expiry and its max_seconds are computed from both. Pass AGENT or
 CONVERSATION-KEY with MAKE-AGENT, not both: an agent holds one conversation's history, so one
 agent cannot serve several keys.
 
@@ -903,7 +914,7 @@ name this service is minted for), a request is authenticated by a session:
     \"max_seconds\": N}. The grant must be for AUDIENCE and name a principal.
   - A session ends when its grant expires, when it has not been used for idle_seconds, or when
     the session table's limit has passed since it opened, whichever comes first; max_seconds is
-    the earlier of the last two. A session gives no more access than its grant, for no longer.
+    the earlier of the table's limit and the time the grant has left. A session gives no more access than its grant, for no longer.
   - A turn whose session's grant has expired by the time it runs ends in an error, without
     running.
   - Every other route needs `Authorization: Session <ID>', and is answered 401 without a
@@ -968,7 +979,9 @@ conversations the app holds."
               (null (ceiling:ed25519-verifier-public-key grant-verifier)))
          (error "praxeon/web: :GRANT-VERIFIER has no public key. A verifier with no key would refuse every grant as forged."))
         ((and grant-verifier (or agent conversation-key (not make-agent)))
-         (error "praxeon/web: :GRANT-VERIFIER takes :MAKE-AGENT, a function of a principal and its grant, and not :AGENT or :CONVERSATION-KEY: the conversation is the session's principal's.")))
+         (error "praxeon/web: :GRANT-VERIFIER takes :MAKE-AGENT, a function of a principal and its grant, and not :AGENT or :CONVERSATION-KEY: the conversation is the session's principal's."))
+        ((and sessions (not (eq clock (ws:session-table-clock sessions))))
+         (error "praxeon/web: the :SESSIONS table was made with a different clock from :CLOCK; make it with (praxeon/web-session:make-session-table :clock <the same function>).")))
   ;; dev renders pretty (readable view-source); prod compacts. The style is bound around each
   ;; request below and never assigned globally (pre-publication issue 469): praxeon/web can be
   ;; started as a second server inside a host app's image, and assigning

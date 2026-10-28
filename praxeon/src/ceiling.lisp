@@ -106,7 +106,8 @@ verifier is made, and not taken later for a grant whose signature does not verif
 (defvar *clock* #'get-universal-time
   "A function of no arguments returning the time as a universal time. VERIFY-GRANT compares a
 grant's expiry with it, and the ledger stamps its lines with it. `praxeon/web:make-app' binds it
-to the app's own clock, so a test can move the time.")
+to the app's own clock around the session exchange and around each turn, which is where grants
+are verified and usage is recorded, so a test can move the time.")
 
 (defun %now () (funcall *clock*))
 
