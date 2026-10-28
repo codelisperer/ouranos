@@ -34,6 +34,17 @@ its tag.
     `query-keys=unparsed`, with no text from it.
   - Log tooling that searched for `query` should search for `query-keys`.
   - No setting brings the raw query back.
+- **`praxeon/ceiling:make-ed25519-verifier` refuses a key that is not an Ed25519 public key**,
+  including NIL (part of #67). Before, a key that failed to load made a verifier that refused
+  every grant as "signature does not verify", so the fault looked like forged grants. Now the
+  call signals an error when the verifier is made. `praxeon/ceiling:*clock*`, a function
+  returning a universal time, is what a grant's expiry is checked against; it defaults to
+  `get-universal-time`. `praxeon/web:make-app` binds it to its own `:clock` around
+  `POST /embed/session` and around each turn, so the ledger's `:at` stamps use the app's clock
+  too. A `:sessions` table passed to `make-app` must be made with the same `:clock`, or
+  `make-app` signals an error. A JSON turn whose grant expires while it waits is answered 401,
+  not 500, so the client mints a new grant.
+
 - **praxeon/web: the chat page's message and poll routes now work from a cursor, and the
   page's own message comes back through the poll** (part of #67). A page built on `make-app`'s
   routes, rather than on its `GET /`, has to change:
@@ -1166,6 +1177,14 @@ its tag.
   from, `:make-agent` is called again and the conversation moves to the new agent, so a grant
   with fewer capabilities takes effect at the next turn and the transcript goes on. A grant can
   be exchanged for sessions any number of times until it expires, so keep grants short-lived.
+  A session ends when its grant expires, if it has not ended before: the host mints a new grant
+  for the page to exchange. `max_seconds` is the earlier of the table's limit and the grant's
+  expiry, and `praxeon/web-session:open-session` takes `:expires-at` for this. A turn whose
+  session's grant expired while it waited behind another ends in `praxeon/ceiling:grant-invalid`
+  without running. `make-app`'s `:clock` is also the clock of the session table it makes when
+  `:sessions` is not given, and the one a grant's expiry is checked against. Ended sessions are
+  removed on the same sweep as stale conversations, and `praxeon/web-session:prune-sessions`
+  removes them on demand. `make-app` refuses an `ed25519-verifier` with no key.
   `make-app` refuses `:grant-verifier` without a non-empty `:audience`, because a grant
   minted for another service would otherwise open a session here. A grant for another audience,
   or with no principal, is refused even if the app's own verifier accepts it.
@@ -1181,7 +1200,8 @@ its tag.
   Before this, conversations were kept for the app's lifetime. A page still open on a dropped
   conversation is not left showing nothing: the page's cursor now names its conversation, and
   the next poll from the old one replaces the transcript with the new conversation's under a
-  notice that a new conversation has started. `make-app` returns, as a second value, a function
+  notice that a new conversation has started. A cursor that is a bare index, with no
+  conversation named, is treated the same way. `make-app` returns, as a second value, a function
   that returns how many conversations it holds. Every transcript item now carries `:turn N`, numbered from 1 in each
   conversation, so a `:turn-ended` item says which turn it ends when two tabs send messages
   close together. `:make-agent` no longer runs under the lock every key's requests take, so a
