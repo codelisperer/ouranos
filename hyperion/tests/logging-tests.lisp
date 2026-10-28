@@ -114,7 +114,10 @@ the suite."
                              (lambda (env) (declare (ignore env)) (error "boom")))
                             (%log-env "/api/ping")))))))
       (is (search "request failed" out))
-      (is (search "boom" out)))))
+      ;; The condition's type, not its report: aion/log:exception no longer writes the report,
+      ;; which can quote outside data (#1013).
+      (is (search "SIMPLE-ERROR" out) "~A" out)
+      (is (null (search "boom" out)) "~A" out))))
 
 (test errors-are-re-signalled-not-swallowed
   ;; Observing a request must not change whether it failed -- Clack still decides the 500.

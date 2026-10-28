@@ -90,6 +90,21 @@ its tag.
   (for example an app's scratch build of an older Ouranos) sets `OURANOS_BOOTSTRAP_LOCAL=1`,
   and then `CL_SOURCE_REGISTRY` for the steps after bootstrap. A machine with one checkout,
   and a fresh CI runner, need no change. The decision is in `scripts/source-registry.lisp`.
+- **`aion/log:exception` no longer writes the condition's report or the backtrace's frame
+  arguments, by default** (#1013). Both can hold outside data: a database driver's report can
+  quote row values, and a frame's arguments can hold a request body, and `hyperion/logging:wrap`
+  logs every error that escapes a route this way, at ERROR.
+  - **What it writes now.** Its line has `error-type`, the condition's fully qualified type such
+    as `COMMON-LISP::SIMPLE-ERROR`, and `backtrace`, the names of up to 40 frames with no
+    arguments. The `error` field is gone. Log tooling that searched for `error` should search for
+    `error-type`.
+  - **The old detail is a development setting.** `aion/log:*log-condition-details*`, NIL by
+    default, brings back the report as `error` and the frames' arguments. The `:debug` level does
+    not turn it on.
+  - **Other log lines with a report.** These now carry the condition's type through the new
+    `aion/log:condition-type` instead of its report:
+    - `hyperion/server-uv`'s eight error and debug lines that had `:condition` (for example "server-uv: handler signalled"), and its "a loop could not be closed" line, whose `:error` became `:condition`;
+    - `praxeon`'s "llm request failed" lines, whose `:error` became `:condition`.
 
 - **MCP resources and retrieval passages are untrusted by default, so in a prompt they refuse
   `:requires-user-intent` means for the turn** (#907, after #906). `praxeon/mcp:add-resource` and
