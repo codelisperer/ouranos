@@ -14,6 +14,14 @@ its tag.
 
 ### An app may have to act
 
+- **`mnemosyne/migrate:migrate` logs each applied migration at DEBUG and one INFO line per
+  call** (#1046). The per-migration line `"migrate: applied"` (with `id`, `description` and `ms`)
+  is now DEBUG, as is `"migrate: applying"`. A call that had migrations to apply ends with one
+  INFO line, `"migrate: finished"`, with `pending`, `applied` and `ms` for the whole call, and
+  `failed` naming the migration that signalled when one did. A call with nothing to apply logs
+  nothing at INFO, as before. An app that searches its logs at INFO for `"migrate: applied"`
+  should search for `"migrate: finished"` instead, or log `mnemosyne/migrate` at DEBUG.
+
 - **A turn run with an observer now asks `anthropic` and `openai-compatible` providers for a
   stream** (#984), so that it can emit `:text-delta` events. The completion, the events and the
   usage are the same as before. An OpenAI-compatible request that streams also sends
@@ -34,6 +42,17 @@ its tag.
     `query-keys=unparsed`, with no text from it.
   - Log tooling that searched for `query` should search for `query-keys`.
   - No setting brings the raw query back.
+- **`praxeon/ceiling:make-ed25519-verifier` refuses a key that is not an Ed25519 public key**,
+  including NIL (part of #67). Before, a key that failed to load made a verifier that refused
+  every grant as "signature does not verify", so the fault looked like forged grants. Now the
+  call signals an error when the verifier is made. `praxeon/ceiling:*clock*`, a function
+  returning a universal time, is what a grant's expiry is checked against; it defaults to
+  `get-universal-time`. `praxeon/web:make-app` binds it to its own `:clock` around
+  `POST /embed/session` and around each turn, so the ledger's `:at` stamps use the app's clock
+  too. A `:sessions` table passed to `make-app` must be made with the same `:clock`, or
+  `make-app` signals an error. A JSON turn whose grant expires while it waits is answered 401,
+  not 500, so the client mints a new grant.
+
 - **praxeon/web: the chat page's message and poll routes now work from a cursor, and the
   page's own message comes back through the poll** (part of #67). A page built on `make-app`'s
   routes, rather than on its `GET /`, has to change:
@@ -46,6 +65,12 @@ its tag.
     shows it. The page's poll runs on `px-poll` as well as on its timer.
   - The JSON path (`Accept: application/json`) still answers `{"reply": ...}`. Its turns now
     appear on a page open on the same conversation, and count towards its token total.
+- **`hyperion/http:json` signals instead of returning `"{}"` for a value that is not a property
+  list** (#1041). An argument that is not a list, such as a string, a number or a vector, signals
+  a `type-error`. A property list with an odd number of elements, whose last key has no value,
+  signals an error; before, that key was written with `null`. A caller that passed the wrong
+  value used to store an empty or partial object without any error, and now gets one. A property
+  list, including the empty list, encodes as before.
 
 - **`scripts/build-desktop-app.lisp` stops, instead of warning and exiting 0, when the bundle
   needs hyperion-view or a library the runtime links against and it is missing** (#956). For an
@@ -1075,6 +1100,13 @@ its tag.
   test writes is not seen by the next. With 300 migrations on an Apple Silicon Mac, a copy took
   0.5 ms per test against 15 ms to migrate a fresh database. It is test support: load it from
   the app's test system. SQLite only. See `docs/migrations.md`, §10.
+- **`hyperion/auth-db:*pbkdf2-iterations*` is exported, so an app's test suite can lower the
+  password hashing cost** (#1045). It was internal, reachable only as
+  `hyperion/auth-db::*pbkdf2-iterations*`. The default stays 100000. A test runner can
+  `(setf auth:*pbkdf2-iterations* 1000)` for its run; production must not lower it. Each hash
+  stores its count, so hashes made at either count verify under the other. `hyperion/auth-db/tests`
+  now runs at 1000, about 29 s to 8 s on an Apple Silicon Mac. See `hyperion/docs/user-guide.md`,
+  "Identity and roles".
 
 - **praxeon: a turn can stream the model's text as it is written, and be cancelled so the
   provider stops generating** (#984).
@@ -1175,6 +1207,14 @@ its tag.
   from, `:make-agent` is called again and the conversation moves to the new agent, so a grant
   with fewer capabilities takes effect at the next turn and the transcript goes on. A grant can
   be exchanged for sessions any number of times until it expires, so keep grants short-lived.
+  A session ends when its grant expires, if it has not ended before: the host mints a new grant
+  for the page to exchange. `max_seconds` is the earlier of the table's limit and the grant's
+  expiry, and `praxeon/web-session:open-session` takes `:expires-at` for this. A turn whose
+  session's grant expired while it waited behind another ends in `praxeon/ceiling:grant-invalid`
+  without running. `make-app`'s `:clock` is also the clock of the session table it makes when
+  `:sessions` is not given, and the one a grant's expiry is checked against. Ended sessions are
+  removed on the same sweep as stale conversations, and `praxeon/web-session:prune-sessions`
+  removes them on demand. `make-app` refuses an `ed25519-verifier` with no key.
   `make-app` refuses `:grant-verifier` without a non-empty `:audience`, because a grant
   minted for another service would otherwise open a session here. A grant for another audience,
   or with no principal, is refused even if the app's own verifier accepts it.
@@ -1190,7 +1230,8 @@ its tag.
   Before this, conversations were kept for the app's lifetime. A page still open on a dropped
   conversation is not left showing nothing: the page's cursor now names its conversation, and
   the next poll from the old one replaces the transcript with the new conversation's under a
-  notice that a new conversation has started. `make-app` returns, as a second value, a function
+  notice that a new conversation has started. A cursor that is a bare index, with no
+  conversation named, is treated the same way. `make-app` returns, as a second value, a function
   that returns how many conversations it holds. Every transcript item now carries `:turn N`, numbered from 1 in each
   conversation, so a `:turn-ended` item says which turn it ends when two tabs send messages
   close together. `:make-agent` no longer runs under the lock every key's requests take, so a
@@ -1219,6 +1260,31 @@ its tag.
   `:turn-ended` with `:outcome :ok` or `:error` per turn), so two tabs on one conversation both
   see every message; before, whichever tab polled first took it. A turn's reply is now rendered
   by the poll that reads it. `praxeon/web` no longer depends on `sb-concurrency`.
+- **`praxeon/llm:provider-endpoint` says where a provider sends its requests, and
+  `endpoint-loopback-p` says whether that is this machine** (#1034). An app that keeps model
+  requests on this machine no longer has to read `oai-base-url` through `praxeon/llm::`.
+  - `provider-endpoint` returns an `endpoint`, with `endpoint-scheme` (`"http"` or `"https"`),
+    `endpoint-host` (lowercase, an IPv6 address without brackets) and `endpoint-port` (the
+    scheme's default when the URL names none).
+  - It has methods for `anthropic`, `openai-compatible`, the remote embedding providers
+    (`openai-compatible-embeddings`, `voyage-embeddings`), `voyage-reranker`, and
+    `praxeon/image`'s `openai-images` and `google-images`. Each method reads the setting that
+    the provider builds its request URLs from.
+  - It returns NIL for a provider whose destination is not known, such as one that runs in this
+    process or a class with no method of its own.
+  - `endpoint-loopback-p` is true for `localhost`, 127.0.0.0/8, `::1`, and an IPv6 address
+    carrying an IPv4 loopback address. It decides from the text without a DNS lookup, so it
+    returns NIL for another name that resolves to loopback, and for NIL.
+  - `parse-endpoint` reads an http or https URL into an `endpoint`. It signals an error for
+    anything else, and for an authority that HTTP clients read in different ways: one with a
+    backslash, whitespace, a control character or more than one `@`, or a host outside brackets
+    with `[` or `]` in it. `http://evil.com\@127.0.0.1/` goes to `evil.com` in some clients, so
+    it is refused rather than reported as loopback.
+  - The egress hook (#988) is to receive this same value.
+  - An OpenAI-compatible tool call whose arguments are not JSON, such as arguments cut off when a
+    reply ends with `finish_reason: "length"`, signals `provider-request-failed`, whether the
+    reply was streamed or not. Before, the tool was called with an empty object. Arguments that
+    are empty or missing are still an empty object.
 
 - **praxeon/image: the generate-image means offers the model a `mask`, so it can change only part
   of an image** (#946). With `:resolve-reference` and a provider that takes a mask

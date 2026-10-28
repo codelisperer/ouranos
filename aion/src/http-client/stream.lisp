@@ -206,9 +206,9 @@ body, as (values DATA EVENT ID OCTETS): DATA the event's data lines joined with 
 its event field or NIL, ID its id field or NIL, OCTETS the octets read for it, comments
 included. Returns NIL at the end of the stream. An event is complete only when a blank line
 follows it, so one the stream ends in the middle of is discarded, as the event-stream format
-says: a provider's connection that drops mid-event must not pass for a whole event. Comments (lines starting with a colon) and
-events with no data are skipped. Signals HTTP-ERROR when an event is longer than
-*MAX-EVENT-OCTETS*."
+says: a provider's connection that drops mid-event must not pass for a whole event. Comments
+(lines starting with a colon) and events with no data are skipped. Signals HTTP-ERROR when an
+event is longer than *MAX-EVENT-OCTETS*."
   (let ((data '()) (event nil) (id nil) (used 0) (saw-data nil))
     (loop
       (multiple-value-bind (line n) (%read-event-line stream (- *max-event-octets* used))

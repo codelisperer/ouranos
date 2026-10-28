@@ -32,7 +32,7 @@
     field. MAKE-DB-AUTH over a mnemosyne pool, or over an open mnemosyne connection;
     :ensure t creates the table.")
   (:export #:db-auth #:make-db-auth #:ensure-schema #:db-auth-ddl #:users-ddl #:*table*
-           #:hash-password #:verify-password
+           #:hash-password #:verify-password #:*pbkdf2-iterations*
            #:create-user #:find-user-by-email #:find-user-by-id #:authenticate #:set-password
            #:grant-role #:revoke-role #:users-with-role #:known-roles
            #:*role-update-attempts*
@@ -73,7 +73,13 @@
   "Default table name for the append-only log of address confirmations and changes (#690).")
 
 (defparameter *pbkdf2-iterations* 100000
-  "PBKDF2 iteration count for password hashing (raise over time as hardware allows).")
+  "PBKDF2 iteration count for password hashing (raise over time as hardware allows).
+HASH-PASSWORD reads it, and VERIFY-PASSWORD uses the count stored in each hash, so a hash made at
+one count still verifies after it changes.
+
+An app's test suite may lower it, for example to 1000 for the whole test run, because each hash
+or verify at 100000 takes about a quarter of a second (#1045). Production must not lower it: the
+count is what makes a stolen hash expensive to guess. hyperion's own auth-db suite runs at 1000.")
 
 ;;; --- schema (single source of truth for the DDL) --------------------------
 (schema:defschema hyperion-user (:table "hyperion_users")

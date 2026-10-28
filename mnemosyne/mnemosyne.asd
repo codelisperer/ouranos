@@ -114,6 +114,7 @@
   :description "Test suite for Mnemosyne."
   :depends-on ("aion/fs" "mnemosyne" "aion/secret" "aion/clock" "aion/log" "fiveam"   ; entity.lisp and backends.lisp
                "aion/test-threads"    ; pool.lisp joins its threads with a deadline (#325)
+               "log4cl"               ; migrate.lisp puts the log's setup back after capturing it (#1046)
                "mnemosyne/test-template")  ; template.lisp (#1047)
   :serial t
   :components ((:module "tests"
@@ -134,6 +135,7 @@
                              (:file "sqlite-rewrite")  ; map-query and the in-place re-encode (#425)
                              (:file "pool")         ; uses sqlite-busy's helpers (#325)
                              (:file "sqlite-library")
+                             (:file "migrate")      ; what MIGRATE logs (#1046)
                              (:file "template")     ; mnemosyne/test-template (#1047)
                              (:file "smoke"))))
   :perform (test-op (o c) (uiop:symbol-call :mnemosyne/tests :run-tests)))

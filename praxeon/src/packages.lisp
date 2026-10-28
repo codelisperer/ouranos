@@ -149,6 +149,9 @@
    #:provider #:complete
    ;; streaming and cancelling a completion (#984)
    #:*on-text* #:*cancel* #:supports-streaming-p
+   ;; where a provider sends its requests (#1034)
+   #:endpoint #:endpoint-p #:endpoint-scheme #:endpoint-host #:endpoint-port
+   #:parse-endpoint #:provider-endpoint #:endpoint-loopback-p
    ;; the embedding seam (#138, #150) -- a SEPARATE hierarchy, not a capability on PROVIDER
    #:embedding-provider #:embed #:embed-batch #:embed-documents #:embed-query
    #:embedding-dimensions #:embedding-model-of
@@ -313,7 +316,8 @@
   (:export #:grant #:grant-p #:grant-principal #:grant-group #:grant-capabilities
            #:grant-token-cap #:grant-call-cap #:grant-expires-at #:grant-audience
            #:grant-permits-p #:grant-permit-fn
-           #:verify-grant #:ed25519-verifier #:make-ed25519-verifier
+           #:verify-grant #:ed25519-verifier #:make-ed25519-verifier #:ed25519-verifier-public-key
+           #:*clock*
            #:encode-grant-token #:decode-grant-token
            #:grant-invalid #:grant-invalid-reason
            #:budget-exhausted #:budget-exhausted-principal
