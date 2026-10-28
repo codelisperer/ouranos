@@ -195,3 +195,62 @@ tell it apart from an error OPEN-DATABASE met before it reached the stores."))
         (is (null {{name}}:*pool*) "the pool was closed")
         (is (null {{name}}:*sessions*) "no session store is left set")
         (is (null {{name}}:*users*) "no user store is left set"))))))
+
+(define-condition %pool-not-closed (error) ()
+  (:report "{{name}}: the pool cannot be closed")
+  (:documentation "The error the replaced CLOSE-POOL signals."))
+
+(defun %with-close-pool-failing (function)
+  "Call FUNCTION while MNEMOSYNE/CONN:CLOSE-POOL signals %POOL-NOT-CLOSED instead of closing.
+Each pool it was asked to close is closed for real afterwards, with the original put back, so
+the test leaves no connections open."
+  (let ((original (fdefinition 'mnemosyne/conn:close-pool))
+        (asked '()))
+    (setf (fdefinition 'mnemosyne/conn:close-pool)
+          (lambda (pool &rest args)
+            (declare (ignore args))
+            (push pool asked)
+            (error '%pool-not-closed)))
+    (unwind-protect (funcall function)
+      (setf (fdefinition 'mnemosyne/conn:close-pool) original)
+      (dolist (pool asked) (funcall original pool)))))
+
+(test a-pool-that-cannot-be-closed-during-cleanup-keeps-the-store-error
+  "#1006: when a store cannot be made and closing the pool then signals too, the caller sees the
+store's error, not the pool's, and *POOL*, *SESSIONS* and *USERS* are NIL, so the next
+OPEN-DATABASE is not refused. The close failure is logged by its type."
+  (call-with-database
+   (lambda ()
+     (let ((log (make-string-output-stream)))
+       (%with-users-store-made-by
+        (lambda (original &rest args)
+          (declare (ignore original args))
+          (error '%users-store-not-made))
+        (lambda ()
+          (%with-close-pool-failing
+           (lambda ()
+             (unwind-protect
+                  (progn (aion/log:setup :env :prod :level :info :stream log)
+                         (signals %users-store-not-made ({{name}}::open-database)))
+               (aion/log:setup :env :dev :level :warn :stream *standard-output*))))))
+       (is (null {{name}}:*pool*) "the pool is not left set")
+       (is (null {{name}}:*sessions*) "no session store is left set")
+       (is (null {{name}}:*users*) "no user store is left set")
+       (let ((text (get-output-stream-string log)))
+         (is (search "%pool-not-closed" text :test #'char-equal) "the close failure is logged by its type: ~S" text)
+         (is (null (search "the pool cannot be closed" text)) "and not by its report"))))))
+
+(test a-pool-that-cannot-be-closed-is-still-forgotten
+  "#1006: CLOSE-DATABASE called directly signals when closing the pool fails, since its caller
+asked to close it, and still leaves *POOL* NIL, so OPEN-DATABASE works again afterwards."
+  (call-with-database
+   (lambda ()
+     (unwind-protect
+          (progn
+            ({{name}}::open-database)
+            (%with-close-pool-failing
+             (lambda ()
+               (signals %pool-not-closed ({{name}}::close-database))
+               (is (null {{name}}:*pool*) "the pool is not left set")))
+            (finishes ({{name}}::open-database) "a later OPEN-DATABASE is not refused"))
+       ({{name}}::close-database)))))

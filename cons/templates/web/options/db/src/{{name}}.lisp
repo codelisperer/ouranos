@@ -66,7 +66,7 @@ which is why the .env load is at the top of it rather than in MAIN alone."
            (setf *handler* (srv:start (app-with-database #'app)
                                       :host host :port port :server server)
                  started t))
-      (when (and opened (not started)) (close-database))))
+      (when (and opened (not started)) (close-database-during-cleanup))))
   (format t "~&{{name}} serving at http://~A:~D/~%" host (srv:handler-port *handler*))
   (finish-output)
   *handler*)

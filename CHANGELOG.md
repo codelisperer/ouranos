@@ -2416,6 +2416,17 @@ its tag.
 
 ### Fixed
 
+- **cons: in a project made with `cons init --template web --db`, a pool that cannot be closed
+  during cleanup no longer hides the error that caused the cleanup, and `*pool*` is always
+  cleared** (#1006). When `open-database` could not make a store, or `start` could not start the
+  server, and `conn:close-pool` then signalled as well, the caller saw the pool's error instead
+  of the original one, and `*pool*` stayed set, so the next `open-database` refused with "the
+  database is already open". Both cleanups now call the new `close-database-during-cleanup`,
+  which logs a close failure with its condition type only and lets the original error continue.
+  `close-database` clears `*pool*`, `*sessions*` and `*users*` even when closing the pool
+  signals. A project made before this change can copy `close-database` and
+  `close-database-during-cleanup` from the template's `src/db.lisp`.
+
 - **cons: in a project made with `cons init --template web --db`, `open-database` closes the
   pool only when making the session or user store did not finish** (#944). It used to close the
   pool from a `handler-bind` on `error`, which runs as soon as an error is signalled, so a store
