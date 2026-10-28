@@ -493,12 +493,15 @@ be classed as something a retry could fix."
   "Whether E, from the dexador path, means no connection was made. Measured on Linux (#79):
 dexador reports a refused connection and a connect timeout as USOCKET:TIMEOUT-ERROR, a name that
 does not resolve as USOCKET:NS-HOST-NOT-FOUND-ERROR, and a read timeout as SB-SYS:IO-TIMEOUT.
-Only types that can come from making the connection count; USOCKET:SOCKET-ERROR as a whole does
-not, because a connection reset while reading the response is one too. Used only where the call
-that failed is not known; the pinned path knows, see *%CONNECTED*."
+Measured on macOS (#974, CI run 40653707988): a refused connection is
+USOCKET:INVALID-ARGUMENT-ERROR, which usocket signals for the EINVAL macOS returns when a
+connect with a timeout has been refused. Only types that can come from making the connection
+count; USOCKET:SOCKET-ERROR as a whole does not, because a connection reset while reading the
+response is one too. Used only where the call that failed is not known; the pinned path knows,
+see *%CONNECTED*."
   (typep e '(or usocket:timeout-error usocket:connection-refused-error
                 usocket:host-unreachable-error usocket:network-unreachable-error
-                usocket:ns-error)))
+                usocket:invalid-argument-error usocket:ns-error)))
 
 #+os-windows
 (defun %winhttp-phase (e)
