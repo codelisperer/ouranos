@@ -333,6 +333,7 @@
                "aion/signature"       ; the #67 tests mint grant tokens
                "praxeon/web-page" "aion/test-http"  ; the #757 tests serve pages from 127.0.0.1
                "aion/http-client"     ; the #719 tests build an http-error to stand for a refused connection
+               "quri"                 ; the #1034 tests read a provider's request URL as the request does
                "fiveam"
                "aion/test-threads"    ; the #531 tests continue a held turn on another thread
                ;; The #678 tests answer the meta impl from a server on 127.0.0.1. An SBCL
@@ -347,6 +348,9 @@
                              (:file "image-tests")
                              ;; #758: the Google provider, after image-tests, whose image helpers it uses
                              (:file "image-google-tests")
+                             ;; #1034: where each provider sends, after image-tests, whose
+                             ;; providers it makes
+                             (:file "endpoint-tests")
                              (:file "web-page-tests")
                              ;; #827: untrusted content in a turn, using the stub reader pattern
                              (:file "reader-guard-tests")

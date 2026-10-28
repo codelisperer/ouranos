@@ -1230,6 +1230,27 @@ its tag.
   `:turn-ended` with `:outcome :ok` or `:error` per turn), so two tabs on one conversation both
   see every message; before, whichever tab polled first took it. A turn's reply is now rendered
   by the poll that reads it. `praxeon/web` no longer depends on `sb-concurrency`.
+- **`praxeon/llm:provider-endpoint` says where a provider sends its requests, and
+  `endpoint-loopback-p` says whether that is this machine** (#1034). An app that keeps model
+  requests on this machine no longer has to read `oai-base-url` through `praxeon/llm::`.
+  - `provider-endpoint` returns an `endpoint`, with `endpoint-scheme` (`"http"` or `"https"`),
+    `endpoint-host` (lowercase, an IPv6 address without brackets) and `endpoint-port` (the
+    scheme's default when the URL names none).
+  - It has methods for `anthropic`, `openai-compatible`, the remote embedding providers
+    (`openai-compatible-embeddings`, `voyage-embeddings`), `voyage-reranker`, and
+    `praxeon/image`'s `openai-images` and `google-images`. Each method reads the setting that
+    the provider builds its request URLs from.
+  - It returns NIL for a provider whose destination is not known, such as one that runs in this
+    process or a class with no method of its own.
+  - `endpoint-loopback-p` is true for `localhost`, 127.0.0.0/8, `::1`, and an IPv6 address
+    carrying an IPv4 loopback address. It decides from the text without a DNS lookup, so it
+    returns NIL for another name that resolves to loopback, and for NIL.
+  - `parse-endpoint` reads an http or https URL into an `endpoint`. It signals an error for
+    anything else, and for an authority that HTTP clients read in different ways: one with a
+    backslash, whitespace, a control character or more than one `@`, or a host outside brackets
+    with `[` or `]` in it. `http://evil.com\@127.0.0.1/` goes to `evil.com` in some clients, so
+    it is refused rather than reported as loopback.
+  - The egress hook (#988) is to receive this same value.
 
 - **praxeon/image: the generate-image means offers the model a `mask`, so it can change only part
   of an image** (#946). With `:resolve-reference` and a provider that takes a mask

@@ -197,6 +197,91 @@ A provider that cannot honour a forced choice must SIGNAL rather than fall back 
 :auto. A silent downgrade returns prose to a caller that is about to treat it as a
 record, and nothing downstream can tell the difference until the data is stored."))
 
+;;; --------------------------------------------------------------------------
+;;; Where a provider sends its requests (#1034)
+;;; --------------------------------------------------------------------------
+;;;
+;;; An app that must keep a request on this machine checks where the request will go. It asks
+;;; PROVIDER-ENDPOINT, which every provider here answers from the same setting its requests are
+;;; built from, so the answer cannot differ from the address the request uses. The egress hook
+;;; (#988) is to be given the same value, so an app's check and the hook agree.
+
+(defstruct (endpoint (:constructor %make-endpoint (scheme host port)))
+  "Where a provider's requests go: SCHEME (\"http\" or \"https\", lowercase), HOST (lowercase,
+an IPv6 address without its brackets) and PORT (an integer, the scheme's default when the URL
+names none)."
+  (scheme "" :type string)
+  (host "" :type string)
+  (port 0 :type (integer 1 65535)))
+
+(defun parse-endpoint (url)
+  "The ENDPOINT of URL, an http or https URL such as a provider's base URL. Signals an error when
+URL is not one, has no host, or names a port that is not a whole number from 1 to 65535. It also
+signals for an authority that HTTP clients read in different ways: one that contains a
+backslash, whitespace, a control character or more than one @, or a host outside brackets that
+contains [ or ]. Some clients treat a backslash as the start of the path, so
+\"http://evil.com\\@127.0.0.1/\" goes to evil.com there, while reading the text after the @ as
+the host would call it a loopback address."
+  (flet ((refuse (why)
+           (error "praxeon/llm: ~S is not an http or https URL with a host: ~A." url why)))
+    (unless (stringp url) (refuse "it is not a string"))
+    (let* ((sep (or (search "://" url) (refuse "it has no scheme")))
+           (scheme (string-downcase (subseq url 0 sep)))
+           (start (+ sep 3))
+           (end (or (position-if (lambda (c) (find c "/?#")) url :start start) (length url)))
+           (whole (subseq url start end))
+           ;; Userinfo, if any, ends at the last @ of the authority.
+           (authority (let ((at (position #\@ url :start start :end end :from-end t)))
+                        (subseq url (if at (1+ at) start) end)))
+           (default (cond ((string= scheme "http") 80)
+                          ((string= scheme "https") 443)
+                          (t (refuse "its scheme is not http or https")))))
+      (when (find-if (lambda (c) (or (char= c #\\) (<= (char-code c) 32) (= (char-code c) 127)))
+                     whole)
+        (refuse "its authority contains a backslash, whitespace or a control character"))
+      (when (> (count #\@ whole) 1)
+        (refuse "its authority contains more than one @"))
+      (multiple-value-bind (host port-text)
+          (if (and (plusp (length authority)) (char= #\[ (char authority 0)))
+              (let ((close (or (position #\] authority) (refuse "an IPv6 address has no ]"))))
+                (values (subseq authority 1 close)
+                        (let ((rest (subseq authority (1+ close))))
+                          (cond ((string= rest "") nil)
+                                ((char= #\: (char rest 0)) (subseq rest 1))
+                                (t (refuse "text follows the IPv6 address"))))))
+              (let ((colon (position #\: authority :from-end t)))
+                (when (find-if (lambda (c) (find c "[]")) authority)
+                  (refuse "a host outside brackets contains [ or ]"))
+                (if colon
+                    (values (subseq authority 0 colon) (subseq authority (1+ colon)))
+                    (values authority nil))))
+        (when (string= host "") (refuse "it has no host"))
+        (let ((port (cond ((or (null port-text) (string= port-text "")) default)
+                          ((and (<= (length port-text) 5) (every #'digit-char-p port-text)
+                                (<= 1 (parse-integer port-text) 65535))
+                           (parse-integer port-text))
+                          (t (refuse "its port is not a number from 1 to 65535")))))
+          (%make-endpoint scheme (string-downcase host) port))))))
+
+(defgeneric provider-endpoint (provider)
+  (:documentation "The ENDPOINT PROVIDER's requests go to, read from the same setting the request
+URL is built from, with defaults applied: an anthropic, openai-compatible, embedding, reranker or
+image provider. NIL when where it sends is not known: a provider that runs in this process, or
+a provider class that defines no method. A caller deciding whether a request stays on this
+machine treats NIL as not on this machine.")
+  (:method ((provider t)) nil))
+
+(defun endpoint-loopback-p (endpoint)
+  "True when ENDPOINT's host is a loopback address: localhost, an address in 127.0.0.0/8, ::1,
+or an IPv6 address carrying an IPv4 loopback address, such as ::ffff:127.0.0.1. Decided from
+the text, with no DNS lookup, so another name that resolves to a loopback address is answered
+NIL. NIL for NIL."
+  (and endpoint
+       (let ((host (endpoint-host endpoint)))
+         (or (string= host "localhost")
+             (and (http:parse-address host)
+                  (eq :loopback (http:address-category host)))))))
+
 (defgeneric supports-tool-choice-p (provider)
   (:documentation "True when PROVIDER can honour a TOOL-CHOICE other than :auto.
 
@@ -564,6 +649,9 @@ with an x-api-key from PRAXEON_ANTHROPIC_API_KEY (or PRAXEON_LLM_API_KEY when
 PRAXEON_LLM_IMPL is anthropic), billed to that key's API credits. (A
 Pro/Max subscription funds Claude.ai and Claude Code, not the raw Messages API, so
 there is no subscription-billed path here.)"))
+
+(defmethod provider-endpoint ((p anthropic))
+  (parse-endpoint (anthropic-endpoint p)))
 
 (defun %auth-headers (p)
   "Request headers for provider P: an x-api-key plus the API version."
@@ -941,6 +1029,12 @@ the shared PRAXEON_LLM_* settings and OpenRouter's URL, as it did before #291.")
     (unless (slot-boundp p 'api-key)
       (setf (slot-value p 'api-key) (%env-for impl "API_KEY")))))
 
+(defun %oai-chat-url (p)
+  (concatenate 'string (oai-base-url p) "/chat/completions"))
+
+(defmethod provider-endpoint ((p openai-compatible))
+  (parse-endpoint (oai-base-url p)))
+
 (defun %oai-tool-choice-json (tool-choice)
   "OpenAI's tool_choice value for a neutral TOOL-CHOICE, or NIL to send nothing.
 
@@ -1035,7 +1129,7 @@ through response_format (#680)."
                                               :tool-choice tool-choice
                                               :response-format *oai-response-format*)))
     (let* ((payload (jzon:stringify body))
-           (url (concatenate 'string (oai-base-url p) "/chat/completions"))
+           (url (%oai-chat-url p))
            (headers (append '(("content-type" . "application/json"))
                             (when (oai-api-key p)
                               (list (cons "authorization"
