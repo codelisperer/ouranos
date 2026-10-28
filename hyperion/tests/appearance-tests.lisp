@@ -85,14 +85,23 @@ system rather than signalling."
     (is (consp (getf gradient :surface)) "the default gradient for a token the app left alone")))
 
 (test both-looks-define-every-token-in-every-scheme
-  (let ((table (appr:make-appearance-table)))
+  "The defaults give every token a value in the flat look, and give every background token its
+own gradient in the gradient look. TOKEN-VALUES falls back to the flat value for a token the
+gradient look does not change, so a gradient value that equals the flat colour would mean the
+defaults left that token out of the gradient look."
+  (let ((table (appr:make-appearance-table))
+        (backgrounds '(:surface :surface-raised :header :button :button-primary :button-danger)))
     (dolist (theme '(:light :dark))
       (dolist (contrast '(:normal :high))
-        (dolist (look '(:flat :gradient))
-          (let ((values (appr:token-values table theme contrast look)))
-            (is (= 12 (/ (length values) 2)))
-            (is (every #'identity (loop for (nil v) on values by #'cddr collect v))
-                "~A ~A ~A has a token with no value" theme contrast look)))))))
+        (let ((flat (appr:token-values table theme contrast :flat))
+              (gradient (appr:token-values table theme contrast :gradient)))
+          (is (= 12 (/ (length flat) 2)))
+          (is (every #'stringp (loop for (nil v) on flat by #'cddr collect v))
+              "~A ~A has a flat token that is not a colour" theme contrast)
+          (dolist (token backgrounds)
+            (is-true (let ((v (getf gradient token))) (and (consp v) (eq :gradient (first v))))
+                "~A ~A gives ~A no gradient in the gradient look: ~S"
+                theme contrast token (getf gradient token))))))))
 
 (test a-table-refuses-what-it-cannot-check
   (signals error (appr:make-appearance-table :light '(:sidebar "#ffffff")))
@@ -143,7 +152,7 @@ to the system: 32 rules, plus the bare :root fallback."
 
 (test the-gradient-look-applies-the-tokens-to-bulma-s-classes
   (let ((css (appr:appearance-css)))
-    (is (search (format nil ":root[data-look=\"gradient\"] .button.is-primary {~%  background-image: var(--hy-button-primary);~%  color: var(--hy-button-primary-text);") css))
+    (is (search (format nil ":root[data-look=\"gradient\"] .button.is-primary:not(.is-outlined):not(.is-light):not(.is-inverted) {~%  background: var(--hy-button-primary);~%  color: var(--hy-button-primary-text);") css))
     (is (search ":root[data-look=\"gradient\"] .navbar .navbar-item, :root[data-look=\"gradient\"] .navbar .navbar-link {" css))))
 
 ;;; --- contrast ----------------------------------------------------------------------
@@ -192,3 +201,15 @@ only the samples between the stops can find."
     (is (equal '((:light :gradient :surface-text))
                (mapcar (lambda (f) (list (getf f :theme) (getf f :look) (getf f :text)))
                        failures)))))
+
+(test a-plain-colour-in-the-gradient-look-replaces-bulma-s-background
+  "An app may give a plain colour as a gradient-look value. The gradient look's rules set it with
+`background:', because `background-image:' with a colour is invalid in a browser: Bulma's own
+background would stay under the token's text colour, which the contrast check never saw."
+  (let* ((table (appr:make-appearance-table
+                 :light '(:gradient (:button-primary "#5b21b6" :button-primary-text "#ffffff"))))
+         (css (appr:appearance-css table)))
+    (is (search "--hy-button-primary: #5b21b6;" css) "the plain colour is not a token value")
+    (is (search (format nil ".button.is-primary:not(.is-outlined):not(.is-light):not(.is-inverted) {~%  background: var(--hy-button-primary);") css))
+    (is (null (search "background-image" css)) "a rule still sets background-image")
+    (is (null (appr:appearance-contrast-failures table)))))

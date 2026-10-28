@@ -322,8 +322,8 @@ the two kinds of rule never match the same page."
     (dolist (m media) (declare (ignore m)) (write-line "}" out))))
 
 (defparameter *gradient-targets*
-  '((".button.is-primary" :button-primary)
-    (".button.is-danger" :button-danger)
+  '((".button.is-primary:not(.is-outlined):not(.is-light):not(.is-inverted)" :button-primary)
+    (".button.is-danger:not(.is-outlined):not(.is-light):not(.is-inverted)" :button-danger)
     (".navbar" :header ".navbar-item" ".navbar-link")
     (".modal-card-head" :header ".modal-card-title")
     (".card-header" :header ".card-header-title")
@@ -331,12 +331,16 @@ the two kinds of rule never match the same page."
     (".card" :surface-raised))
   "Bulma classes the gradient look applies its tokens to: the selector, the background
 token, and descendants that carry their own text colour and must take the token's text
-colour too.")
+colour too. A button's outlined, light and inverted variants keep Bulma's own colours,
+because they are not filled with the button's colour. Hover is left to Bulma.")
 
 (defun %gradient-targets (out)
   (loop for (selector token . children) in *gradient-targets*
         for scope = (format nil ":root[data-look=\"gradient\"] ~A" selector)
-        do (format out "~A {~%  background-image: var(--hy-~(~A~));~%  color: var(--hy-~(~A~)-text);~%}~%"
+        ;; `background:', because an app may give a plain colour as a gradient-look value, and
+        ;; `background-image:' with a colour is invalid, which would leave Bulma's background
+        ;; under the token's text colour.
+        do (format out "~A {~%  background: var(--hy-~(~A~));~%  color: var(--hy-~(~A~)-text);~%}~%"
                    scope token token)
            (when children
              (format out "~{~A~^, ~} {~%  color: var(--hy-~(~A~)-text);~%}~%"
@@ -349,7 +353,11 @@ TABLE (hyperion's defaults when omitted), plus the spacing steps. A bare :root r
 the light, normal-contrast, flat values, for a browser that matches no other rule.
 
 Serve it after Bulma. The type scale needs nothing here: it is Bulma's own --bulma-size-1
-to --bulma-size-7, which HYPERION/ASSETS:THEME sets."
+to --bulma-size-7, which HYPERION/ASSETS:THEME sets.
+
+A browser that does not support the prefers-contrast media feature (Chrome before 96,
+Firefox before 101) matches none of the rules that leave contrast to the system, so on a
+page without data-contrast it shows the bare :root rule's light, flat look."
   (with-output-to-string (out)
     (write-line ":root {" out)
     (%declarations out table :light :normal :flat :spacing t)

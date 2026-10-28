@@ -932,7 +932,11 @@ its tag.
     `linear-gradient` in the gradient look, so use it with `background:`, not
     `background-color:`.
   - In the gradient look, the CSS also applies the tokens to Bulma's `.button.is-primary`,
-    `.button.is-danger`, `.navbar`, `.modal-card-head`, `.card-header`, `.box` and `.card`.
+    `.button.is-danger`, `.navbar`, `.modal-card-head`, `.card-header`, `.box` and `.card`,
+    with `background:`, so a plain colour given as a gradient-look value replaces Bulma's own
+    background. The outlined, light and inverted button variants keep Bulma's colours.
+  - A browser without the `prefers-contrast` media feature (Chrome before 96, Firefox before
+    101) shows the light, flat look on a page that sets no `data-contrast`.
   - The type scale is Bulma's `--bulma-size-1` to `--bulma-size-7`, set through
     `hyperion/assets:theme`.
   - `appearance-contrast-failures` checks every text token against its background in all eight
