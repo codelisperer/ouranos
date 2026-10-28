@@ -356,3 +356,84 @@ a `test' target testing it; NAME's one file holds SOURCE."
     (dolist (fresh '(nil t))
       (multiple-value-bind (code out) (%cons-target-in-child dir "build" :fresh fresh)
         (is (eql 0 code) "cons ~:[~;--fresh ~]build of a clean project must exit 0, got ~A:~%~A" fresh code out)))))
+
+;;; --- #960: --strict and the targets it cannot judge, and fasls written outside cons --------
+
+(test the-targets-strict-cannot-judge-are-the-ones-that-load-nothing
+  "#960: a target whose work is :eval, :call or :sh with no :load or :test is one --strict
+cannot judge. A target with :load or :test is judged, and a :steps target is judged by the
+targets it runs."
+  (let* ((spec (cons/spec:install-spec
+                "unjudged"
+                '(:system "unjudged"
+                  :targets
+                  ((build :load "unjudged")
+                   (test :test "unjudged/tests")
+                   (dev :load "unjudged/web" :call ("unjudged/web:dev"))
+                   (build-eval :eval "(asdf:load-system \"unjudged\")")
+                   (build-call :call ("asdf:load-system" "unjudged"))
+                   (dump :sh ("sbcl" "--script" "dump.lisp"))
+                   (repl :interactive t)
+                   (all :steps (build build-eval dump))))))
+         (tgt (lambda (name) (find name (cons/spec:spec-targets spec) :key #'cons/spec:target-name))))
+    (flet ((unjudged (name) (cons/run::%unjudged-targets spec (funcall tgt name))))
+      (dolist (judged '(:build :test :dev :repl))
+        (is (null (unjudged judged)) "~S loads what it builds, or does no work" judged))
+      (is (equal '((:build-eval :eval)) (unjudged :build-eval)))
+      (is (equal '((:build-call :call)) (unjudged :build-call)))
+      (is (equal '((:dump :sh)) (unjudged :dump)))
+      (is (equal '((:build-eval :eval) (:dump :sh)) (unjudged :all))
+          "a :steps target names each step it runs that --strict cannot judge"))))
+
+(defmacro %with-cons-targets ((dir name tag source targets-format) &body body)
+  "BODY with DIR a fresh project whose system NAME's one file holds SOURCE and whose cons.lisp
+has the targets TARGETS-FORMAT gives, a format string applied to NAME."
+  `(tempdir:with-temporary-directory (,dir "strict-cli")
+     (let ((,name (string-downcase (%strict-name ,tag))))
+       (%strict-project ,dir ,name ,source)
+       (with-open-file (out (merge-pathnames "cons.lisp" ,dir) :direction :output)
+         (format out "(cons:project ~S :system ~S :targets (~A))~%"
+                 ,name ,name (format nil ,targets-format ,name ,name ,name)))
+       ,@body)))
+
+(test cons-strict-refuses-a-target-that-loads-its-code-in-an-eval
+  "#960: an :eval target that loads a system holding a full WARNING. Under --strict it is
+refused, exit 1, naming the target and the clause, before it runs. Control: run without
+--strict, the same target runs, loads the system with its warnings muffled, as a build step
+through Quicklisp's quiet mode does, and exits 0 -- the check --strict could not have made."
+  (%with-cons-targets (dir name "evaltarget" *strict-warning-source*
+                       "(build-eval :eval \"(handler-bind ((warning (function muffle-warning))) (asdf:load-system \\\"~A\\\"))\") (build :load ~S)")
+    (multiple-value-bind (code out) (%cons-target-in-child dir "build-eval" :strict t)
+      (is (eql 1 code) "cons --strict build-eval must exit 1, got ~A:~%~A" code out)
+      (is (search "target build-eval does its work with :eval" out) "~A" out))
+    (multiple-value-bind (code out) (%cons-target-in-child dir "build-eval")
+      (is (eql 0 code) "control: cons build-eval without --strict runs and exits 0, got ~A:~%~A" code out))))
+
+(defun %plain-load-in-child (dir name)
+  "Load system NAME, found in DIR, in a child SBCL with plain ASDF, its warnings muffled, as a
+build step outside cons would: the child compiles the system and writes its fasls."
+  (multiple-value-bind (out err code)
+      (uiop:run-program
+       (list (uiop:native-namestring sb-ext:*runtime-pathname*)
+             "--noinform" "--no-userinit" "--no-sysinit" "--non-interactive"
+             "--eval" "(require :asdf)"
+             "--eval" (format nil "(push ~S asdf:*central-registry*)" (namestring (truename dir)))
+             "--eval" (format nil "(handler-bind ((warning (function muffle-warning))) (asdf:load-system ~S))" name))
+       :output :string :error-output :output :ignore-error-status t)
+    (declare (ignore err))
+    (values code out)))
+
+(test cons-strict-recompiles-fasls-written-outside-cons
+  "#960: a step outside cons -- plain ASDF in another process -- compiles a system holding a
+full WARNING and writes its fasl. cons --strict build must still fail, because --strict
+recompiles the project's own systems instead of loading that fasl. Control: plain cons build
+loads the fasl without compiling it and exits 0, which is the silent pass --strict exists to
+prevent."
+  (%with-cons-targets (dir name "outside" *strict-warning-source* "(build :load ~S)")
+    (multiple-value-bind (code out) (%plain-load-in-child dir name)
+      (is (eql 0 code) "the plain load outside cons must succeed and write the fasl, got ~A:~%~A" code out))
+    (multiple-value-bind (code out) (%cons-target-in-child dir "build")
+      (is (eql 0 code) "control: plain cons build loads the warm fasl and exits 0, got ~A:~%~A" code out))
+    (multiple-value-bind (code out) (%cons-target-in-child dir "build" :strict t)
+      (is (eql 1 code) "cons --strict build must recompile and exit 1, got ~A:~%~A" code out)
+      (is (search "not a number" out) "the warning must be printed:~%~A" out))))

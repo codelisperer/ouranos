@@ -404,6 +404,32 @@ return -- it enters the REPL, which exits the process itself."
        (or (spec:target-load tgt) (spec:target-call tgt)
            (spec:target-test tgt) (spec:target-eval tgt))))
 
+(defun %unjudged-targets (spec tgt)
+  "The targets TGT runs, following :STEPS, whose work --strict cannot judge: each does its work
+with :EVAL, :CALL or :SH and has no :LOAD or :TEST clause. --strict judges a system by loading
+it through LOAD-SYSTEM-STRICTLY, which only :LOAD and :TEST do, so a target that loads its code
+in an :EVAL, a :CALL or a shell command is run with nothing checked (#960). Returns a list of
+(NAME . CLAUSES), CLAUSES the keywords of the clauses that do the work."
+  (if (spec:target-steps tgt)
+      (loop for step in (spec:target-steps tgt)
+            append (%unjudged-targets spec (%require-target spec step)))
+      (let ((clauses (append (and (spec:target-eval tgt) '(:eval))
+                             (and (spec:target-call tgt) '(:call))
+                             (and (spec:target-sh tgt) '(:sh)))))
+        (and clauses
+             (null (spec:target-load tgt))
+             (null (spec:target-test tgt))
+             (list (cons (spec:target-name tgt) clauses))))))
+
+(defun %refuse-unjudged (spec tgt)
+  "Under --strict, signal an error when TGT, or a step it runs, does work --strict cannot
+judge (%UNJUDGED-TARGETS), naming each such target and its clauses."
+  (let ((unjudged (%unjudged-targets spec tgt)))
+    (when unjudged
+      (error "--strict judges only what a target loads with :load or :test, so it could not check:~{~%  target ~A does its work with ~{:~(~A~)~^ and ~} and loads nothing with :load or :test~}~%Add a :load clause naming the systems the target builds, or run it without --strict."
+             (loop for (name . clauses) in unjudged
+                   append (list (string-downcase (string name)) clauses))))))
+
 (defun %load-env (spec)
   "Load the spec's :env files (relative to the spec dir) into the environment."
   (dolist (f (spec:spec-env spec))
@@ -422,6 +448,8 @@ fasl is seen; see LOAD-SYSTEM-STRICTLY."
             (pmap (%param-map spec params))
             (*strict* strict)
             (*root* (spec:spec-dir spec)))
+        ;; #960: --strict that would check nothing is refused before anything runs.
+        (when strict (%refuse-unjudged spec tgt))
         ;; pre-publication issue 240: before doing the work, say whether the framework this app is built
         ;; against has moved. Advisory, fail-open, no network -- see cons/upstream.
         (cons/upstream:report)

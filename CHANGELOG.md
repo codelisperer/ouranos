@@ -14,6 +14,16 @@ its tag.
 
 ### An app may have to act
 
+- **`cons --strict` refuses a target it cannot check, instead of running it and exiting 0**
+  (#960). `--strict` judges only what a target loads with `:load` or `:test`. A target whose work
+  is `:eval`, `:call` or `:sh` with neither -- for example an `:eval` that calls
+  `asdf:load-system` -- ran with nothing checked. Under `--strict` it now exits 1 before running,
+  naming the target and the clause, and a `:steps` target names each such step. Give such a
+  target a `:load` clause naming the systems it builds, or run it without `--strict`. Also, a
+  strict load (`cons/run:load-system-strictly` with `:force-own`) whose root holds none of the
+  systems it loads now signals an error naming the root, instead of loading everything with its
+  warnings muffled. Without `--strict` nothing changes.
+
 - **MCP resources and retrieval passages are untrusted by default, so in a prompt they refuse
   `:requires-user-intent` means for the turn** (#907, after #906). `praxeon/mcp:add-resource` and
   `praxeon/retrieval:passage->ctx-item` put outside content into an agent's context with nothing
