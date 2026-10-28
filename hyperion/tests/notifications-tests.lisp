@@ -189,8 +189,11 @@
          (b (%put s "u1" "grouped" :group-key "g")))
     (%put s "u1" "grouped again" :group-key "g")
     (n:mark-read s "u1" (n:notification-id a))
-    (let ((html (%html (lambda () (n:notification-panel (n:notification-list s "u1") :more t
-                                                                                     :prefix "/notes")))))
+    (let ((html (let ((hyperion/csrf:*token-thunk* (lambda () "tok-123")))
+                  (%html (lambda () (n:notification-panel (n:notification-list s "u1") :more t
+                                                                                       :prefix "/notes"))))))
+      (is (search "hx-headers=\"{&quot;X-CSRF-Token&quot;: &quot;tok-123&quot;}\"" html)
+          "each POST carries the request's CSRF token in its header: ~A" html)
       (is (search "&lt;b&gt;bold&lt;/b&gt;" html) "the title is escaped: ~A" html)
       (is (search "body &amp; more" html) "~A" html)
       (is (search "href=\"/t/1\"" html) "~A" html)
@@ -202,9 +205,26 @@
       (is (search "hx-get=\"/notes/list?before=" html) "Older, when there is more: ~A" html))
     (is (search "You have no notifications." (%html (lambda () (n:notification-panel '())))))))
 
+(defun %ht (&rest kvs)
+  (let ((h (make-hash-table :test 'equal)))
+    (loop for (k v) on kvs by #'cddr do (setf (gethash k h) v))
+    h))
+
 (test a-translation-key-is-shown-in-the-viewers-locale-or-as-its-name
-  (let ((s (n:make-memory-notification-store)))
+  (let ((s (n:make-memory-notification-store))
+        (source (hyperion/i18n:make-dictionary
+                 (%ht "fr" (%ht "app" (%ht "reply" "Réponse de {who}")
+                                "notifications" (%ht "mark-read" "Marquer comme lu"
+                                                     "unread.one" "{count} notification non lue"
+                                                     "unread.other" "{count} notifications non lues")))
+                 :default :fr)))
     (%put s "u1" '(:key :app/reply :args (:who "Ann")))
+    (let ((html (%html (lambda () (n:notification-panel (n:notification-list s "u1")
+                                                        :locale "fr" :source source)))))
+      (is (search "Réponse de Ann" html) "the title in the viewer's locale, with its argument: ~A" html)
+      (is (search "Marquer comme lu" html) "and the panel's own text: ~A" html))
+    (let ((bell (%html (lambda () (n:notification-bell 1 :locale "fr" :source source)))))
+      (is (search "1 notification non lue" bell) "the unread sentence in the locale's plural form: ~A" bell))
     (let ((html (%html (lambda () (n:notification-panel (n:notification-list s "u1") :source nil)))))
       (is (search "app/reply" html) "a key with no source shows as its name: ~A" html))))
 
@@ -265,12 +285,29 @@
     (is (null (n:delivery-ref s "u1" :test-digest)) "an unknown delivery is ignored")
     (is (search "selected" (%body (%call s "u1" :get "/delivery"))))))
 
-(test the-prune-job-returns-its-count-for-the-run-log
-  (let ((s (n:make-memory-notification-store)))
-    (%put s "u1" "x")
+(test the-prune-job-runs-on-aion-schedule-as-the-docs-define-it-and-counts-what-it-deleted
+  "Review of #1012: the docs passed the keyword :prune-notifications, which DEFINE-JOB refuses with a
+TYPE-ERROR. This defines the job exactly as hyperion/docs/notifications.md does and runs it."
+  (let ((s (n:make-memory-notification-store))
+        (scheduler (aion/schedule:make-scheduler (aion/schedule:make-memory-job-store)))
+        (three-days-ago (- (get-universal-time) (* 3 86400))))
+    (dotimes (i 2) (%put s "u1" "old"))
+    (%put s "u1" "unread")
     (n:mark-all-read s "u1")
-    (is (equal '(:deleted 0) (funcall (n:prune-notifications-job s :read-days 1) nil)))
-    (signals n:invalid-notification (n:prune-notifications-job s :read-days 0))))
+    (%put s "u1" "still unread")
+    ;; The two first items were read three days ago.
+    (dolist (item (gethash "u1" (n::%items s)))
+      (when (equal "old" (n:notification-title item))
+        (setf (n:notification-read-at item) three-days-ago)))
+    (aion/schedule:define-job scheduler "prune-notifications"
+                              (n:prune-notifications-job s :read-days 1)
+                              :schedule '(:daily (3 0)))
+    (let ((run (aion/schedule:run-job scheduler "prune-notifications")))
+      (is-true run "the job ran")
+      (is (equal '(:deleted 2) (aion/schedule:job-run-counts run)) "~S" (and run (aion/schedule:job-run-counts run))))
+    (is (= 2 (length (n:notification-list s "u1"))) "the item read today and the unread one are kept"))
+  (signals n:invalid-notification
+    (n:prune-notifications-job (n:make-memory-notification-store) :read-days 0)))
 
 (defun run-tests ()
   (let ((results (run 'notifications)))

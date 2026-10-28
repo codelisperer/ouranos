@@ -718,7 +718,7 @@ The POST routes rely on the app's CSRF check (HYPERION/CSRF:WRAP-CSRF), as every
 READ-DAYS ago, and, when UNREAD-DAYS is given, unread ones created more than UNREAD-DAYS ago.
 It returns (:DELETED N) for the run log.
 
-    (aion/schedule:define-job scheduler :prune-notifications
+    (aion/schedule:define-job scheduler \"prune-notifications\"
                               (prune-notifications-job store :read-days 30)
                               :schedule '(:daily (3 0)))"
   (flet ((days-ago (days) (and days (- (get-universal-time) (* days 86400)))))

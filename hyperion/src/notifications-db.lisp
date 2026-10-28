@@ -243,6 +243,22 @@ which names the migrations to add, when they cannot."
 
 ;;; --- the protocol -----------------------------------------------------------------------
 
+(defun %unique-violation-p (condition)
+  "Whether CONDITION, a MNEMOSYNE/CONN:DB-ERROR, is a unique-constraint violation: SQLSTATE 23505
+on Postgres, and SQLite's CONSTRAINT code with a UNIQUE message (cl-dbi reports both as
+DBI-DATABASE-ERROR, the cause the DB-ERROR keeps). Every other database error is not one."
+  (let* ((cause (conn:db-error-cause condition))
+         (code (ignore-errors (uiop:symbol-call "DBI.ERROR" "DATABASE-ERROR-CODE" cause))))
+    (or (equal code "23505")
+        (and (eq code :constraint)
+             (search "UNIQUE" (or (ignore-errors (princ-to-string cause)) ""))
+             t))))
+
+(defvar *%after-a-missed-collapse* nil
+  "For a test only: a function of the connection and store that NOTIFICATION-PUT calls after its
+UPDATE found no unread item to collapse into and before it inserts, so a test can insert a
+competing row in that gap, which is what two concurrent calls do. NIL in use.")
+
 (defmethod n:notification-put ((store db-notification-store) (x n:notification))
   (with-connection (c store)
     (let ((recipient (n:notification-recipient x)) (key (n:notification-group-key x)))
@@ -253,9 +269,11 @@ which names the migrations to add, when they cannot."
         (cond ((null key) (%insert c store x) (stored))
               ((plusp (or (%int (%collapse c store x)) 0)) (stored))
               ;; None to collapse into: insert. When a concurrent call inserted first, the
-              ;; unread-key index refuses this one, and the row it made is collapsed into.
-              ((handler-case (progn (%insert c store x) t)
-                 (conn:db-error () nil))
+              ;; unread-key index refuses this one, and the row it made is collapsed into. Only
+              ;; that refusal is caught: any other database error is the caller's.
+              ((progn (when *%after-a-missed-collapse* (funcall *%after-a-missed-collapse* c store))
+                      (handler-case (progn (%insert c store x) t)
+                        (conn:db-error (e) (if (%unique-violation-p e) nil (error e)))))
                (stored))
               (t (%collapse c store x) (stored)))))))
 
@@ -316,11 +334,13 @@ which names the migrations to add, when they cannot."
 (defmethod n:delivery-set ((store db-notification-store) recipient kind delivery)
   ;; The same check as the memory store: a declared kind, and one of the four deliveries or NIL.
   (n::%check-delivery-choice kind delivery)
+  ;; One statement either way, so no reader sees the choice missing between two of them (review
+  ;; of #1012). The upsert is the same text on SQLite (3.24 and later) and Postgres.
   (with-connection (c store)
-    (conn:exec c (format nil "DELETE FROM ~A WHERE recipient = ? AND kind = ?" (%delivery-table store))
-               recipient (%kind-name kind))
-    (when delivery
-      (conn:exec c (format nil "INSERT INTO ~A (recipient, kind, delivery) VALUES (?, ?, ?)"
-                           (%delivery-table store))
-                 recipient (%kind-name kind) (%kind-name delivery))))
+    (if delivery
+        (conn:exec c (format nil "INSERT INTO ~A (recipient, kind, delivery) VALUES (?, ?, ?) ON CONFLICT (recipient, kind) DO UPDATE SET delivery = excluded.delivery"
+                             (%delivery-table store))
+                   recipient (%kind-name kind) (%kind-name delivery))
+        (conn:exec c (format nil "DELETE FROM ~A WHERE recipient = ? AND kind = ?" (%delivery-table store))
+                   recipient (%kind-name kind))))
   delivery)

@@ -133,6 +133,34 @@ and key cannot be inserted, while a read one does not block a new one."
     (n:mark-read s "u1" (n:notification-id first))
     (finishes (ndb::%insert c s (n:make-notification "u1" :db-test-reply :title "new" :group-key "g")))))
 
+(backend-test a-collapse-that-loses-the-race-collapses-into-the-row-that-won (s c)
+  "Two calls with one group key: both find no unread item, and the second's insert is refused by
+the unread-key index. Forced here by inserting the competing row in that gap."
+  (let ((ndb::*%after-a-missed-collapse*
+          (lambda (conn store)
+            (ndb::%insert conn store (n:make-notification "u1" :db-test-reply :title "won the race"
+                                                                               :group-key "g")))))
+    (let ((stored (%put s "u1" "lost the race" :group-key "g")))
+      (is (= 2 (n:notification-count stored)) "collapsed into the row that won")
+      (is (equal "lost the race" (n:notification-title stored)))
+      (is (= 1 (n:unread-count s "u1"))))))
+
+(test a-database-error-other-than-the-conflict-is-not-swallowed
+  "Only the unread-key conflict is caught. A trigger here refuses the insert with its own message,
+in the gap after the missed collapse; that error reaches the caller as it is. Catching every
+DB-ERROR, as the code did before the review of #1012, swallowed it and failed later, elsewhere."
+  (call-with-sqlite
+   (lambda (c table delivery)
+     (let ((s (ndb:make-db-notification-store c :table table :delivery-table delivery :ensure t)))
+       (let* ((ndb::*%after-a-missed-collapse*
+                (lambda (conn store)
+                  (conn:exec conn (format nil "CREATE TRIGGER refuse_insert BEFORE INSERT ON ~A BEGIN SELECT RAISE(ABORT, 'refused by the test'); END"
+                                          (ndb::%table store)))))
+              (e (handler-case (progn (%put s "u1" "x" :group-key "g") nil)
+                   (error (e) e))))
+         (is (typep e 'conn:db-error) "got ~S" e)
+         (is (search "refused by the test" (princ-to-string e)) "the insert's own error: ~A" e))))))
+
 (backend-test the-list-is-newest-first-and-pages (s c)
   (dotimes (i 5) (%put s "u1" (format nil "n~D" i)))
   (multiple-value-bind (page more) (n:notification-list s "u1" :limit 2)

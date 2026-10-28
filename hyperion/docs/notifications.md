@@ -126,7 +126,7 @@ on).
 ## Retention
 
 ```lisp
-(aion/schedule:define-job scheduler :prune-notifications
+(aion/schedule:define-job scheduler "prune-notifications"
                           (prune-notifications-job store :read-days 30)
                           :schedule '(:daily (3 0)))
 ```

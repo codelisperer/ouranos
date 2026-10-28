@@ -363,7 +363,8 @@
   :description "Tests for hyperion/notifications: the store protocol on the memory store, collapsing by group key, delivery per kind, the link check, the components' markup and the routes."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
-  :depends-on ("hyperion/notifications" "hyperion" "spinneret" "flexi-streams" "fiveam")
+  :depends-on ("hyperion/notifications" "hyperion" "spinneret" "flexi-streams" "fiveam"
+               "aion/schedule")   ; the prune job is run the way the docs define it
   :components ((:file "tests/notifications-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/notifications/tests :run-tests)))
 
