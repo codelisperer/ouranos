@@ -269,6 +269,13 @@ change, so the address bar shows the same URL a link would. Put the toolbar insi
 the list's htmx target replaces, so its hidden fields follow every change the pager and sort
 headings make. The search field keeps its text and focus across those swaps.
 
+A `:values` filter's choices can depend on the request, for example the projects the signed-in
+user may see: give `:values` a function of the request's env instead of a list.
+`read-list-state` calls it once per request, keeps a value only when it is one of the choices
+returned, drops any other value, and stores the choices on the state. `filter-choices` returns
+them, and `list-href` and the toolbar's selects use that same list, so a value the user cannot
+choose is never shown, linked to or passed to the query.
+
 A master/detail page uses `hyperion/kit/panel`. The app writes its own rows and gives each the
 attributes `selectable-row` returns, so a click or Enter loads the item's `properties-panel`
 into a `panel-region` beside the list. `panel-js` moves `aria-current` to the chosen row, and

@@ -934,6 +934,14 @@ its tag.
     and the spec readers `list-spec-sorts`, `list-spec-default-sort`, `list-spec-filters` and
     `list-spec-hx-target`.
   - `kit.css` styles the toolbar, the chosen row and the panel.
+- **hyperion/list: a filter's choices can depend on the request** (#1014). The `:values` of a
+  filter given to `hyperion/list:make-list-spec` may be a function of the request's env instead
+  of a list of strings, for choices such as the projects the signed-in user may see.
+  `read-list-state` calls it once per request, keeps the request's value only when it is one of
+  the returned strings, and drops any other value, as it drops a value outside a fixed list.
+  The new `hyperion/list:filter-choices` returns the choices for that request; `list-href`
+  checks a value against them, and `hyperion/kit/toolbar:list-toolbar` shows them as the
+  select's options. A function that returns anything but a list of strings signals an error.
 
 - **hyperion/kit: dialogs, a destructive-action confirm and an undo notice** (#981, part
   three). The new package `hyperion/kit/dialog`; `hyperion/kit` now also depends on

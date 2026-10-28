@@ -538,6 +538,26 @@ the listeners do is checked in a browser by kit-browser-tests."
              "selected")
       "All is selected when the filter is not set"))
 
+(test a-filter-select-shows-this-request-s-choices
+  "A :values filter whose choices are a function of the request shows the choices for this
+request, and the trash toggle's value is looked up the same way."
+  (let* ((spec (list:make-list-spec
+                :id "drafts" :tiebreak :id
+                :filters (list (list :project :values (lambda (env) (getf env :projects)))
+                               (list :where :values (lambda (env)
+                                                      (declare (ignore env))
+                                                      '("active" "trash"))))))
+         (dom (%dom (lambda ()
+                      (tb:list-toolbar (list:read-list-state
+                                        spec (list :query-string "project=p2"
+                                                   :projects '("p1" "p2")))
+                                       :filters '((:project "Project")) :trash :where))))
+         (options (%all (find "project" (%all dom "select")
+                              :key (lambda (s) (%attr s "name")) :test #'equal)
+                        "option")))
+    (is (equal '("" "p1" "p2") (mapcar (lambda (o) (%attr o "value")) options)))
+    (is (equal '(nil nil t) (mapcar (lambda (o) (and (%attr o "selected") t)) options)))))
+
 (test the-sort-select-marks-the-current-key
   (let ((select (find "sort" (%all (%toolbar "sort=title") "select")
                       :key (lambda (s) (%attr s "name")) :test #'equal)))
