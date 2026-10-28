@@ -47,6 +47,17 @@ upstream.sexp reads this.")
   "The permissions the connect flow asks for: the three Meta's Page Feed reference lists for
 publishing.")
 
+(defparameter +facebook-required-scopes+ '("pages_manage_posts")
+  "The scopes a Page token needs for what hermes/facebook does with it, which
+FACEBOOK-PAGE-HEALTH checks (#978). hermes posts to /{page}/feed and /{page}/photos, which need
+pages_manage_posts, and reads /me's id and name, which needs no scope.
+
+Meta's Page Feed and Page Photos references list pages_read_engagement and pages_show_list for
+publishing too. They are left out here because no call hermes makes with the Page token uses
+them: hermes reads no engagement data, and lists Pages only in the connect flow, on the admin's
+user token (+FACEBOOK-CONNECT-SCOPES+ asks for all three there). If Meta refuses a post for
+want of one of them, the refusal is FACEBOOK-NOT-PERMITTED, and the scope belongs here.")
+
 (defclass facebook (facebook-provider)
   ((app-id :initarg :app-id :initform (uiop:getenv "FACEBOOK_APP_ID") :reader facebook-app-id)
    (app-secret :initarg :app-secret :initform (uiop:getenv "FACEBOOK_APP_SECRET")
@@ -213,11 +224,32 @@ made: check the Page before posting again.")
   "VALUE as the text sent: a SECRET revealed, anything else printed."
   (if (secret:secretp value) (secret:reveal value) (princ-to-string value)))
 
-(defun %facebook-call (p method path params &key secrets token link-post)
+(defun %multipart (fields file boundary)
+  "A multipart/form-data body (RFC 7578) of FIELDS, an alist of strings, and FILE, a list (NAME
+FILENAME CONTENT-TYPE OCTETS), separated by BOUNDARY, as octets."
+  (let ((out (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+    (flet ((emit (text)
+             (loop for b across (sb-ext:string-to-octets text :external-format :utf-8)
+                   do (vector-push-extend b out))))
+      (loop for (name . value) in fields
+            do (emit (format nil "--~A~C~CContent-Disposition: form-data; name=\"~A\"~C~C~C~C~A~C~C"
+                             boundary #\Return #\Newline name #\Return #\Newline #\Return #\Newline
+                             value #\Return #\Newline)))
+      (destructuring-bind (name filename content-type octets) file
+        (emit (format nil "--~A~C~CContent-Disposition: form-data; name=\"~A\"; filename=\"~A\"~C~CContent-Type: ~A~C~C~C~C"
+                      boundary #\Return #\Newline name filename #\Return #\Newline content-type
+                      #\Return #\Newline #\Return #\Newline))
+        (loop for b across octets do (vector-push-extend b out))
+        (emit (format nil "~C~C--~A--~C~C" #\Return #\Newline boundary #\Return #\Newline))))
+    (coerce out '(simple-array (unsigned-byte 8) (*)))))
+
+(defun %facebook-call (p method path params &key secrets token link-post file)
   "Call the Graph API: METHOD (:get or :post) on PATH (below the version) with PARAMS, an alist
 whose values are strings or AION/SECRET:SECRETs. TOKEN, a SECRET, is the access token: in the
 form body of a POST, in an Authorization header for a GET, with appsecret_proof when the app
-secret is known. SECRETS lists other SECRETs to remove from any failure's text. Returns the
+secret is known. SECRETS lists other SECRETs to remove from any failure's text. FILE, for a
+POST, is a list (NAME FILENAME CONTENT-TYPE OCTETS) uploaded with the form as
+multipart/form-data, the token and every other field going in the same body. Returns the
 answer's JSON object. On a refusal or a transport failure, signals the condition
 %FACEBOOK-REFUSAL chooses, with every secret removed from its text.
 
@@ -240,27 +272,42 @@ unwound first (see this file's header)."
                                                                    (mapcar #'cdr params)))))))
          (redact (lambda (text) (%redact-all text hidden)))
          (url (format nil "~A/~A/~A" (facebook-graph-base p) +facebook-graph-api-version+ path))
-         (req (if (eq method :get)
-                  (make-request :method :get :url (format nil "~A?~A" url (%query sent))
-                                :headers (when token-text
-                                           (list (cons "Authorization"
-                                                       (format nil "OAuth ~A" token-text))))
-                                :connect-timeout +facebook-connect-timeout+
-                                :read-timeout +facebook-read-timeout+
-                                :max-body-bytes +facebook-max-response-bytes+)
-                  (make-request :method :post :url url :content sent
-                                :connect-timeout +facebook-connect-timeout+
-                                :read-timeout +facebook-read-timeout+
-                                :max-body-bytes +facebook-max-response-bytes+)))
          (resp (handler-case
-                   (apply #'send-request req '()
-                          (when *facebook-perform* (list :perform *facebook-perform*)))
+                   ;; THE REQUEST IS BUILT IN HERE, not in a binding above (the hub's review of
+                   ;; #994). SENT holds the access token and appsecret_proof in plain text, so
+                   ;; every function it is passed to must be below this HANDLER-CASE: an error
+                   ;; raised while the request is built is then caught here, and the frames
+                   ;; holding SENT have unwound before anything is signalled, exactly as for an
+                   ;; error raised while it is sent.
+                   (let ((req (if (eq method :get)
+                                  (make-request :method :get
+                                                :url (format nil "~A?~A" url (%query sent))
+                                                :headers (when token-text
+                                                           (list (cons "Authorization"
+                                                                       (format nil "OAuth ~A" token-text))))
+                                                :connect-timeout +facebook-connect-timeout+
+                                                :read-timeout +facebook-read-timeout+
+                                                :max-body-bytes +facebook-max-response-bytes+)
+                                  (let ((boundary (and file (format nil "hermes-~A"
+                                                                    (aion/random:random-hex 128)))))
+                                    (make-request :method :post :url url
+                                                  :content (if file (%multipart sent file boundary) sent)
+                                                  :headers (when file
+                                                             (list (cons "Content-Type"
+                                                                         (format nil "multipart/form-data; boundary=~A"
+                                                                                 boundary))))
+                                                  :connect-timeout +facebook-connect-timeout+
+                                                  :read-timeout +facebook-read-timeout+
+                                                  :max-body-bytes +facebook-max-response-bytes+)))))
+                     (apply #'send-request req '()
+                            (when *facebook-perform* (list :perform *facebook-perform*))))
                  (http-error (c)
                    (error 'delivery-failure
                           :provider :facebook :status (http-error-status c)
                           :detail (funcall redact (or (http-error-detail c) (http-error-body c)))))
                  ;; As in telegram.lisp: anything else is reported, redacted, after this
-                 ;; HANDLER-CASE has unwound the frames that hold the request.
+                 ;; HANDLER-CASE has unwound the frames that hold the request, whether it was
+                 ;; raised while the request was built or while it was sent.
                  (cl:error (c)
                    (error 'delivery-failure
                           :provider :facebook
@@ -303,20 +350,39 @@ looked for. Signals INVALID-MESSAGE when PAGE is not a Page id."
   "A photo's caption: MESSAGE, then LINK on its own line."
   (format nil "~@[~A~]~:[~;~%~]~@[~A~]" message (and message link) link))
 
+(defun %photo-extension (type)
+  "A file name extension for the media TYPE, for the multipart part's filename."
+  (let ((slash (position #\/ type)))
+    (if (and slash (string= "jpeg" (subseq type (1+ slash)))) "jpg" (subseq type (1+ (or slash -1))))))
+
 (defmethod deliver ((p facebook) (m facebook-post))
   (let* ((page (facebook-post-page m))
          (token (%page-token p page))
          (link (facebook-post-link m))
          (message (facebook-post-message m))
-         (json (if (facebook-post-image-url m)
-                   (%facebook-call p :post (format nil "~A/photos" page)
-                                   (list (cons "url" (facebook-post-image-url m))
-                                         (cons "caption" (%caption message link)))
-                                   :token token)
-                   (%facebook-call p :post (format nil "~A/feed" page)
-                                   (append (when message (list (cons "message" message)))
-                                           (when link (list (cons "link" link))))
-                                   :token token :link-post (and link t))))
+         (json (cond
+                 ((facebook-post-image-url m)
+                  (%facebook-call p :post (format nil "~A/photos" page)
+                                  (list (cons "url" (facebook-post-image-url m))
+                                        (cons "caption" (%caption message link)))
+                                  :token token))
+                 ;; The same endpoint, with the photo uploaded as multipart/form-data, as Meta's
+                 ;; Page Photos reference says: "Attach the photo as multipart/form-data". The
+                 ;; field is named source, the name it says has "historically" been used (#978).
+                 ((facebook-post-image-octets m)
+                  (%facebook-call p :post (format nil "~A/photos" page)
+                                  (list (cons "caption" (%caption message link)))
+                                  :token token
+                                  :file (list "source"
+                                              (format nil "photo.~A" (%photo-extension
+                                                                      (facebook-post-image-type m)))
+                                              (facebook-post-image-type m)
+                                              (facebook-post-image-octets m))))
+                 (t
+                  (%facebook-call p :post (format nil "~A/feed" page)
+                                  (append (when message (list (cons "message" message)))
+                                          (when link (list (cons "link" link))))
+                                  :token token :link-post (and link t)))))
          (id (or (gethash "post_id" json) (gethash "id" json))))
     (unless (stringp id)
       (error 'delivery-failure :provider :facebook
@@ -331,38 +397,87 @@ may be NIL when MESSAGE is given. Signals as MAKE-FACEBOOK-POST and DELIVER do."
    (deliver provider (make-facebook-post :page page :link link :message message
                                          :image-url image-url))))
 
-;;; --- health ----------------------------------------------------------------------------
+;;; --- the token, and the Page's health --------------------------------------------------
 
-(defmethod facebook-page-health ((p facebook) page)
+(defstruct (facebook-token-info (:constructor %make-facebook-token-info
+                                    (valid-p scopes expires-at data-access-expires-at page-id app-id)))
+  "What debug_token says about a Page token (#978).
+
+  VALID-P                 whether Facebook says the token still works.
+  SCOPES                  the scopes granted to it, as a list of strings.
+  EXPIRES-AT              when the token expires, as a universal time, or :NEVER.
+  DATA-ACCESS-EXPIRES-AT  when the app's access to data through the token expires, as a
+                          universal time, or NIL when Facebook gave none. It applies to a token
+                          that never expires too, so an admin screen shows both.
+  PAGE-ID                 the Page the token is for (debug_token's profile_id), or NIL.
+  APP-ID                  the app the token was issued to, or NIL.
+
+:NEVER is read from an expires_at of 0 or an absent expires_at. Meta's debug_token reference
+does not say what 0 means; Page tokens taken with a long-lived user token, which Meta's
+Facebook Login guide says \"do[es] not have an expiration date\", are observed to come back
+with 0. That reading is observed behaviour, not documented."
+  valid-p scopes expires-at data-access-expires-at page-id app-id)
+
+(defconstant +unix-epoch+ (encode-universal-time 0 0 0 1 1 1970 0)
+  "The universal time of 1970-01-01T00:00:00Z, which Graph's unixtime fields count from.")
+
+(defun %token-info-from-json (json)
+  "The FACEBOOK-TOKEN-INFO in a debug_token answer JSON (a parsed object), or NIL when it has no
+data object."
+  (let ((data (and (hash-table-p json) (gethash "data" json))))
+    (when (hash-table-p data)
+      (flet ((text (key) (let ((v (gethash key data))) (and (stringp v) v)))
+             (time-of (key) (let ((v (gethash key data)))
+                              (and (integerp v) (plusp v) (+ +unix-epoch+ v)))))
+        (%make-facebook-token-info
+         (eq t (gethash "is_valid" data))
+         (let ((scopes (gethash "scopes" data)))
+           (and (vectorp scopes) (remove-if-not #'stringp (coerce scopes 'list))))
+         (or (time-of "expires_at") :never)
+         (time-of "data_access_expires_at")
+         (text "profile_id")
+         (text "app_id"))))))
+
+(defmethod facebook-token-info ((p facebook) page)
   (let* ((page (%check-page-id page))
-         (token (handler-case (%page-token p page)
-                  (configuration-error () (return-from facebook-page-health :not-connected))))
+         (token (%page-token p page))
          (app-id (facebook-app-id p))
          (app-secret (%facebook-app-secret p)))
+    (unless (and app-id (%reveal app-secret))
+      (error 'configuration-error
+             :missing "the Meta app's id and secret (FACEBOOK_APP_ID and FACEBOOK_APP_SECRET), which debug_token needs"))
+    ;; The app token is built as a SECRET, never as text.
+    (let* ((app-token (secret:make-secret (format nil "~A|~A" app-id (%reveal app-secret))))
+           (json (%facebook-call p :get "debug_token" (list (cons "input_token" token))
+                                 :token app-token)))
+      (or (%token-info-from-json json)
+          (error 'delivery-failure :provider :facebook
+                                   :detail "the Graph API's answer to debug_token carried no data")))))
+
+(defmethod facebook-page-health ((p facebook) page)
+  (let ((page (%check-page-id page)))
+    (handler-case (%page-token p page)
+      (configuration-error () (return-from facebook-page-health :not-connected)))
     (handler-case
         ;; A Page token's /me is its own Page. Reading PAGE itself would succeed for any public
         ;; Page, whichever Page the token belongs to, so the token's Page is compared with PAGE.
-        (let* ((me (%facebook-call p :get "me" (list (cons "fields" "id,name")) :token token))
+        (let* ((me (%facebook-call p :get "me" (list (cons "fields" "id,name"))
+                                   :token (%page-token p page)))
                (name (let ((n (gethash "name" me))) (and (stringp n) n))))
           (cond ((not (equal page (gethash "id" me))) (values :wrong-page name))
-                ((and app-id (%reveal app-secret))
+                ((and (facebook-app-id p) (%reveal (%facebook-app-secret p)))
                  ;; With the app's credentials, ask Facebook what the token may do: a Page token
-                 ;; that reads its Page but lacks pages_manage_posts cannot post, and only
-                 ;; debug_token says so. The app token is built as a SECRET, never as text.
-                 (let* ((app-token (secret:make-secret
-                                    (format nil "~A|~A" app-id (%reveal app-secret))))
-                        (debug (%facebook-call p :get "debug_token"
-                                               (list (cons "input_token" token))
-                                               :token app-token))
-                        (data (gethash "data" debug))
-                        (scopes (and (hash-table-p data) (gethash "scopes" data))))
-                   (cond ((not (and (hash-table-p data) (eq t (gethash "is_valid" data))))
-                          (values :reconnect name))
-                         ((not (equal page (gethash "profile_id" data)))
+                 ;; that reads its Page but lacks a scope hermes needs cannot post, and only
+                 ;; debug_token says so.
+                 (let* ((info (facebook-token-info p page))
+                        (missing (remove-if (lambda (scope)
+                                              (member scope (facebook-token-info-scopes info)
+                                                      :test #'string=))
+                                            +facebook-required-scopes+)))
+                   (cond ((not (facebook-token-info-valid-p info)) (values :reconnect name))
+                         ((not (equal page (facebook-token-info-page-id info)))
                           (values :wrong-page name))
-                         ((not (and (vectorp scopes)
-                                    (find "pages_manage_posts" scopes :test #'equal)))
-                          (values :reconnect name))
+                         (missing (values :missing-permission name missing))
                          (t (values :connected name)))))
                 (t (values :connected name))))
       (facebook-reconnect-required () :reconnect)

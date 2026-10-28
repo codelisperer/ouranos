@@ -14,6 +14,13 @@ its tag.
 
 ### An app may have to act
 
+- **hermes/facebook: `facebook-page-health` answers `:missing-permission`, with the missing
+  scopes, where it answered `:reconnect`** (#978). A Page token that `debug_token` says is valid,
+  and is for the right Page, but lacks a scope in the new `+facebook-required-scopes+`
+  (`pages_manage_posts`), used to be `:reconnect`. It is now `:missing-permission`, and the
+  missing scope names are a third value. An app that shows "reconnect" for `:reconnect` shows it
+  for `:missing-permission` too, and can name the permission. The statuses are the exported type
+  `facebook-page-status`, documented value by value.
 - **`scripts/build-desktop-app.lisp` stops, instead of warning and exiting 0, when the bundle
   needs hyperion-view or a library the runtime links against and it is missing** (#956). For an
   app that loads `hyperion/desktop`, a `hyperion/hyperion-view/hyperion-view(.exe)` that was not
@@ -1019,6 +1026,18 @@ its tag.
 
 ### Added
 
+- **hermes/facebook: `facebook-token-info` reports a Page token's scopes and expiry, and a post
+  can upload a photo's octets** (#978).
+  - `facebook-token-info provider page` returns a `facebook-token-info` from Graph's
+    `debug_token`: `facebook-token-info-valid-p`, `-scopes`, `-expires-at` (a universal time, or
+    `:never` for an `expires_at` of 0, which is observed, not documented), `-data-access-expires-at`,
+    `-page-id` and `-app-id`. It needs the app's id and secret and signals `configuration-error`
+    without them. A token that never expires still has a data-access expiry; show both.
+  - `make-facebook-post` takes `:image-octets` and `:image-type`, for a photo the app already holds
+    (from `hermes/blob:get-blob`, say). It is uploaded to `POST /{page}/photos` as
+    `multipart/form-data` (field `source`), with the message and link as its caption. Refused with
+    `invalid-message`: octets together with `:image-url`, more than `+facebook-photo-max-octets+`
+    (Meta's 10MB), or a type outside `+facebook-photo-types+`. A photo alone is a post.
 - **praxeon/image: the generate-image means offers the model a `mask`, so it can change only part
   of an image** (#946). With `:resolve-reference` and a provider that takes a mask
   (`image-provider-accepts-mask-p`, true for OpenAI), the tool schema offers `mask`: a reference,
