@@ -2352,6 +2352,15 @@ its tag.
 
 ### Fixed
 
+- **cons: in a project made with `cons init --template web --db`, `open-database` closes the
+  pool only when making the session or user store did not finish** (#944). It used to close the
+  pool from a `handler-bind` on `error`, which runs as soon as an error is signalled, so a store
+  constructor that signalled an error and recovered from it through a restart carried on with a
+  closed pool and failed with `mnemosyne/conn:pool-closed`. It now closes the pool from an
+  `unwind-protect`, as the template's `start` already did. When a store cannot be made,
+  `*pool*`, `*sessions*` and `*users*` are all `nil` afterwards. A project already generated
+  keeps the old `open-database` in its own `src/db.lisp`; the change can be copied there by hand.
+
 - **aion/http-client: a pinned https request refuses a certificate whose common name matches
   the host when its subject alternative names do not** (#917). On Linux and macOS, cl+ssl checks
   a certificate's common name whenever none of its alternative names match, which RFC 6125
