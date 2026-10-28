@@ -1453,3 +1453,25 @@ timed out and sent the request again, and this server counted two connections."
       (is (string= "*/*" (%head-header first "Accept")))
       (is (string= "probe/1" (%head-header second "User-Agent")) "a caller's own wins")
       (is (string= "text/html" (%head-header second "Accept"))))))
+
+(test a-pinned-request-frames-its-body-as-dexador-did
+  "#985: string content without a Content-Type is text/plain, and a POST with no content says
+Content-Length: 0, as dexador wrote them; a GET with no content says neither."
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "ok")))
+    (flet ((send (&rest args)
+             (http:send-request (apply #'http:make-request :url (%local s "/" "pinned.test")
+                                       :connect-address "127.0.0.1" :read-timeout 5 args)
+                                '())
+             (first (server-heads s))))
+      (let ((head (send :method :post :content "hello")))
+        (is (string= "text/plain" (%head-header head "Content-Type")))
+        (is (string= "5" (%head-header head "Content-Length"))))
+      (let ((head (send :method :post :content "{}" :headers '(("Content-Type" . "application/json")))))
+        (is (string= "application/json" (%head-header head "Content-Type")) "a caller's own wins"))
+      (let ((head (send :method :post)))
+        (is (string= "0" (%head-header head "Content-Length")))
+        (is (null (%head-header head "Content-Type"))))
+      (let ((head (send :method :get)))
+        (is (null (%head-header head "Content-Length")))))))

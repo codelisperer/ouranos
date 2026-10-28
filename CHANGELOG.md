@@ -2269,8 +2269,11 @@ its tag.
   and macOS: the request asks for `Accept-Encoding: identity` instead of gzip; a pinned
   `send-request` does not follow redirects itself (`fetch-public` follows them, as before);
   responses are read under http1.lisp's limits and refused with `malformed-response` outside
-  HTTP/1.1's grammar. The default `User-Agent` and `Accept: */*` are dexador's as before, and are
-  now sent on Windows too.
+  HTTP/1.1's grammar; an alist `:content` whose values are pathnames (dexador's multipart) is not
+  supported there. As through dexador, the default `User-Agent` and `Accept: */*` are sent,
+  string or octet content without a Content-Type is `text/plain`, and a request without content
+  other than GET or HEAD sends `Content-Length: 0`. Those four are now also what the Windows
+  pinned path sends.
 
 - **aion/http-client: a pinned https request refuses a certificate whose common name matches
   the host when its subject alternative names do not** (#917). On Linux and macOS, cl+ssl checks

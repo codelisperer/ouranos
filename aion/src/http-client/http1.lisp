@@ -282,7 +282,10 @@ to the binary STREAM, and force it out. Host is the URI's host (and port when it
 scheme's default). Connection: close and Accept-Encoding: identity are always sent, and a
 caller's own values for those, for Host and for Content-Length are not. User-Agent and Accept
 are dexador's defaults (its *DEFAULT-USER-AGENT* and */*) unless HEADERS sets them, so a pinned
-request identifies itself as one through dexador did (#985)."
+request identifies itself as one through dexador did (#985). For the same reason, as dexador does,
+string or octet CONTENT without a Content-Type in HEADERS is sent as text/plain, and a request
+with no CONTENT sends Content-Length: 0, except for GET and HEAD, which define no meaning for a
+body."
   (multiple-value-bind (body default-type) (%content-octets content)
     (let* ((path (let ((p (or (quri:uri-path uri) "")) (q (quri:uri-query uri)))
                    (%encode-target (format nil "~A~@[?~A~]" (if (string= p "") "/" p) q))))
@@ -308,11 +311,12 @@ request identifies itself as one through dexador did (#985)."
             (unless (and (plusp (length name)) (every #'%token-char-p name))
               (error 'http-error :detail (format nil "not a header name: ~S" name)))
             (push (format nil "~A: ~A" name (%field-safe (princ-to-string (cdr h)) name)) lines))))
-      (when (and default-type
+      (when (and body
                  (not (find "content-type" headers :key (lambda (h) (string (car h)))
                                                    :test #'string-equal)))
-        (push (format nil "Content-Type: ~A" default-type) lines))
-      (when body (push (format nil "Content-Length: ~D" (length body)) lines))
+        (push (format nil "Content-Type: ~A" (or default-type "text/plain")) lines))
+      (cond (body (push (format nil "Content-Length: ~D" (length body)) lines))
+            ((not (member method '(:get :head))) (push "Content-Length: 0" lines)))
       (push "Connection: close" lines)
       (push "Accept-Encoding: identity" lines)
       (let ((head (format nil "~{~A~C~C~}~C~C"
