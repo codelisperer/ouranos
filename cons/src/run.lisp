@@ -213,8 +213,8 @@ both upcased for the standard readtable."
                                  (let ((n (dep-name d))) (when n (visit n)))))
                               (t (push name others))))))))
          (visit system)
-         ;; NOTHING OF THE PROJECT'S OWN, NOTHING JUDGED. When ROOT matches no system's
-         ;; directory -- a mistyped root, or one that names some other directory -- every
+         ;; A strict load that finds none of the project's systems checks nothing, so it is
+         ;; refused. When ROOT matches no system's directory -- a mistyped root, or one that names some other directory -- every
          ;; system is a dependency, every warning is muffled, and a `cons --strict' load passed
          ;; whatever the code held. Under FORCE-OWN, which only --strict sets, that is refused,
          ;; naming the root and the system (#960). A plain load of a library from outside the
@@ -404,31 +404,51 @@ return -- it enters the REPL, which exits the process itself."
        (or (spec:target-load tgt) (spec:target-call tgt)
            (spec:target-test tgt) (spec:target-eval tgt))))
 
+(defun %steps-in-order (spec tgt &optional path)
+  "TGT and every target its :STEPS run, depth first, each named once, as a list of targets.
+PATH is the chain of target names that led here. Signals an error naming the cycle when a step
+leads back to a target already on the chain, which would otherwise recurse until the stack
+ran out (#968's review)."
+  (let ((name (spec:target-name tgt)))
+    (when (member name path)
+      (error "the :steps of target ~(~A~) form a cycle: ~{~(~A~)~^ -> ~}"
+             (first (last path)) (reverse (cons name path))))
+    (cons tgt
+          (loop for step in (spec:target-steps tgt)
+                append (%steps-in-order spec (%require-target spec step) (cons name path))))))
+
 (defun %unjudged-targets (spec tgt)
-  "The targets TGT runs, following :STEPS, whose work --strict cannot judge: each does its work
-with :EVAL, :CALL or :SH and has no :LOAD or :TEST clause. --strict judges a system by loading
-it through LOAD-SYSTEM-STRICTLY, which only :LOAD and :TEST do, so a target that loads its code
-in an :EVAL, a :CALL or a shell command is run with nothing checked (#960). Returns a list of
-(NAME . CLAUSES), CLAUSES the keywords of the clauses that do the work."
-  (if (spec:target-steps tgt)
-      (loop for step in (spec:target-steps tgt)
-            append (%unjudged-targets spec (%require-target spec step)))
-      (let ((clauses (append (and (spec:target-eval tgt) '(:eval))
-                             (and (spec:target-call tgt) '(:call))
-                             (and (spec:target-sh tgt) '(:sh)))))
-        (and clauses
-             (null (spec:target-load tgt))
-             (null (spec:target-test tgt))
-             (list (cons (spec:target-name tgt) clauses))))))
+  "The targets TGT runs, following :STEPS, whose work --strict cannot judge, each named once.
+--strict judges a system by loading it through LOAD-SYSTEM-STRICTLY, which only :LOAD and :TEST
+do (#960). So these are not judged:
+- a target with :SH, whatever else it has: %PERFORM, and the --fresh path, run :SH in place of
+  its :LOAD and :TEST, which then never run (#968's review);
+- a target whose work is :EVAL or :CALL with no :LOAD or :TEST.
+Returns a list of (NAME . CLAUSES), CLAUSES the keywords of the clauses that do the work."
+  (loop for target in (remove-duplicates (%steps-in-order spec tgt)
+                                         :key #'spec:target-name :from-end t)
+        for clauses = (append (and (spec:target-eval target) '(:eval))
+                              (and (spec:target-call target) '(:call))
+                              (and (spec:target-sh target) '(:sh)))
+        when (and (not (spec:target-steps target))
+                  (or (spec:target-sh target)
+                      (and clauses
+                           (null (spec:target-load target))
+                           (null (spec:target-test target)))))
+          collect (cons (spec:target-name target) clauses)))
 
 (defun %refuse-unjudged (spec tgt)
   "Under --strict, signal an error when TGT, or a step it runs, does work --strict cannot
-judge (%UNJUDGED-TARGETS), naming each such target and its clauses."
+judge (%UNJUDGED-TARGETS), naming each such target once and why."
   (let ((unjudged (%unjudged-targets spec tgt)))
     (when unjudged
-      (error "--strict judges only what a target loads with :load or :test, so it could not check:~{~%  target ~A does its work with ~{:~(~A~)~^ and ~} and loads nothing with :load or :test~}~%Add a :load clause naming the systems the target builds, or run it without --strict."
+      (error "--strict judges only what a target loads with :load or :test, so it could not check:~{~%  ~A~}~%Give the target a :load clause naming the systems it builds, and do the shell work in a separate target, or run it without --strict."
              (loop for (name . clauses) in unjudged
-                   append (list (string-downcase (string name)) clauses))))))
+                   collect (if (member :sh clauses)
+                               (format nil "target ~(~A~) runs a shell command (:sh), and cons runs :sh in place of a target's :load and :test, so nothing is loaded for --strict to check"
+                                       name)
+                               (format nil "target ~(~A~) does its work with ~{:~(~A~)~^ and ~} and loads nothing with :load or :test"
+                                       name clauses)))))))
 
 (defun %load-env (spec)
   "Load the spec's :env files (relative to the spec dir) into the environment."
@@ -448,6 +468,9 @@ fasl is seen; see LOAD-SYSTEM-STRICTLY."
             (pmap (%param-map spec params))
             (*strict* strict)
             (*root* (spec:spec-dir spec)))
+        ;; A :steps cycle is refused before anything runs, strict or not; %PERFORM would
+        ;; otherwise recurse until the stack ran out (#968's review).
+        (%steps-in-order spec tgt)
         ;; #960: --strict that would check nothing is refused before anything runs.
         (when strict (%refuse-unjudged spec tgt))
         ;; pre-publication issue 240: before doing the work, say whether the framework this app is built

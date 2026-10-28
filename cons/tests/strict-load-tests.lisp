@@ -374,6 +374,9 @@ targets it runs."
                    (build-call :call ("asdf:load-system" "unjudged"))
                    (dump :sh ("sbcl" "--script" "dump.lisp"))
                    (repl :interactive t)
+                   (load-and-sh :load "unjudged" :sh ("sbcl" "--version"))
+                   (test-and-sh :test "unjudged/tests" :sh ("sbcl" "--version"))
+                   (twice :steps (build-eval build build-eval))
                    (all :steps (build build-eval dump))))))
          (tgt (lambda (name) (find name (cons/spec:spec-targets spec) :key #'cons/spec:target-name))))
     (flet ((unjudged (name) (cons/run::%unjudged-targets spec (funcall tgt name))))
@@ -383,7 +386,35 @@ targets it runs."
       (is (equal '((:build-call :call)) (unjudged :build-call)))
       (is (equal '((:dump :sh)) (unjudged :dump)))
       (is (equal '((:build-eval :eval) (:dump :sh)) (unjudged :all))
-          "a :steps target names each step it runs that --strict cannot judge"))))
+          "a :steps target names each step it runs that --strict cannot judge")
+      ;; #968's review: cons runs :sh in place of :load and :test, so they never run.
+      (is (equal '((:load-and-sh :sh)) (unjudged :load-and-sh)))
+      (is (equal '((:test-and-sh :sh)) (unjudged :test-and-sh)))
+      (is (equal '((:build-eval :eval)) (unjudged :twice)) "a step run twice is named once"))))
+
+(test a-steps-cycle-is-refused-naming-the-cycle
+  "#968's review: :steps that lead back to a target already being run are refused, naming the
+cycle, instead of recursing until the stack runs out. Control: a step reached twice by two
+paths, which is not a cycle, is accepted."
+  (let* ((spec (cons/spec:install-spec
+                "cycle"
+                '(:system "cycle"
+                  :targets
+                  ((a :steps (b))
+                   (b :steps (c))
+                   (c :steps (a))
+                   (leaf :load "cycle")
+                   (diamond :steps (left right))
+                   (left :steps (leaf))
+                   (right :steps (leaf))))))
+         (tgt (lambda (name) (find name (cons/spec:spec-targets spec) :key #'cons/spec:target-name))))
+    (let ((e (handler-case (progn (cons/run::%steps-in-order spec (funcall tgt :a)) nil)
+               (error (e) e))))
+      (is-true e)
+      (is (search "a -> b -> c -> a" (princ-to-string e)) "~A" e))
+    (is (= 4 (length (remove-duplicates (cons/run::%steps-in-order spec (funcall tgt :diamond))
+                                        :key #'cons/spec:target-name)))
+        "control: diamond, left, right and leaf")))
 
 (defmacro %with-cons-targets ((dir name tag source targets-format) &body body)
   "BODY with DIR a fresh project whose system NAME's one file holds SOURCE and whose cons.lisp
@@ -437,3 +468,17 @@ prevent."
     (multiple-value-bind (code out) (%cons-target-in-child dir "build" :strict t)
       (is (eql 1 code) "cons --strict build must recompile and exit 1, got ~A:~%~A" code out)
       (is (search "not a number" out) "the warning must be printed:~%~A" out))))
+
+(test cons-strict-refuses-a-target-whose-shell-command-replaces-its-load
+  "#968's review: a target with :load and :sh. cons runs :sh in place of :load, so the system
+holding a full WARNING is never loaded. Under --strict that is refused, exit 1, naming the
+target. Control: without --strict the shell command runs, exit 0, and the warning, never loaded,
+is not printed."
+  (%with-cons-targets (dir name "loadsh" *strict-warning-source*
+                       "(build-sh :load ~S :sh (\"sbcl\" \"--version\"))")
+    (multiple-value-bind (code out) (%cons-target-in-child dir "build-sh" :strict t)
+      (is (eql 1 code) "cons --strict build-sh must exit 1, got ~A:~%~A" code out)
+      (is (search "target build-sh runs a shell command (:sh)" out) "~A" out))
+    (multiple-value-bind (code out) (%cons-target-in-child dir "build-sh")
+      (is (eql 0 code) "control: without --strict the shell command runs and exits 0, got ~A:~%~A" code out)
+      (is (null (search "not a number" out)) "control: the :load never ran:~%~A" out))))
