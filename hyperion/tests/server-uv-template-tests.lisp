@@ -116,8 +116,8 @@ that a second START is refused: 4 checks."
 holds, through the one pool; a second START refused with the pool still open; a START that
 fails closes the pool it opened; a user store that recovers from an error keeps the pool open;
 a store that cannot be made leaves the database closed (#944); and a pool that cannot be closed
-keeps the store's error and is still forgotten (#1006): 27 checks."
-  (%check-generated-suite '(:db :sqlite) 27))
+keeps the store's or the server's error and is still forgotten (#1006): 30 checks."
+  (%check-generated-suite '(:db :sqlite) 30))
 
 (defparameter +default-store-tables+
   (format nil "~{~A~^,~}" '("hyperion_sessions" "hyperion_users" "hyperion_role_events"
@@ -126,17 +126,17 @@ keeps the store's error and is still forgotten (#1006): 27 checks."
 
 (test the-web-postgres-project-builds-and-its-own-tests-pass
   "web --db postgres is scaffolded and built on every leg. Against the gate's Postgres its suite
-runs the same 27 checks as SQLite. Without a Postgres URL, the project's eight tests skip
+runs the same 30 checks as SQLite. Without a Postgres URL, the project's nine tests skip
 themselves, which this checks, and then this test records a skip."
   (let ((url (uiop:getenv "MNEMOSYNE_TEST_PG_URL")))
     (if (and url (plusp (length url)))
         ;; The child drops the default-named tables that were not there before it ran.
         (%with-environment `(("DATABASE_URL" . ,url)
                              ("TEMPLATE_DROP_NEW_TABLES" . ,+default-store-tables+))
-                           (lambda () (%check-generated-suite '(:db :postgres) 27)))
+                           (lambda () (%check-generated-suite '(:db :postgres) 30)))
         (progn
           (%with-environment '(("DATABASE_URL" . nil))
-                             (lambda () (%check-generated-suite '(:db :postgres) 8 :skipped 8)))
+                             (lambda () (%check-generated-suite '(:db :postgres) 9 :skipped 9)))
           (skip (concatenate 'string "MNEMOSYNE_TEST_PG_URL is not set -- the Postgres project "
                              "was built, and its tests were not run"))))))
 

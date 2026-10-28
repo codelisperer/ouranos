@@ -215,6 +215,20 @@ the test leaves no connections open."
       (setf (fdefinition 'mnemosyne/conn:close-pool) original)
       (dolist (pool asked) (funcall original pool)))))
 
+(defun %call-with-log-to (stream function)
+  "Call FUNCTION with aion/log writing JSON lines at INFO to STREAM, and put back afterwards the
+root logger's appenders and level and the layout that were in force before."
+  (let ((layout aion/log:*layout*)
+        (appenders (copy-list (log4cl:logger-appenders log4cl:*root-logger*)))
+        (level (log4cl:logger-log-level log4cl:*root-logger*)))
+    (unwind-protect
+         (progn (aion/log:setup :env :prod :level :info :stream stream)
+                (funcall function))
+      (log4cl:remove-all-appenders log4cl:*root-logger*)
+      (dolist (appender appenders) (log4cl:add-appender log4cl:*root-logger* appender))
+      (setf (log4cl:logger-log-level log4cl:*root-logger*) level
+            aion/log:*layout* layout))))
+
 (test a-pool-that-cannot-be-closed-during-cleanup-keeps-the-store-error
   "#1006: when a store cannot be made and closing the pool then signals too, the caller sees the
 store's error, not the pool's, and *POOL*, *SESSIONS* and *USERS* are NIL, so the next
@@ -229,16 +243,34 @@ OPEN-DATABASE is not refused. The close failure is logged by its type."
         (lambda ()
           (%with-close-pool-failing
            (lambda ()
-             (unwind-protect
-                  (progn (aion/log:setup :env :prod :level :info :stream log)
-                         (signals %users-store-not-made ({{name}}::open-database)))
-               (aion/log:setup :env :dev :level :warn :stream *standard-output*))))))
+             (%call-with-log-to log (lambda ()
+                                      (signals %users-store-not-made
+                                        ({{name}}::open-database))))))))
        (is (null {{name}}:*pool*) "the pool is not left set")
        (is (null {{name}}:*sessions*) "no session store is left set")
        (is (null {{name}}:*users*) "no user store is left set")
        (let ((text (get-output-stream-string log)))
          (is (search "%pool-not-closed" text :test #'char-equal) "the close failure is logged by its type: ~S" text)
          (is (null (search "the pool cannot be closed" text)) "and not by its report"))))))
+
+(test a-start-whose-server-fails-reports-that-even-when-the-pool-cannot-be-closed
+  "#1006, from the hub's review: START opens the pool, the server does not start (here because
+HYPERION_SERVER names no server), and closing the pool then signals too. The caller sees the
+server's error, not the pool's, and *POOL* is NIL."
+  (call-with-database
+   (lambda ()
+     (%with-env "HYPERION_SERVER" "no-such-server"
+                (lambda ()
+                  (let ((e (%with-close-pool-failing
+                            (lambda ()
+                              (%call-with-log-to (make-broadcast-stream)
+                                                 (lambda ()
+                                                   (handler-case (progn ({{name}}:start :port 0) nil)
+                                                     (error (e) e))))))))
+                    (is (and e (not (typep e '%pool-not-closed))) "not the pool's error: ~A" e)
+                    (is (and e (search "no-such-server" (princ-to-string e) :test (function char-equal)))
+                        "the server's: ~A" e)
+                    (is (null {{name}}:*pool*) "the pool is not left set")))))))
 
 (test a-pool-that-cannot-be-closed-is-still-forgotten
   "#1006: CLOSE-DATABASE called directly signals when closing the pool fails, since its caller
