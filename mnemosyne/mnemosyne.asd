@@ -105,8 +105,9 @@
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   ;; #1047. An app loads this in its test system only. The copy uses SQLite's backup API
-  ;; through cffi, on the database handle cl-sqlite (the "sqlite" system) keeps.
-  :depends-on ("mnemosyne" "dbi" "sqlite" "cffi")
+  ;; through cffi, on the database handle cl-sqlite keeps; cl-sqlite arrives with mnemosyne's
+  ;; dbd-sqlite3, the way mnemosyne/conn reads the same handle.
+  :depends-on ("mnemosyne" "dbi" "cffi")
   :components ((:file "tests/test-template")))
 
 (defsystem "mnemosyne/tests"
