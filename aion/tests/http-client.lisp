@@ -1288,3 +1288,142 @@ also asked about as ::1, the form %TLS-NAMES gives and the one Linux and macOS v
                                               :connect-address "127.0.0.1" :read-timeout 5)
                            '())
         (is (equal '("::1") seen) "for ~A the verifier was asked about ~S" host seen)))))
+
+;;; --- what aion/retry reads from an HTTP-ERROR (#79) ------------------------------
+
+(defun %refusal (status &optional retry-after)
+  "The HTTP-ERROR ENSURE-2XX signals for a response with STATUS and, when given, a Retry-After
+header RETRY-AFTER."
+  (let ((headers (make-hash-table :test #'equal)))
+    (when retry-after (setf (gethash "retry-after" headers) retry-after))
+    (handler-case (progn (http:send-request (http:make-request :url "u") (list (http:ensure-2xx))
+                                            :perform (%ok :status status :headers headers))
+                         nil)
+      (http:http-error (e) e))))
+
+(test ensure-2xx-reads-retry-after
+  (is (eql 30 (http:http-error-retry-after (%refusal 429 "30"))))
+  (is (eql 30 (aion/retry:retry-after (%refusal 429 "30"))) "and AION/RETRY:RETRY-AFTER reads it")
+  (is (null (http:http-error-retry-after (%refusal 429))) "no header is NIL")
+  (is (null (http:http-error-retry-after (%refusal 503 "later"))) "nor is one it cannot read"))
+
+(test transience-of-an-http-error-follows-its-status
+  (dolist (status '(408 425 429 503 529))
+    (is (eq :transient (aion/retry:transience (%refusal status))) "~D" status))
+  (dolist (status '(500 502 504))
+    (is (eq :unknown (aion/retry:transience (%refusal status))) "~D" status))
+  (dolist (status '(400 401 403 404 409 422))
+    (is (null (aion/retry:transience (%refusal status))) "~D" status)))
+
+(test transience-of-a-transport-failure-follows-how-far-it-got
+  (is (eq :transient (aion/retry:transience (make-condition 'http:http-error :phase :connect))))
+  (is (eq :unknown (aion/retry:transience (make-condition 'http:http-error :phase :response))))
+  (is (null (aion/retry:transience (make-condition 'http:http-error :detail "a refused header")))
+      "a failure this client raised before sending is not transient"))
+
+(test a-refused-connection-is-a-connect-phase-failure
+  ;; A port nothing listens on: bound, then closed, so nothing can answer. The connect timeout
+  ;; is well above the time the refusal takes to arrive. Windows retries a refused connect to
+  ;; 127.0.0.1 for about two seconds before it reports the refusal, so with a two-second
+  ;; timeout WinHTTP reported 12002 (a timeout) on the CI Windows leg, not 12029 (#974, run
+  ;; 40653707988), and the test measured a timeout instead of a refusal.
+  (let ((port (let ((s (usocket:socket-listen "127.0.0.1" 0)))
+                (prog1 (usocket:get-local-port s) (usocket:socket-close s)))))
+    ;; A POST, which never uses dexador's connection pool (the hub's review of #974), so a
+    ;; refusal shows the request was not sent. A GET's refusal may have followed a send on a
+    ;; pooled connection, and is :RESPONSE on the dexador path.
+    (let ((e (handler-case (progn (http:send-request
+                                   (http:make-request :method :post
+                                                      :url (format nil "http://127.0.0.1:~D/" port)
+                                                      :content "x"
+                                                      :connect-timeout 15 :read-timeout 15)
+                                   (list (http:ensure-2xx)))
+                                  nil)
+               (http:http-error (e) e))))
+      ;; Each message names the failure, so a platform whose transport signals a type the
+      ;; classifier does not know shows which one (#974: WinHTTP's 12029 on Windows).
+      (is (typep e 'http:http-error) "got ~S" e)
+      (is (eq :connect (and e (http:http-error-phase e))) "phase ~S for: ~A"
+          (and e (http:http-error-phase e)) e)
+      (is (aion/retry:transient-p e) "so the default policy retries it: ~A" e))))
+
+;;; --- where a pinned connection failed, from the call that failed (review of #974) -------
+
+(defun %pinned-failure (port &key (scheme "http") (read-timeout 2))
+  "The HTTP-ERROR a pinned request to 127.0.0.1:PORT signals."
+  (handler-case (progn (http:send-request
+                        (http:make-request :url (format nil "~A://pinned.test:~D/" scheme port)
+                                           :connect-address "127.0.0.1"
+                                           :connect-timeout 2 :read-timeout read-timeout)
+                        '())
+                       nil)
+    (http:http-error (e) e)))
+
+(defmacro with-silent-listener ((port-var &key reply) &body body)
+  "Run BODY with PORT-VAR bound to a port on 127.0.0.1 whose server accepts one connection,
+writes REPLY (a string) when given, and then sends nothing more until BODY ends."
+  (let ((listener (gensym)) (thread (gensym)))
+    `(let* ((,listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t))
+            (,port-var (usocket:get-local-port ,listener))
+            (,thread (bt:make-thread
+                      (lambda ()
+                        (ignore-errors
+                         (let ((c (usocket:socket-accept ,listener :element-type '(unsigned-byte 8))))
+                           (when ,reply
+                             (write-sequence (sb-ext:string-to-octets ,reply)
+                                             (usocket:socket-stream c))
+                             (finish-output (usocket:socket-stream c)))
+                           (sleep 5)
+                           (usocket:socket-close c)))))))
+       (unwind-protect (progn ,@body)
+         (ignore-errors (bt:destroy-thread ,thread))
+         (usocket:socket-close ,listener)))))
+
+(test a-pinned-connection-that-was-refused-is-a-connect-failure
+  (let* ((port (let ((s (usocket:socket-listen "127.0.0.1" 0)))
+                 (prog1 (usocket:get-local-port s) (usocket:socket-close s))))
+         (e (%pinned-failure port)))
+    (is (typep e 'http:http-error))
+    (is (eq :connect (and e (http:http-error-phase e))))))
+
+(test a-pinned-failure-after-connecting-is-a-response-failure-whatever-its-type
+  ;; The connection is made and the request sent; the server never answers, and the read times
+  ;; out. On Linux the condition that arrives is not the read timeout: dexador then reconnects by
+  ;; resolving pinned.test, which resolves nowhere, and that USOCKET:NS-HOST-NOT-FOUND-ERROR is
+  ;; what reaches the caller (#985). By its type it would be :CONNECT; it happened after the
+  ;; connection was made, so it is :RESPONSE, and a POST is not resent.
+  (with-silent-listener (port)
+    (let ((e (%pinned-failure port :read-timeout 1)))
+      (is (typep e 'http:http-error) "got ~S" e)
+      (is (eq :response (and e (http:http-error-phase e))) "got ~S: ~A" (and e (http:http-error-phase e)) e)
+      (is (not (aion/retry:transient-p e)) "the default policy does not resend it"))))
+
+#-os-windows
+(test a-tls-failure-on-a-pinned-connection-has-no-phase
+  ;; A server that answers the TLS handshake with plain text. Retrying cannot fix that, so it
+  ;; must not be classed as a transport failure either way.
+  (with-silent-listener (port :reply (format nil "HTTP/1.1 400 Bad Request~C~C~C~C" #\Return #\Linefeed #\Return #\Linefeed))
+    (let ((e (%pinned-failure port :scheme "https")))
+      (is (typep e 'http:http-error) "got ~S" e)
+      (is (null (and e (http:http-error-phase e))) "got ~S: ~A" (and e (http:http-error-phase e)) e)
+      (is (not (aion/retry:transient-or-unknown-p e))))))
+
+;;; --- a pooled request's failure to connect is not known to be before the send (#974 review) --
+
+(test a-request-that-may-have-used-a-pooled-connection-does-not-fail-in-the-connect-phase
+  "dexador pools connections, and a request it sent on a pooled connection that then dropped is
+sent again by dexador on a new one. A refusal of that new connection does not show the request
+was not acted on. So on the dexador path a failure to connect is :CONNECT only for a request
+that could not have used the pool, and a request that is not idempotent never uses it."
+  (let ((refused (make-condition 'usocket:connection-refused-error :socket nil)))
+    (is (eq :response (http::%transport-phase refused nil :pooled t))
+        "a pooled request's refused reconnect is :RESPONSE")
+    (is (eq :connect (http::%transport-phase refused nil :pooled nil))
+        "control: a request on a new connection is :CONNECT"))
+  (flet ((args (method) (http::%dex-args (http:make-request :method method :url "http://x.test/"))))
+    (is (and (member :use-connection-pool (args :post))
+             (null (getf (args :post) :use-connection-pool))
+             (null (getf (args :post) :keep-alive)))
+        "a POST gets a new connection: ~S" (args :post))
+    (is (null (member :use-connection-pool (args :get)))
+        "control: a GET may use the pool: ~S" (args :get))))

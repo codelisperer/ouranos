@@ -15,4 +15,4 @@
     undoes the signal mask a new thread can inherit from the thread that created it (#541).")
   (:export #:register-inheritable #:inheritable-variables #:unregister-inheritable
            #:capture #:call-with-captured #:inheriting #:with-captured
-           #:unblock-interrupts))
+           #:unblock-interrupts #:*blocking-forbidden*))

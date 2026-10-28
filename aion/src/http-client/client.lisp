@@ -17,7 +17,9 @@
   ((status :initarg :status :initform nil :reader http-error-status)
    (body :initarg :body :initform nil :reader http-error-body)
    (label :initarg :label :initform nil :reader http-error-label)
-   (detail :initarg :detail :initform nil :reader http-error-detail))
+   (detail :initarg :detail :initform nil :reader http-error-detail)
+   (retry-after :initarg :retry-after :initform nil :reader http-error-retry-after)
+   (transport-phase :initarg :phase :initform nil :reader http-error-phase))
   (:report (lambda (c s)
              (format s "http~@[ ~A~]:~@[ ~A~]~@[ ~A~]"
                      (http-error-label c) (http-error-status c)
@@ -39,7 +41,40 @@ discarded it, and the first consumer to adopt the client asked for the promise t
 written down before depending on it.
 
 LABEL is free-form and is for the caller's benefit in a report -- a provider name, an
-endpoint. It carries no semantics here."))
+endpoint. It carries no semantics here.
+
+RETRY-AFTER is the seconds the response's Retry-After header asked the caller to wait, read by
+ENSURE-2XX with AION/RETRY:PARSE-RETRY-AFTER, or NIL (#79).
+
+PHASE says how far a transport failure got, for AION/RETRY:TRANSIENCE (#79): :CONNECT when no
+connection was made (refused, a connect timeout, a name that does not resolve), so the request
+was not sent; :RESPONSE for a socket or stream failure after the connection was made, such as a
+read timeout, after which the server may have acted on the request. It is NIL for a failure with
+a status, for one this client raised itself before sending, such as a refused header, and for a
+failure that is not of the socket or stream, such as a TLS failure (%TRANSPORT-PHASE)."))
+
+(defparameter +transient-statuses+ '(408 425 429 503 529)
+  "Statuses after which the request was not acted on and may succeed later: request timeout, too
+early, too many requests, service unavailable, and 529, which Anthropic's API sends when it is
+overloaded.")
+
+(defparameter +unknown-statuses+ '(500 502 504)
+  "Statuses that may be temporary, but after which the server may have acted on the request.")
+
+(defmethod aion/retry:transience ((c http-error))
+  "For HTTP-ERROR: :TRANSIENT for a status in +TRANSIENT-STATUSES+ or a failure in the :CONNECT
+phase; :UNKNOWN for a status in +UNKNOWN-STATUSES+ or a failure in the :RESPONSE phase; NIL
+otherwise, a 4xx such as 400, 401 or 404 included."
+  (let ((status (http-error-status c)))
+    (cond ((member status +transient-statuses+) :transient)
+          ((member status +unknown-statuses+) :unknown)
+          (status nil)
+          ((eq (http-error-phase c) :connect) :transient)
+          ((eq (http-error-phase c) :response) :unknown)
+          (t nil))))
+
+(defmethod aion/retry:retry-after ((c http-error))
+  (http-error-retry-after c))
 
 (define-condition response-too-large (http-error)
   ((limit :initarg :limit :reader response-too-large-limit))
@@ -317,7 +352,11 @@ was."
                                (error 'http-error
                                       :label label
                                       :status (response-status resp)
-                                      :body (response-body resp)))
+                                      :body (response-body resp)
+                                      :retry-after (aion/retry:parse-retry-after
+                                                    (ignore-errors
+                                                     (header-value (response-headers resp)
+                                                                   "retry-after")))))
                              resp)))
 
 ;;; --- the runner (enter -> the one effect -> leave) ------------------------
@@ -417,6 +456,21 @@ way fails CI, not a provider call; upstream.sexp's Quicklisp entry points here t
                 headers)
         headers)))
 
+(defun %idempotent-method-p (method)
+  "Whether METHOD may be sent twice with the same effect as once (RFC 9110 9.2.2)."
+  (member method '(:get :head :options :trace :put :delete)))
+
+(defun %pooled-p (req)
+  "Whether dexador may send REQ on a connection it pooled from an earlier request.
+
+A request that is not idempotent never is: %DEX-ARGS turns the pool and keep-alive off for it
+(the hub's review of #974). Otherwise a POST could go out on a pooled connection, the server
+could act on it and then drop the connection, dexador would reconnect inside its own retry, and
+a refusal of that reconnect would look like a failure to connect, which WITH-RETRY's default
+policy resends. Not used on Windows, where dexador's WinHTTP backend opens a new session for
+every request, so no connection is reused."
+  (%idempotent-method-p (request-method req)))
+
 (defun %dex-args (req)
   "The dexador keyword arguments REQ implies, apart from the URL and the stream."
   (append (list :method (request-method req)
@@ -436,7 +490,67 @@ way fails CI, not a provider call; upstream.sexp's Quicklisp entry points here t
           (when (request-connect-timeout req)
             (list :connect-timeout (request-connect-timeout req)))
           (when (request-read-timeout req)
-            (list :read-timeout (request-read-timeout req)))))
+            (list :read-timeout (request-read-timeout req)))
+          ;; See %POOLED-P: a request that is not idempotent always gets a new connection.
+          (unless (%pooled-p req)
+            (list :use-connection-pool nil :keep-alive nil))))
+
+(defvar *%connected* nil
+  "Bound to NIL by %HTTP around one round trip, and set to T by the pinned path
+(%REQUEST-PINNED) as soon as its USOCKET:SOCKET-CONNECT returns, so a transport failure there is
+known to have happened before or after the connection was made (#79).")
+
+(defun %io-failure-p (e)
+  "Whether E is a failure of the socket or the stream: a usocket condition, a name that did not
+resolve, or a stream error such as a read timeout (SB-SYS:IO-TIMEOUT) or an early end of file.
+A TLS failure is not: cl+ssl's conditions are plain errors, and a refused certificate must never
+be classed as something a retry could fix."
+  (typep e '(or usocket:socket-condition usocket:ns-condition stream-error)))
+
+(defun %dexador-connect-failure-p (e)
+  "Whether E, from the dexador path, means no connection was made. Measured on Linux (#79):
+dexador reports a refused connection and a connect timeout as USOCKET:TIMEOUT-ERROR, a name that
+does not resolve as USOCKET:NS-HOST-NOT-FOUND-ERROR, and a read timeout as SB-SYS:IO-TIMEOUT.
+Measured on macOS (#974, CI run 40653707988): a refused connection is
+USOCKET:INVALID-ARGUMENT-ERROR, which usocket signals for the EINVAL macOS returns when a
+connect with a timeout has been refused. Only types that can come from making the connection
+count; USOCKET:SOCKET-ERROR as a whole does not, because a connection reset while reading the
+response is one too. Used only where the call that failed is not known; the pinned path knows,
+see *%CONNECTED*."
+  (typep e '(or usocket:timeout-error usocket:connection-refused-error
+                usocket:host-unreachable-error usocket:network-unreachable-error
+                usocket:invalid-argument-error usocket:ns-error)))
+
+#+os-windows
+(defun %winhttp-phase (e)
+  "HTTP-ERROR-PHASE for E, a WINHTTP::WIN-ERROR, which is what dexador signals on Windows, where it
+uses WinHTTP (#974; a refused connection measured as 12029). From the error code:
+- 12029 (ERROR_WINHTTP_CANNOT_CONNECT) and 12007 (ERROR_WINHTTP_NAME_NOT_RESOLVED): no connection
+  was made, so :CONNECT;
+- 12002 (ERROR_WINHTTP_TIMEOUT), 12030 (ERROR_WINHTTP_CONNECTION_ERROR) and 12152
+  (ERROR_WINHTTP_INVALID_SERVER_RESPONSE): :RESPONSE. 12002 is also the code for a connect
+  timeout, but WinHTTP does not say which, so it is counted as the case that must not be resent;
+- any other code, a TLS failure included: no phase."
+  (case (winhttp::win-error-code e)
+    ((12029 12007) :connect)
+    ((12002 12030 12152) :response)
+    (t nil)))
+
+(defun %transport-phase (e pinned &key pooled)
+  "HTTP-ERROR-PHASE for E, a transport failure. On the pinned path, which makes the connection
+itself, from where it failed: a socket failure before USOCKET:SOCKET-CONNECT returned is
+:CONNECT, one after it :RESPONSE. On the dexador path, from E's type
+(%DEXADOR-CONNECT-FAILURE-P), but only for a request that could not have used a pooled
+connection: with POOLED true, dexador may have sent the request on a pooled connection and then
+failed to reconnect, so a failure to connect does not show the request was not acted on, and it
+is :RESPONSE (%POOLED-P). On Windows, where dexador uses WinHTTP with a new session for every
+request, from its error code (%WINHTTP-PHASE). Anything that is not a socket or stream failure,
+a TLS failure included, has no phase, so AION/RETRY does not retry it."
+  (cond #+os-windows ((and (not pinned) (typep e 'winhttp::win-error)) (%winhttp-phase e))
+        ((not (%io-failure-p e)) nil)
+        (pinned (if *%connected* :response :connect))
+        ((and (not pooled) (%dexador-connect-failure-p e)) :connect)
+        (t :response)))
 
 (defun %http (req)
   "Perform the single dexador round-trip for REQ, returning a RESPONSE.
@@ -445,7 +559,8 @@ A non-2xx is captured as a RESPONSE rather than signalled -- dexador would signa
 would decide the meaning of a status before any LEAVE stage got to. A transport-level failure
 has no response to hand back, so it signals HTTP-ERROR directly."
   (let ((limit (request-max-body-bytes req))
-        (url (request-url req)))
+        (url (request-url req))
+        (*%connected* nil))
     (flet ((response (status headers body)
              (let ((declared (and limit (%content-length headers))))
                (when (and declared (> declared limit))
@@ -473,7 +588,9 @@ has no response to hand back, so it signals HTTP-ERROR directly."
                     (ignore-errors (dexador.error:response-headers e))
                     (dexador.error:response-body e)))
         (error (e)
-          (error 'http-error :detail (format nil "transport error: ~A" e)))))))
+          (error 'http-error :detail (format nil "transport error: ~A" e)
+                             :phase (%transport-phase e (request-connect-address req)
+                                                      :pooled (%pooled-p req))))))))
 
 (defun send-request (request interceptors &key (perform #'%http))
   "Run REQUEST through INTERCEPTORS around one HTTP round-trip and return the processed
