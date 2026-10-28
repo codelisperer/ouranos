@@ -368,3 +368,25 @@ the number the earlier step passes in."
         "with one carried earlier:~%~A" one)
     (is (search "build-desktop-app: 0 of this tree's native libraries carried into the bundle." none)
         "with none carried earlier:~%~A" none)))
+
+(test the-bundle-check-asks-the-stamp-about-a-vendored-libuv
+  "#1001: VERIFY-NATIVES-WILL-BE-CARRIED refuses a vendored libuv whose BUILT-FROM stamp does not
+name libuv.pin, because a checkout that pulled a pin bump without rebuilding would otherwise ship
+the old build. It asks STAMP-REFUSAL with the tree's libuv.pin, beside vendor/. A library from a
+build script that writes no stamp is not asked."
+  (let* ((tree (%fresh-tree))
+         (ouranos-tree-natives:*vendor* (merge-pathnames "vendor/" tree))
+         (library (merge-pathnames "vendor/libuv/lib/libuv.so" tree))
+         (sha "cb0d6dd2128d5a95bd242c6cc982a24fe608fa93da57b6b4ec763b0018c53e64"))
+    (ensure-directories-exist library)
+    (with-open-file (out library :direction :output) (write-string "x" out))
+    (with-open-file (out (merge-pathnames "libuv.pin" tree) :direction :output)
+      (format out "version 1.53.0~%sha256 ~A~%" sha))
+    (ouranos-built-from:write-stamp (merge-pathnames "vendor/libuv/" tree) "1.52.1" sha)
+    (let ((refusal (ouranos-tree-natives::%stamp-refusal-for library "build-libuv.lisp")))
+      (is (and refusal (search "1.52.1" refusal) (search "1.53.0" refusal)) "stale: ~S" refusal))
+    (is (null (ouranos-tree-natives::%stamp-refusal-for library "build-libgit2.lisp"))
+        "a build script that writes no stamp is not asked")
+    (ouranos-built-from:write-stamp (merge-pathnames "vendor/libuv/" tree) "1.53.0" sha)
+    (is (null (ouranos-tree-natives::%stamp-refusal-for library "build-libuv.lisp"))
+        "control: a current stamp is carried")))

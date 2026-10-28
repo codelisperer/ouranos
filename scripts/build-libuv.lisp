@@ -447,22 +447,25 @@ and is only on PATH inside the toolchain environment, so it goes through vcvarsa
        ;; An existing library is reused only when vendor/libuv/BUILT-FROM names this pin's
        ;; version and sha256. Before, its existence was enough, so after the pin moved a
        ;; checkout kept the old release and said "already built" (#977).
-       (when (and (probe-file (library-path)) (not force))
-         (ecase (ouranos-built-from:stamp-state *vendor* version sha)
-           (:current
-            (format t "~&  already built: ~A~%  (--force to rebuild)~%"
-                    (human-path:human-path (library-path)))
-            (uiop:quit 0))
-           (:stale
-            (format t "~&  the library there was built from another release than libuv.pin's ~A (its BUILT-FROM says otherwise), so it is rebuilt~%"
-                    version))
-           (:missing
-            (format t "~&  the library there has no BUILT-FROM stamp, so which release it came from is unknown; it is rebuilt from libuv.pin's ~A~%"
-                    version))))
+       (ecase (ouranos-built-from:build-decision *vendor* (library-path) version sha :force force)
+         (:reuse
+          (format t "~&  already built: ~A~%  (--force to rebuild)~%"
+                  (human-path:human-path (library-path)))
+          (uiop:quit 0))
+         ((:forced :absent))
+         (:stale
+          (format t "~&  the library there was built from another release than libuv.pin's ~A (its BUILT-FROM says otherwise), so it is rebuilt~%"
+                  version))
+         (:missing
+          (format t "~&  the library there has no BUILT-FROM stamp, so which release it came from is unknown; it is rebuilt from libuv.pin's ~A~%"
+                  version)))
        (handler-case
            ;; BEFORE the fetch rather than inside the compile -- see `require-toolchain'.
            (progn
              (require-toolchain)
+             ;; The old stamp goes first: a compile that fails after overwriting the library
+             ;; must not leave a stamp saying the library is current (#1001).
+             (ouranos-built-from:delete-stamp *vendor*)
              (let* ((srcdir (ensure-source version url sha))
                     (library (compile-library srcdir)))
                (verify-built library)

@@ -2416,6 +2416,15 @@ its tag.
 
 ### Fixed
 
+- **A desktop bundle, and `cons bin`, refuse to carry a `vendor/libuv` whose `BUILT-FROM` stamp
+  is missing or does not name `libuv.pin`** (#1001). Before this, a checkout that pulled a
+  `libuv.pin` bump and did not run `scripts/build-libuv.lisp` shipped the old libuv with no
+  message. `verify-natives-will-be-carried` in `scripts/tree-natives.lisp` now exits with code 3
+  and names the stamp's version, the pin's version and the command
+  `sbcl --script scripts/build-libuv.lisp`. A libuv built before #991 has no stamp and is refused
+  until it is rebuilt once. `build-libuv.lisp` also deletes the old stamp before it compiles, so
+  a `--force` rebuild that fails no longer leaves a stamp saying the library is current.
+
 - **cons: in a project made with `cons init --template web --db`, `open-database` closes the
   pool only when making the session or user store did not finish** (#944). It used to close the
   pool from a `handler-bind` on `error`, which runs as soon as an error is signalled, so a store
