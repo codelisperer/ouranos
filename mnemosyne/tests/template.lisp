@@ -36,7 +36,7 @@
           "migrate has nothing left to apply to a copy"))))
 
 (test a-write-to-one-copy-is-not-seen-by-the-template-or-the-next-copy
-  "Each test gets its own database. Control: two connections to one database would see the row."
+  "Each test gets its own database."
   (%with-template (tm (%template-migrations))
     (tmpl:with-sqlite-template-copy (first tm)
       (conn:exec first "INSERT INTO notes (id, body) VALUES (2, 'written by the first test')")
@@ -70,3 +70,47 @@
   (signals conn:db-error
     (tmpl:make-sqlite-template
      (list (be:make-migration "20261028_103_bad" "not SQL" "NOT SQL AT ALL" "")))))
+
+(test a-copy-that-cannot-be-made-signals-and-closes-its-connection
+  "sqlite3_backup_init refuses a destination that has a transaction open. The connection
+COPY-SQLITE-TEMPLATE opens is made to start a read transaction, so the copy fails inside
+%BACKUP; that connection is then disconnected, and the template is not."
+  (%with-template (tm (%template-migrations))
+    (let ((closed '()))
+      (unwind-protect
+           (progn
+             (sb-int:encapsulate 'conn:connect '%begin-a-read
+                                 (lambda (f backend)
+                                   (let ((c (funcall f backend)))
+                                     (conn:exec c "BEGIN")
+                                     (conn:query c "SELECT count(*) FROM sqlite_master")
+                                     c)))
+             (sb-int:encapsulate 'conn:disconnect '%record-disconnect
+                                 (lambda (f c) (push c closed) (funcall f c)))
+             (signals conn:db-error (tmpl:copy-sqlite-template tm)))
+        (sb-int:unencapsulate 'conn:connect '%begin-a-read)
+        (sb-int:unencapsulate 'conn:disconnect '%record-disconnect))
+      (is (= 1 (length closed)) "the copy's connection was disconnected: ~S" closed)
+      (is (not (eq (tmpl::sqlite-template-connection tm) (first closed)))
+          "and it was not the template's"))))
+
+(test foreign-keys-are-off-on-a-copy-until-the-test-turns-them-on
+  "PRAGMA foreign_keys belongs to a connection, so a copy does not inherit it (docs/migrations.md
+section 10). A test that relies on foreign keys sets it on its copy, and SQLite then enforces them."
+  (%with-template (tm (list (be:make-migration "20261028_104_parent" "parent"
+                                               "CREATE TABLE parent (id integer PRIMARY KEY)"
+                                               "DROP TABLE parent")
+                            (be:make-migration "20261028_105_child" "child"
+                                               (concatenate 'string
+                                                "CREATE TABLE child (id integer PRIMARY KEY, "
+                                                "parent_id integer NOT NULL REFERENCES parent (id))")
+                                               "DROP TABLE child")))
+    (tmpl:with-sqlite-template-copy (c tm)
+      (is (= 0 (%count c "PRAGMA foreign_keys")))
+      (conn:exec c "INSERT INTO child (id, parent_id) VALUES (1, 99)")
+      (is (= 1 (%count c "SELECT count(*) FROM child")) "without the pragma the orphan is stored"))
+    (tmpl:with-sqlite-template-copy (c tm)
+      (conn:exec c "PRAGMA foreign_keys = ON")
+      (is (= 1 (%count c "PRAGMA foreign_keys")))
+      (signals conn:db-error (conn:exec c "INSERT INTO child (id, parent_id) VALUES (1, 99)"))
+      (is (= 0 (%count c "SELECT count(*) FROM child"))))))

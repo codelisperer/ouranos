@@ -355,7 +355,8 @@ template database, and gives each test a copy of it. Load it from the app's **te
 only; it is not part of what the app ships.
 
 ```lisp
-;; In the test system's :depends-on: "mnemosyne/test-template"
+;; In the test system's :depends-on: "mnemosyne/test-template". The test package names it:
+;;   (:local-nicknames (#:tmpl #:mnemosyne/test-template))
 (defvar *template* nil)
 
 (defun run-tests ()

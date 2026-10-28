@@ -63,10 +63,13 @@ contents. Signals a mnemosyne/conn:db-error naming the SQLite result code when i
              :message (format nil "copying an SQLite template: backup init failed, code ~D"
                               (cffi:foreign-funcall "sqlite3_errcode" :pointer dest :int))))
     ;; -1 copies every page in one step. SQLITE_DONE (101) is the only result that means the
-    ;; copy is complete; _finish releases the backup either way and reports any error.
-    (let ((step (cffi:foreign-funcall "sqlite3_backup_step" :pointer backup :int -1 :int))
-          (finish (cffi:foreign-funcall "sqlite3_backup_finish" :pointer backup :int)))
-      (unless (and (= step 101) (zerop finish))
+    ;; copy is complete. _finish releases the backup and reports any error; it runs from the
+    ;; cleanup, so a non-local exit between init and finish does not leave the backup open.
+    (let ((step nil) (finish nil))
+      (unwind-protect
+           (setf step (cffi:foreign-funcall "sqlite3_backup_step" :pointer backup :int -1 :int))
+        (setf finish (cffi:foreign-funcall "sqlite3_backup_finish" :pointer backup :int)))
+      (unless (and (eql step 101) (eql finish 0))
         (error 'conn:db-error
                :message (format nil "copying an SQLite template: backup step ~D, finish ~D"
                                 step finish))))))
