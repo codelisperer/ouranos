@@ -14,6 +14,14 @@ its tag.
 
 ### An app may have to act
 
+- **A turn run with an observer now asks `anthropic` and `openai-compatible` providers for a
+  stream** (#984), so that it can emit `:text-delta` events. The completion, the events and the
+  usage are the same as before. An OpenAI-compatible request that streams also sends
+  `stream_options: {"include_usage": true}`, because the server otherwise reports no token
+  counts. A server that refuses either returns an error the turn reports as before. To keep the
+  old request for such a server, define `praxeon/llm:supports-streaming-p` to return `NIL` for
+  a subclass of `openai-compatible`; that also means a cancel cannot stop a call in progress.
+
 - **`scripts/build-desktop-app.lisp` stops, instead of warning and exiting 0, when the bundle
   needs hyperion-view or a library the runtime links against and it is missing** (#956). For an
   app that loads `hyperion/desktop`, a `hyperion/hyperion-view/hyperion-view(.exe)` that was not
@@ -1018,6 +1026,42 @@ its tag.
   `claude-opus-5-5` where they named `claude-opus-4-8`.
 
 ### Added
+
+- **praxeon: a turn can stream the model's text as it is written, and be cancelled so the
+  provider stops generating** (#984).
+  - `praxeon/actor:run-turn` takes **`:cancel`**, a handle from **`make-turn-cancel`**. Calling
+    **`cancel-turn`** on it from another thread stops the turn. A model call in progress has its
+    connection closed. A tool call in progress finishes, and the turn ends before the next model
+    call. The turn then returns `NIL` and `:cancelled`, after a `:usage` event with
+    `:cancelled t` for a call it stopped and a **`:turn-ended`** event with `:reason
+    :cancelled`. **`turn-cancelled-p`** reads the handle.
+  - The stopped call's `:usage` has the counts the provider had reported. Anthropic reports
+    output tokens only at the end, so `:output` is usually `NIL`. **`:estimated-output`** is
+    praxeon's count of the output that arrived: text, tool names and tool arguments, at one token
+    per UTF-8 octet, which cannot come out below the tokens that arrived.
+  - **`praxeon/ceiling:record-usage`** takes `:estimated-input` and `:estimated-output` and
+    charges each in place of a count that is `NIL`. The usage line keeps the reported count as
+    `NIL` and adds `:estimated t` and the estimate it charged. **`record-usage-event`** charges
+    a `:usage` event this way, and `meter` takes `:estimated-input-fn` and
+    `:estimated-output-fn`. `praxeon/studio:status-observer` shows a stopped call's output
+    tokens, marked `(estimated)` when they are the estimate.
+  - While an observer is bound, each piece of text is a **`:text-delta`** event with `:text` and
+    `:step`. `praxeon/llm:complete` streams when **`*on-text*`** or **`*cancel*`** is bound, on
+    a provider whose **`supports-streaming-p`** is true (`anthropic` and `openai-compatible`), and
+    returns the same completion it returns without streaming. A cancel through `*cancel*`
+    signals **`praxeon/conditions:completion-cancelled`**.
+  - **`aion/http-client:open-response-stream`** returns a response's body as a stream once the
+    head has arrived, and **`read-event`** reads Server-Sent Events from it. A
+    **`make-request-cancel`** handle passed as `:cancel` lets another thread call
+    **`cancel-request`**, which shuts the socket down; reads then signal `request-cancelled`.
+    One handle can serve several requests at once, from several threads, and a cancel stops all
+    of them. `read-event` does not return an event that the stream ends in the middle of, before
+    the blank line that finishes it.
+  - A streamed reply that ends before the provider's end event (`message_stop` for Anthropic;
+    `[DONE]` or a finish reason for an OpenAI-compatible server), or that carries an event that
+    is not JSON, signals **`praxeon/conditions:provider-request-failed`**, rather than returning
+    what arrived as the whole reply. A tool call cut off halfway through its arguments signals it
+    too. Of the body of a non-2xx streamed request, the first 64 KiB are read and kept.
 
 - **praxeon/image: the generate-image means offers the model a `mask`, so it can change only part
   of an image** (#946). With `:resolve-reference` and a provider that takes a mask
