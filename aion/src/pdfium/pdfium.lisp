@@ -122,7 +122,12 @@ reason (:FORMAT, :PASSWORD, :SECURITY, ...)."
 PNG octets. Grey (one byte a pixel) unless COLOR is true. Returns (values PNG WIDTH HEIGHT).
 
 DPI is a whole number from 1 to 1200. A page whose size at DPI is over *MAX-RENDER-PIXELS* is
-refused before a bitmap is made."
+refused before a bitmap is made.
+
+The PNG is not compressed: its data is in stored deflate blocks, because the tree has no deflate
+compressor. That is fine for what it is for, an image handed to OCR or to a model and not
+stored; a grey index card at 200 DPI is about 600 KB. An app that stores the images should
+compress them itself."
   (unless (pdf-document-handle document) (%refuse :closed "the document is closed"))
   (unless (and (integerp dpi) (<= 1 dpi 1200))
     (%refuse :dpi "DPI must be a whole number from 1 to 1200"))
