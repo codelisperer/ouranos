@@ -1359,8 +1359,13 @@ header RETRY-AFTER."
   ;; 40653707988), and the test measured a timeout instead of a refusal.
   (let ((port (let ((s (usocket:socket-listen "127.0.0.1" 0)))
                 (prog1 (usocket:get-local-port s) (usocket:socket-close s)))))
+    ;; A POST, which never uses dexador's connection pool (the hub's review of #974), so a
+    ;; refusal shows the request was not sent. A GET's refusal may have followed a send on a
+    ;; pooled connection, and is :RESPONSE on the dexador path.
     (let ((e (handler-case (progn (http:send-request
-                                   (http:make-request :url (format nil "http://127.0.0.1:~D/" port)
+                                   (http:make-request :method :post
+                                                      :url (format nil "http://127.0.0.1:~D/" port)
+                                                      :content "x"
                                                       :connect-timeout 15 :read-timeout 15)
                                    (list (http:ensure-2xx)))
                                   nil)
@@ -1432,3 +1437,23 @@ writes REPLY (a string) when given, and then sends nothing more until BODY ends.
       (is (typep e 'http:http-error) "got ~S" e)
       (is (null (and e (http:http-error-phase e))) "got ~S: ~A" (and e (http:http-error-phase e)) e)
       (is (not (aion/retry:transient-or-unknown-p e))))))
+
+;;; --- a pooled request's failure to connect is not known to be before the send (#974 review) --
+
+(test a-request-that-may-have-used-a-pooled-connection-does-not-fail-in-the-connect-phase
+  "dexador pools connections, and a request it sent on a pooled connection that then dropped is
+sent again by dexador on a new one. A refusal of that new connection does not show the request
+was not acted on. So on the dexador path a failure to connect is :CONNECT only for a request
+that could not have used the pool, and a request that is not idempotent never uses it."
+  (let ((refused (make-condition 'usocket:connection-refused-error :socket nil)))
+    (is (eq :response (http::%transport-phase refused nil :pooled t))
+        "a pooled request's refused reconnect is :RESPONSE")
+    (is (eq :connect (http::%transport-phase refused nil :pooled nil))
+        "control: a request on a new connection is :CONNECT"))
+  (flet ((args (method) (http::%dex-args (http:make-request :method method :url "http://x.test/"))))
+    (is (and (member :use-connection-pool (args :post))
+             (null (getf (args :post) :use-connection-pool))
+             (null (getf (args :post) :keep-alive)))
+        "a POST gets a new connection: ~S" (args :post))
+    (is (null (member :use-connection-pool (args :get)))
+        "control: a GET may use the pool: ~S" (args :get))))

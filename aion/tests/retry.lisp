@@ -287,3 +287,74 @@ that were there before. As hermes/tests/blob.lisp does."
                       (failing 1 :asked 5))))
     (is (search "reason=deadline" log))
     (is (search "retry-after-s=5" log) "the log line carries the server's value: ~A" log)))
+
+;;; --- the hub's review of #974 ------------------------------------------------------------
+
+(test the-wait-happens-after-the-failed-attempt-has-unwound
+  "The runner waits in the RETRY restart's clause, so the failed attempt's UNWIND-PROTECT
+cleanups have run, and a lock it held is free, while the runner waits. The control is the lock:
+the test checks it is held during the attempt, so a free lock during the wait is a release."
+  (let ((lock (sb-thread:make-mutex :name "held by the body"))
+        (unwound nil)
+        (seen '())
+        (calls 0))
+    (let ((r::*sleep-function*
+            (lambda (s)
+              (declare (ignore s))
+              (push (list :unwound unwound
+                          :lock-free (null (sb-thread:mutex-owner lock)))
+                    seen)))
+          (r::*random-function* (lambda () 0.5)))
+      (r:call-with-retry
+       (r:make-retry-policy :max-attempts 3 :base-delay 1 :jitter :none)
+       (lambda ()
+         (incf calls)
+         (setf unwound nil)
+         (sb-thread:with-mutex (lock)
+           (unwind-protect
+                (progn
+                  (is (eq sb-thread:*current-thread* (sb-thread:mutex-owner lock))
+                      "control: the body holds the lock while it runs")
+                  (when (< calls 3) (error 'flaky)))
+             (setf unwound t))))))
+    (is (= 2 (length seen)) "two waits: ~S" seen)
+    (is (every (lambda (s) (getf s :unwound)) seen) "the cleanup had run before each wait: ~S" seen)
+    (is (every (lambda (s) (getf s :lock-free)) seen) "and the lock was free: ~S" seen)))
+
+(test a-retryable-symbol-that-names-no-function-is-refused-when-the-policy-is-made
+  (signals type-error (r:make-retry-policy :retryable 'flaky))
+  (is (typep (r:make-retry-policy :retryable 'r:transient-p) 'r:retry-policy)
+      "control: a symbol naming a function is accepted")
+  (is (typep (r:make-retry-policy :retryable (list 'flaky)) 'r:retry-policy)
+      "and a condition type is given as a list of one"))
+
+(define-condition %badly-described (error) ()
+  (:report "the original failure"))
+
+(defmethod r:transience ((c %badly-described)) (error "the transience method itself failed"))
+
+(define-condition %bad-retry-after (error) ()
+  (:report "the original failure, with a broken retry-after"))
+
+(defmethod r:transience ((c %bad-retry-after)) :transient)
+(defmethod r:retry-after ((c %bad-retry-after)) (error "the retry-after method itself failed"))
+
+(test an-error-in-a-transience-or-retry-after-method-leaves-the-original-failure
+  "A method that signals while the runner asks about a failure is logged and taken as \"do not
+retry\", and the caller sees the original failure. The control is FLAKY, whose methods work and
+which is retried."
+  (with-recorded-waits (waits)
+    (dolist (type '(%badly-described %bad-retry-after))
+      (let ((calls 0))
+        (let ((e (handler-case
+                     (progn (r:call-with-retry (r:make-retry-policy :max-attempts 3)
+                                               (lambda () (incf calls) (error type)))
+                            nil)
+                   (error (e) e))))
+          (is (typep e type) "~S: the caller sees the original failure, got ~A" type e)
+          (is (= 1 calls) "~S: and it is not retried" type))))
+    (is (null waits) "nothing waited"))
+  (with-recorded-waits (waits)
+    (multiple-value-bind (thunk calls) (failing 1)
+      (r:call-with-retry (r:make-retry-policy :max-attempts 3) thunk)
+      (is (= 2 (funcall calls)) "control: FLAKY is retried"))))

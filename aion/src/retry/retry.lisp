@@ -121,9 +121,12 @@ NIL, which the runner treats as no request to wait."
   DEADLINE      seconds from the start of the first attempt after which no retry starts, or NIL
                 for none. It does not cut short an attempt that is running; that is the call's
                 own timeout's job.
-  RETRYABLE     which conditions are retried: a function of the condition, or a list of
-                condition type specifiers. The default is TRANSIENT-P, which retries only
-                failures after which sending the request again is safe for any request.
+  RETRYABLE     which conditions are retried: a function of the condition, the name of one,
+                or a list of condition type specifiers. The default is TRANSIENT-P, which
+                retries only failures after which sending the request again is safe for any
+                request. A symbol that names no function is refused here, because the runner
+                would call it: a single condition type is given as a list of one, such as
+                (LIST 'MY-ERROR).
 
 Signals TYPE-ERROR for a value outside these."
   (check-type name (or null string))
@@ -134,6 +137,10 @@ Signals TYPE-ERROR for a value outside these."
   (check-type jitter (member :full :equal :none))
   (check-type deadline (or null (real (0))))
   (check-type retryable (or function symbol list))
+  (when (and retryable (symbolp retryable) (not (fboundp retryable)))
+    (error 'type-error :datum retryable
+                       :expected-type '(or function (and symbol (satisfies fboundp)) list)
+                       :context "RETRYABLE names no function; give a condition type as a list of one"))
   (%make-retry-policy :name name :max-attempts max-attempts :base-delay base-delay
                       :multiplier multiplier :max-delay max-delay :jitter jitter
                       :deadline deadline :retryable retryable))
@@ -163,11 +170,23 @@ MAX-DELAY, and then:
       (:full (* d random))
       (:equal (+ (/ d 2) (* (/ d 2) random))))))
 
+(defun %ask (what thunk condition)
+  "THUNK's value, where THUNK calls a function the policy or the condition's type supplies,
+such as a RETRYABLE function or a TRANSIENCE or RETRY-AFTER method. An error it signals is
+logged and taken as \"do not retry\": the caller then sees CONDITION, the original failure,
+not an error from a function asked about it (the hub's review of #974). Returns (values VALUE
+OK), OK false when it signalled."
+  (handler-case (values (funcall thunk) t)
+    (error (e)
+      (log:warn "retry: a function asked about a failure signalled, so it is not retried"
+                :asked what :condition (%type-name condition) :error-type (%type-name e))
+      (values nil nil))))
+
 (defun %retryable-p (policy condition)
   (let ((r (retry-policy-retryable policy)))
     (if (listp r)
         (some (lambda (type) (typep condition type)) r)
-        (funcall r condition))))
+        (values (%ask "retryable" (lambda () (funcall r condition)) condition)))))
 
 ;;; --- the runner -------------------------------------------------------------------------
 
@@ -243,31 +262,36 @@ for CONDITION, logging why at :info when the reason is the policy's limits."
                                    :max-attempts (retry-policy-max-attempts policy))
        nil)
       (t
-       (let* ((computed (retry-delay policy next (funcall *random-function*)))
-              (asked (retry-after condition))
-              (deadline (retry-policy-deadline policy)))
-         (cond
-           ((and asked (> asked (retry-policy-max-delay policy)))
-            (log:info "retry not taken" :reason "retry-after longer than max-delay"
-                                        :policy (retry-policy-name policy) :attempt attempt
-                                        :condition (%type-name condition)
-                                        :retry-after-s asked
-                                        :max-delay-s (retry-policy-max-delay policy))
-            nil)
-           (t
-            (let ((wait (if asked (max computed asked) computed)))
-              (cond ((and deadline (> (+ (%elapsed start) wait) deadline))
-                     (log:info "retry not taken" :reason "deadline"
-                                                 :policy (retry-policy-name policy)
-                                                 :attempt attempt
-                                                 :condition (%type-name condition)
-                                                 :wait-ms (%ms wait) :deadline-s deadline
-                                                 :retry-after-s asked)
-                     nil)
-                    (t wait))))))))))
+       (multiple-value-bind (asked ok)
+           (%ask "retry-after" (lambda () (retry-after condition)) condition)
+         (let* ((computed (retry-delay policy next (funcall *random-function*)))
+               (deadline (retry-policy-deadline policy)))
+          (cond
+            ((not ok) nil)
+            ((and asked (> asked (retry-policy-max-delay policy)))
+             (log:info "retry not taken" :reason "retry-after longer than max-delay"
+                                         :policy (retry-policy-name policy) :attempt attempt
+                                         :condition (%type-name condition)
+                                         :retry-after-s asked
+                                         :max-delay-s (retry-policy-max-delay policy))
+             nil)
+            (t
+             (let ((wait (if asked (max computed asked) computed)))
+               (cond ((and deadline (> (+ (%elapsed start) wait) deadline))
+                      (log:info "retry not taken" :reason "deadline"
+                                                  :policy (retry-policy-name policy)
+                                                  :attempt attempt
+                                                  :condition (%type-name condition)
+                                                  :wait-ms (%ms wait) :deadline-s deadline
+                                                  :retry-after-s asked)
+                      nil)
+                     (t wait)))))))))))
 
 (defun %on-failure (policy condition attempt start retry)
-  "The runner's handler: wait and invoke RETRY, or return, which declines the condition."
+  "The runner's handler: invoke RETRY with the seconds to wait, or return, which declines the
+condition. The wait itself happens in RETRY's clause, after the failed attempt has unwound, so
+the attempt's UNWIND-PROTECT cleanups have run and its locks are released while the runner waits
+(the hub's review of #974)."
   (let ((wait (%next-wait policy condition attempt start)))
     (when wait
       (restart-case
@@ -281,8 +305,7 @@ for CONDITION, logging why at :info when the reason is the policy's limits."
           (setf wait 0)))
       (log:info "retrying" :policy (retry-policy-name policy) :attempt (1+ attempt)
                            :condition (%type-name condition) :wait-ms (%ms wait))
-      (when (plusp wait) (funcall *sleep-function* wait))
-      (invoke-restart retry))))
+      (invoke-restart retry wait))))
 
 (defun call-with-retry (policy thunk)
   "THUNK's values, calling it again under POLICY while it fails with a retryable condition.
@@ -304,8 +327,10 @@ See WITH-RETRY."
                     (handler-bind ((error (lambda (c)
                                             (%on-failure policy c this-attempt start retry))))
                       (cons :done (multiple-value-list (funcall thunk)))))
-                (retry ()
+                (retry (&optional (wait 0))
                   :report "Run the body again now."
+                  ;; Here, not in the handler: the failed attempt has unwound by now.
+                  (when (plusp wait) (funcall *sleep-function* wait))
                   :again))))
         (when (consp results)
           (return (values-list (rest results))))))))
@@ -323,6 +348,10 @@ still available to run BODY once more by hand. The last three reasons are logged
 
 BODY must be safe to run again after a failure. With the default RETRYABLE, TRANSIENT-P, only
 failures after which the request was not acted on are retried.
+
+NESTED WITH-RETRY MULTIPLIES THE ATTEMPTS. An inner WITH-RETRY retries a failure first, and if
+it gives up, the outer one runs the whole body again, inner retries and all, so with three
+attempts each the innermost call can run nine times. Put the policy at one level.
 
 THE WAIT BLOCKS THE THREAD. Do not use it on a thread other work waits for, such as an aion/uv
 loop thread or a handler that hyperion's :uv server runs on its loop: there it signals
