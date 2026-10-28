@@ -2226,3 +2226,43 @@ BLOB-BACKEND-ERROR."
                                              (b:blob-invalid-metadata (c) (b:blob-invalid-metadata-name c))))))
           (is (equal '("if-match" "if-match") result) "~S on ~A" bad (b:store-name store))
           (is (null calls)))))))
+
+(test s3-secure-setting-comes-from-the-argument-or-the-environment
+  ;; #124: SECURE was the one setting with no environment fallback, so STORE-FROM-ENV could not
+  ;; make a store for a local S3 double that speaks plain http.
+  (flet ((secure (&rest args)
+           (b::s3-secure-p (apply #'b:make-s3-store :endpoint "s3.amazonaws.com"
+                                 :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x" args))))
+    (with-environment-variable ("MNEMOSYNE_S3_SECURE" nil)
+      (is (eq t (secure)) "unset is https")
+      (is (eq nil (secure :secure nil)) "and the argument can still turn it off"))
+    (with-environment-variable ("MNEMOSYNE_S3_SECURE" "false")
+      (is (eq nil (secure)) "false is plain http")
+      (is (eq t (secure :secure t)) "the argument wins over the environment"))
+    (with-environment-variable ("MNEMOSYNE_S3_SECURE" "FALSE")
+      (is (eq nil (secure)) "case does not matter"))
+    (with-environment-variable ("MNEMOSYNE_S3_SECURE" "True")
+      (is (eq t (secure))))
+    ;; A misspelling must not quietly pick either answer.
+    (dolist (v '("flase" "0" "no" "off" "yes"))
+      (with-environment-variable ("MNEMOSYNE_S3_SECURE" v)
+        (signals b:blob-configuration-error (secure))))))
+
+(test store-from-env-can-make-a-store-for-a-local-s3-double
+  ;; The whole configuration a MinIO on localhost:9000 needs, from the environment alone.
+  (let ((b:*store* nil))
+    (with-environment-variable ("MNEMOSYNE_BLOB_IMPL" "s3")
+      (with-environment-variable ("MNEMOSYNE_S3_ENDPOINT" "localhost:9000")
+        (with-environment-variable ("MNEMOSYNE_S3_ACCESS_KEY" "minioadmin")
+          (with-environment-variable ("MNEMOSYNE_S3_SECRET_KEY" "minioadmin")
+            (with-environment-variable ("MNEMOSYNE_S3_PATH_STYLE" "true")
+              (with-environment-variable ("MNEMOSYNE_S3_SECURE" "false")
+                (let* ((store (b:store-from-env))
+                       (url (b:blob-url store "media" "a/b.png" :expires-in 60)))
+                  (is (typep store 'b:s3-store))
+                  (is (eql 0 (search "http://localhost:9000/media/a/b.png?" url))
+                      "a plain http, path-style URL to the double: ~A" url)))
+              (with-environment-variable ("MNEMOSYNE_S3_SECURE" nil)
+                (is (eql 0 (search "https://" (b:blob-url (b:store-from-env) "media" "a/b.png"
+                                                          :expires-in 60)))
+                    "control: the same settings without MNEMOSYNE_S3_SECURE give https")))))))))

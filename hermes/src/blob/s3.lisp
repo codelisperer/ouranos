@@ -41,20 +41,26 @@ MAKE-S3-STORE."))
       (error 'blob-configuration-error :missing name)))
 
 (defun make-s3-store (&key endpoint region access-key secret-key session-token
-                           (secure t) path-style public-base-url upload-acl)
+                           (secure t secure-p) path-style public-base-url upload-acl)
   "An S3-STORE, defaulting every setting from the environment.
 
 ENDPOINT is MNEMOSYNE_S3_ENDPOINT (default \"s3.amazonaws.com\"), REGION is MNEMOSYNE_S3_REGION
 (default \"us-east-1\"), ACCESS-KEY and SECRET-KEY are MNEMOSYNE_S3_ACCESS_KEY and
 MNEMOSYNE_S3_SECRET_KEY, SESSION-TOKEN is MNEMOSYNE_S3_SESSION_TOKEN, PATH-STYLE is
 MNEMOSYNE_S3_PATH_STYLE=true and PUBLIC-BASE-URL is MNEMOSYNE_S3_PUBLIC_BASE_URL.
+SECURE, whether requests and signed URLs use https, is MNEMOSYNE_S3_SECURE, and true when that
+is unset; see %SECURE-SETTING (#124). A local S3 double such as MinIO on localhost:9000 is
+reached with MNEMOSYNE_S3_SECURE=false and MNEMOSYNE_S3_PATH_STYLE=true.
 UPLOAD-ACL is :NONE (the default) or :PRIVATE, or MNEMOSYNE_S3_UPLOAD_ACL: whether UPLOAD-URL
 signs `x-amz-acl: private'. Set :PRIVATE for a bucket that honours ACLs, such as DigitalOcean
 Spaces or an AWS bucket with ACLs enabled, and leave :NONE for an AWS bucket with ACLs disabled
 or Cloudflare R2; see %UPLOAD-ACL-SETTING (#796).
 
 Credentials are checked HERE rather than at first use, so a deploy missing a secret dies
-at boot with the variable's name instead of on the first upload a member attempts."
+at boot with the variable's name instead of on the first upload a member attempts.
+
+The MNEMOSYNE_ prefix on these variables is historical: the blob store began in mnemosyne and
+moved to hermes, and the deployed names were kept rather than renamed. They are hermes settings."
   (let ((endpoint (or endpoint (uiop:getenv "MNEMOSYNE_S3_ENDPOINT") "s3.amazonaws.com"))
         (region (or region (uiop:getenv "MNEMOSYNE_S3_REGION") "us-east-1"))
         (access-key (or access-key (uiop:getenv "MNEMOSYNE_S3_ACCESS_KEY")))
@@ -65,13 +71,32 @@ at boot with the variable's name instead of on the first upload a member attempt
                    :access-key (%require-setting access-key "MNEMOSYNE_S3_ACCESS_KEY")
                    :secret-key (%require-setting secret-key "MNEMOSYNE_S3_SECRET_KEY")
                    :session-token (or session-token (uiop:getenv "MNEMOSYNE_S3_SESSION_TOKEN"))
-                   :secure secure
+                   :secure (%secure-setting secure secure-p)
                    :path-style (or path-style
                                    (let ((v (uiop:getenv "MNEMOSYNE_S3_PATH_STYLE")))
                                      (and v (string-equal v "true"))))
                    :public-base-url (or public-base-url
                                         (uiop:getenv "MNEMOSYNE_S3_PUBLIC_BASE_URL"))
                    :upload-acl (%upload-acl-setting upload-acl))))
+
+(defun %secure-setting (value supplied-p)
+  "The store's SECURE: VALUE when :SECURE was passed, else MNEMOSYNE_S3_SECURE, else T.
+
+The variable is read as true or false without regard to case, and unset or empty means true,
+so plaintext http has to be asked for. Any other value signals BLOB-CONFIGURATION-ERROR rather
+than picking a default, so a misspelling cannot quietly change the store to http, and cannot
+quietly leave a local double unreachable either.
+
+This reads oppositely from MNEMOSYNE_S3_PATH_STYLE beside it, where unset means NIL. That is
+deliberate: for path-style the safe default is off, and for secure it is on."
+  (if supplied-p
+      (and value t)
+      (let ((v (uiop:getenv "MNEMOSYNE_S3_SECURE")))
+        (cond ((or (null v) (zerop (length v))) t)
+              ((string-equal v "true") t)
+              ((string-equal v "false") nil)
+              (t (error 'blob-configuration-error
+                        :missing (format nil "MNEMOSYNE_S3_SECURE must be true or false, not ~S" v)))))))
 
 (defun %upload-acl-setting (value)
   "The store's UPLOAD-ACL: VALUE when given, else MNEMOSYNE_S3_UPLOAD_ACL, else :NONE.

@@ -642,7 +642,11 @@ through every call.")
   name)
 
 (defun store-from-env ()
-  "The store named by MNEMOSYNE_BLOB_IMPL (default \"filesystem\"), or *STORE* if bound."
+  "The store named by MNEMOSYNE_BLOB_IMPL (default \"filesystem\"), or *STORE* if bound.
+
+The MNEMOSYNE_ prefix is historical: the blob store began in mnemosyne and moved to hermes, and
+the deployed variable names were kept. MNEMOSYNE_BLOB_IMPL, MNEMOSYNE_BLOB_ROOT and the
+MNEMOSYNE_S3_* variables are hermes settings."
   (or *store*
       (let* ((name (string-downcase (or (uiop:getenv "MNEMOSYNE_BLOB_IMPL") "filesystem")))
              (ctor (gethash name *stores*)))
