@@ -1286,3 +1286,49 @@ certificate's IP address entry holds."
                                             :connect-address "127.0.0.1" :read-timeout 5)
                          '())
       (is (equal '("::1") seen) "the verifier was asked about ~S" seen))))
+
+;;; --- what aion/retry reads from an HTTP-ERROR (#79) ------------------------------
+
+(defun %refusal (status &optional retry-after)
+  "The HTTP-ERROR ENSURE-2XX signals for a response with STATUS and, when given, a Retry-After
+header RETRY-AFTER."
+  (let ((headers (make-hash-table :test #'equal)))
+    (when retry-after (setf (gethash "retry-after" headers) retry-after))
+    (handler-case (progn (http:send-request (http:make-request :url "u") (list (http:ensure-2xx))
+                                            :perform (%ok :status status :headers headers))
+                         nil)
+      (http:http-error (e) e))))
+
+(test ensure-2xx-reads-retry-after
+  (is (eql 30 (http:http-error-retry-after (%refusal 429 "30"))))
+  (is (eql 30 (aion/retry:retry-after (%refusal 429 "30"))) "and AION/RETRY:RETRY-AFTER reads it")
+  (is (null (http:http-error-retry-after (%refusal 429))) "no header is NIL")
+  (is (null (http:http-error-retry-after (%refusal 503 "later"))) "nor is one it cannot read"))
+
+(test transience-of-an-http-error-follows-its-status
+  (dolist (status '(408 425 429 503 529))
+    (is (eq :transient (aion/retry:transience (%refusal status))) "~D" status))
+  (dolist (status '(500 502 504))
+    (is (eq :unknown (aion/retry:transience (%refusal status))) "~D" status))
+  (dolist (status '(400 401 403 404 409 422))
+    (is (null (aion/retry:transience (%refusal status))) "~D" status)))
+
+(test transience-of-a-transport-failure-follows-how-far-it-got
+  (is (eq :transient (aion/retry:transience (make-condition 'http:http-error :phase :connect))))
+  (is (eq :unknown (aion/retry:transience (make-condition 'http:http-error :phase :response))))
+  (is (null (aion/retry:transience (make-condition 'http:http-error :detail "a refused header")))
+      "a failure this client raised before sending is not transient"))
+
+(test a-refused-connection-is-a-connect-phase-failure
+  ;; A port nothing listens on: bound, then closed, so nothing can answer.
+  (let ((port (let ((s (usocket:socket-listen "127.0.0.1" 0)))
+                (prog1 (usocket:get-local-port s) (usocket:socket-close s)))))
+    (let ((e (handler-case (progn (http:send-request
+                                   (http:make-request :url (format nil "http://127.0.0.1:~D/" port)
+                                                      :connect-timeout 2 :read-timeout 2)
+                                   (list (http:ensure-2xx)))
+                                  nil)
+               (http:http-error (e) e))))
+      (is (typep e 'http:http-error))
+      (is (eq :connect (and e (http:http-error-phase e))))
+      (is (aion/retry:transient-p e) "so the default policy retries it"))))

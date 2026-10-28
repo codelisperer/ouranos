@@ -379,6 +379,21 @@ from seeing a bundle without its libuv fail."
            (is (= 100 count)))
       (uv:close-loop l))))
 
+(test a-callback-on-the-loop-knows-it-must-not-block
+  ;; aion/retry refuses to wait on a thread where this is bound (#79).
+  (let ((l (uv:make-loop)))
+    (unwind-protect
+         (let ((seen :never-ran)
+               (done (sb-thread:make-semaphore)))
+           (uv:start-loop-thread l)
+           (uv:submit l (lambda ()
+                          (setf seen aion/dynamic:*blocking-forbidden*)
+                          (sb-thread:signal-semaphore done)))
+           (is-true (sb-thread:wait-on-semaphore done :timeout 10))
+           (is (equal "an aion/uv loop" seen))
+           (is (null aion/dynamic:*blocking-forbidden*) "control: this thread is not a loop"))
+      (uv:close-loop l))))
+
 ;;; --- watching ----------------------------------------------------------------------
 
 (test watcher-observes-a-change

@@ -888,6 +888,27 @@ its tag.
 
 ### Added
 
+- **aion/retry: a retry policy as data, and `with-retry`, which retries through restarts**
+  (#79). `make-retry-policy` takes `:max-attempts`, `:base-delay`, `:multiplier`, `:max-delay`,
+  `:jitter` (`:full`, `:equal` or `:none`), `:deadline` and `:retryable`, and `retry-delay`
+  computes the schedule as a pure function. `with-retry` and `call-with-retry` run each attempt
+  inside a `retry` restart, signal `retry-scheduled` before each wait (a handler can take
+  `give-up` or `retry-now`), and let the original condition through unchanged when the policy
+  allows no more attempts. A server's Retry-After is a floor on the wait, and one longer than
+  `:max-delay` stops the retrying. Which conditions are retried by default is the `transience`
+  protocol: `transient-p` covers failures after which the request was not acted on, and
+  `transient-or-unknown-p` adds those after which it may have been, for idempotent calls.
+  `with-retry` signals `retry-would-block` on an aion/uv loop thread, which binds the new
+  `aion/dynamic:*blocking-forbidden*`. Nothing in the tree retries yet; praxeon and hermes adopt
+  it, opt-in, in a later change.
+- **aion/http-client: `http-error` carries `http-error-retry-after` and `http-error-phase`**
+  (#79). `ensure-2xx` reads the response's Retry-After header, in seconds or as an HTTP date,
+  into `http-error-retry-after`. A transport failure has `http-error-phase` `:connect` when no
+  connection was made, so the request was not sent, and `:response` otherwise. aion/http-client
+  now depends on `aion/retry` and defines the `transience` and `retry-after` methods for
+  `http-error`: 408, 425, 429, 503, 529 and `:connect` are `:transient`; 500, 502, 504 and
+  `:response` are `:unknown`.
+
 - **praxeon/actor: every deliberation step records how many of the prompt's estimated tokens came
   from each source** (#317, step D). `praxeon/actor:request-messages` returns a third value, and
   `praxeon/actor:prompt-breakdown` computes it: a plist of estimated tokens under `:system`,
