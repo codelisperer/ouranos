@@ -356,6 +356,9 @@
    #:thread-memory #:attach-thread-memory #:agent-thread-memory #:thread-memory-observer
    #:thread-memory-replace-at #:*read-observed-messages-means* #:thread-observations-text
    #:agent-taint-scope
+   ;; the recorded taint of a conversation, for an app that stores text transcripts (#948)
+   #:agent-conversation-taint #:conversation-taint-unrecorded
+   #:conversation-taint-unrecorded-agent
    ;; The accessors of what AGENT-MEANS-FOR returns. NAME and DESCRIPTION were missing, so an
    ;; app could enumerate the means it may use and not read them -- which is the
    ;; knowable-blast-radius property of ADR-0002 being exported in a form nobody can consume.
