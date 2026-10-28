@@ -34,9 +34,14 @@
    #:variant-change-type
    #:+vt-empty+ #:+vt-null+ #:+vt-i2+ #:+vt-i4+ #:+vt-r4+ #:+vt-r8+ #:+vt-cy+
    #:+vt-date+ #:+vt-bstr+ #:+vt-dispatch+ #:+vt-error+ #:+vt-bool+ #:+vt-variant+
-   #:+vt-unknown+ #:+vt-i1+ #:+vt-ui1+ #:+vt-ui2+ #:+vt-ui4+ #:+vt-i8+ #:+vt-ui8+
+   #:+vt-unknown+ #:+vt-array+ #:+vt-i1+ #:+vt-ui1+ #:+vt-ui2+ #:+vt-ui4+ #:+vt-i8+ #:+vt-ui8+
    #:+vt-int+ #:+vt-uint+ #:+vt-decimal+ #:+vt-byref+
    #:decimal
+   ;; SAFEARRAY (#964)
+   #:safearraybound #:safe-array-get-dim #:safe-array-get-vartype #:safe-array-get-lbound
+   #:safe-array-get-ubound #:safe-array-get-elemsize #:safe-array-access-data
+   #:safe-array-unaccess-data #:safe-array-create-vector #:safe-array-create
+   #:safe-array-destroy
    ;; strings
    #:sys-alloc-string #:sys-free-string #:sys-string-len
    ;; call plumbing
@@ -60,6 +65,7 @@
 (cl:defpackage #:aion/windows/com
   (:use #:common-lisp)
   (:local-nicknames (#:ffi #:aion/windows/com/ffi)
+                    (#:log #:aion/log)
                     (#:reg #:aion/windows/registry)
                     (#:w #:aion/windows)
                     (#:wffi #:aion/windows/ffi))

@@ -251,3 +251,146 @@ time, and the parts accessor must name it."
 (test a-decimal-zero-is-zero
   (with-decimal-variant (v 0 0 0 0)
     (is (eql 0 (com:variant-to-lisp v)))))
+
+;;; --- SAFEARRAY (#964) ---------------------------------------------------------------------
+;;;
+;;; A long-binary column read through ADO or DAO, GetChunk, and any Automation byte[] arrive as
+;;; VT_ARRAY|VT_UI1 (8209), which signalled "no Lisp mapping for VARIANT type 8209". These build
+;;; the arrays with oleaut32's own SafeArrayCreateVector, hand them to a VARIANT that owns them,
+;;; read them, and then VariantClear the VARIANT: S_OK there shows the array was left unlocked,
+;;; since VariantClear refuses a locked array with DISP_E_ARRAYISLOCKED.
+
+(defun %fill-array (psa type values)
+  "Write VALUES, as foreign TYPE, into the one-dimensional SAFEARRAY PSA."
+  (cffi:with-foreign-object (pdata :pointer)
+    (assert (zerop (ffi:safe-array-access-data psa pdata)))
+    (let ((data (cffi:mem-ref pdata :pointer)))
+      (loop for v in values for i from 0
+            do (setf (cffi:mem-aref data type i) v)))
+    (assert (zerop (ffi:safe-array-unaccess-data psa)))))
+
+(defmacro with-array-variant ((var element-vt psa) &body body)
+  "VAR, a VARIANT of type VT_ARRAY|ELEMENT-VT owning the SAFEARRAY PSA."
+  `(with-typed-variant (,var (logior ffi:+vt-array+ ,element-vt))
+     (setf (cffi:mem-ref (payload ,var) :pointer) ,psa)
+     ,@body))
+
+(test a-byte-array-becomes-an-octet-vector-and-is-left-unlocked
+  "VT_ARRAY|VT_UI1, the type of a long-binary value, read as an (UNSIGNED-BYTE 8) vector with
+every byte, 0 and 255 included. VariantClear then answers S_OK, so the read unlocked the array."
+  (let ((psa (ffi:safe-array-create-vector ffi:+vt-ui1+ 0 5)))
+    (%fill-array psa :uint8 '(1 2 3 255 0))
+    (with-array-variant (v ffi:+vt-ui1+ psa)
+      (is (= 8209 (logior ffi:+vt-array+ ffi:+vt-ui1+)))
+      (let ((octets (com:variant-to-lisp v)))
+        (is (typep octets '(vector (unsigned-byte 8))) "~S" (type-of octets))
+        (is (equalp #(1 2 3 255 0) octets) "~S" octets))
+      (is (zerop (ffi:variant-clear v)) "VariantClear refused the array: it was left locked"))))
+
+(test an-empty-byte-array-is-an-empty-octet-vector
+  (let ((psa (ffi:safe-array-create-vector ffi:+vt-ui1+ 0 0)))
+    (with-array-variant (v ffi:+vt-ui1+ psa)
+      (let ((octets (com:variant-to-lisp v)))
+        (is (typep octets '(vector (unsigned-byte 8))))
+        (is (zerop (length octets)))))))
+
+(test an-array-whose-lower-bound-is-not-zero-is-read-whole
+  "A SAFEARRAY may count from any lower bound; VBA's default is 1 under Option Base 1."
+  (let ((psa (ffi:safe-array-create-vector ffi:+vt-i4+ 1 3)))
+    (%fill-array psa :int32 '(10 -20 30))
+    (with-array-variant (v ffi:+vt-i4+ psa)
+      (is (equalp #(10 -20 30) (com:variant-to-lisp v))))))
+
+(test arrays-of-numbers-and-strings-become-simple-vectors
+  (let ((psa (ffi:safe-array-create-vector ffi:+vt-r8+ 0 2)))
+    (%fill-array psa :double '(1.5d0 -2.25d0))
+    (with-array-variant (v ffi:+vt-r8+ psa)
+      (is (equalp #(1.5d0 -2.25d0) (com:variant-to-lisp v)))))
+  (let ((psa (ffi:safe-array-create-vector ffi:+vt-bstr+ 0 2)))
+    ;; The array owns the BSTRs it holds, and SafeArrayDestroy, through VariantClear, frees them.
+    (%fill-array psa :pointer (list (cffi:with-foreign-string (s "alpha" :encoding :utf-16le)
+                                      (ffi:sys-alloc-string s))
+                                    (cffi:with-foreign-string (s (format nil "~Ceta" (code-char #x3B2))
+                                                                 :encoding :utf-16le)
+                                      (ffi:sys-alloc-string s))))
+    (with-array-variant (v ffi:+vt-bstr+ psa)
+      (is (equalp (vector "alpha" (format nil "~Ceta" (code-char #x3B2)))
+                  (com:variant-to-lisp v))))))
+
+(test an-array-that-cannot-be-mapped-is-refused-with-the-reason
+  "#964: a two-dimensional array and an array of an element type with no mapping each signal
+COM-ERROR naming why, and VariantClear still answers S_OK afterwards."
+  (cffi:with-foreign-object (bounds '(:struct ffi:safearraybound) 2)
+    (dotimes (i 2)
+      (let ((b (cffi:mem-aptr bounds '(:struct ffi:safearraybound) i)))
+        (setf (cffi:foreign-slot-value b '(:struct ffi:safearraybound) 'ffi::c-elements) 2
+              (cffi:foreign-slot-value b '(:struct ffi:safearraybound) 'ffi::l-lbound) 0)))
+    (let ((psa (ffi:safe-array-create ffi:+vt-ui1+ 2 bounds)))
+      (with-array-variant (v ffi:+vt-ui1+ psa)
+        (let ((e (handler-case (progn (com:variant-to-lisp v) nil) (com:com-error (e) e))))
+          (is-true e)
+          (is (search "2 dimensions" (princ-to-string e)) "~A" e))
+        (is (zerop (ffi:variant-clear v))))))
+  (let ((psa (ffi:safe-array-create-vector ffi:+vt-date+ 0 1)))
+    (with-array-variant (v ffi:+vt-date+ psa)
+      (let ((e (handler-case (progn (com:variant-to-lisp v) nil) (com:com-error (e) e))))
+        (is-true e)
+        (is (search "SAFEARRAY of VARIANT type 7" (princ-to-string e)) "~A" e)))))
+
+(test an-element-that-fails-to-convert-still-leaves-the-array-unlocked
+  "A VT_VARIANT array whose one element is a VT_ARRAY|VT_BYREF value, which is refused, signals
+while the array is locked. The unlock runs anyway, so VariantClear answers S_OK. (The element's
+pointer is NULL, and a BYREF value is not freed by VariantClear.)"
+  (let ((psa (ffi:safe-array-create-vector ffi:+vt-variant+ 0 1)))
+    (cffi:with-foreign-object (pdata :pointer)
+      (assert (zerop (ffi:safe-array-access-data psa pdata)))
+      (let ((element (cffi:mem-ref pdata :pointer)))
+        (setf (cffi:foreign-slot-value element '(:struct ffi:variant) 'ffi::vt)
+              (logior ffi:+vt-array+ ffi:+vt-byref+ ffi:+vt-ui1+)))
+      (assert (zerop (ffi:safe-array-unaccess-data psa))))
+    (with-array-variant (v ffi:+vt-variant+ psa)
+      (signals com:com-error (com:variant-to-lisp v))
+      (is (zerop (ffi:variant-clear v)) "the array was left locked after the error"))))
+
+(test adodb-stream-read-returns-the-bytes-as-an-octet-vector
+  "A real server: ADODB.Stream, which ships with Windows, writes text in us-ascii, switches to
+binary and Reads it back. Read returns VT_ARRAY|VT_UI1."
+  (if (not (com:class-available-p "ADODB.Stream"))
+      (skip "ADODB.Stream is not available in this process")
+      (com:with-com-object (s (com:create-object "ADODB.Stream"))
+        (com:set-property s "Type" 2)                 ; adTypeText
+        (com:set-property s "Charset" "us-ascii")
+        (com:invoke-method s "Open")
+        (unwind-protect
+             (progn
+               (com:invoke-method s "WriteText" "hello, 964")
+               (com:set-property s "Position" 0)
+               (com:set-property s "Type" 1)          ; adTypeBinary
+               (let ((octets (com:invoke-method s "Read")))
+                 (is (typep octets '(vector (unsigned-byte 8))) "~S" (type-of octets))
+                 (is (equalp (map 'vector #'char-code "hello, 964") octets) "~S" octets)))
+          (com:invoke-method s "Close")))))
+
+(test a-byref-array-is-refused-with-its-own-reason
+  "#966's review: VT_ARRAY|VT_BYREF refers to an array another owns, and is refused saying so,
+not with the generic message."
+  (with-typed-variant (v (logior ffi:+vt-array+ ffi:+vt-byref+ ffi:+vt-ui1+))
+    (let ((e (handler-case (progn (com:variant-to-lisp v) nil) (com:com-error (e) e))))
+      (is-true e)
+      (is (search "VT_ARRAY|VT_BYREF" (princ-to-string e)) "~A" e))))
+
+(test single-values-and-array-elements-are-read-alike
+  "#966's review: VT_I1 and VT_UINT, which arrays of them already read, are read as single
+values too, and a NULL BSTR is NIL whether it is a single value or an array element."
+  (with-typed-variant (v ffi:+vt-i1+)
+    (setf (cffi:mem-ref (payload v) :int8) -5)
+    (is (eql -5 (com:variant-to-lisp v))))
+  (with-typed-variant (v ffi:+vt-uint+)
+    (setf (cffi:mem-ref (payload v) :uint32) 4000000000)
+    (is (eql 4000000000 (com:variant-to-lisp v))))
+  (with-typed-variant (v ffi:+vt-bstr+)
+    (setf (cffi:mem-ref (payload v) :pointer) (cffi:null-pointer))
+    (is (null (com:variant-to-lisp v)) "a single NULL BSTR"))
+  (let ((psa (ffi:safe-array-create-vector ffi:+vt-bstr+ 0 1)))
+    (with-array-variant (v ffi:+vt-bstr+ psa)
+      (is (equalp #(nil) (com:variant-to-lisp v)) "a NULL BSTR element"))))
