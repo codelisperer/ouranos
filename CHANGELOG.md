@@ -1019,6 +1019,14 @@ its tag.
 
 ### Added
 
+- **hyperion/page-meta: `:visibility :unlisted` writes the full preview card plus `robots
+  noindex`** (#947). `page-meta`, `meta-tags` and `meta-tags-string` accept `:unlisted` beside
+  `:public`, `:noindex` and `:private`. It is for a page anyone with the link may see and
+  share but that should not appear in search results. An app that added its own robots tag
+  next to `:visibility :public` for this can pass `:unlisted` and drop that tag. `:noindex` and
+  `:private` are unchanged: they still write only the site's name and fallback image. Robots
+  noindex is a request crawlers may ignore, so a page whose content must stay private still
+  uses `:private`.
 - **praxeon/image: the generate-image means offers the model a `mask`, so it can change only part
   of an image** (#946). With `:resolve-reference` and a provider that takes a mask
   (`image-provider-accepts-mask-p`, true for OpenAI), the tool schema offers `mask`: a reference,

@@ -675,11 +675,20 @@ startup, then call `meta-tags` in the layout's head:
 - A page with no image uses the site's fallback image. An image URL presigned with an
   expiry is replaced by the fallback too, because a crawler keeps the card longer than the
   URL lasts; serve card images from a stable public URL.
-- `:visibility` is required, so a layout cannot forget to say that a page is private. A
-  public page passes `:visibility :public`. A page that needs sign-in passes
-  `:visibility :private`, and one kept out of search
-  engines passes `:noindex`. Either gets `robots noindex` and the site's name and fallback
-  image, and nothing from its own title, description, URL, image or `:site-name`.
+- `:visibility` is required, so a layout cannot forget to say that a page is private. It
+  takes one of four values:
+  - `:public`: the full card, and search engines may index the page.
+  - `:unlisted`: the same full card plus `robots noindex`. Use it for a page anyone with the
+    link may see and share, such as a post shared by link, that should not be listed in
+    search results.
+  - `:noindex`: `robots noindex`, and the card shows only the site's name and fallback
+    image.
+  - `:private`, for a page that needs sign-in: the same tags as `:noindex`.
+
+  `:noindex` and `:private` put nothing from the page's own title, description, URL, image
+  or `:site-name` in the head. `:unlisted` puts all of it there. `robots noindex` is a
+  request: a crawler may ignore it, and crawlers and link previewers still fetch an unlisted
+  page's card. A page whose content must stay private uses `:private` and requires sign-in.
 - `page-meta` returns the tags as a list of `(kind name value)` for a test or a layout that
   writes its own markup.
 
