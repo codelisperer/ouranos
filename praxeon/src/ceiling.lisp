@@ -97,21 +97,38 @@ Holds a PUBLIC key only: this component can check a grant and cannot issue one."
 (defun %now () (get-universal-time))
 
 (defun %parse-payload (payload)
-  "PAYLOAD is the signed JSON. Returns a GRANT with no validity checking of its own."
-  (let ((o (jzon:parse payload)))
-    (flet ((s (k) (or (gethash k o) ""))
+  "PAYLOAD is the signed JSON. Returns a GRANT, checking only that each claim has the right type:
+a payload that is not a JSON object, a principal, group or audience that is not a string, or
+capabilities that are not an array of strings signals GRANT-INVALID. The signer is trusted, but a
+mistake in what it signed is the caller's to hear about as a refused grant, not as an error of
+this code."
+  (let ((o (handler-case (jzon:parse payload)
+             (error () (error 'grant-invalid :reason "the payload is not JSON")))))
+    (unless (hash-table-p o)
+      (error 'grant-invalid :reason "the payload is not a JSON object"))
+    (flet ((s (k) (let ((v (gethash k o "")))
+                    (if (stringp v)
+                        v
+                        (error 'grant-invalid :reason (format nil "~A is not a string" k)))))
            (i (k) (let ((v (gethash k o))) (if (integerp v) v 0))))
-      (%make-grant :principal (s "principal") :group (s "group")
-                   :capabilities (coerce (or (gethash "capabilities" o) #()) 'list)
-                   :token-cap (i "token_cap") :call-cap (i "call_cap")
-                   :expires-at (i "expires_at") :audience (s "audience")))))
+      (let ((capabilities (gethash "capabilities" o #())))
+        (unless (and (vectorp capabilities) (not (stringp capabilities))
+                     (every #'stringp capabilities))
+          (error 'grant-invalid :reason "capabilities is not an array of strings"))
+        (%make-grant :principal (s "principal") :group (s "group")
+                     :capabilities (coerce capabilities 'list)
+                     :token-cap (i "token_cap") :call-cap (i "call_cap")
+                     :expires-at (i "expires_at") :audience (s "audience"))))))
 
 (defmethod verify-grant ((v ed25519-verifier) payload signature)
   "Signature first, then claims. Order matters: nothing in an unverified payload is worth
-reading, including its expiry."
-  (let ((bytes (sb-ext:string-to-octets payload :external-format :utf-8)))
-    (unless (ignore-errors
-             (ironclad:verify-signature (ed25519-verifier-public-key v) bytes signature))
+reading, including its expiry. The verifier's key is an `aion/signature' public key or an
+ironclad Ed25519 public key."
+  (let ((bytes (sb-ext:string-to-octets payload :external-format :utf-8))
+        (key (ed25519-verifier-public-key v)))
+    (unless (if (sig:public-key-p key)
+                (sig:verify key bytes signature)
+                (ignore-errors (ironclad:verify-signature key bytes signature)))
       (error 'grant-invalid :reason "signature does not verify")))
   (let ((g (%parse-payload payload)))
     (when (<= (grant-expires-at g) (%now))
@@ -121,6 +138,59 @@ reading, including its expiry."
         (error 'grant-invalid :reason (format nil "grant is for audience ~S, not ~S"
                                               (grant-audience g) want))))
     g))
+
+;;; --- a grant as one string (#67) ------------------------------------------
+;;;
+;;; A browser passes a grant to the agent service in an Authorization header, so the payload
+;;; and its signature travel as one string: the base64url of the payload's UTF-8 bytes, a
+;;; dot, and the base64url of the 64-byte signature, both without padding. That is the shape
+;;; of a JWT's last two parts, with no header part, because there is one algorithm.
+;;;
+;;; The application mints with `aion/signature', the Ed25519 module hyperion already loads
+;;; for its updater, so the format adds no crypto dependency. An application that already
+;;; issues its own tokens decodes them itself and calls VERIFY-GRANT through its own
+;;; verifier, as before.
+
+(defun %base64url (octets)
+  (string-right-trim "="
+                     (substitute #\_ #\/ (substitute #\- #\+ (cl-base64:usb8-array-to-base64-string octets)))))
+
+(defun %from-base64url (text)
+  "The octets TEXT encodes, or NIL when it is not unpadded base64url."
+  (when (and (plusp (length text))
+             ;; ASCII only: ALPHANUMERICP is also true of letters and digits in other scripts.
+             (every (lambda (c) (and (< (char-code c) 128)
+                                     (or (alphanumericp c) (char= c #\-) (char= c #\_))))
+                    text)
+             (/= 1 (mod (length text) 4)))
+    (ignore-errors
+     (cl-base64:base64-string-to-usb8-array
+      (concatenate 'string
+                   (substitute #\/ #\_ (substitute #\+ #\- text))
+                   (make-string (mod (- (length text)) 4) :initial-element #\=))))))
+
+(defun encode-grant-token (payload private-key)
+  "PAYLOAD, the grant's JSON as a string, signed with PRIVATE-KEY, an `aion/signature' private
+key, as one string: base64url(payload) \".\" base64url(signature). DECODE-GRANT-TOKEN reverses
+it. For an application that mints grants in Lisp."
+  (check-type payload string)
+  (let ((bytes (sb-ext:string-to-octets payload :external-format :utf-8)))
+    (concatenate 'string (%base64url bytes) "." (%base64url (sig:sign private-key bytes)))))
+
+(defun decode-grant-token (token)
+  "The payload and signature in TOKEN, as (values PAYLOAD SIGNATURE), ready for VERIFY-GRANT.
+Signals GRANT-INVALID when TOKEN is not two base64url parts joined by one dot, or the payload
+is not UTF-8. Nothing here checks the signature: that is VERIFY-GRANT's."
+  (let* ((dot (and (stringp token) (position #\. token)))
+         (payload (and dot (%from-base64url (subseq token 0 dot))))
+         ;; A second dot is refused here too: it is not in the base64url alphabet.
+         (signature (and dot (%from-base64url (subseq token (1+ dot)))))
+         (text (and payload
+                    (ignore-errors (sb-ext:octets-to-string payload :external-format :utf-8)))))
+    (unless (and text signature)
+      (error 'grant-invalid
+             :reason "the token is not a base64url payload and signature joined by a dot"))
+    (values text signature)))
 
 ;;; --- the session ledger ---------------------------------------------------
 
