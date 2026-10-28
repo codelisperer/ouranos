@@ -52,6 +52,28 @@ its tag.
   - An app that chose `:uv` by hand (`HYPERION_SERVER`, else `:uv` when
     `aion/uv:library-path` loads, else Hunchentoot) can call `default-server` instead.
 
+- **praxeon/claude-code: the hook replaces a large search output with lines copied from it,
+  not with a list of facts a model wrote** (#465). #454's check refused nearly every list the
+  second model wrote, because the model rewrote line numbers and invented paths. Now:
+  - for `rg` and `grep` output that names a file on every line, the matches are grouped by file
+    with a count per file and the first five lines of each, and no model is called;
+  - otherwise the second model answers only with ranges of line numbers (`select_lines`, at most
+    40, no other field allowed), and the hook copies those lines in the output's order, cut to
+    `PRAXEON_CC_SUMMARY_BUDGET`, with `[praxeon-claude-code: N lines omitted]` for each gap;
+  - every line the hook writes itself starts with `[praxeon-claude-code: `, and the header says
+    `lines selected by ...` instead of `a summary of ... written by ...`;
+  - the log line gains `method` (`grouped` or `selected`); the refusal reasons are now `empty`,
+    `over-budget` and `too-little-smaller`, and `unsupported` is gone.
+
+  Removed from `praxeon/claude-code/hook`: `check-summary`, `unsupported-tokens`,
+  `validate-facts`, `facts-spec`, and the generic `summarize`, which is now `select-lines` and
+  returns `(from . to)` pairs. `decide` takes `:group nil` to skip the grouping. The rules for
+  what the hook never replaces are unchanged. This raises how often a replacement is accepted;
+  it does not change which outputs are eligible, and on the maintainer's sessions #454 found
+  none of 38 large outputs eligible. `praxeon/scripts/claude-code-trials.lisp` measures it, and
+  calls no model unless `PRAXEON_CC_TRIALS=run` is set. Rebuild `bin/praxeon-claude-code` to get
+  it.
+
 - **praxeon/retrieval and praxeon/memory-db on SQLite: similarity search works at real corpus
   sizes, and the stored embeddings change form** (#425). A SQLite store kept each embedding as
   text and parsed every one on every search, so at width 1024 `retrieve-similar` took about a
