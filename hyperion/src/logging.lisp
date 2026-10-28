@@ -120,6 +120,53 @@ a streaming response owns its own headers."
              (cddr response))
       response))
 
+;;; --- the query's parameter names, never its values (#1007) ----------------------------
+
+(defparameter +max-query-keys+ 20
+  "The most parameter names the request start line records.")
+
+(defparameter +max-query-key-length+ 40
+  "The most characters of one parameter name the request start line records.")
+
+(defun %decode-name (text)
+  "TEXT, a query parameter name, with + read as a space and %XX escapes decoded as UTF-8, or NIL
+when an escape is malformed or the octets are not UTF-8."
+  (let ((octets (make-array (length text) :element-type '(unsigned-byte 8) :fill-pointer 0))
+        (i 0) (n (length text)))
+    (loop while (< i n)
+          do (let ((c (char text i)))
+               (cond ((char= c #\%)
+                      (let ((hi (and (< (+ i 2) n) (digit-char-p (char text (+ i 1)) 16)))
+                            (lo (and (< (+ i 2) n) (digit-char-p (char text (+ i 2)) 16))))
+                        (unless (and hi lo) (return-from %decode-name nil))
+                        (vector-push (+ (* 16 hi) lo) octets)
+                        (incf i 3)))
+                     ((> (char-code c) 127) (return-from %decode-name nil))
+                     (t (vector-push (if (char= c #\+) 32 (char-code c)) octets)
+                        (incf i)))))
+    (handler-case (sb-ext:octets-to-string (coerce octets '(simple-array (unsigned-byte 8) (*)))
+                                           :external-format '(:utf-8 :replacement nil))
+      (error () nil))))
+
+(defun %query-keys (query)
+  "The parameter names of QUERY, a raw query string, for the request start line: in the order
+they first appear, each once, at most +MAX-QUERY-KEYS+ of them, each cut to
++MAX-QUERY-KEY-LENGTH+ characters. Never a value: a query string is a payload, and can carry
+tokens and personal data (#1007). NIL for no query; :UNPARSED, with no text from it, when a name
+has a malformed escape or is not UTF-8."
+  (when (and (stringp query) (plusp (length query)))
+    (let ((names '()))
+      (dolist (part (uiop:split-string query :separator "&"))
+        (let* ((raw (subseq part 0 (or (position #\= part) (length part))))
+               (name (%decode-name raw)))
+          (cond ((null name) (return-from %query-keys :unparsed))
+                ((zerop (length name)))
+                (t (let ((cut (subseq name 0 (min (length name) +max-query-key-length+))))
+                     (unless (member cut names :test #'string=)
+                       (push cut names)
+                       (when (>= (length names) +max-query-keys+) (return))))))))
+      (nreverse names))))
+
 (defun wrap (app)
   "Clack middleware: give each request an id, bind it into the logging context so every
 framework's events correlate, and log the request's arrival, outcome, and latency.
@@ -139,7 +186,8 @@ client sees."
           ;; says everything, and doubling the volume is the complaint.
           (unless quiet
             (log:debug "request start" :method method :path path
-                                       :query (getf env :query-string)
+                                       ;; The names only, never the values (#1007).
+                                       :query-keys (%query-keys (getf env :query-string))
                                        ;; The client, behind a trusted proxy too (#381).
                                        :remote (proxy:client-address env)))
           (handler-bind

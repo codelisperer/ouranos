@@ -160,3 +160,38 @@ the suite."
                                 (funcall app (%log-env "/api/reload-epoch"))
                                 (funcall app (%log-env "/api/dev-error"))))))
       (is (string= "" (string-trim '(#\Space #\Newline) out))))))
+
+;;; --- the request start line logs the query's names, never its values (#1007) ---------
+
+(defun %log-start-line (query)
+  "What WRAP logs at DEBUG for a GET of /x with QUERY as its query string."
+  (with-clean-quiet-paths
+    (%log-capture :debug (lambda ()
+                           (funcall (hyperion/logging:wrap (%log-ok-app))
+                                    (list* :query-string query (%log-env "/x")))))))
+
+(test the-start-line-logs-the-query-names-and-not-the-values
+  (let ((out (%log-start-line "secret=abc&page=2")))
+    (is (search "request start" out) "~A" out)
+    (is (search "secret" out) "the name: ~A" out)
+    (is (search "page" out) "~A" out)
+    (is (null (search "abc" out)) "not the value: ~A" out)
+    (is (null (search "query=" out)) "and no raw query field: ~A" out)))
+
+(test query-keys-are-in-order-once-each-and-capped
+  (is (equal '("page" "q") (hyperion/logging::%query-keys "page=1&q=x&page=2")))
+  (is (equal '("flag" "a b" "é") (hyperion/logging::%query-keys "flag&a+b=1&%C3%A9=2&=x&&")))
+  (is (null (hyperion/logging::%query-keys "")))
+  (is (null (hyperion/logging::%query-keys nil)))
+  (let ((many (format nil "~{k~D=v~^&~}" (loop for i below 50 collect i))))
+    (is (= 20 (length (hyperion/logging::%query-keys many))) "at most twenty names"))
+  (let ((long (hyperion/logging::%query-keys (format nil "~A=1" (make-string 500 :initial-element #\n)))))
+    (is (= 40 (length (first long))) "each cut to forty characters")))
+
+(test a-query-that-does-not-parse-is-logged-as-unparsed-with-no-text-from-it
+  (dolist (q '("ab%zz=SECRETVALUE" "%E2%82=SECRETVALUE" "a%2=SECRETVALUE"))
+    (is (eq :unparsed (hyperion/logging::%query-keys q)) "~S" q))
+  (let ((out (%log-start-line "x%zz=SECRETVALUE")))
+    (is (search "unparsed" out) "~A" out)
+    (is (null (search "SECRETVALUE" out)) "~A" out)
+    (is (null (search "x%zz" out)) "not even the name: ~A" out)))

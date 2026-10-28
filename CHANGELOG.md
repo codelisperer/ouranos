@@ -14,6 +14,17 @@ its tag.
 
 ### An app may have to act
 
+- **`hyperion/logging:wrap`'s "request start" line logs the query's parameter names, not the
+  raw query string** (#1007). The line is written at DEBUG, and `wrap` runs outside every
+  middleware an app adds, so with DEBUG on, every query string, with any token or personal data
+  in it, went into the log, and an app could not stop it.
+  - The `query` field is gone. The line has `query-keys` instead: the parameter names in the order
+    they first appear, each once, at most 20, each cut to 40 characters, such as `(page q)`.
+  - A query whose names have a malformed `%` escape or are not UTF-8 is logged as
+    `query-keys=unparsed`, with no text from it.
+  - Log tooling that searched for `query` should search for `query-keys`.
+  - No setting brings the raw query back.
+
 - **MCP resources and retrieval passages are untrusted by default, so in a prompt they refuse
   `:requires-user-intent` means for the turn** (#907, after #906). `praxeon/mcp:add-resource` and
   `praxeon/retrieval:passage->ctx-item` put outside content into an agent's context with nothing
