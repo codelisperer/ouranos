@@ -14,7 +14,8 @@
 
 (defpackage #:ouranos-missing-natives
   (:use #:cl)
-  (:export #:decide #:allow-missing-p #:+allow-option+ #:missing-summary))
+  (:export #:decide #:allow-missing-p #:+allow-option+ #:missing-summary #:refusal-message
+           #:allowed-message))
 
 (in-package #:ouranos-missing-natives)
 
@@ -36,6 +37,17 @@ from --allow-missing-natives, is true."
         (present :carry)
         (allow :allowed-missing)
         (t :refuse)))
+
+(defun refusal-message (name path build-command)
+  "What the build prints when it stops because NAME, expected at PATH (as text), is missing: the
+file, where it was looked for, the command that builds it, and the option that allows it."
+  (format nil "build-desktop-app: ~A is missing at ~A.~%~%The bundle needs it, and a bundle built without it fails on every user's machine.~%Build it first:~%  ~A~%~%To build without it on purpose, pass ~A.~%"
+          name path build-command +allow-option+))
+
+(defun allowed-message (name path)
+  "What the build prints when --allow-missing-natives lets it go on without NAME, expected at PATH."
+  (format nil "build-desktop-app: ~A is missing at ~A; going on without it, as ~A asks. The bundle will not work where it needs ~A.~%"
+          name path +allow-option+ name))
 
 (defun missing-summary (missing)
   "The build's summary line about MISSING, the names of the native files it went on without, in

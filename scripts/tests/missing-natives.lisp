@@ -42,6 +42,23 @@ not refused, with or without the option. That is the case of the sqlite and uv p
             "a misspelling is not the option")
   (is-false (ouranos-missing-natives:allow-missing-p '("--name" "--allow-missing-natives-x"))))
 
+(test the-refusal-names-the-file-where-it-was-looked-for-and-the-command-that-builds-it
+  "#963's review: the message the build stops with names the missing file, the path it looked
+at, the command that builds it, and the option that lets a build go on without it. The message
+for a build that goes on names the file and the option."
+  (let ((refusal (ouranos-missing-natives:refusal-message
+                  "hyperion-view" "C:/tree/hyperion/hyperion-view/hyperion-view.exe"
+                  "powershell -File hyperion/hyperion-view/build.ps1")))
+    (is (search "hyperion-view is missing at C:/tree/hyperion/hyperion-view/hyperion-view.exe." refusal)
+        "~A" refusal)
+    (is (search "Build it first:" refusal) "~A" refusal)
+    (is (search "  powershell -File hyperion/hyperion-view/build.ps1" refusal) "~A" refusal)
+    (is (search "pass --allow-missing-natives." refusal) "~A" refusal))
+  (let ((allowed (ouranos-missing-natives:allowed-message "libzstd.1.dylib" "/opt/lib/libzstd.1.dylib")))
+    (is (search "libzstd.1.dylib is missing at /opt/lib/libzstd.1.dylib; going on without it" allowed)
+        "~A" allowed)
+    (is (search "as --allow-missing-natives asks" allowed) "~A" allowed)))
+
 (test the-summary-line-counts-and-names-what-is-missing
   (is (search "no native file" (ouranos-missing-natives:missing-summary '())))
   (let ((one (ouranos-missing-natives:missing-summary '("hyperion-view"))))
