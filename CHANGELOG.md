@@ -970,6 +970,8 @@ its tag.
     `/api/events?ticket=…`. A ticket can be used once, within 30 seconds
     (`make-session-table :ticket-seconds`), while its session is open, through
     `praxeon/web-session:issue-ticket` and `redeem-ticket`. The stream ends when its session does.
+    An open stream does not keep its session from going idle: it checks with
+    `praxeon/web-session:session-open-p`, which does not count as a use.
   - `praxeon/web` now declares `parenscript`, which hyperion already loads.
 
 - **praxeon/web: a service that takes signed grants and gives each browser a session** (part of
