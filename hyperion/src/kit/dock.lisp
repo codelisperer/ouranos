@@ -29,7 +29,8 @@
 (cl:defpackage #:hyperion/kit/dock
   (:use #:cl)
   (:local-nicknames (#:spin #:spinneret)
-                    (#:out #:hyperion/output))
+                    (#:out #:hyperion/output)
+                    (#:page #:hyperion/kit/page))  ; SAFE-HREF-P, for the panel's content-href
   (:import-from #:parenscript #:chain #:@ #:new)
   (:documentation
    "DOCK-PANEL, a region in the host's own container whose contents htmx loads from a route,
@@ -54,9 +55,15 @@ CONTENT-HREF. Put it inside the element of the page it should fill. LOAD is :AT-
 page loads, which works in a tab that is not shown, or :ON-OPEN, the first time the panel gets
 the event hy-dock-open, which DOCK-LAUNCHER's button sends when it opens the panel. HIDDEN writes
 it hidden, for a panel DOCK-LAUNCHER opens. Until the contents arrive it shows LOADING-TEXT,
-announced politely."
+announced politely.
+
+Signals when CONTENT-HREF has a scheme other than http or https (PAGE:SAFE-HREF-P). The panel
+is loaded by the host page's htmx, whose settings this does not control, and a data: or
+javascript: URL there could be fetched and its script run."
   (check-type content-href string)
   (check-type label string)
+  (unless (page:safe-href-p content-href)
+    (error "A dock panel's CONTENT-HREF must be http, https or relative, not ~S." content-href))
   (spin:with-html
     (:section :id id :class "hy-dock" :aria-label label :hidden hidden
               :hx-get content-href

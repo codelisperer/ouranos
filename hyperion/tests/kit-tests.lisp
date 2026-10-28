@@ -740,7 +740,12 @@ panel on a click that did not come from a control inside it."
 (test the-dock-panel-refuses-what-it-cannot-write
   (signals error (%dom (lambda () (dock:dock-panel nil "Help"))))
   (signals error (%dom (lambda () (dock:dock-panel "/help" nil))))
-  (signals error (%dom (lambda () (dock:dock-panel "/help" "Help" :load :later)))))
+  (signals error (%dom (lambda () (dock:dock-panel "/help" "Help" :load :later))))
+  (signals error (%dom (lambda () (dock:dock-panel "javascript:alert(1)" "Help"))))
+  (signals error (%dom (lambda () (dock:dock-panel "JavaScript:alert(1)" "Help"))))
+  (signals error (%dom (lambda () (dock:dock-panel "data:text/html,<script>alert(1)</script>"
+                                                   "Help"))))
+  (finishes (%dom (lambda () (dock:dock-panel "https://chat.example.com/panel" "Help")))))
 
 (test the-dock-launcher-controls-its-panel-and-says-whether-it-is-open
   (let ((closed (%one (%dom (lambda () (dock:dock-launcher "Chat" :dock-id "chat"))) "button"))
@@ -753,7 +758,9 @@ panel on a click that did not come from a control inside it."
     (is (equal "hy-dock" (%attr open "aria-controls")))
     (is (equal "true" (%attr open "aria-expanded")))))
 
-(test the-dock-script-leaves-a-host-page-s-htmx-and-loaders-alone
+(test the-compiled-dock-script-has-no-text-that-replaces-htmx-or-defines-a-module
+  "A check of the script's text only. That a host page keeps its window.htmx is shown by
+the-dock-panel-in-a-real-browser."
   (let ((js (remove #\Space (dock:dock-js))))
     (is (null (search "window.htmx=" js)))
     (is (null (search "define" js)))

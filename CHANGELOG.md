@@ -922,7 +922,9 @@ its tag.
     step. `dock-js`, included once per page, makes it work and sends `hy-dock-open` to a panel it
     opens. A page's own tab or drawer code can send the same event.
   - Nothing in it loads a script or changes `window.htmx`; the page's own htmx loads the
-    contents. `*dock-id*` is the default id, `hy-dock`. The styles are in `kit.css`.
+    contents. `dock-panel` signals when its content URL is not http, https or relative
+    (`hyperion/kit/page:safe-href-p`), because the host's htmx would fetch a `data:` or
+    `javascript:` URL. `*dock-id*` is the default id, `hy-dock`. The styles are in `kit.css`.
 
 - **hyperion/appearance: text-size roles, a UI font and a prose font, and a focus-ring colour**
   (#981). `appearance-css` writes seven text-size tokens: `--hy-text-caps` 0.6875rem,
