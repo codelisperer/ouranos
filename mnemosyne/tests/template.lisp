@@ -21,8 +21,8 @@
 (defun %count (c sql)
   (second (first (conn:query c sql))))
 
-(defmacro %with-template ((var migrations) &body body)
-  `(let ((,var (tmpl:make-sqlite-template ,migrations)))
+(defmacro %with-template ((var migrations &rest options) &body body)
+  `(let ((,var (tmpl:make-sqlite-template ,migrations ,@options)))
      (unwind-protect (progn ,@body)
        (tmpl:close-sqlite-template ,var))))
 
@@ -116,3 +116,36 @@ section 10). A test that relies on foreign keys sets it on its copy, and SQLite 
       (is (= 1 (%count c "PRAGMA foreign_keys")))
       (signals conn:db-error (conn:exec c "INSERT INTO child (id, parent_id) VALUES (1, 99)"))
       (is (= 0 (%count c "SELECT count(*) FROM child"))))))
+
+(test a-closed-template-refuses-a-copy
+  (let ((tm (tmpl:make-sqlite-template (%template-migrations))))
+    (tmpl:close-sqlite-template tm)
+    (signals conn:db-error (tmpl:copy-sqlite-template tm))
+    (finishes (tmpl:close-sqlite-template tm))))
+
+(test setup-runs-on-the-template-connection-before-the-migrations
+  "With foreign keys on while migrating, a migration's delete cascades in the template, and so
+in every copy. Without SETUP the child row stays behind."
+  (let ((migrations
+          (list (be:make-migration "20261028_106_parent" "parent"
+                                   "CREATE TABLE parent (id integer PRIMARY KEY)"
+                                   "DROP TABLE parent")
+                (be:make-migration "20261028_107_child" "child"
+                                   (concatenate
+                                    'string
+                                    "CREATE TABLE child (id integer PRIMARY KEY, parent_id integer "
+                                    "REFERENCES parent (id) ON DELETE CASCADE)")
+                                   "DROP TABLE child")
+                (be:make-migration "20261028_108_rows" "rows"
+                                   "INSERT INTO parent (id) VALUES (1)" "")
+                (be:make-migration "20261028_109_child_row" "a child row"
+                                   "INSERT INTO child (id, parent_id) VALUES (1, 1)" "")
+                (be:make-migration "20261028_110_delete" "delete the parent"
+                                   "DELETE FROM parent WHERE id = 1" ""))))
+    (%with-template (tm migrations
+                        :setup (lambda (c) (conn:exec c "PRAGMA foreign_keys = ON")))
+      (tmpl:with-sqlite-template-copy (c tm)
+        (is (= 0 (%count c "SELECT count(*) FROM child")) "the delete cascaded")))
+    (%with-template (tm migrations)
+      (tmpl:with-sqlite-template-copy (c tm)
+        (is (= 1 (%count c "SELECT count(*) FROM child")) "control: without SETUP it did not")))))

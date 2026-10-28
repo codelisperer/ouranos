@@ -378,7 +378,14 @@ only; it is not part of what the app ships.
 - A copy is a separate database. A row one test writes is not in the template or in the next
   test's copy, and copies may be open at the same time.
 - Settings that belong to a connection rather than to the database, such as
-  `PRAGMA foreign_keys`, are not copied. Set them on the copy.
+  `PRAGMA foreign_keys`, are not copied. Set them on the copy. When the migrations themselves
+  rely on one (a delete that should cascade), pass `:setup`, a function called with the
+  template's connection before `migrate`.
+- Only the `main` database is copied. A `CREATE TEMP TABLE` belongs to the connection that
+  ran it, so it is not in a copy, just as it is gone from an app's own database once the
+  migrating connection closes. Use ordinary tables in migrations.
+- `close-sqlite-template` waits for a copy in progress; a copy asked for afterwards signals
+  `db-error`.
 - Measured on an Apple Silicon Mac with 300 migrations (150 tables and 150 indexes): about
   15 ms per test to migrate a fresh database, 13 ms once for the template, and 0.5 ms per test
   for a copy. A copy's cost grows with the size of the database, not with the number of

@@ -1069,7 +1069,7 @@ its tag.
 
 - **`mnemosyne/test-template`: a test suite can migrate one SQLite database per run and give
   each test a copy** (#1047). `make-sqlite-template` applies an app's migrations to an
-  in-memory database once; `copy-sqlite-template` and `with-sqlite-template-copy` give a test
+  in-memory database once (`:setup` configures its connection first); `copy-sqlite-template` and `with-sqlite-template-copy` give a test
   its own in-memory copy, made with SQLite's backup API, and `close-sqlite-template` closes the
   template. A copy is a separate database, so what one test writes is not seen by the next. With
   300 migrations on an Apple Silicon Mac, a copy took 0.5 ms per test against 15 ms to migrate

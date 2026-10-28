@@ -28,8 +28,10 @@
 APPLIED is the list of migration ids MIGRATE applied to it."
   connection
   (applied '() :type list)
-  ;; Copies read the template's connection, so one copy is made at a time.
-  (lock (sb-thread:make-mutex :name "sqlite template")))
+  ;; Copies read the template's connection, so one copy is made at a time, and closing waits
+  ;; for a copy in progress. CLOSED is read and set only while LOCK is held.
+  (lock (sb-thread:make-mutex :name "sqlite template"))
+  (closed nil))
 
 (defmacro %closing-unless-returned ((var connection) &body body)
   "Bind VAR to CONNECTION and run BODY. When BODY does not return normally, disconnect VAR."
@@ -38,11 +40,17 @@ APPLIED is the list of migration ids MIGRATE applied to it."
        (unwind-protect (multiple-value-prog1 (progn ,@body) (setf ,done t))
          (unless ,done (conn:disconnect ,var))))))
 
-(defun make-sqlite-template (migrations)
+(defun make-sqlite-template (migrations &key setup)
   "Open an in-memory SQLite database, apply MIGRATIONS (mnemosyne/backend:Migration values) to
 it with mnemosyne/migrate:migrate, and return it as a SQLITE-TEMPLATE. Do this once per test
-run, and close it with CLOSE-SQLITE-TEMPLATE when the run is over."
+run, and close it with CLOSE-SQLITE-TEMPLATE when the run is over.
+
+SETUP, when given, is called with the new connection before MIGRATE, for settings the app
+makes on its own connections and its migrations rely on, such as PRAGMA foreign_keys = ON
+so that a migration's deletes cascade. Settings of this kind belong to the connection: a copy
+does not have them, and a test that needs them sets them on its copy."
   (%closing-unless-returned (c (conn:connect (be:make-sqlite ":memory:")))
+    (when setup (funcall setup c))
     (%make-sqlite-template c (mig:migrate (be:make-sqlite ":memory:") c migrations))))
 
 (defun %sqlite-handle (connection)
@@ -81,6 +89,8 @@ to it is seen by TEMPLATE or by another copy. The caller disconnects it, or uses
 WITH-SQLITE-TEMPLATE-COPY."
   (%closing-unless-returned (c (conn:connect (be:make-sqlite ":memory:")))
     (sb-thread:with-mutex ((sqlite-template-lock template))
+      (when (sqlite-template-closed template)
+        (error 'conn:db-error :message "copying an SQLite template: the template is closed"))
       (%backup (sqlite-template-connection template) c))
     c))
 
@@ -91,6 +101,11 @@ WITH-SQLITE-TEMPLATE-COPY."
        (conn:disconnect ,var))))
 
 (defun close-sqlite-template (template)
-  "Disconnect TEMPLATE's database. Copies already made are not affected."
-  (conn:disconnect (sqlite-template-connection template))
+  "Disconnect TEMPLATE's database, after any copy in progress finishes. Copies already made are
+not affected; a later COPY-SQLITE-TEMPLATE signals mnemosyne/conn:db-error. Closing twice
+does nothing the second time."
+  (sb-thread:with-mutex ((sqlite-template-lock template))
+    (unless (sqlite-template-closed template)
+      (setf (sqlite-template-closed template) t)
+      (conn:disconnect (sqlite-template-connection template))))
   nil)
