@@ -162,6 +162,8 @@
     :hyperion/auth-db :hyperion/db-connection :hyperion/cli
     ;; The query-string list component and its mnemosyne half (#488).
     :hyperion/list :hyperion/list-db
+    ;; In-app notifications and their mnemosyne store (#792).
+    :hyperion/notifications :hyperion/notifications-db
     :aion/random
     ;; The credential wrapper (pre-publication issue 209) and its Coalton view. Two systems because
     ;; aion/secret must stay Coalton-free for cons; both belong in the gate, since a
@@ -204,6 +206,9 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
     ;; The list component (#488), registered in the commit that adds it. The -db suite
     ;; reports Postgres, and +REQUIRED-BACKEND-REPORTS+ holds it to that.
     :hyperion/list/tests :hyperion/list-db/tests
+    ;; In-app notifications (#792), registered in the commit that adds them. The -db suite
+    ;; reports Postgres, and +REQUIRED-BACKEND-REPORTS+ holds it to that.
+    :hyperion/notifications/tests :hyperion/notifications-db/tests
     ;; praxeon/web's own suite (pre-publication issue 151) -- THE GAP THIS FILE ALREADY NAMES. Two entries below,
     ;; `hyperion/update/tests' is justified as "invisible to this checker until someone
     ;; looked, which is the praxeon/web gap exactly", and the praxeon/web gap was still open
@@ -823,7 +828,8 @@ it, hades/credentials/tests on Windows, macOS and Linux.")
     (:praxeon/memory-db/tests "postgres")
     (:praxeon/results-db/tests "postgres")
     (:praxeon/retrieval/tests "postgres")
-    (:hyperion/list-db/tests "postgres"))
+    (:hyperion/list-db/tests "postgres")
+    (:hyperion/notifications-db/tests "postgres"))
   "Each suite that must print a BACKEND-CHECKS line for a backend, as (SUITE BACKEND &key HOSTS),
 on every host or only on HOSTS (values of OURANOS-PLATFORM:HOST-OS). +BACKEND-RULES+ judges a
 line that is there; a missing line passed silently, so a suite that stopped printing it, because

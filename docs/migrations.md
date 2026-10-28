@@ -170,6 +170,14 @@ statements that create them and the runs index, as a list, and `make-db-job-stor
 `missing-job-tables` at construction when they cannot be read. See
 [scheduling.md](scheduling.md).
 
+`hyperion/notifications-db` (#792) owns two tables, `hyperion_notifications` and
+`hyperion_notification_delivery`. `notifications-ddl`, `notifications-index-ddl`,
+`notifications-unread-key-ddl` and `delivery-ddl` each return one statement, and each takes
+`:table`. The unread-key index is a partial unique index, and collapsing notifications by group
+key relies on it, so it is not optional. `make-db-notification-store` signals
+`missing-notification-tables` at construction when the tables cannot be read, and its report
+names the four migrations. See [hyperion/docs/notifications.md](../hyperion/docs/notifications.md).
+
 `hyperion/auth-db:users-ddl` is the reference for this pattern. **Any aux system that owns
 a table should provide one**: the app's timeline stays the single source of truth for what
 exists in its database, and `schema_migrations` stays an honest record.
