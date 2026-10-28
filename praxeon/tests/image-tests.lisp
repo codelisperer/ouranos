@@ -1104,6 +1104,49 @@ reference image."
     (is (eq :not-run (getf r :outcome)) "~S" r)
     (is (search "\"other\" is not an image reference" (getf r :content)) "~A" (getf r :content))))
 
+(test a-mask-that-cannot-be-sent-is-refused-before-the-resolver-reads-it
+  "#946's review: for a provider that takes no mask, and for a call with no reference image, the
+mask is refused before the app's resolver is asked for it, so no image is read for a call that
+cannot be sent. Control: OpenAI with a reference asks the resolver for the mask."
+  (flet ((asked-for (provider call-args)
+           (let* ((asked '())
+                  (ag (%mask-agent call-args
+                                   (lambda (ref) (push ref asked) (%ref (%png 8 6) ref))
+                                   :provider provider)))
+             (%collecting-events (lambda () (actor:run-turn ag "x")))
+             (reverse asked))))
+    (is (equal '("img-1")
+               (asked-for (praxeon/image:make-google-images :api-key "k"
+                                                            :base-url "http://127.0.0.1:9/v1beta")
+                          (list "prompt" "x" "reference_images" (vector "img-1") "mask" "mask-1")))
+        "Google: only the reference image is resolved")
+    (is (null (asked-for nil (list "prompt" "x" "mask" "mask-1")))
+        "no reference image: nothing is resolved")
+    (is (equal '("img-1" "mask-1")
+               (asked-for nil (list "prompt" "x" "reference_images" (vector "img-1")
+                                    "mask" "mask-1")))
+        "control: OpenAI with a reference resolves the mask")))
+
+(test a-mask-naming-a-reference-image-is-resolved-once
+  "#946's review: the model names img-1 as both a reference image and the mask. The resolver is
+asked for img-1 once, and the request carries that image as both the image and the mask part."
+  (let ((png (%png 8 6))
+        (asked '()))
+    (multiple-value-bind (port server) (%serve-replies (list (%image-reply)))
+      (let ((requests nil))
+        (unwind-protect
+             (let ((ag (%mask-agent
+                        (list "prompt" "x" "reference_images" (vector "img-1") "mask" "img-1")
+                        (lambda (ref) (push ref asked) (%ref png ref))
+                        :base-url (format nil "http://127.0.0.1:~D/v1" port))))
+               (%collecting-events (lambda () (actor:run-turn ag "x"))))
+          (setf requests (aion/test-threads:join server :timeout 10)))
+        (is (equal '("img-1") asked) "~S" asked)
+        (multiple-value-bind (request-line type parts) (%edit-request requests)
+          (declare (ignore request-line type))
+          (is (equalp png (cdr (first (%part-named parts "image[]")))))
+          (is (equalp png (cdr (first (%part-named parts "mask"))))))))))
+
 (test the-file-name-sent-is-praxeons-not-the-callers
   "A name with a quote and a line break, as an app or a model might supply, never reaches the
 part's header; the provider is given image-1.png."

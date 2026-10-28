@@ -986,7 +986,9 @@ prompt, so it needs only enough to see what changed; the whole of it is in the I
 (defun %resolve-references (args resolve max)
   "The REFERENCE-IMAGEs the tool ARGS name in reference_images, through RESOLVE, each reference
 once however often it is named, so a repeated reference is neither resolved nor sent twice, and
-each image once even when two references resolve to it. Refuses the call before any request, as
+each image once even when two references resolve to it. A second value pairs each reference with
+its image, so a mask naming one of them is not resolved again. Refuses the call before any
+request, as
 a :NOT-RUN error result, when the list is not a list of strings, names more than MAX different
 references, names one RESOLVE does not know, or RESOLVE returns something other than a
 REFERENCE-IMAGE for it.
@@ -1007,13 +1009,14 @@ image's stored size before reading it."
              (let ((refs (remove-duplicates (coerce given 'list) :test #'string= :from-end t)))
                (when (> (length refs) max)
                  (refuse "reference_images must name at most ~D references." max))
-               (let ((images '()) (total 0))
-                 (dolist (ref refs (nreverse images))
+               (let ((images '()) (known '()) (total 0))
+                 (dolist (ref refs (values (nreverse images) (nreverse known)))
                    (let ((image (funcall resolve ref)))
                      (cond ((null image)
                             (refuse "~S is not an image reference you were given. Use a reference exactly as you were told it." ref))
                            ((not (reference-image-p image))
                             (refuse "the image ~S could not be read." ref)))
+                     (push (cons ref image) known)
                      ;; Two references to one stored image send it once.
                      (unless (find (reference-image-octets image) images
                                    :key #'reference-image-octets :test #'eq)
@@ -1023,14 +1026,20 @@ image's stored size before reading it."
                                  *max-reference-total-bytes*))
                        (push image images)))))))))))
 
-(defun %resolve-mask (args resolve)
+(defun %resolve-mask (args resolve provider references known)
   "The REFERENCE-IMAGE the tool ARGS name in mask, through RESOLVE, the resolver reference_images
-uses, so a mask is subject to the same rules as a reference image: the app decides which
-references a model may reach, and the image's size and type are checked when it is made. NIL when
-ARGS name no mask. Refuses the call before any request, as a :NOT-RUN error result, when mask is
-not a string, names a reference RESOLVE does not know, or RESOLVE returns something other than a
-REFERENCE-IMAGE. Whether the mask suits the first reference and the provider is checked by
-GENERATE-IMAGE, which refuses with IMAGE-INPUT-INVALID (#946)."
+uses, so the app decides which references a model may reach, as for reference images. NIL when
+ARGS name no mask. KNOWN pairs each reference already resolved for reference_images with its
+image (%RESOLVE-REFERENCES), and a mask naming one of them reuses that image instead of resolving
+it again (#946's review).
+
+Refused before RESOLVE is called, so the app reads no image for a call that cannot be sent: with
+IMAGE-INPUT-INVALID when PROVIDER takes no mask or REFERENCES is empty, and as a :NOT-RUN error
+result when mask is not a string. Refused after it, as a :NOT-RUN error result, when RESOLVE does
+not know the reference or returns something other than a REFERENCE-IMAGE. MAKE-REFERENCE-IMAGE,
+which made the image, has checked its byte length and that it is a PNG, JPEG or WebP file;
+GENERATE-IMAGE then checks that it is a PNG with an alpha channel, the same width and height as
+the first reference (#946)."
   (let ((given (gethash "mask" args)))
     (flet ((refuse (control &rest args)
              (error 'cnd:tool-error-result
@@ -1039,6 +1048,13 @@ GENERATE-IMAGE, which refuses with IMAGE-INPUT-INVALID (#946)."
       (cond ((null given) nil)
             ((not (stringp given))
              (refuse "mask must be one reference, as a string."))
+            ((not (image-provider-accepts-mask-p provider))
+             (%invalid "The ~A image provider takes no mask. Describe in the prompt which part to change, and leave the mask out."
+                       (image-provider-name provider)))
+            ((null references)
+             (%invalid "A mask marks part of a reference image to replace, and no reference image was given."))
+            ((assoc given known :test #'string=)
+             (cdr (assoc given known :test #'string=)))
             (t
              (let ((image (funcall resolve given)))
                (cond ((null image)
@@ -1131,9 +1147,14 @@ An app normally calls REGISTER-OPENAI-IMAGE, which registers nothing when there 
                                        :text "generate-image needs a prompt describing the image."))
      (let* ((size (%choice args "size" *sizes* default-size))
             (quality (%choice args "quality" qualities default-quality))
+            (known '())
             (references (and resolve-reference
-                             (%resolve-references args resolve-reference max-references)))
-            (mask (and resolve-reference (%resolve-mask args resolve-reference)))
+                             (multiple-value-bind (images pairs)
+                                 (%resolve-references args resolve-reference max-references)
+                               (setf known pairs)
+                               images)))
+            (mask (and resolve-reference
+                       (%resolve-mask args resolve-reference provider references known)))
             (results
               (handler-bind
                   ((image-request-failed
