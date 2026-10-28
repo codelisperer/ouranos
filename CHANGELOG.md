@@ -59,6 +59,29 @@ its tag.
   - A `:steps` cycle is refused with the cycle named, with or without `--strict`; it used to
     recurse until the stack ran out.
   - Without `--strict`, nothing else changes.
+- **`bootstrap.lisp` no longer overwrites a source-registry drop-in that names another
+  checkout; it stops with exit code 3 before building anything** (#955). Bootstrap writes
+  `50-ouranos.conf` under the user's `common-lisp/source-registry.conf.d/`, which every Lisp
+  process the user runs reads. It used to rewrite the file on every run, so bootstrapping a
+  second checkout (a scratch clone pinned to an older Ouranos, or a worktree) silently moved
+  every other process on the machine to that checkout. Now:
+  - When the drop-in names another checkout that still exists, bootstrap prints both paths
+    and the command for each way forward on the current OS, and exits 3. The drop-in is left
+    byte for byte as it was. A drop-in that is not a single `(:tree "...")` form is refused
+    the same way.
+  - `OURANOS_BOOTSTRAP_LOCAL=1` builds this checkout without reading or writing the drop-in.
+    Bootstrap sets `CL_SOURCE_REGISTRY` to `<checkout>//:` (`//;` on Windows) for itself and
+    the child processes it starts, and prints that value to set in each shell that should use
+    this checkout.
+  - `OURANOS_BOOTSTRAP_FORCE=1` rewrites the drop-in to name this checkout, as bootstrap used
+    to do. Each switch is on only when its value is exactly `1`.
+  - A drop-in naming a checkout that no longer exists is still rewritten, with a line saying
+    which path it replaced, so moving a clone still needs only a second bootstrap.
+
+  A script or CI job that bootstraps a second checkout on a machine that already has one
+  (for example an app's scratch build of an older Ouranos) sets `OURANOS_BOOTSTRAP_LOCAL=1`,
+  and then `CL_SOURCE_REGISTRY` for the steps after bootstrap. A machine with one checkout,
+  and a fresh CI runner, need no change. The decision is in `scripts/source-registry.lisp`.
 
 - **MCP resources and retrieval passages are untrusted by default, so in a prompt they refuse
   `:requires-user-intent` means for the turn** (#907, after #906). `praxeon/mcp:add-resource` and
