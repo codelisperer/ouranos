@@ -96,6 +96,8 @@
            #:template-files-root #:builtin-template-directory
            #:template #:template-p #:template-name #:template-target-kind
            #:template-dependencies #:template-description #:template-kind
+           #:template-options #:template-option-choices #:templates-with-option
+           #:template-variants
            #:*target-kinds* #:find-target-kind #:target-kind-names
            #:target-kind #:target-kind-p #:target-kind-name
            #:target-kind-executable-p #:target-kind-implemented-p

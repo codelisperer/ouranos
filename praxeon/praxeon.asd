@@ -150,7 +150,7 @@
   :in-order-to ((test-op (test-op "praxeon/claude-code/tests"))))
 
 (defsystem "praxeon/claude-code/tests"
-  :description "praxeon/claude-code's rules, summary check, hook and report, with no model call (#452)."
+  :description "praxeon/claude-code's rules, replacement, hook and report, with no model call (#452, #465)."
   :depends-on ("praxeon/claude-code" "praxeon" "com.inuoe.jzon" "fiveam" "aion/log"
                "aion/fs"      ; the tests' temporary directories are removed with delete-tree (#347)
                (:feature :unix (:require "sb-posix")))  ; chmod for the stand-in programs
