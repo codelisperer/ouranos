@@ -1090,6 +1090,10 @@ its tag.
     is not JSON, signals **`praxeon/conditions:provider-request-failed`**, rather than returning
     what arrived as the whole reply. A tool call cut off halfway through its arguments signals it
     too. Of the body of a non-2xx streamed request, the first 64 KiB are read and kept.
+  - An OpenAI-compatible tool call whose arguments are not JSON, such as arguments cut off when a
+    reply ends with `finish_reason: "length"`, signals `provider-request-failed`, whether the
+    reply was streamed or not. Before, the tool was called with an empty object. Arguments that
+    are empty or missing are still an empty object.
 
 - **praxeon/image: the generate-image means offers the model a `mask`, so it can change only part
   of an image** (#946). With `:resolve-reference` and a provider that takes a mask
