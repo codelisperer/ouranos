@@ -47,8 +47,7 @@ http1.lisp's limits, read on a pinned connection where this client reads the res
 (defun %ended (fmt &rest args)
   "Signal MALFORMED-RESPONSE for a connection that ended before the response did, with phase
 :RESPONSE. It ended after the connection was made and the request sent, so the server may have
-acted on the request, and AION/RETRY must not resend it as if no connection had been made. On
-Windows a read timeout on the socket also arrives here, as the end of the stream (#974)."
+acted on the request, and AION/RETRY must not resend it as if no connection had been made (#974)."
   (error 'malformed-response :detail (apply #'format nil fmt args) :phase :response))
 
 ;;; --- reading lines -------------------------------------------------------------------
