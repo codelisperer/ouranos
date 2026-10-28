@@ -973,8 +973,9 @@ its tag.
 - **praxeon/llm: an image content part, so an agent can be shown a picture** (#995).
   - **The part.** `llm:image-part` takes the image's bytes, or an https URL for a provider that
     fetches it. The media type is read from the bytes (PNG, JPEG, GIF or WebP); a `:media-type`
-    given with them must agree. The limit is `llm:*max-image-part-bytes*`, 5 MB by default. A
-    refused part signals `praxeon/conditions:image-part-invalid`, which names the limit.
+    given with them must agree. The limit is `llm:*max-image-part-bytes*`, 3932160 bytes before
+    encoding by default, so the base64 a provider is sent stays within Anthropic's 5 MB. The part
+    keeps its own copy of the bytes. A refused part signals `praxeon/conditions:image-part-invalid`, which names the limit.
   - **How it is sent.** Anthropic sends it as an image block with a base64 or url source. The
     OpenAI-compatible provider sends it as an `image_url` part, in a content array that only
     messages with an image use; messages without one are sent exactly as before.

@@ -137,9 +137,11 @@ CONTENT is a string; IS-ERROR marks a failed application."
 ;;; media type and size and nothing of the content, so no image reaches memory or a provider
 ;;; chosen for distillation.
 
-(defvar *max-image-part-bytes* (* 5 1024 1024)
-  "The largest image, in bytes, IMAGE-PART accepts. Five megabytes is Anthropic's limit for one
-image; OpenAI's is larger, and a smaller common limit is what lets a part go to either.")
+(defvar *max-image-part-bytes* 3932160
+  "The largest image, in bytes before encoding, IMAGE-PART accepts: 3932160, which is 5 MiB x 3/4.
+Anthropic's limit of 5 MB applies to the base64-encoded image, and base64 makes 4 bytes of every
+3, so a raw image at this size encodes to 5 MiB and no more. OpenAI's limit is larger, so a part
+within this one can go to either provider (#995, review of #1018).")
 
 (defvar *image-part-tokens* 1600
   "The tokens one image part is estimated at, for budgets and the prompt breakdown, before the
@@ -157,7 +159,8 @@ estimate is this constant rather than a size divided by *CHARS-PER-TOKEN*.")
                       always (or (null b) (= b (aref octets i)))))))
     (cond ((starts #x89 #x50 #x4E #x47 #x0D #x0A #x1A #x0A) "image/png")
           ((starts #xFF #xD8 #xFF) "image/jpeg")
-          ((starts #x47 #x49 #x46 #x38) "image/gif")
+          ((or (starts #x47 #x49 #x46 #x38 #x37 #x61) (starts #x47 #x49 #x46 #x38 #x39 #x61))
+           "image/gif")                 ; GIF87a or GIF89a, the two versions there are
           ((starts #x52 #x49 #x46 #x46 nil nil nil nil #x57 #x45 #x42 #x50) "image/webp")
           (t nil))))
 
@@ -170,8 +173,10 @@ estimate is this constant rather than a size divided by *CHARS-PER-TOKEN*.")
 
 SOURCE is the image's bytes, a vector of (UNSIGNED-BYTE 8), or an https URL for a provider that
 fetches images itself. Bytes must be PNG, JPEG, GIF or WebP, which is read from the bytes; a
-MEDIA-TYPE, when given, must agree with them. At most *MAX-IMAGE-PART-BYTES*. A URL must be
-https and at most 2048 characters. Anything else signals IMAGE-PART-INVALID, which names the
+MEDIA-TYPE, when given, must agree with them. At most *MAX-IMAGE-PART-BYTES* before encoding,
+3932160 by default, so the base64 a provider is sent stays within Anthropic's 5 MB. The part
+holds its own copy of the bytes, so changing SOURCE afterwards does not change what was checked.
+A URL must be https and at most 2048 characters. Anything else signals IMAGE-PART-INVALID, which names the
 limit. CACHE marks the end of a cacheable prefix, as for TEXT-PART.
 
 An image can go only in a user message; a provider without vision input refuses the request
@@ -191,7 +196,8 @@ An image can go only in a user message; a provider without vision input refuses 
              (let ((n (length source)))
                (when (zerop n) (%image-refuse nil "the image is empty"))
                (when (> n *max-image-part-bytes*)
-                 (%image-refuse (format nil "~D bytes (*MAX-IMAGE-PART-BYTES*)" *max-image-part-bytes*)
+                 (%image-refuse (format nil "~D bytes before encoding (*MAX-IMAGE-PART-BYTES*), so that the base64 a provider is sent stays within 5 MB"
+                                        *max-image-part-bytes*)
                                 "the image is ~D bytes" n))
                (let ((sniffed (%sniff-image-type source)))
                  (unless sniffed
@@ -200,8 +206,11 @@ An image can go only in a user message; a provider without vision input refuses 
                  (when (and media-type (not (string-equal media-type sniffed)))
                    (%image-refuse sniffed "the media type given, ~A, does not match the bytes"
                                   (praxeon/conditions:value-shape media-type)))
-                 (list :type :image :media-type sniffed
-                       :data (coerce source '(simple-array (unsigned-byte 8) (*)))))))
+                 ;; A copy, always: COERCE returns SOURCE itself when it is already a simple
+                 ;; octet vector, and a caller could then change the bytes after the check.
+                 (let ((copy (make-array n :element-type '(unsigned-byte 8))))
+                   (replace copy source)
+                   (list :type :image :media-type sniffed :data copy)))))
             (t (%image-refuse nil "an image's source must be its bytes or an https URL, not ~A"
                               (praxeon/conditions:value-shape source))))))
     (if cache (append part '(:cache t)) part)))

@@ -1133,7 +1133,10 @@ unchecked."
                           (loop for p in proposals for i from 1 collect (%describe-proposal p i known))))
          (arguments (llm:generate-structured
                      provider
-                     (append window (list (llm:msg "user" (format nil "~A~%~%~A" *support-instructions* listing))))
+                     ;; Without images, as DISTIL sends the window (#995, review of #1018): the
+                     ;; verify provider may have no vision input, and no image goes to it.
+                     (append (mapcar #'distil:without-images window)
+                             (list (llm:msg "user" (format nil "~A~%~%~A" *support-instructions* listing))))
                      (%support-spec)))
          (numbers (coerce (gethash "supported" arguments) 'list)))
     (distil:make-distillation

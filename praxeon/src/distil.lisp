@@ -240,7 +240,7 @@ a proposal that replaces or repeats it."
     (declare (ignore s m h))
     (format nil "~4,'0D-~2,'0D-~2,'0D" y mo d)))
 
-(defun %without-images (message)
+(defun without-images (message)
   "MESSAGE with each image part replaced by a text part describing it, LLM:IMAGE-PART-DESCRIPTION
 (#995). Distillation reads a window to write observations, which are stored in memory; an image's
 bytes have no place there, and the provider chosen for distillation may have no vision input."
@@ -290,7 +290,7 @@ function's extent would preempt every caller's."
                   (format nil "Today is ~A. Write any applies_from date against that." (date-string today))))
          (preface (format nil "~@[~A~%~%~]~@[~A~]" dated block))
          (messages (append (when (plusp (length preface)) (list (llm:msg "user" preface)))
-                           (mapcar #'%without-images window))))
+                           (mapcar #'without-images window))))
     (handler-case
         (let ((arguments (apply #'llm:generate-structured
                                 provider messages (observation-tool)

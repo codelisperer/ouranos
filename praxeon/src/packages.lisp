@@ -225,7 +225,7 @@
     one is a claim about identity, and the existing one is not in the window. A wrong
     `remember' adds a bad fact; a wrong `supersede' also removes a good one, which is the
     half nobody sees.")
-  (:export #:distil #:apply-distillation
+  (:export #:distil #:apply-distillation #:without-images
            #:distillation #:make-distillation #:distillation-subject #:distillation-proposals
            #:distillation-replacements
            #:proposal #:proposal-content #:proposal-kind #:proposal-replaces
