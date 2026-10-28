@@ -94,6 +94,25 @@ refuses."
         (%drop-in-naming conf (concatenate 'string (uiop:native-namestring link) "/"))
         (is (eq :same (ouranos-registry:classify-drop-in conf this))))))
 
+(test on-windows-a-drop-in-spelling-the-drive-in-another-case-is-this-tree
+  ;; Pure, so every leg runs both directions without a Windows file system or a symbolic link.
+  (is (ouranos-registry:same-tree-p "c:/Users/x/ouranos/" "C:/Users/x/ouranos/" :windows t))
+  (is (ouranos-registry:same-tree-p "C:\\Users\\x\\ouranos\\" "C:/Users/x/ouranos/" :windows t)
+      "a backslash and a slash are the same separator")
+  (is (not (ouranos-registry:same-tree-p "/home/x/Ouranos/" "/home/x/ouranos/" :windows nil))
+      "elsewhere, case matters")
+  (is (not (ouranos-registry:same-tree-p "C:/Users/x/ouranos-2/" "C:/Users/x/ouranos/" :windows t))))
+
+(test only-the-value-1-turns-either-switch-on
+  (let* ((root (%fresh-tree))
+         (this (%new-directory root "this-"))
+         (other (%new-directory root "other-"))
+         (conf (%drop-in-in (%new-directory root "xdg-"))))
+    (%drop-in-naming conf other)
+    (is (eq :refused (%step this conf "OURANOS_BOOTSTRAP_LOCAL" "0")) "OURANOS_BOOTSTRAP_LOCAL=0 turned local mode on")
+    (is (eq :refused (%step this conf "OURANOS_BOOTSTRAP_FORCE" "0")) "OURANOS_BOOTSTRAP_FORCE=0 forced the rewrite")
+    (is (eq :refused (%step this conf "OURANOS_BOOTSTRAP_FORCE" "")))))
+
 (test registry-step-writes-rewrites-and-repoints-the-drop-in
   (let* ((root (%fresh-tree))
          (this (%new-directory root "this-"))
@@ -148,6 +167,16 @@ refuses."
     (is (search "$env:OURANOS_BOOTSTRAP_FORCE='1'; sbcl" windows))
     (is (search "$env:CL_SOURCE_REGISTRY='" windows))
     (is (search "//;'" windows) "the Windows separator is ;")))
+
+(test a-path-containing-a-quote-still-prints-a-command-that-pastes
+  (let ((posix (format nil "~{~A~%~}" (ouranos-registry:refusal-commands #p"/w/it's/" :windows nil)))
+        (windows (format nil "~{~A~%~}" (ouranos-registry:refusal-commands #p"/w/it's/" :windows t))))
+    ;; The separators in the path differ by host, so these look only at the quote.
+    (is (search "export CL_SOURCE_REGISTRY='" posix))
+    (is (search "it'\\''s" posix) "~A" posix)
+    (is (search "it''s" windows) "~A" windows))
+  (is (equal "'/w/it'\\''s//:'" (ouranos-registry::%single-quoted "/w/it's//:" nil)))
+  (is (equal "'C:\\w\\it''s//;'" (ouranos-registry::%single-quoted "C:\\w\\it's//;" t))))
 
 (test tree-local-mode-leaves-the-drop-in-alone-and-hands-its-registry-to-children
   (let* ((root (%fresh-tree))

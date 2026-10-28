@@ -24,7 +24,7 @@
 (defpackage #:ouranos-registry
   (:use #:cl)
   (:export #:drop-in-path #:classify-drop-in #:registry-action #:registry-step
-           #:local-registry-value #:refusal-commands
+           #:local-registry-value #:refusal-commands #:same-tree-p
            #:registry-refused #:registry-refused-drop-in #:registry-refused-this-tree
            #:registry-refused-other-tree))
 
@@ -66,6 +66,14 @@ Read with *READ-EVAL* off, because the file may have been edited by hand."
   (ignore-errors
    (probe-file (uiop:ensure-directory-pathname (uiop:parse-native-namestring string)))))
 
+(defun same-tree-p (a b &key (windows (uiop:os-windows-p)))
+  "Whether A and B, two directory namestrings, name the same tree. Both are compared with
+forward slashes. On Windows the comparison ignores case, because the file system does, and
+an older drop-in can spell the drive c: where *LOAD-TRUENAME* spells it C:; without this, the
+refusal would name the same tree twice."
+  (funcall (if windows #'string-equal #'string=)
+           (substitute #\/ #\\ a) (substitute #\/ #\\ b)))
+
 (defun classify-drop-in (conf this-tree)
   "What CONF says about THIS-TREE. Returns (values KIND OTHER), where OTHER is the tree named in
 CONF, as written there, and KIND is one of:
@@ -84,7 +92,8 @@ CONF, as written there, and KIND is one of:
            (values :unreadable nil)
            (let ((found (%existing-directory other)))
              (values (cond ((null found) :missing)
-                           ((equal found (truename this-tree)) :same)
+                           ((same-tree-p (namestring found) (namestring (truename this-tree)))
+                            :same)
                            (t :other))
                      other)))))))
 
@@ -109,6 +118,17 @@ the configuration: ROOT, then //, then the separator, which is ; on Windows and 
                (string-right-trim "/\\" (uiop:native-namestring root))
                "//" (if windows ";" ":")))
 
+(defun %single-quoted (string windows)
+  "STRING inside single quotes for this OS's shell. A quote inside it is written '' for
+PowerShell and '\\'' for a POSIX shell, so a path containing one still pastes as one word."
+  (with-output-to-string (out)
+    (write-char #\' out)
+    (loop for char across string
+          do (if (char= char #\')
+                 (write-string (if windows "''" "'\\''") out)
+                 (write-char char out)))
+    (write-char #\' out)))
+
 (defun refusal-commands (root &key (windows (uiop:os-windows-p)))
   "The lines a refusal prints under its explanation: the command for each way forward, written
 for this OS's shell (PowerShell on Windows, a POSIX shell elsewhere)."
@@ -118,13 +138,13 @@ for this OS's shell (PowerShell on Windows, a POSIX shell elsewhere)."
         (list "To build this tree and leave the drop-in alone, run this in PowerShell, from this tree:"
               (concatenate 'string "  $env:OURANOS_BOOTSTRAP_LOCAL='1'; " bootstrap "; Remove-Item Env:OURANOS_BOOTSTRAP_LOCAL")
               "and, in each PowerShell session that should use this tree:"
-              (concatenate 'string "  $env:CL_SOURCE_REGISTRY='" value "'")
+              (concatenate 'string "  $env:CL_SOURCE_REGISTRY=" (%single-quoted value t))
               "To make this tree the one every process on this machine uses, run this from this tree:"
               (concatenate 'string "  $env:OURANOS_BOOTSTRAP_FORCE='1'; " bootstrap "; Remove-Item Env:OURANOS_BOOTSTRAP_FORCE"))
         (list "To build this tree and leave the drop-in alone, run this from this tree:"
               (concatenate 'string "  OURANOS_BOOTSTRAP_LOCAL=1 " bootstrap)
               "and, in each shell that should use this tree:"
-              (concatenate 'string "  export CL_SOURCE_REGISTRY='" value "'")
+              (concatenate 'string "  export CL_SOURCE_REGISTRY=" (%single-quoted value nil))
               "To make this tree the one every process on this machine uses, run this from this tree:"
               (concatenate 'string "  OURANOS_BOOTSTRAP_FORCE=1 " bootstrap)))))
 
@@ -148,17 +168,18 @@ for this OS's shell (PowerShell on Windows, a POSIX shell elsewhere)."
          (format stream "~A~%" line))))))
 
 (defun registry-step (root &key (conf (drop-in-path))
-                                (getenv #'uiop:getenvp)
+                                (getenv #'uiop:getenv)
                                 (stream *standard-output*))
   "Do bootstrap's drop-in step for the tree at ROOT, and return the action taken (see
 REGISTRY-ACTION). GETENV reads OURANOS_BOOTSTRAP_LOCAL and OURANOS_BOOTSTRAP_FORCE; a test
-passes its own. Signals REGISTRY-REFUSED, and leaves CONF exactly as it was, on :REFUSE.
+passes its own. Each switch is on only when its value is exactly \"1\", as the docs say, so
+OURANOS_BOOTSTRAP_LOCAL=0 leaves local mode off. Signals REGISTRY-REFUSED, and leaves CONF exactly as it was, on :REFUSE.
 
 On :LOCAL this sets CL_SOURCE_REGISTRY in this process's environment, so the child sbcl
 processes bootstrap starts afterwards (the warm step and the platform package) build against
 ROOT and not against the tree the drop-in names."
-  (let ((local (funcall getenv "OURANOS_BOOTSTRAP_LOCAL"))
-        (force (funcall getenv "OURANOS_BOOTSTRAP_FORCE")))
+  (let ((local (equal "1" (funcall getenv "OURANOS_BOOTSTRAP_LOCAL")))
+        (force (equal "1" (funcall getenv "OURANOS_BOOTSTRAP_FORCE"))))
     (multiple-value-bind (kind other)
         (if local (values nil nil) (classify-drop-in conf root))
       (let ((action (registry-action kind :local local :force force)))

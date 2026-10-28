@@ -29,7 +29,7 @@ its tag.
     the child processes it starts, and prints that value to set in each shell that should use
     this checkout.
   - `OURANOS_BOOTSTRAP_FORCE=1` rewrites the drop-in to name this checkout, as bootstrap used
-    to do.
+    to do. Each switch is on only when its value is exactly `1`.
   - A drop-in naming a checkout that no longer exists is still rewritten, with a line saying
     which path it replaced, so moving a clone still needs only a second bootstrap.
 

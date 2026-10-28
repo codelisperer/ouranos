@@ -143,7 +143,7 @@ each way forward on your OS:
 - `OURANOS_BOOTSTRAP_FORCE=1` rewrites the drop-in to name this checkout, so every process
   on the machine uses it from then on.
 
-Both are environment variables, like `OURANOS_NO_WARM`:
+Both are environment variables, and each is on only when its value is exactly `1`:
 
 ```sh
 OURANOS_BOOTSTRAP_LOCAL=1 sbcl --dynamic-space-size 4096 --script bootstrap.lisp
