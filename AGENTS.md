@@ -213,7 +213,10 @@ issue — a message is read once by one session, an issue outlives it.
 - Every lane works in its own worktree on `work/<track>`. Two agents on one machine still
   need two trees.
 - The ASDF drop-in names one tree. Set `CL_SOURCE_REGISTRY=<worktree>//:` (`//;` on
-  Windows — a colon is read as part of the drive letter).
+  Windows — a colon is read as part of the drive letter). To bootstrap in a worktree, also
+  set `OURANOS_BOOTSTRAP_LOCAL=1`: bootstrap then leaves the drop-in naming the main checkout
+  and builds against the worktree. Without it, bootstrap stops with exit code 3, because the
+  drop-in names another tree (#955).
 - Gitignored build output (`vendor/libuv/`, `dist/`) does not travel; run
   `scripts/build-libuv.lisp` if needed. A suite failing that your diff cannot reach is an
   environment result, not a code one.

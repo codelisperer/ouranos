@@ -46,20 +46,41 @@ file but not its directory."
 
 (defun open-database ()
   "Open the pool and both stores over it, creating their tables when they do not exist.
-Signals when the database is already open. If a store cannot be made, the pool is closed."
+Signals when the database is already open. If a store cannot be made, the pool is closed, and
+*POOL*, *SESSIONS* and *USERS* are all NIL again."
   (when *pool* (error "{{name}}: the database is already open. Call CLOSE-DATABASE first."))
-  (let ((url (database-url)))
+  (let ((url (database-url))
+        (made nil))
     (%ensure-sqlite-directory url)
     (setf *pool* (conn:make-pool (url:backend-from-url url) :size *pool-size*))
-    (handler-bind ((error (lambda (e) (declare (ignore e)) (close-database))))
-      (setf *sessions* (session-db:make-db-store *pool* :dialect +dialect+ :ensure t)
-            *users* (auth:make-db-auth *pool* :dialect +dialect+ :ensure t)))))
+    ;; The pool is closed only when making the stores did not finish, as in START. A handler
+    ;; on ERROR would run as soon as an error was signalled, before anything had decided to
+    ;; unwind. A HANDLER-CASE inside a store constructor was never affected, because it handles
+    ;; the error before an outer handler sees it. The case it broke is an error that reaches a
+    ;; handler further out, which then declines it or resumes the constructor through a
+    ;; restart: the pool was already closed under the constructor (#944).
+    (unwind-protect
+         (prog1 (setf *sessions* (session-db:make-db-store *pool* :dialect +dialect+ :ensure t)
+                      *users* (auth:make-db-auth *pool* :dialect +dialect+ :ensure t))
+           (setf made t))
+      (unless made (close-database-during-cleanup)))))
 
 (defun close-database ()
-  "Close the pool, and with it every connection the stores and requests used."
+  "Close the pool, and with it every connection the stores and requests used. *POOL*,
+*SESSIONS* and *USERS* are NIL afterwards even when closing the pool signals, so a later
+OPEN-DATABASE is not refused (#1006)."
   (when *pool*
-    (conn:close-pool *pool*)
-    (setf *pool* nil *sessions* nil *users* nil)))
+    (let ((pool *pool*))
+      (unwind-protect (conn:close-pool pool)
+        (setf *pool* nil *sessions* nil *users* nil)))))
+
+(defun close-database-during-cleanup ()
+  "CLOSE-DATABASE for cleanup code that runs while another error unwinds. A failure to close the
+pool is logged with its condition type and nothing else, and does not replace the error that is
+unwinding, which is the one the caller needs to see (#1006)."
+  (handler-case (close-database)
+    (error (e)
+      (log:error "{{name}}: closing the database failed during cleanup" :condition (type-of e)))))
 
 (defun app-with-database (app)
   "APP with a session from *SESSIONS*, inside a request that holds its own connection in *DB*.
