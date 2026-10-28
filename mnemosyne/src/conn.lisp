@@ -20,14 +20,44 @@
 Signalled by CONNECT / EXEC / QUERY so callers establish restarts around DB work rather
 than parsing return codes."))
 
+(define-condition db-connect-timeout (db-error)
+  ((host :initarg :host :reader db-connect-timeout-host)
+   (port :initarg :port :reader db-connect-timeout-port)
+   (seconds :initarg :seconds :reader db-connect-timeout-seconds))
+  (:documentation
+   "Signalled by CONNECT when a Postgres connection was not established within the connect
+timeout (#959): the server did not answer, or did not finish the handshake, in time. The
+message names the host and port and nothing else from the configuration. Within a pool, the
+slot the connect had reserved is free again by the time this is signalled."))
+
+(define-condition db-statement-timeout (db-error) ()
+  (:documentation
+   "Signalled by EXEC, QUERY and MAP-QUERY when Postgres cancelled the statement because it ran
+longer than the connection's statement_timeout (SQLSTATE 57014 with the server's \"statement
+timeout\" message), whether the timeout came from CONNECT's :STATEMENT-TIMEOUT or from the
+server's own setting, such as ALTER ROLE ... SET statement_timeout (#959). The connection is
+still usable. A statement cancelled for another reason, such as pg_cancel_backend, is a plain
+DB-ERROR."))
+
+(defun %statement-timeout-cause-p (cause)
+  "Is CAUSE Postgres cancelling a statement for its statement_timeout? SQLSTATE 57014 is any
+cancellation; the server's message is what tells a timeout from pg_cancel_backend. It is in the
+server's language, so a server whose lc_messages is not English gives a plain DB-ERROR."
+  (and (typep cause 'dbi:dbi-database-error)
+       (equal (dbi:database-error-code cause) "57014")
+       (search "statement timeout" (princ-to-string cause))
+       t))
+
 (defmacro %wrapping-db-errors (context &body body)
   "Run BODY, re-signalling any error as a DB-ERROR tagged with CONTEXT (keeping CAUSE);
-an already-DB-ERROR passes through unchanged."
+an already-DB-ERROR passes through unchanged. A statement timeout is re-signalled as
+DB-STATEMENT-TIMEOUT, a subtype."
   (let ((e (gensym)))
     `(handler-case (progn ,@body)
        (db-error (,e) (error ,e))
        (error (,e)
-         (error 'db-error :message (format nil "~A: ~A" ,context ,e) :cause ,e)))))
+         (error (if (%statement-timeout-cause-p ,e) 'db-statement-timeout 'db-error)
+                :message (format nil "~A: ~A" ,context ,e) :cause ,e)))))
 
 (defun %ms-since (start)
   "Milliseconds since START (an internal-real-time reading), rounded."
@@ -153,7 +183,134 @@ where the difference shows."
           (log:info "db sqlite library unknown" :reason error)
           (log:info "db sqlite library" :version version :path path)))))
 
-(defun connect (backend)
+(defvar *postgres-connect-timeout-seconds* 10
+  "Seconds CONNECT waits for a Postgres connection to be established, from the start of the TCP
+connect to the end of authentication, before it signals DB-CONNECT-TIMEOUT; or NIL to wait as
+long as the operating system does (#959). The default for CONNECT's and MAKE-POOL's
+:CONNECT-TIMEOUT.
+
+Without a limit, a server that does not answer, such as one behind a firewall that drops
+packets, holds the caller for the operating system's connect limit, about 127 s on Linux, and
+inside a pool it holds a slot for that long. Like libpq's connect_timeout, this covers the
+whole connect, not only the TCP part.")
+
+(defvar *postgres-statement-timeout-ms* nil
+  "Milliseconds a statement may run on a Postgres connection before the server cancels it, or
+NIL to leave the server's setting alone (#959). The default for CONNECT's and MAKE-POOL's
+:STATEMENT-TIMEOUT. A cancelled statement signals DB-STATEMENT-TIMEOUT.
+
+Applied with SET statement_timeout on each new connection, and again each time a pool takes a
+connection back, because the pool's reset runs RESET ALL. A setting made on the server, such as
+ALTER ROLE app SET statement_timeout = '30s', also limits connections that do not set one
+here, and is the fallback for connections mnemosyne does not open.")
+
+(defparameter +connect-thread-specials+
+  '(cl-postgres:*ssl-certificate-file* cl-postgres:*ssl-key-file*
+    cl-postgres:*ssl-root-ca-file* #+(and sbcl unix) cl-postgres:*unix-socket-dir*)
+  "cl-postgres's settings for opening a connection, which %CALL-WITHIN-SECONDS passes from the
+caller's thread to the thread that connects. A new thread sees only global values, so an app
+that binds one of these around CONNECT would otherwise connect without it. These four are the
+only ones passed. Any other cl-postgres or cl+ssl special, such as cl+ssl's verification
+settings, is read on the connecting thread at its global value, so an app that changes one sets
+it globally rather than binding it around CONNECT.")
+
+(defun %stop-thread (thread)
+  "Ask THREAD to stop, ignoring a thread that has already ended."
+  (handler-case (sb-thread:terminate-thread thread)
+    (sb-thread:interrupt-thread-error () nil)))
+
+(defun %call-within-seconds (seconds thunk on-timeout on-late)
+  "THUNK's value, computed on a thread of its own and waited for at most SECONDS. When SECONDS
+pass first, stop the thread and call ON-TIMEOUT, which is expected to signal. If THUNK returns a
+value after the caller stopped waiting, whether because SECONDS passed or because the caller was
+unwound, ON-LATE is called with it on the thread, to close it. A condition that ends THUNK is
+re-signalled in the caller. SECONDS NIL calls THUNK directly.
+
+cl-postgres makes its socket and connects it itself, with no timeout, so a timeout cannot be
+given to the socket the way aion/http-client gives one to usocket. The thread is stopped rather
+than left to finish, because a server that completed the TCP handshake and then never answers
+would hold it forever: the operating system's connect limit covers only the handshake.
+
+Stopping it unwinds out of whatever cl-postgres was doing, and what becomes of the socket
+depends on how far it had got. During the TCP connect it is left for the collector: nothing
+references it afterwards, and SBCL closes its file descriptor when the socket object is
+collected, not at once. From the startup message onwards, authentication and the TLS handshake
+included, cl-postgres has established the UNWIND-PROTECT in its INITIATE-CONNECTION whose
+cleanup calls ENSURE-SOCKET-IS-CLOSED unless the connection finished, so the unwind closes the
+socket. Inside the TLS handshake the thread is in OpenSSL through cl+ssl, and the stop takes
+effect when that foreign call returns to Lisp; measured on Linux against a server that answered
+the SSL request and then sent nothing, the timeout fired after 1 s and the thread had ended
+within 5 s.
+
+The stop is delivered only while THUNK runs, so once THUNK has returned the thread hands its
+result over, or closes it, before it can be stopped. ONE WINDOW IS NARROWED AND NOT CLOSED: a
+stop that arrives between the connect returning and WITH-LOCAL-INTERRUPTS exiting unwinds with
+the connection still on the stack, so V is never set and ON-LATE never sees it. That connection
+is closed by cl-postgres's unwind-protect above only while it is still being made; one already
+established is dropped, and its socket waits for the collector. Closing this would need the
+connect to be stoppable without unwinding it, which TERMINATE-THREAD is not."
+  (if (null seconds)
+      (funcall thunk)
+      (let ((state (list :running))   ; CAR moves once, to :DONE or :ABANDONED, by CAS
+            (done (sb-thread:make-semaphore :name "mnemosyne-connect"))
+            (value nil)
+            (failure nil)
+            (thread nil)
+            (symbols +connect-thread-specials+)
+            (bound (mapcar #'symbol-value +connect-thread-specials+)))
+        (setf thread
+              ;; THREAD-LIFETIME: this connect's own, and not inheriting the caller's bindings.
+              ;; The only ones it needs are cl-postgres's, passed through PROGV below.
+              (sb-thread:make-thread
+               (lambda ()
+                 ;; FIRST, and the timeout depends on it (#541): a thread made inside a caller's
+                 ;; WITHOUT-INTERRUPTS can never be interrupted, and the timeout below stops this
+                 ;; one with TERMINATE-THREAD, which would then never arrive.
+                 (aion/dynamic:unblock-interrupts)
+                 (progv symbols bound
+                   ;; A stop is taken only inside THUNK. One that arrives after THUNK returned
+                   ;; waits until the result has been handed over or, when the caller has given
+                   ;; up, closed by ON-LATE. The window where a stop can still lose a connection
+                   ;; is narrowed to the instant between the connect returning and the exit from
+                   ;; WITH-LOCAL-INTERRUPTS; it is not closed. See the docstring.
+                   (sb-sys:without-interrupts
+                     (let ((v nil) (e nil))
+                       (handler-case (sb-sys:with-local-interrupts (setf v (funcall thunk)))
+                         (serious-condition (c) (setf e c)))
+                       (setf value v failure e)
+                       (if (eq (sb-ext:compare-and-swap (car state) :running :done) :running)
+                           (sb-thread:signal-semaphore done)
+                           (when v (funcall on-late v)))))))
+               :name "mnemosyne-connect"))
+        (let ((waited nil))
+          (unwind-protect
+               (progn
+                 (unless (sb-thread:wait-on-semaphore done :timeout seconds)
+                   (when (eq (sb-ext:compare-and-swap (car state) :running :abandoned) :running)
+                     (%stop-thread thread)
+                     (funcall on-timeout))
+                   ;; The thread finished between the timeout and the CAS: its result is ready.
+                   (sb-thread:wait-on-semaphore done))
+                 (setf waited t))
+            ;; Unwound while waiting, by an outer deadline for example. If the connect is still
+            ;; running, give it up, so a connection it opens later is closed on the thread. If
+            ;; it had already handed a connection over, close that one here.
+            (unless waited
+              (if (eq (sb-ext:compare-and-swap (car state) :running :abandoned) :running)
+                  (%stop-thread thread)
+                  (when (and (eq (car state) :done) value)
+                    (funcall on-late value))))))
+        (when failure (error failure))
+        value)))
+
+(defun %apply-statement-timeout (connection milliseconds)
+  "Set CONNECTION's statement_timeout to MILLISECONDS, when it is a Postgres connection and
+MILLISECONDS is not NIL."
+  (when (and milliseconds (eq (dbi:connection-driver-type connection) :postgres))
+    (dbi:do-sql connection (format nil "SET statement_timeout = ~D" milliseconds))))
+
+(defun connect (backend &key (connect-timeout *postgres-connect-timeout-seconds*)
+                             (statement-timeout *postgres-statement-timeout-ms*))
   "Open a CL-DBI connection for BACKEND (a mnemosyne/backend:Backend). Postgres speaks
 the wire protocol (cl-postgres, no libpq); SQLite is a local file or \":memory:\" -- and a
 file path's parent directory is created if missing (see %ENSURE-SQLITE-DIRECTORY).
@@ -161,7 +318,14 @@ file path's parent directory is created if missing (see %ENSURE-SQLITE-DIRECTORY
 TLS follows the backend's own SSL mode; see %RESOLVE-SSL for what happens when the mode
 asks for encryption this image cannot provide. Note that the driver's default is
 plaintext, so passing nothing here is not neutral -- it actively requests no TLS, which
-is why the argument is always supplied."
+is why the argument is always supplied.
+
+For Postgres, CONNECT-TIMEOUT is the seconds to wait for the connection, or NIL for no limit;
+past it, DB-CONNECT-TIMEOUT is signalled. STATEMENT-TIMEOUT is the milliseconds a statement
+may run before the server cancels it, or NIL to leave the server's setting. See
+*POSTGRES-CONNECT-TIMEOUT-SECONDS* and *POSTGRES-STATEMENT-TIMEOUT-MS*. SQLite ignores both."
+  (check-type connect-timeout (or null (real (0))))
+  (check-type statement-timeout (or null (integer 1 2147483647)))
   (%wrapping-db-errors "connect"
     (let ((name (be:backend-name backend)))
       (cond
@@ -175,19 +339,42 @@ is why the argument is always supplied."
          ;; Resolved BEFORE the log line, so the line reports the mode actually used
          ;; rather than the one requested -- a log that says `require' about a plaintext
          ;; connection is worse than no log.
-         (let ((ssl (%resolve-ssl backend)))
-           (log:debug "db connect" :backend name :sslmode (string-downcase (symbol-name ssl)))
-           (dbi:connect :postgres
-                        :database-name (be:backend-pg-database backend)
-                        :host          (be:backend-pg-host backend)
-                        :port          (be:backend-pg-port backend)
-                        :username      (be:backend-pg-user backend)
-                        ;; The ONE place mnemosyne turns the password back into plaintext
-                        ;; (pre-publication issue 209): the driver needs a String. Everywhere else it stays an
-                        ;; opaque SECRET, so no backtrace, log line or printed config can
-                        ;; render it. `grep -rn reveal' enumerates the disclosure points.
-                        :password      (sec:reveal (be:backend-pg-password backend))
-                        :use-ssl       ssl)))
+         (let ((ssl (%resolve-ssl backend))
+               (host (be:backend-pg-host backend))
+               (port (be:backend-pg-port backend)))
+           (log:debug "db connect" :backend name :sslmode (string-downcase (symbol-name ssl))
+                      :connect-timeout-s connect-timeout :statement-timeout-ms statement-timeout)
+           (let ((connection
+                   (%call-within-seconds
+                    connect-timeout
+                    (lambda ()
+                      (dbi:connect :postgres
+                                   :database-name (be:backend-pg-database backend)
+                                   :host          host
+                                   :port          port
+                                   :username      (be:backend-pg-user backend)
+                                   ;; The ONE place mnemosyne turns the password back into plaintext
+                                   ;; (pre-publication issue 209): the driver needs a String. Everywhere else it stays an
+                                   ;; opaque SECRET, so no backtrace, log line or printed config can
+                                   ;; render it. `grep -rn reveal' enumerates the disclosure points.
+                                   :password      (sec:reveal (be:backend-pg-password backend))
+                                   :use-ssl       ssl))
+                    (lambda ()
+                      (log:warn "db connect timed out" :host host :port port
+                                :connect-timeout-s connect-timeout)
+                      (error 'db-connect-timeout
+                             :host host :port port :seconds connect-timeout
+                             :message (format nil "connect: no connection to ~A:~D within ~A seconds"
+                                              host port connect-timeout)))
+                    (lambda (late)
+                      (log:debug "db connect finished after its timeout, closing it"
+                                 :host host :port port)
+                      (ignore-errors (dbi:disconnect late))))))
+             (handler-bind ((error (lambda (e)
+                                     (declare (ignore e))
+                                     (ignore-errors (dbi:disconnect connection)))))
+               (%apply-statement-timeout connection statement-timeout))
+             connection)))
         (t (error 'db-error :message (format nil "unknown backend ~S" name)))))))
 
 (defun disconnect (connection)
@@ -405,6 +592,8 @@ checkout timeout. A web app answers it with 503."))
   (size 1 :type (integer 1))
   (checkout-timeout 30 :type (real 0))
   (idle-check 30 :type (or null (real 0)))
+  (connect-timeout nil :type (or null (real (0))))
+  (statement-timeout nil :type (or null (integer 1 2147483647)))
   ;; Everything below is read and written with LOCK held.
   (idle '())                                   ; (connection . internal-real-time-returned)
   (open 0 :type unsigned-byte)                 ; lent + idle + being opened
@@ -419,7 +608,9 @@ checkout timeout. A web app answers it with 503."))
     (format stream "~A size ~D" (be:backend-name (pool-backend pool)) (pool-size pool))))
 
 (defun make-pool (backend &key (size 10) (checkout-timeout *checkout-timeout-seconds*)
-                               (idle-check *idle-check-seconds*))
+                               (idle-check *idle-check-seconds*)
+                               (connect-timeout *postgres-connect-timeout-seconds*)
+                               (statement-timeout *postgres-statement-timeout-ms*))
   "A pool of up to SIZE connections to BACKEND. Connections are opened when first needed,
 not here, so making a pool does no IO.
 
@@ -427,13 +618,20 @@ CHECKOUT-TIMEOUT is how many seconds WITH-CONNECTION waits for a free connection
 signals POOL-EXHAUSTED. IDLE-CHECK is how many seconds a connection may sit idle before it is
 pinged on its way out, or NIL to never ping.
 
+CONNECT-TIMEOUT and STATEMENT-TIMEOUT are CONNECT's, for every connection the pool opens (#959).
+A connect that times out or fails gives its slot back before the condition reaches the caller.
+The statement timeout is set again each time a connection comes back, after the reset.
+
 A web server with N worker threads wants SIZE of at least N, or requests wait for each
 other's connections. Close the pool with CLOSE-POOL."
   (check-type size (integer 1))
   (check-type checkout-timeout (real 0))
   (check-type idle-check (or null (real 0)))
+  (check-type connect-timeout (or null (real (0))))
+  (check-type statement-timeout (or null (integer 1 2147483647)))
   (%make-pool :backend backend :size size :checkout-timeout checkout-timeout
-              :idle-check idle-check))
+              :idle-check idle-check :connect-timeout connect-timeout
+              :statement-timeout statement-timeout))
 
 (defun pool-open-count (pool)
   "How many connections POOL has open: lent out, idle, or being opened."
@@ -496,7 +694,9 @@ pool is closed, or :TIMEOUT when DEADLINE passed with every connection lent out.
 fails. Outside the lock: a connect is a network round trip, and holding the lock through it
 would make every other checkout and return wait for it."
   (let ((connection nil))
-    (unwind-protect (setf connection (connect (pool-backend pool)))
+    (unwind-protect (setf connection (connect (pool-backend pool)
+                                              :connect-timeout (pool-connect-timeout pool)
+                                              :statement-timeout (pool-statement-timeout pool)))
       (unless connection (%release-slot pool)))))
 
 (defun %checkout (pool)
@@ -577,7 +777,10 @@ database handle cl-sqlite keeps in a slot it does not export."
 (defun %checkin (pool connection clean-exit)
   "Take CONNECTION back into POOL. See the section header for why a non-local exit closes it."
   (let ((keep (and clean-exit
-                   (handler-case (progn (%reset-connection connection) t)
+                   (handler-case (progn (%reset-connection connection)
+                                        (%apply-statement-timeout connection
+                                                                  (pool-statement-timeout pool))
+                                        t)
                      (error (e)
                        (log:warn "db pool could not reset a connection, closing it"
                                  :condition (type-of e))

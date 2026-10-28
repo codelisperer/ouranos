@@ -19,6 +19,7 @@
                "aion/log"       ; neutral logging facade (leftward dep: aion is left of mnemosyne)
                "aion/clock"     ; the monotonic clock + v6 ids behind mnemosyne/id (pre-publication issue 96)
                "aion/secret/types" ; the DB password as an opaque field, not a printable String (pre-publication issue 209)
+               "aion/dynamic"   ; unblock-interrupts, first in the connect thread (#541, #959)
                "alexandria"
                "dbi"            ; CL-DBI: the DB-independent API (the neutral substrate)
                "dbd-postgres"   ; PostgreSQL over the WIRE (cl-postgres, no libpq); XTDB 2 rides it
@@ -122,6 +123,7 @@
                              (:file "sqlite-busy")
                              (:file "sqlite-rewrite")  ; map-query and the in-place re-encode (#425)
                              (:file "pool")         ; uses sqlite-busy's helpers (#325)
+                             (:file "timeouts")     ; Postgres connect and statement timeouts (#959)
                              (:file "sqlite-library")
                              (:file "smoke"))))
   :perform (test-op (o c) (uiop:symbol-call :mnemosyne/tests :run-tests)))
