@@ -14,6 +14,20 @@ its tag.
 
 ### An app may have to act
 
+- **hermes/blob: `MNEMOSYNE_S3_SECURE=false` is refused unless the endpoint is local, and an
+  empty `MNEMOSYNE_S3_SESSION_TOKEN` is now no token** (#124).
+  - `make-s3-store` refuses `MNEMOSYNE_S3_SECURE=false` when `MNEMOSYNE_S3_ENDPOINT` is not a
+    loopback, private or link-local address, signalling `blob-configuration-error`. Before, that
+    one variable put a store still aimed at the default `s3.amazonaws.com` on plain http, sending
+    its signed requests and any session token across the internet in the clear. `localhost`, an
+    address in those ranges, and a name that resolves only to such addresses (a Docker Compose
+    service name, say) are all accepted. **An app that set `MNEMOSYNE_S3_SECURE=false` against a
+    public endpoint now fails to start** and should either point the endpoint at its local double
+    or, if plaintext to that endpoint is really meant, pass `:secure nil` in code, which is not
+    checked.
+  - An empty `MNEMOSYNE_S3_SESSION_TOKEN` is now no token, where it used to be sent as an empty
+    one.
+
 - **MCP resources and retrieval passages are untrusted by default, so in a prompt they refuse
   `:requires-user-intent` means for the turn** (#907, after #906). `praxeon/mcp:add-resource` and
   `praxeon/retrieval:passage->ctx-item` put outside content into an agent's context with nothing
@@ -902,8 +916,7 @@ its tag.
   `MNEMOSYNE_BLOB_IMPL`, `MNEMOSYNE_BLOB_ROOT`, `MNEMOSYNE_BLOB_BASE_URL` and every
   `MNEMOSYNE_S3_*` variable now fall back to their defaults when empty, as a blank line in a
   `.env` file sets them. Before, an empty `MNEMOSYNE_BLOB_IMPL` made `store-from-env` look for a
-  store named `""` and signal, and an empty `MNEMOSYNE_S3_ENDPOINT` failed `make-s3-store`. An
-  empty `MNEMOSYNE_S3_SESSION_TOKEN` is now no token, where it used to be sent as an empty one.
+  store named `""` and signal, and an empty `MNEMOSYNE_S3_ENDPOINT` failed `make-s3-store`.
 
 - **praxeon/actor: every deliberation step records how many of the prompt's estimated tokens came
   from each source** (#317, step D). `praxeon/actor:request-messages` returns a third value, and

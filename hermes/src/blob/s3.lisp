@@ -71,7 +71,7 @@ moved to hermes, and the deployed names were kept rather than renamed. They are 
                    :access-key (%require-setting access-key "MNEMOSYNE_S3_ACCESS_KEY")
                    :secret-key (%require-setting secret-key "MNEMOSYNE_S3_SECRET_KEY")
                    :session-token (or session-token (%setting "MNEMOSYNE_S3_SESSION_TOKEN"))
-                   :secure (%secure-setting secure secure-p)
+                   :secure (%secure-setting secure secure-p endpoint)
                    :path-style (or path-style
                                    (let ((v (%setting "MNEMOSYNE_S3_PATH_STYLE")))
                                      (and v (string-equal v "true"))))
@@ -79,22 +79,69 @@ moved to hermes, and the deployed names were kept rather than renamed. They are 
                                         (%setting "MNEMOSYNE_S3_PUBLIC_BASE_URL"))
                    :upload-acl (%upload-acl-setting upload-acl))))
 
-(defun %secure-setting (value supplied-p)
+(defun %endpoint-host (endpoint)
+  "ENDPOINT's host, without a port: \"localhost:9000\" gives \"localhost\", \"[::1]:9000\" gives
+\"::1\". A bare IPv6 address, which carries colons of its own, is returned unchanged."
+  (let ((endpoint (string-trim " " endpoint)))
+    (cond ((and (plusp (length endpoint)) (char= #\[ (char endpoint 0)))
+           (let ((close (position #\] endpoint)))
+             (if close (subseq endpoint 1 close) endpoint)))
+          (t (let ((colon (position #\: endpoint :from-end t)))
+               (if (and colon
+                        (plusp (length (subseq endpoint (1+ colon))))
+                        (every #'digit-char-p (subseq endpoint (1+ colon)))
+                        ;; One colon only: more than one means a bare IPv6 address.
+                        (not (find #\: endpoint :end colon)))
+                   (subseq endpoint 0 colon)
+                   endpoint))))))
+
+(defun %local-endpoint-p (endpoint)
+  "Whether ENDPOINT names something only this machine or this network can reach, so sending it
+requests in plaintext does not put them on the public internet (the hub's review of #970).
+
+\"localhost\" counts. An IP address is classified by AION/HTTP-CLIENT:ADDRESS-CATEGORY, and
+counts when it is loopback, private or link-local. Any other name is resolved, and counts only
+when it resolves and every address it resolves to is one of those, so a Docker Compose service
+name such as \"minio\" works while a name pointing at the internet does not. A name that does not
+resolve does not count: an endpoint that cannot be reached is not an endpoint known to be local."
+  (let ((host (%endpoint-host endpoint)))
+    (flet ((local-p (address)
+             (member (http:address-category address) '(:loopback :private :link-local))))
+      (or (string-equal host "localhost")
+          (let ((literal (http:parse-address host)))
+            (if literal
+                (and (local-p literal) t)
+                (let ((addresses (ignore-errors (http:resolve-host host))))
+                  (and addresses (every #'local-p addresses) t))))))))
+
+(defun %secure-setting (value supplied-p endpoint)
   "The store's SECURE: VALUE when :SECURE was passed, else MNEMOSYNE_S3_SECURE, else T.
 
-The variable is read as true or false without regard to case, and unset or empty means true,
-so plaintext http has to be asked for. Any other value signals BLOB-CONFIGURATION-ERROR rather
-than picking a default, so a misspelling cannot quietly change the store to http, and cannot
-quietly leave a local double unreachable either.
+The variable is read as true or false without regard to case, and unset means true, so plaintext
+http has to be asked for. Any other value signals BLOB-CONFIGURATION-ERROR rather than picking a
+default, so a misspelling cannot quietly change the store to http, and cannot quietly leave a
+local double unreachable either.
+
+MNEMOSYNE_S3_SECURE=false IS REFUSED FOR AN ENDPOINT THAT IS NOT LOCAL (the hub's review of
+#970). Without that, one environment variable turned a store still aimed at the default
+s3.amazonaws.com into one that sent its signed requests, and any session token, in plaintext
+across the internet. See %LOCAL-ENDPOINT-P. A caller that passes :SECURE NIL in code is not
+checked: that is a deliberate choice written by whoever owns the code, and it is the workaround
+#124 was filed with; the environment is the surface an operator changes without one.
 
 This reads oppositely from MNEMOSYNE_S3_PATH_STYLE beside it, where unset means NIL. That is
 deliberate: for path-style the safe default is off, and for secure it is on."
   (if supplied-p
       (and value t)
       (let ((v (%setting "MNEMOSYNE_S3_SECURE")))
-        (cond ((or (null v) (zerop (length v))) t)
+        (cond ((null v) t)
               ((string-equal v "true") t)
-              ((string-equal v "false") nil)
+              ((string-equal v "false")
+               (unless (%local-endpoint-p endpoint)
+                 (error 'blob-configuration-error
+                        :missing (format nil "MNEMOSYNE_S3_SECURE=false, which sends every request in plaintext, and MNEMOSYNE_S3_ENDPOINT is ~S, which is not a loopback, private or link-local address. Plaintext is for a local S3 double; point the endpoint at one, or pass :secure nil in code if this is really what you want"
+                                         endpoint)))
+               nil)
               (t (error 'blob-configuration-error
                         :missing (format nil "MNEMOSYNE_S3_SECURE must be true or false, not ~S" v)))))))
 
