@@ -1185,7 +1185,11 @@ Windows leg of train 78 when only the unwrapped types were matched. An HTTP-ERRO
 or one the client raised itself before sending, has no phase and does not count."
   (or (and (typep condition 'http:fetch-refused)
            (eq :unresolvable (http:fetch-refused-reason condition)))
+      ;; A MALFORMED-RESPONSE carries :RESPONSE too, when the connection ended early or WinHTTP
+      ;; refused the reply (12152), and it is this client's or the server's doing, not the
+      ;; network's (the hub's review of #979).
       (and (typep condition 'http:http-error)
+           (not (typep condition 'http:malformed-response))
            (member (http:http-error-phase condition) '(:connect :response))
            t)
       (typep condition '(or http:fetch-deadline-exceeded usocket:socket-condition
@@ -1232,7 +1236,21 @@ response and a refused private address are not."
              (make-condition 'http:fetch-refused :url "https://x.test/" :reason :private)))
   (is-false (%runner-network-failure-p
              (make-condition 'http:certificate-expired :host "x.test" :verdict :expired :code 0)))
-  (is-false (%runner-network-failure-p (make-condition 'http:malformed-response :detail "x"))))
+  (is-false (%runner-network-failure-p (make-condition 'http:malformed-response :detail "x")))
+  (is-false (%runner-network-failure-p
+             (make-condition 'http:malformed-response :detail "the connection ended" :phase :response))
+            "a malformed response is not the network's, though it carries :RESPONSE")
+  (is-true (%runner-network-failure-p
+            (make-condition 'http:http-error :detail "transport error" :phase :response))
+           "control: another :RESPONSE transport failure is")
+  #+os-windows
+  (is (eq 'http::malformed-response
+          (http::%transport-error-class (make-condition 'winhttp::win-error :code 12152)))
+      "WinHTTP's 12152 is signalled as a MALFORMED-RESPONSE")
+  #+os-windows
+  (is (eq 'http:http-error
+          (http::%transport-error-class (make-condition 'winhttp::win-error :code 12002)))
+      "control: a WinHTTP timeout is not"))
 
 (test a-wrapped-transport-failure-is-a-runner-network-failure
   "#976: the client wraps a socket timeout in an HTTP-ERROR, \"transport error\". A refused

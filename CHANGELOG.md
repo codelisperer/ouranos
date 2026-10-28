@@ -1055,7 +1055,10 @@ its tag.
     dexador may have sent the request on a pooled connection that then dropped, before its
     reconnect failed. So a request whose method is not idempotent, such as POST or PATCH, is
     now sent with `:use-connection-pool nil` and `:keep-alive nil`. A pooled request's failure
-    to connect, such as a GET's, is `:response`. On Windows, where dexador uses WinHTTP, the phase comes
+    to connect, such as a GET's, is `:response`.
+  - **WinHTTP's 12152.** On Windows, a reply WinHTTP refuses as not HTTP (12152) is now
+    signalled as `malformed-response`, as this client's own reader signals one on the pinned
+    path, still with phase `:response`. It was a plain `http-error`. On Windows, where dexador uses WinHTTP, the phase comes
   from WinHTTP's error code: 12029 and 12007 are `:connect`; 12002, 12030 and 12152 are
   `:response`. aion/http-client now depends on `aion/retry` and defines the `transience` and
   `retry-after` methods for `http-error`: 408, 425, 429, 503, 529 and `:connect` are

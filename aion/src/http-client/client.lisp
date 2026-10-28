@@ -536,6 +536,16 @@ uses WinHTTP (#974; a refused connection measured as 12029). From the error code
     ((12002 12030 12152) :response)
     (t nil)))
 
+(defun %transport-error-class (e)
+  "The HTTP-ERROR class for the transport failure E: MALFORMED-RESPONSE when WinHTTP reported
+12152 (ERROR_WINHTTP_INVALID_SERVER_RESPONSE), the server's reply not being HTTP, as this
+client's own reader reports it on the pinned path; HTTP-ERROR otherwise (the hub's review of
+#979)."
+  #+os-windows (if (and (typep e 'winhttp::win-error) (eql 12152 (winhttp::win-error-code e)))
+                   'malformed-response
+                   'http-error)
+  #-os-windows (progn e 'http-error))
+
 (defun %transport-phase (e pinned &key pooled)
   "HTTP-ERROR-PHASE for E, a transport failure. On the pinned path, which makes the connection
 itself, from where it failed: a socket failure before USOCKET:SOCKET-CONNECT returned is
@@ -588,9 +598,10 @@ has no response to hand back, so it signals HTTP-ERROR directly."
                     (ignore-errors (dexador.error:response-headers e))
                     (dexador.error:response-body e)))
         (error (e)
-          (error 'http-error :detail (format nil "transport error: ~A" e)
-                             :phase (%transport-phase e (request-connect-address req)
-                                                      :pooled (%pooled-p req))))))))
+          (error (%transport-error-class e)
+                 :detail (format nil "transport error: ~A" e)
+                 :phase (%transport-phase e (request-connect-address req)
+                                          :pooled (%pooled-p req))))))))
 
 (defun send-request (request interceptors &key (perform #'%http))
   "Run REQUEST through INTERCEPTORS around one HTTP round-trip and return the processed
