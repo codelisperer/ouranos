@@ -96,6 +96,36 @@
       (is (null (search "4411" html)) "Nothing from the page's declaration reaches the head.")
       (is (null (search "Balance" html))))))
 
+(test an-unlisted-page-gets-the-full-card-and-robots-noindex
+  (let* ((args (list :site (%meta-site) :title "Holiday photos"
+                     :description "Photos from the trip" :url "/posts/77"
+                     :image "/img/77.jpg" :site-name "Example Travel"))
+         (public (apply #'%pm args))
+         (unlisted (apply #'%pm :visibility :unlisted args))
+         (html (apply #'%head :visibility :unlisted args)))
+    (is (equal '("noindex") (%tag unlisted :name "robots")))
+    (is (equal (cons '(:name "robots" "noindex") public) unlisted)
+        "Apart from robots noindex, the tags are the public page's.")
+    (is (equal '("Holiday photos") (%tag unlisted :property "og:title")))
+    (is (equal '("Example Travel") (%tag unlisted :property "og:site_name")))
+    (is (equal '("https://example.com/posts/77") (%tag unlisted :link "canonical")))
+    (is (equal '("https://example.com/img/77.jpg") (%tag unlisted :property "og:image")))
+    (is (%attr-p html "content" "noindex"))
+    (is (search "Holiday photos" html))))
+
+(test each-visibility-decides-the-card-and-robots
+  (flet ((tags (visibility)
+           (%pm :site (%meta-site) :visibility visibility :title "Post 9" :url "/posts/9")))
+    (is (null (%tag (tags :public) :name "robots")))
+    (is (equal '("Post 9") (%tag (tags :public) :property "og:title")))
+    (dolist (visibility '(:unlisted :noindex :private))
+      (is (equal '("noindex") (%tag (tags visibility) :name "robots")) "~S" visibility))
+    (is (equal '("Post 9") (%tag (tags :unlisted) :property "og:title")))
+    (is (equal '("https://example.com/posts/9") (%tag (tags :unlisted) :property "og:url")))
+    (dolist (visibility '(:noindex :private))
+      (is (equal '("Example News") (%tag (tags visibility) :property "og:title")) "~S" visibility)
+      (is (null (%tag (tags visibility) :property "og:url")) "~S" visibility))))
+
 (test attribute-values-are-escaped
   (let ((html (%head :site (%meta-site) :title "\"><script>alert(1)</script>"
                      :description "Tom & Jerry's \"best\" bits")))
