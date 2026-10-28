@@ -627,6 +627,22 @@ effect did or did not happen."
       (signals ceiling:grant-invalid
         (ceiling:verify-grant (ceiling:make-ed25519-verifier pub) forged sig)))))
 
+(test a-signed-payload-of-the-wrong-shape-is-refused
+  "The signature is good and the payload is not a grant. Each is GRANT-INVALID, which a web
+service answers 401, and none is another error, which it would answer 500."
+  (with-keys (priv pub)
+    (let ((v (ceiling:make-ed25519-verifier pub)))
+      (dolist (payload '("not json" "[1,2]" "\"a string\""
+                         "{\"principal\":5}" "{\"principal\":\"u1\",\"audience\":[1]}"
+                         "{\"principal\":\"u1\",\"capabilities\":\"search\"}"
+                         "{\"principal\":\"u1\",\"capabilities\":[1]}"
+                         "{\"principal\":\"u1\",\"capabilities\":7}"))
+        (is (eq :refused (handler-case (progn (ceiling:verify-grant v payload (%sign priv payload))
+                                              :accepted)
+                           (ceiling:grant-invalid () :refused)
+                           (error (e) (type-of e))))
+            "~S" payload)))))
+
 (test a-grant-signed-by-the-wrong-key-is-rejected
   ;; The property a shared secret would NOT have given us: this side can verify and cannot
   ;; mint, so compromising it yields no usable grants.
@@ -669,6 +685,45 @@ effect did or did not happen."
             (is (search "signature" (ceiling:grant-invalid-reason c))
                 "must fail on the signature, not the expiry: got ~S"
                 (ceiling:grant-invalid-reason c))))))))
+
+;;; --- a grant as one string (#67) ---------------------------------------------
+
+(test a-grant-token-round-trips-and-verifies
+  "ENCODE-GRANT-TOKEN signs with an `aion/signature' key; DECODE-GRANT-TOKEN gives back the
+payload and signature, and VERIFY-GRANT accepts them under the matching public key."
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (let* ((payload (%grant-json :principal "ü1"))
+           (token (ceiling:encode-grant-token payload priv)))
+      (is (= 1 (count #\. token)) "a token is two parts and one dot: ~S" token)
+      (is (notany (lambda (c) (find c "+/=")) token)
+          "a token is base64url without padding, so it fits a header unescaped: ~S" token)
+      (multiple-value-bind (text signature) (ceiling:decode-grant-token token)
+        (is (string= payload text) "the payload came back changed")
+        (is (string= "ü1" (ceiling:grant-principal
+                           (ceiling:verify-grant (ceiling:make-ed25519-verifier pub :audience "elise")
+                                                 text signature)))
+            "a non-ASCII principal survives the round trip")))))
+
+(test a-grant-token-with-a-changed-payload-does-not-verify
+  "The payload part is only base64url, so anyone can rewrite it. The signature is what stops it."
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (let* ((token (ceiling:encode-grant-token (%grant-json :token-cap 10) priv))
+           (forged-payload (subseq (ceiling:encode-grant-token (%grant-json :token-cap 999999) priv)
+                                   0 (position #\. (ceiling:encode-grant-token
+                                                     (%grant-json :token-cap 999999) priv))))
+           (forged (concatenate 'string forged-payload (subseq token (position #\. token)))))
+      (signals ceiling:grant-invalid
+        (multiple-value-bind (text signature) (ceiling:decode-grant-token forged)
+          (ceiling:verify-grant (ceiling:make-ed25519-verifier pub) text signature))))))
+
+(test a-malformed-grant-token-is-refused-with-a-reason
+  ;; The last four have letters or a digit from outside ASCII in the payload or the signature.
+  (dolist (bad (list "" "no-dot" "a.b.c" ".abc" "abc." "a+b.c/d" "abcde.QUJD" nil 42
+                     "QUJD.QUJé" "QUJD.ＱＵＪＤ" "ＱＵＪＤ.QUJD" "QUJD.QUJ٣"))
+    (is (eq :refused (handler-case (progn (ceiling:decode-grant-token bad) :accepted)
+                       (ceiling:grant-invalid (e)
+                         (if (search "base64url" (ceiling:grant-invalid-reason e)) :refused :no-reason))))
+        "~S was not refused with the reason" bad)))
 
 ;;; --- the ledger ------------------------------------------------------------
 
@@ -9404,3 +9459,46 @@ comes after the correction."
           (is (search "Has a dog called Rui." text) "~A" text)
           (is (null (search "Lives in Porto." text)) "the replaced value is gone: ~A" text)
           (is (= 0 (obs:observer-failures second))))))))
+
+;;; --- moving a conversation to a rebuilt agent (#67, #1011's review) ---------------------
+
+(in-suite praxeon)
+
+(defparameter +moved-agent-slots+
+  '("CONTEXT" "RESULT-STORE" "CONVERSATION" "RESULT-INDEX" "CLEARED" "GUARD" "UNTRUSTED-INPUTS"
+    "UNTRUSTED-CALLS" "CONVERSATION-TAINT" "THREAD-MEMORY" "HISTORY"))
+
+(defparameter +kept-agent-slots+
+  '("NAME" "PROVIDER" "SYSTEM-PROMPT" "CACHE-SYSTEM" "MEANS" "HISTORY-BUDGET" "MAX-TOKENS"
+    "OFFLOAD-THRESHOLD" "CLEAR-BUDGET" "CLEAR-TARGET" "KEEP-RECENT" "NEVER-CLEAR" "TAINT-SCOPE"))
+
+(test every-agent-slot-is-either-moved-or-kept-by-move-conversation
+  "A slot added to the agent fails this test until it is listed here as conversation state, which
+MOVE-CONVERSATION must then copy, or as configuration."
+  (let ((slots (mapcar (lambda (d) (symbol-name (sb-mop:slot-definition-name d)))
+                       (sb-mop:class-slots (find-class 'praxeon/actor::agent)))))
+    (is (null (set-difference slots (append +moved-agent-slots+ +kept-agent-slots+)
+                              :test #'string=))
+        "slots in neither list: ~S"
+        (set-difference slots (append +moved-agent-slots+ +kept-agent-slots+) :test #'string=))))
+
+(test move-conversation-carries-the-conversation-and-keeps-the-new-configuration
+  (let ((from (actor:make-agent :name "from" :system-prompt "old"))
+        (to (actor:make-agent :name "to" :system-prompt "new")))
+    (setf (actor:agent-history from) (list "m1" "m2")
+          (praxeon/actor::agent-context from) (ctx:make-context)
+          (praxeon/actor::agent-result-store from) (list :store)
+          (praxeon/actor::agent-conversation from) "conv-1"
+          (praxeon/actor::agent-guard from) (list :guard)
+          (praxeon/actor::agent-untrusted-inputs from) (list "task")
+          (praxeon/actor::agent-conversation-taint from) :untrusted
+          (praxeon/actor::agent-thread-memory from) (list :memory))
+    (setf (gethash "c1" (praxeon/actor::agent-untrusted-calls from)) t
+          (gethash "c2" (praxeon/actor::agent-result-index from)) :described
+          (gethash "c3" (praxeon/actor::agent-cleared from)) t)
+    (is (eq to (actor:move-conversation from to)))
+    (dolist (name +moved-agent-slots+)
+      (let ((reader (find-symbol (format nil "AGENT-~A" name) :praxeon/actor)))
+        (is (eq (funcall reader from) (funcall reader to)) "~A was not moved" name)))
+    (is (string= "to" (actor:agent-name to)))
+    (is (string= "new" (actor:agent-system-prompt to)) "the new agent's configuration was replaced")))

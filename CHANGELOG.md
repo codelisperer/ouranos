@@ -34,6 +34,18 @@ its tag.
     `query-keys=unparsed`, with no text from it.
   - Log tooling that searched for `query` should search for `query-keys`.
   - No setting brings the raw query back.
+- **praxeon/web: the chat page's message and poll routes now work from a cursor, and the
+  page's own message comes back through the poll** (part of #67). A page built on `make-app`'s
+  routes, rather than on its `GET /`, has to change:
+  - `GET /api/progress` takes `after`, the index of the first transcript item the page has not
+    shown, and returns the items from there plus an out-of-band `<input id="px-cursor">` holding
+    the next index. Without `after` it returns no items and the newest index. `GET /` renders the
+    field and sends it with each poll (`hx-include="#px-cursor"`).
+  - `POST /api/message` from the page returns an empty body and the header `HX-Trigger: px-poll`.
+    It no longer returns the user's bubble; the poll returns it, so every tab on the conversation
+    shows it. The page's poll runs on `px-poll` as well as on its timer.
+  - The JSON path (`Accept: application/json`) still answers `{"reply": ...}`. Its turns now
+    appear on a page open on the same conversation, and count towards its token total.
 
 - **`scripts/build-desktop-app.lisp` stops, instead of warning and exiting 0, when the bundle
   needs hyperion-view or a library the runtime links against and it is missing** (#956). For an
@@ -1090,6 +1102,114 @@ its tag.
     is not JSON, signals **`praxeon/conditions:provider-request-failed`**, rather than returning
     what arrived as the whole reply. A tool call cut off halfway through its arguments signals it
     too. Of the body of a non-2xx streamed request, the first 64 KiB are read and kept.
+- **praxeon/web: another site's page can show the chat in a frame** (part of #67). `make-app`,
+  `start` and `serve-forever` take `:embed-origins`, a list of origins such as
+  `"https://app.example.com"`, which needs `:grant-verifier`. With it:
+  - `GET /embed.js` serves a loader that a host page includes with one `<script src>` tag. Its
+    `data-grant-url` names a URL on the host's own origin that answers a POST with
+    `{"grant": TOKEN}` for the signed-in viewer. Without `data-container`, it docks a launcher
+    button and the panel it opens at the side `data-position` names (`right` by default);
+    `data-label` sets the button's text. With `data-container`, the frame fills that element.
+    Its styles use class names starting with `praxeon-embed-`.
+  - `GET /embed/panel` is the chat for the frame. It needs no session. It asks its host page for
+    a grant with `postMessage`, takes one only from its parent and only from an origin in
+    `:embed-origins`, and exchanges it at `POST /embed/session`. Until then the composer is
+    disabled and nothing is polled or streamed. A 401 makes it ask for a new grant. The grant is
+    never put in a URL.
+  - The panel's `Content-Security-Policy` names `:embed-origins` in `frame-ancestors`, and it
+    sends no `X-Frame-Options`. Every other route keeps the defaults, so it still cannot be
+    framed.
+  - `make-app` refuses `:embed-origins` that are not a list of lowercase `http://` or `https://`
+    origins with no path.
+  - Nothing in the panel or the loader loads an AMD or UMD loader or assigns `window.htmx`, so a
+    host page's own htmx is left alone.
+  - The chat page's parts (the stylesheet, the bubbles, the composer, the gate and the scripts)
+    moved to a new system, `praxeon/chat-ui`, which `praxeon/web` depends on. The page is
+    unchanged, except that the Send button now has the id `px-send`.
+
+- **hyperion/security-headers: a route can drop a header by setting it to NIL** (part of #67). A
+  response that sets one of the headers `wrap-security-headers` manages to NIL is sent without
+  that header; before, the NIL entry was passed on. The embed panel uses this to drop
+  `X-Frame-Options`.
+
+- **praxeon/web: the chat page can read its updates from a Server-Sent Events stream instead of
+  polling** (part of #67). `make-app` takes `:transport`, `:poll` (the default) or `:sse`. With
+  `:sse`, `GET /api/events` streams what `GET /api/progress` would answer, whenever it changes:
+  new transcript items, the status line and the token count. Each event's id is the page's
+  cursor, so a browser that reconnects sends it back as `Last-Event-ID` and gets nothing twice;
+  a cursor from a conversation that has been replaced gets the whole new transcript, as a poll
+  does. The page opens an `EventSource` instead of polling. A conversation with an open stream is
+  not dropped as idle, and a stream that ends counts as a request to it.
+  - `start` and `serve-forever` take `:transport :auto` (the default), `:poll` or `:sse`. `:auto`
+    streams on `:hunchentoot` and polls on `:woo` and `:uv`. `:sse` is refused on `:woo`, whose
+    handlers all run on one event-loop thread. On `:uv` each open page holds one of the server's
+    workers, two by default, so `:auto` polls there.
+  - With grants, an `EventSource` cannot send the session header. The page asks
+    `POST /embed/stream-ticket`, with the session header, for a ticket, and opens
+    `/api/events?ticket=…`. A ticket can be used once, within 30 seconds
+    (`make-session-table :ticket-seconds`), while its session is open, through
+    `praxeon/web-session:issue-ticket` and `redeem-ticket`. The stream ends when its session does.
+    An open stream does not keep its session from going idle: it checks with
+    `praxeon/web-session:session-open-p`, which does not count as a use.
+  - `praxeon/web` now declares `parenscript`, which hyperion already loads.
+
+- **praxeon/web: a service that takes signed grants and gives each browser a session** (part of
+  #67, for #90). `make-app`, `start` and `serve-forever` take `:grant-verifier` (a
+  `praxeon/ceiling` verifier), `:audience` (the name this service's grants are minted for) and
+  `:sessions` (a `praxeon/web-session:make-session-table`, which sets `:idle-seconds`, 30 minutes
+  by default, and `:max-seconds`, 12 hours). With them, `POST /embed/session` takes
+  `Authorization: Grant <token>` and answers `{"session": ID, "idle_seconds": N, "max_seconds":
+  N}`; every other route needs `Authorization: Session <ID>` and is answered 401 without one.
+  The conversation is the grant's principal's, and `:make-agent` is called with the principal and
+  a grant. Each turn runs on an agent made from the grant of the session that sent the message:
+  when that grant's capabilities, token cap or call cap differ from the ones the agent was made
+  from, `:make-agent` is called again and the conversation moves to the new agent, so a grant
+  with fewer capabilities takes effect at the next turn and the transcript goes on. A grant can
+  be exchanged for sessions any number of times until it expires, so keep grants short-lived.
+  `make-app` refuses `:grant-verifier` without a non-empty `:audience`, because a grant
+  minted for another service would otherwise open a session here. A grant for another audience,
+  or with no principal, is refused even if the app's own verifier accepts it.
+- **praxeon/web: a key's conversation expires when it is idle, and every transcript item names
+  its turn** (part of #67). With `:conversation-key` or `:grant-verifier`, a key's conversation
+  and its agent are dropped once no request has reached them for `:conversation-idle-seconds`
+  (a new argument to `make-app`, `start` and `serve-forever`; 30 minutes by default, the same as
+  a session's idle limit), no turn of theirs is running, and their last turn ended at least that
+  long ago, so the reply to a turn that ran past the limit is kept for the page. The key's next
+  request finds its
+  conversation stale, calls `:make-agent` again and starts with an empty transcript, and any
+  request removes every stale conversation if a minute has passed since that was last done.
+  Before this, conversations were kept for the app's lifetime. A page still open on a dropped
+  conversation is not left showing nothing: the page's cursor now names its conversation, and
+  the next poll from the old one replaces the transcript with the new conversation's under a
+  notice that a new conversation has started. `make-app` returns, as a second value, a function
+  that returns how many conversations it holds. Every transcript item now carries `:turn N`, numbered from 1 in each
+  conversation, so a `:turn-ended` item says which turn it ends when two tabs send messages
+  close together. `:make-agent` no longer runs under the lock every key's requests take, so a
+  slow first request holds up only the requests with its own key; two first requests with one
+  key still make one agent. A turn's reply and its `:turn-ended` item are now published, and its
+  status line cleared, before the next queued turn starts.
+- **praxeon/actor: `move-conversation` moves an agent's conversation onto another agent** (part
+  of #67). It copies the history and the state needed to read it as before: retrieved context,
+  offloaded and cleared tool results with their store, the untrusted-content records and the
+  turn guard, and the thread memory. The new agent keeps its own provider, system prompt, means
+  and budgets.
+- **praxeon/ceiling: a grant as one string** (part of #67). `encode-grant-token` signs a grant's
+  JSON with an `aion/signature` private key and returns `base64url(payload).base64url(signature)`,
+  unpadded. `decode-grant-token` returns the payload and signature for `verify-grant`, and signals
+  `grant-invalid` for anything else. `make-ed25519-verifier` now also takes an `aion/signature`
+  public key.
+
+- **praxeon/web: one conversation per key, a transcript every tab reads in full, and an item
+  that marks the end of each turn** (part of #67). `make-app`, `start` and `serve-forever` take
+  `:conversation-key`, a function of the Clack env that returns the request's key (normally the
+  signed-in principal's id), and `:make-agent`, a function of a key that returns a fresh agent.
+  Requests with an `equal` key share a conversation; a request whose key is NIL is answered 403.
+  Without `:conversation-key` there is one conversation over `:agent`, as before, and `make-app`
+  refuses `:conversation-key` without `:make-agent`, or with `:agent`. Each conversation
+  publishes its transcript to a `hyperion/channel` as items (`:user`, `:assistant`, and one
+  `:turn-ended` with `:outcome :ok` or `:error` per turn), so two tabs on one conversation both
+  see every message; before, whichever tab polled first took it. A turn's reply is now rendered
+  by the poll that reads it. `praxeon/web` no longer depends on `sb-concurrency`.
 
 - **praxeon/image: the generate-image means offers the model a `mask`, so it can change only part
   of an image** (#946). With `:resolve-reference` and a provider that takes a mask
@@ -2648,6 +2768,14 @@ its tag.
   "Long-running calls".
 
 ### Fixed
+
+- **praxeon/ceiling: `verify-grant` refuses a signed payload that is not a grant** (part of #67).
+  A payload that is not a JSON object, a `principal`, `group` or `audience` that is not a string,
+  or `capabilities` that is not an array of strings now signals `grant-invalid`, which
+  `praxeon/web` answers 401. Before, each signalled another error, answered 500.
+- **praxeon/web: `GET /api/reload-epoch` and `GET /api/dev-error` exist only with `:dev t`**
+  (part of #67). Before, every app answered them, without a session even when the app takes
+  grants. The hot-reload poller that reads them is on the page only in a dev app.
 
 - **cons: in a project made with `cons init --template web --db`, a pool that cannot be closed
   during cleanup no longer hides the error that caused the cleanup, and `*pool*` is always

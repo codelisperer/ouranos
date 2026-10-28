@@ -43,6 +43,20 @@
     (is (= 1 (%sh-count h :x-frame-options)) "a string-keyed header is respected")
     (is (equal "nosniff" (getf h :x-content-type-options)) "the others still arrive")))
 
+(test a-header-the-app-sets-to-nil-is-left-off-the-response
+  ;; A route framed by named origins drops X-Frame-Options and sends its own frame-ancestors.
+  (let ((h (%sh-headers (hyperion/security-headers:wrap-security-headers
+                         (%sh-app (list :x-frame-options nil
+                                        :content-security-policy
+                                        "frame-ancestors https://app.example"
+                                        "Referrer-Policy" nil
+                                        :x-other nil))))))
+    (is (zerop (%sh-count h :x-frame-options)) "neither the default nor the NIL entry is sent")
+    (is (zerop (%sh-count h :referrer-policy)) "a string-keyed NIL counts too")
+    (is (equal "frame-ancestors https://app.example" (getf h :content-security-policy)))
+    (is (equal "nosniff" (getf h :x-content-type-options)) "the others still arrive")
+    (is (= 1 (%sh-count h :x-other)) "a header the wrapper does not manage is left alone")))
+
 (test each-header-can-be-replaced-or-turned-off
   (let ((h (%sh-headers (hyperion/security-headers:wrap-security-headers
                          (%sh-app)
