@@ -1019,6 +1019,12 @@ its tag.
 
 ### Added
 
+- **aion/uv/net: a connection has a `connection-data` slot for the code that owns it** (#125).
+  Nothing in `aion/uv/net` reads or sets it. `hyperion/server-uv` keeps each connection's
+  transport there: every octet the server sends or receives now goes through that transport,
+  which for a server without TLS passes the bytes to `aion/uv/net` unchanged. This is the first
+  step towards `:tls` on `hyperion/server-uv:start`; a server's behaviour does not change.
+
 - **praxeon/image: the generate-image means offers the model a `mask`, so it can change only part
   of an image** (#946). With `:resolve-reference` and a provider that takes a mask
   (`image-provider-accepts-mask-p`, true for OpenAI), the tool schema offers `mask`: a reference,

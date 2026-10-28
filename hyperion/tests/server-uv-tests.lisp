@@ -3148,3 +3148,163 @@ stubbed out, as in aion/uv's control for #877."
     (is (eq :freed (uv:loop-freed-p loop)) "a later STOP frees it")
     (is (null (srv::server-shards server)))
     (cffi:foreign-free handle)))
+
+;;; --- the transport (#125) ----------------------------------------------------
+;;;
+;;; Every octet server-uv sends or receives goes through the connection's transport, which is
+;;; what lets TLS be added as a transport without touching the HTTP code. The first test starts
+;;; the server with a transport that counts what passes through it, makes one request of each
+;;; kind of response, and compares the counts with what the client sent and received. A write
+;;; that reached the socket some other way would make the client's count larger than the
+;;; transport's. The second checks that what the server serves is what TRANSPORT-RECEIVE
+;;; returned, not what arrived on the socket, which is the property decryption depends on.
+
+(defclass %counting-transport (srv::plaintext-transport)
+  ((sent :initform 0 :accessor %sent)
+   (received :initform 0 :accessor %received)
+   (freed :initform 0 :accessor %freed))
+  (:documentation "The plaintext transport, counting octets each way and how often it is
+freed. One per connection, so a count belongs to one connection."))
+
+(defun %octet-count (octets)
+  "How many octets OCTETS, a vector or a list of vectors, puts on the wire."
+  (if (listp octets) (reduce #'+ octets :key #'length) (length octets)))
+
+(defmethod srv::transport-write :before ((tr %counting-transport) conn octets
+                                         &key on-complete on-error)
+  (declare (ignore conn on-complete on-error))
+  (incf (%sent tr) (%octet-count octets)))
+
+(defmethod srv::transport-receive :before ((tr %counting-transport) conn octets)
+  (declare (ignore conn))
+  (incf (%received tr) (length octets)))
+
+(defmethod srv::transport-free :after ((tr %counting-transport) conn)
+  (declare (ignore conn))
+  (incf (%freed tr)))
+
+(defun %call-with-transports (class function)
+  "Call FUNCTION with a function that returns the transports made so far, while a server
+started inside FUNCTION gives each connection a new instance of CLASS."
+  (let* ((made '())
+         (lock (bt:make-lock "transports"))
+         (srv::*%transport-maker*
+           (lambda (conn)
+             (declare (ignore conn))
+             (let ((tr (make-instance class)))
+               (bt:with-lock-held (lock) (push tr made))
+               tr))))
+    (funcall function (lambda () (bt:with-lock-held (lock) (copy-list made))))))
+
+(defun %wire-exchange (port pieces &key between)
+  "Write PIECES on one new connection, and read until the server closes it. Before each
+piece after the first, read until BETWEEN has arrived, when it is given, as a client waiting
+for 100 Continue does. Returns (values OCTETS-SENT OCTETS-RECEIVED TEXT-RECEIVED)."
+  (let ((s (make-instance 'sock:inet-socket :type :stream :protocol :tcp))
+        (sent 0)
+        (got (make-string-output-stream)))
+    (unwind-protect
+         (ports:with-deadline (+io-timeout+ (%what (first pieces) port))
+           (sock:socket-connect s #(127 0 0 1) port)
+           (let ((stream (sock:socket-make-stream s :input t :output t
+                                                    :element-type '(unsigned-byte 8))))
+             (loop for (piece . more) on pieces
+                   do (let ((octets (sb-ext:string-to-octets piece :external-format :latin-1)))
+                        (incf sent (length octets))
+                        (write-sequence octets stream)
+                        (force-output stream))
+                      (when (and more between)
+                        (write-string (read-until stream between) got)))
+             (write-string (read-all stream) got)))
+      (ignore-errors (sock:socket-close s)))
+    (let ((text (get-output-stream-string got)))
+      (values sent (length text) text))))
+
+(test every-octet-the-server-sends-or-receives-goes-through-the-transport
+  "#125: one connection for each kind of response the server writes: a body, the head alone
+for HEAD, a streamed body, a file, an interim 100 Continue followed by the response, and the
+400 for a request that is not HTTP. The octets each client received equal those its
+connection's transport wrote, the octets each client sent equal those the transport received,
+and each transport is freed once, when its connection ends."
+  (%with-static-dir (dir file "a file body, served through the file pump")
+    (is (uiop:file-exists-p file) "the file the pump serves exists")
+    (%call-with-transports
+     '%counting-transport
+     (lambda (made)
+       (let ((app (lambda (env)
+                    (let ((path (getf env :path-info)))
+                      (cond ((string= path "/stream")
+                             (funcall (stream-app "alpha" "beta") env))
+                            ((string= path "/echo") (funcall (echo-body-app) env))
+                            ((string= path "/hello.txt") (funcall (static-app dir) env))
+                            (t (list 200 +ok+ (list "plain"))))))))
+         (with-server (port app)
+           (let ((exchanges
+                   (list (list (list (req "GET / HTTP/1.1" "Host: h" "Connection: close")))
+                         (list (list (req "HEAD / HTTP/1.1" "Host: h" "Connection: close")))
+                         (list (list (req "GET /stream HTTP/1.1" "Host: h" "Connection: close")))
+                         (list (list (req "GET /hello.txt HTTP/1.1" "Host: h"
+                                          "Connection: close")))
+                         (list (list (req "POST /echo HTTP/1.1" "Host: h" "Content-Length: 5"
+                                          "Expect: 100-continue" "Connection: close")
+                                     "abcde")
+                               :between +crlfcrlf+)
+                         (list (list (req "NOT A REQUEST LINE")))))
+                 (client-sent 0)
+                 (client-got 0)
+                 (texts '()))
+             (dolist (exchange exchanges)
+               (multiple-value-bind (sent got text) (apply #'%wire-exchange port exchange)
+                 (incf client-sent sent)
+                 (incf client-got got)
+                 (push text texts)))
+             (setf texts (nreverse texts))
+             (is (search "plain" (first texts)) "the body: ~S" (first texts))
+             (is (search "chunked" (third texts) :test #'char-equal) "the stream: ~S" (third texts))
+             (is (search "served through the file pump" (fourth texts))
+                 "the file: ~S" (fourth texts))
+             (is (and (search "100 Continue" (fifth texts)) (search "abcde" (fifth texts)))
+                 "the interim and the echo: ~S" (fifth texts))
+             (is (search " 400 " (sixth texts)) "the refusal: ~S" (sixth texts))
+             (is (%wait-until (lambda ()
+                                (let ((all (funcall made)))
+                                  (and (= 6 (length all))
+                                       (every (lambda (tr) (plusp (%freed tr))) all)))))
+                 "six connections, each with its own transport, all ended")
+             (let ((all (funcall made)))
+               (is (= client-got (reduce #'+ all :key #'%sent))
+                   "the client received ~D octets and the transports wrote ~D"
+                   client-got (reduce #'+ all :key #'%sent))
+               (is (= client-sent (reduce #'+ all :key #'%received))
+                   "the client sent ~D octets and the transports received ~D"
+                   client-sent (reduce #'+ all :key #'%received))
+               (is (every (lambda (tr) (= 1 (%freed tr))) all)
+                   "each transport is freed once: ~S" (mapcar #'%freed all))))))))))
+
+(defclass %rewriting-transport (srv::plaintext-transport) ()
+  (:documentation "The plaintext transport, except that it serves /after! where /before
+arrived. A stand-in for decryption: what is served must be what the transport returned."))
+
+(defmethod srv::transport-receive ((tr %rewriting-transport) conn octets)
+  (declare (ignore conn))
+  (let* ((text (sb-ext:octets-to-string octets :external-format :latin-1))
+         (at (search "/before" text)))
+    (sb-ext:string-to-octets (if at
+                                 (concatenate 'string (subseq text 0 at) "/after!"
+                                              (subseq text (+ at (length "/before"))))
+                                 text)
+                             :external-format :latin-1)))
+
+(test the-server-serves-what-the-transport-received-not-what-arrived
+  "#125: a TLS transport decrypts in TRANSPORT-RECEIVE, so the HTTP code must parse what that
+returns. Here the transport turns /before into /after!, and the app answers with the path it
+was given. The control is the same request with no transport, which is answered /before."
+  (%call-with-transports
+   '%rewriting-transport
+   (lambda (made)
+     (declare (ignore made))
+     (with-server (port (echo-path-app))
+       (is (string= "/after!" (body-of (get* port "GET /before HTTP/1.1" "Host: h")))))))
+  (with-server (port (echo-path-app))
+    (is (string= "/before" (body-of (get* port "GET /before HTTP/1.1" "Host: h")))
+        "control: without the transport the path arrives as sent")))

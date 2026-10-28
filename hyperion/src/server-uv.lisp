@@ -239,6 +239,80 @@ silently become two octets and the Content-Length we just computed would be wron
 is ISO-8859-1 by definition (RFC 9112), so this is the encoding that round-trips it."
   (sb-ext:string-to-octets string :external-format :latin-1))
 
+;;; --- the transport (#125) ----------------------------------------------------
+;;;
+;;; Every byte server-uv sends or receives goes through the connection's TRANSPORT: %SEND,
+;;; %SATURATED-P and %SHUTDOWN-WRITE below, TRANSPORT-RECEIVE in the read callback, and
+;;; TRANSPORT-FREE in %FINISH. The plaintext transport passes bytes to aion/uv/net unchanged,
+;;; and is what every connection uses unless START was given another. TLS is the other one:
+;;; it encrypts in TRANSPORT-WRITE, decrypts in TRANSPORT-RECEIVE, sends close_notify before
+;;; the half-close and frees its mbedTLS state in TRANSPORT-FREE, and nothing else in this
+;;; file needs to know. A connection's transport is kept in NET:CONNECTION-DATA, because most
+;;; of the writers below are given only the connection.
+
+(defclass transport () ()
+  (:documentation "How a connection's bytes reach the socket. See the section header."))
+
+(defclass plaintext-transport (transport) ()
+  (:documentation "Bytes go to the socket as they are: HTTP without TLS."))
+
+(defparameter +plaintext+ (make-instance 'plaintext-transport)
+  "The one plaintext transport. It holds no state, so every connection can share it.")
+
+(defgeneric transport-write (transport conn octets &key on-complete on-error)
+  (:documentation "Queue OCTETS, or a list of octet vectors written as one, on CONN.
+ON-COMPLETE and ON-ERROR are NET:WRITE-BYTES' callbacks, and run on the loop thread."))
+
+(defgeneric transport-receive (transport conn octets)
+  (:documentation "OCTETS arrived on CONN. Returns the octets to serve, or NIL when there are
+none yet, as when a TLS record is still incomplete."))
+
+(defgeneric transport-saturated-p (transport conn)
+  (:documentation "Whether CONN has queued more than it should, so its producer must wait."))
+
+(defgeneric transport-shutdown-write (transport conn &key on-complete on-error)
+  (:documentation "End CONN's sending side once what is queued has gone out."))
+
+(defgeneric transport-free (transport conn)
+  (:documentation "Release whatever TRANSPORT holds for CONN. Called once, from %FINISH,
+before the handle is closed."))
+
+(defmethod transport-write ((transport plaintext-transport) conn octets &key on-complete on-error)
+  (net:write-bytes conn octets :on-complete on-complete :on-error on-error))
+
+(defmethod transport-receive ((transport plaintext-transport) conn octets)
+  (declare (ignore conn))
+  octets)
+
+(defmethod transport-saturated-p ((transport plaintext-transport) conn)
+  (net:saturated-p conn))
+
+(defmethod transport-shutdown-write ((transport plaintext-transport) conn &key on-complete on-error)
+  (net:shutdown-write conn :on-complete on-complete :on-error on-error))
+
+(defmethod transport-free ((transport plaintext-transport) conn)
+  (declare (ignore conn))
+  nil)
+
+(defun %transport (conn)
+  "CONN's transport: the one START gave it, or +PLAINTEXT+."
+  (or (net:connection-data conn) +plaintext+))
+
+(defun %send (conn octets &key on-complete on-error)
+  "Write OCTETS on CONN through its transport. Every write in this file is a call to this."
+  (transport-write (%transport conn) conn octets :on-complete on-complete :on-error on-error))
+
+(defun %saturated-p (conn)
+  (transport-saturated-p (%transport conn) conn))
+
+(defun %shutdown-write (conn &key on-complete on-error)
+  (transport-shutdown-write (%transport conn) conn :on-complete on-complete :on-error on-error))
+
+(defvar *%transport-maker* nil
+  "NIL, or a function of an accepted connection that returns its TRANSPORT. START reads it
+once, on the thread that calls START, so a test can bind it around START (#125). The :TLS
+option will be the first caller that sets one.")
+
 (defun %body-octets (body)
   "A Ring response body as octets. A string is UTF-8 (what a handler means by a string); an
 octet vector passes through; NIL is empty; a PATHNAME is read from disk.
@@ -363,14 +437,14 @@ as pieces, not joined into a new vector first (#430)."
   (multiple-value-bind (pieces reason) (%encode-response status headers body keep-alive)
     (cond
       (pieces
-       (net:write-bytes conn pieces)
+       (%send conn pieces)
        keep-alive)
       (t
        ;; The handler produced a header we will not put on the wire. That is a bug in the
        ;; application, reported as a 500 -- never sanitised, never sent. NIL, because
        ;; H1:ENCODE-ERROR says Connection: close and the socket has to agree with it.
        (log:warn "server-uv: response refused" :reason reason)
-       (net:write-bytes conn (%latin1 (h1:encode-error 500)))
+       (%send conn (%latin1 (h1:encode-error 500)))
        nil))))
 
 (defun %write-head-only (conn status headers length keep-alive)
@@ -388,11 +462,11 @@ octets as the start of the next response, so a body here would have been taken f
                       status (%head-strings headers 'h1:encode-head-flat) length keep-alive))))
     (cond
       ((h1:encode-ok? encoded)
-       (net:write-bytes conn (%latin1 (h1:encode-text encoded)))
+       (%send conn (%latin1 (h1:encode-text encoded)))
        keep-alive)
       (t
        (log:warn "server-uv: response refused" :reason (h1:encode-reason encoded))
-       (net:write-bytes conn (%latin1 (h1:encode-error 500)))
+       (%send conn (%latin1 (h1:encode-error 500)))
        nil))))
 
 (defun %file-size (path)
@@ -435,7 +509,7 @@ case's work early, never decide something differently."
       result))
 
 (defun %write-error (conn status)
-  (net:write-bytes conn (%latin1 (h1:encode-error status))))
+  (%send conn (%latin1 (h1:encode-error status))))
 
 (defparameter +crlf-octets+
   (make-array 2 :element-type '(unsigned-byte 8) :initial-contents '(13 10))
@@ -520,12 +594,12 @@ three pieces that NET:WRITE-BYTES copies into one buffer (#430)."
       ;; thing ENCODE-CHUNK-HEADER rejects. Checked rather than assumed, because an
       ;; unframed write here desynchronises the connection instead of failing.
       (error 'stream-write-failed :reason (h1:encode-reason header)))
-    (net:write-bytes (so-conn so)
-                     (list (%latin1 (h1:encode-text header)) octets +crlf-octets+)
-                     :on-complete (lambda (&rest _) (declare (ignore _))
-                                    (%stream-settle so))
-                     :on-error (lambda (&rest _) (declare (ignore _))
-                                 (%stream-settle so)))))
+    (%send (so-conn so)
+           (list (%latin1 (h1:encode-text header)) octets +crlf-octets+)
+           :on-complete (lambda (&rest _) (declare (ignore _))
+                          (%stream-settle so))
+           :on-error (lambda (&rest _) (declare (ignore _))
+                       (%stream-settle so)))))
 
 (defun %stream-settle (so)
   "One outstanding write finished, however it finished. Wakes a waiting producer."
@@ -539,7 +613,7 @@ Called only off the loop thread. On the loop thread this cannot be done and must
 faked: the thread that would drain the queue is the thread that would be waiting, so
 waiting there is a deadlock rather than a delay. The loop-thread path lets the write queue
 grow instead -- which is the inline dispatcher's documented cost, not a new one."
-  (when (net:saturated-p (so-conn so))
+  (when (%saturated-p (so-conn so))
     (let ((sem (so-settled so)))
       (unless (bt:wait-on-semaphore sem :timeout *stream-write-timeout-seconds*)
         (error 'stream-write-failed
@@ -618,7 +692,7 @@ the only way left to say `this response is wrong' once its head is on the wire."
       (cond
         ((conn-state-done state) nil)
         (ok
-         (net:write-bytes conn (%latin1 (coalton:coalton h1:last-chunk)))
+         (%send conn (%latin1 (coalton:coalton h1:last-chunk)))
          (if (so-keep-alive so)
              (%resume conn (so-app so) state)
              (%close-after conn state)))
@@ -666,14 +740,14 @@ message."
       ((and (%sse-response-p headers) (eq (%dispatcher state) *inline-dispatch*))
        (log:error "server-uv: refused an SSE stream on the loop thread"
                   :fix "set *DISPATCH* to (POOL-DISPATCH (POOL:MAKE-POOL ...))")
-       (net:write-bytes conn (%latin1 (h1:encode-error 500)))
+       (%send conn (%latin1 (h1:encode-error 500)))
        nil)
       ((not (h1:encode-ok? encoded))
        (log:warn "server-uv: streaming response refused" :reason (h1:encode-reason encoded))
-       (net:write-bytes conn (%latin1 (h1:encode-error 500)))
+       (%send conn (%latin1 (h1:encode-error 500)))
        nil)
       (t
-       (net:write-bytes conn (%latin1 (h1:encode-text encoded)))
+       (%send conn (%latin1 (h1:encode-text encoded)))
        (let* ((loop* (net:connection-loop conn))
               (so (%make-stream-out :conn conn :app app :state state :loop loop*
                                     :keep-alive keep-alive))
@@ -798,11 +872,11 @@ the whole body was held in memory."
           (incf (fo-written fo) (length body))
           (when *file-write-observer*
             (funcall *file-write-observer* (length body)))
-          (net:write-bytes (fo-conn fo) buffer
-                           :on-complete (lambda (&rest _) (declare (ignore _))
-                                          (%file-continue fo))
-                           :on-error (lambda (&rest _) (declare (ignore _))
-                                       (%file-finish fo)))))))
+          (%send (fo-conn fo) buffer
+                 :on-complete (lambda (&rest _) (declare (ignore _))
+                                (%file-continue fo))
+                 :on-error (lambda (&rest _) (declare (ignore _))
+                             (%file-finish fo)))))))
 
 (defun %file-continue (fo)
   "One piece has settled; read and write the next. LOOP THREAD ONLY -- a write callback runs
@@ -909,7 +983,7 @@ it on the way out."
        ;; application bug, reported as a 500 and never sanitised. NIL, because
        ;; H1:ENCODE-ERROR says Connection: close and the socket must agree.
        (log:warn "server-uv: response refused" :reason (h1:encode-reason encoded))
-       (net:write-bytes conn (%latin1 (h1:encode-error 500)))
+       (%send conn (%latin1 (h1:encode-error 500)))
        nil)
       (t
        ;; THE REQUEST IS STILL IN FLIGHT, and saying so is what keeps a pipelined peer
@@ -1162,6 +1236,11 @@ Idempotent, and the only place a connection's handle is closed."
     (%timer-release state)
     (let ((live (conn-state-live state)))
       (when live (remhash conn live)))
+    (let ((transport (%transport conn)))
+      (setf (net:connection-data conn) nil)
+      (handler-case (transport-free transport conn)
+        (error (e)
+          (log:warn "server-uv: freeing a connection's transport failed" :condition (type-of e)))))
     (ignore-errors (uv:close-handle conn))))
 
 (defun %linger (conn state)
@@ -1183,21 +1262,21 @@ already ended its side, otherwise when it does or after a grace period. Once onl
   (unless (or (conn-state-closed state) (conn-state-shutdown state))
     (setf (conn-state-shutdown state) :pending)
     (handler-case
-        (net:shutdown-write conn
-                            :on-complete (lambda (size)
-                                           (declare (ignore size))
-                                           (setf (conn-state-shutdown state) :done)
-                                           ;; Already finished -- by STOP, or by an error
-                                           ;; while the shutdown was pending: nothing to
-                                           ;; wait for, and a linger timer made now would
-                                           ;; never be released.
-                                           (unless (conn-state-closed state)
-                                             (if (conn-state-peer-ended state)
-                                                 (%finish conn state)
-                                                 (%linger conn state))))
-                            :on-error (lambda (e)
-                                        (declare (ignore e))
-                                        (%finish conn state)))
+        (%shutdown-write conn
+                         :on-complete (lambda (size)
+                                        (declare (ignore size))
+                                        (setf (conn-state-shutdown state) :done)
+                                        ;; Already finished -- by STOP, or by an error
+                                        ;; while the shutdown was pending: nothing to
+                                        ;; wait for, and a linger timer made now would
+                                        ;; never be released.
+                                        (unless (conn-state-closed state)
+                                          (if (conn-state-peer-ended state)
+                                              (%finish conn state)
+                                              (%linger conn state))))
+                         :on-error (lambda (e)
+                                     (declare (ignore e))
+                                     (%finish conn state)))
       (error () (%finish conn state)))))
 
 (defun %peer-ended (conn state)
@@ -1412,7 +1491,7 @@ body, and the buffer index just past the trailer section."
 checked rather than assumed -- an unframed string on the wire desynchronises the connection."
   (let ((encoded (h1:encode-interim status)))
     (when (h1:encode-ok? encoded)
-      (net:write-bytes conn (%latin1 (h1:encode-text encoded))))))
+      (%send conn (%latin1 (h1:encode-text encoded))))))
 
 (defun %complete (conn app state result keep-alive &optional head-request)
   "Write the response for the request in flight, then resume the connection.
@@ -1454,7 +1533,7 @@ written into a closed socket."
                      (%complete-response conn app state (encoded-result result) keep-alive
                                          head-request)
                      (handler-case
-                         (progn (net:write-bytes conn (encoded-pieces result))
+                         (progn (%send conn (encoded-pieces result))
                                 (encoded-keep-alive result))
                        (error (e)
                          (log:error "server-uv: response could not be written"
@@ -1828,6 +1907,7 @@ Clack -- owning the socket is what makes it available at all."
                         (%resolve-scheme (or scheme *default-scheme*) requested)))
          (loops (if (eq scheme :single) 1 requested))
          (drain (list nil))
+         (transport-maker *%transport-maker*)
          (handoffs (list 0))
          (shards (coerce (loop for i below loops
                                collect (%make-shard :index i :loop (uv:make-loop)))
@@ -1848,10 +1928,13 @@ Clack -- owning the socket is what makes it available at all."
                (let ((state (%make-conn-state :live (shard-live shard) :dispatch dispatch
                                               :drain drain)))
                  (setf (gethash conn (shard-live shard)) state)
+                 (when transport-maker
+                   (setf (net:connection-data conn) (funcall transport-maker conn)))
                  (net:start-reading
                   conn
                   (lambda (octets connection)
-                    (%serve connection app state octets))
+                    (let ((plain (transport-receive (%transport connection) connection octets)))
+                      (when plain (%serve connection app state plain))))
                   ;; Both ways the peer can end the connection reach %FINISH, which releases
                   ;; the timer (a live timer holds the loop open) and closes the handle (#262).
                   ;; The orderly one goes through %SHUTDOWN first.

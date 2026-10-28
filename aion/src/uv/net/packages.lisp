@@ -103,7 +103,7 @@ return; see the ref/unref discussion in aion/uv's introspect.lisp and ask
    #:listen-tcp #:connect-tcp #:listen-pipe #:connect-pipe #:make-pipe-connection
    ;; one server on more than one loop (#463); Unix only
    #:listen-copy #:detach-socket #:adopt-tcp-socket
-   #:connection-pointer
+   #:connection-pointer #:connection-data
    ;; reading, with the pause/resume pair that makes backpressure real
    #:start-reading #:stop-reading #:pause-reading #:resume-reading #:reading-p #:paused-p
    ;; writing

@@ -72,7 +72,10 @@ UV-ERROR family."))
   (read-buffer nil)
   (high-water-mark +default-high-water-mark+)
   (low-water-mark +default-low-water-mark+)
-  (drain-hooks '()))
+  (drain-hooks '())
+  ;; Whatever the code that owns this connection keeps with it, such as hyperion/server-uv's
+  ;; transport (#125). Nothing in aion/uv/net reads or sets it.
+  (data nil))
 
 (defun reading-p (connection) (connection-reading connection))
 (defun paused-p (connection) (connection-paused connection))
