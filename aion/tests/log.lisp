@@ -342,6 +342,25 @@ to DETAILS."
                  (%fail-with-a-secret "SECRET-ARG"))
              (cl:error () nil))
            (let ((line (get-output-stream-string out)))
+             (is (search "request failed" line) "the line was written: ~A" line)
              (is (null (search "SECRET-VALUE" line)) "~A" line)
              (is (null (search "SECRET-ARG" line)) "~A" line)))
+      (log:setup :env :dev :level :info))))
+
+(test a-condition-given-as-a-field-is-logged-by-its-type
+  "#1013: a caller that passes a condition itself as a field value, instead of its
+CONDITION-TYPE, still gets the type and not the report. The control is the same report passed
+as a string, which is written as it is."
+  (let ((out (make-string-output-stream))
+        (c (make-condition 'simple-error :format-control "the row held SECRET-VALUE")))
+    (unwind-protect
+         (progn
+           (log:setup :env :prod :level :info :stream out)
+           (log:warn "call failed" :condition c)
+           (let ((line (get-output-stream-string out)))
+             (is (search "COMMON-LISP::SIMPLE-ERROR" line) "the type: ~A" line)
+             (is (null (search "SECRET-VALUE" line)) "not the report: ~A" line))
+           (log:warn "call failed" :condition (princ-to-string c))
+           (is (search "SECRET-VALUE" (get-output-stream-string out))
+               "control: the report given as a string is written"))
       (log:setup :env :dev :level :info))))

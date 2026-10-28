@@ -27,7 +27,7 @@ its tag.
     not turn it on.
   - **Other log lines with a report.** These now carry the condition's type through the new
     `aion/log:condition-type` instead of its report:
-    - `hyperion/server-uv`'s nine error and debug lines that had `:condition` (for example "server-uv: handler signalled"), and its "a loop could not be closed" line, whose `:error` became `:condition`;
+    - `hyperion/server-uv`'s eight error and debug lines that had `:condition` (for example "server-uv: handler signalled"), and its "a loop could not be closed" line, whose `:error` became `:condition`;
     - `praxeon`'s "llm request failed" lines, whose `:error` became `:condition`.
 
 - **MCP resources and retrieval passages are untrusted by default, so in a prompt they refuse
