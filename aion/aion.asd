@@ -362,6 +362,7 @@
   :depends-on ("aion/http-client" "fiveam" "usocket" "bordeaux-threads" "aion/test-threads" "quri"
                "aion/test-http"
                "aion/retry"   ; TRANSIENCE and RETRY-AFTER of an HTTP-ERROR (#79)
+               "dexador"      ; the default User-Agent a pinned request sends (#985)
                (:feature (:not :os-windows) "cl+ssl")
                (:feature :os-windows "aion/tls") (:feature :os-windows "aion/windows"))
   :serial t

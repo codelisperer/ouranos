@@ -1,10 +1,11 @@
 ;;;; http1.lisp --- one HTTP/1.1 exchange over a stream this client opened (#536).
 ;;;;
-;;;; On Linux and macOS a pinned request hands its connection to dexador, which writes the
-;;;; request and reads the response. On Windows dexador has no backend that takes a caller's
-;;;; connection (its usocket backend is not loaded there), so the pinned path writes the request
-;;;; and reads the response itself, with this file. It is compiled everywhere, so its tests run on
-;;;; every platform, but only Windows' %REQUEST-PINNED uses it.
+;;;; Every pinned request (:CONNECT-ADDRESS, which FETCH-PUBLIC always uses) writes its request
+;;;; and reads its response with this file, on every platform. Windows has done so since #536,
+;;;; because dexador has no backend there that takes a caller's connection. Linux and macOS
+;;;; handed the connection to dexador until #985: after any failure on a stream it was given,
+;;;; dexador opened a new connection by resolving the URL's host, which bypassed the pinned
+;;;; address, and sent the request again. Here a pinned request uses exactly one connection.
 ;;;;
 ;;;; THE RESPONSE IS UNTRUSTED INPUT. It comes from a server a user named, so every part of it is
 ;;;; read under a limit, and anything outside HTTP/1.1's grammar is refused with
@@ -279,7 +280,9 @@ are left as they are."
   "Write an HTTP/1.1 request for METHOD on URI (a QURI:URI) with HEADERS, an alist, and CONTENT
 to the binary STREAM, and force it out. Host is the URI's host (and port when it is not the
 scheme's default). Connection: close and Accept-Encoding: identity are always sent, and a
-caller's own values for those, for Host and for Content-Length are not."
+caller's own values for those, for Host and for Content-Length are not. User-Agent and Accept
+are dexador's defaults (its *DEFAULT-USER-AGENT* and */*) unless HEADERS sets them, so a pinned
+request identifies itself as one through dexador did (#985)."
   (multiple-value-bind (body default-type) (%content-octets content)
     (let* ((path (let ((p (or (quri:uri-path uri) "")) (q (quri:uri-query uri)))
                    (%encode-target (format nil "~A~@[?~A~]" (if (string= p "") "/" p) q))))
@@ -293,6 +296,12 @@ caller's own values for those, for Host and for Content-Length are not."
            (lines (list (format nil "Host: ~A" (%host-safe host))
                         (format nil "~A ~A HTTP/1.1" (string-upcase (symbol-name method))
                                 (%field-safe path "path")))))
+      (flet ((given-p (name)
+               (find name headers :key (lambda (h) (string (car h))) :test #'string-equal)))
+        (unless (given-p "user-agent")
+          (push (format nil "User-Agent: ~A" dexador.util:*default-user-agent*) lines))
+        (unless (given-p "accept")
+          (push "Accept: */*" lines)))
       (dolist (h headers)
         (let ((name (string (car h))))
           (unless (member name skip :test #'string-equal)

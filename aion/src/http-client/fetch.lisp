@@ -224,15 +224,25 @@ cl+ssl for the whole image (#917)."
 
 #-os-windows
 (defun %request-pinned (req)
-  "Run REQ over a connection to its CONNECT-ADDRESS, returning what DEX:REQUEST returns.
+  "Run REQ over a connection to its CONNECT-ADDRESS, returning (values BODY STATUS HEADERS).
 
-The socket is opened here, to that address. For https the TLS handshake uses the URL's host
-name, so the server is asked for that name (SNI) and its certificate is verified against that
-name, not against the address. When the URL's host is itself an IP address, no SNI is sent and
-the certificate is verified against the address without its brackets (%TLS-NAMES, #915). In
-both cases a certificate with alternative names must match one of them; its common name counts
-only when it has none (%VERIFY-PEER-NAME, #917).
-DEX:REQUEST then writes the request on this connection, so the Host header is the URL's too."
+The socket is opened here, to that address and nowhere else. For https the TLS handshake uses
+the URL's host name, so the server is asked for that name (SNI) and its certificate is verified
+against that name, not against the address. When the URL's host is itself an IP address, no SNI
+is sent and the certificate is verified against the address without its brackets (%TLS-NAMES,
+#915). In both cases a certificate with alternative names must match one of them; its common
+name counts only when it has none (%VERIFY-PEER-NAME, #917).
+
+The request is written and the response read by http1.lisp, as on Windows (#536), whose limits
+apply, and the Host header is the URL's. Until #985 this handed the connection to DEX:REQUEST,
+which after any failure on it reconnected by resolving the URL's host and sent the request
+again: a second connection that bypassed CONNECT-ADDRESS, and a request sent twice. Now a
+failure is signalled from the one connection, and no request is sent twice.
+
+The socket is lent to FETCH-PUBLIC's deadline watch, and the read timeout is the socket's
+receive timeout. A body read as a stream (MAX-BODY-BYTES) keeps the connection, and closing the
+body closes it; otherwise the body is read here and the connection closed. A non-2xx is returned
+like any other response, while the connection is open, so its body is kept (#527)."
   (let* ((uri (quri:uri (request-url req)))
          (host (quri:uri-host uri))
          (address (or (parse-address (request-connect-address req))
@@ -244,47 +254,45 @@ DEX:REQUEST then writes the request on this connection, so the Host header is th
                                                 :timeout (request-connect-timeout req))
                    ;; From here on a failure happened after the connection was made (#79).
                    (setf *%connected* t)))
+         (stream nil)
          (body-owns-connection nil))
     (%lend-socket socket)
-    (unwind-protect
-         (let ((stream (usocket:socket-stream socket)))
-           (when (request-read-timeout req)
-             (setf (usocket:socket-option socket :receive-timeout) (request-read-timeout req)))
-           (when (string-equal (quri:uri-scheme uri) "https")
-             (cl+ssl:ensure-initialized)
-             (let ((context (cl+ssl:make-context
-                             :verify-mode cl+ssl:+ssl-verify-peer+
-                             :verify-location (if (request-ca-path req)
-                                                  (uiop:native-namestring (request-ca-path req))
-                                                  :default))))
-               (multiple-value-bind (sni name) (%tls-names host)
-                 (cl+ssl:with-global-context (context :auto-free-p t)
-                   ;; With no SNI name, cl+ssl verifies the chain but not a name. Either way the
-                   ;; name is verified here, alternative names first (#917).
-                   (setf stream (cl+ssl:make-ssl-client-stream stream :hostname sni
-                                                                      :verify :required))
-                   (%verify-peer-name stream name)))))
-           (multiple-value-bind (body status headers)
-               ;; A non-2xx is caught HERE, while the connection is open, and returned like any
-               ;; other response. Caught in %HTTP instead, the HANDLER-CASE there unwound
-               ;; through this UNWIND-PROTECT first, which closed the socket, and the body of
-               ;; every 4xx and 5xx fetched this way was lost -- such as an OAuth token
-               ;; endpoint's {"error":"invalid_grant"} (#527).
-               (handler-case
-                   (apply #'dex:request (request-url req) :stream stream
-                          :use-connection-pool nil :keep-alive nil (%dex-args req))
-                 (dexador.error:http-request-failed (e)
-                   (values (dexador.error:response-body e)
-                           (dexador.error:response-status e)
-                           (ignore-errors (dexador.error:response-headers e)))))
-             ;; A streamed body (MAX-BODY-BYTES) still needs the connection, and
-             ;; %READ-CAPPED closes it when it has read enough. Otherwise the connection is
-             ;; finished with here.
-             (setf body-owns-connection (streamp body))
-             (values body status headers)))
-      (unless body-owns-connection
-        (%take-back-socket)
-        (ignore-errors (usocket:socket-close socket))))))
+    (flet ((close-connection ()
+             (%take-back-socket)
+             (when stream (ignore-errors (close stream)))
+             (ignore-errors (usocket:socket-close socket))))
+      (unwind-protect
+           (progn
+             (setf stream (usocket:socket-stream socket))
+             (when (request-read-timeout req)
+               (setf (usocket:socket-option socket :receive-timeout) (request-read-timeout req)))
+             (when (string-equal (quri:uri-scheme uri) "https")
+               (cl+ssl:ensure-initialized)
+               (let ((context (cl+ssl:make-context
+                               :verify-mode cl+ssl:+ssl-verify-peer+
+                               :verify-location (if (request-ca-path req)
+                                                    (uiop:native-namestring (request-ca-path req))
+                                                    :default))))
+                 (multiple-value-bind (sni name) (%tls-names host)
+                   (cl+ssl:with-global-context (context :auto-free-p t)
+                     ;; With no SNI name, cl+ssl verifies the chain but not a name. Either way the
+                     ;; name is verified here, alternative names first (#917).
+                     (setf stream (cl+ssl:make-ssl-client-stream stream :hostname sni
+                                                                        :verify :required))
+                     (%verify-peer-name stream name)))))
+             (multiple-value-bind (body status headers)
+                 (http1-exchange stream (request-method req) uri (request-headers req)
+                                 (request-content req) :closer #'close-connection)
+               (if (request-max-body-bytes req)
+                   (progn (setf body-owns-connection t)
+                          (values body status headers))
+                   (let ((octets (let ((out (make-array 0 :element-type '(unsigned-byte 8)
+                                                          :adjustable t :fill-pointer 0)))
+                                   (loop for b = (read-byte body nil nil)
+                                         while b do (vector-push-extend b out))
+                                   (coerce out '(simple-array (unsigned-byte 8) (*))))))
+                     (values octets status headers)))))
+        (unless body-owns-connection (close-connection))))))
 
 #+os-windows
 (defvar *server-certificate-verifier* 'aion/windows:verify-server-certificate-chain

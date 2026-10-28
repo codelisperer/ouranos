@@ -2259,6 +2259,19 @@ its tag.
 
 ### Fixed
 
+- **aion/http-client: a failure on a pinned connection no longer reconnects through DNS or sends
+  the request again** (#985). A request with `:connect-address`, which `fetch-public` always
+  makes, handed its connection to dexador on Linux and macOS. After any failure on it, such as a
+  read timeout or a reset, dexador opened a second connection by resolving the URL's host name,
+  bypassing the address `fetch-public` had checked, and sent the request again, a POST included.
+  The pinned path now writes the request and reads the response itself on every platform, as it
+  already did on Windows (#536), so it uses exactly one connection. Visible differences on Linux
+  and macOS: the request asks for `Accept-Encoding: identity` instead of gzip; a pinned
+  `send-request` does not follow redirects itself (`fetch-public` follows them, as before);
+  responses are read under http1.lisp's limits and refused with `malformed-response` outside
+  HTTP/1.1's grammar. The default `User-Agent` and `Accept: */*` are dexador's as before, and are
+  now sent on Windows too.
+
 - **aion/http-client: a pinned https request refuses a certificate whose common name matches
   the host when its subject alternative names do not** (#917). On Linux and macOS, cl+ssl checks
   a certificate's common name whenever none of its alternative names match, which RFC 6125

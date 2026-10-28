@@ -1374,10 +1374,9 @@ writes REPLY (a string) when given, and then sends nothing more until BODY ends.
 
 (test a-pinned-failure-after-connecting-is-a-response-failure-whatever-its-type
   ;; The connection is made and the request sent; the server never answers, and the read times
-  ;; out. On Linux the condition that arrives is not the read timeout: dexador then reconnects by
-  ;; resolving pinned.test, which resolves nowhere, and that USOCKET:NS-HOST-NOT-FOUND-ERROR is
-  ;; what reaches the caller (#985). By its type it would be :CONNECT; it happened after the
-  ;; connection was made, so it is :RESPONSE, and a POST is not resent.
+  ;; out. It happened after the connection was made, so it is :RESPONSE, and a POST is not
+  ;; resent. Before #985 the condition that arrived here was dexador's attempt to reconnect by
+  ;; resolving pinned.test, a USOCKET:NS-HOST-NOT-FOUND-ERROR, which by its type is :CONNECT.
   (with-silent-listener (port)
     (let ((e (%pinned-failure port :read-timeout 1)))
       (is (typep e 'http:http-error) "got ~S" e)
@@ -1393,3 +1392,64 @@ writes REPLY (a string) when given, and then sends nothing more until BODY ends.
       (is (typep e 'http:http-error) "got ~S" e)
       (is (null (and e (http:http-error-phase e))) "got ~S: ~A" (and e (http:http-error-phase e)) e)
       (is (not (aion/retry:transient-or-unknown-p e))))))
+
+;;; --- a pinned request uses one connection (#985) -----------------------------------------
+
+(defmacro with-counting-listener ((port-var count-var) &body body)
+  "Run BODY with PORT-VAR bound to a port on 127.0.0.1 whose server accepts every connection and
+never answers, and COUNT-VAR to a function returning how many connections it accepted."
+  (let ((listener (gensym)) (thread (gensym)) (accepted (gensym)) (held (gensym)))
+    `(let* ((,listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t :backlog 8))
+            (,port-var (usocket:get-local-port ,listener))
+            (,accepted 0)
+            (,held '())
+            (,thread (bt:make-thread
+                      (lambda ()
+                        (ignore-errors
+                         (loop (let ((c (usocket:socket-accept ,listener)))
+                                 (incf ,accepted)
+                                 (push c ,held)))))))
+            (,count-var (lambda () ,accepted)))
+       (unwind-protect (progn ,@body)
+         (ignore-errors (bt:destroy-thread ,thread))
+         (dolist (c ,held) (ignore-errors (usocket:socket-close c)))
+         (usocket:socket-close ,listener)))))
+
+(test a-pinned-request-that-times-out-uses-one-connection
+  "#985: the URL names localhost, which resolves, and the request is pinned to 127.0.0.1. The
+server accepts and never answers. Before #985, dexador reconnected through DNS after the read
+timed out and sent the request again, and this server counted two connections."
+  (with-counting-listener (port accepted)
+    (let ((e (handler-case
+                 (progn (http:send-request
+                         (http:make-request :url (format nil "http://localhost:~D/" port)
+                                            :connect-address "127.0.0.1"
+                                            :connect-timeout 2 :read-timeout 1)
+                         '())
+                        nil)
+               (http:http-error (e) e))))
+      (sleep 0.5)                       ; a second connection, if one were made, has arrived
+      (is (= 1 (funcall accepted)) "the server accepted ~D connections" (funcall accepted))
+      (is (typep e 'http:http-error))
+      (is (eq :response (and e (http:http-error-phase e))))
+      (is (search "timeout" (string-downcase (or (and e (http:http-error-detail e)) "")))
+          "the caller gets the read timeout: ~A" (and e (http:http-error-detail e))))))
+
+(test a-pinned-request-sends-dexadors-user-agent-and-accept-unless-given
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "ok")))
+    (http:send-request (http:make-request :url (%local s "/" "pinned.test")
+                                          :connect-address "127.0.0.1" :read-timeout 5)
+                       '())
+    (http:send-request (http:make-request :url (%local s "/" "pinned.test")
+                                          :connect-address "127.0.0.1" :read-timeout 5
+                                          :headers '(("User-Agent" . "probe/1")
+                                                     ("Accept" . "text/html")))
+                       '())
+    (destructuring-bind (second first) (server-heads s)
+      (is (string= dexador.util:*default-user-agent* (%head-header first "User-Agent"))
+          "as a request through dexador sent")
+      (is (string= "*/*" (%head-header first "Accept")))
+      (is (string= "probe/1" (%head-header second "User-Agent")) "a caller's own wins")
+      (is (string= "text/html" (%head-header second "Accept"))))))
