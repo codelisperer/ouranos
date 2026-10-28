@@ -14,6 +14,13 @@ its tag.
 
 ### An app may have to act
 
+- **`hyperion/http:json` signals instead of returning `"{}"` for a value that is not a property
+  list** (#1041). An argument that is not a list, such as a string, a number or a vector, signals
+  a `type-error`. A property list with an odd number of elements, whose last key has no value,
+  signals an error; before, that key was written with `null`. A caller that passed the wrong
+  value used to store an empty or partial object without any error, and now gets one. A property
+  list, including the empty list, encodes as before.
+
 - **`scripts/build-desktop-app.lisp` stops, instead of warning and exiting 0, when the bundle
   needs hyperion-view or a library the runtime links against and it is missing** (#956). For an
   app that loads `hyperion/desktop`, a `hyperion/hyperion-view/hyperion-view(.exe)` that was not
