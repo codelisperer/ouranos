@@ -118,7 +118,31 @@ client rendering `agent-history' still shows the whole conversation."
   ;; prompt in place of the messages they were distilled from, once enough has been observed.
   (thread-memory nil)
   (taint-scope :turn)
+  ;; A new slot that holds part of the conversation, rather than how the agent is configured,
+  ;; is also copied by MOVE-CONVERSATION; the actor tests list every slot as one or the other.
   (history '() :type list))               ; list of praxeon/llm messages
+
+(defun move-conversation (from to)
+  "Give TO, an agent just made, FROM's conversation, and return TO. What moves is the history and
+the state needed to read it as it was read before: the retrieved context, the offloaded and
+cleared tool results with the store they are in, the untrusted-content records and the turn
+guard, and the thread memory. TO keeps its own configuration: provider, system prompt, means,
+budgets and taint scope. An app does this when what an agent may do changes and its
+conversation should go on, such as praxeon/web when a session's grant changes (#67). The two
+agents share the moved tables afterwards, so FROM is not used again."
+  (setf (agent-history to) (agent-history from)
+        (agent-context to) (agent-context from)
+        (agent-result-index to) (agent-result-index from)
+        (agent-cleared to) (agent-cleared from)
+        (agent-guard to) (agent-guard from)
+        (agent-untrusted-inputs to) (agent-untrusted-inputs from)
+        (agent-untrusted-calls to) (agent-untrusted-calls from)
+        (agent-thread-memory to) (agent-thread-memory from))
+  ;; The result index names results in FROM's store, so the store goes with it.
+  (when (agent-result-store from)
+    (setf (agent-result-store to) (agent-result-store from)
+          (agent-conversation to) (agent-conversation from)))
+  to)
 
 (defvar *principal* nil
   "The user the current turn runs for, as the app identifies its users, or NIL (#527). RUN-TURN

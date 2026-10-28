@@ -342,6 +342,7 @@
    #:agent-clear-target #:agent-keep-recent #:agent-never-clear
    #:agent #:make-agent #:agent-name #:agent-provider #:agent-means
    #:agent-context #:agent-history #:agent-history-budget #:agent-system-prompt
+   #:move-conversation
    #:agent-cache-system #:agent-system-parts #:agent-max-tokens
    #:request-messages #:prompt-breakdown
    #:means-entry #:means-entry-source #:register-means #:means-permitted-p #:agent-means-for

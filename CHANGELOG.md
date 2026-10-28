@@ -931,21 +931,36 @@ its tag.
   `Authorization: Grant <token>` and answers `{"session": ID, "idle_seconds": N, "max_seconds":
   N}`; every other route needs `Authorization: Session <ID>` and is answered 401 without one.
   The conversation is the grant's principal's, and `:make-agent` is called with the principal and
-  the grant. `make-app` refuses `:grant-verifier` without a non-empty `:audience`, because a grant
+  a grant. Each turn runs on an agent made from the grant of the session that sent the message:
+  when that grant's capabilities, token cap or call cap differ from the ones the agent was made
+  from, `:make-agent` is called again and the conversation moves to the new agent, so a grant
+  with fewer capabilities takes effect at the next turn and the transcript goes on. A grant can
+  be exchanged for sessions any number of times until it expires, so keep grants short-lived.
+  `make-app` refuses `:grant-verifier` without a non-empty `:audience`, because a grant
   minted for another service would otherwise open a session here. A grant for another audience,
   or with no principal, is refused even if the app's own verifier accepts it.
 - **praxeon/web: a key's conversation expires when it is idle, and every transcript item names
   its turn** (part of #67). With `:conversation-key` or `:grant-verifier`, a key's conversation
   and its agent are dropped once no request has reached them for `:conversation-idle-seconds`
   (a new argument to `make-app`, `start` and `serve-forever`; 30 minutes by default, the same as
-  a session's idle limit) and no turn of theirs is running. The key's next request calls
-  `:make-agent` again and starts with an empty transcript. Before this, conversations were kept
-  for the app's lifetime. Every transcript item now carries `:turn N`, numbered from 1 in each
+  a session's idle limit) and no turn of theirs is running. The key's next request finds its
+  conversation stale, calls `:make-agent` again and starts with an empty transcript, and any
+  request removes every stale conversation if a minute has passed since that was last done.
+  Before this, conversations were kept for the app's lifetime. A page still open on a dropped
+  conversation is not left showing nothing: the page's cursor now names its conversation, and
+  the next poll from the old one replaces the transcript with the new conversation's under a
+  notice that a new conversation has started. `make-app` returns, as a second value, a function
+  that returns how many conversations it holds. Every transcript item now carries `:turn N`, numbered from 1 in each
   conversation, so a `:turn-ended` item says which turn it ends when two tabs send messages
   close together. `:make-agent` no longer runs under the lock every key's requests take, so a
   slow first request holds up only the requests with its own key; two first requests with one
   key still make one agent. A turn's reply and its `:turn-ended` item are now published, and its
   status line cleared, before the next queued turn starts.
+- **praxeon/actor: `move-conversation` moves an agent's conversation onto another agent** (part
+  of #67). It copies the history and the state needed to read it as before: retrieved context,
+  offloaded and cleared tool results with their store, the untrusted-content records and the
+  turn guard, and the thread memory. The new agent keeps its own provider, system prompt, means
+  and budgets.
 - **praxeon/ceiling: a grant as one string** (part of #67). `encode-grant-token` signs a grant's
   JSON with an `aion/signature` private key and returns `base64url(payload).base64url(signature)`,
   unpadded. `decode-grant-token` returns the payload and signature for `verify-grant`, and signals
@@ -2337,6 +2352,13 @@ its tag.
 
 ### Fixed
 
+- **praxeon/ceiling: `verify-grant` refuses a signed payload that is not a grant** (part of #67).
+  A payload that is not a JSON object, a `principal`, `group` or `audience` that is not a string,
+  or `capabilities` that is not an array of strings now signals `grant-invalid`, which
+  `praxeon/web` answers 401. Before, each signalled another error, answered 500.
+- **praxeon/web: `GET /api/reload-epoch` and `GET /api/dev-error` exist only with `:dev t`**
+  (part of #67). Before, every app answered them, without a session even when the app takes
+  grants. The hot-reload poller that reads them is on the page only in a dev app.
 - **aion/http-client: a pinned https request refuses a certificate whose common name matches
   the host when its subject alternative names do not** (#917). On Linux and macOS, cl+ssl checks
   a certificate's common name whenever none of its alternative names match, which RFC 6125

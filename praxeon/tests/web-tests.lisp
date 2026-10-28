@@ -192,15 +192,27 @@ string."
            (when (and (< v (length html)) (char= (char html v) #\")) (incf v))
            (eql v (search "#px-cursor" html :start2 v))))))
 
-(defun %cursor-in (html)
-  "The index in HTML's px-cursor field, or NIL. Spinneret leaves an attribute value unquoted when
-it can, so the value is read after `value=' with or without a quote."
+(defun %cursor-value-in (html)
+  "The value of HTML's px-cursor field, \"EPOCH:INDEX\", or NIL. Spinneret leaves an attribute
+value unquoted when it can, so the value is read after `value=' with or without a quote."
   (let* ((at (search "px-cursor" html))
          (v (and at (search "value=" html :start2 at)))
          (start (and v (+ v 6))))
     (when (and start (< start (length html)) (char= (char html start) #\"))
       (incf start))
-    (and start (parse-integer html :start start :junk-allowed t))))
+    (and start (subseq html start (position-if (lambda (c) (find c "\" >")) html :start start)))))
+
+(defun %cursor-in (html)
+  "The index in HTML's px-cursor field, or NIL."
+  (let* ((value (%cursor-value-in html))
+         (colon (and value (position #\: value))))
+    (and value (parse-integer value :start (if colon (1+ colon) 0) :junk-allowed t))))
+
+(defun %epoch-in (html)
+  "The epoch in HTML's px-cursor field, or NIL."
+  (let* ((value (%cursor-value-in html))
+         (colon (and value (position #\: value))))
+    (and colon (subseq value 0 colon))))
 
 ;;; --------------------------------------------------------------------------
 ;;; The output style is the app's, not the image's (pre-publication issue 469)
@@ -838,3 +850,111 @@ ends."
     (signals error (web:make-app :conversation-key (lambda (env) (declare (ignore env)) "k")
                                  :make-agent (lambda (k) (actor:make-agent :name k))
                                  :conversation-idle-seconds bad))))
+
+;;; --- #1011's review: a replaced conversation, sweeping, a changed grant ---------------
+
+(defun %poll-cursor (app cursor &key query)
+  "The body of a poll of APP that sends CURSOR, a cursor value as the page holds it."
+  (nth-value 2 (%call app :get "/api/progress"
+                      :query (format nil "after=~A~@[&~A~]" cursor query))))
+
+(test a-page-whose-conversation-was-replaced-shows-the-new-one
+  "A page open on a conversation that expired holds a cursor into the old transcript. Its next poll
+replaces the transcript with the new conversation's, under a notice, instead of reading the new
+transcript from the old index and showing nothing."
+  (let* ((now 1000)
+         (made (make-hash-table :test 'equal :synchronized t))
+         (app (%expiring-app made (lambda () now))))
+    (dotimes (i 4) (%say app (format nil "old ~D" i) :query "who=a"))
+    (let ((old (%cursor-value-in (nth-value 2 (%call app :get "/" :query "who=a")))))
+      (is (eql 12 (%cursor-in (format nil "px-cursor value=~A>" old))) "four turns, three items each")
+      (setf now 2800)
+      (%say app "new" :query "who=a")
+      (let ((reply (%poll-cursor app old :query "who=a")))
+        (is (search "innerHTML:#chat" reply) "the transcript is not replaced: ~S" reply)
+        (is (search "This is a new conversation" reply))
+        (is (search "echo: new" reply) "the new conversation's turn is not shown")
+        (is (null (search "old 0" reply)) "the old transcript is shown again")
+        (is (and (%epoch-in reply) (string/= (%epoch-in reply) (%epoch-in (format nil "px-cursor value=~A>" old))))
+            "the cursor sent back still has the old epoch")
+        (is (eql 3 (%cursor-in reply)))
+        (let ((next (%poll-cursor app (%cursor-value-in reply) :query "who=a")))
+          (is (null (search "innerHTML:#chat" next)) "a poll with the new cursor is reset again"))))))
+
+(test a-returning-key-after-the-idle-limit-gets-a-new-conversation
+  "The key's own request finds its conversation stale, even when the sweep ran too recently to run
+again: here 10 seconds before, when the conversation had been idle for 1790."
+  (let* ((now 1000)
+         (made (make-hash-table :test 'equal :synchronized t))
+         (app (%expiring-app made (lambda () now))))
+    (%say app "hello" :query "who=a")
+    (setf now 2790)
+    (%call app :get "/" :query "who=b")
+    (setf now 2800)
+    (is (null (search "echo: hello" (%poll app 0 :query "who=a"))) "1800 seconds idle is stale")
+    (is (= 2 (%made-for made "a")))))
+
+(test stale-conversations-are-swept-on-any-request
+  "A conversation whose key never returns is removed by a later request with another key that the
+table already holds."
+  (let ((now 1000)
+        (made (make-hash-table :test 'equal :synchronized t)))
+    (multiple-value-bind (app count) (%expiring-app made (lambda () now))
+      (%say app "a" :query "who=a")
+      (%say app "b" :query "who=b")
+      (is (= 2 (funcall count)))
+      (setf now 2700)
+      (%poll app 0 :query "who=b")
+      (is (= 2 (funcall count)) "a, 1700 seconds idle, is not stale yet")
+      (setf now 2800)
+      (%poll app 0 :query "who=b")
+      (is (= 1 (funcall count)) "a, 1800 seconds idle, was not swept")
+      (is (= 1 (%made-for made "b")) "b was in use and should have been kept"))))
+
+(test a-session-with-a-smaller-grant-runs-its-next-turn-without-the-lost-capability
+  "Two sessions of one principal, opened with different grants. Each turn runs on an agent made
+from the grant of the session that sent it, and the conversation goes on across the change."
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (let* ((made (list nil))
+           (app (web:make-app
+                 :grant-verifier (ceiling:make-ed25519-verifier pub) :audience "svc"
+                 :make-agent (lambda (principal grant)
+                               (declare (ignore principal))
+                               (push (ceiling:grant-capabilities grant) (car made))
+                               (actor:make-agent
+                                :name (format nil "~{~A~^+~}" (ceiling:grant-capabilities grant))))
+                 :responder (lambda (agent message locale)
+                              (declare (ignore locale))
+                              (push message (actor:agent-history agent))
+                              (format nil "~A-ran-as-~A-with-~D-in-history" message
+                                      (actor:agent-name agent)
+                                      (length (actor:agent-history agent))))))
+           (wide (nth-value 1 (%open app (%grant-token priv :capabilities '("search" "write")))))
+           (narrow (nth-value 1 (%open app (%grant-token priv :capabilities '("search"))))))
+      (flet ((say (session text)
+               (nth-value 2 (%call app :post "/api/message"
+                                   :authorization (format nil "Session ~A" session)
+                                   :json (format nil "{\"message\":\"~A\"}" text)))))
+        (is (search "one-ran-as-search+write-with-1-in-history" (say wide "one")))
+        (is (search "two-ran-as-search-with-2-in-history" (say narrow "two"))
+            "the narrower grant did not take effect, or the history was not carried")
+        (is (search "three-ran-as-search-with-3-in-history" (say narrow "three")))
+        (is (= 2 (length (car made))) "a grant with the same terms made another agent")
+        (let ((all (nth-value 2 (%call app :get "/api/progress" :query "after=0"
+                                       :authorization (format nil "Session ~A" narrow)))))
+          (is (search "one-ran-as-search+write" all) "the transcript did not go on"))))))
+
+(test the-dev-routes-exist-only-in-a-dev-app
+  (let ((prod (%echo-app))
+        (dev (%echo-app :dev t)))
+    (is (eql 404 (nth-value 0 (%call prod :get "/api/dev-error"))))
+    (is (eql 404 (nth-value 0 (%call prod :get "/api/reload-epoch"))))
+    (is (eql 200 (nth-value 0 (%call dev :get "/api/dev-error"))))
+    (is (eql 200 (nth-value 0 (%call dev :get "/api/reload-epoch"))))))
+
+(test a-signed-grant-of-the-wrong-shape-is-refused-401
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (let ((app (%grant-app pub)))
+      (is (eql 401 (nth-value 0 (%open app (ceiling:encode-grant-token "[1,2]" priv)))))
+      (is (eql 401 (nth-value 0 (%open app (ceiling:encode-grant-token
+                                            "{\"principal\":5,\"audience\":\"svc\"}" priv))))))))

@@ -112,7 +112,14 @@ translator agent, or a locale-aware guardrail. Overridable via :responder."
   (status "")                                                   ; latest status line
   (tokens 0)                                                    ; cumulative conversation cost
   (turn-tokens 0)                                               ; the last turn's cost
-  (turns 0))                                                    ; turn ids given out so far
+  (turns 0)                                                     ; turn ids given out so far
+  ;; Which conversation a page's cursor belongs to. A key's conversation can expire and be
+  ;; replaced, and an index into the old transcript means nothing in the new one.
+  (epoch (aion/random:random-hex 64))
+  ;; With grants: the capabilities and caps the agent was made from (%GRANT-TERMS), and how to
+  ;; make the principal's agent from another grant.
+  (built-with nil)
+  (rebuild nil))
 
 (defun %next-turn (conv)
   "A new turn id for CONV: 1 for its first turn, then 2, and so on."
@@ -269,7 +276,7 @@ fail-safe -- with JS disabled it stays up, so the app is never used un-acknowled
     (:script :type "text/javascript" (:raw *gate-js*))))
 
 (defun %page (title intro footer &optional dev model chat-html theme-css
-                                           locale locales gate (cursor 0))
+                                           locale locales gate (cursor "0"))
   "The chat page: a full-height chat window -- fixed header, a transcript that
 scrolls and auto-sticks to the bottom, and an input bar pinned at the bottom with
 an auto-growing multiline box (Enter sends, Shift+Enter for a newline). Bulma-
@@ -407,12 +414,16 @@ page did before items existed."
   (with-output-to-string (s)
     (dolist (item items) (write-string (%item-html conv item) s))))
 
-(defun %cursor-input (index &optional oob)
-  "The hidden field the poll sends as `after': the index of the first transcript item this page
-has not shown. A poll response replaces it out of band (OOB true) with the index past what it
-returned."
+(defun %cursor-value (conv index)
+  "The cursor a page holds for CONV: its epoch and INDEX, the first transcript item the page has
+not shown, as \"EPOCH:INDEX\"."
+  (format nil "~A:~D" (conversation-epoch conv) index))
+
+(defun %cursor-input (value &optional oob)
+  "The hidden field the poll sends as `after', holding VALUE (%CURSOR-VALUE). A poll response
+replaces it out of band (OOB true) with the cursor past what it returned."
   (spinneret:with-html-string
-    (:input :type "hidden" :id "px-cursor" :name "after" :value (princ-to-string index)
+    (:input :type "hidden" :id "px-cursor" :name "after" :value value
             :hx-swap-oob (when oob (hh:oob)))))
 
 (defun %status-oob (status)
@@ -503,19 +514,44 @@ note instead."
     (%publish conv (list :kind :user :turn turn :text message))
     turn))
 
-(defun %turn (conv message locale &key turn)
+(defun %grant-terms (grant)
+  "What of GRANT an agent is built from: its capabilities, as a sorted list, and its token and
+call caps. Two grants with the same terms make the same agent."
+  (list (sort (copy-list (ceiling:grant-capabilities grant)) #'string<)
+        (ceiling:grant-token-cap grant)
+        (ceiling:grant-call-cap grant)))
+
+(defun %apply-grant (conv grant)
+  "When GRANT's terms differ from those CONV's agent was made from, make the agent again from
+GRANT and move the conversation onto it (`praxeon/actor:move-conversation'), so a grant with fewer
+capabilities or a lower cap takes effect at the next turn. Caller holds CONV's turn lock."
+  (when (and grant (conversation-rebuild conv))
+    (let ((terms (%grant-terms grant)))
+      (unless (equal terms (conversation-built-with conv))
+        (let ((agent (funcall (conversation-rebuild conv) grant)))
+          (actor:move-conversation (conversation-agent conv) agent)
+          (setf (conversation-agent conv) agent
+                (conversation-built-with conv) terms))))))
+
+(defun %turn (conv message locale &key turn grant)
   "Run one turn of CONV on this thread and publish how it went: the reply as shown and then a
 :TURN-ENDED item. TURN is the id %PUBLISH-MESSAGE gave MESSAGE when the caller published it;
-without it, MESSAGE is published here. Returns (values REPLY NIL), or (values NIL ERROR) when
-the responder signalled ERROR. Turns are serialized by CONV's turn lock, which is held until the
-turn's last item is published and its status line cleared, so a turn queued behind this one
-neither has its status cleared by this one nor publishes its reply first. The progress
-observer records the status and token count while the turn runs."
+without it, MESSAGE is published here. GRANT is the grant of the session that sent MESSAGE, when
+the app takes grants; the turn runs on an agent made from it (%APPLY-GRANT). Returns
+(values REPLY NIL), or (values NIL ERROR) when the responder signalled ERROR.
+
+Turns are serialized by CONV's turn lock, which is held until the turn's last item is published
+and its status line cleared, so a turn queued behind this one neither has its status cleared by
+this one nor publishes its reply first. Turns run in the order they take the lock, which is not
+always the order their messages were published in, because an SBCL mutex is not first-come,
+first-served. TURN says which message each item belongs to; it does not say which turn ran
+first. The progress observer records the status and token count while the turn runs."
   (let ((turn (or turn (%publish-message conv message))))
     (sb-thread:with-mutex ((conversation-turn-lock conv))
       (unwind-protect
            (handler-case
                (let ((reply (evt:with-observer ((%progress-observer conv))
+                              (%apply-grant conv grant)
                               (funcall (conversation-responder conv)
                                        (conversation-agent conv) message locale))))
                  (%publish conv (list :kind :assistant :turn turn :text (%shown-reply reply)))
@@ -527,7 +563,7 @@ observer records the status and token count while the turn runs."
                (values nil e)))
         (%set-status conv "")))))
 
-(defun %run-turn-async (conv message locale)
+(defun %run-turn-async (conv message locale &optional grant)
   "Run one turn on a background thread so the web server's event loop stays free
 (critical on Woo). See %TURN. LOCALE is the resolved request locale, handed to the
 responder (e.g. for Elise's translator)."
@@ -543,7 +579,7 @@ responder (e.g. for Elise's translator)."
      (aion/dynamic:inheriting
       (lambda ()
         (aion/dynamic:unblock-interrupts)
-        (%turn conv message locale :turn turn)
+        (%turn conv message locale :turn turn :grant grant)
         nil))
      :name "praxeon-web-turn")))
 
@@ -563,28 +599,48 @@ responder (e.g. for Elise's translator)."
 ;;; The Clack app
 ;;; --------------------------------------------------------------------------
 (defun %request-cursor (env)
-  "The `after' index the poll sent, or NIL when it sent none or one that is not a non-negative
-integer."
+  "The cursor the poll sent as `after', as (values INDEX EPOCH). INDEX is NIL when the poll sent
+no cursor, or one whose index is not a non-negative integer. EPOCH is NIL for a bare index, which
+is what a page rendered before cursors had epochs sends."
   (let* ((raw (http:query-param env "after"))
-         (n (and raw (ignore-errors (parse-integer raw)))))
-    (and (integerp n) (>= n 0) n)))
+         (colon (and raw (position #\: raw :from-end t)))
+         (n (and raw (ignore-errors (parse-integer raw :start (if colon (1+ colon) 0))))))
+    (if (and (integerp n) (>= n 0))
+        (values n (and colon (subseq raw 0 colon)))
+        (values nil nil))))
 
-(defun %progress-fragment (conv after)
+(defparameter *conversation-restarted-notice*
+  "The earlier conversation ended because it was not used for a while. This is a new conversation."
+  "What the page shows at the top of the transcript when its conversation was replaced.")
+
+(defun %progress-fragment (conv after &optional epoch)
   "The poll response: the transcript items from AFTER on, appended to #chat; the cursor moved
 past them; and the status line and token count, out of band. With no AFTER, which is what a page
 loaded before the cursor existed sends, no items are returned and the cursor is moved to the
-newest item, so that page carries on from there instead of repeating the transcript."
-  (multiple-value-bind (items next)
-      (if after
-          (%items-since conv after)
-          (values nil (chan:channel-length (conversation-events conv))))
-    (with-output-to-string (s)
-      (write-string (%items-html conv items) s)
-      (write-string (%cursor-input next t) s)
-      (write-string (%status-oob (%get-status conv)) s)
-      (write-string (%tokens-oob (%get-turn-tokens conv) (%get-tokens conv)) s))))
+newest item, so that page carries on from there instead of repeating the transcript.
 
-(defun %handle-message (env conv dictionary)
+When EPOCH is not CONV's, the page's cursor belongs to a conversation that has since been
+replaced, so its index means nothing here. The response then replaces the whole of #chat, out of
+band, with a notice that a new conversation has started and CONV's transcript so far."
+  (let ((reset (and after epoch (string/= epoch (conversation-epoch conv)))))
+    (multiple-value-bind (items next)
+        (cond (reset (%items-since conv -1))
+              (after (%items-since conv after))
+              (t (values nil (chan:channel-length (conversation-events conv)))))
+      (with-output-to-string (s)
+        (if reset
+            (write-string (spinneret:with-html-string
+                            (:div :hx-swap-oob "innerHTML:#chat"
+                              (:div :class "notification is-light px-notice"
+                                *conversation-restarted-notice*)
+                              (:raw (%items-html conv items))))
+                          s)
+            (write-string (%items-html conv items) s))
+        (write-string (%cursor-input (%cursor-value conv next) t) s)
+        (write-string (%status-oob (%get-status conv)) s)
+        (write-string (%tokens-oob (%get-turn-tokens conv) (%get-tokens conv)) s)))))
+
+(defun %handle-message (env conv dictionary &optional grant)
   (let ((message (%request-message env))
         ;; The POST carries no ?lang=; the locale rides the lang cookie set on GET
         ;; (or Accept-Language). NIL when the app has no dictionary.
@@ -595,7 +651,7 @@ newest item, so that page carries on from there instead of repeating the transcr
       ;; REST client: synchronous JSON (blocks this request for the turn). The turn is
       ;; published like any other, so a page open on the same conversation shows it.
       ((http:wants-json env)
-       (multiple-value-bind (reply e) (%turn conv message locale)
+       (multiple-value-bind (reply e) (%turn conv message locale :grant grant)
          (if e
              (list 500 '(:content-type "application/json")
                    (list (http:json (list "error" (format nil "~A" e)))))
@@ -604,15 +660,17 @@ newest item, so that page carries on from there instead of repeating the transcr
       ;; HTMX client: run the turn in the background, and ask the page to poll now. The
       ;; user's message reaches the page through that poll, so every tab gets it the same way.
       (t
-       (%run-turn-async conv message locale)
+       (%run-turn-async conv message locale grant)
        (list 200 '(:content-type "text/html; charset=utf-8" :hx-trigger "px-poll")
              (list ""))))))
 
-(defun %new-conversation (key agent agent-name responder)
+(defun %new-conversation (key agent agent-name responder &key built-with rebuild)
   "A conversation over AGENT, for KEY, whose transcript starts with AGENT's history. Its next turn
-is numbered after the history's last."
+is numbered after the history's last. BUILT-WITH and REBUILD are set with grants: see the
+CONVERSATION slots."
   (let ((conv (make-conversation :key key :agent agent :agent-name agent-name
-                                 :responder responder))
+                                 :responder responder :built-with built-with
+                                 :rebuild rebuild))
         (history (%history-items agent)))
     (dolist (item history) (%publish conv item))
     (setf (conversation-turns conv)
@@ -627,13 +685,17 @@ last reached it."
   (conversation nil)
   (used-at 0 :type integer))
 
+(defun %entry-stale-p (entry now idle-seconds)
+  "Whether no request has reached ENTRY for IDLE-SECONDS by NOW, and none of its turns is running."
+  (and (>= (- now (%entry-used-at entry)) idle-seconds)
+       (let ((conv (%entry-conversation entry)))
+         (not (and conv (sb-thread:mutex-owner (conversation-turn-lock conv)))))))
+
 (defun %expire-conversations (table now idle-seconds)
-  "Remove from TABLE, MAKE-APP's table of entries by key, every conversation no request has
-reached for IDLE-SECONDS, unless one of its turns is running. Caller holds the table's lock."
+  "Remove from TABLE, MAKE-APP's table of entries by key, every stale entry (%ENTRY-STALE-P).
+Caller holds the table's lock."
   (loop for key being the hash-keys of table using (hash-value entry)
-        when (and (>= (- now (%entry-used-at entry)) idle-seconds)
-                  (let ((conv (%entry-conversation entry)))
-                    (not (and conv (sb-thread:mutex-owner (conversation-turn-lock conv))))))
+        when (%entry-stale-p entry now idle-seconds)
           collect key into gone
         finally (dolist (k gone) (remhash k table))))
 
@@ -704,8 +766,12 @@ MAKE-AGENT is a function of a key that returns a fresh agent for it. The first r
 key makes that key's conversation; later requests with an EQUAL key share it. A request whose
 key is NIL is answered 403. A key's conversation, and its agent, are dropped once no request
 has reached them for CONVERSATION-IDLE-SECONDS (30 minutes by default, the same as a session's
-idle limit) and no turn of theirs is running; the next request with that key starts a new one.
-CLOCK returns the time in seconds; a test passes its own. Pass AGENT or
+idle limit) and no turn of theirs is running. The key's next request finds it stale and starts a
+new one, and every request sweeps out all stale conversations if a minute (or the idle limit, if
+that is shorter) has passed since the last sweep. A page still open on a dropped conversation
+holds a cursor from it; its next poll replaces the page's transcript with the new conversation's
+and a notice that a new conversation has started. CLOCK returns the time in seconds; a test
+passes its own. Pass AGENT or
 CONVERSATION-KEY with MAKE-AGENT, not both: an agent holds one conversation's history, so one
 agent cannot serve several keys.
 
@@ -717,10 +783,22 @@ name this service is minted for), a request is authenticated by a session:
   - Every other route needs `Authorization: Session <ID>', and is answered 401 without a
     session that is open in SESSIONS (a `praxeon/web-session' table).
   - The conversation is the session's principal's. MAKE-AGENT is called with the principal and
-    the grant that opened that principal's first session, so the agent's means can be built
-    from the grant's capabilities.
+    a grant, so the agent's means can be built from the grant's capabilities. A turn runs on an
+    agent made from the grant of the session that sent the message: when that grant's
+    capabilities, token cap or call cap differ from those of the grant the agent was made from,
+    MAKE-AGENT is called again and the conversation is moved onto the new agent
+    (`praxeon/actor:move-conversation'). So a grant with fewer capabilities takes effect at the
+    next turn, and the transcript goes on.
+  - A grant can be exchanged for sessions any number of times until it expires: nothing records
+    that a grant has been used. Keep grants short-lived for that reason.
 AUDIENCE is required, because a grant minted for another service must not open a session on
-this one. GRANT-VERIFIER goes with MAKE-AGENT, and not with AGENT or CONVERSATION-KEY."
+this one. GRANT-VERIFIER goes with MAKE-AGENT, and not with AGENT or CONVERSATION-KEY.
+
+GET /api/reload-epoch and GET /api/dev-error, which the hot-reload poller reads, exist only when
+DEV is true, and need no session.
+
+Returns the Clack app, and as a second value a function of no arguments that returns how many
+conversations the app holds."
   (cond ((and conversation-key (not make-agent))
          (error "praxeon/web: :CONVERSATION-KEY needs :MAKE-AGENT, a function of a key that returns that conversation's agent."))
         ((and make-agent (not conversation-key) (not grant-verifier))
@@ -741,31 +819,43 @@ this one. GRANT-VERIFIER goes with MAKE-AGENT, and not with AGENT or CONVERSATIO
   (let* ((style (if dev :pretty :compact))
          (new-conversation
            (lambda (key agent) (%new-conversation key agent agent-name responder)))
-         (shared (unless conversation-key (funcall new-conversation nil agent)))
+         (shared (unless (or conversation-key grant-verifier) (funcall new-conversation nil agent)))
          (table (make-hash-table :test 'equal))  ; key -> %ENTRY
          (table-lock (sb-thread:make-mutex :name "praxeon-web-conversations"))
+         ;; Stale entries are swept at most once in this many seconds, on whichever request
+         ;; comes, so memory is reclaimed without waiting for a new key.
+         (sweep-seconds (min 60 conversation-idle-seconds))
+         (swept-at nil)
          (keyed
            (lambda (key make)
-             ;; The table's lock is held only to find or add KEY's entry, and to expire idle
-             ;; conversations when an entry is added. MAKE runs under the entry's own lock, so a
-             ;; slow MAKE-AGENT holds up only the requests with its key: they wait for it and
-             ;; then share the conversation it made, so two first requests make one agent.
+             ;; The table's lock is held only to find or add KEY's entry, and to sweep. MAKE,
+             ;; which returns KEY's new conversation, runs under the entry's own lock, so a slow
+             ;; MAKE-AGENT holds up only the requests with its key: they wait for it and then
+             ;; share the conversation it made, so two first requests make one agent.
              (let ((entry (sb-thread:with-mutex (table-lock)
                             (let ((now (funcall clock)))
-                              (let ((e (or (gethash key table)
-                                           (progn
-                                             (%expire-conversations table now
-                                                                    conversation-idle-seconds)
-                                             (setf (gethash key table) (%make-entry))))))
+                              (when (or (null swept-at) (>= (- now swept-at) sweep-seconds))
+                                (%expire-conversations table now conversation-idle-seconds)
+                                (setf swept-at now))
+                              (let ((e (gethash key table)))
+                                ;; A returning key's stale entry is replaced here, whether or not
+                                ;; the sweep has run since it went stale.
+                                (when (or (null e) (%entry-stale-p e now conversation-idle-seconds))
+                                  (setf e (setf (gethash key table) (%make-entry))))
                                 ;; Set under the table's lock, so an expiry cannot remove an
                                 ;; entry between this request finding it and using it.
                                 (setf (%entry-used-at e) now)
                                 e)))))
                (sb-thread:with-mutex ((%entry-lock entry))
                  (or (%entry-conversation entry)
-                     (setf (%entry-conversation entry)
-                           (funcall new-conversation key (funcall make))))))))
-         ;; CONVERSATION-FOR returns the request's conversation, or the response that refuses it.
+                     (setf (%entry-conversation entry) (funcall make)))))))
+         (conversation-count
+           (lambda ()
+             (if shared
+                 1
+                 (sb-thread:with-mutex (table-lock) (hash-table-count table)))))
+         ;; CONVERSATION-FOR returns the request's conversation, or the response that refuses it,
+         ;; and with grants the session's grant as a second value.
          (conversation-for
            (cond
              (grant-verifier
@@ -773,15 +863,23 @@ this one. GRANT-VERIFIER goes with MAKE-AGENT, and not with AGENT or CONVERSATIO
                 (let ((grant (ws:session-grant sessions (%authorization env "Session"))))
                   (if (null grant)
                       (%unauthenticated "send an open session as: Authorization: Session <id>")
-                      (let ((principal (ceiling:grant-principal grant)))
-                        (funcall keyed principal
-                                 (lambda () (funcall make-agent principal grant))))))))
+                      (let* ((principal (ceiling:grant-principal grant))
+                             (rebuild (lambda (g) (funcall make-agent principal g))))
+                        (values (funcall keyed principal
+                                         (lambda ()
+                                           (%new-conversation principal (funcall rebuild grant)
+                                                              agent-name responder
+                                                              :built-with (%grant-terms grant)
+                                                              :rebuild rebuild)))
+                                grant))))))
              (conversation-key
               (lambda (env)
                 (let ((key (funcall conversation-key env)))
                   (if (null key)
                       (%no-conversation)
-                      (funcall keyed key (lambda () (funcall make-agent key)))))))
+                      (funcall keyed key
+                               (lambda ()
+                                 (funcall new-conversation key (funcall make-agent key))))))))
              (t (lambda (env) (declare (ignore env)) shared))))
          ;; The route table -- DATA, built once. `(hyperion/router:describe-routes …)`
          ;; prints what this surface answers; the `cond` this replaces could not be
@@ -825,41 +923,47 @@ this one. GRANT-VERIFIER goes with MAKE-AGENT, and not with AGENT or CONVERSATIO
                                                            (and gate (if (functionp gate)
                                                                          (funcall gate locale)
                                                                          gate))
-                                                           next))))))))
+                                                           (%cursor-value conv next)))))))))
                             :name :chat)
               (router:route :get "/api/progress"
                             (lambda (env)
                               (let ((conv (funcall conversation-for env)))
                                 (if (not (conversation-p conv))
                                     conv
-                                    (list 200 '(:content-type "text/html; charset=utf-8")
-                                          (list (%progress-fragment conv (%request-cursor env)))))))
+                                    (multiple-value-bind (after epoch) (%request-cursor env)
+                                      (list 200 '(:content-type "text/html; charset=utf-8")
+                                            (list (%progress-fragment conv after epoch)))))))
                             :name :progress)
-              (router:route :get "/api/reload-epoch"
-                            (lambda (env)
-                              (declare (ignore env))
-                              (list 200 '(:content-type "text/plain" :cache-control "no-store")
-                                    (list (princ-to-string dev:*reload-epoch*))))
-                            :name :reload-epoch)
-              (router:route :get "/api/dev-error"
-                            (lambda (env)
-                              (declare (ignore env))
-                              (list 200 '(:content-type "text/plain" :cache-control "no-store")
-                                    (list (or (dev:dev-error) ""))))
-                            :name :dev-error)
+              ;; The dev page's poller reads these two, and only a dev app has them.
+              (when dev
+                (router:route :get "/api/reload-epoch"
+                              (lambda (env)
+                                (declare (ignore env))
+                                (list 200 '(:content-type "text/plain" :cache-control "no-store")
+                                      (list (princ-to-string dev:*reload-epoch*))))
+                              :name :reload-epoch))
+              (when dev
+                (router:route :get "/api/dev-error"
+                              (lambda (env)
+                                (declare (ignore env))
+                                (list 200 '(:content-type "text/plain" :cache-control "no-store")
+                                      (list (or (dev:dev-error) ""))))
+                              :name :dev-error))
               (router:route :post "/api/message"
                             (lambda (env)
-                              (let ((conv (funcall conversation-for env)))
+                              (multiple-value-bind (conv grant) (funcall conversation-for env)
                                 (if (not (conversation-p conv))
                                     conv
-                                    (%handle-message env conv dictionary))))
+                                    (%handle-message env conv dictionary grant))))
                           :name :message))))))
-    (lambda (env)
-      ;; Render every response within the app's output style: dev = pretty HTML+JS
-      ;; for readable "view source"; prod = compact/minified. Binds the Spinneret
-      ;; and Parenscript formatting vars for the whole request (see hyperion/output).
-      (out:with-output-style (style)
-        (router:dispatch routes env)))))
+    (values
+     (lambda (env)
+       ;; Render every response within the app's output style: dev = pretty HTML+JS
+       ;; for readable "view source"; prod = compact/minified. Binds the Spinneret
+       ;; and Parenscript formatting vars for the whole request (see hyperion/output).
+       (out:with-output-style (style)
+         (router:dispatch routes env)))
+     conversation-count)))
 
 ;;; --------------------------------------------------------------------------
 ;;; Lifecycle
