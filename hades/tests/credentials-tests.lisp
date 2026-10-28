@@ -136,6 +136,37 @@ Linux this is why the backend uses libsecret's _binary_ calls rather than the te
              (signals cred:credential-not-found (cred:fetch-credential service "user")))
         (%cleanup service "user"))))
 
+  (test exists-and-names-follow-what-is-stored-without-reading-a-value
+    "#1035: CREDENTIAL-EXISTS-P and CREDENTIAL-NAMES against the real store. Only this run's own
+service is listed, so no credential of whoever runs this is read."
+    (let* ((service (%item (%service) "user"))
+           (value (%marker))
+           (second (%marker)))
+      (unwind-protect
+           (progn
+             (is (null (cred:credential-exists-p service "user"))
+                 "nothing is stored under this run's service yet")
+             (is (null (cred:credential-names service)) "and it lists nothing")
+             (cred:store-credential service "user" (sec:make-secret value))
+             (is (eq t (cred:credential-exists-p service "user")) "stored, so it exists")
+             (is (null (cred:credential-exists-p service "someone-else"))
+                 "and another account under the same service does not")
+             (is (equal '("user") (cred:credential-names service)) "which is the one name listed")
+             (cred:store-credential (%item service "second") "second" (sec:make-secret second))
+             (is (eq t (cred:credential-exists-p service "user")) "the first is still there")
+             ;; THE VALUE IS NOT IN THE ANSWER. Both markers are unique to this run, so finding
+             ;; either in what these two returned could only be a leak.
+             (let ((answer (format nil "~S ~S" (cred:credential-names service)
+                                   (cred:credential-exists-p service "user"))))
+               (is (null (search value answer)) "the value is not in what they returned")
+               (is (null (search second answer))))
+             (is (eq t (cred:delete-credential service "user")))
+             (is (null (cred:credential-exists-p service "user")) "deleted, so it does not exist")
+             (is (null (member "user" (cred:credential-names service) :test #'string=))
+                 "and it is no longer listed"))
+        (%cleanup service "user")
+        (%cleanup (%item service "second") "second"))))
+
   (test names-with-non-ascii-characters-round-trip
     (let* ((account (concatenate 'string "b" (string (code-char #xF6)) "b"))
            (service (%item (concatenate 'string (%service) (string (code-char #x6587))) account))
@@ -312,6 +343,106 @@ fetches by name only the items this run created."
 ;;; they run without OURANOS_TEST_REAL_CREDENTIAL_STORE.
 
 (in-suite all)
+
+;;; --- the value is never read, whichever backend is compiled (#1035) ----------------------
+
+(defparameter +value-reading-entry-points+
+  '(("win32" . "cred-read-w")
+    ("darwin" . "sec-item-copy-matching")
+    ("linux" . "secret-password-lookupv-binary-sync"))
+  "The one call in each backend that returns a credential's VALUE. CREDENTIAL-EXISTS-P and
+CREDENTIAL-NAMES must reach none of them. On macOS SEC-ITEM-COPY-MATCHING is also the call the
+attributes-only query uses, so it is the query that is checked there, not the call; see
+THE-VALUE-IS-NEVER-FETCHED-TO-ANSWER-EXISTS-OR-NAMES.")
+
+(defun %credentials-source ()
+  "hades/src/credentials/credentials.lisp as a list of lines. Every backend is in this file
+whichever one is compiled, so a sweep of it checks all three on any operating system."
+  (uiop:read-file-lines
+   (merge-pathnames "src/credentials/credentials.lisp"
+                    (asdf:system-source-directory "hades/credentials"))))
+
+(defun %definition-lines (lines name)
+  "The lines of the top-level or nested definition of NAME in LINES: from its (defun NAME line to
+the line before the next definition at the same indentation."
+  (let* ((start (position-if (lambda (l) (search (format nil "(defun ~A " name) l)) lines)))
+    (when start
+      (let* ((indent (- (length (nth start lines)) (length (string-left-trim " " (nth start lines)))))
+             (rest (nthcdr (1+ start) lines))
+             (end (position-if (lambda (l)
+                                 (and (search "(defun " l)
+                                      (= indent (- (length l) (length (string-left-trim " " l))))))
+                               rest)))
+        (subseq lines start (if end (+ 1 start end) (length lines)))))))
+
+(test the-value-is-never-fetched-to-answer-exists-or-names
+  "#1035: neither CREDENTIAL-EXISTS-P nor CREDENTIAL-NAMES may decrypt or copy a secret. Read
+from the source, so all three backends are checked wherever this runs: the two that are not
+compiled here are still in the file, and a change to the Windows backend fails this on Linux."
+  (let ((lines (%credentials-source)))
+    (is (plusp (length lines)) "the backend source was read")
+    (dolist (name '("%exists-p" "%names" "%accounts" "credential-exists-p" "credential-names"))
+      (let ((body (%definition-lines lines name)))
+        (when body
+          (loop for (os . entry) in +value-reading-entry-points+
+                do (is (notany (lambda (l) (search entry l)) body)
+                       "~A does not call ~A, the ~A backend's value read" name entry os)))))
+    ;; The macOS query must not ask for the data: kSecReturnData is the only key that returns a
+    ;; value, and the attributes-only query shares its entry point with %FETCH.
+    (let ((body (append (%definition-lines lines "%accounts")
+                        (%definition-lines lines "%exists-p")
+                        (%definition-lines lines "%names"))))
+      (is (notany (lambda (l) (search "kSecReturnData" l)) body)
+          "the attributes-only Keychain query never asks for kSecReturnData"))
+    ;; The Linux search must not ask to unlock or to load secrets.
+    (is (notany (lambda (l) (search "secret-search-unlock" (string-downcase l)))
+                (%credentials-source))
+        "the Secret Service search never asks to unlock a collection")))
+
+(test asking-whether-a-credential-exists-never-calls-the-value-read
+  "#1035, on the backend compiled here, and without needing a store: the value-reading entry
+point is replaced by one that records the call and signals. CREDENTIAL-EXISTS-P and
+CREDENTIAL-NAMES are then called, and the assertion is on the recorder, not on what they
+return: a machine with no store answers CREDENTIAL-STORE-UNAVAILABLE, and that is fine. What
+must not happen is the read being reached at all."
+  #-(or win32 darwin linux)
+  (skip "no backend on this operating system, so there is no value read to replace")
+  #+(or win32 darwin linux)
+  (let* ((called 0)
+         (symbol #+win32 'ffi:cred-read-w
+                 #+darwin 'ffi:sec-item-copy-matching
+                 #+linux 'ffi:secret-password-lookupv-binary-sync)
+         (original (fdefinition symbol)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition symbol)
+                 (lambda (&rest args)
+                   (declare (ignore args))
+                   (incf called)
+                   (error "the value read was called to answer a question about existence")))
+           (dolist (call (list (lambda () (cred:credential-exists-p (%service) "user"))
+                               (lambda () (cred:credential-names (%service)))))
+             ;; Any outcome is allowed; the recorder is what is asserted.
+             (handler-case (funcall call) (error () nil)))
+           (is (zerop called)
+               "neither call reached the value read (~D call~:P)" called))
+      (setf (fdefinition symbol) original))
+    ;; THE CONTROL: the stub must be capable of noticing, or the assertion above is vacuous.
+    ;; FETCH-CREDENTIAL does want the value, so it reaches the read -- but only once there is a
+    ;; store to reach it through. Without one, every backend refuses before the read, so the
+    ;; control cannot run and says so rather than passing emptily. CI has a store on all three
+    ;; operating systems, so it runs there.
+    (if (not (cred:credential-store-available-p))
+        (skip "no store on this machine, so the control for the stub could not run (the ~
+assertion above still held: the read was not reached)")
+        (let ((reached 0))
+          (unwind-protect
+               (progn
+                 (setf (fdefinition symbol)
+                       (lambda (&rest args) (declare (ignore args)) (incf reached) (error "read")))
+                 (handler-case (cred:fetch-credential (%service) "user") (error () nil)))
+            (setf (fdefinition symbol) original))
+          (is (plusp reached) "control: FETCH-CREDENTIAL does reach the value read")))))
 
 #-(or win32 darwin linux)
 (test with-no-backend-every-call-signals-and-nothing-is-stored

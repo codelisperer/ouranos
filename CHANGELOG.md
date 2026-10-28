@@ -1019,6 +1019,26 @@ its tag.
 
 ### Added
 
+- **hades/credentials: `credential-exists-p` and `credential-names` answer without reading any
+  secret** (#1035). `credential-exists-p service account` says whether a credential is stored,
+  and `credential-names service` lists the accounts under one service, both without decrypting
+  or copying a value. An app showing "a key is saved", or offering to remove one, no longer
+  fetches the secret to decide a label, and no longer has to keep its own list of what it saved,
+  which could drift from the store.
+  - Windows reads target names with `CredEnumerateW` and never a credential blob; macOS asks the
+    Keychain for attributes only (`kSecReturnAttributes`, never `kSecReturnData`); Linux searches
+    the Secret Service and reads item attributes, which it stores unencrypted, without
+    `SECRET_SEARCH_LOAD_SECRETS` and without `SECRET_SEARCH_UNLOCK`.
+  - **Neither prompts.** On macOS the query sets `kSecUseAuthenticationUIFail`, so a locked
+    Keychain signals `credential-store-unavailable` saying it is locked instead of showing a
+    dialog. On Linux a locked keyring still answers, so `credential-exists-p` can be true for an
+    item `fetch-credential` would refuse to read until the keyring is unlocked; both docstrings
+    say so.
+  - Nothing is logged by either, so no account name can reach a log.
+  - `aion/libsecret` gains `search-attribute-values` and the bindings it needs
+    (`secret_service_search_sync`, `secret_item_get_attributes`, `g_hash_table_lookup`,
+    `g_list_free_full`).
+
 - **praxeon/image: the generate-image means offers the model a `mask`, so it can change only part
   of an image** (#946). With `:resolve-reference` and a provider that takes a mask
   (`image-provider-accepts-mask-p`, true for OpenAI), the tool schema offers `mask`: a reference,
