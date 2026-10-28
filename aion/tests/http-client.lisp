@@ -1304,9 +1304,11 @@ also asked about as ::1, the form %TLS-NAMES gives and the one Linux and macOS v
 dropped; the event and id fields belong to their own event only."
   (is (equal '(("one" "start" "7") ("two" nil nil) ("a
 b" nil nil) ("é" nil nil))
-             (%events-of (format nil ": hello~%event: start~%id: 7~%data: one~%~%data:two~%~%~
-                                      event: empty~%~%data: a~C~%data: b~C~%~C~%data: é"
-                                 #\Return #\Return #\Return)))))
+             (%events-of (concatenate
+                          'string
+                          (format nil ": hello~%event: start~%id: 7~%data: one~%~%data:two~%~%")
+                          (format nil "event: empty~%~%data: a~C~%data: b~C~%~C~%data: é"
+                                  #\Return #\Return #\Return))))))
 
 (test read-event-refuses-an-event-over-its-limit
   "An event longer than *MAX-EVENT-OCTETS* signals HTTP-ERROR rather than being read whole."
