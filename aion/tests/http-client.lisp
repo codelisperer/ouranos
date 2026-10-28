@@ -1177,9 +1177,17 @@ the self-signed test certificate as CERTIFICATE-UNTRUSTED-ROOT."
   "Whether CONDITION is a failure of the runner's network rather than of this client: the host
 did not resolve, a socket could not connect or timed out, or the fetch ran past its deadline. A
 TLS error, a refused certificate or a malformed response is not one of these, and still fails the
-test below (#931)."
+test below (#931).
+
+The client wraps a transport failure, such as a USOCKET:TIMEOUT-ERROR, in an HTTP:HTTP-ERROR
+whose HTTP-ERROR-PHASE is :CONNECT or :RESPONSE, and that counts too (#976). It failed the
+Windows leg of train 78 when only the unwrapped types were matched. An HTTP-ERROR with a status,
+or one the client raised itself before sending, has no phase and does not count."
   (or (and (typep condition 'http:fetch-refused)
            (eq :unresolvable (http:fetch-refused-reason condition)))
+      (and (typep condition 'http:http-error)
+           (member (http:http-error-phase condition) '(:connect :response))
+           t)
       (typep condition '(or http:fetch-deadline-exceeded usocket:socket-condition
                          usocket:ns-condition sb-sys:io-timeout))))
 
@@ -1225,6 +1233,28 @@ response and a refused private address are not."
   (is-false (%runner-network-failure-p
              (make-condition 'http:certificate-expired :host "x.test" :verdict :expired :code 0)))
   (is-false (%runner-network-failure-p (make-condition 'http:malformed-response :detail "x"))))
+
+(test a-wrapped-transport-failure-is-a-runner-network-failure
+  "#976: the client wraps a socket timeout in an HTTP-ERROR, \"transport error\". A refused
+connection on 127.0.0.1 comes back that way, wrapping USOCKET:TIMEOUT-ERROR on Linux, which is
+the condition from the Windows leg of train 78."
+  (let* ((port (let ((s (usocket:socket-listen "127.0.0.1" 0)))
+                 (prog1 (usocket:get-local-port s) (usocket:socket-close s))))
+         (wrapped (handler-case (progn (http:send-request
+                                        (http:make-request :url (format nil "http://127.0.0.1:~D/" port)
+                                                           :connect-timeout 2 :read-timeout 2)
+                                        '())
+                                       nil)
+                    (http:http-error (e) e))))
+    (is (typep wrapped 'http:http-error) "control: the failure arrived wrapped: ~S" wrapped)
+    (is-true (%runner-network-failure-p wrapped)))
+  (is-true (%runner-network-failure-p (make-condition 'http:http-error :phase :response
+                                                                       :detail "transport error: read timed out"))
+           "a failure after the request was sent, such as a read timeout, counts too")
+  (is-false (%runner-network-failure-p (make-condition 'http:http-error :status 503 :body "busy"))
+            "an HTTP status is the server's answer, not the runner's network")
+  (is-false (%runner-network-failure-p (make-condition 'http:http-error :detail "not a header name: \"a b\""))
+            "nor is a failure the client raised before sending"))
 
 ;;; --- the hub's review of #913 ---------------------------------------------------------------
 
