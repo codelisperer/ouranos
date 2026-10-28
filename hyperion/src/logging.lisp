@@ -157,15 +157,19 @@ to +MAX-QUERY-KEY-LENGTH+ characters. Never a value: a query string is a payload
 tokens and personal data (#1007). NIL for no query; :UNPARSED, with no text from it, when a name
 has a malformed escape or is not UTF-8.
 
-A part with no =, as in /reset?3f9a..., is counted in BARE-PARTS and never named, because such
-a part is usually a token rather than a name (the hub's review of #1017). An empty part, as in
-a&&b, is neither."
+A part with no value is counted in BARE-PARTS and never named, because such a part is usually
+a token rather than a name (the hub's reviews of #1017): one with no = at all, as in
+/reset?3f9a..., and one whose value is empty or only = signs, as in ?abc123secret= or a base64
+token with its padding, ?dGhpcyBpcyBhIHNlY3JldCB0b2tlbg==. An empty part, as in a&&b, is
+neither."
   (if (and (stringp query) (plusp (length query)))
       (let ((names '()) (bare 0) (full nil))
         (dolist (part (uiop:split-string query :separator "&"))
           (let ((equals (position #\= part)))
             (cond ((zerop (length part)))
-                  ((null equals) (incf bare))
+                  ((or (null equals)
+                       (every (lambda (c) (char= c #\=)) (subseq part equals)))
+                   (incf bare))
                   (full)
                   (t (let ((name (%decode-name (subseq part 0 equals))))
                        (cond ((null name) (return-from %query-keys (values :unparsed bare)))
@@ -197,13 +201,14 @@ client sees."
           ;; says everything, and doubling the volume is the complaint.
           (unless quiet
             (multiple-value-bind (query-keys bare-parts) (%query-keys (getf env :query-string))
-             (log:debug "request start" :method method :path path
-                                        ;; The names only, never the values (#1007), and only
-                                        ;; a count of the parts with no = (the review of #1017).
-                                        :query-keys query-keys
-                                        :bare-parts (and (plusp bare-parts) bare-parts)
-                                        ;; The client, behind a trusted proxy too (#381).
-                                        :remote (proxy:client-address env))))
+              (log:debug "request start" :method method :path path
+                                         ;; The names only, never the values (#1007), and only
+                                         ;; a count of the parts with no value (the reviews of
+                                         ;; #1017).
+                                         :query-keys query-keys
+                                         :bare-parts (and (plusp bare-parts) bare-parts)
+                                         ;; The client, behind a trusted proxy too (#381).
+                                         :remote (proxy:client-address env))))
           (handler-bind
               ((cl:error (lambda (c)
                            ;; Never quieted, whatever the path.

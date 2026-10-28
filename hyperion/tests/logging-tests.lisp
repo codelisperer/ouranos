@@ -207,6 +207,20 @@ where it is a name and is logged."
   (is (equal '(nil 2) (multiple-value-list (hyperion/logging::%query-keys "AAAA&BBBB")))
       "two bare parts and no names"))
 
+(test a-query-part-whose-value-is-empty-or-padding-is-counted-and-never-named
+  "The second review of #1017: a base64 token ends in = padding, so it splits into a name and
+a value of only =, and a token written as ?token= has an empty value. Both are counted as
+bare-parts and not named. The control is a name with a real value, which is logged."
+  (dolist (q '("dGhpcyBpcyBhIHNlY3JldCB0b2tlbg==" "abc123secret=" "QUJDREVGR0g="))
+    (let ((out (%log-start-line q)))
+      (is (search "bare-parts" out) "~S is counted: ~A" q out)
+      (is (null (search (subseq q 0 (position #\= q)) out)) "~S is not named: ~A" q out)))
+  (let ((out (%log-start-line "dGhpcyBpcyBhIHNlY3JldCB0b2tlbg=1")))
+    (is (search "dGhpcyBpcyBhIHNlY3JldCB0b2tlbg" out)
+        "control: with a real value the same text is a name, and is logged: ~A" out))
+  (is (equal '(("page") 2)
+             (multiple-value-list (hyperion/logging::%query-keys "x==&page=2&y=")))))
+
 (test a-query-that-does-not-parse-is-logged-as-unparsed-with-no-text-from-it
   (dolist (q '("ab%zz=SECRETVALUE" "%E2%82=SECRETVALUE" "a%2=SECRETVALUE"))
     (is (eq :unparsed (hyperion/logging::%query-keys q)) "~S" q))
