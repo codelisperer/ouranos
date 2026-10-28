@@ -42,7 +42,7 @@
            #:add-header #:ensure-2xx
            #:send-request #:header-value
            #:http-error #:http-error-status #:http-error-body #:http-error-label
-           #:http-error-detail
+           #:http-error-detail #:http-error-retry-after #:http-error-phase
            ;; fetching a URL a user supplied (#295)
            #:fetch-public #:*fetch-public-max-body-bytes*
            #:address-category #:parse-address #:address-string #:resolve-host

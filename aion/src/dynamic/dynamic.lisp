@@ -163,3 +163,14 @@ the same on every platform."
   (when *unblock-deferrable-signals*
     (funcall *unblock-deferrable-signals*))
   nil)
+
+;;; --- threads that must not block (#79) -----------------------------------------
+
+(defvar *blocking-forbidden* nil
+  "NIL, or a string naming why the current thread must not block, such as \"an aion/uv loop\".
+
+Bound, never set, by code that runs callbacks on a thread other work is waiting for: aion/uv's
+RUN binds it around every callback. Code that would block for a while, such as aion/retry's
+wait between attempts, checks it and signals instead of stalling every connection the loop
+serves. It is not inheritable (see REGISTER-INHERITABLE): a thread a callback starts is its
+own thread, and may block.")

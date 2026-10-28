@@ -215,7 +215,8 @@
 (defsystem "aion/uv/tests"
   :description "Tests for aion/uv. Requires a built libuv (scripts/build-libuv.lisp)."
   :depends-on ("aion/uv" "fiveam"
-               "aion/platform")   ; *search-source-tree*, which the loader tests bind (#472)
+               "aion/platform"    ; *search-source-tree*, which the loader tests bind (#472)
+               "aion/dynamic")    ; *blocking-forbidden*, which a loop callback must see bound (#79)
   :serial t
   :components ((:module "tests"
                 :serial t
@@ -319,6 +320,33 @@
 ;;; Lives here for the reason aion/interceptor does: the shape is request-response, not web.
 ;;; It had already been reimplemented twice before it moved -- internal to hermes, and three
 ;;; raw dex:post calls in praxeon -- which is the same evidence that settled pre-publication issue 177.
+(defsystem "aion/retry"
+  :description "Retry policy as data: bounded attempts, backoff with jitter, a deadline, and a runner built on restarts (#79)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; aion/log for the line each retry and each retry not taken writes; aion/dynamic for
+  ;; *BLOCKING-FORBIDDEN*, which aion/uv binds on its loop threads. Nothing native and nothing
+  ;; from the network: the HTTP methods of TRANSIENCE and RETRY-AFTER live in aion/http-client.
+  :depends-on ("aion/log" "aion/dynamic")
+  :serial t
+  :components ((:module "src/retry"
+                :serial t
+                :components ((:file "packages")
+                             (:file "retry"))))
+  :in-order-to ((test-op (test-op "aion/retry/tests"))))
+
+(defsystem "aion/retry/tests"
+  :description "Tests for aion/retry: the schedule, the runner's restarts, Retry-After, the deadline."
+  :depends-on ("aion/retry" "fiveam"
+               "aion/dynamic"   ; binds *blocking-forbidden* to test the refusal
+               "aion/log" "log4cl")   ; captures the log lines the runner writes
+  :serial t
+  :components ((:module "tests"
+                :serial t
+                :components ((:file "retry"))))
+  :perform (test-op (o c) (uiop:symbol-call :aion/retry/tests :run-tests)))
+
 (defsystem "aion/http-client"
   :description "An interceptor-shaped HTTP client: enter stages, one round-trip, leave stages."
   :author "Bob <eternal.recursion@proton.me>"
@@ -331,7 +359,8 @@
   ;; On Windows a pinned connection uses aion/tls for TLS and aion/windows for Windows' verdict
   ;; on the server's certificate (#536). aion/tls loads its mbedTLS on first use, not here.
   :depends-on ("dexador" "quri" "usocket" (:feature (:not :os-windows) "cl+ssl")
-               (:feature :os-windows "aion/tls") (:feature :os-windows "aion/windows"))
+               (:feature :os-windows "aion/tls") (:feature :os-windows "aion/windows")
+               "aion/retry")   ; TRANSIENCE and RETRY-AFTER methods for HTTP-ERROR (#79)
   :serial t
   :components ((:module "src/http-client"
                 :serial t
@@ -349,6 +378,7 @@
   ;; aion/tls and aion/windows directly (#536).
   :depends-on ("aion/http-client" "fiveam" "usocket" "bordeaux-threads" "aion/test-threads" "quri"
                "aion/test-http"
+               "aion/retry"   ; TRANSIENCE and RETRY-AFTER of an HTTP-ERROR (#79)
                (:feature (:not :os-windows) "cl+ssl")
                (:feature :os-windows "aion/tls") (:feature :os-windows "aion/windows"))
   :serial t
