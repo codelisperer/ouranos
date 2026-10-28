@@ -138,3 +138,60 @@ because HYPERION_SERVER names no server, the pool is closed again."
                 (lambda ()
                   (signals error ({{name}}:start :port 0))
                   (is (null {{name}}:*pool*) "the pool START opened was closed"))))))
+
+(defun %with-users-store-made-by (replacement function)
+  "Call FUNCTION while HYPERION/AUTH-DB:MAKE-DB-AUTH, the user store's constructor, is replaced
+by REPLACEMENT, which is called with the original constructor and its arguments. The original
+is put back afterwards."
+  (let ((original (fdefinition 'hyperion/auth-db:make-db-auth)))
+    (setf (fdefinition 'hyperion/auth-db:make-db-auth)
+          (lambda (&rest args) (apply replacement original args)))
+    (unwind-protect (funcall function)
+      (setf (fdefinition 'hyperion/auth-db:make-db-auth) original))))
+
+(test a-store-that-recovers-from-an-error-keeps-the-pool-open
+  "OPEN-DATABASE closes the pool only when a store could not be made. Here the user store's
+constructor signals an error, a handler outside OPEN-DATABASE resumes it through a restart, and
+the constructor carries on and makes the store, so the pool stays open and usable."
+  (call-with-database
+   (lambda ()
+     (%with-users-store-made-by
+      (lambda (original &rest args)
+        (restart-case (error "{{name}}: an error the user store recovers from")
+          (resume-making-the-store () nil))
+        (apply original args))
+      (lambda ()
+        (unwind-protect
+             (progn
+               ;; Only the restart the constructor set up for this condition is taken. Any
+               ;; other error, such as one from a pool closed under the constructor, is left
+               ;; to fail the test.
+               (handler-bind ((error (lambda (e)
+                                       (let ((restart (find-restart 'resume-making-the-store e)))
+                                         (when restart (invoke-restart restart))))))
+                 ({{name}}::open-database))
+               (is (not (null {{name}}:*pool*)) "the pool is still open")
+               (is (not (null {{name}}:*users*)) "the user store was made")
+               (is (integerp (session:store-count {{name}}:*sessions*))
+                   "the session store reads the database through the pool"))
+          ({{name}}::close-database)))))))
+
+(define-condition %users-store-not-made (error) ()
+  (:report "{{name}}: the user store cannot be made")
+  (:documentation "The error the replaced user-store constructor signals, so that a test can
+tell it apart from an error OPEN-DATABASE met before it reached the stores."))
+
+(test a-store-that-cannot-be-made-leaves-the-database-closed
+  "When a store cannot be made, OPEN-DATABASE signals, closes the pool it made, and leaves
+*POOL*, *SESSIONS* and *USERS* all NIL."
+  (call-with-database
+   (lambda ()
+     (%with-users-store-made-by
+      (lambda (original &rest args)
+        (declare (ignore original args))
+        (error '%users-store-not-made))
+      (lambda ()
+        (signals %users-store-not-made ({{name}}::open-database))
+        (is (null {{name}}:*pool*) "the pool was closed")
+        (is (null {{name}}:*sessions*) "no session store is left set")
+        (is (null {{name}}:*users*) "no user store is left set"))))))

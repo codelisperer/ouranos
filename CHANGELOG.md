@@ -28,6 +28,75 @@ its tag.
   - Log tooling that searched for `query` should search for `query-keys`.
   - No setting brings the raw query back.
 
+- **`scripts/build-desktop-app.lisp` stops, instead of warning and exiting 0, when the bundle
+  needs hyperion-view or a library the runtime links against and it is missing** (#956). For an
+  app that loads `hyperion/desktop`, a `hyperion/hyperion-view/hyperion-view(.exe)` that was not
+  built now ends the build with exit code 3, naming the file and the command that builds it
+  (`hyperion/hyperion-view/build.sh`, or `build.ps1` on Windows). On macOS the same happens for a
+  library the SBCL runtime links against that is not on the build machine; it was printed as
+  `MISSING`, and when the runtime could not be patched (an `install_name_tool` or `codesign`
+  error) none of those libraries was carried and the build said "continuing UNPATCHED" and
+  exited 0; each is now named and refused. A build that deliberately does not carry them passes
+  **`--allow-missing-natives`**: it warns, goes on, and the build's summary line names what is
+  missing.
+  - An app that does not load `hyperion/desktop`, such as a console tool, needs no launcher, so
+    a missing hyperion-view does not stop its build. The macOS runtime-linked libraries above
+    still apply to it.
+  - Such an app also **no longer gets hyperion-view copied into its bundle** when hyperion-view
+    is built: the build says "no launcher carried -- this image does not load
+    hyperion/desktop".
+  - The tree's lazily loaded libraries (libuv, mbedTLS, libgit2) and its SQLite already stopped
+    the build when missing, and still do, with no option to go on without them.
+- **`scripts/build-libuv.lisp` rebuilds a libuv built from another release instead of keeping
+  it** (#977). It reused any `vendor/libuv/lib` library that existed, so after `libuv.pin` moved
+  (1.52.1 to 1.53.0 in train 77) a checkout kept the old build, said "already built" and exited 0,
+  and bundles carried the old release. It now writes `vendor/libuv/BUILT-FROM` with the version
+  and sha256 it built from, and reuses a library only when that stamp names the pin. **The first
+  run after updating rebuilds libuv once on every checkout**, because no existing build has a
+  stamp, so it needs the C toolchain build-libuv already requires. The stamp's format is shared
+  with `build-sqlite.lisp`'s, in `scripts/built-from.lisp`.
+- **`cons --strict` refuses a target it cannot check, instead of running it and exiting 0**
+  (#960). `--strict` judges only what a target loads with `:load` or `:test`. A target whose work
+  is `:eval`, `:call` or `:sh` with neither -- for example an `:eval` that calls
+  `asdf:load-system` -- ran with nothing checked. A target with `:sh` is not judged either,
+  whatever else it has: cons runs `:sh` in place of the target's `:load` and `:test`, so
+  `(x :load "app" :sh (...))` never loaded `app`. Under `--strict` such a target now exits 1
+  before running, naming it and why, and a `:steps` target names each such step once. Give the
+  target a `:load` clause naming the systems it builds and put the shell work in a target of its
+  own, or run it without `--strict`.
+  - A strict load (`cons/run:load-system-strictly` with `:force-own`) whose root holds none of the
+    systems it loads now signals an error naming the root, instead of loading everything with
+    its warnings muffled. Under `--strict` each `:load` entry is loaded this way, so **a `:load`
+    list that names a library from outside the project, such as `:load ("swank" "app")`, is now
+    refused**. Load the library through the project's own system instead (add it to that
+    system's `:depends-on`), or keep it in a target run without `--strict`.
+  - A `:steps` cycle is refused with the cycle named, with or without `--strict`; it used to
+    recurse until the stack ran out.
+  - Without `--strict`, nothing else changes.
+- **`bootstrap.lisp` no longer overwrites a source-registry drop-in that names another
+  checkout; it stops with exit code 3 before building anything** (#955). Bootstrap writes
+  `50-ouranos.conf` under the user's `common-lisp/source-registry.conf.d/`, which every Lisp
+  process the user runs reads. It used to rewrite the file on every run, so bootstrapping a
+  second checkout (a scratch clone pinned to an older Ouranos, or a worktree) silently moved
+  every other process on the machine to that checkout. Now:
+  - When the drop-in names another checkout that still exists, bootstrap prints both paths
+    and the command for each way forward on the current OS, and exits 3. The drop-in is left
+    byte for byte as it was. A drop-in that is not a single `(:tree "...")` form is refused
+    the same way.
+  - `OURANOS_BOOTSTRAP_LOCAL=1` builds this checkout without reading or writing the drop-in.
+    Bootstrap sets `CL_SOURCE_REGISTRY` to `<checkout>//:` (`//;` on Windows) for itself and
+    the child processes it starts, and prints that value to set in each shell that should use
+    this checkout.
+  - `OURANOS_BOOTSTRAP_FORCE=1` rewrites the drop-in to name this checkout, as bootstrap used
+    to do. Each switch is on only when its value is exactly `1`.
+  - A drop-in naming a checkout that no longer exists is still rewritten, with a line saying
+    which path it replaced, so moving a clone still needs only a second bootstrap.
+
+  A script or CI job that bootstraps a second checkout on a machine that already has one
+  (for example an app's scratch build of an older Ouranos) sets `OURANOS_BOOTSTRAP_LOCAL=1`,
+  and then `CL_SOURCE_REGISTRY` for the steps after bootstrap. A machine with one checkout,
+  and a fresh CI runner, need no change. The decision is in `scripts/source-registry.lisp`.
+
 - **MCP resources and retrieval passages are untrusted by default, so in a prompt they refuse
   `:requires-user-intent` means for the turn** (#907, after #906). `praxeon/mcp:add-resource` and
   `praxeon/retrieval:passage->ctx-item` put outside content into an agent's context with nothing
@@ -87,6 +156,46 @@ its tag.
   none of 38 large outputs eligible. `praxeon/scripts/claude-code-trials.lisp` measures it, and
   calls no model unless `PRAXEON_CC_TRIALS=run` is set. Rebuild `bin/praxeon-claude-code` to get
   it.
+- **praxeon/actor: `:taint-scope :conversation` works for an app that rebuilds the agent from a
+  text transcript, and warns when it cannot tell** (#948). Before, `:conversation` looked only
+  for untrusted tool calls in the history, so a history rebuilt from text, which has none,
+  made it behave like `:turn` without saying so. Now:
+  - The agent records the conversation's taint in the new slot `agent-conversation-taint`:
+    `:untrusted` once the agent has read untrusted content, `:delegated` when the only such
+    content is a task a coordinating agent gave it, `:clean` from a first turn until either,
+    `nil` when not recorded. `make-agent` takes `:conversation-taint`; any other value signals
+    an error when the agent runs a turn.
+  - **An app that stores text transcripts** stores this value with each transcript and passes it
+    to `make-agent` when it rebuilds the agent.
+  - Under `:conversation`, an agent with earlier turns, no tool calls in them and nothing recorded
+    is treated as untrusted. Praxeon records `:untrusted`, logs it once for that agent, and
+    signals the warning `praxeon/actor:conversation-taint-unrecorded`, whose message names the
+    fix. Muffling the warning does not make the turn trusted.
+  - Once an agent records `:untrusted` or `:delegated`, it stays untrusted under `:conversation`
+    even if the app removes the untrusted call from the history. To start over, set the slot to
+    `:clean` and remove the untrusted calls from the history too.
+  - `untrusted-window-predicate` reads the recorded value too, so an observer agrees with the turn.
+  - **`:conversation` now refuses more than before:** a sub-agent given a task by
+    `register-agent-as-means` records `:delegated`, because the task is another model's text and
+    stays in its history. Under `:conversation`, the sub-agent's later turns are untrusted, so a
+    spending means is refused in them. The delegated turn itself is treated as before, except
+    when the app rebuilds the sub-agent partway through that turn and passes `:delegated` back:
+    the rebuilt turn is then untrusted too, which refuses more, not less.
+    `:delegated` is kept apart from `:untrusted` so that delegating to the same sub-agent again
+    does not make the coordinator untrusted; the coordinator is marked only when the sub-agent
+    read untrusted content, as before. A coordinator that delegated after its own turn had
+    become untrusted leaves the sub-agent recording `:untrusted`, because that task was written
+    after the coordinator read untrusted content, so a later delegation to it marks the
+    coordinator.
+- **hyperion/i18n: `load-dictionary` and `make-json-source` signal `empty-dictionary` when
+  their directory holds no locale files** (#294). `make-json-source` calls `load-dictionary`,
+  so everything below applies to both. Before, a wrong, missing or empty directory returned a
+  dictionary with no locales, and every string rendered as its `[section/key]` marker. The
+  condition's message gives the absolute directory searched, says when it does not exist, when
+  the path given was relative and what it was resolved against, and when the path lacks its
+  trailing slash. Both also warn `default-locale-not-loaded` when the `:default` locale has no
+  file, and still return the dictionary. An app that relied on an empty dictionary
+  can build one with `make-dictionary` and an empty hash table.
 
 - **praxeon/retrieval and praxeon/memory-db on SQLite: similarity search works at real corpus
   sizes, and the stored embeddings change form** (#425). A SQLite store kept each embedding as
@@ -923,6 +1032,131 @@ its tag.
   `claude-opus-5-5` where they named `claude-opus-4-8`.
 
 ### Added
+
+- **praxeon/image: the generate-image means offers the model a `mask`, so it can change only part
+  of an image** (#946). With `:resolve-reference` and a provider that takes a mask
+  (`image-provider-accepts-mask-p`, true for OpenAI), the tool schema offers `mask`: a reference,
+  resolved by the same `:resolve-reference` function as `reference_images`, to a PNG with
+  transparency the size of the first reference image. It is checked as a `:mask` given to
+  `generate-image` is, and refused before any request with `image-input-invalid` when it does
+  not fit. The `:image-usage` event of a request with a mask carries `:mask t`. Google's provider
+  is not offered `mask`, and one the model gives anyway is refused with the reason.
+- **`aion/sexp`: a safe reader and writer for s-expression data from outside the program**
+  (#972). `read-data` accepts plain data only -- lists, dotted pairs, strings, integers, ratios,
+  floats, `t`, `nil`, keywords that already exist, and the symbols in its `:symbols` list -- and
+  signals `aion/sexp:unsafe-data`, with a `reason`, for anything else. It is a parser of its
+  own, not `cl:read`, so it interns nothing (`:intern-keywords t` allows new keywords), refuses
+  every `#` form (`#S`, `#.`, `#+`, `#P`, `#n=`, `#(` and the rest), quote and backquote,
+  `|escaped|` symbols and package prefixes, and keeps its own stack, so deep nesting is
+  `unsafe-data :too-deep` and never a `storage-condition`. Limits: `:max-depth` (64),
+  `:max-elements` (100 000, each list and each atom counted once), `:max-string-length` (65 536), `:max-number-digits` (100) and
+  `:max-input` (1 MiB characters), each also a special variable. A float's type follows its
+  exponent marker, not `*read-default-float-format*`; an exponent past a float's range is
+  `:number-out-of-range` and `1/0` is `:division-by-zero`. Symbol tokens are folded to upper
+  case, as the standard reader folds them. `write-data` and `write-data-to-string` write only
+  what `read-data` accepts, and refuse anything else before writing a character, including a symbol whose name would read back as a number or as CL's `t` or `nil`. An app that
+  reads data it did not write with `cl:read`, even with `*read-eval*` nil, should move to it.
+- **hyperion/kit: a list toolbar and a properties panel** (#981, part four). `hyperion/kit` now
+  also depends on `hyperion/list`.
+  - `hyperion/kit/toolbar:list-toolbar` takes a `hyperion/list` state and writes a GET form with
+    `role="search"`: a search field for a `:text` filter (`:search`), a select for each
+    `:values` filter (`:filters`, with an "All" option first), a select of sort keys
+    (`:sorts`), and an Active/Trash segmented control for a `:values` filter (`:trash`). The
+    list's other parameters and the page's own parameters are hidden fields, and the page is
+    left out, so a new search starts on page 1. With an htmx target the form re-requests the
+    list 300ms after typing stops, when a select changes, and on submit. It signals when a name
+    is not a filter or sort key of the right kind.
+  - `hyperion/kit/toolbar:toolbar-js`, included once per page, makes the toolbar's requests
+    carry the same parameters `list-href` writes for the same change: it sends them to the
+    page's own path, leaves out a filter set to All and the default sort key, and drops the
+    direction when the sort key changes.
+  - `hyperion/kit/panel:selectable-row` returns the attributes, for Spinneret's `:attrs`, of a
+    row that loads an item's properties into a `panel-region` on a click or on Enter.
+    `properties-panel` writes the panel, an `<aside>` named by its title with a close button.
+    `panel-js` marks the chosen row with `aria-current="true"`, and the close button or Escape
+    empties the panel and returns focus to that row.
+  - `hyperion/list` exports `list-param-name`, the query-parameter name a spec reads for a
+    filter or setting; `list-carried-params`, the hidden fields a GET form for the list needs;
+    and the spec readers `list-spec-sorts`, `list-spec-default-sort`, `list-spec-filters` and
+    `list-spec-hx-target`.
+  - `kit.css` styles the toolbar, the chosen row and the panel.
+
+- **hyperion/kit: dialogs, a destructive-action confirm and an undo notice** (#981, part
+  three). The new package `hyperion/kit/dialog`; `hyperion/kit` now also depends on
+  `parenscript`, which `hyperion` already loads.
+  - `dialog` writes a closed native `<dialog>` named by its title through `aria-labelledby`,
+    with a close button. `dialog-opener` writes the button that opens it; with `:href`, htmx
+    loads the dialog's contents first and the dialog opens when they have settled.
+  - `confirm-dialog` writes a dialog whose form posts to `:action-href` with htmx. Cancel is on
+    the left and has the initial focus, so Enter cancels; the action is on the right, labelled
+    by `:action-label` and styled as danger. The action is disabled while its request is in
+    flight, so a double click posts once. The dialog closes when the request succeeds. It
+    signals unless `:action-href` and `:action-label` are given.
+  - `notice-region` writes an empty `role="status"` live region, and `undo-notice` writes a
+    notice with Undo and Dismiss buttons and no timer. With `:oob t` a handler can return the
+    notice with any response and htmx appends it to the region.
+  - `dialog-js` returns the script for all of them, to include once per page. Escape closes a
+    dialog, and closing it returns focus to the button that opened it, including in browsers
+    where clicking a button does not focus it. The browser itself focuses the dialog's
+    `autofocus` element when it opens.
+  - `kit.css` styles the dialogs and notices.
+
+- **hyperion/kit: a page header, breadcrumbs, an empty state, a segmented control and a toggle
+  group for collection pages** (#981, part two). A new opt-in system, `hyperion/kit`. Each
+  component writes into Spinneret's `*html*`, like `hyperion/list:pager`, and is styled by
+  `(hyperion/assets:url :kit)` in the `--hy-*` tokens of `hyperion/appearance`.
+  - `hyperion/kit/page:page-header` takes a title, which becomes the page's `<h1>`, and
+    optionally `:subtitle`, `:breadcrumbs` and `:actions`. `:actions` is a function that writes
+    the action buttons.
+  - `hyperion/kit/page:breadcrumbs` takes `(label . href)` items and writes an ordered list in a
+    `<nav>` with an `aria-label`. The last item is the current page: it has
+    `aria-current="page"` and is not a link. The separators are drawn by CSS, so a screen
+    reader does not read them.
+  - `hyperion/kit/page:empty-state` writes a heading, one line of text and an optional primary
+    link.
+  - A breadcrumb href or an empty state's `:action-href` becomes a link only when it has no
+    scheme or its scheme is `http` or `https`. Any other, such as `javascript:` or `data:`, is
+    left out of the page, and the label is written as plain text. Nothing is signalled.
+  - `hyperion/kit/toggle:segmented-control` (exactly one option pressed) and
+    `hyperion/kit/toggle:toggle-group` (any number pressed) write buttons with `aria-pressed`
+    in a `role="group"` with an `aria-label`. Each button loads its href with htmx.
+    `segmented-control` signals when `:selected` does not name exactly one option.
+  - `hyperion/assets` serves the new stylesheet `kit.css` under the key `:kit`, so
+    `(hyperion/assets:assets)` now has five entries.
+
+- **hyperion/appearance: theme, contrast and look as one visitor setting, and the `--hy-*`
+  appearance tokens** (#981, part one). A page's appearance is three attributes on `<html>`:
+  `data-theme` (`light` or `dark`), `data-contrast` (`normal` or `high`) and the new
+  `data-look` (`flat` or `gradient`). The default for theme and for contrast is the system:
+  with the attribute absent, `prefers-color-scheme` and `prefers-contrast: more` decide. With
+  `data-look` absent the look is flat.
+  - `make-appearance` and `appearance-from-strings` build the setting, and `html-attributes`
+    returns the attributes for `<html>`, leaving out any setting that follows the system.
+  - `read-appearance` and `persist-appearance` are a store protocol.
+    `make-cookie-appearance-store` keeps the setting in one cookie, named `appearance` by
+    default, for example `dark.system.gradient`. An app that stores it elsewhere supplies its
+    own store.
+  - `make-appearance-table` takes token values for the light, dark, light high-contrast and dark
+    high-contrast schemes, merged over hyperion's defaults. Each scheme has a `:gradient` plist
+    for the values the gradient look changes. `appearance-css` writes CSS for every combination,
+    plus `--hy-space-1` to `--hy-space-7` (a 4px base).
+  - The tokens are `--hy-surface`, `--hy-surface-raised`, `--hy-header`, `--hy-button`,
+    `--hy-button-primary` and `--hy-button-danger`, each with a `-text` token. Their names are
+    the same in both looks. A background token is a colour in the flat look and may be a
+    `linear-gradient` in the gradient look, so use it with `background:`, not
+    `background-color:`.
+  - In the gradient look, the CSS also applies the tokens to Bulma's `.button.is-primary`,
+    `.button.is-danger`, `.navbar`, `.modal-card-head`, `.card-header`, `.box` and `.card`,
+    with `background:`, so a plain colour given as a gradient-look value replaces Bulma's own
+    background. The outlined, light and inverted button variants keep Bulma's colours.
+  - A browser without the `prefers-contrast` media feature (Chrome before 96, Firefox before
+    101) shows the light, flat look on a page that sets no `data-contrast`.
+  - The type scale is Bulma's `--bulma-size-1` to `--bulma-size-7`, set through
+    `hyperion/assets:theme`.
+  - `appearance-contrast-failures` checks every text token against its background in all eight
+    combinations, at WCAG AA (4.5:1). For a gradient it checks every stop and 19 points between
+    each pair of stops. Hyperion's own table passes. An app calls the check in its own tests on
+    its own table. `contrast-ratio` and `relative-luminance` are exported.
 
 - **praxeon/actor: every deliberation step records how many of the prompt's estimated tokens came
   from each source** (#317, step D). `praxeon/actor:request-messages` returns a third value, and
@@ -2296,6 +2530,15 @@ its tag.
   "Long-running calls".
 
 ### Fixed
+
+- **cons: in a project made with `cons init --template web --db`, `open-database` closes the
+  pool only when making the session or user store did not finish** (#944). It used to close the
+  pool from a `handler-bind` on `error`, which runs as soon as an error is signalled, so a store
+  constructor that signalled an error and recovered from it through a restart carried on with a
+  closed pool and failed with `mnemosyne/conn:pool-closed`. It now closes the pool from an
+  `unwind-protect`, as the template's `start` already did. When a store cannot be made,
+  `*pool*`, `*sessions*` and `*users*` are all `nil` afterwards. A project already generated
+  keeps the old `open-database` in its own `src/db.lisp`; the change can be copied there by hand.
 
 - **aion/http-client: a pinned https request refuses a certificate whose common name matches
   the host when its subject alternative names do not** (#917). On Linux and macOS, cl+ssl checks

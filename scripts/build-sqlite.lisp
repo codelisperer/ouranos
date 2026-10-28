@@ -44,6 +44,7 @@
 (require :uiop)
 (load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
 (load (merge-pathnames "fs.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; aion/fs:delete-tree (#347)
+(load (merge-pathnames "built-from.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; the BUILT-FROM stamp (#977)
 ;;; Finding MSVC and running a command inside its environment, shared with the other build
 ;;; scripts (#410). Loaded before any form below is read, because those forms name
 ;;; FIND-MSVC and MSVC-COMMAND.
@@ -428,18 +429,9 @@ carry-natives.lisp) and where tree-natives.lisp's LICENSE-FILES would find it."
 ;;; so after a pin bump a checkout that still holds the old build rebuilds it instead of
 ;;; carrying the old version into bundles.
 
-(defun stamp-path () (merge-pathnames "BUILT-FROM" *vendor*))
+(defun write-stamp (version sha) (ouranos-built-from:write-stamp *vendor* version sha))
 
-(defun stamp-text (version sha)
-  (format nil "version ~A~%sha256 ~A~%" version (string-downcase sha)))
-
-(defun write-stamp (version sha)
-  (with-open-file (out (stamp-path) :direction :output :if-exists :supersede)
-    (write-string (stamp-text version sha) out)))
-
-(defun stamp-matches-p (version sha)
-  (let ((path (probe-file (stamp-path))))
-    (and path (string= (uiop:read-file-string path) (stamp-text version sha)))))
+(defun stamp-matches-p (version sha) (ouranos-built-from:stamp-matches-p *vendor* version sha))
 
 ;;; ------------------------------------------------------------------------- main
 
