@@ -27,10 +27,10 @@ sentences, such as which frameworks carry which dependencies, is written by hand
 checked. The number of ASDF systems is not given here, because it changes with every new
 test suite; `scripts/check-deps.lisp` prints it.
 
-- **27** distinct third-party systems named in a `:depends-on` (Quicklisp; the SBCL contribs
+- **28** distinct third-party systems named in a `:depends-on` (Quicklisp; the SBCL contribs
   are counted on the next line). The tables below also document `hunchentoot` and `woo`, which
   no `.asd` in this tree names in a `:depends-on`, so they are not in this count;
-  `clack-handler-woo` is in it since `hyperion/woo` declares it (#372). Of the 27 — 3 are foundation/test
+  `clack-handler-woo` is in it since `hyperion/woo` declares it (#372), and `chipz` since `aion/pdfium/tests` names it (#997; dexador already loaded it). Of the 28 — 3 are foundation/test
   (`coalton`, `alexandria`, `fiveam`), **~13 are hyperion's web stack**, **3 are the
   mnemosyne data layer** (CL-DBI + two drivers), and **2 arrived with hermes** (`cl-base64`,
   `ironclad` — see the hermes section below; `ironclad` and `dexador` are reused by `hermes/blob`, which adds NO new external dep (pre-publication issue 164)). One (`lass`) is example-only. Two (`usocket`, `cl+ssl`) were already loaded as dexador's
@@ -48,6 +48,7 @@ test suite; `scripts/check-deps.lisp` prints it.
 | `alexandria` | CL utilities | all six core (not hermes) | De-facto CL stdlib; tiny, ubiquitous. |
 | `fiveam` | test framework | all `*/tests` | **Test-only.** |
 | `flexi-streams` | in-memory octet streams | `hyperion/tests` | **Test-only.** Hands `body-string` a body without a socket (pre-publication issue 211). Already present transitively via clack; declared rather than assumed. |
+| `chipz` | inflating a zlib stream | `aion/pdfium/tests` | **Test-only.** Reads back the PNG aion/pdfium writes, independently of the writer, to check its pixels (#997). Already present transitively: dexador depends on it. Inflate only; nothing in the tree compresses with it. |
 | `clingon` | CLI arg parsing | cons/cli, hyperion/cli | hyperion/cli is being retired (ADR-0007) → collapses to **cons only**. |
 | `com.inuoe.jzon` | JSON | hyperion, praxeon(+web,+web-search), klio | **One** JSON lib across the tree — no duplication. klio writes a site's search index with it (#353). |
 | `usocket` | sockets | aion/http-client (and its tests) | **Not a new load.** It is dexador's own transport, and clack's. `aion/http-client` names it to open a connection to an address it has already checked, for a URL a user supplied, and its tests run a small HTTP server with it (#295). |
