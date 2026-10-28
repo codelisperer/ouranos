@@ -1063,6 +1063,14 @@ its tag.
 
 ### Added
 
+- **`hyperion/auth-db:*pbkdf2-iterations*` is exported, so an app's test suite can lower the
+  password hashing cost** (#1045). It was internal, reachable only as
+  `hyperion/auth-db::*pbkdf2-iterations*`. The default stays 100000. A test runner can
+  `(setf auth:*pbkdf2-iterations* 1000)` for its run; production must not lower it. Each hash
+  stores its count, so hashes made at either count verify under the other. `hyperion/auth-db/tests`
+  now runs at 1000, about 29 s to 8 s on an Apple Silicon Mac. See `hyperion/docs/user-guide.md`,
+  "Identity and roles".
+
 - **praxeon: a turn can stream the model's text as it is written, and be cancelled so the
   provider stops generating** (#984).
   - `praxeon/actor:run-turn` takes **`:cancel`**, a handle from **`make-turn-cancel`**. Calling
