@@ -7,7 +7,7 @@
  * own poll() loop on one shared listening socket. compare.py drives it with the load generator
  * before any Hyperion backend. Because it uses every core and does no work per request, the
  * rate it reaches is the most the generator can measure on this machine, and a backend whose
- * rate comes within 80% of it is reported as limited by the generator, not given a number.
+ * rate reaches 80% of it or more is reported as limited by the generator, not given a number.
  *
  * The first version ran one process, so its rate was one core's limit, and on Linux Woo went
  * past it (#413). The processes are forked after listen() and share the socket rather than
@@ -15,7 +15,10 @@
  * SO_REUSEPORT sockets. The socket is non-blocking, so a process that loses the race for a
  * connection goes back to poll().
  *
- * SIGTERM to the first process stops all of them.
+ * SIGTERM to the first process stops all of them: it sends SIGTERM to its whole process group
+ * with kill(0, ...). compare.py starts it in a group of its own. Run by hand from a shell
+ * without job control, the group can include the shell and whatever else it started, so
+ * stop a hand-run copy with Ctrl-C or by killing each process instead.
  *
  * Not a web server: it answers once per "\r\n\r\n" it reads and never reads a body. That is
  * exactly what GET without a body sends, and all it needs to do.

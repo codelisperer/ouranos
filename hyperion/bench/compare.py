@@ -155,7 +155,10 @@ def ceiling(gen, connections, seconds):
         wait_for(f"http://127.0.0.1:{port}/", proc, 10)
         return drive(gen, f"http://127.0.0.1:{port}/", connections, seconds)[0]
     finally:
-        os.killpg(proc.pid, signal.SIGTERM)
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass   # trivial.c already exited, for example on a failed bind; keep the real error
         proc.wait()
 
 
