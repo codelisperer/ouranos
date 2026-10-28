@@ -31,10 +31,10 @@ all. Only a store that HAS one can answer BLOB-URL."))
 
 BASE-URL, if given, is the public prefix ROOT is served from -- without it the store
 cannot produce a URL and says so, rather than guessing at one that 404s."
-  (let ((root (or root (uiop:getenv "MNEMOSYNE_BLOB_ROOT") "blobs/")))
+  (let ((root (or root (%setting "MNEMOSYNE_BLOB_ROOT") "blobs/")))
     (make-instance 'filesystem-store
                    :root (uiop:ensure-directory-pathname root)
-                   :base-url (or base-url (uiop:getenv "MNEMOSYNE_BLOB_BASE_URL")))))
+                   :base-url (or base-url (%setting "MNEMOSYNE_BLOB_BASE_URL")))))
 
 (register-store "filesystem" #'make-filesystem-store)
 

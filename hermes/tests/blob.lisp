@@ -1306,7 +1306,9 @@ client to send no ACL header."
 
 (defmacro with-environment-variable ((name value) &body body)
   "Run BODY with the environment variable NAME set to VALUE, then restore it. NIL sets it to the
-empty string, which MAKE-S3-STORE reads as unset, so no unsetenv (and no sb-posix) is needed."
+empty string, which every blob setting reads as unset (%SETTING, #124), so no unsetenv (and no
+sb-posix) is needed. A variable that was unset before is restored as the empty string, which
+is the same to the blob store."
   (let ((old (gensym "OLD")))
     `(let ((,old (uiop:getenv ,name)))
        (unwind-protect
@@ -2226,3 +2228,104 @@ BLOB-BACKEND-ERROR."
                                              (b:blob-invalid-metadata (c) (b:blob-invalid-metadata-name c))))))
           (is (equal '("if-match" "if-match") result) "~S on ~A" bad (b:store-name store))
           (is (null calls)))))))
+
+(test s3-secure-setting-comes-from-the-argument-or-the-environment
+  ;; #124: SECURE was the one setting with no environment fallback, so STORE-FROM-ENV could not
+  ;; make a store for a local S3 double that speaks plain http.
+  ;; A local endpoint throughout: since #970's review, MNEMOSYNE_S3_SECURE=false is refused for
+  ;; an endpoint that is not local, which PLAINTEXT-IS-REFUSED-FOR-AN-ENDPOINT-THAT-IS-NOT-LOCAL
+  ;; covers. This test is about where the setting comes from, not about that rule.
+  (flet ((secure (&rest args)
+           (b::s3-secure-p (apply #'b:make-s3-store :endpoint "localhost:9000"
+                                 :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x" args))))
+    (with-environment-variable ("MNEMOSYNE_S3_SECURE" nil)
+      (is (eq t (secure)) "unset is https")
+      (is (eq nil (secure :secure nil)) "and the argument can still turn it off"))
+    (with-environment-variable ("MNEMOSYNE_S3_SECURE" "false")
+      (is (eq nil (secure)) "false is plain http")
+      (is (eq t (secure :secure t)) "the argument wins over the environment"))
+    (with-environment-variable ("MNEMOSYNE_S3_SECURE" "FALSE")
+      (is (eq nil (secure)) "case does not matter"))
+    (with-environment-variable ("MNEMOSYNE_S3_SECURE" "True")
+      (is (eq t (secure))))
+    ;; A misspelling must not quietly pick either answer.
+    (dolist (v '("flase" "0" "no" "off" "yes"))
+      (with-environment-variable ("MNEMOSYNE_S3_SECURE" v)
+        (signals b:blob-configuration-error (secure))))))
+
+(test store-from-env-can-make-a-store-for-a-local-s3-double
+  ;; The whole configuration a MinIO on localhost:9000 needs, from the environment alone.
+  (let ((b:*store* nil))
+    (with-environment-variable ("MNEMOSYNE_BLOB_IMPL" "s3")
+      (with-environment-variable ("MNEMOSYNE_S3_ENDPOINT" "localhost:9000")
+        (with-environment-variable ("MNEMOSYNE_S3_ACCESS_KEY" "minioadmin")
+          (with-environment-variable ("MNEMOSYNE_S3_SECRET_KEY" "minioadmin")
+            (with-environment-variable ("MNEMOSYNE_S3_PATH_STYLE" "true")
+              (with-environment-variable ("MNEMOSYNE_S3_SECURE" "false")
+                (let* ((store (b:store-from-env))
+                       (url (b:blob-url store "media" "a/b.png" :expires-in 60)))
+                  (is (typep store 'b:s3-store))
+                  (is (eql 0 (search "http://localhost:9000/media/a/b.png?" url))
+                      "a plain http, path-style URL to the double: ~A" url)))
+              (with-environment-variable ("MNEMOSYNE_S3_SECURE" nil)
+                (is (eql 0 (search "https://" (b:blob-url (b:store-from-env) "media" "a/b.png"
+                                                          :expires-in 60)))
+                    "control: the same settings without MNEMOSYNE_S3_SECURE give https")))))))))
+
+(test an-empty-blob-setting-means-the-same-as-an-unset-one
+  ;; WITH-ENVIRONMENT-VARIABLE restores an unset variable as "", so after a test that sets
+  ;; MNEMOSYNE_BLOB_IMPL or MNEMOSYNE_S3_ENDPOINT, every later reader sees "". Before #124's
+  ;; review, STORE-FROM-ENV looked up a store named "" and MAKE-S3-STORE refused an empty endpoint.
+  (let ((b:*store* nil))
+    (with-environment-variable ("MNEMOSYNE_BLOB_IMPL" "")
+      (with-environment-variable ("MNEMOSYNE_BLOB_ROOT" "")
+        (is (typep (b:store-from-env) 'b:filesystem-store)
+            "an empty MNEMOSYNE_BLOB_IMPL is the default, filesystem")))
+    (with-environment-variable ("MNEMOSYNE_S3_ENDPOINT" "")
+      (with-environment-variable ("MNEMOSYNE_S3_REGION" "")
+        (with-environment-variable ("MNEMOSYNE_S3_SESSION_TOKEN" "")
+          (let ((store (b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x")))
+            (is (string= "s3.amazonaws.com" (b::s3-endpoint store)) "an empty endpoint is the default")
+            (is (string= "us-east-1" (b::s3-region store)) "an empty region is the default")
+            (is (null (b::s3-session-token store)) "an empty session token is no token")))))
+    ;; An empty required credential is still missing.
+    (with-environment-variable ("MNEMOSYNE_S3_ACCESS_KEY" "")
+      (signals b:blob-configuration-error
+        (b:make-s3-store :endpoint "s3.amazonaws.com" :secret-key "x")))))
+
+(test plaintext-is-refused-for-an-endpoint-that-is-not-local
+  ;; #970: MNEMOSYNE_S3_SECURE=false alone turned a store still aimed at s3.amazonaws.com into
+  ;; one that sent signed requests, and any session token, in plaintext across the internet.
+  (flet ((store (&rest args)
+           (apply #'b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x" args)))
+    (with-environment-variable ("MNEMOSYNE_S3_SECURE" "false")
+      ;; Refused: the default endpoint and any other public name or address.
+      (with-environment-variable ("MNEMOSYNE_S3_ENDPOINT" nil)
+        (signals b:blob-configuration-error (store))
+        "the default s3.amazonaws.com")
+      (dolist (endpoint '("s3.amazonaws.com" "nyc3.digitaloceanspaces.com" "93.184.216.34"
+                          "[2606:2800:220:1:248:1893:25c8:1946]:9000"))
+        (signals b:blob-configuration-error (store :endpoint endpoint)))
+      ;; Allowed: a local double, by name or by address, with or without a port.
+      (dolist (endpoint '("localhost:9000" "LOCALHOST" "127.0.0.1:9000" "10.1.2.3:9000"
+                          "192.168.1.10" "172.17.0.2:9000" "[::1]:9000" "169.254.1.2"))
+        (is (not (b::s3-secure-p (store :endpoint endpoint)))
+            "~A is local, so plaintext is allowed" endpoint))
+      ;; A name that does not resolve is not known to be local.
+      (signals b:blob-configuration-error (store :endpoint "minio.invalid:9000"))
+      ;; In code, :secure nil stays a deliberate choice and is not checked.
+      (is (not (b::s3-secure-p (store :endpoint "s3.amazonaws.com" :secure nil)))))
+    ;; The control: with the variable unset or true, the same endpoints are https.
+    (with-environment-variable ("MNEMOSYNE_S3_SECURE" nil)
+      (is (b::s3-secure-p (store :endpoint "localhost:9000")))
+      (is (b::s3-secure-p (store :endpoint "s3.amazonaws.com"))))))
+
+(test an-endpoint-host-is-read-without-its-port
+  (dolist (case '(("s3.amazonaws.com" . "s3.amazonaws.com")
+                  ("localhost:9000" . "localhost")
+                  ("127.0.0.1:9000" . "127.0.0.1")
+                  ("[::1]:9000" . "::1")
+                  ("[2606:2800::1]" . "2606:2800::1")
+                  ("::1" . "::1")
+                  ("minio" . "minio")))
+    (is (string= (cdr case) (b::%endpoint-host (car case))) "~A" (car case))))
