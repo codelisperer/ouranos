@@ -42,7 +42,8 @@
 (defpackage #:praxeon/event
   (:use #:cl)
   (:export #:*observer* #:emit #:with-observer
-           #:event-type #:event-get #:event-plist))
+           #:event-type #:event-get #:event-plist
+           #:*withhold-content* #:+content-keys+))
 
 (defpackage #:praxeon/conditions
   (:use #:cl)

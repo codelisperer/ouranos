@@ -132,11 +132,31 @@ client watching progress simply sees that part of the turn produce no events.")
 ;; lifetime should not inherit an observer belonging to somebody else's turn.
 (aion/dynamic:register-inheritable '*observer*)
 
+(defvar *withhold-content* nil
+  "When true, EMIT replaces the value of each content field of an event, those in +CONTENT-KEYS+,
+with :WITHHELD, so an observer, and whatever it prints or stores, receives no prompt, tool
+argument, tool result or reply (#983). A private agent's turn binds it (ACTOR:MAKE-AGENT
+:PRIVATE); counts, ids and names still arrive.")
+
+;; Inheritable for the reason *OBSERVER* is: a thread that continues the turn runs for the same
+;; agent (#158).
+(aion/dynamic:register-inheritable '*withhold-content*)
+
+(defparameter +content-keys+ '(:arguments :content :text :task :message :schema :url)
+  "The event fields that can hold content: a tool call's :ARGUMENTS, a tool result's :CONTENT, an
+answer's :TEXT, a delegation's :TASK, and an MCP task's :MESSAGE, :SCHEMA and :URL, which come
+from the server and can quote the request.")
+
+(defun %withhold (payload)
+  (loop for (key value) on payload by #'cddr
+        append (list key (if (member key +content-keys+) :withheld value))))
+
 (defun emit (type &rest payload)
   "Send an event of TYPE (a keyword) with PAYLOAD (a plist) to *OBSERVER*, if one
-is bound. A no-op otherwise. Returns NIL."
+is bound. A no-op otherwise. Returns NIL. Under *WITHHOLD-CONTENT*, each content field is
+:WITHHELD (#983)."
   (when *observer*
-    (funcall *observer* (list* :type type payload)))
+    (funcall *observer* (list* :type type (if *withhold-content* (%withhold payload) payload))))
   nil)
 
 (defmacro with-observer ((observer) &body body)

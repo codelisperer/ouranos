@@ -118,6 +118,12 @@ client rendering `agent-history' still shows the whole conversation."
   ;; prompt in place of the messages they were distilled from, once enough has been observed.
   (thread-memory nil)
   (taint-scope :turn)
+  ;; #983: PRIVATE keeps the agent's content out of every log line and out of events, so an app
+  ;; whose agent works over content it may not keep, such as a writer's manuscript, can rely on
+  ;; that. RETAIN-CONTENT lets events carry content for a private agent again, for an app that
+  ;; shows a trace and means to; logs stay without it either way. See %WITH-AGENT-PRIVACY.
+  (private nil)
+  (retain-content nil)
   (history '() :type list))               ; list of praxeon/llm messages
 
 (defvar *principal* nil
@@ -1163,6 +1169,40 @@ and ends the turn when nothing handles it, as before."
   (let ((entry (gethash name (agent-means agent))))
     (and entry (means-entry-source entry))))
 
+;;; --- a private agent (#983) -----------------------------------------------------------------
+;;;
+;;; Praxeon's own log lines record counts, ids, durations and type names, never a prompt, a tool
+;;; argument, a tool result or a reply (docs/logging.md). Two routes could still carry content
+;;; while an agent runs, and a private agent closes both for the whole of its turn, on every
+;;; thread the turn continues on:
+;;;   - AION/LOG:*LOG-CONDITION-DETAILS*, a development setting, would make AION/LOG:EXCEPTION
+;;;     write a condition's report and the backtrace's arguments, which can quote any of these.
+;;;     It is bound to NIL.
+;;;   - Events: a tool call's arguments, a tool result, an answer's text and a delegated task
+;;;     reach EVT:*OBSERVER*, which the studio's status printer and praxeon/web print. They are
+;;;     :WITHHELD (EVT:*WITHHOLD-CONTENT*), unless the agent says RETAIN-CONTENT.
+;;; A sub-agent delegated to from a private agent's turn runs under the same bindings.
+
+(aion/dynamic:register-inheritable 'aion/log:*log-condition-details*)
+
+(defun %withhold-content-for (agent)
+  "What EVT:*WITHHOLD-CONTENT* is during a turn of AGENT: true when an enclosing turn already
+withholds, or AGENT is private and does not retain content."
+  (or evt:*withhold-content* (and (agent-private agent) (not (agent-retain-content agent)))))
+
+(defun %condition-details-for (agent)
+  "What AION/LOG:*LOG-CONDITION-DETAILS* is during a turn of AGENT: NIL when AGENT is private,
+and otherwise what it already was, which an enclosing private turn has made NIL."
+  (and (not (agent-private agent)) aion/log:*log-condition-details*))
+
+(defmacro %with-agent-privacy ((agent) &body body)
+  "Run BODY, a turn of AGENT, with its privacy in force (#983)."
+  (let ((a (gensym "AGENT")))
+    `(let* ((,a ,agent)
+            (evt:*withhold-content* (%withhold-content-for ,a))
+            (aion/log:*log-condition-details* (%condition-details-for ,a)))
+       ,@body)))
+
 (defun %append-history (agent &rest messages)
   (setf (agent-history agent) (append (agent-history agent) messages)))
 
@@ -1233,10 +1273,11 @@ CONTINUE-TURN."
                           ((eq *on-hold* :hold) nil)
                           (t *on-hold*)))
          (*hold-allowed* on-hold-p))
-    (%settle-unanswered agent held claim)
-    (multiple-value-prog1 (%run-turn agent user-input max-steps permit max-tokens)
-      ;; The observer is given the history after every turn (#317, step C).
-      (%observe-after-turn agent))))
+    (%with-agent-privacy (agent)
+      (%settle-unanswered agent held claim)
+      (multiple-value-prog1 (%run-turn agent user-input max-steps permit max-tokens)
+        ;; The observer is given the history after every turn (#317, step C).
+        (%observe-after-turn agent)))))
 
 (defun %run-turn (agent user-input max-steps permit max-tokens)
   "RUN-TURN's steps, with *PRINCIPAL* and *ON-HOLD* already bound."

@@ -926,6 +926,24 @@ its tag.
 
 ### Added
 
+- **praxeon: a private agent keeps its prompts, tool arguments, tool results and replies out of
+  every log sink and out of events** (#983). `actor:make-agent` takes `:private`, default NIL.
+  While a private agent's turn runs, through `run-turn`, `continue-turn` or
+  `abandon-held-turn`, and on every thread the turn continues on:
+  - **Logs.** `aion/log:*log-condition-details*` is NIL, so `aion/log:exception` writes a
+    condition's type and frame names, never its report or a frame's arguments, even when an app
+    turned the setting on for development. praxeon's own log lines already record only counts,
+    ids, durations and type names. The two "llm request failed" lines changed to the condition's
+    type in #1013, and each line was checked for this change.
+  - **Events.** `evt:*withhold-content*` is true, and `evt:emit` replaces every content field
+    (`evt:+content-keys+`: `:arguments`, `:content`, `:text`, `:task`, `:message`, `:schema`,
+    `:url`) with `:withheld`. This covers what the studio's status printer and praxeon/web's
+    progress line show. The other fields still arrive.
+  - **Retaining content.** `:retain-content t` keeps content in events for a private agent, for
+    an app that shows a trace and means to. Logs stay without it either way.
+
+  A sub-agent delegated to from a private agent's turn runs under the same rules.
+
 - **praxeon/actor: every deliberation step records how many of the prompt's estimated tokens came
   from each source** (#317, step D). `praxeon/actor:request-messages` returns a third value, and
   `praxeon/actor:prompt-breakdown` computes it: a plist of estimated tokens under `:system`,
