@@ -73,6 +73,7 @@
 (require :asdf)
 (load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
 (load (merge-pathnames "fs.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; aion/fs:delete-tree (#347)
+(load (merge-pathnames "built-from.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; the BUILT-FROM stamp (#977)
 
 (defparameter *root*
   (uiop:pathname-parent-directory-pathname
@@ -443,11 +444,21 @@ and is only on PATH inside the toolchain environment, so it goes through vcvarsa
          (format t "~&libuv.pin is missing version/sha256/url.~%")
          (uiop:quit 1))
        (format t "~&libuv ~A (~A)~%" version (platform))
-       (let ((existing (probe-file (library-path))))
-         (when (and existing (not force))
-           (format t "~&  already built: ~A~%  (--force to rebuild)~%"
-                   (human-path:human-path (library-path)))
-           (uiop:quit 0)))
+       ;; An existing library is reused only when vendor/libuv/BUILT-FROM names this pin's
+       ;; version and sha256. Before, its existence was enough, so after the pin moved a
+       ;; checkout kept the old release and said "already built" (#977).
+       (when (and (probe-file (library-path)) (not force))
+         (ecase (ouranos-built-from:stamp-state *vendor* version sha)
+           (:current
+            (format t "~&  already built: ~A~%  (--force to rebuild)~%"
+                    (human-path:human-path (library-path)))
+            (uiop:quit 0))
+           (:stale
+            (format t "~&  the library there was built from another release than libuv.pin's ~A (its BUILT-FROM says otherwise), so it is rebuilt~%"
+                    version))
+           (:missing
+            (format t "~&  the library there has no BUILT-FROM stamp, so which release it came from is unknown; it is rebuilt from libuv.pin's ~A~%"
+                    version))))
        (handler-case
            ;; BEFORE the fetch rather than inside the compile -- see `require-toolchain'.
            (progn
@@ -455,6 +466,7 @@ and is only on PATH inside the toolchain environment, so it goes through vcvarsa
              (let* ((srcdir (ensure-source version url sha))
                     (library (compile-library srcdir)))
                (verify-built library)
+               (ouranos-built-from:write-stamp *vendor* version sha)
                (format t "~&OK. aion/uv will load this in preference to any system libuv.~%")
                (uiop:quit 0)))
          (error (e)

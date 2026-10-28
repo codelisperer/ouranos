@@ -138,3 +138,151 @@ because HYPERION_SERVER names no server, the pool is closed again."
                 (lambda ()
                   (signals error ({{name}}:start :port 0))
                   (is (null {{name}}:*pool*) "the pool START opened was closed"))))))
+
+(defun %with-users-store-made-by (replacement function)
+  "Call FUNCTION while HYPERION/AUTH-DB:MAKE-DB-AUTH, the user store's constructor, is replaced
+by REPLACEMENT, which is called with the original constructor and its arguments. The original
+is put back afterwards."
+  (let ((original (fdefinition 'hyperion/auth-db:make-db-auth)))
+    (setf (fdefinition 'hyperion/auth-db:make-db-auth)
+          (lambda (&rest args) (apply replacement original args)))
+    (unwind-protect (funcall function)
+      (setf (fdefinition 'hyperion/auth-db:make-db-auth) original))))
+
+(test a-store-that-recovers-from-an-error-keeps-the-pool-open
+  "OPEN-DATABASE closes the pool only when a store could not be made. Here the user store's
+constructor signals an error, a handler outside OPEN-DATABASE resumes it through a restart, and
+the constructor carries on and makes the store, so the pool stays open and usable."
+  (call-with-database
+   (lambda ()
+     (%with-users-store-made-by
+      (lambda (original &rest args)
+        (restart-case (error "{{name}}: an error the user store recovers from")
+          (resume-making-the-store () nil))
+        (apply original args))
+      (lambda ()
+        (unwind-protect
+             (progn
+               ;; Only the restart the constructor set up for this condition is taken. Any
+               ;; other error, such as one from a pool closed under the constructor, is left
+               ;; to fail the test.
+               (handler-bind ((error (lambda (e)
+                                       (let ((restart (find-restart 'resume-making-the-store e)))
+                                         (when restart (invoke-restart restart))))))
+                 ({{name}}::open-database))
+               (is (not (null {{name}}:*pool*)) "the pool is still open")
+               (is (not (null {{name}}:*users*)) "the user store was made")
+               (is (integerp (session:store-count {{name}}:*sessions*))
+                   "the session store reads the database through the pool"))
+          ({{name}}::close-database)))))))
+
+(define-condition %users-store-not-made (error) ()
+  (:report "{{name}}: the user store cannot be made")
+  (:documentation "The error the replaced user-store constructor signals, so that a test can
+tell it apart from an error OPEN-DATABASE met before it reached the stores."))
+
+(test a-store-that-cannot-be-made-leaves-the-database-closed
+  "When a store cannot be made, OPEN-DATABASE signals, closes the pool it made, and leaves
+*POOL*, *SESSIONS* and *USERS* all NIL."
+  (call-with-database
+   (lambda ()
+     (%with-users-store-made-by
+      (lambda (original &rest args)
+        (declare (ignore original args))
+        (error '%users-store-not-made))
+      (lambda ()
+        (signals %users-store-not-made ({{name}}::open-database))
+        (is (null {{name}}:*pool*) "the pool was closed")
+        (is (null {{name}}:*sessions*) "no session store is left set")
+        (is (null {{name}}:*users*) "no user store is left set"))))))
+
+(define-condition %pool-not-closed (error) ()
+  (:report "{{name}}: the pool cannot be closed")
+  (:documentation "The error the replaced CLOSE-POOL signals."))
+
+(defun %with-close-pool-failing (function)
+  "Call FUNCTION while MNEMOSYNE/CONN:CLOSE-POOL signals %POOL-NOT-CLOSED instead of closing.
+Each pool it was asked to close is closed for real afterwards, with the original put back, so
+the test leaves no connections open."
+  (let ((original (fdefinition 'mnemosyne/conn:close-pool))
+        (asked '()))
+    (setf (fdefinition 'mnemosyne/conn:close-pool)
+          (lambda (pool &rest args)
+            (declare (ignore args))
+            (push pool asked)
+            (error '%pool-not-closed)))
+    (unwind-protect (funcall function)
+      (setf (fdefinition 'mnemosyne/conn:close-pool) original)
+      (dolist (pool asked) (funcall original pool)))))
+
+(defun %call-with-log-to (stream function)
+  "Call FUNCTION with aion/log writing JSON lines at INFO to STREAM, and put back afterwards the
+root logger's appenders and level and the layout that were in force before."
+  (let ((layout aion/log:*layout*)
+        (appenders (copy-list (log4cl:logger-appenders log4cl:*root-logger*)))
+        (level (log4cl:logger-log-level log4cl:*root-logger*)))
+    (unwind-protect
+         (progn (aion/log:setup :env :prod :level :info :stream stream)
+                (funcall function))
+      (log4cl:remove-all-appenders log4cl:*root-logger*)
+      (dolist (appender appenders) (log4cl:add-appender log4cl:*root-logger* appender))
+      (setf (log4cl:logger-log-level log4cl:*root-logger*) level
+            aion/log:*layout* layout))))
+
+(test a-pool-that-cannot-be-closed-during-cleanup-keeps-the-store-error
+  "#1006: when a store cannot be made and closing the pool then signals too, the caller sees the
+store's error, not the pool's, and *POOL*, *SESSIONS* and *USERS* are NIL, so the next
+OPEN-DATABASE is not refused. The close failure is logged by its type."
+  (call-with-database
+   (lambda ()
+     (let ((log (make-string-output-stream)))
+       (%with-users-store-made-by
+        (lambda (original &rest args)
+          (declare (ignore original args))
+          (error '%users-store-not-made))
+        (lambda ()
+          (%with-close-pool-failing
+           (lambda ()
+             (%call-with-log-to log (lambda ()
+                                      (signals %users-store-not-made
+                                        ({{name}}::open-database))))))))
+       (is (null {{name}}:*pool*) "the pool is not left set")
+       (is (null {{name}}:*sessions*) "no session store is left set")
+       (is (null {{name}}:*users*) "no user store is left set")
+       (let ((text (get-output-stream-string log)))
+         (is (search "%pool-not-closed" text :test #'char-equal) "the close failure is logged by its type: ~S" text)
+         (is (null (search "the pool cannot be closed" text)) "and not by its report"))))))
+
+(test a-start-whose-server-fails-reports-that-even-when-the-pool-cannot-be-closed
+  "#1006, from the hub's review: START opens the pool, the server does not start (here because
+HYPERION_SERVER names no server), and closing the pool then signals too. The caller sees the
+server's error, not the pool's, and *POOL* is NIL."
+  (call-with-database
+   (lambda ()
+     (%with-env "HYPERION_SERVER" "no-such-server"
+                (lambda ()
+                  (let ((e (%with-close-pool-failing
+                            (lambda ()
+                              (%call-with-log-to (make-broadcast-stream)
+                                                 (lambda ()
+                                                   (handler-case (progn ({{name}}:start :port 0) nil)
+                                                     (error (e) e))))))))
+                    (is (and e (not (typep e '%pool-not-closed))) "not the pool's error: ~A" e)
+                    (is (and e (search "no-such-server" (princ-to-string e) :test (function char-equal)))
+                        "the server's: ~A" e)
+                    (is (null {{name}}:*pool*) "the pool is not left set")))))))
+
+(test a-pool-that-cannot-be-closed-is-still-forgotten
+  "#1006: CLOSE-DATABASE called directly signals when closing the pool fails, since its caller
+asked to close it, and still leaves *POOL* NIL, so OPEN-DATABASE works again afterwards."
+  (call-with-database
+   (lambda ()
+     (unwind-protect
+          (progn
+            ({{name}}::open-database)
+            (%with-close-pool-failing
+             (lambda ()
+               (signals %pool-not-closed ({{name}}::close-database))
+               (is (null {{name}}:*pool*) "the pool is not left set")))
+            (finishes ({{name}}::open-database) "a later OPEN-DATABASE is not refused"))
+       ({{name}}::close-database)))))
