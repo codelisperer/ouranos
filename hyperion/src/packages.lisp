@@ -447,6 +447,9 @@
    #:translate-current #:translate-plural-current
    #:no-translation-source #:no-translation-source-key
    #:make-json-source #:load-dictionary #:make-dictionary
+   #:empty-dictionary #:empty-dictionary-directory #:empty-dictionary-given
+   #:default-locale-not-loaded #:default-locale-not-loaded-default
+   #:default-locale-not-loaded-locales #:default-locale-not-loaded-directory
    #:dictionary #:dictionary-p #:interpolate #:locale-supported-p #:*default-locale*
    ;; locale store
    #:read-locale #:persist-locale #:cookie-store #:make-cookie-store #:lang-cookie
@@ -490,6 +493,32 @@
    #:consent-decided-p #:resolve-consent
    ;; component
    #:consent-banner))
+
+;;; --- Appearance: theme, contrast and look, and the tokens (#981) -----------
+(cl:defpackage #:hyperion/appearance
+  (:use #:cl)
+  (:local-nicknames (#:http #:hyperion/http))
+  (:documentation
+   "The appearance settings a visitor chooses (theme, contrast, look), stored behind a
+    store protocol and applied as data-theme, data-contrast and data-look on <html>; and
+    the --hy-* tokens for every combination of the three, generated as CSS from one table
+    and checked against WCAG AA.")
+  (:export
+   ;; the visitor's choice
+   #:appearance #:appearance-p #:make-appearance #:appearance-from-strings
+   #:appearance-theme #:appearance-contrast #:appearance-look
+   #:html-attributes
+   ;; store protocol + cookie backend
+   #:read-appearance #:persist-appearance
+   #:cookie-appearance-store #:make-cookie-appearance-store
+   #:appearance-cookie-value #:parse-appearance-cookie
+   ;; tokens
+   #:appearance-table #:appearance-table-p #:make-appearance-table #:token-values
+   #:appearance-css #:*default-spacing* #:*default-type-scale* #:*default-fonts*
+   ;; contrast
+   #:relative-luminance #:contrast-ratio #:background-samples
+   #:appearance-contrast-failures #:*minimum-contrast* #:*minimum-ring-contrast*
+   #:*ring-backgrounds*))
 
 ;;; --- Link-preview tags: Open Graph, Twitter cards, canonical (#821) ------
 (cl:defpackage #:hyperion/page-meta

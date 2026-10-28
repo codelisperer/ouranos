@@ -9466,7 +9466,7 @@ comes after the correction."
 
 (defparameter +moved-agent-slots+
   '("CONTEXT" "RESULT-STORE" "CONVERSATION" "RESULT-INDEX" "CLEARED" "GUARD" "UNTRUSTED-INPUTS"
-    "UNTRUSTED-CALLS" "THREAD-MEMORY" "HISTORY"))
+    "UNTRUSTED-CALLS" "CONVERSATION-TAINT" "THREAD-MEMORY" "HISTORY"))
 
 (defparameter +kept-agent-slots+
   '("NAME" "PROVIDER" "SYSTEM-PROMPT" "CACHE-SYSTEM" "MEANS" "HISTORY-BUDGET" "MAX-TOKENS"
@@ -9491,6 +9491,7 @@ MOVE-CONVERSATION must then copy, or as configuration."
           (praxeon/actor::agent-conversation from) "conv-1"
           (praxeon/actor::agent-guard from) (list :guard)
           (praxeon/actor::agent-untrusted-inputs from) (list "task")
+          (praxeon/actor::agent-conversation-taint from) :untrusted
           (praxeon/actor::agent-thread-memory from) (list :memory))
     (setf (gethash "c1" (praxeon/actor::agent-untrusted-calls from)) t
           (gethash "c2" (praxeon/actor::agent-result-index from)) :described
