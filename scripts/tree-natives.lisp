@@ -311,7 +311,11 @@ NIL if this app pulled in no FFI at all."
 LICENSE* and COPYING*, in the package's directory, beside the library in its lib/, or in its
 unpacked source under src/. COPYING because that is what libgit2 calls its licence, which
 build-libgit2.lisp copies into lib/ (#429). One file per name: the same licence in lib/ and in
-src/ is carried once."
+src/ is carried once.
+
+And every file in the package's licenses/ directory: pdfium's archive keeps there the licences of
+the libraries built into it (freetype, zlib, libjpeg-turbo and others), which travel with the
+binary that contains them (#997)."
   (let ((pkg (vendor-package-directory library-path))
         (found '()))
     (dolist (dir '("" "lib/" "src/*/"))
@@ -319,6 +323,9 @@ src/ is carried once."
         (dolist (file (directory (merge-pathnames (concatenate 'string dir pattern) pkg)))
           (unless (find (file-namestring file) found :key #'file-namestring :test #'string=)
             (push file found)))))
+    (dolist (file (directory (merge-pathnames "licenses/*.*" pkg)))
+      (unless (find (file-namestring file) found :key #'file-namestring :test #'string=)
+        (push file found)))
     (nreverse found)))
 
 (defun carry-native-libraries (&key (already-carried 0))

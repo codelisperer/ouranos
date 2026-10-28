@@ -342,6 +342,19 @@ OURANOS_WITH_LIBGIT=1, for the reasons WITH-UV-P gives for libuv.")
   "Their suites: real repositories over the libgit2 this tree builds, each checked with the git
 command.")
 
+(defparameter +pdfium-systems+ '(:aion/pdfium)
+  "Opt-in systems that need scripts/fetch-pdfium.lisp to have run (#997). Loaded only when
+OURANOS_WITH_PDFIUM=1, for the reasons WITH-UV-P gives for libuv.")
+
+(defparameter +pdfium-test-systems+ '(:aion/pdfium/tests)
+  "Their suite: PDFs built in the test, rendered by the pdfium this tree fetches.")
+
+(defun with-pdfium-p ()
+  "Should this run include the pdfium systems? OURANOS_WITH_PDFIUM=1 says yes. An opt-in, not a
+probe for vendor/pdfium/, for the reason WITH-UV-P gives."
+  (let ((v (uiop:getenv "OURANOS_WITH_PDFIUM")))
+    (and v (member (string-trim " " v) '("1" "true" "yes") :test #'string-equal) t)))
+
 (defun with-libgit-p ()
   "Should this run include the libgit2 systems? OURANOS_WITH_LIBGIT=1 says yes. An opt-in, not
 a probe for vendor/libgit2/, for the reason WITH-UV-P gives."
@@ -393,6 +406,7 @@ that the pinned libuv builds at all."
   '(("uv" with-uv-p report-uv-declined)
     ("tls" with-tls-p report-tls-declined)
     ("libgit" with-libgit-p report-libgit-declined)
+    ("pdfium" with-pdfium-p report-pdfium-declined)
     ("view" view-covered-p report-view-uncovered))
   "(name predicate-symbol disclosure-symbol) for each axis this run may not cover.
 
@@ -504,6 +518,14 @@ the section reports and why."
   (format t "          OURANOS_WITH_TLS is unset. Set it to 1 to include them (needs scripts/build-mbedtls.lisp to have run).~%")
   (format t "          Their checks are NOT in the total below, and no figure here says how many.~%"))
 
+(defun report-pdfium-declined (name)
+  "The pdfium axis is off. One cause only: the caller did not ask for it."
+  (format t "  off     ~a axis~34tthis host CAN answer these; the caller declined~%" name)
+  (dolist (s +pdfium-systems+)
+    (format t "          ~(~a~)~%" s))
+  (format t "          OURANOS_WITH_PDFIUM is unset. Set it to 1 to include them (needs scripts/fetch-pdfium.lisp to have run).~%")
+  (format t "          Their checks are NOT in the total below, and no figure here says how many.~%"))
+
 (defun report-libgit-declined (name)
   "The libgit axis is off. One cause only: the caller did not ask for it."
   (format t "  off     ~a axis~34tthis host CAN answer these; the caller declined~%" name)
@@ -555,6 +577,7 @@ inventing a suite name that does not exist would fail the gate for the wrong rea
           (when (with-uv-p) +uv-systems+)
           (when (with-tls-p) +tls-systems+)
           (when (with-libgit-p) +libgit-systems+)
+          (when (with-pdfium-p) +pdfium-systems+)
           (platform-required-systems)))
 
 (defun all-test-systems ()
@@ -562,6 +585,7 @@ inventing a suite name that does not exist would fail the gate for the wrong rea
           (when (with-uv-p) +uv-test-systems+)
           (when (with-tls-p) +tls-test-systems+)
           (when (with-libgit-p) +libgit-test-systems+)
+          (when (with-pdfium-p) +pdfium-test-systems+)
           (platform-required-test-systems)))
 
 ;;; --- the child image --------------------------------------------------------

@@ -195,6 +195,32 @@
                 :components ((:file "libgit-tests"))))
   :perform (test-op (o c) (uiop:symbol-call :aion/libgit/tests :run-tests)))
 
+(defsystem "aion/pdfium"
+  :description "Open a PDF, count its pages and render a page to a PNG, through the pdfium scripts/fetch-pdfium.lisp fetches pinned (#997). Optional: core aion never loads it."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  :depends-on ("cffi"
+               "aion/platform")  ; *search-source-tree*: a bundle does not search vendor/ (#472)
+  :serial t
+  :components ((:module "src/pdfium"
+                :serial t
+                :components ((:file "packages")
+                             (:file "ffi")
+                             (:file "library")
+                             (:file "pdfium"))))
+  :in-order-to ((test-op (test-op "aion/pdfium/tests"))))
+
+(defsystem "aion/pdfium/tests"
+  :description "Tests for aion/pdfium. Requires the fetched pdfium (scripts/fetch-pdfium.lisp)."
+  :depends-on ("aion/pdfium" "fiveam"
+               "chipz")   ; inflates the PNG's data, to read it back without trusting the writer
+  :serial t
+  :components ((:module "tests"
+                :serial t
+                :components ((:file "pdfium-tests"))))
+  :perform (test-op (o c) (uiop:symbol-call :aion/pdfium/tests :run-tests)))
+
 (defsystem "aion/uv/tests"
   :description "Tests for aion/uv. Requires a built libuv (scripts/build-libuv.lisp)."
   :depends-on ("aion/uv" "fiveam"
