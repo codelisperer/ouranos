@@ -338,13 +338,15 @@ COM-ERROR naming why, and VariantClear still answers S_OK afterwards."
         (is (search "SAFEARRAY of VARIANT type 7" (princ-to-string e)) "~A" e)))))
 
 (test an-element-that-fails-to-convert-still-leaves-the-array-unlocked
-  "A VT_VARIANT array whose one element is a VT_I1, which has no scalar mapping, signals while
-the array is locked. The unlock runs anyway, so VariantClear answers S_OK."
+  "A VT_VARIANT array whose one element is a VT_ARRAY|VT_BYREF value, which is refused, signals
+while the array is locked. The unlock runs anyway, so VariantClear answers S_OK. (The element's
+pointer is NULL, and a BYREF value is not freed by VariantClear.)"
   (let ((psa (ffi:safe-array-create-vector ffi:+vt-variant+ 0 1)))
     (cffi:with-foreign-object (pdata :pointer)
       (assert (zerop (ffi:safe-array-access-data psa pdata)))
       (let ((element (cffi:mem-ref pdata :pointer)))
-        (setf (cffi:foreign-slot-value element '(:struct ffi:variant) 'ffi::vt) ffi:+vt-i1+))
+        (setf (cffi:foreign-slot-value element '(:struct ffi:variant) 'ffi::vt)
+              (logior ffi:+vt-array+ ffi:+vt-byref+ ffi:+vt-ui1+)))
       (assert (zerop (ffi:safe-array-unaccess-data psa))))
     (with-array-variant (v ffi:+vt-variant+ psa)
       (signals com:com-error (com:variant-to-lisp v))
@@ -368,3 +370,27 @@ binary and Reads it back. Read returns VT_ARRAY|VT_UI1."
                  (is (typep octets '(vector (unsigned-byte 8))) "~S" (type-of octets))
                  (is (equalp (map 'vector #'char-code "hello, 964") octets) "~S" octets)))
           (com:invoke-method s "Close")))))
+
+(test a-byref-array-is-refused-with-its-own-reason
+  "#966's review: VT_ARRAY|VT_BYREF refers to an array another owns, and is refused saying so,
+not with the generic message."
+  (with-typed-variant (v (logior ffi:+vt-array+ ffi:+vt-byref+ ffi:+vt-ui1+))
+    (let ((e (handler-case (progn (com:variant-to-lisp v) nil) (com:com-error (e) e))))
+      (is-true e)
+      (is (search "VT_ARRAY|VT_BYREF" (princ-to-string e)) "~A" e))))
+
+(test single-values-and-array-elements-are-read-alike
+  "#966's review: VT_I1 and VT_UINT, which arrays of them already read, are read as single
+values too, and a NULL BSTR is NIL whether it is a single value or an array element."
+  (with-typed-variant (v ffi:+vt-i1+)
+    (setf (cffi:mem-ref (payload v) :int8) -5)
+    (is (eql -5 (com:variant-to-lisp v))))
+  (with-typed-variant (v ffi:+vt-uint+)
+    (setf (cffi:mem-ref (payload v) :uint32) 4000000000)
+    (is (eql 4000000000 (com:variant-to-lisp v))))
+  (with-typed-variant (v ffi:+vt-bstr+)
+    (setf (cffi:mem-ref (payload v) :pointer) (cffi:null-pointer))
+    (is (null (com:variant-to-lisp v)) "a single NULL BSTR"))
+  (let ((psa (ffi:safe-array-create-vector ffi:+vt-bstr+ 0 1)))
+    (with-array-variant (v ffi:+vt-bstr+ psa)
+      (is (equalp #(nil) (com:variant-to-lisp v)) "a NULL BSTR element"))))

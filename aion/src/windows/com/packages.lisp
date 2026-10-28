@@ -65,6 +65,7 @@
 (cl:defpackage #:aion/windows/com
   (:use #:common-lisp)
   (:local-nicknames (#:ffi #:aion/windows/com/ffi)
+                    (#:log #:aion/log)
                     (#:reg #:aion/windows/registry)
                     (#:w #:aion/windows)
                     (#:wffi #:aion/windows/ffi))

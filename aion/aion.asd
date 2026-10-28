@@ -522,7 +522,8 @@
   ;; "not installed" from "installed for the other bitness" -- both are REGDB_E_CLASSNOTREG
   ;; under WOW64 -- and the registry can. Read-only and Windows-only, like this system.
   :depends-on ("aion/windows" "aion/windows/registry"
-               "aion/dynamic")   ; unblock-interrupts, first in the apartment thread (#896)
+               "aion/dynamic"    ; unblock-interrupts, first in the apartment thread (#896)
+               "aion/log")       ; a SAFEARRAY unlock that fails while another error unwinds (#966)
   :serial t
   :components ((:module "src/windows/com"
                 :serial t

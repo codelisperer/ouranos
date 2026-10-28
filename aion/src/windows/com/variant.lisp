@@ -242,9 +242,10 @@ type is refused.")
 (defun %safearray-element (data index element-type)
   "Element INDEX of the array whose data starts at DATA, of the VT ELEMENT-TYPE."
   (cond ((= element-type ffi:+vt-bstr+)
+         ;; A NULL BSTR is NIL, as VARIANT-TO-LISP reads a single one (#966's review).
          (let ((bstr (cffi:mem-aref data :pointer index)))
            (if (cffi:null-pointer-p bstr)
-               ""
+               nil
                (cffi:foreign-string-to-lisp bstr :encoding :utf-16le
                                                  :count (* 2 (ffi:sys-string-len bstr))))))
         ((= element-type ffi:+vt-variant+)
@@ -276,18 +277,39 @@ and for an element type this does not read; a NULL array is the empty vector."
                  (%safearray-check (ffi:safe-array-get-lbound psa 1 lo) "SafeArrayGetLBound")
                  (%safearray-check (ffi:safe-array-get-ubound psa 1 hi) "SafeArrayGetUBound")
                  (max 0 (1+ (- (cffi:mem-ref hi :int32) (cffi:mem-ref lo :int32)))))))
+    ;; The array says how wide its elements are; reading them at another width would read
+    ;; garbage, so the two must agree (#966's review).
+    (let ((stored (ffi:safe-array-get-elemsize psa))
+          (expected (cond ((= element-type ffi:+vt-bstr+) (cffi:foreign-type-size :pointer))
+                          ((= element-type ffi:+vt-variant+)
+                           (cffi:foreign-type-size '(:struct ffi:variant)))
+                          (t (cffi:foreign-type-size
+                              (cdr (assoc element-type +array-element-readers+)))))))
+      (unless (= stored expected)
+        (error 'com-error :detail (format nil "a SAFEARRAY of VARIANT type ~D has elements of ~D bytes, not the ~D expected" element-type stored expected))))
     (cffi:with-foreign-object (pdata :pointer)
       (%safearray-check (ffi:safe-array-access-data psa pdata) "SafeArrayAccessData")
-      (unwind-protect
-           (let ((data (cffi:mem-ref pdata :pointer)))
-             (if (= element-type ffi:+vt-ui1+)
-                 (let ((out (make-array count :element-type '(unsigned-byte 8))))
-                   (dotimes (i count out)
-                     (setf (aref out i) (cffi:mem-aref data :uint8 i))))
-                 (let ((out (make-array count)))
-                   (dotimes (i count out)
-                     (setf (svref out i) (%safearray-element data i element-type))))))
-        (%safearray-check (ffi:safe-array-unaccess-data psa) "SafeArrayUnaccessData")))))
+      ;; THE UNLOCK MUST NOT HIDE THE ERROR IT CLEANS UP AFTER. When copying an element
+      ;; signals and the unlock then fails too, the element's error is the one the caller
+      ;; gets, and the unlock failure is logged; only after a normal copy does a failed unlock
+      ;; signal (#966's review).
+      (let ((copied nil))
+        (unwind-protect
+             (multiple-value-prog1
+                 (let ((data (cffi:mem-ref pdata :pointer)))
+                   (if (= element-type ffi:+vt-ui1+)
+                       (let ((out (make-array count :element-type '(unsigned-byte 8))))
+                         (dotimes (i count out)
+                           (setf (aref out i) (cffi:mem-aref data :uint8 i))))
+                       (let ((out (make-array count)))
+                         (dotimes (i count out)
+                           (setf (svref out i) (%safearray-element data i element-type))))))
+               (setf copied t))
+          (let ((hr (ffi:safe-array-unaccess-data psa)))
+            (cond (copied (%safearray-check hr "SafeArrayUnaccessData"))
+                  ((minusp hr)
+                   (log:warn "SafeArrayUnaccessData failed while an earlier error unwound"
+                             :hresult (ldb (byte 32 0) hr))))))))))
 
 (defun variant-to-lisp (variant)
   "Read VARIANT as a Lisp value. Does not clear it -- the owner does that.
@@ -317,6 +339,9 @@ vector (#964)."
       ((= vt ffi:+vt-int+) (cffi:mem-ref p :int32))
       ((= vt ffi:+vt-i8+) (cffi:mem-ref p :int64))
       ((= vt ffi:+vt-ui1+) (cffi:mem-ref p :uint8))
+      ;; VT_I1 and VT_UINT, mapped as the array readers map them (#966's review).
+      ((= vt ffi:+vt-i1+) (cffi:mem-ref p :int8))
+      ((= vt ffi:+vt-uint+) (cffi:mem-ref p :uint32))
       ((= vt ffi:+vt-ui2+) (cffi:mem-ref p :uint16))
       ((= vt ffi:+vt-ui4+) (cffi:mem-ref p :uint32))
       ((= vt ffi:+vt-ui8+) (cffi:mem-ref p :uint64))
@@ -344,9 +369,13 @@ vector (#964)."
       ;; Money, exactly. Both of these return RATIONALS on purpose.
       ((= vt ffi:+vt-cy+) (%currency-to-rational (cffi:mem-ref p :int64)))
       ((= vt ffi:+vt-decimal+) (%decimal-to-rational variant))
-      ;; An array the VARIANT owns. A VT_ARRAY|VT_BYREF one points at another's array and is
-      ;; not mapped: it fails this test and reaches the T clause.
-      ((= (logand vt (logior ffi:+vt-array+ ffi:+vt-byref+)) ffi:+vt-array+)
+      ;; A VT_ARRAY|VT_BYREF value points at a SAFEARRAY* that another VARIANT or the caller
+      ;; owns, and is not read (#966's review).
+      ((= (logand vt (logior ffi:+vt-array+ ffi:+vt-byref+)) (logior ffi:+vt-array+ ffi:+vt-byref+))
+       (error 'com-error
+              :detail (format nil "no Lisp mapping for VARIANT type ~D: a VT_ARRAY|VT_BYREF value refers to an array another owns, and only an array the VARIANT holds itself is read" vt)))
+      ;; An array the VARIANT owns.
+      ((= (logand vt ffi:+vt-array+) ffi:+vt-array+)
        (safearray-to-lisp (cffi:mem-ref p :pointer) (logand vt (lognot ffi:+vt-array+))))
       (t
        ;; Named rather than silently returned as NIL: an unhandled vt is a gap in this
