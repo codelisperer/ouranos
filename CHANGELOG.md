@@ -14,6 +14,26 @@ its tag.
 
 ### An app may have to act
 
+- **`scripts/build-desktop-app.lisp` stops, instead of warning and exiting 0, when the bundle
+  needs hyperion-view or a library the runtime links against and it is missing** (#956). For an
+  app that loads `hyperion/desktop`, a `hyperion/hyperion-view/hyperion-view(.exe)` that was not
+  built now ends the build with exit code 3, naming the file and the command that builds it
+  (`hyperion/hyperion-view/build.sh`, or `build.ps1` on Windows). On macOS the same happens for a
+  library the SBCL runtime links against that is not on the build machine; it was printed as
+  `MISSING`, and when the runtime could not be patched (an `install_name_tool` or `codesign`
+  error) none of those libraries was carried and the build said "continuing UNPATCHED" and
+  exited 0; each is now named and refused. A build that deliberately does not carry them passes
+  **`--allow-missing-natives`**: it warns, goes on, and the build's summary line names what is
+  missing.
+  - An app that does not load `hyperion/desktop`, such as a console tool, needs no launcher, so
+    a missing hyperion-view does not stop its build. The macOS runtime-linked libraries above
+    still apply to it.
+  - Such an app also **no longer gets hyperion-view copied into its bundle** when hyperion-view
+    is built: the build says "no launcher carried -- this image does not load
+    hyperion/desktop".
+  - The tree's lazily loaded libraries (libuv, mbedTLS, libgit2) and its SQLite already stopped
+    the build when missing, and still do, with no option to go on without them.
+
 - **MCP resources and retrieval passages are untrusted by default, so in a prompt they refuse
   `:requires-user-intent` means for the turn** (#907, after #906). `praxeon/mcp:add-resource` and
   `praxeon/retrieval:passage->ctx-item` put outside content into an agent's context with nothing
@@ -73,6 +93,46 @@ its tag.
   none of 38 large outputs eligible. `praxeon/scripts/claude-code-trials.lisp` measures it, and
   calls no model unless `PRAXEON_CC_TRIALS=run` is set. Rebuild `bin/praxeon-claude-code` to get
   it.
+- **praxeon/actor: `:taint-scope :conversation` works for an app that rebuilds the agent from a
+  text transcript, and warns when it cannot tell** (#948). Before, `:conversation` looked only
+  for untrusted tool calls in the history, so a history rebuilt from text, which has none,
+  made it behave like `:turn` without saying so. Now:
+  - The agent records the conversation's taint in the new slot `agent-conversation-taint`:
+    `:untrusted` once the agent has read untrusted content, `:delegated` when the only such
+    content is a task a coordinating agent gave it, `:clean` from a first turn until either,
+    `nil` when not recorded. `make-agent` takes `:conversation-taint`; any other value signals
+    an error when the agent runs a turn.
+  - **An app that stores text transcripts** stores this value with each transcript and passes it
+    to `make-agent` when it rebuilds the agent.
+  - Under `:conversation`, an agent with earlier turns, no tool calls in them and nothing recorded
+    is treated as untrusted. Praxeon records `:untrusted`, logs it once for that agent, and
+    signals the warning `praxeon/actor:conversation-taint-unrecorded`, whose message names the
+    fix. Muffling the warning does not make the turn trusted.
+  - Once an agent records `:untrusted` or `:delegated`, it stays untrusted under `:conversation`
+    even if the app removes the untrusted call from the history. To start over, set the slot to
+    `:clean` and remove the untrusted calls from the history too.
+  - `untrusted-window-predicate` reads the recorded value too, so an observer agrees with the turn.
+  - **`:conversation` now refuses more than before:** a sub-agent given a task by
+    `register-agent-as-means` records `:delegated`, because the task is another model's text and
+    stays in its history. Under `:conversation`, the sub-agent's later turns are untrusted, so a
+    spending means is refused in them. The delegated turn itself is treated as before, except
+    when the app rebuilds the sub-agent partway through that turn and passes `:delegated` back:
+    the rebuilt turn is then untrusted too, which refuses more, not less.
+    `:delegated` is kept apart from `:untrusted` so that delegating to the same sub-agent again
+    does not make the coordinator untrusted; the coordinator is marked only when the sub-agent
+    read untrusted content, as before. A coordinator that delegated after its own turn had
+    become untrusted leaves the sub-agent recording `:untrusted`, because that task was written
+    after the coordinator read untrusted content, so a later delegation to it marks the
+    coordinator.
+- **hyperion/i18n: `load-dictionary` and `make-json-source` signal `empty-dictionary` when
+  their directory holds no locale files** (#294). `make-json-source` calls `load-dictionary`,
+  so everything below applies to both. Before, a wrong, missing or empty directory returned a
+  dictionary with no locales, and every string rendered as its `[section/key]` marker. The
+  condition's message gives the absolute directory searched, says when it does not exist, when
+  the path given was relative and what it was resolved against, and when the path lacks its
+  trailing slash. Both also warn `default-locale-not-loaded` when the `:default` locale has no
+  file, and still return the dictionary. An app that relied on an empty dictionary
+  can build one with `make-dictionary` and an empty hash table.
 
 - **praxeon/retrieval and praxeon/memory-db on SQLite: similarity search works at real corpus
   sizes, and the stored embeddings change form** (#425). A SQLite store kept each embedding as
@@ -909,6 +969,15 @@ its tag.
   `claude-opus-5-5` where they named `claude-opus-4-8`.
 
 ### Added
+
+- **praxeon/image: the generate-image means offers the model a `mask`, so it can change only part
+  of an image** (#946). With `:resolve-reference` and a provider that takes a mask
+  (`image-provider-accepts-mask-p`, true for OpenAI), the tool schema offers `mask`: a reference,
+  resolved by the same `:resolve-reference` function as `reference_images`, to a PNG with
+  transparency the size of the first reference image. It is checked as a `:mask` given to
+  `generate-image` is, and refused before any request with `image-input-invalid` when it does
+  not fit. The `:image-usage` event of a request with a mask carries `:mask t`. Google's provider
+  is not offered `mask`, and one the model gives anyway is refused with the reason.
 
 - **praxeon/actor: every deliberation step records how many of the prompt's estimated tokens came
   from each source** (#317, step D). `praxeon/actor:request-messages` returns a third value, and
