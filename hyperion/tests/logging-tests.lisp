@@ -171,11 +171,13 @@ the suite."
                                     (list* :query-string query (%log-env "/x")))))))
 
 (test the-start-line-logs-the-query-names-and-not-the-values
-  (let ((out (%log-start-line "secret=abc&page=2")))
+  ;; Not "abc", which the issue used: the line carries a random hex request id, and one run's id
+  ;; (7e72abcfdde3187c) held "abc", so the check failed with the value nowhere in the line.
+  (let ((out (%log-start-line "secret=hunter-two&page=2")))
     (is (search "request start" out) "~A" out)
     (is (search "secret" out) "the name: ~A" out)
     (is (search "page" out) "~A" out)
-    (is (null (search "abc" out)) "not the value: ~A" out)
+    (is (null (search "hunter" out)) "not the value: ~A" out)
     (is (null (search "query=" out)) "and no raw query field: ~A" out)))
 
 (test query-keys-are-in-order-once-each-and-capped
