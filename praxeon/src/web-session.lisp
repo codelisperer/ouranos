@@ -13,12 +13,20 @@
 ;;;;
 ;;;; Sessions are held in memory, in this process. A restart ends them all, and the page then
 ;;;; exchanges a new grant.
+;;;;
+;;;; A browser's EventSource cannot send an Authorization header, so a page that streams first
+;;;; asks for a stream ticket with its session header, then opens the stream with the ticket in
+;;;; the URL. A ticket can be used once, lasts TICKET-SECONDS (30 by default), and opens a
+;;;; stream only while the session that asked for it is still open. A URL can reach a log; a
+;;;; ticket in it has been spent, or has expired, before anyone could read the log and use it.
 
 (defpackage #:praxeon/web-session
   (:use #:cl)
   (:export #:session-table #:session-table-p #:make-session-table
            #:session-table-idle-seconds #:session-table-max-seconds
-           #:open-session #:session-grant #:close-session #:session-count))
+           #:session-table-ticket-seconds
+           #:open-session #:session-grant #:close-session #:session-count
+           #:issue-ticket #:redeem-ticket))
 
 (in-package #:praxeon/web-session)
 
@@ -29,6 +37,8 @@ seconds; a test passes its own."
   (lock (sb-thread:make-mutex :name "praxeon-web-sessions"))
   (idle-seconds 1800 :type (integer 1))
   (max-seconds 43200 :type (integer 1))
+  (ticket-seconds 30 :type (integer 1))
+  (tickets (make-hash-table :test 'equal))  ; ticket -> (session-id . expires-at)
   (clock #'get-universal-time))
 
 (defstruct (%session (:constructor %make-session (grant opened-at)))
@@ -36,11 +46,13 @@ seconds; a test passes its own."
   (opened-at 0 :type integer)
   (used-at 0 :type integer))
 
-(defun make-session-table (&key (idle-seconds 1800) (max-seconds 43200)
+(defun make-session-table (&key (idle-seconds 1800) (max-seconds 43200) (ticket-seconds 30)
                                 (clock #'get-universal-time))
   "An empty session table. A session ends after IDLE-SECONDS without a request (30 minutes by
-default) or MAX-SECONDS after it was opened (12 hours by default)."
-  (%make-session-table :idle-seconds idle-seconds :max-seconds max-seconds :clock clock))
+default) or MAX-SECONDS after it was opened (12 hours by default). A stream ticket lasts
+TICKET-SECONDS (30 by default)."
+  (%make-session-table :idle-seconds idle-seconds :max-seconds max-seconds
+                       :ticket-seconds ticket-seconds :clock clock))
 
 (defun %expired-p (table session now)
   (or (>= (- now (%session-used-at session)) (session-table-idle-seconds table))
@@ -77,6 +89,34 @@ that is found counts as used now."
                nil)
               (t (setf (%session-used-at s) now)
                  (%session-grant s)))))))
+
+(defun issue-ticket (table id)
+  "A stream ticket for session ID, 256 random bits as hex, or NIL when ID is not open. Asking
+for one counts as using the session. Expired tickets are removed first."
+  (when (session-grant table id)
+    (let ((ticket (aion/random:random-hex 256))
+          (now (funcall (session-table-clock table))))
+      (sb-thread:with-mutex ((session-table-lock table))
+        (let ((tickets (session-table-tickets table)))
+          (loop for k being the hash-keys of tickets using (hash-value v)
+                when (>= now (cdr v)) collect k into gone
+                finally (dolist (k gone) (remhash k tickets)))
+          (setf (gethash ticket tickets)
+                (cons id (+ now (session-table-ticket-seconds table))))))
+      ticket)))
+
+(defun redeem-ticket (table ticket)
+  "The session id TICKET was issued for, when TICKET has not been used, has not expired, and its
+session is still open; otherwise NIL. TICKET cannot be used again either way."
+  (let ((entry (and (stringp ticket)
+                    (sb-thread:with-mutex ((session-table-lock table))
+                      (let ((e (gethash ticket (session-table-tickets table))))
+                        (remhash ticket (session-table-tickets table))
+                        e)))))
+    (when (and entry
+               (< (funcall (session-table-clock table)) (cdr entry))
+               (session-grant table (car entry)))
+      (car entry))))
 
 (defun close-session (table id)
   "End session ID. Returns true when there was one."

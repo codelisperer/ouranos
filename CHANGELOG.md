@@ -923,6 +923,25 @@ its tag.
 
 ### Added
 
+- **praxeon/web: the chat page can read its updates from a Server-Sent Events stream instead of
+  polling** (part of #67). `make-app` takes `:transport`, `:poll` (the default) or `:sse`. With
+  `:sse`, `GET /api/events` streams what `GET /api/progress` would answer, whenever it changes:
+  new transcript items, the status line and the token count. Each event's id is the page's
+  cursor, so a browser that reconnects sends it back as `Last-Event-ID` and gets nothing twice;
+  a cursor from a conversation that has been replaced gets the whole new transcript, as a poll
+  does. The page opens an `EventSource` instead of polling. A conversation with an open stream is
+  not dropped as idle, and a stream that ends counts as a request to it.
+  - `start` and `serve-forever` take `:transport :auto` (the default), `:poll` or `:sse`. `:auto`
+    streams on `:hunchentoot` and polls on `:woo` and `:uv`. `:sse` is refused on `:woo`, whose
+    handlers all run on one event-loop thread. On `:uv` each open page holds one of the server's
+    workers, two by default, so `:auto` polls there.
+  - With grants, an `EventSource` cannot send the session header. The page asks
+    `POST /embed/stream-ticket`, with the session header, for a ticket, and opens
+    `/api/events?ticket=…`. A ticket can be used once, within 30 seconds
+    (`make-session-table :ticket-seconds`), while its session is open, through
+    `praxeon/web-session:issue-ticket` and `redeem-ticket`. The stream ends when its session does.
+  - `praxeon/web` now declares `parenscript`, which hyperion already loads.
+
 - **praxeon/web: a service that takes signed grants and gives each browser a session** (part of
   #67, for #90). `make-app`, `start` and `serve-forever` take `:grant-verifier` (a
   `praxeon/ceiling` verifier), `:audience` (the name this service's grants are minted for) and

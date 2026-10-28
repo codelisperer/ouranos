@@ -221,7 +221,7 @@ is essentially absent from the CL web world. 40ants **Reblocks** does reactive s
 widgets over WebSocket — a different, heavier animal. A lightweight "edit → recompile →
 browser refreshes, session intact" loop is a genuine differentiator; lean into it.
 
-### Server backends behind a protocol — and why polling, not SSE
+### Server backends behind a protocol — and when to poll and when to stream
 
 Hyperion declares **no HTTP server** (pre-publication issue 139). The application depends on the Clack handler
 it wants — `clack-handler-hunchentoot` (pure CL, every platform) or `clack-handler-woo`
@@ -256,6 +256,10 @@ deliberately transport-agnostic — a poller reads it via `since`; a WebSocket o
 transport would *push* from the same channel. That makes real-time an **additive step, not
 a rewrite**, and WebSockets are worth promoting to a first-class Hyperion protocol once a
 low-latency UX (token streaming, presence) justifies the second code path.
+
+The SSE half of that step landed with #67: `praxeon/web` with `:transport :sse` streams from the
+same channel at `GET /api/events`, and `praxeon/web:start` chooses SSE on Hunchentoot and polling
+on Woo and `:uv`. See [Framework-Praxeon](Framework-Praxeon.md).
 
 ### Sessions behind a `store` protocol
 
