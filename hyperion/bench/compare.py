@@ -39,13 +39,20 @@ Per backend:
   open conns      load.py's idle test: resident memory and threads while IDLE connections
                   are open at once.
 
-A backward step of the wall clock during a run makes the generator's error count wrong (#962).
-wrk and ab both time requests with gettimeofday, and wrk subtracts two such readings as unsigned
-numbers, so every request in flight when the clock steps back is counted as a timeout. WSL2 steps
-its clock back by up to a few milliseconds every 20 to 30 seconds. compare.py watches for steps
-during each run (ClockWatch) and, when there was one, prints the steps beside the error count
-and marks the count as not valid. The rate stays valid: a step of a few milliseconds changes a 10 s run's
-length by well under 0.1%.
+A backward step of the wall clock during a run makes wrk's TIMEOUT count wrong (#962). wrk times
+each request with gettimeofday and subtracts two such readings as unsigned numbers, so every
+request in flight when the clock steps back wraps to a huge latency, which wrk counts as a
+timeout (its src/wrk.c:344 and src/stats.c:23). WSL2 steps its clock back by up to a few
+milliseconds every 20 to 30 seconds. compare.py watches for steps during each run (ClockWatch)
+and, when there was one and wrk counted timeouts, says that THOSE are not a valid count. The
+rest of the error count -- connect, read and write errors and non-2xx responses -- is a real
+count of real failures and is reported as it is. The rate stays valid too: a step of a few
+milliseconds changes a 10 s run's length by well under 0.1%.
+
+ab is not marked. Its "Failed requests" counts connections that failed and responses of the
+wrong length, and its "Non-2xx responses" counts statuses; neither is derived from a subtraction
+of two clock readings, so a backward step does not inflate either. A step does disturb the times
+ab reports, which compare.py does not use: latency here comes from load.py.
 
 Requires: sbcl and Quicklisp as for run.sh; a built vendor/libuv for :uv; cc; and wrk or ab.
 Woo is Unix-only.
@@ -126,6 +133,14 @@ class ClockWatch:
     skipped, because the thread may have been preempted between the reads. Use as a context
     manager; afterwards STEPS holds each step's size in nanoseconds."""
 
+    # A sample is kept only when its two monotonic reads are at most SAMPLE_NS apart, so the
+    # wall clock was read within that window and the offset is off by at most half of it: 25 us.
+    # Two consecutive kept samples can therefore differ by 50 us from that alone, with no step at
+    # all. STEP_NS is set just above that, so noise is not reported as a step. The cost is that a
+    # step smaller than 100 us is not detected; one that small can still spoil the few requests
+    # in flight during it, so a timeout count of 1 or 2 with no step reported is not evidence
+    # that the clock held. The steps measured on WSL2 for #962 were 266 to 2188 us, well above
+    # this.
     STEP_NS = 100_000
     SAMPLE_NS = 50_000
 
@@ -164,11 +179,13 @@ def drive(gen, url, connections, seconds):
     None where it cannot be measured. The errors are not valid when the list of steps is not
     empty (#962)."""
     with ClockWatch() as clock:
-        rps, errors, share = _drive(gen, url, connections, seconds)
-    return rps, errors, share, clock.steps
+        rps, errors, timeouts, share = _drive(gen, url, connections, seconds)
+    return rps, errors, timeouts, share, clock.steps
 
 
 def _drive(gen, url, connections, seconds):
+    """(rps, errors, timeouts, share). TIMEOUTS is the part of ERRORS a backward clock step can
+    inflate: wrk's own timeout count, and None for ab, which has no such figure."""
     if gen == "wrk":
         threads = str(max(1, min(connections, os.cpu_count() or 4)))
         before = accepted_connections()
@@ -178,11 +195,13 @@ def _drive(gen, url, connections, seconds):
         rps = float(re.search(r"Requests/sec:\s+([\d.]+)", out).group(1))
         requests = int(re.search(r"(\d+) requests in", out).group(1))
         errors = sum(int(n) for n in re.findall(r"(?:connect|read|write|timeout) (\d+)", out))
+        timeout = re.search(r"timeout (\d+)", out)
+        timeouts = int(timeout.group(1)) if timeout else 0
         non2xx = re.search(r"Non-2xx or 3xx responses: (\d+)", out)
         share = None
         if before is not None and after is not None and requests:
             share = max(0.0, 1 - (after - before) / requests)
-        return rps, errors + (int(non2xx.group(1)) if non2xx else 0), share
+        return rps, errors + (int(non2xx.group(1)) if non2xx else 0), timeouts, share
     # ab: -t bounds the run by time; -n only has to be larger than what fits in it.
     out = subprocess.run(["ab", "-k", "-q", "-c", str(connections), "-t", str(seconds),
                           "-n", "50000000", url], capture_output=True, text=True).stdout
@@ -192,7 +211,8 @@ def _drive(gen, url, connections, seconds):
     complete = int(re.search(r"Complete requests:\s+(\d+)", out).group(1))
     kept = re.search(r"Keep-Alive requests:\s+(\d+)", out)
     share = (int(kept.group(1)) / complete) if (kept and complete) else 0.0
-    return rps, failed + (int(non2xx.group(1)) if non2xx else 0), share
+    # None, not 0: ab reports no timeout figure, so there is nothing a clock step could inflate.
+    return rps, failed + (int(non2xx.group(1)) if non2xx else 0), None, share
 
 
 GENERATOR_BOUND = 0.8   # a rate at this share of the ceiling or above is not given a number
@@ -263,9 +283,11 @@ def measure(backend, gen, args):
         row = {"backend": backend}
         for path in ("/ping", "/tile"):
             before, started = cpu(url), time.monotonic()
-            rps, errors, kept, steps = drive(gen, url + path, args.connections, args.seconds)
+            rps, errors, timeouts, kept, steps = drive(gen, url + path, args.connections,
+                                                       args.seconds)
             process, loops, conns = busy(before, cpu(url), time.monotonic() - started)
-            row[path] = {"rps": rps, "errors": errors, "kept": kept, "steps": steps,
+            row[path] = {"rps": rps, "errors": errors, "timeouts": timeouts, "kept": kept,
+                         "steps": steps,
                          "cpu_process": process, "cpu_loops": loops, "conns": conns}
         row["latency"] = load.latency(url, "/tile", args.requests, reuse=True)
         row["idle"] = load.idle_connections(url, proc.pid, args.idle)
@@ -282,21 +304,41 @@ def measure(backend, gen, args):
 
 # --- the table -----------------------------------------------------------------------
 
-def cell(m, top):
-    if m["rps"] >= GENERATOR_BOUND * top:
-        return (f"limited by the generator ({m['rps']:,.0f}, "
-                f"{m['rps'] / top:.0%} of its ceiling {top:,.0f})")
-    notes = []
-    if m["steps"]:
+def error_note(m):
+    """The errors note for M, or None when there is nothing to say.
+
+    A backward clock step inflates wrk's timeout figure and nothing else, so only that figure is
+    marked, and only when wrk actually counted timeouts: a step with no timeouts inflated nothing.
+    The connect, read and write errors and the non-2xx responses in the same total are real
+    failures and are reported as they are, because a server that answers 500 quickly, or refuses
+    connections, must not be able to hide behind a clock step (the hub's review of #965)."""
+    marked = bool(m["steps"]) and bool(m.get("timeouts"))
+    if not m["errors"] and not marked:
+        return None
+    note = f"{m['errors']:,} errors"
+    if marked:
         worst = max(m["steps"]) / 1000
-        notes.append(f"{m['errors']} errors, a count that is not valid: the clock stepped back "
-                     f"{len(m['steps'])} time(s) during the run, up to {worst:,.0f} µs")
-    elif m["errors"]:
-        notes.append(f"{m['errors']} errors")
+        note += (f", of which the {m['timeouts']:,} wrk counted as timeouts are not a valid "
+                 f"figure: the clock stepped back {len(m['steps'])} time(s) during the run, up to "
+                 f"{worst:,.0f} µs")
+    return note
+
+
+def cell(m, top):
+    notes = []
+    errors = error_note(m)
+    if errors:
+        notes.append(errors)
     if m["kept"] is None:
         notes.append("kept-alive share not measured")
     else:
         notes.append(f"{m['kept']:.0%} on kept-alive connections")
+    # The errors come first and are kept in both shapes: a rate at the ceiling does not excuse a
+    # server from reporting its failures, and a 500 answered fast is exactly the case that would
+    # otherwise read as healthy (the hub's review of #965).
+    if top > 0 and m["rps"] >= GENERATOR_BOUND * top:
+        return (f"limited by the generator ({m['rps']:,.0f}, {m['rps'] / top:.0%} of its ceiling "
+                f"{top:,.0f}; {'; '.join(notes)})")
     return f"{m['rps']:,.0f} ({'; '.join(notes)})"
 
 
@@ -318,10 +360,13 @@ def table(rows, gen_line, top, args):
     osname = {"Darwin": "macOS", "Linux": "Linux"}.get(platform.system(), platform.system())
     lines = [
         f"**{osname}** ({platform.machine()}, {os.cpu_count()} CPUs). Generator: `{gen_line}`, "
-        f"{args.connections} keep-alive connections for {args.seconds} s. "
-        f"Generator ceiling: {top:,.0f} requests/s, against trivial.c with {os.cpu_count()} "
-        f"processes; a rate of {GENERATOR_BOUND:.0%} of it or more is shown as limited by the "
-        "generator. "
+        f"{args.connections} keep-alive connections for {args.seconds} s. " +
+        (f"Generator ceiling: {top:,.0f} requests/s, against trivial.c with {os.cpu_count()} "
+         f"processes; a rate of {GENERATOR_BOUND:.0%} of it or more is shown as limited by the "
+         "generator. "
+         if top > 0 else
+         "Generator ceiling: trivial.c answered nothing, so there is no ceiling here and no rate "
+         "is called limited by the generator. ") +
         f"`:uv` requests per connection: {args.uv_max_requests:,} (shipped default 100). "
         f"{workers_text} "
         f"`:uv` loops: {args.loops or 'the default'}, scheme: {args.scheme or 'the default'}. "
