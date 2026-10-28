@@ -55,6 +55,10 @@
    #:provider-request-failed-error-type #:provider-request-failed-error-code
    #:provider-request-failed-body
    #:unknown-tool-choice #:unknown-tool-choice-value #:value-shape
+   #:completion-cancelled #:completion-cancelled-input-tokens #:completion-cancelled-output-tokens
+   #:completion-cancelled-cache-read-tokens #:completion-cancelled-cache-write-tokens
+   #:completion-cancelled-estimated-output #:completion-cancelled-text
+   #:completion-cancelled-estimated-input
    #:output-limit-reached #:output-limit-reached-max-tokens
    #:output-truncated #:output-truncated-step #:output-truncated-max-tokens
    #:translation-truncated #:translation-truncated-text
@@ -143,6 +147,8 @@
   (:export
    ;; protocol
    #:provider #:complete
+   ;; streaming and cancelling a completion (#984)
+   #:*on-text* #:*cancel* #:supports-streaming-p
    ;; the embedding seam (#138, #150) -- a SEPARATE hierarchy, not a capability on PROVIDER
    #:embedding-provider #:embed #:embed-batch #:embed-documents #:embed-query
    #:embedding-dimensions #:embedding-model-of
@@ -312,7 +318,7 @@
            #:budget-exhausted-requested #:budget-exhausted-remaining
            #:ledger #:make-ledger #:ledger-grant #:ledger-tokens #:ledger-calls
            #:remaining-tokens #:remaining-calls #:affordable-p
-           #:record-usage #:usage-report
+           #:record-usage #:record-usage-event #:usage-report
            #:chargeable-tokens #:*token-weights*
            #:budget-guard #:capability-guard #:meter))
 
@@ -329,6 +335,7 @@
                     (#:llm #:praxeon/llm)
                     (#:prompt #:praxeon/prompt)
                     (#:evt #:praxeon/event)
+                    (#:http #:aion/http-client)
                     (#:turn #:praxeon/turn)
                     (#:res #:praxeon/results)
                     (#:jzon #:com.inuoe.jzon)
@@ -361,6 +368,8 @@
    #:means-entry-name #:means-entry-description #:means-entry-capability #:agent-tool-specs #:register-agent-as-means
    #:deliberate #:act #:run-turn #:converse-repl
    #:run-turn-through #:*principal*
+   ;; cancelling a turn (#984)
+   #:turn-cancel #:make-turn-cancel #:cancel-turn #:turn-cancelled-p #:*turn-cancel*
    ;; work that finishes after the call that started it (#532)
    #:started-result #:started-result-p #:started-result-text #:*tool-call-id*
    ;; holding a call until the user decides (#531)

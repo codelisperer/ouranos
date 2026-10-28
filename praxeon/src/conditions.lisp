@@ -72,6 +72,33 @@ because praxeon/llm logs the report of a failed request at warn and a log line n
 payload (docs/logging.md). A service's response body can repeat parts of the request, which
 holds the prompt."))
 
+(define-condition completion-cancelled (praxeon-error)
+  ((input-tokens :initarg :input-tokens :initform nil :reader completion-cancelled-input-tokens)
+   (output-tokens :initarg :output-tokens :initform nil :reader completion-cancelled-output-tokens)
+   (cache-read-tokens :initarg :cache-read-tokens :initform nil
+                      :reader completion-cancelled-cache-read-tokens)
+   (cache-write-tokens :initarg :cache-write-tokens :initform nil
+                       :reader completion-cancelled-cache-write-tokens)
+   (estimated-output :initarg :estimated-output :initform 0
+                     :reader completion-cancelled-estimated-output)
+   (text :initarg :text :initform "" :reader completion-cancelled-text)
+   (estimated-input :initarg :estimated-input :initform nil
+                    :accessor completion-cancelled-estimated-input))
+  (:report (lambda (c stream)
+             (format stream "The completion was cancelled after ~D characters of text."
+                     (length (completion-cancelled-text c)))))
+  (:documentation "A streamed completion was cancelled through PRAXEON/LLM:*CANCEL* before it
+had finished (#984). The provider's connection is closed by then, so it has stopped generating.
+
+The token counts are what the provider had reported when the cancel came, each NIL when it had
+reported none: NIL and 0 are different answers, as on a completion. Anthropic reports the input
+and cache counts when the reply starts, and the output count only when it ends, so after a
+cancel OUTPUT-TOKENS is usually NIL; an OpenAI-compatible server reports all of them at the end.
+ESTIMATED-OUTPUT is praxeon's own count of what the model had sent, which a ledger charges when
+OUTPUT-TOKENS is NIL (see PRAXEON/LLM:*CANCEL*). TEXT is the text that arrived.
+ESTIMATED-INPUT is the estimate of the prompt's tokens, which PRAXEON/ACTOR:DELIBERATE sets
+before the condition reaches the turn; it is NIL when COMPLETE was called some other way."))
+
 (define-condition unknown-tool-choice (deliberation-failure)
   ((value :initarg :value :initform nil :reader unknown-tool-choice-value))
   (:documentation "A provider was given a tool-choice value it does not recognise (#727).
