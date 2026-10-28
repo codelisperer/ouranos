@@ -31,6 +31,23 @@ the Telegram backend fills); signals `delivery-failure`
 (carries the provider's HTTP status + body), `unsupported-message`, or `configuration-error`.
 For an explicit provider, `(hermes:deliver (hermes:make-sendgrid) email)`.
 
+**Extra email headers** (#106). `make-email` takes `:headers`, an alist of `(name . value)`
+strings sent as they are. One-click unsubscribe (RFC 8058), which Gmail and Yahoo expect from
+bulk senders, needs both of these:
+
+```lisp
+(hermes:make-email :to "a@x.io" :from "news@app.io" :subject "October" :text "..."
+                   :headers '(("List-Unsubscribe" . "<https://app.io/u/abc>")
+                              ("List-Unsubscribe-Post" . "List-Unsubscribe=One-Click")))
+```
+
+`make-email` signals `invalid-message`, before anything is sent, for a name that is not a valid
+header name, a name given twice, a header hermes or the provider sets itself (`To`, `From`,
+`Subject`, `Reply-To`, `Cc`, `Bcc`, `Content-Type` and the others `hermes:reserved-email-headers`
+returns), a header longer than the 998 characters a line of email may have, or a value with
+anything but printable ASCII and tabs. A carriage return or line feed could otherwise add a
+header of its own. hermes does not encode non-ASCII text in a header.
+
 **Transport selection (env):**
 - `HERMES_TRANSPORT=dev` → the **dev transport** for every channel: *renders* the message
   (recipient/subject/body — so links are visible) instead of sending. The local-dev default.

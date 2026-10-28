@@ -1019,6 +1019,17 @@ its tag.
 
 ### Added
 
+- **hermes: `make-email` takes `:headers`, so an email can carry `List-Unsubscribe` and
+  `List-Unsubscribe-Post`** (#106). `:headers` is an alist of `(name . value)` strings, read
+  back with `email-headers`. SendGrid receives them as its `headers` object, and the dev
+  transport prints them. `make-email` signals `invalid-message` for a name that is not a valid
+  header name or is given twice, a reserved header (`To`, `From`, `Subject`, `Reply-To`, `Cc`,
+  `Bcc`, `Content-Type` and the others `hermes:reserved-email-headers` returns), a header
+  longer than 998 characters, or a value with anything but printable ASCII and tabs, so a
+  carriage return or line feed cannot add a header of its own. Non-ASCII header text is not
+  encoded and is refused. An email without `:headers` sends the same SendGrid request as
+  before. A new email backend's `deliver` sends `email-headers` or signals `invalid-message`
+  when there are any; it never drops them.
 - **praxeon/image: the generate-image means offers the model a `mask`, so it can change only part
   of an image** (#946). With `:resolve-reference` and a provider that takes a mask
   (`image-provider-accepts-mask-p`, true for OpenAI), the tool schema offers `mask`: a reference,

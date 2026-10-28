@@ -262,6 +262,13 @@ needed, extract it once the shape is known, and generalize only what experience 
 (hermes:send (hermes:make-sms :to "+15551234567"
                               :text "Your code is 123456"))        ; Twilio, or dev
 
+;; extra headers, such as one-click unsubscribe (RFC 8058); read back with EMAIL-HEADERS
+(hermes:make-email :to "a@x.io" :from "news@app.io" :subject "October" :text "..."
+                   :headers '(("List-Unsubscribe" . "<https://app.io/u/abc>")
+                              ("List-Unsubscribe-Post" . "List-Unsubscribe=One-Click")))
+;; names and values are printable ASCII; a line break, a reserved header
+;; (HERMES:RESERVED-EMAIL-HEADERS) or a duplicate signals INVALID-MESSAGE
+
 ;; explicit provider, when you really mean one:
 (hermes:deliver (hermes:make-sendgrid) email)
 

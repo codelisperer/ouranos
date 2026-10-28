@@ -42,24 +42,99 @@ inline attachment has a CONTENT-ID. Signals INVALID-MESSAGE otherwise, before an
         (coerce content '(simple-array (unsigned-byte 8) (*))))))
 
 (defstruct (email (:constructor %make-email
-                      (&key to from subject text html reply-to attachments)))
+                      (&key to from subject text html reply-to attachments headers)))
   "A provider-neutral email. TO and FROM are address strings; TEXT is the plain body; HTML is
 an optional rich body; REPLY-TO is optional. ATTACHMENTS is a list of ATTACHMENTs (#366), empty
-by default."
+by default. HEADERS is an alist of extra header names and values, (NAME . VALUE), empty by
+default (#106)."
   (to nil :type (or null string))
   (from nil :type (or null string))
   (subject "" :type string)
   (text "" :type string)
   (html nil :type (or null string))
   (reply-to nil :type (or null string))
-  (attachments '() :type list))
+  (attachments '() :type list)
+  ;; READ-ONLY, so the checks MAKE-EMAIL runs cannot be stepped around (the hub's review of
+  ;; #969): there is no (SETF EMAIL-HEADERS), so a Bcc or a value holding CRLF cannot be put on
+  ;; an email after it was made. %SENDGRID-BODY checks again anyway, for a struct built inside
+  ;; this package without MAKE-EMAIL.
+  (headers '() :type list :read-only t))
 
-(defun make-email (&rest keys &key to from subject text html reply-to attachments)
+(defun reserved-email-headers ()
+  "The header names an email's :HEADERS may not set (#106), as a fresh list, so a caller cannot
+change the list MAKE-EMAIL checks against. The first four are set from MAKE-EMAIL's own
+arguments, and the rest are set by hermes or by the provider when the message is built and
+signed; SendGrid refuses all of them in its headers object. Compared without regard to case."
+  (list "To" "From" "Subject" "Reply-To" "Cc" "Bcc" "Content-Type" "Content-Transfer-Encoding"
+        "MIME-Version" "Received" "DKIM-Signature" "X-SG-ID" "X-SG-EID"))
+
+(defconstant +max-header-line+ 998
+  "The most characters RFC 5322 allows on one line of a message, CRLF not counted. MAKE-EMAIL
+refuses a header whose \"Name: value\" is longer, because hermes does not fold long headers.")
+
+(defun %header-name-p (name)
+  "True for a header field name RFC 5322 allows: one or more printable US-ASCII characters
+other than the colon."
+  (and (stringp name) (plusp (length name))
+       (every (lambda (ch) (and (char<= #\! ch #\~) (char/= ch #\:))) name)))
+
+(defun %header-value-p (value)
+  "True for a header value hermes can send as it is: a string of printable US-ASCII characters
+and tabs. A carriage return or line feed would end the header and let the value start one of
+its own. Other control characters are refused with them, the C1 controls (U+0080 to U+009F,
+NEL among them) and the line and paragraph separators U+2028 and U+2029 included. Every other
+non-ASCII character is refused too, because a raw non-ASCII header is not valid without RFC
+2047 encoding, which hermes does not do."
+  (and (stringp value)
+       (every (lambda (ch) (or (char= ch #\Tab) (char<= #\Space ch #\~))) value)))
+
+(defun %check-email-headers (headers)
+  "Signal INVALID-MESSAGE unless HEADERS is a list of (NAME . VALUE) conses that MAKE-EMAIL
+accepts: each NAME a field name (%HEADER-NAME-P) that is not reserved and not given twice, each
+VALUE a string of printable ASCII and tabs (%HEADER-VALUE-P), and \"Name: value\" no longer
+than +MAX-HEADER-LINE+. A carriage return or line feed in a name or value is refused because it
+would let the value end the header and add one of its own (header injection)."
+  (flet ((bad (format &rest args)
+           (error 'invalid-message :problem (apply #'format nil format args))))
+    ;; IGNORE-ERRORS, because EVERY on an improper list signals a TYPE-ERROR, and every refusal
+    ;; here is an INVALID-MESSAGE (the hub's review of #969).
+    (unless (and (listp headers) (ignore-errors (every #'consp headers)))
+      (bad ":headers must be a list of (name . value) conses"))
+    (let ((seen '()))
+      (dolist (header headers)
+        (destructuring-bind (name . value) header
+          (unless (%header-name-p name)
+            (bad "a header name must be a non-empty string of printable ASCII characters other than a colon, with no line break; got ~S" name))
+          (when (member name (reserved-email-headers) :test #'string-equal)
+            (bad "the ~A header is set by hermes or the provider, not through :headers" name))
+          (when (member name seen :test #'string-equal)
+            (bad "the ~A header is given twice in :headers" name))
+          (unless (%header-value-p value)
+            (bad "the ~A header's value must be a string of printable ASCII characters and tabs, with no line break, control character or other non-ASCII character" name))
+          (when (> (+ (length name) 2 (length value)) +max-header-line+)
+            (bad "the ~A header is longer than the ~D characters a line of email may have" name +max-header-line+))
+          (push name seen))))))
+
+(defun make-email (&rest keys &key to from subject text html reply-to attachments headers)
   "A provider-neutral EMAIL. ATTACHMENTS, when given, is a list of values from MAKE-ATTACHMENT;
-anything else in it signals INVALID-MESSAGE."
+anything else in it signals INVALID-MESSAGE.
+
+HEADERS, when given, is an alist of extra headers, (NAME . VALUE) with both strings, sent as
+they are (#106). Values are printable ASCII; hermes does not encode non-ASCII text in a header.
+For example, one-click unsubscribe (RFC 8058), which Gmail and Yahoo expect
+from bulk senders:
+
+  (make-email :to ... :from ... :subject ... :text ...
+              :headers '((\"List-Unsubscribe\" . \"<https://app.example/u/abc>\")
+                         (\"List-Unsubscribe-Post\" . \"List-Unsubscribe=One-Click\")))
+
+A name that is not a valid field name, a reserved name (see RESERVED-EMAIL-HEADERS), a name
+given twice, a value with anything but printable ASCII and tabs, or a header longer than
++MAX-HEADER-LINE+ signals INVALID-MESSAGE before anything is sent."
   (declare (ignore to from subject text html reply-to))
   (unless (and (listp attachments) (every #'attachment-p attachments))
     (error 'invalid-message :problem ":attachments must be a list of values from MAKE-ATTACHMENT"))
+  (%check-email-headers headers)
   (apply #'%make-email keys))
 
 (defstruct (sms (:constructor make-sms (&key to from text)))
