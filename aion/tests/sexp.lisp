@@ -158,8 +158,9 @@ reader folds it."
                                   (make-string n :initial-element #\)))))
     (is (eq :none (reason (sexp:read-data (nested 5) :max-depth 5))))
     (is (eq :too-deep (reason (sexp:read-data (nested 6) :max-depth 5)))))
-  (is (eq :none (reason (sexp:read-data "(1 2 3)" :max-elements 3))))
-  (is (eq :too-many-elements (reason (sexp:read-data "(1 2 3 4)" :max-elements 3))))
+  ;; A list counts once and each atom once: (1 2 3) is four elements.
+  (is (eq :none (reason (sexp:read-data "(1 2 3)" :max-elements 4))))
+  (is (eq :too-many-elements (reason (sexp:read-data "(1 2 3 4)" :max-elements 4))))
   (is (eq :none (reason (sexp:read-data "\"abcd\"" :max-string-length 4))))
   (is (eq :string-too-long (reason (sexp:read-data "\"abcde\"" :max-string-length 4))))
   (is (eq :none (reason (sexp:read-data "1234" :max-number-digits 4))))
@@ -197,3 +198,60 @@ reader folds it."
     (let ((out (make-string-output-stream)))
       (is (eq :unwritable (reason (sexp:write-data datum out :max-string-length 5))) "~S" (type-of datum))
       (is (string= "" (get-output-stream-string out)) "nothing was written"))))
+
+;;; --- #972's review ---------------------------------------------------------------------------
+
+(test a-flood-of-empty-lists-is-bounded-by-the-element-limit
+  "Each list counts as an element. 400 000 () under the default limit of 100 000, and 1000 ()
+under a limit of 10, are both refused; before, only atoms counted and both were read."
+  (flet ((flood (n) (with-output-to-string (s)
+                      (write-char #\( s) (dotimes (i n) (write-string "()" s)) (write-char #\) s))))
+    (is (eq :too-many-elements (reason (sexp:read-data (flood 400000)))))
+    (is (eq :too-many-elements (reason (sexp:read-data (flood 1000) :max-elements 10))))
+    (is (eq :none (reason (sexp:read-data (flood 9) :max-elements 10))) "control: nine () and the list")))
+
+(test write-data-refuses-a-symbol-that-would-read-back-as-something-else
+  "A symbol named 1 or 1E5 would read back as a number, and one named T or NIL that is not CL's
+would read back as CL's. Each is refused; a symbol whose name reads as itself is written."
+  (dolist (name '("1" "1E5" "-2/3" ".5" "T" "NIL"))
+    (let ((symbol (make-symbol name)))
+      (is (eq :unwritable (reason (sexp:write-data-to-string symbol :symbols (list symbol))))
+          "a symbol named ~S" name)))
+  (let ((symbol (make-symbol "E5")))
+    (is (eq symbol (sexp:read-data (sexp:write-data-to-string symbol :symbols (list symbol))
+                                   :symbols (list symbol)))
+        "control: E5 is a symbol, written and read back")))
+
+(test write-data-counts-digits-and-elements-as-read-data-does
+  "Digits are counted in base 10 whatever *PRINT-BASE* and *PRINT-RADIX* are, and a list of
+60 000 atoms, which READ-DATA accepts, is written."
+  (let ((*print-base* 16))
+    (is (eq :unwritable (reason (sexp:write-data-to-string (expt 10 110))))
+        "111 digits in base 10, though fewer in base 16"))
+  (let ((*print-radix* t) (n (1- (expt 10 100))))
+    (is (= n (sexp:read-data (sexp:write-data-to-string n))) "100 digits, written under *PRINT-RADIX* T"))
+  (let ((long (make-list 60000 :initial-element 1)))
+    (is (equal long (sexp:read-data (sexp:write-data-to-string long))))))
+
+(test write-data-checks-symbol-name-length-and-clips-what-it-reports
+  (let* ((name (make-string 100 :initial-element #\A))
+         (keyword (intern name :keyword))
+         (c (handler-case (progn (sexp:write-data-to-string keyword :max-string-length 50) nil)
+              (sexp:unsafe-data (c) c))))
+    (is (and c (eq :unwritable (sexp:unsafe-data-reason c))))
+    (is (and c (<= (length (sexp:unsafe-data-detail c)) 80)) "~S" (and c (sexp:unsafe-data-detail c)))
+    (unintern keyword :keyword)))
+
+(test the-symbols-argument-must-be-a-list-of-symbols
+  (dolist (call (list (lambda () (sexp:read-data "1" :symbols '(1)))
+                      (lambda () (sexp:write-data-to-string 1 :symbols '(1)))))
+    (let ((c (handler-case (progn (funcall call) nil) (error (c) c))))
+      (is (and c (not (typep c 'type-error))) "~S" c)
+      (is (and c (search ":SYMBOLS" (princ-to-string c))) "~A" c))))
+
+(test only-ascii-digits-make-a-number-and-small-exponents-may-have-leading-zeros
+  "A digit of another script is not a digit here; 1e-0000001 is 0.1; and 1e-50, too small for a
+single float, reads as zero, as READ-DATA's docstring says."
+  (is (eq :unknown-symbol (reason (sexp:read-data (string (code-char #x663))))))
+  (is (eql 0.1 (sexp:read-data "1e-0000001")))
+  (is (eql 0.0 (sexp:read-data "1e-50"))))

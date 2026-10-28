@@ -39,7 +39,9 @@ or NIL from WRITE-DATA. DETAIL quotes at most the first 40 characters of the off
 token."))
 
 (defparameter *max-depth* 64 "The deepest nesting of lists accepted.")
-(defparameter *max-elements* 100000 "The most conses and atoms in one datum.")
+(defparameter *max-elements* 100000
+  "The most elements in one datum, counting each list and each atom once: (1 (2 3)) is five, two
+lists and three atoms, and () is one. READ-DATA and WRITE-DATA count the same way.")
 (defparameter *max-string-length* 65536 "The longest string, or symbol name, accepted.")
 (defparameter *max-number-digits* 100
   "The most digits in an integer, in each part of a ratio, and in a float's digits. A float's
@@ -127,9 +129,14 @@ exponent is bounded separately, by the range of a double float.")
              (write-char (%next r) out))
     (get-output-stream-string out)))
 
+(defun %digit-p (c)
+  "An ASCII decimal digit. DIGIT-CHAR-P alone also accepts digits of other scripts, which would
+read as numbers here and not in the standard reader (#972's review)."
+  (char<= #\0 c #\9))
+
 (defun %digits-p (string &key (start 0) end)
   (let ((end (or end (length string))))
-    (and (< start end) (every #'digit-char-p (subseq string start end)))))
+    (and (< start end) (every #'%digit-p (subseq string start end)))))
 
 (defun %parse-integer-token (token r start)
   "TOKEN as an integer, or NIL when it is not one: an optional sign and decimal digits, and
@@ -169,7 +176,8 @@ integer first.")
 or digits and an exponent, or both. THE EXPONENT MARKER DECIDES THE TYPE, whatever the caller's
 *READ-DEFAULT-FLOAT-FORMAT*: E, F and S, and no marker, give a SINGLE-FLOAT; D and L give a
 DOUBLE-FLOAT. The value is computed exactly as a rational and then converted, so an exponent
-past the type's range is UNSAFE-DATA :NUMBER-OUT-OF-RANGE, never a FLOATING-POINT-OVERFLOW."
+past the type's range is UNSAFE-DATA :NUMBER-OUT-OF-RANGE, never a FLOATING-POINT-OVERFLOW. A
+value too small for the type reads as zero, or as the nearest denormal: 1e-50 is 0.0."
   (let* ((i (if (find (char token 0) "+-") 1 0))
          (negative (char= (char token 0) #\-))
          (marker (position-if (lambda (c) (find c "eEfFsSdDlL")) token :start i))
@@ -179,7 +187,7 @@ past the type's range is UNSAFE-DATA :NUMBER-OUT-OF-RANGE, never a FLOATING-POIN
          (frac-part (if dot (subseq token (1+ dot) mantissa-end) "")))
     (when (and (or dot marker)
                (or (plusp (length int-part)) (plusp (length frac-part)))
-               (every #'digit-char-p int-part) (every #'digit-char-p frac-part))
+               (every #'%digit-p int-part) (every #'%digit-p frac-part))
       (let* ((exponent-text (and marker (subseq token (1+ marker))))
              (exponent-sign (if (and exponent-text (plusp (length exponent-text))
                                      (find (char exponent-text 0) "+-"))
@@ -190,9 +198,11 @@ past the type's range is UNSAFE-DATA :NUMBER-OUT-OF-RANGE, never a FLOATING-POIN
           (%unsafe :number-too-long start "more than ~D digits" (%r-max-number-digits r)))
         (let* ((type (if (and marker (find (char token marker) "dDlL")) 'double-float 'single-float))
                (exponent (if marker
-                             (if (> (- (length exponent-text) exponent-sign) 6)
-                                 (%unsafe :number-out-of-range start "~A" (%clip token))
-                                 (parse-integer exponent-text))
+                             ;; Leading zeros do not count, so 1e-0000001 is 0.1 (#972's review).
+                             (let ((significant (string-left-trim "0" (subseq exponent-text exponent-sign))))
+                               (if (> (length significant) 6)
+                                   (%unsafe :number-out-of-range start "~A" (%clip token))
+                                   (parse-integer exponent-text)))
                              0))
                (digits (concatenate 'string int-part frac-part))
                (scale (- exponent (length frac-part))))
@@ -272,6 +282,8 @@ is read."
                                (if stack "a list is not closed" "no datum")))
             ((char= c #\()
              (%next r)
+             ;; Each list counts as an element, so a flood of () is bounded too (#972's review).
+             (%count-element r)
              (when (>= (length stack) (%r-max-depth r))
                (%unsafe :too-deep (%r-position r) "nested deeper than ~D" (%r-max-depth r)))
              (push (cons '() nil) stack))
@@ -330,10 +342,11 @@ variables of the same names.
 For a string, text after the datum other than whitespace is refused; for a stream, the stream
 is left just after the datum."
   (let* ((stream (if (stringp source) (make-string-input-stream source) source))
-         (r (make-%reader :stream stream :symbols symbols :intern-keywords intern-keywords
+         (r (progn (%check-symbols-argument symbols)
+                   (make-%reader :stream stream :symbols symbols :intern-keywords intern-keywords
                           :max-depth max-depth :max-elements max-elements
                           :max-string-length max-string-length
-                          :max-number-digits max-number-digits :max-input max-input))
+                          :max-number-digits max-number-digits :max-input max-input)))
          (datum (%read r)))
     (when (stringp source)
       (%skip-whitespace r)
@@ -343,21 +356,45 @@ is left just after the datum."
 
 ;;; --- writing --------------------------------------------------------------------------------
 
-(defun %write-atom (x stream symbols)
+(defun %check-symbols-argument (symbols)
+  (unless (and (listp symbols) (every #'symbolp symbols))
+    (error "aion/sexp: :SYMBOLS must be a list of symbols, not ~S." symbols)))
+
+(defun %number-token-p (name)
+  "Whether READ-DATA would read NAME as a number rather than as a symbol: through the reader's
+own number parsers, so the writer and the reader cannot disagree. A name the parsers refuse as
+a number, such as one out of range, counts too."
+  (let ((r (make-%reader :max-number-digits most-positive-fixnum)))
+    (handler-case (or (%parse-integer-token name r 0)
+                      (%parse-ratio-token name r 0)
+                      (%parse-float-token name r 0))
+      (unsafe-data () t))))
+
+(defun %writable-name-p (name max-string-length)
+  "Whether a symbol NAME is written as it is and reads back as the same name."
+  (and (%symbol-name-p name)
+       (<= (length name) max-string-length)
+       (string= name (string-upcase name))))
+
+(defun %write-atom (x stream symbols max-string-length)
   (typecase x
     (null (write-string "NIL" stream))
     ((eql t) (write-string "T" stream))
     (keyword
      (let ((name (symbol-name x)))
-       (unless (and (%symbol-name-p name) (string= name (string-upcase name)))
-         (%unsafe :unwritable nil "the keyword ~S would not read back" x))
+       (unless (%writable-name-p name max-string-length)
+         (%unsafe :unwritable nil "the keyword ~A would not read back" (%clip name)))
        (write-char #\: stream) (write-string name stream)))
     (symbol
      (let ((name (symbol-name x)))
        (unless (member x symbols)
          (%unsafe :unwritable nil "~A is not an allowed symbol" (%clip name)))
-       (unless (and (%symbol-name-p name) (string= name (string-upcase name)))
-         (%unsafe :unwritable nil "the symbol ~A would not read back" (%clip name)))
+       ;; A name that reads as a number (1, 1E5), or as CL's T or NIL, would come back as
+       ;; something else (#972's review).
+       (unless (and (%writable-name-p name max-string-length)
+                    (not (%number-token-p name))
+                    (not (member name '("T" "NIL") :test #'string=)))
+         (%unsafe :unwritable nil "the symbol ~A would not read back as itself" (%clip name)))
        (write-string name stream)))
     (string
      (write-char #\" stream)
@@ -376,6 +413,11 @@ is left just after the datum."
      (let ((*read-default-float-format* 'single-float)) (prin1 x stream)))
     (t (%unsafe :unwritable nil "a ~A is not data" (type-of x)))))
 
+(defun %decimal-digits (n)
+  "How many decimal digits the integer N has, whatever the caller's *PRINT-BASE*."
+  (let ((*print-base* 10) (*print-radix* nil))
+    (length (princ-to-string (abs n)))))
+
 (defun write-data (datum &optional (stream *standard-output*)
                    &key symbols (max-depth *max-depth*) (max-elements *max-elements*)
                      (max-string-length *max-string-length*)
@@ -385,6 +427,8 @@ EQUAL to it. Signals UNSAFE-DATA :UNWRITABLE, before writing anything, for a dat
 would refuse: a struct, a vector or another object that is not data, a symbol not in SYMBOLS or
 whose name would not read back as itself, a float that is not finite, and a datum past a
 limit, which includes a circular list. Returns DATUM."
+  (%check-symbols-argument symbols)
+  ;; Elements are counted as READ-DATA counts them: each list once and each atom once.
   (let ((elements 0))
     (labels ((check (x depth)
                (when (> (incf elements) max-elements)
@@ -392,24 +436,22 @@ limit, which includes a circular list. Returns DATUM."
                (cond ((consp x)
                       (when (> depth max-depth)
                         (%unsafe :unwritable nil "nested deeper than ~D" max-depth))
+                      ;; A circular cdr chain is caught by the element count: each car counts.
                       (loop for tail = x then (cdr tail)
                             while (consp tail)
                             do (check (car tail) (1+ depth))
-                               (when (> (incf elements) max-elements)
-                                 (%unsafe :unwritable nil "more than ~D elements" max-elements))
                             finally (when tail (check tail (1+ depth)))))
                      ((stringp x)
                       (when (> (length x) max-string-length)
                         (%unsafe :unwritable nil "a string longer than ~D" max-string-length)))
                      ((integerp x)
-                      (when (> (length (princ-to-string (abs x))) max-number-digits)
+                      (when (> (%decimal-digits x) max-number-digits)
                         (%unsafe :unwritable nil "an integer longer than ~D digits" max-number-digits)))
                      ((typep x 'ratio)
-                      (when (> (max (length (princ-to-string (abs (numerator x))))
-                                    (length (princ-to-string (denominator x))))
+                      (when (> (max (%decimal-digits (numerator x)) (%decimal-digits (denominator x)))
                                max-number-digits)
                         (%unsafe :unwritable nil "a ratio part longer than ~D digits" max-number-digits)))
-                     (t (%write-atom x (make-broadcast-stream) symbols))))
+                     (t (%write-atom x (make-broadcast-stream) symbols max-string-length))))
              (emit (x)
                (cond ((consp x)
                       (write-char #\( stream)
@@ -422,7 +464,7 @@ limit, which includes a circular list. Returns DATUM."
                                       (write-string " . " stream)
                                       (emit tail)))
                       (write-char #\) stream))
-                     (t (%write-atom x stream symbols)))))
+                     (t (%write-atom x stream symbols max-string-length)))))
       ;; The whole datum is checked before a character is written, so a refusal leaves STREAM
       ;; untouched.
       (check datum 1)
