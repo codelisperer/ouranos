@@ -1438,6 +1438,28 @@ timed out and sent the request again, and this server counted two connections."
       (is (search "timeout" (string-downcase (or (and e (http:http-error-detail e)) "")))
           "the caller gets the read timeout: ~A" (and e (http:http-error-detail e))))))
 
+(test fetch-public-stops-at-its-deadline-when-the-server-never-answers
+  "#985: a real socket, not a stub. The server accepts and never answers, and there is no read
+timeout, so only the deadline can end the fetch. On Windows the deadline used to shut the socket
+down, which did not wake the read: the fetch was still waiting after 20 seconds. An outer limit
+of 30 seconds makes that a failure here rather than a hang."
+  (with-counting-listener (port accepted)
+    (let* ((start (get-internal-real-time))
+           (result (handler-case
+                       (sb-ext:with-timeout 30
+                         (handler-case
+                             (progn (http:fetch-public (format nil "http://silent.test:~D/" port)
+                                                       :resolve (%resolver '(("silent.test" "127.0.0.1")))
+                                                       :address-policy #'%loopback-allowed
+                                                       :deadline 2)
+                                    :returned)
+                           (http:fetch-deadline-exceeded () :deadline)))
+                     (sb-ext:timeout () :still-waiting)))
+           (seconds (/ (- (get-internal-real-time) start) internal-time-units-per-second)))
+      (is (eq :deadline result) "got ~S after ~,1F s" result seconds)
+      (is (< seconds 10) "and within a few seconds of the deadline: ~,1F s" seconds)
+      (is (= 1 (funcall accepted)) "on one connection: ~D" (funcall accepted)))))
+
 (test a-pinned-request-sends-dexadors-user-agent-and-accept-unless-given
   (with-server (s (lambda (path head stream)
                     (declare (ignore path head))

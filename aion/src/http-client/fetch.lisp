@@ -523,12 +523,16 @@ is read here and the connection closed."
       (first addresses))))
 
 (defun %fire (watch)
-  "The deadline has passed: record it, and shut down the socket the fetch is using, which wakes
-a read or write blocked on it."
+  "The deadline has passed: record it, and wake a read or write blocked on the socket the fetch
+is using. Elsewhere the socket is shut down. On Windows it is closed, because a shutdown from
+another thread did not wake a blocked read there: measured, a FETCH-PUBLIC with :DEADLINE 2 to a
+server that never answered was still waiting after 20 seconds (#985)."
   (sb-thread:with-mutex ((%watch-lock watch))
     (setf (%watch-fired watch) t)
     (let ((socket (%watch-socket watch)))
-      (when socket (ignore-errors (usocket:socket-shutdown socket :io))))))
+      (when socket
+        #+os-windows (ignore-errors (usocket:socket-close socket))
+        #-os-windows (ignore-errors (usocket:socket-shutdown socket :io))))))
 
 (defun %fired-p (watch)
   (and watch (sb-thread:with-mutex ((%watch-lock watch)) (%watch-fired watch))))
