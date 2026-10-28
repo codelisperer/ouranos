@@ -85,7 +85,7 @@ the CLI and as a web app.
 | **Per-agent models (roles)** | Config is **not global**: `PRAXEON_<ROLE>_*` > `PRAXEON_<IMPL>_*` > `PRAXEON_LLM_*`, so one process runs several agents each on its own model/vendor. `PRAXEON_LLM_*` applies only to the provider `PRAXEON_LLM_IMPL` names. Embedding providers read only `PRAXEON_<ROLE>_EMBED_*`, `PRAXEON_EMBED_*` and the backend's own variables, and there is no default one (#290). |
 | **Studio DX** | `agent-summary` / `describe-agent` / `show-transcript` / `trace-turn`, with a deliberate data/render split. |
 | **Live progress** | `praxeon/event` — the loop emits neutral `:deliberating` / `:tool-call` / `:tool-result` / `:answer` events to an observer; CLI and web render the *same* stream. |
-| **Web + REST** | `praxeon/web` (now on Hyperion): an HTMX chat page, `POST /api/message` (background turn; JSON for REST clients), `GET /api/progress`. One endpoint serves browser and program by content negotiation. |
+| **Web + REST** | `praxeon/web` (now on Hyperion): an HTMX chat page, `POST /api/message` (background turn; JSON for REST clients), `GET /api/progress`, and with `:transport :sse` the same updates as a Server-Sent Events stream at `GET /api/events`. One endpoint serves browser and program by content negotiation. |
 | **Hot-reload dev loop** | Layers 1–2: watch → recompile → rebuild the server around a *persistent agent*, auto-refreshing `:dev` pages, and compile errors as a red browser overlay. Plus transcript rehydration on load. |
 | **Multi-agent coordination** | Both halves: **delegation** (`register-agent-as-means`) and **workflows** (`praxeon/workflow`) — network-free tested. |
 | **Token-cost visibility** | Neutral `completion` carries usage; the loop emits `:usage`; the web header shows a running `· N tokens`. |
@@ -361,10 +361,13 @@ on one conversation both see every message. Every handler stays quick, so it wor
 **identically on Woo and Hunchentoot with no per-server code.**
 
 The upshot: **polling is the portable floor, not a ceiling.** Because the event data is
-transport-neutral, a native SSE renderer can be added for threaded backends as a swappable
-transport, without touching the agent loop or the event contract. Revisit when a
-token-by-token streaming UX justifies the second code path — for a "… thinking / → tool"
-indicator at human reading speed, 700 ms polling is indistinguishable.
+transport-neutral, an SSE stream could be added for threaded backends without touching the agent
+loop or the event contract, and #67 did that. With `:transport :sse`, `praxeon/web` serves
+`GET /api/events`, a Server-Sent Events stream whose events carry what a poll would answer, with
+the transcript cursor as each event's id, so a browser that reconnects resumes where it stopped.
+`start` streams on Hunchentoot and polls on Woo and on `:uv`, because a stream holds a handler
+thread for as long as the page is open and `:uv` has two workers by default. An app can force
+either transport, and forcing SSE on Woo is refused at `start`.
 
 #### Modular design
 

@@ -144,12 +144,15 @@ a question that has nothing to do with the network."
 ;;; socket: the property under test is what the app answers, and a server would add a port and
 ;;; a thread to every one of them.
 
-(defun %call (app method path &key query json form authorization)
+(defun %call (app method path &key query json form authorization headers)
   "Call APP, a Clack app, with a request for METHOD and PATH, and return (values STATUS HEADERS
 BODY). QUERY is the query string. JSON or FORM, a string, is the body, sent as application/json
-or as a urlencoded form. AUTHORIZATION is the Authorization header's value."
+or as a urlencoded form. AUTHORIZATION is the Authorization header's value, and HEADERS an alist
+of other request headers by lowercase name. A streamed BODY, a function of a writer, is returned
+as it is."
   (let* ((headers (let ((h (make-hash-table :test 'equal)))
                     (when authorization (setf (gethash "authorization" h) authorization))
+                    (loop for (name . value) in headers do (setf (gethash name h) value))
                     h))
          (env (list :request-method method :path-info path :query-string query
                     :headers headers
@@ -158,7 +161,7 @@ or as a urlencoded form. AUTHORIZATION is the Authorization header's value."
     (when (or json form)
       (setf env (hyperion/http:cache-body-string env (or json form))))
     (destructuring-bind (status hdrs body) (funcall app env)
-      (values status hdrs (format nil "~{~A~}" body)))))
+      (values status hdrs (if (functionp body) body (format nil "~{~A~}" body))))))
 
 (defun %echo-app (&rest keys)
   "An app whose turn answers \"echo: MESSAGE\" and fails for the message \"fail\". KEYS go to
@@ -248,11 +251,11 @@ rendering changed for the rest of the process."
   ;; the bug fully present. Measured: under the reverted fix this test failed `f.\', one of two.
   ;; So the non-dev case runs against a :pretty image and the dev case against a :compact one.
   (let ((out:*output-style* :pretty))
-    (web::%build-app nil "Guest" "Guest" #'identity nil nil nil nil nil nil nil nil nil nil nil nil)
+    (web::%build-app nil "Guest" "Guest" #'identity nil nil nil nil nil nil nil nil nil nil nil nil :poll)
     (is (eq :pretty out:*output-style*)
         "a :pretty host survives a non-dev agent surface, which the defect would set :compact"))
   (let ((out:*output-style* :compact))
-    (web::%build-app nil "Guest" "Guest" #'identity nil nil t nil nil nil nil nil nil nil nil nil)
+    (web::%build-app nil "Guest" "Guest" #'identity nil nil t nil nil nil nil nil nil nil nil nil :poll)
     (is (eq :compact out:*output-style*)
         "and a :compact host survives a :dev one, which the defect would set :pretty")))
 
@@ -784,10 +787,11 @@ publishes carry the same turn id."
                  (mapcar (lambda (i) (list (getf i :kind) (getf i :turn))) items))
           "the items were ~S" items))))
 
-(defun %expiring-app (made clock &key gate entered turn-thread)
+(defun %expiring-app (made clock &key gate entered turn-thread (transport :poll))
   "An app with one conversation per `who' key and conversations that expire after 1800 idle
 seconds by CLOCK. The message \"slow\" signals ENTERED and then waits for GATE, both
-semaphores, before it is answered. TURN-THREAD, a cons, gets the slow turn's thread in its car."
+semaphores, before it is answered. TURN-THREAD, a cons, gets the slow turn's thread in its car.
+TRANSPORT goes to MAKE-APP."
   (web:make-app
    :agent-name "Echo"
    :responder (lambda (agent message locale)
@@ -800,6 +804,7 @@ semaphores, before it is answered. TURN-THREAD, a cons, gets the slow turn's thr
    :conversation-key (lambda (env) (hyperion/http:query-param env "who"))
    :make-agent (%counting-make-agent made)
    :conversation-idle-seconds 1800
+   :transport transport
    :clock clock))
 
 (test an-idle-conversation-is-dropped-and-the-next-request-starts-a-new-one
@@ -982,3 +987,300 @@ from the grant of the session that sent it, and the conversation goes on across 
       (is (eql 401 (nth-value 0 (%open app (ceiling:encode-grant-token "[1,2]" priv)))))
       (is (eql 401 (nth-value 0 (%open app (ceiling:encode-grant-token
                                             "{\"principal\":5,\"audience\":\"svc\"}" priv))))))))
+
+;;; --------------------------------------------------------------------------
+;;; The page's updates as a stream (#67 step three)
+;;; --------------------------------------------------------------------------
+;;;
+;;; With :TRANSPORT :SSE, GET /api/events answers a streamed body, a function of a writer. These
+;;; tests call that function with a writer that keeps what it is given, and end the stream by
+;;; signalling from the writer, which is what a server's writer does when the browser has gone.
+
+(define-condition %stream-stopped (error) ()
+  (:documentation "Signalled by %READ-STREAM's writer to end a stream the test has read enough of."))
+
+(defun %read-stream (body &key (events 1) on-event (seconds 5))
+  "Run BODY, a stream body, until it has written EVENTS events, ending it then, or until it ends by
+itself, or until it has run SECONDS. ON-EVENT is called with each event's text, before the next.
+Returns (values EVENT-TEXTS HOW): HOW is :READ when the test ended the stream, :ENDED when the
+stream ended by itself, and :TIMEOUT. A comment line is not an event."
+  (let ((got '())
+        (deadline (+ (get-universal-time) seconds)))
+    (handler-case
+        (progn
+          (funcall body
+                   (lambda (chunk)
+                     (unless (eql 0 (search ": " chunk))
+                       (push chunk got)
+                       (when on-event (funcall on-event chunk))
+                       (when (>= (length got) events) (error '%stream-stopped)))
+                     (when (>= (get-universal-time) deadline) (error '%stream-stopped))))
+          (values (reverse got) :ended))
+      (%stream-stopped ()
+        (values (reverse got) (if (>= (length got) events) :read :timeout))))))
+
+(defun %event-id (event)
+  "The value of EVENT's id field, or NIL."
+  (let ((at (search (format nil "~%id: ") (format nil "~%~A" event))))
+    (and at (subseq event (+ at 4) (position #\Newline event :start (+ at 4))))))
+
+(defun %stream-of (app &key query headers authorization)
+  "GET APP's /api/events. Returns (values STATUS HEADERS BODY)."
+  (%call app :get "/api/events" :query query :headers headers :authorization authorization))
+
+(defun %page-epoch (app &key query authorization)
+  (%epoch-in (nth-value 2 (%call app :get "/" :query query :authorization authorization))))
+
+(test a-polling-app-has-no-stream
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (declare (ignore priv))
+    (let ((app (%echo-app)))
+      (is (eql 404 (nth-value 0 (%stream-of app :query "after=0"))))
+      (is (null (search "px-events" (nth-value 2 (%call app :get "/")))))
+      (is (search "/api/progress" (nth-value 2 (%call app :get "/")))))
+    (is (eql 404 (nth-value 0 (%call (%grant-app pub) :post "/embed/stream-ticket"))))))
+
+(test a-streaming-page-reads-the-stream-and-does-not-poll
+  (let ((page (nth-value 2 (%call (%echo-app :transport :sse) :get "/"))))
+    (is (search "px-events" page))
+    (is (search "/api/events" page))
+    (is (null (search "/api/progress" page)) "the page still polls")
+    (is (search "new EventSource(" page) "the page has no stream client")
+    (is (search "px-cursor" page) "the stream client has no cursor to start from")))
+
+(test the-stream-sends-what-a-poll-would-with-the-cursor-as-the-event-id
+  (let ((app (%echo-app :transport :sse)))
+    (%say app "hi")
+    (let ((epoch (%page-epoch app)))
+      (multiple-value-bind (status headers body)
+          (%stream-of app :query (format nil "after=~A:0" epoch))
+        (is (eql 200 status))
+        (is (search "text/event-stream" (getf headers :content-type)))
+        (let ((event (first (%read-stream body))))
+          (is (search "hi</p>" event) "the user's message is missing: ~S" event)
+          (is (search "echo: hi" event) "the reply is missing: ~S" event)
+          (is (equal (format nil "~A:3" epoch) (%event-id event))
+              "a message, a reply and a turn-ended item make the cursor 3: ~S" event)
+          (is (search "id=status" event) "the status line is not in the event"))))))
+
+(test the-stream-sends-each-new-item-once
+  (let* ((app (%echo-app :transport :sse))
+         (epoch (%page-epoch app)))
+    (%say app "first")
+    (multiple-value-bind (events how)
+        (%read-stream (nth-value 2 (%stream-of app :query (format nil "after=~A:0" epoch)))
+                      :events 2
+                      :on-event (lambda (e)
+                                  (when (search "echo: first" e) (%say app "second"))))
+      (is (eq :read how) "the second event never came")
+      (is (search "echo: second" (second events)) "~S" (second events))
+      (is (null (search "echo: first" (second events))) "an item was sent twice")
+      (is (equal (format nil "~A:6" epoch) (%event-id (second events)))))))
+
+(test a-reconnecting-browser-resumes-from-its-last-event-id
+  "A browser that reconnects by itself sends Last-Event-ID, and keeps the URL it first opened, so
+the header wins over `after'."
+  (let* ((app (%echo-app :transport :sse))
+         (epoch (%page-epoch app)))
+    (%say app "before")
+    (let ((event (first (%read-stream
+                         (nth-value 2 (%stream-of app
+                                                  :query (format nil "after=~A:0" epoch)
+                                                  :headers (list (cons "last-event-id"
+                                                                       (format nil "~A:3" epoch)))))))))
+      (is (null (search "before" event)) "items before Last-Event-ID were sent again: ~S" event)
+      (is (equal (format nil "~A:3" epoch) (%event-id event))))))
+
+(test a-stream-from-another-conversation-gets-this-one-from-the-start
+  (let ((app (%echo-app :transport :sse)))
+    (%say app "now")
+    (let ((event (first (%read-stream
+                         (nth-value 2 (%stream-of app :headers '(("last-event-id" . "0123abcd:9"))))))))
+      (is (search "innerHTML:#chat" event) "the transcript was not replaced: ~S" event)
+      (is (search "echo: now" event))
+      (is (search "not used for a while" event) "the notice is missing"))))
+
+(test a-conversation-being-streamed-is-not-dropped-and-the-stream-ending-counts-as-use
+  "No request reaches a conversation while its page reads a stream, and the conversation is kept.
+When the stream ends, that counts as a request, so a page that opens a new stream at once finds
+the same conversation."
+  (let* ((now 1000)
+         (made (make-hash-table :test 'equal :synchronized t))
+         (app (%expiring-app made (lambda () now) :transport :sse)))
+    (%say app "hello" :query "who=a")
+    ;; While the stream is open, an hour passes and a request with another key sweeps. Then the
+    ;; stream ends, at 4600.
+    (%read-stream (nth-value 2 (%stream-of app :query "who=a&after=0"))
+                  :on-event (lambda (e)
+                              (declare (ignore e))
+                              (setf now 4600)
+                              (%call app :get "/" :query "who=b")))
+    (is (= 1 (%made-for made "a")) "the streamed conversation was dropped")
+    (setf now 6300)
+    (is (search "echo: hello" (%poll app 0 :query "who=a"))
+        "the stream's end did not count as using the conversation")
+    (is (= 1 (%made-for made "a")))))
+
+;;; --- streams with grants: tickets ----------------------------------------------------
+
+(defun %ticket (app session)
+  "POST APP's /embed/stream-ticket with SESSION. Returns (values STATUS TICKET-or-NIL)."
+  (multiple-value-bind (status headers body)
+      (%call app :post "/embed/stream-ticket"
+                 :authorization (and session (format nil "Session ~A" session)))
+    (declare (ignore headers))
+    (values status (and (eql status 200) (gethash "ticket" (com.inuoe.jzon:parse body))))))
+
+(test a-stream-ticket-needs-an-open-session
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (let* ((app (%grant-app pub :transport :sse))
+           (session (nth-value 1 (%open app (%grant-token priv)))))
+      (is (eql 401 (%ticket app nil)))
+      (is (eql 401 (%ticket app "no-such-session")))
+      (multiple-value-bind (status ticket) (%ticket app session)
+        (is (eql 200 status))
+        (is (and (stringp ticket) (= 64 (length ticket))) "a ticket is 256 bits as hex: ~S" ticket)))))
+
+(test a-ticket-opens-one-stream-and-only-one
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (let* ((app (%grant-app pub :transport :sse))
+           (session (nth-value 1 (%open app (%grant-token priv))))
+           (ticket (nth-value 1 (%ticket app session))))
+      (%call app :post "/api/message" :authorization (format nil "Session ~A" session)
+                                      :json "{\"message\":\"hi\"}")
+      (is (eql 401 (nth-value 0 (%stream-of app :query "after=0"))) "a stream without a ticket")
+      (is (eql 401 (nth-value 0 (%stream-of app :query "after=0"
+                                                :authorization (format nil "Session ~A" session))))
+          "the session header opened a stream; only a ticket should")
+      (multiple-value-bind (status headers body)
+          (%stream-of app :query (format nil "after=0&ticket=~A" ticket))
+        (declare (ignore headers))
+        (is (eql 200 status))
+        (is (search "echo: hi" (first (%read-stream body))) "the stream is not the principal's"))
+      (is (eql 401 (nth-value 0 (%stream-of app :query (format nil "after=0&ticket=~A" ticket))))
+          "a ticket opened a second stream"))))
+
+(test a-stream-ends-when-its-session-does
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (let* ((sessions (praxeon/web-session:make-session-table))
+           (app (%grant-app pub :transport :sse :sessions sessions))
+           (session (nth-value 1 (%open app (%grant-token priv))))
+           (ticket (nth-value 1 (%ticket app session)))
+           (web::*stream-check-seconds* 0))
+      (multiple-value-bind (events how)
+          (%read-stream (nth-value 2 (%stream-of app :query (format nil "ticket=~A" ticket)))
+                        :events 2
+                        :on-event (lambda (e)
+                                    (declare (ignore e))
+                                    (praxeon/web-session:close-session sessions session)))
+        (is (eq :ended how) "the stream did not end with its session: ~S" how)
+        (is (= 1 (length events)))))))
+
+(test an-open-stream-does-not-keep-its-session-from-going-idle
+  "A page left open holds its stream, and the stream checks its session on a timer. The check
+must not count as a use, or the session, and the server thread holding the stream, would last
+until the session's maximum age. Once the first event is read, each reading of the clock moves
+it 10 seconds, so the idle limit of 60 seconds passes within a few checks."
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (let* ((now 1000)
+           (ticking nil)
+           (sessions (praxeon/web-session:make-session-table
+                      :idle-seconds 60 :clock (lambda () (if ticking (incf now 10) now))))
+           (app (%grant-app pub :transport :sse :sessions sessions))
+           (session (nth-value 1 (%open app (%grant-token priv))))
+           (ticket (nth-value 1 (%ticket app session)))
+           (web::*stream-check-seconds* 0)
+           ;; A comment on every pass, so %READ-STREAM can stop the stream if it does not end.
+           (hyperion/sse:*keep-alive-seconds* 0))
+      (multiple-value-bind (events how)
+          (%read-stream (nth-value 2 (%stream-of app :query (format nil "ticket=~A" ticket)))
+                        :events 2 :seconds 3
+                        :on-event (lambda (e) (declare (ignore e)) (setf ticking t)))
+        (is (eq :ended how) "the stream kept its idle session open: ~S" how)
+        (is (= 1 (length events)))
+        (is (null (praxeon/web-session:session-grant sessions session))
+            "the session is still open")))))
+
+(test a-ticket-is-spent-by-use-by-time-and-by-its-session-ending
+  (let* ((now 1000)
+         (table (praxeon/web-session:make-session-table :ticket-seconds 30
+                                                        :clock (lambda () now)))
+         (id (praxeon/web-session:open-session table :grant)))
+    (is (null (praxeon/web-session:issue-ticket table "no-such-session")))
+    (let ((ticket (praxeon/web-session:issue-ticket table id)))
+      (is (equal id (praxeon/web-session:redeem-ticket table ticket)))
+      (is (null (praxeon/web-session:redeem-ticket table ticket)) "a ticket was used twice"))
+    (let ((ticket (praxeon/web-session:issue-ticket table id)))
+      (incf now 29)
+      (is (equal id (praxeon/web-session:redeem-ticket table ticket)) "29 seconds is within 30"))
+    (let ((ticket (praxeon/web-session:issue-ticket table id)))
+      (incf now 30)
+      (is (null (praxeon/web-session:redeem-ticket table ticket)) "a ticket outlived 30 seconds"))
+    (let ((ticket (praxeon/web-session:issue-ticket table id)))
+      (praxeon/web-session:close-session table id)
+      (is (null (praxeon/web-session:redeem-ticket table ticket))
+          "a ticket opened a stream for a closed session"))))
+
+;;; --- which transport START serves -----------------------------------------------------
+
+(test start-streams-only-where-the-server-can-hold-a-stream
+  (is (eq :sse (web::%resolve-transport :auto :hunchentoot)))
+  (is (eq :poll (web::%resolve-transport :auto :woo)))
+  (is (eq :poll (web::%resolve-transport :auto :uv)) ":uv has two workers by default")
+  (is (eq :sse (web::%resolve-transport :sse :uv)))
+  (is (eq :poll (web::%resolve-transport :poll :hunchentoot)))
+  (signals error (web::%resolve-transport :sse :woo))
+  (signals error (web::%resolve-transport :websocket :hunchentoot))
+  (signals error (web:make-app :agent (quiet-agent) :transport :auto)))
+
+(defun %worker-threads (client-port)
+  "The live threads Hunchentoot runs the connection from CLIENT-PORT on. It names each one after
+the client's address and port."
+  (remove-if-not (lambda (th)
+                   (search (format nil "worker-127.0.0.1:~D" client-port) (sb-thread:thread-name th)))
+                 (sb-thread:list-all-threads)))
+
+(test hunchentoot-delivers-each-event-while-the-stream-is-open
+  "The first event reaches the browser while the stream is still open: Hunchentoot sends the
+response chunked, and a backend that held the chunks until the body ended would show a page that
+never updates. Ending the session then ends the stream, and the thread the server ran it on."
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (let* ((sessions (praxeon/web-session:make-session-table))
+           (app (%grant-app pub :transport :sse :sessions sessions))
+           (session (nth-value 1 (%open app (%grant-token priv))))
+           (ticket (nth-value 1 (%ticket app session)))
+           (port (free-port))
+           (handler (srv:start app :server :hunchentoot :port port :log nil))
+           (s (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
+      (unwind-protect
+           (progn
+             (is-true (await (lambda () (listening-p port))) "the server did not come up")
+             (sb-bsd-sockets:socket-connect s #(127 0 0 1) port)
+             (let ((st (sb-bsd-sockets:socket-make-stream s :input t :output t
+                                                            :element-type 'character
+                                                            :external-format :utf-8))
+                   (text ""))
+               (format st "GET /api/events?ticket=~A HTTP/1.1~C~CHost: 127.0.0.1~C~CConnection: close~C~C~C~C"
+                       ticket #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed
+                       #\Return #\Linefeed)
+               (finish-output st)
+               (handler-case
+                   (sb-sys:with-deadline (:seconds 10)
+                     ;; Read until the first event's id line and the blank line after it.
+                     (loop for c = (read-char st nil nil)
+                           while c
+                           do (setf text (concatenate 'string text (string c)))
+                              (let ((id (search "id: " text)))
+                                (when (and id (search (format nil "~%~%") text :start2 id))
+                                  (return)))))
+                 (sb-sys:deadline-timeout () nil))
+               (is (search "text/event-stream" text) "~S" text)
+               (is (search "id: " text) "no event arrived while the stream was open: ~S" text))
+             (let ((client (nth-value 1 (sb-bsd-sockets:socket-name s))))
+               (is-true (%worker-threads client) "no thread was serving the stream")
+               (praxeon/web-session:close-session sessions session)
+               (is-true (await (lambda () (null (%worker-threads client)))
+                             :timeout (+ 5 web::*stream-check-seconds*))
+                        "the stream went on after its session ended")))
+        (ignore-errors (sb-bsd-sockets:socket-close s))
+        (ignore-errors (srv:stop handler))))))
