@@ -52,6 +52,28 @@ its tag.
   - An app that chose `:uv` by hand (`HYPERION_SERVER`, else `:uv` when
     `aion/uv:library-path` loads, else Hunchentoot) can call `default-server` instead.
 
+- **praxeon/claude-code: the hook replaces a large search output with lines copied from it,
+  not with a list of facts a model wrote** (#465). #454's check refused nearly every list the
+  second model wrote, because the model rewrote line numbers and invented paths. Now:
+  - for `rg` and `grep` output that names a file on every line, the matches are grouped by file
+    with a count per file and the first five lines of each, and no model is called;
+  - otherwise the second model answers only with ranges of line numbers (`select_lines`, at most
+    40, no other field allowed), and the hook copies those lines in the output's order, cut to
+    `PRAXEON_CC_SUMMARY_BUDGET`, with `[praxeon-claude-code: N lines omitted]` for each gap;
+  - every line the hook writes itself starts with `[praxeon-claude-code: `, and the header says
+    `lines selected by ...` instead of `a summary of ... written by ...`;
+  - the log line gains `method` (`grouped` or `selected`); the refusal reasons are now `empty`,
+    `over-budget` and `too-little-smaller`, and `unsupported` is gone.
+
+  Removed from `praxeon/claude-code/hook`: `check-summary`, `unsupported-tokens`,
+  `validate-facts`, `facts-spec`, and the generic `summarize`, which is now `select-lines` and
+  returns `(from . to)` pairs. `decide` takes `:group nil` to skip the grouping. The rules for
+  what the hook never replaces are unchanged. This raises how often a replacement is accepted;
+  it does not change which outputs are eligible, and on the maintainer's sessions #454 found
+  none of 38 large outputs eligible. `praxeon/scripts/claude-code-trials.lisp` measures it, and
+  calls no model unless `PRAXEON_CC_TRIALS=run` is set. Rebuild `bin/praxeon-claude-code` to get
+  it.
+
 - **praxeon/retrieval and praxeon/memory-db on SQLite: similarity search works at real corpus
   sizes, and the stored embeddings change form** (#425). A SQLite store kept each embedding as
   text and parsed every one on every search, so at width 1024 `retrieve-similar` took about a
@@ -913,6 +935,33 @@ its tag.
   `hyperion-view --restore-placement PATH X0 Y0 X1 Y1 ...` prints where a saved frame would
   open for a given list of screens, without opening a window. Rebuild `hyperion-view` to get
   it.
+
+- **cons: `cons init NAME --template web --db sqlite` or `--db postgres` scaffolds a web app
+  with a database, and every web app gets a test suite that starts it** (#711).
+  - With `--db`, the generated `src/db.lisp` makes one mnemosyne pool from `DATABASE_URL` and
+    gives that pool to a session store (`hyperion/session-db:make-db-store`), to a user store
+    (`hyperion/auth-db:make-db-auth`), and to `hyperion/db-connection:wrap-connection`, which
+    lends each request its own connection in `*db*`. The page counts visits in the session.
+    SQLite uses `data/NAME.db` when `DATABASE_URL` is unset; Postgres requires it. A `start`
+    that fails closes the pool it opened. In every web app, with or without `--db`, a second
+    `start` while the app is running is refused.
+    `.env.example` carries the line, and the generated `.gitignore` covers `data/`.
+  - The web template now declares `aion/uv` and `aion/log`, its `start` logs which server
+    `hyperion/server:default-server` chose and why (`server chosen server=uv
+    reason=preferred`), and it no longer passes `:workers`, so `:uv` gets
+    `default-workers` (#710).
+  - The generated `tests/NAME-tests.lisp` starts the app on a free port, sends GET / over a
+    socket and checks that `hyperion/server-uv`'s handler answered. With `--db` it also checks
+    that two requests with the session cookie count two visits and that the session is in the
+    database. They load the project's `.env` first, as `start` does. A Postgres app's tests
+    skip when `DATABASE_URL` is unset there and in the environment.
+  - A template manifest may offer `:options`; each choice adds dependencies, files that
+    replace or add to `files/`, and markers (`cons/docs/templates-design.md` §4). New in
+    `cons/init`: `template-options`, `template-option-choices`, `templates-with-option`,
+    `template-variants`, and `scaffold`'s `:options`. `cons template check` builds every
+    variant.
+  - The docstrings of `make-db-store`, `make-db-auth` and `wrap-connection`, and the hyperion
+    user guide, now say to give every store the same pool, never one shared connection.
 
 - **praxeon/actor: an agent can send its thread's observations in place of the messages they
   were distilled from** (#317, step C). `(praxeon/actor:attach-thread-memory agent store subject
@@ -2255,6 +2304,19 @@ its tag.
   form, or an RSA key in PKCS#1 form (`-----BEGIN RSA PRIVATE KEY-----`). A key that does not
   match its certificate is reported as before. The restriction is lifted when a TF-PSA-Crypto
   release carrying upstream commit 841da2ad is pinned.
+
+- **aion/uv: `ensure-available` keeps signalling `libuv-abi-mismatch` after a failed ABI check,
+  instead of treating libuv as available from the second call on** (#940). `load-libuv` marks
+  libuv loaded before `verify-abi` runs, and `ensure-available` checked the ABI only while libuv
+  was not loaded, so a libuv that loaded but failed the check was used on every later call in
+  the same image. The check now runs until it has passed. New:
+  `aion/uv/ffi:abi-verified-p`, true once `verify-abi` has passed against the libuv now loaded.
+
+- **aion/http-client: on Windows, a pinned https request to an IPv6 address written in a long
+  form verifies the certificate against the address's canonical form** (#921). The Windows path
+  removed the brackets from the URL's host and passed the rest on as it was, so
+  `https://[0:0:0:0:0:0:0:1]/` was verified against `0:0:0:0:0:0:0:1`. It now uses the same
+  name as Linux and macOS (since #915): the address as usocket writes it, here `::1`.
 
 - **aion/http-client: an https request to an IPv6 address such as `https://[::1]/` verifies the
   certificate against the address, and a request to any IP address sends no SNI name** (#915).
