@@ -1035,7 +1035,10 @@ its tag.
     carrying an IPv4 loopback address. It decides from the text without a DNS lookup, so it
     returns NIL for another name that resolves to loopback, and for NIL.
   - `parse-endpoint` reads an http or https URL into an `endpoint`. It signals an error for
-    anything else.
+    anything else, and for an authority that HTTP clients read in different ways: one with a
+    backslash, whitespace, a control character or more than one `@`, or a host outside brackets
+    with `[` or `]` in it. `http://evil.com\@127.0.0.1/` goes to `evil.com` in some clients, so
+    it is refused rather than reported as loopback.
   - The egress hook (#988) is to receive this same value.
 
 - **praxeon/image: the generate-image means offers the model a `mask`, so it can change only part

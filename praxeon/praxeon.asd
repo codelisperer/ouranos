@@ -330,6 +330,7 @@
                "praxeon/image" "cl-base64"   ; the #758 tests encode the image the stub sends
                "praxeon/web-page" "aion/test-http"  ; the #757 tests serve pages from 127.0.0.1
                "aion/http-client"     ; the #719 tests build an http-error to stand for a refused connection
+               "quri"                 ; the #1034 tests read a provider's request URL as the request does
                "fiveam"
                "aion/test-threads"    ; the #531 tests continue a held turn on another thread
                ;; The #678 tests answer the meta impl from a server on 127.0.0.1. An SBCL

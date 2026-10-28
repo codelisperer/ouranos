@@ -214,7 +214,12 @@ names none)."
 
 (defun parse-endpoint (url)
   "The ENDPOINT of URL, an http or https URL such as a provider's base URL. Signals an error when
-URL is not one, has no host, or names a port that is not a whole number from 1 to 65535."
+URL is not one, has no host, or names a port that is not a whole number from 1 to 65535. It also
+signals for an authority that HTTP clients read in different ways: one that contains a
+backslash, whitespace, a control character or more than one @, or a host outside brackets that
+contains [ or ]. Some clients treat a backslash as the start of the path, so
+\"http://evil.com\\@127.0.0.1/\" goes to evil.com there, while reading the text after the @ as
+the host would call it a loopback address."
   (flet ((refuse (why)
            (error "praxeon/llm: ~S is not an http or https URL with a host: ~A." url why)))
     (unless (stringp url) (refuse "it is not a string"))
@@ -222,12 +227,18 @@ URL is not one, has no host, or names a port that is not a whole number from 1 t
            (scheme (string-downcase (subseq url 0 sep)))
            (start (+ sep 3))
            (end (or (position-if (lambda (c) (find c "/?#")) url :start start) (length url)))
+           (whole (subseq url start end))
            ;; Userinfo, if any, ends at the last @ of the authority.
            (authority (let ((at (position #\@ url :start start :end end :from-end t)))
                         (subseq url (if at (1+ at) start) end)))
            (default (cond ((string= scheme "http") 80)
                           ((string= scheme "https") 443)
                           (t (refuse "its scheme is not http or https")))))
+      (when (find-if (lambda (c) (or (char= c #\\) (<= (char-code c) 32) (= (char-code c) 127)))
+                     whole)
+        (refuse "its authority contains a backslash, whitespace or a control character"))
+      (when (> (count #\@ whole) 1)
+        (refuse "its authority contains more than one @"))
       (multiple-value-bind (host port-text)
           (if (and (plusp (length authority)) (char= #\[ (char authority 0)))
               (let ((close (or (position #\] authority) (refuse "an IPv6 address has no ]"))))
@@ -237,6 +248,8 @@ URL is not one, has no host, or names a port that is not a whole number from 1 t
                                 ((char= #\: (char rest 0)) (subseq rest 1))
                                 (t (refuse "text follows the IPv6 address"))))))
               (let ((colon (position #\: authority :from-end t)))
+                (when (find-if (lambda (c) (find c "[]")) authority)
+                  (refuse "a host outside brackets contains [ or ]"))
                 (if colon
                     (values (subseq authority 0 colon) (subseq authority (1+ colon)))
                     (values authority nil))))

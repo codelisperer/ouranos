@@ -24,11 +24,17 @@
     (reads "https://[::1]/v1" '("https" "::1" 443))
     (reads "https://user:p%40ss@host.example:8443/x?y=1#z" '("https" "host.example" 8443))
     (reads "http://host.example:/v1" '("http" "host.example" 80))
-    (reads "http://host.example/v1?next=http://other:9/" '("http" "host.example" 80)))
-  (dolist (bad '("ftp://host.example/" "localhost:11434" "http:///v1" "http://:80/v1"
-                 "http://host.example:0/" "http://host.example:65536/" "http://host.example:12a/"
-                 "http://[::1/v1" "http://[::1]x/v1" nil))
-    (signals error (llm:parse-endpoint bad))))
+    (reads "http://host.example/v1?next=http://other:9/" '("http" "host.example" 80))
+    (reads "http://host.example/a@b\\c d" '("http" "host.example" 80)))
+  (dolist (bad (list "ftp://host.example/" "localhost:11434" "http:///v1" "http://:80/v1"
+                     "http://host.example:0/" "http://host.example:65536/"
+                     "http://host.example:12a/" "http://[::1/v1" "http://[::1]x/v1" nil
+                     ;; Authorities that HTTP clients read in different ways, each with a loopback
+                     ;; address in it (#1042's review).
+                     "http://evil.com\\@127.0.0.1/" "http://a@b@127.0.0.1/" "http://]127.0.0.1[/"
+                     "http://evil.com 127.0.0.1/" (format nil "http://127.0.0.1~C/" #\Tab)
+                     (format nil "http://evil.com~C@127.0.0.1/" (code-char 127))))
+    (signals error (llm:parse-endpoint bad) "~S" bad)))
 
 (test endpoint-loopback-p-answers-for-localhost-127-0-0-0-8-and-1
   (flet ((loopback (host) (llm:endpoint-loopback-p (llm:parse-endpoint
@@ -78,13 +84,25 @@ report and the URL it builds for a request."
         do (is (equal want (%endpoint-list (llm:provider-endpoint provider)))
                "~A reports ~S" name (%endpoint-list (llm:provider-endpoint provider)))))
 
+(defun %quri-endpoint-list (url)
+  "URL's scheme, host and port as quri reads it, in the form %ENDPOINT-LIST returns. quri is what
+aion/http-client parses a request's URL with, so this is where the request goes."
+  (let ((q (quri:uri url)))
+    (list (string-downcase (quri:uri-scheme q))
+          (string-downcase (string-trim "[]" (quri:uri-host q)))
+          (or (quri:uri-port q) (if (string-equal (quri:uri-scheme q) "https") 443 80)))))
+
 (test the-url-a-provider-builds-goes-to-the-endpoint-it-reports
   "An app's check and the request must not disagree, so the endpoint is compared with the URL
-the provider actually builds for a request."
+the provider actually builds for a request, read both by PARSE-ENDPOINT and by quri, the parser
+the request is sent with."
   (loop for (name provider nil url) in (%every-provider)
         do (is (equalp (llm:parse-endpoint url) (llm:provider-endpoint provider))
                "~A builds ~A, but reports ~S" name url
-               (%endpoint-list (llm:provider-endpoint provider)))))
+               (%endpoint-list (llm:provider-endpoint provider)))
+           (is (equal (%quri-endpoint-list url) (%endpoint-list (llm:provider-endpoint provider)))
+               "~A builds ~A, which quri reads as ~S, but reports ~S" name url
+               (%quri-endpoint-list url) (%endpoint-list (llm:provider-endpoint provider)))))
 
 (test a-provider-whose-destination-is-unknown-reports-nil
   "A provider class with no method, such as one that runs in this process, answers NIL, and NIL
