@@ -181,6 +181,101 @@ DSL covering both Spinneret-targeting HTML and Parenscript-targeting JS.
 Theming stays an **app-level hook** — neutral framework defaults plus app CSS passed in —
 so the generic layer never learns a specific app's colors.
 
+### Appearance: theme, contrast and look
+
+`hyperion/appearance` (#981) handles the three settings a visitor chooses. Each one is an
+attribute on `<html>`:
+
+| Attribute | Values | When absent |
+|---|---|---|
+| `data-theme` | `light`, `dark` | the system's `prefers-color-scheme` decides |
+| `data-contrast` | `normal`, `high` | the system's `prefers-contrast: more` decides |
+| `data-look` | `flat`, `gradient` | flat |
+
+**Storing the choice.** `read-appearance` and `persist-appearance` are the store protocol,
+the same shape as the locale store. Hyperion ships a cookie store. An app that keeps the
+choice in its own user table, or a desktop app that writes it to a file, supplies its own
+store. `html-attributes` turns a choice into the attributes for `<html>`, and it leaves out a
+setting that follows the system, so that the CSS media queries can decide.
+
+**Colours.** Components are coloured with the `--hy-*` tokens:
+- `surface`, `surface-raised`, `header`, `button`, `button-primary` and `button-danger`,
+  each with a `-text` token;
+- `--hy-space-1` to `--hy-space-7` for spacing.
+
+An app writes its values once, as a table with one plist per scheme (light, dark, and the
+high-contrast form of each). `appearance-css` generates the rules for all eight combinations.
+
+**Gradients and contrast.** The two looks use the same token names, so a component never
+checks which look is active. In the gradient look a background token may be a
+`linear-gradient`. Because of that, components set `background:`, not `background-color:`.
+`appearance-contrast-failures` checks every text token against its background in every
+combination, sampling along each gradient. An app runs it in its own tests, so a gradient that
+drops text below WCAG AA fails the build, not a visitor.
+
+### Collection-page components (`hyperion/kit`)
+
+`hyperion/kit` (#981) holds the generic parts of a page that lists things. Domain components,
+such as a row for a particular kind of record, stay in the apps. Each component is a plain
+function that writes into Spinneret's `*html*`, like `hyperion/list:pager`, so it can sit
+inside any page body. When #38's `render` protocol lands, each can become a method without
+changing the HTML it writes.
+
+The components so far:
+- `page-header`;
+- `breadcrumbs`;
+- `empty-state`;
+- `segmented-control` and `toggle-group`, which are buttons with `aria-pressed` in a labelled
+  group. They need no script for the keyboard, because a `<button>` already takes Enter and
+  Space;
+- `dialog`, `dialog-opener`, `confirm-dialog`, `notice-region` and `undo-notice`, described
+  below;
+- `list-toolbar`, and `selectable-row` with `properties-panel`, described below.
+
+The tests parse the HTML the components write and check roles, names and pressed state. They
+do not search the HTML as a string.
+
+Dialogs (`hyperion/kit/dialog`) use the browser's own `<dialog>`, opened with `showModal()`.
+The browser makes the rest of the page inert, keeps focus inside the dialog and focuses the
+field marked `autofocus`. `dialog-js`, included once per page, adds what not every browser
+does: Escape closes the dialog, and closing it by any route returns focus to the button that
+opened it. Browsers return focus to whatever had it when the dialog opened, and in Safari and
+Firefox on macOS clicking a button does not focus it, so without the script focus would not
+go back to the opener there. An opener with an `href` loads the dialog's contents with htmx
+first and opens the dialog when they have settled, so the field the browser focuses is the
+loaded one.
+
+`confirm-dialog` is the one layout for a destructive action: Cancel on the left with the
+initial focus, so Enter does not destroy anything, and the action on the right, named by what
+it does ("Delete 3 drafts", never "OK") and styled as danger. It closes when its request
+succeeds.
+
+`undo-notice` is shown instead of a confirm when the action can be undone. It goes into a
+`notice-region`, a `role="status"` region that is on the page before any notice arrives,
+because a live region added together with its message is not announced reliably. It has no
+timer. A handler returns it out of band with `:oob t` alongside its own response.
+
+The tests for these come in two parts. `hyperion/kit/tests` parses the markup. In
+`hyperion/assets/tests`, `kit-browser-tests` serves a page with each kind of dialog and runs it
+in the same headless browser as the htmx smoke page. A script on that page presses the
+controls and records which element has focus and whether each dialog is open, and the test
+reads that record back from the page.
+
+`list-toolbar` (`hyperion/kit/toolbar`) is built on `hyperion/list`. It is a GET form with
+`role="search"`, so it works without JavaScript; the list's other parameters ride along as
+hidden fields. With htmx it re-requests the list as the visitor types or picks, and
+`toolbar-js` makes each request carry the same parameters as the `list-href` link for the same
+change, so the address bar shows the same URL a link would. Put the toolbar inside the element
+the list's htmx target replaces, so its hidden fields follow every change the pager and sort
+headings make. The search field keeps its text and focus across those swaps.
+
+A master/detail page uses `hyperion/kit/panel`. The app writes its own rows and gives each the
+attributes `selectable-row` returns, so a click or Enter loads the item's `properties-panel`
+into a `panel-region` beside the list. `panel-js` moves `aria-current` to the chosen row, and
+closing the panel, with its button or Escape, returns focus to that row. The browser test
+checks the toolbar's URLs against `list-href` and the panel's focus handling on a small list
+page.
+
 ### The hot-reload dev loop — the signature feature
 
 The property everything else follows from: **state ≠ server.**

@@ -113,9 +113,10 @@ that a second START is refused: 4 checks."
 
 (test the-web-sqlite-projects-own-tests-pass
   "web --db sqlite: the page from server-uv; two visits counted in a session that the database
-holds, through the one pool; a second START refused with the pool still open; and a START that
-fails closes the pool it opened: 11 checks."
-  (%check-generated-suite '(:db :sqlite) 11))
+holds, through the one pool; a second START refused with the pool still open; a START that
+fails closes the pool it opened; a user store that recovers from an error keeps the pool open;
+and a store that cannot be made leaves the database closed (#944): 18 checks."
+  (%check-generated-suite '(:db :sqlite) 18))
 
 (defparameter +default-store-tables+
   (format nil "~{~A~^,~}" '("hyperion_sessions" "hyperion_users" "hyperion_role_events"
@@ -124,17 +125,17 @@ fails closes the pool it opened: 11 checks."
 
 (test the-web-postgres-project-builds-and-its-own-tests-pass
   "web --db postgres is scaffolded and built on every leg. Against the gate's Postgres its suite
-runs the same 11 checks as SQLite. Without a Postgres URL, the project's four tests skip
+runs the same 18 checks as SQLite. Without a Postgres URL, the project's six tests skip
 themselves, which this checks, and then this test records a skip."
   (let ((url (uiop:getenv "MNEMOSYNE_TEST_PG_URL")))
     (if (and url (plusp (length url)))
         ;; The child drops the default-named tables that were not there before it ran.
         (%with-environment `(("DATABASE_URL" . ,url)
                              ("TEMPLATE_DROP_NEW_TABLES" . ,+default-store-tables+))
-                           (lambda () (%check-generated-suite '(:db :postgres) 11)))
+                           (lambda () (%check-generated-suite '(:db :postgres) 18)))
         (progn
           (%with-environment '(("DATABASE_URL" . nil))
-                             (lambda () (%check-generated-suite '(:db :postgres) 4 :skipped 4)))
+                             (lambda () (%check-generated-suite '(:db :postgres) 6 :skipped 6)))
           (skip (concatenate 'string "MNEMOSYNE_TEST_PG_URL is not set -- the Postgres project "
                              "was built, and its tests were not run"))))))
 
