@@ -70,7 +70,8 @@ Returns AGENT."
                        (getf part :id) (getf part :name)
                        (%args->string (getf part :input))))
     (:tool-result (format stream "[result ~A: ~A]"
-                          (getf part :tool-use-id) (getf part :content)))))
+                          (getf part :tool-use-id) (getf part :content)))
+    (:image (format stream "~A" (llm:image-part-description part)))))
 
 (defun render-message (message &optional (stream *standard-output*))
   "Render one neutral MESSAGE as `ROLE> ...` on STREAM."

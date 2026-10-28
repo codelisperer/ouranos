@@ -970,6 +970,33 @@ its tag.
 
 ### Added
 
+- **praxeon/llm: an image content part, so an agent can be shown a picture** (#995).
+  - **The part.** `llm:image-part` takes the image's bytes, or an https URL for a provider that
+    fetches it. The media type is read from the bytes (PNG, JPEG, GIF or WebP); a `:media-type`
+    given with them must agree. The limit is `llm:*max-image-part-bytes*`, 3932160 bytes before
+    encoding by default, so the base64 a provider is sent stays within Anthropic's 5 MB. The part
+    keeps its own copy of the bytes. A refused part signals `praxeon/conditions:image-part-invalid`, which names the limit.
+  - **How it is sent.** Anthropic sends it as an image block with a base64 or url source. The
+    OpenAI-compatible provider sends it as an `image_url` part, in a content array that only
+    messages with an image use; messages without one are sent exactly as before.
+  - **Providers without vision input refuse it.** `llm:supports-image-input-p` says whether a
+    provider takes images. It is true for Anthropic. For the OpenAI-compatible provider it is the
+    new `:image-input` initarg, which defaults to true for openai and openrouter and false for
+    ollama and meta. A request with an image that the provider cannot take signals
+    `praxeon/conditions:image-input-unsupported` before anything is sent, from `complete`'s
+    `:around` method, so every provider is covered. So does an image in the system prompt, in an
+    assistant message, or, on the OpenAI-compatible path, beside tool results. An image is never
+    dropped.
+  - **History and observation.** An image part stays in the message, so an agent's history sends
+    it again each turn, as it does the conversation. Everything that turns parts into text sees
+    `llm:image-part-description`, which gives the media type and size only. That covers the
+    observer's distillation and its support check (`praxeon/observe:supported-proposals`), the
+    replay of observed messages and the studio, so no image reaches memory or the provider used
+    for distillation or for the check. Both send their window through the new export
+    `praxeon/distil:without-images`, which an app can use on a window of its own.
+  - **Tokens.** `prompt:part-tokens` estimates an image at `llm:*image-part-tokens*`, 1600. The
+    provider's own count comes back in the input tokens it reports, as before.
+
 - **praxeon/image: the generate-image means offers the model a `mask`, so it can change only part
   of an image** (#946). With `:resolve-reference` and a provider that takes a mask
   (`image-provider-accepts-mask-p`, true for OpenAI), the tool schema offers `mask`: a reference,

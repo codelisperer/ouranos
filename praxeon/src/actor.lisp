@@ -1010,6 +1010,8 @@ has already happened."
                        (handler-case (jzon:stringify (getf part :input)) (error () (princ-to-string (getf part :input))))))
     (:tool-result (let ((c (getf part :content)))
                     (format nil "[result: ~A]" (if (stringp c) c (princ-to-string c)))))
+    ;; The description, never the bytes: printing the part would put the octets in the text (#995).
+    (:image (llm:image-part-description part))
     (t (princ-to-string part))))
 
 (defun %observed-positions (agent id)

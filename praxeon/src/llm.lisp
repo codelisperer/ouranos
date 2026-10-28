@@ -121,6 +121,129 @@ CONTENT is a string; IS-ERROR marks a failed application."
   (list :type :tool-result :tool-use-id tool-use-id :content content
         :is-error is-error))
 
+;;; --- an image the model is shown (#995) ------------------------------------------------
+;;;
+;;; An image part is (:type :image :media-type MT :data OCTETS), or (:type :image :url URL) for a
+;;; provider that fetches it. It is checked when it is made, so a part that exists is one a
+;;; provider can be sent: the bytes are PNG, JPEG, GIF or WebP, read from the bytes themselves
+;;; rather than trusted from the caller, and within *MAX-IMAGE-PART-BYTES*. A provider without
+;;; vision input refuses a request that carries one before anything is sent
+;;; (CHECK-IMAGE-INPUT), and never drops it.
+;;;
+;;; THE BYTES STAY IN THE MESSAGE AND GO NOWHERE ELSE. An image part in an agent's history is
+;;; sent again with every turn, as the conversation is; that is how a model keeps seeing it.
+;;; Everything that turns parts into text -- the observer's distillation, the replay of observed
+;;; messages, the studio, the token estimate -- sees IMAGE-PART-DESCRIPTION, which says the
+;;; media type and size and nothing of the content, so no image reaches memory or a provider
+;;; chosen for distillation.
+
+(defvar *max-image-part-bytes* 3932160
+  "The largest image, in bytes before encoding, IMAGE-PART accepts: 3932160, which is 5 MiB x 3/4.
+Anthropic's limit of 5 MB applies to the base64-encoded image, and base64 makes 4 bytes of every
+3, so a raw image at this size encodes to 5 MiB and no more. OpenAI's limit is larger, so a part
+within this one can go to either provider (#995, review of #1018).")
+
+(defvar *image-part-tokens* 1600
+  "The tokens one image part is estimated at, for budgets and the prompt breakdown, before the
+provider reports the real count. Anthropic documents about width x height / 750 tokens, capped
+near 1600 for an image it does not shrink; the bytes say nothing useful about it, so the
+estimate is this constant rather than a size divided by *CHARS-PER-TOKEN*.")
+
+(defparameter +max-image-url-length+ 2048 "The longest URL IMAGE-PART accepts.")
+
+(defun %sniff-image-type (octets)
+  "The media type OCTETS begin with: image/png, image/jpeg, image/gif or image/webp, or NIL."
+  (flet ((starts (&rest bytes)
+           (and (>= (length octets) (length bytes))
+                (loop for b in bytes for i from 0
+                      always (or (null b) (= b (aref octets i)))))))
+    (cond ((starts #x89 #x50 #x4E #x47 #x0D #x0A #x1A #x0A) "image/png")
+          ((starts #xFF #xD8 #xFF) "image/jpeg")
+          ((or (starts #x47 #x49 #x46 #x38 #x37 #x61) (starts #x47 #x49 #x46 #x38 #x39 #x61))
+           "image/gif")                 ; GIF87a or GIF89a, the two versions there are
+          ((starts #x52 #x49 #x46 #x46 nil nil nil nil #x57 #x45 #x42 #x50) "image/webp")
+          (t nil))))
+
+(defun %image-refuse (limit control &rest args)
+  (error 'praxeon/conditions:image-part-invalid
+         :detail (apply #'format nil control args) :limit limit))
+
+(defun image-part (source &key media-type cache)
+  "A neutral image content part: a picture shown to the model (#995).
+
+SOURCE is the image's bytes, a vector of (UNSIGNED-BYTE 8), or an https URL for a provider that
+fetches images itself. Bytes must be PNG, JPEG, GIF or WebP, which is read from the bytes; a
+MEDIA-TYPE, when given, must agree with them. At most *MAX-IMAGE-PART-BYTES* before encoding,
+3932160 by default, so the base64 a provider is sent stays within Anthropic's 5 MB. The part
+holds its own copy of the bytes, so changing SOURCE afterwards does not change what was checked.
+A URL must be https and at most 2048 characters. Anything else signals IMAGE-PART-INVALID, which names the
+limit. CACHE marks the end of a cacheable prefix, as for TEXT-PART.
+
+An image can go only in a user message; a provider without vision input refuses the request
+(CHECK-IMAGE-INPUT)."
+  (let ((part
+          (cond
+            ((stringp source)
+             (unless (and (<= (length source) +max-image-url-length+)
+                          (> (length source) 8)
+                          (string-equal "https://" source :end2 8))
+               (%image-refuse (format nil "an https URL of at most ~D characters"
+                                      +max-image-url-length+)
+                              "an image URL must be https and at most ~D characters; this one is ~D characters"
+                              +max-image-url-length+ (length source)))
+             (list :type :image :url source))
+            ((typep source '(vector (unsigned-byte 8)))
+             (let ((n (length source)))
+               (when (zerop n) (%image-refuse nil "the image is empty"))
+               (when (> n *max-image-part-bytes*)
+                 (%image-refuse (format nil "~D bytes before encoding (*MAX-IMAGE-PART-BYTES*), so that the base64 a provider is sent stays within 5 MB"
+                                        *max-image-part-bytes*)
+                                "the image is ~D bytes" n))
+               (let ((sniffed (%sniff-image-type source)))
+                 (unless sniffed
+                   (%image-refuse "PNG, JPEG, GIF or WebP"
+                                  "the bytes are not a PNG, JPEG, GIF or WebP image"))
+                 (when (and media-type (not (string-equal media-type sniffed)))
+                   (%image-refuse sniffed "the media type given, ~A, does not match the bytes"
+                                  (praxeon/conditions:value-shape media-type)))
+                 ;; A copy, always: COERCE returns SOURCE itself when it is already a simple
+                 ;; octet vector, and a caller could then change the bytes after the check.
+                 (let ((copy (make-array n :element-type '(unsigned-byte 8))))
+                   (replace copy source)
+                   (list :type :image :media-type sniffed :data copy)))))
+            (t (%image-refuse nil "an image's source must be its bytes or an https URL, not ~A"
+                              (praxeon/conditions:value-shape source))))))
+    (if cache (append part '(:cache t)) part)))
+
+(defun image-part-p (part)
+  "True when PART is an image part."
+  (eq (getf part :type) :image))
+
+(defun image-part-description (part)
+  "What an image part is, as text that holds none of it: \"[image: image/png, 48213 bytes]\", or
+\"[image: from a URL]\". Used wherever parts become text (the observer, replay, the studio), so
+the image itself goes nowhere but a provider with vision input."
+  (if (getf part :url)
+      "[image: from a URL]"
+      (format nil "[image: ~A, ~D bytes]" (getf part :media-type) (length (getf part :data)))))
+
+(defun %base64 (octets)
+  "OCTETS as standard base64 with padding, the encoding both providers' image fields take."
+  (let* ((alphabet "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/")
+         (n (length octets))
+         (out (make-string (* 4 (ceiling n 3)))))
+    (loop for i from 0 below n by 3
+          for j from 0 by 4
+          do (let* ((b0 (aref octets i))
+                    (b1 (if (< (+ i 1) n) (aref octets (+ i 1)) 0))
+                    (b2 (if (< (+ i 2) n) (aref octets (+ i 2)) 0))
+                    (word (logior (ash b0 16) (ash b1 8) b2)))
+               (setf (char out j) (char alphabet (ldb (byte 6 18) word))
+                     (char out (+ j 1)) (char alphabet (ldb (byte 6 12) word))
+                     (char out (+ j 2)) (if (< (+ i 1) n) (char alphabet (ldb (byte 6 6) word)) #\=)
+                     (char out (+ j 3)) (if (< (+ i 2) n) (char alphabet (ldb (byte 6 0) word)) #\=))))
+    out))
+
 ;;; --------------------------------------------------------------------------
 ;;; Neutral tools and completions
 ;;; --------------------------------------------------------------------------
@@ -247,6 +370,41 @@ identifier, not a value from a provider or a user.")
            :requested tool-choice))
   tool-choice)
 
+(defgeneric supports-image-input-p (provider)
+  (:documentation "True when PROVIDER, with its configured model, can be shown an image part (#995).
+
+Defaults to NIL, as SUPPORTS-TOOL-CHOICE-P does, so a backend that has not said it takes images
+refuses a request that carries one instead of dropping the image. Anthropic's models all take
+images. An OPENAI-COMPATIBLE provider says so per instance, :IMAGE-INPUT, because the same
+backend serves models with and without vision: true by default for openai and openrouter,
+false for ollama and meta, whose default models have none.")
+  (:method ((p provider)) nil))
+
+(defun %image-parts-in (content)
+  (and (listp content) (remove-if-not #'image-part-p content)))
+
+(defun check-image-input (provider messages &optional system)
+  "Signal IMAGE-INPUT-UNSUPPORTED, before anything is sent, when MESSAGES or SYSTEM carry an image
+part that PROVIDER cannot be sent: PROVIDER has no vision input (SUPPORTS-IMAGE-INPUT-P), or the
+image is in the system prompt or an assistant message, where no provider takes one. Returns
+MESSAGES. COMPLETE's :AROUND calls this for every provider, so a backend cannot forget to."
+  (flet ((refuse (detail)
+           (error 'praxeon/conditions:image-input-unsupported
+                  :provider (string (type-of provider)) :model (model-of provider)
+                  :detail detail)))
+    (when (%image-parts-in system)
+      (refuse "an image in the system prompt, where no provider takes one; put it in a user message"))
+    (let ((images 0))
+      (dolist (m messages)
+        (let ((n (length (%image-parts-in (content m)))))
+          (when (and (plusp n) (not (equal (role m) "user")))
+            (refuse (format nil "an image in a message whose role is ~A; only a user message can carry one"
+                            (praxeon/conditions:value-shape (role m)))))
+          (incf images n)))
+      (when (and (plusp images) (not (supports-image-input-p provider)))
+        (refuse (format nil "~D image part~:P" images)))))
+  messages)
+
 (defun %valid-tool-choice-p (tool-choice)
   (or (null tool-choice)
       (member tool-choice '(:auto :none))
@@ -265,6 +423,9 @@ identifier, not a value from a provider or a user.")
 (defmethod complete :around ((p provider) messages
                              &key system tools max-tokens temperature tool-choice)
   (declare (ignorable system))
+  ;; Before the log line and before any backend runs: an image a provider cannot take is refused
+  ;; here, for every provider, rather than dropped by one that never looks (#995).
+  (check-image-input p messages system)
   (let ((start (get-internal-real-time))
         (model (model-of p)))
     (log:debug "llm request" :provider (string (type-of p)) :model model
@@ -467,6 +628,9 @@ translation happened."
 
 (defmethod supports-tool-choice-p ((p anthropic)) t)
 
+;; Every current Claude model takes images (#995).
+(defmethod supports-image-input-p ((p anthropic)) t)
+
 (defmethod complete ((p anthropic) messages
                      &key system tools (max-tokens *default-max-tokens*) temperature
                           tool-choice)
@@ -522,7 +686,18 @@ learn whether a `mapcar' ran."
              (gethash "tool_use_id" ht) (getf part :tool-use-id)
              (gethash "content" ht) (getf part :content))
        (when (getf part :is-error)
-         (setf (gethash "is_error" ht) t))))
+         (setf (gethash "is_error" ht) t)))
+      (:image
+       ;; {"type":"image","source":{"type":"base64","media_type":..,"data":..}}, or a url source.
+       (let ((source (make-hash-table :test #'equal)))
+         (if (getf part :url)
+             (setf (gethash "type" source) "url"
+                   (gethash "url" source) (getf part :url))
+             (setf (gethash "type" source) "base64"
+                   (gethash "media_type" source) (getf part :media-type)
+                   (gethash "data" source) (%base64 (getf part :data))))
+         (setf (gethash "type" ht) "image"
+               (gethash "source" ht) source))))
     ;; The prefix breakpoint (pre-publication issue 401). Attached to the block the caller marked, because
     ;; Anthropic's cache_control means "cache through this block inclusive" -- which is
     ;; exactly what `:cache t' was defined to mean, so this is a translation and not an
@@ -641,6 +816,12 @@ does (https://dev.meta.ai/docs/structured-output, #680). RESPONSE-FORMAT-SCHEMA-
 \"none\", \"required\" and a named function (https://dev.meta.ai/docs/tool-calling, #678), so
 SUPPORTS-TOOL-CHOICE-P is false for it and a forced choice signals before anything is sent.")
 
+(defparameter +openai-compatible-image-input-impls+
+  '("openai" "openrouter")
+  "The backends whose provider takes image parts unless told otherwise (:IMAGE-INPUT). OpenAI's
+current chat models and most OpenRouter models have vision input. Ollama's and Meta's default
+models do not, so those backends refuse an image until an app names a vision model (#995).")
+
 (defun %oai-default-model (impl)
   "The model OPENAI-COMPATIBLE uses for IMPL when none is configured."
   (or (cdr (assoc impl +openai-compatible-default-models+ :test #'string=)) "qwen2.5"))
@@ -655,7 +836,11 @@ PRAXEON_LLM_IMPL names one this class serves, otherwise \"openai\"."
   ((impl :initarg :impl :initform (%default-oai-impl) :reader oai-impl)
    (model :initarg :model :reader oai-model)
    (base-url :initarg :base-url :reader oai-base-url)
-   (api-key :initarg :api-key :reader oai-api-key))
+   (api-key :initarg :api-key :reader oai-api-key)
+   (image-input :initarg :image-input :reader oai-image-input
+                :documentation "Whether the configured model takes image parts (#995). Unless
+given, true for the backends in +OPENAI-COMPATIBLE-IMAGE-INPUT-IMPLS+. Pass :IMAGE-INPUT T for
+a vision model on Ollama, such as llava, and NIL for a text-only model on OpenAI or OpenRouter."))
   (:documentation "Any OpenAI-compatible chat endpoint as a Praxeon provider.
 BASE-URL selects the target (Ollama http://localhost:11434/v1, OpenRouter
 https://openrouter.ai/api/v1, ...); API-KEY is sent as a Bearer token when set
@@ -677,7 +862,10 @@ the shared PRAXEON_LLM_* settings and OpenRouter's URL, as it did before #291.")
                 (cdr (assoc impl +openai-compatible-impls+ :test #'string=))
                 "http://localhost:11434/v1")))
     (unless (slot-boundp p 'api-key)
-      (setf (slot-value p 'api-key) (%env-for impl "API_KEY")))))
+      (setf (slot-value p 'api-key) (%env-for impl "API_KEY")))
+    (unless (slot-boundp p 'image-input)
+      (setf (slot-value p 'image-input)
+            (and (member impl +openai-compatible-image-input-impls+ :test #'string=) t)))))
 
 (defun %oai-tool-choice-json (tool-choice)
   "OpenAI's tool_choice value for a neutral TOOL-CHOICE, or NIL to send nothing.
@@ -740,6 +928,9 @@ through response_format (#680)."
     (when response-format
       (setf (gethash "response_format" body) (%oai-response-format-json response-format)))
     body))
+
+(defmethod supports-image-input-p ((p openai-compatible))
+  (and (oai-image-input p) t))
 
 (defmethod supports-tool-choice-p ((p openai-compatible))
   (not (member (oai-impl p) +openai-compatible-auto-only-impls+ :test #'string=)))
@@ -825,16 +1016,35 @@ IS-ERROR set says so in its CONTENT instead, which is the only place the model c
           (gethash "content" ht) (if is-error (concatenate 'string "Error: " content) content))
     ht))
 
+(defun %oai-text-piece (text)
+  (let ((ht (make-hash-table :test #'equal)))
+    (setf (gethash "type" ht) "text" (gethash "text" ht) text)
+    ht))
+
+(defun %oai-image-piece (part)
+  "{\"type\":\"image_url\",\"image_url\":{\"url\":U}}, U a data: URL of the bytes or the part's
+URL (#995)."
+  (let ((ht (make-hash-table :test #'equal))
+        (image (make-hash-table :test #'equal)))
+    (setf (gethash "url" image)
+          (or (getf part :url)
+              (format nil "data:~A;base64,~A" (getf part :media-type) (%base64 (getf part :data))))
+          (gethash "type" ht) "image_url"
+          (gethash "image_url" ht) image)
+    ht))
+
 (defun %message->openai (m)
   "Translate one neutral message into a LIST of OpenAI messages (tool results
 expand into one role:\"tool\" message each)."
   (let ((role (role m)) (content (content m)))
     (if (stringp content)
         (list (%oai-msg role content))
-        (let ((texts '()) (tool-calls '()) (tool-msgs '()))
+        (let ((texts '()) (tool-calls '()) (tool-msgs '()) (pieces '()))
           (dolist (part content)
             (ecase (getf part :type)
-              (:text (push (getf part :text) texts))
+              (:text (push (getf part :text) texts)
+                     (push (%oai-text-piece (getf part :text)) pieces))
+              (:image (push (%oai-image-piece part) pieces))
               (:tool-use
                (push (%oai-tool-call (getf part :id) (getf part :name)
                                      (getf part :input))
@@ -844,12 +1054,23 @@ expand into one role:\"tool\" message each)."
                                        (getf part :content)
                                        (getf part :is-error))
                      tool-msgs))))
+          ;; Tool results become role:"tool" messages, which hold text only, so an image beside
+          ;; them would be lost: refused instead (#995). Anthropic takes that mix.
+          (when (and tool-msgs (some #'image-part-p content))
+            (error 'praxeon/conditions:image-input-unsupported
+                   :provider "OPENAI-COMPATIBLE"
+                   :detail "an image in the same message as tool results, which this API sends as text-only tool messages; send the image in a user message of its own"))
           (if tool-msgs
               (nreverse tool-msgs)
               (let ((ht (make-hash-table :test #'equal)))
                 (setf (gethash "role" ht) role
                       (gethash "content" ht)
-                      (if texts (format nil "~{~A~}" (nreverse texts)) ""))
+                      ;; With an image, content is an array of parts in their order (#995).
+                      ;; Without one it stays one string, so every body built before is
+                      ;; unchanged.
+                      (cond ((some #'image-part-p content) (coerce (nreverse pieces) 'vector))
+                            (texts (format nil "~{~A~}" (nreverse texts)))
+                            (t "")))
                 (when tool-calls
                   (setf (gethash "tool_calls" ht)
                         (coerce (nreverse tool-calls) 'vector)))

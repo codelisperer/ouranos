@@ -9404,3 +9404,205 @@ comes after the correction."
           (is (search "Has a dog called Rui." text) "~A" text)
           (is (null (search "Lives in Porto." text)) "the replaced value is gone: ~A" text)
           (is (= 0 (obs:observer-failures second))))))))
+
+;;; --- an image content part (#995) ------------------------------------------------------
+
+(defun %vision-png (&optional (extra 32))
+  "Bytes that begin as a PNG does, then EXTRA more."
+  (let ((v (make-array (+ 8 extra) :element-type '(unsigned-byte 8) :initial-element 7)))
+    (replace v #(#x89 #x50 #x4E #x47 #x0D #x0A #x1A #x0A))
+    v))
+
+(defun %vision-jpeg ()
+  (let ((v (make-array 16 :element-type '(unsigned-byte 8) :initial-element 1)))
+    (replace v #(#xFF #xD8 #xFF #xE0))
+    v))
+
+(defun %vision-msgs (part)
+  (list (llm:msg "user" (list (llm:text-part "What is written on this card?") part))))
+
+(test an-image-part-reads-its-media-type-from-the-bytes
+  (is (equal "image/png" (getf (llm:image-part (%vision-png)) :media-type)))
+  (is (equal "image/jpeg" (getf (llm:image-part (%vision-jpeg) :media-type "image/jpeg") :media-type)))
+  (is (equal "https://example.test/card.png"
+             (getf (llm:image-part "https://example.test/card.png") :url)))
+  (is-true (llm:cache-boundary-p (llm:image-part (%vision-png) :cache t))))
+
+(defun %vision-octets (&rest bytes)
+  "A 32-byte vector beginning with BYTES."
+  (let ((v (make-array 32 :element-type '(unsigned-byte 8) :initial-element 0)))
+    (replace v bytes)
+    v))
+
+(test an-image-part-knows-gif-and-webp-by-their-signatures
+  (is (equal "image/gif" (getf (llm:image-part (%vision-octets #x47 #x49 #x46 #x38 #x37 #x61)) :media-type))
+      "GIF87a")
+  (is (equal "image/gif" (getf (llm:image-part (%vision-octets #x47 #x49 #x46 #x38 #x39 #x61)) :media-type))
+      "GIF89a")
+  (signals cnd:image-part-invalid (llm:image-part (%vision-octets #x47 #x49 #x46 #x38 #x30 #x61))
+    "GIF8 followed by anything else is not a GIF")
+  (is (equal "image/webp"
+             (getf (llm:image-part (%vision-octets #x52 #x49 #x46 #x46 1 2 3 4 #x57 #x45 #x42 #x50)) :media-type))
+      "RIFF, a length, WEBP")
+  (signals cnd:image-part-invalid (llm:image-part (%vision-octets #x52 #x49 #x46 #x46 1 2 3 4 #x57 #x41 #x56 #x45))
+    "a RIFF that is WAVE is not an image"))
+
+(test an-image-part-keeps-its-own-copy-of-the-bytes
+  (let* ((bytes (%vision-png))
+         (part (llm:image-part bytes)))
+    (fill bytes 0)
+    (is (= #x89 (aref (getf part :data) 0)) "changing the caller's vector does not change the part")
+    (is (not (eq bytes (getf part :data))))))
+
+(test the-image-size-limit-keeps-the-base64-within-five-megabytes
+  (is (= 3932160 llm:*max-image-part-bytes*))
+  (is (<= (* 4 (ceiling llm:*max-image-part-bytes* 3)) (* 5 1024 1024))
+      "the largest part encodes to at most 5 MiB of base64")
+  (let ((c (handler-case (let ((llm:*max-image-part-bytes* 20)) (llm:image-part (%vision-png)) nil)
+             (cnd:image-part-invalid (c) c))))
+    (is (search "before encoding" (princ-to-string c)) "the report says the limit is on the raw bytes: ~A" c)))
+
+(test an-image-part-refuses-what-a-provider-cannot-take-and-names-the-limit
+  (flet ((refusal (thunk)
+           (handler-case (progn (funcall thunk) nil)
+             (cnd:image-part-invalid (c) c))))
+    (is (typep (refusal (lambda () (llm:image-part (%vision-png) :media-type "image/jpeg")))
+               'cnd:image-part-invalid)
+        "a media type that disagrees with the bytes")
+    (is (typep (refusal (lambda () (llm:image-part (make-array 10 :element-type '(unsigned-byte 8)
+                                                                  :initial-element 0))))
+               'cnd:image-part-invalid)
+        "bytes that are no image")
+    (is (typep (refusal (lambda () (llm:image-part (make-array 0 :element-type '(unsigned-byte 8)))))
+               'cnd:image-part-invalid)
+        "no bytes")
+    (let ((c (let ((llm:*max-image-part-bytes* 20)) (refusal (lambda () (llm:image-part (%vision-png)))))))
+      (is (typep c 'cnd:image-part-invalid) "over the size limit")
+      (is (search "20 bytes" (princ-to-string (cnd:image-part-invalid-limit c)))
+          "and the limit is named: ~A" c))
+    (let ((c (refusal (lambda () (llm:image-part "http://secret.example/card.png")))))
+      (is (typep c 'cnd:image-part-invalid) "a URL that is not https")
+      (is (null (search "secret.example" (princ-to-string c))) "whose report leaves the URL out: ~A" c))
+    (is (typep (refusal (lambda () (llm:image-part 42))) 'cnd:image-part-invalid))))
+
+(test the-image-encoder-agrees-with-cl-base64
+  (dotimes (n 12)
+    (let ((v (make-array n :element-type '(unsigned-byte 8))))
+      (dotimes (i n) (setf (aref v i) (mod (* 37 (1+ i)) 256)))
+      (is (equal (cl-base64:usb8-array-to-base64-string v) (praxeon/llm::%base64 v))
+          "~D bytes" n))))
+
+(test anthropic-sends-an-image-as-a-base64-or-url-source
+  (let* ((p (make-instance 'llm:anthropic :api-key "k" :model "m"))
+         (json (%json-of (llm:anthropic-request-body p (%vision-msgs (llm:image-part (%vision-png)))))))
+    (is (search "\"type\":\"text\",\"text\":\"What is written on this card?\"" json) "~A" json)
+    (is (search "\"type\":\"image\"" json) "~A" json)
+    (is (search "\"type\":\"base64\"" json) "~A" json)
+    (is (search "\"media_type\":\"image/png\"" json) "~A" json)
+    (is (search (format nil "\"data\":\"~A\"" (cl-base64:usb8-array-to-base64-string (%vision-png))) json)
+        "~A" json))
+  (let* ((p (make-instance 'llm:anthropic :api-key "k" :model "m"))
+         (json (%json-of (llm:anthropic-request-body
+                          p (%vision-msgs (llm:image-part "https://example.test/c.png"))))))
+    (is (search "\"type\":\"url\",\"url\":\"https://example.test/c.png\"" json) "~A" json)))
+
+(test openai-sends-an-image-as-an-image-url-part-and-leaves-text-only-messages-alone
+  (let* ((p (make-instance 'llm:openai-compatible :impl "openai" :base-url "http://x" :model "m"))
+         (json (%json-of (llm:openai-request-body p (%vision-msgs (llm:image-part (%vision-png))))))
+         (text-only (%json-of (llm:openai-request-body p (list (llm:msg "user" (list (llm:text-part "a")
+                                                                                     (llm:text-part "b"))))))))
+    (is (search "\"content\":[{\"type\":\"text\",\"text\":\"What is written on this card?\"},{\"type\":\"image_url\"" json)
+        "the parts in their order: ~A" json)
+    (is (search (format nil "\"url\":\"data:image/png;base64,~A\""
+                        (cl-base64:usb8-array-to-base64-string (%vision-png)))
+                json)
+        "~A" json)
+    (is (search "\"content\":\"ab\"" text-only) "a message without an image is still one string: ~A"
+        text-only)))
+
+(test a-provider-without-vision-input-refuses-an-image-before-sending
+  (flet ((refused-p (provider messages &optional system)
+           (handler-case (progn (llm:complete provider messages :system system) nil)
+             (cnd:image-input-unsupported () t)
+             (error (e) (list :other (type-of e))))))
+    ;; Ollama's default model has no vision; the request would go to localhost and fail some other
+    ;; way if it were sent, so a refusal here is one made before sending.
+    (let ((ollama (make-instance 'llm:openai-compatible :impl "ollama" :base-url "http://127.0.0.1:1"
+                                                        :model "qwen2.5")))
+      (is-false (llm:supports-image-input-p ollama))
+      (is (eq t (refused-p ollama (%vision-msgs (llm:image-part (%vision-png)))))))
+    (is-true (llm:supports-image-input-p
+              (make-instance 'llm:openai-compatible :impl "ollama" :model "llava" :image-input t))
+             "an app names a vision model on Ollama")
+    (is-true (llm:supports-image-input-p (make-instance 'llm:openai-compatible :impl "openai" :model "m")))
+    (is-false (llm:supports-image-input-p
+               (make-instance 'llm:openai-compatible :impl "openrouter" :model "m" :image-input nil)))
+    (is-true (llm:supports-image-input-p (make-instance 'llm:anthropic :api-key "k" :model "m")))
+    (let ((stub (make-instance 'recording)))
+      (is (eq t (refused-p stub (%vision-msgs (llm:image-part (%vision-png)))))
+          "a backend that has not said it takes images refuses them")
+      (is (null (recording-requests stub)) "and its COMPLETE never ran"))
+    ))
+
+(test an-image-outside-a-user-message-is-refused-before-sending
+  "Even by a provider with vision input: no provider takes an image in the system prompt or in an
+assistant message. The endpoint is 127.0.0.1:1, so a request that had been sent would fail
+some other way."
+  (flet ((refused-p (provider messages &optional system)
+           (handler-case (progn (llm:complete provider messages :system system) nil)
+             (cnd:image-input-unsupported () t)
+             (error (e) (list :other (type-of e))))))
+    (let ((claude (make-instance 'llm:anthropic :api-key "k" :model "m" :endpoint "http://127.0.0.1:1")))
+      (is (eq t (refused-p claude (list (llm:msg "user" "x")) (list (llm:image-part (%vision-png)))))
+          "an image in the system prompt")
+      (is (eq t (refused-p claude (list (llm:msg "assistant" (list (llm:image-part (%vision-png)))))))
+          "an image in an assistant message"))))
+
+(defclass %no-vision-verifier (llm:provider)
+  ((sent :initform '() :accessor verifier-sent))
+  (:documentation "A support-check provider with no vision input. It records the messages it is
+sent and answers that proposal 1 is supported."))
+
+(defmethod llm:supports-tool-choice-p ((p %no-vision-verifier)) t)
+
+(defmethod llm:complete ((p %no-vision-verifier) messages &key system tools max-tokens temperature tool-choice)
+  (declare (ignore system tools max-tokens temperature tool-choice))
+  (push messages (verifier-sent p))
+  (llm:make-completion
+   :tool-calls (list (llm:make-tool-call :id "s1" :name "record_supported"
+                                         :arguments (%args "supported" (vector 1))))
+   :stop-reason :tool-use))
+
+(test the-support-check-is-sent-the-window-without-its-images
+  "Review of #1018: SUPPORTED-PROPOSALS sends the window to the observer's :verify provider. With an
+image in it, a provider with no vision input refused every retry, and one with vision was sent the
+bytes."
+  (let* ((verifier (make-instance '%no-vision-verifier))
+         (window (%vision-msgs (llm:image-part (%vision-png))))
+         (distillation (praxeon/distil:make-distillation
+                        "user-1" (list (praxeon/distil::%make-proposal :content "The card says hello."))))
+         (checked (praxeon/observe:supported-proposals verifier window distillation)))
+    (is (= 1 (length (praxeon/distil:distillation-proposals checked))) "the check ran and kept proposal 1")
+    (is (= 1 (length (verifier-sent verifier))))
+    (let ((parts (loop for m in (first (verifier-sent verifier))
+                       when (listp (llm:content m)) append (llm:content m))))
+      (is (notany #'llm:image-part-p parts) "no image part reached the verify provider")
+      (is (some (lambda (part) (search "[image: image/png" (or (getf part :text) ""))) parts)
+          "the image is described in its place"))))
+
+(test openai-refuses-an-image-beside-tool-results-rather-than-dropping-it
+  (let ((p (make-instance 'llm:openai-compatible :impl "openai" :base-url "http://x" :model "m")))
+    (signals cnd:image-input-unsupported
+      (llm:openai-request-body p (list (llm:msg "user" (list (llm:tool-result-part "t1" "done")
+                                                             (llm:image-part (%vision-png)))))))))
+
+(test an-image-is-described-not-printed-wherever-parts-become-text
+  (let* ((part (llm:image-part (%vision-png 100)))
+         (description (llm:image-part-description part)))
+    (is (equal "[image: image/png, 108 bytes]" description))
+    (is (= llm:*image-part-tokens* (prompt:part-tokens part)) "a constant estimate, not the bytes")
+    (is (equal description (praxeon/actor::%raw-part-text part)) "the replay of observed messages")
+    (is (search description (with-output-to-string (s) (praxeon/studio::%render-part part s))))
+    (let ((stripped (praxeon/distil:without-images (first (%vision-msgs part)))))
+      (is (notany #'llm:image-part-p (llm:content stripped)) "distillation is sent no image")
+      (is (equal description (getf (second (llm:content stripped)) :text))))))

@@ -225,6 +225,30 @@ PRAXEON/LLM uses it for the UNKNOWN-TOOL-CHOICE detail (#727)."
 REQUESTED is the tool choice as given. The report says only what kind of value it was and its
 length, because COMPLETE signals this inside the handler that logs a failed request at warn,
 and a forced tool's name can come from a prompt (#727)."))
+(define-condition image-part-invalid (praxeon-error)
+  ((limit :initarg :limit :initform nil :reader image-part-invalid-limit))
+  (:report
+   (lambda (c s)
+     (format s "An image part was refused: ~A~@[ (the limit is ~A)~]."
+             (praxeon-error-detail c) (image-part-invalid-limit c))))
+  (:documentation "Signalled by PRAXEON/LLM:IMAGE-PART for an image it will not carry: a size
+over *MAX-IMAGE-PART-BYTES*, bytes that are not PNG, JPEG, GIF or WebP, a media type that does
+not match the bytes, or a URL that is not https (#995). LIMIT names the limit that was passed.
+The report never includes the image or the URL."))
+
+(define-condition image-input-unsupported (praxeon-error)
+  ((provider :initarg :provider :initform nil :reader image-input-unsupported-provider)
+   (model :initarg :model :initform nil :reader image-input-unsupported-model))
+  (:report
+   (lambda (c s)
+     (format s "~A~@[ with model ~A~] cannot take an image, and the request carries one: ~A. Nothing was sent.~%~%An image is refused here rather than dropped, because a model shown a request about a picture without the picture answers about something it never saw."
+             (or (image-input-unsupported-provider c) "This provider")
+             (image-input-unsupported-model c)
+             (praxeon-error-detail c))))
+  (:documentation "Signalled before a request is sent when its messages carry an image part and
+the provider or model has no vision input (PRAXEON/LLM:SUPPORTS-IMAGE-INPUT-P), or the image is
+in a place no provider takes one: the system prompt, or an assistant message (#995)."))
+
 (define-condition parallel-child-failure (praxeon-error)
   ((failures :initarg :failures :initform nil :reader parallel-child-failure-failures)
    (completed :initarg :completed :initform nil :reader parallel-child-failure-completed))
