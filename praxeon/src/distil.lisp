@@ -242,8 +242,10 @@ a proposal that replaces or repeats it."
 
 (defun without-images (message)
   "MESSAGE with each image part replaced by a text part describing it, LLM:IMAGE-PART-DESCRIPTION
-(#995). Distillation reads a window to write observations, which are stored in memory; an image's
-bytes have no place there, and the provider chosen for distillation may have no vision input."
+(#995). DISTIL and the observer's support check, PRAXEON/OBSERVE:SUPPORTED-PROPOSALS, send their
+window through this. Both write or judge observations, which are stored in memory: an image's bytes
+have no place there, and the providers chosen for distillation and for the check may have no
+vision input. A message without an image part is returned as it is.
   (let ((content (llm:content message)))
     (if (and (listp content) (some #'llm:image-part-p content))
         (llm:msg (llm:role message)

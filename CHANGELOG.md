@@ -990,8 +990,10 @@ its tag.
   - **History and observation.** An image part stays in the message, so an agent's history sends
     it again each turn, as it does the conversation. Everything that turns parts into text sees
     `llm:image-part-description`, which gives the media type and size only. That covers the
-    observer's distillation, the replay of observed messages and the studio, so no image reaches
-    memory or the provider used for distillation.
+    observer's distillation and its support check (`praxeon/observe:supported-proposals`), the
+    replay of observed messages and the studio, so no image reaches memory or the provider used
+    for distillation or for the check. Both send their window through the new export
+    `praxeon/distil:without-images`, which an app can use on a window of its own.
   - **Tokens.** `prompt:part-tokens` estimates an image at `llm:*image-part-tokens*`, 1600. The
     provider's own count comes back in the input tokens it reports, as before.
 
