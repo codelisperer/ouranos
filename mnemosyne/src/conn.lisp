@@ -249,8 +249,14 @@ returned, the thread hands its result over or closes it before it can be stopped
             (symbols +connect-thread-specials+)
             (bound (mapcar #'symbol-value +connect-thread-specials+)))
         (setf thread
+              ;; THREAD-LIFETIME: this connect's own, and not inheriting the caller's bindings.
+              ;; The only ones it needs are cl-postgres's, passed through PROGV below.
               (sb-thread:make-thread
                (lambda ()
+                 ;; FIRST, and the timeout depends on it (#541): a thread made inside a caller's
+                 ;; WITHOUT-INTERRUPTS can never be interrupted, and the timeout below stops this
+                 ;; one with TERMINATE-THREAD, which would then never arrive.
+                 (aion/dynamic:unblock-interrupts)
                  (progv symbols bound
                    ;; A stop is taken only inside THUNK. One that arrives after THUNK returned
                    ;; waits until the result has been handed over or, when the caller has given

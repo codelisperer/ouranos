@@ -111,6 +111,37 @@ sends a byte."
       (loop repeat 50 while (%connect-threads) do (sleep 0.1))
       (is (null (%connect-threads)) "and the thread that was connecting is gone"))))
 
+(test a-connect-made-with-an-interrupt-deferred-still-stops-its-thread
+  ;; #541, found by aion/dynamic's spawn-site sweep on #959's CI. A thread made while its creator
+  ;; has an interrupt DEFERRED -- not merely inside SB-SYS:WITHOUT-INTERRUPTS, but with a signal
+  ;; already waiting -- starts with the deferrable signals blocked and can never be interrupted.
+  ;; TERMINATE-THREAD would then never reach CONNECT's thread, and a timed-out connect would hold
+  ;; its socket for the life of the image. Measured on this machine: a plain thread, and one made
+  ;; inside WITHOUT-INTERRUPTS with no signal waiting, both die; one made with an interrupt
+  ;; deferred does not. CONNECT's thread calls UNBLOCK-INTERRUPTS first, so it does.
+  (with-silent-server (port)
+    (let ((me sb-thread:*current-thread*)
+          (condition nil)
+          (elapsed nil))
+      (sb-sys:without-interrupts
+        ;; Provoke the deferred interrupt: it arrives while this region is running, so SBCL
+        ;; defers it and blocks the deferrable signals here until the region ends.
+        (sb-thread:make-thread
+         ;; THREAD-LIFETIME: this test's; it is not inheriting anything.
+         ;; INTERRUPTS: it interrupts another thread and exits; nothing interrupts it.
+         (lambda () (sleep 0.2) (ignore-errors (sb-thread:interrupt-thread me (lambda () nil)))))
+        (sleep 1)
+        (let ((start (get-internal-real-time)))
+          (setf condition (handler-case
+                              (progn (conn:connect (%silent-backend port) :connect-timeout 1) nil)
+                            (error (e) e))
+                elapsed (%elapsed-seconds start))))
+      (is (typep condition 'conn:db-connect-timeout) "got ~S" condition)
+      (is (<= 0.9 elapsed 5) "it timed out in ~,2F s" elapsed)
+      (loop repeat 50 while (%connect-threads) do (sleep 0.1))
+      (is (null (%connect-threads))
+          "the connect thread is gone, so the stop reached a thread made with an interrupt deferred"))))
+
 (test the-timeout-settings-are-checked
   (signals type-error (conn:connect (mnemosyne/backend:make-sqlite ":memory:") :connect-timeout 0))
   (signals type-error (conn:connect (mnemosyne/backend:make-sqlite ":memory:")
