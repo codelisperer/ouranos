@@ -57,5 +57,7 @@ that hides which scripts it is about.")
                              (:file "release-file-readers") (:file "with-mode")
                              (:file "dyld-libraries")
                              ;; #956: a native file the bundle needs and cannot find
-                             (:file "missing-natives"))))
+                             (:file "missing-natives")
+                             ;; #977: the BUILT-FROM stamp of a vendored library's build
+                             (:file "built-from"))))
   :perform (test-op (o c) (symbol-call :checkers/tests '#:run-tests)))
