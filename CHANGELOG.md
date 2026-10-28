@@ -923,6 +923,35 @@ its tag.
 
 ### Added
 
+- **praxeon/web: a service that takes signed grants and gives each browser a session** (part of
+  #67, for #90). `make-app`, `start` and `serve-forever` take `:grant-verifier` (a
+  `praxeon/ceiling` verifier), `:audience` (the name this service's grants are minted for) and
+  `:sessions` (a `praxeon/web-session:make-session-table`, which sets `:idle-seconds`, 30 minutes
+  by default, and `:max-seconds`, 12 hours). With them, `POST /embed/session` takes
+  `Authorization: Grant <token>` and answers `{"session": ID, "idle_seconds": N, "max_seconds":
+  N}`; every other route needs `Authorization: Session <ID>` and is answered 401 without one.
+  The conversation is the grant's principal's, and `:make-agent` is called with the principal and
+  the grant. `make-app` refuses `:grant-verifier` without a non-empty `:audience`, because a grant
+  minted for another service would otherwise open a session here. A grant for another audience,
+  or with no principal, is refused even if the app's own verifier accepts it.
+- **praxeon/web: a key's conversation expires when it is idle, and every transcript item names
+  its turn** (part of #67). With `:conversation-key` or `:grant-verifier`, a key's conversation
+  and its agent are dropped once no request has reached them for `:conversation-idle-seconds`
+  (a new argument to `make-app`, `start` and `serve-forever`; 30 minutes by default, the same as
+  a session's idle limit) and no turn of theirs is running. The key's next request calls
+  `:make-agent` again and starts with an empty transcript. Before this, conversations were kept
+  for the app's lifetime. Every transcript item now carries `:turn N`, numbered from 1 in each
+  conversation, so a `:turn-ended` item says which turn it ends when two tabs send messages
+  close together. `:make-agent` no longer runs under the lock every key's requests take, so a
+  slow first request holds up only the requests with its own key; two first requests with one
+  key still make one agent. A turn's reply and its `:turn-ended` item are now published, and its
+  status line cleared, before the next queued turn starts.
+- **praxeon/ceiling: a grant as one string** (part of #67). `encode-grant-token` signs a grant's
+  JSON with an `aion/signature` private key and returns `base64url(payload).base64url(signature)`,
+  unpadded. `decode-grant-token` returns the payload and signature for `verify-grant`, and signals
+  `grant-invalid` for anything else. `make-ed25519-verifier` now also takes an `aion/signature`
+  public key.
+
 - **praxeon/web: one conversation per key, a transcript every tab reads in full, and an item
   that marks the end of each turn** (part of #67). `make-app`, `start` and `serve-forever` take
   `:conversation-key`, a function of the Clack env that returns the request's key (normally the

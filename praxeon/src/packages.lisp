@@ -290,6 +290,7 @@
   (:local-nicknames (#:cnd #:praxeon/conditions)
                     (#:turn #:praxeon/turn)
                     (#:jzon #:com.inuoe.jzon)
+                    (#:sig #:aion/signature)
                     (#:bt #:bordeaux-threads))
   (:documentation
    "What a caller may spend, and refusing before it is spent (pre-publication issue 172). Two ceilings, not
@@ -307,6 +308,7 @@
            #:grant-token-cap #:grant-call-cap #:grant-expires-at #:grant-audience
            #:grant-permits-p #:grant-permit-fn
            #:verify-grant #:ed25519-verifier #:make-ed25519-verifier
+           #:encode-grant-token #:decode-grant-token
            #:grant-invalid #:grant-invalid-reason
            #:budget-exhausted #:budget-exhausted-principal
            #:budget-exhausted-requested #:budget-exhausted-remaining

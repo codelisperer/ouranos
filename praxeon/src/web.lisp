@@ -3,10 +3,11 @@
 ;;;; Any Praxeon client app can serve an agent over HTTP with one call:
 ;;;;   - GET  /            an HTMX + Bulma chat page (server renders HTML
 ;;;;                       fragments; HTMX swaps them -- no SPA, no compile-to-JS)
-;;;;   - POST /api/message send a message. HTMX gets the user's bubble back
-;;;;                       immediately and the turn runs on a background thread;
-;;;;                       a JSON client (Accept: application/json) blocks for a
-;;;;                       synchronous {"reply": ...}.
+;;;;   - POST /api/message send a message. For HTMX, the message is published to the
+;;;;                       conversation's transcript, the turn runs on a background
+;;;;                       thread, and the response is empty with an HX-Trigger that
+;;;;                       makes the page poll at once; a JSON client (Accept:
+;;;;                       application/json) blocks for a synchronous {"reply": ...}.
 ;;;;   - GET  /api/progress the live-progress poll: the transcript items after the
 ;;;;                       page's cursor, the cursor moved past them, and the current
 ;;;;                       "… thinking / → tool" status (OOB). Same praxeon/event data
@@ -27,6 +28,8 @@
                     (#:evt #:praxeon/event)
                     (#:llm #:praxeon/llm)
                     (#:chan #:hyperion/channel)  ; the per-conversation transcript
+                    (#:ceiling #:praxeon/ceiling)  ; grants: the embed surface's auth (#67)
+                    (#:ws #:praxeon/web-session)
                     ;; Hyperion provides the generic web machinery (extracted
                     ;; from this file); praxeon/web keeps only the agent/chat UI.
                     (#:srv #:hyperion/server)
@@ -109,15 +112,12 @@ translator agent, or a locale-aware guardrail. Overridable via :responder."
   (status "")                                                   ; latest status line
   (tokens 0)                                                    ; cumulative conversation cost
   (turn-tokens 0)                                               ; the last turn's cost
-  ;; HOW THIS APP RENDERS, carried rather than read from a global (pre-publication issue 469). The style is a
-  ;; property of an app, not of the image: praxeon/web can be started as a SECOND server
-  ;; inside a host app's image, and assigning `hyperion/output:*output-style*' there would
-  ;; change how the host renders for the rest of the process.
-  ;;
-  ;; The turn thread no longer renders: it publishes items, and the request that reads them
-  ;; renders them inside MAKE-APP's WITH-OUTPUT-STYLE (#67). Before that, `%assistant-bubble'
-  ;; ran on the turn thread, which a binding made at the request boundary does not reach.
-  (output-style :compact))
+  (turns 0))                                                    ; turn ids given out so far
+
+(defun %next-turn (conv)
+  "A new turn id for CONV: 1 for its first turn, then 2, and so on."
+  (sb-thread:with-mutex ((conversation-state-lock conv))
+    (incf (conversation-turns conv))))
 
 (defun %set-status (conv text)
   (sb-thread:with-mutex ((conversation-state-lock conv))
@@ -146,13 +146,17 @@ translator agent, or a locale-aware guardrail. Overridable via :responder."
 ;;; data, and whoever reads the channel renders it, so the HTML poll here and an
 ;;; SSE or JSON reader later read the same items. An item is a plist:
 ;;;
-;;;   (:kind :user :text TEXT)                          a message from the viewer
-;;;   (:kind :assistant :text TEXT)                     the reply, as shown
-;;;   (:kind :turn-ended :outcome :ok)                  the turn finished
-;;;   (:kind :turn-ended :outcome :error :message TEXT) the turn signalled an error
+;;;   (:kind :user :turn N :text TEXT)                          a message from the viewer
+;;;   (:kind :assistant :turn N :text TEXT)                     the reply, as shown
+;;;   (:kind :turn-ended :turn N :outcome :ok)                  the turn finished
+;;;   (:kind :turn-ended :turn N :outcome :error :message TEXT) the turn signalled an error
 ;;;
-;;; Every turn ends with exactly one :TURN-ENDED item, so a reader can tell that a
-;;; turn is over without inferring it from the status line.
+;;; N is the turn the item belongs to, numbered from 1 in each conversation. Every turn
+;;; ends with exactly one :TURN-ENDED item, so a reader can tell that a turn is over
+;;; without inferring it from the status line, and which turn it was: with two tabs on
+;;; one conversation, a second message can be published while the first turn still runs.
+;;; The reply and the :TURN-ENDED item are published while the turn holds the turn lock,
+;;; so a turn's items come before the next turn's reply.
 ;;; --------------------------------------------------------------------------
 (defun %publish (conv item)
   "Append ITEM to CONV's transcript; return the index just past it."
@@ -372,18 +376,20 @@ parts list (tool-use/tool-result parts are skipped)."
 (defun %history-items (agent)
   "AGENT's conversation as transcript items: the user's messages and the assistant's replies,
 without the tool calls and results between them. A new conversation starts its channel with
-these, so an agent that arrives with a history shows it."
+these, so an agent that arrives with a history shows it. Each user message starts a turn,
+numbered from 1; a reply before the first user message is turn 0."
   (when agent
-    (loop for m in (actor:agent-history agent)
-          for role = (llm:role m)
-          for content = (llm:content m)
-          ;; a real user turn is a plain string; tool-result messages are parts lists
-          append (cond ((and (string= role "user") (stringp content))
-                        (list (list :kind :user :text content)))
-                       ((string= role "assistant")
-                        (let ((text (%text-of content)))
-                          (when (plusp (length text))
-                            (list (list :kind :assistant :text text)))))))))
+    (let ((turn 0))
+      (loop for m in (actor:agent-history agent)
+            for role = (llm:role m)
+            for content = (llm:content m)
+            ;; a real user turn is a plain string; tool-result messages are parts lists
+            append (cond ((and (string= role "user") (stringp content))
+                          (list (list :kind :user :turn (incf turn) :text content)))
+                         ((string= role "assistant")
+                          (let ((text (%text-of content)))
+                            (when (plusp (length text))
+                              (list (list :kind :assistant :turn turn :text text))))))))))
 
 (defun %item-html (conv item)
   "ITEM as the chat page shows it. A turn that ended normally shows nothing, because its reply
@@ -491,27 +497,35 @@ note instead."
       "*(no response — the model returned no text)*"
       reply))
 
-(defun %turn (conv message locale &key published)
-  "Run one turn of CONV on this thread, after publishing MESSAGE unless PUBLISHED says the
-caller already did, and publish how it went: the reply as shown and then a :TURN-ENDED item.
-Returns (values REPLY NIL), or (values NIL ERROR)
-when the responder signalled ERROR. Turns are serialized by CONV's turn lock; the progress
+(defun %publish-message (conv message)
+  "Give MESSAGE a new turn id, publish it to CONV's transcript, and return the id."
+  (let ((turn (%next-turn conv)))
+    (%publish conv (list :kind :user :turn turn :text message))
+    turn))
+
+(defun %turn (conv message locale &key turn)
+  "Run one turn of CONV on this thread and publish how it went: the reply as shown and then a
+:TURN-ENDED item. TURN is the id %PUBLISH-MESSAGE gave MESSAGE when the caller published it;
+without it, MESSAGE is published here. Returns (values REPLY NIL), or (values NIL ERROR) when
+the responder signalled ERROR. Turns are serialized by CONV's turn lock, which is held until the
+turn's last item is published and its status line cleared, so a turn queued behind this one
+neither has its status cleared by this one nor publishes its reply first. The progress
 observer records the status and token count while the turn runs."
-  (unless published (%publish conv (list :kind :user :text message)))
-  (unwind-protect
-       (handler-case
-           (let ((reply (sb-thread:with-mutex ((conversation-turn-lock conv))
-                          (evt:with-observer ((%progress-observer conv))
-                            (funcall (conversation-responder conv)
-                                     (conversation-agent conv) message locale)))))
-             (%publish conv (list :kind :assistant :text (%shown-reply reply)))
-             (%publish conv (list :kind :turn-ended :outcome :ok))
-             (values reply nil))
-         (error (e)
-           (%publish conv (list :kind :turn-ended :outcome :error
-                                :message (princ-to-string e)))
-           (values nil e)))
-    (%set-status conv "")))
+  (let ((turn (or turn (%publish-message conv message))))
+    (sb-thread:with-mutex ((conversation-turn-lock conv))
+      (unwind-protect
+           (handler-case
+               (let ((reply (evt:with-observer ((%progress-observer conv))
+                              (funcall (conversation-responder conv)
+                                       (conversation-agent conv) message locale))))
+                 (%publish conv (list :kind :assistant :turn turn :text (%shown-reply reply)))
+                 (%publish conv (list :kind :turn-ended :turn turn :outcome :ok))
+                 (values reply nil))
+             (error (e)
+               (%publish conv (list :kind :turn-ended :turn turn :outcome :error
+                                    :message (princ-to-string e)))
+               (values nil e)))
+        (%set-status conv "")))))
 
 (defun %run-turn-async (conv message locale)
   "Run one turn on a background thread so the web server's event loop stays free
@@ -519,19 +533,19 @@ observer records the status and token count while the turn runs."
 responder (e.g. for Elise's translator)."
   ;; The user's message is published here, on the request thread, and not by the turn
   ;; thread, so the poll that HX-Trigger asks for finds it even if the thread has not run yet.
-  (%publish conv (list :kind :user :text message))
-  ;; THREAD-LIFETIME: continues -- this thread runs ONE turn of the request that spawned it,
-  ;; so it carries the caller's dynamic context (#158). Without the wrapper every line the
-  ;; turn logs -- including the LLM request and response lines -- is missing the request-id
-  ;; that hyperion/logging bound around the request, because a LET binding does not cross a
-  ;; thread. The field is simply absent and nothing reports it.
-  (sb-thread:make-thread
-   (aion/dynamic:inheriting
-    (lambda ()
-      (aion/dynamic:unblock-interrupts)
-      (%turn conv message locale :published t)
-      nil))
-   :name "praxeon-web-turn"))
+  (let ((turn (%publish-message conv message)))
+    ;; THREAD-LIFETIME: continues -- this thread runs ONE turn of the request that spawned it,
+    ;; so it carries the caller's dynamic context (#158). Without the wrapper every line the
+    ;; turn logs -- including the LLM request and response lines -- is missing the request-id
+    ;; that hyperion/logging bound around the request, because a LET binding does not cross a
+    ;; thread. The field is simply absent and nothing reports it.
+    (sb-thread:make-thread
+     (aion/dynamic:inheriting
+      (lambda ()
+        (aion/dynamic:unblock-interrupts)
+        (%turn conv message locale :turn turn)
+        nil))
+     :name "praxeon-web-turn")))
 
 ;;; --------------------------------------------------------------------------
 ;;; Request parsing -- the raw-Clack utilities (body-string/form-param/wants-json/
@@ -594,13 +608,84 @@ newest item, so that page carries on from there instead of repeating the transcr
        (list 200 '(:content-type "text/html; charset=utf-8" :hx-trigger "px-poll")
              (list ""))))))
 
+(defun %new-conversation (key agent agent-name responder)
+  "A conversation over AGENT, for KEY, whose transcript starts with AGENT's history. Its next turn
+is numbered after the history's last."
+  (let ((conv (make-conversation :key key :agent agent :agent-name agent-name
+                                 :responder responder))
+        (history (%history-items agent)))
+    (dolist (item history) (%publish conv item))
+    (setf (conversation-turns conv)
+          (count :user history :key (lambda (item) (getf item :kind))))
+    conv))
+
+(defstruct (%entry (:constructor %make-entry ()))
+  "A key's place in MAKE-APP's table of conversations. LOCK is held while the key's agent is
+made, so the table's own lock is not; CONVERSATION is NIL until then. USED-AT is when a request
+last reached it."
+  (lock (sb-thread:make-mutex :name "praxeon-web-conversation-entry"))
+  (conversation nil)
+  (used-at 0 :type integer))
+
+(defun %expire-conversations (table now idle-seconds)
+  "Remove from TABLE, MAKE-APP's table of entries by key, every conversation no request has
+reached for IDLE-SECONDS, unless one of its turns is running. Caller holds the table's lock."
+  (loop for key being the hash-keys of table using (hash-value entry)
+        when (and (>= (- now (%entry-used-at entry)) idle-seconds)
+                  (let ((conv (%entry-conversation entry)))
+                    (not (and conv (sb-thread:mutex-owner (conversation-turn-lock conv))))))
+          collect key into gone
+        finally (dolist (k gone) (remhash k table))))
+
 (defun %no-conversation ()
   (list 403 '(:content-type "text/plain; charset=utf-8")
         (list "praxeon/web: this request has no conversation.")))
 
+(defun %unauthenticated (reason)
+  (list 401 '(:content-type "application/json" :www-authenticate "Session")
+        (list (http:json (list "error" reason)))))
+
+(defun %authorization (env scheme)
+  "The credential after SCHEME (\"Grant\" or \"Session\", compared without case) in ENV's
+Authorization header, or NIL."
+  (let* ((value (http:request-header env "authorization"))
+         (space (and value (position #\Space value))))
+    (when (and space (string-equal scheme (subseq value 0 space)))
+      (let ((credential (string-trim " " (subseq value space))))
+        (and (plusp (length credential)) credential)))))
+
+(defun %open-session (env verifier audience sessions)
+  "POST /embed/session: verify the grant in ENV's `Authorization: Grant <token>' header and
+answer a session id for it, or 401 with the reason."
+  (let ((token (%authorization env "Grant")))
+    (if (null token)
+        (%unauthenticated "send the grant as: Authorization: Grant <token>")
+        (handler-case
+            (let ((grant (multiple-value-bind (payload signature)
+                             (ceiling:decode-grant-token token)
+                           (ceiling:verify-grant verifier payload signature))))
+              ;; The audience is checked here as well as by the verifier, because a verifier an
+              ;; app supplies need not check it, and a grant for another service must not open
+              ;; a session on this one.
+              (cond ((string/= audience (ceiling:grant-audience grant))
+                     (%unauthenticated (format nil "the grant is for audience ~S, not ~S"
+                                               (ceiling:grant-audience grant) audience)))
+                    ((zerop (length (ceiling:grant-principal grant)))
+                     (%unauthenticated "the grant names no principal"))
+                    (t
+                     (list 200 '(:content-type "application/json" :cache-control "no-store")
+                           (list (http:json
+                                  (list "session" (ws:open-session sessions grant)
+                                        "idle_seconds" (ws:session-table-idle-seconds sessions)
+                                        "max_seconds" (ws:session-table-max-seconds sessions))))))))
+          (ceiling:grant-invalid (e)
+            (%unauthenticated (ceiling:grant-invalid-reason e)))))))
+
 (defun make-app (&key agent (agent-name "Praxeon") (title "Praxeon")
                       (responder #'%default-responder) intro footer dev theme-css
-                      dictionary gate conversation-key make-agent)
+                      dictionary gate conversation-key make-agent
+                      grant-verifier audience (sessions (ws:make-session-table))
+                      (conversation-idle-seconds 1800) (clock #'get-universal-time))
   "A Clack app exposing an agent: GET / (chat page), POST /api/message (HTMX or JSON),
 GET /api/progress (live-progress poll). One agent holds one conversation, so turns
 are serialized; the HTMX turn runs on a background thread so no handler blocks.
@@ -617,99 +702,158 @@ conversation, over AGENT, shared by every request. With it, CONVERSATION-KEY is 
 of the Clack env that returns the request's key, normally the signed-in principal's id, and
 MAKE-AGENT is a function of a key that returns a fresh agent for it. The first request with a
 key makes that key's conversation; later requests with an EQUAL key share it. A request whose
-key is NIL is answered 403. Conversations are kept for the app's lifetime. Pass AGENT or
+key is NIL is answered 403. A key's conversation, and its agent, are dropped once no request
+has reached them for CONVERSATION-IDLE-SECONDS (30 minutes by default, the same as a session's
+idle limit) and no turn of theirs is running; the next request with that key starts a new one.
+CLOCK returns the time in seconds; a test passes its own. Pass AGENT or
 CONVERSATION-KEY with MAKE-AGENT, not both: an agent holds one conversation's history, so one
-agent cannot serve several keys."
+agent cannot serve several keys.
+
+SIGNED GRANTS (#67, #90). With GRANT-VERIFIER (a `praxeon/ceiling' verifier) and AUDIENCE (the
+name this service is minted for), a request is authenticated by a session:
+  - POST /embed/session with `Authorization: Grant <token>' verifies the grant (see
+    `praxeon/ceiling:decode-grant-token') and answers {\"session\": ID, \"idle_seconds\": N,
+    \"max_seconds\": N}. The grant must be for AUDIENCE and name a principal.
+  - Every other route needs `Authorization: Session <ID>', and is answered 401 without a
+    session that is open in SESSIONS (a `praxeon/web-session' table).
+  - The conversation is the session's principal's. MAKE-AGENT is called with the principal and
+    the grant that opened that principal's first session, so the agent's means can be built
+    from the grant's capabilities.
+AUDIENCE is required, because a grant minted for another service must not open a session on
+this one. GRANT-VERIFIER goes with MAKE-AGENT, and not with AGENT or CONVERSATION-KEY."
   (cond ((and conversation-key (not make-agent))
          (error "praxeon/web: :CONVERSATION-KEY needs :MAKE-AGENT, a function of a key that returns that conversation's agent."))
-        ((and make-agent (not conversation-key))
-         (error "praxeon/web: :MAKE-AGENT is used only with :CONVERSATION-KEY, which says which conversation a request belongs to."))
+        ((and make-agent (not conversation-key) (not grant-verifier))
+         (error "praxeon/web: :MAKE-AGENT is used only with :CONVERSATION-KEY or :GRANT-VERIFIER, which say which conversation a request belongs to."))
         ((and conversation-key agent)
-         (error "praxeon/web: pass :AGENT or :CONVERSATION-KEY with :MAKE-AGENT, not both. An agent holds one conversation's history, so it cannot serve several keys.")))
-  (let* ((style (if dev :pretty :compact))  ; dev renders pretty (readable view-source); prod compacts
+         (error "praxeon/web: pass :AGENT or :CONVERSATION-KEY with :MAKE-AGENT, not both. An agent holds one conversation's history, so it cannot serve several keys."))
+        ((and grant-verifier (not (and (stringp audience) (plusp (length audience)))))
+         (error "praxeon/web: :GRANT-VERIFIER needs :AUDIENCE, the name grants for this service are minted with. Without it a grant minted for another service would open a session here."))
+        ((not (typep conversation-idle-seconds '(integer 1)))
+         (error "praxeon/web: :CONVERSATION-IDLE-SECONDS must be a whole number of seconds, at least 1, not ~S." conversation-idle-seconds))
+        ((and grant-verifier (or agent conversation-key (not make-agent)))
+         (error "praxeon/web: :GRANT-VERIFIER takes :MAKE-AGENT, a function of a principal and its grant, and not :AGENT or :CONVERSATION-KEY: the conversation is the session's principal's.")))
+  ;; dev renders pretty (readable view-source); prod compacts. The style is bound around each
+  ;; request below and never assigned globally (pre-publication issue 469): praxeon/web can be
+  ;; started as a second server inside a host app's image, and assigning
+  ;; `hyperion/output:*output-style*' there would change how the host renders. The turn thread
+  ;; does not render; it publishes items, and the poll that reads them renders them here.
+  (let* ((style (if dev :pretty :compact))
          (new-conversation
-           (lambda (key agent)
-             (let ((conv (make-conversation :key key :agent agent :agent-name agent-name
-                                            :responder responder :output-style style)))
-               (dolist (item (%history-items agent)) (%publish conv item))
-               conv)))
+           (lambda (key agent) (%new-conversation key agent agent-name responder)))
          (shared (unless conversation-key (funcall new-conversation nil agent)))
-         (table (make-hash-table :test 'equal))
+         (table (make-hash-table :test 'equal))  ; key -> %ENTRY
          (table-lock (sb-thread:make-mutex :name "praxeon-web-conversations"))
+         (keyed
+           (lambda (key make)
+             ;; The table's lock is held only to find or add KEY's entry, and to expire idle
+             ;; conversations when an entry is added. MAKE runs under the entry's own lock, so a
+             ;; slow MAKE-AGENT holds up only the requests with its key: they wait for it and
+             ;; then share the conversation it made, so two first requests make one agent.
+             (let ((entry (sb-thread:with-mutex (table-lock)
+                            (let ((now (funcall clock)))
+                              (let ((e (or (gethash key table)
+                                           (progn
+                                             (%expire-conversations table now
+                                                                    conversation-idle-seconds)
+                                             (setf (gethash key table) (%make-entry))))))
+                                ;; Set under the table's lock, so an expiry cannot remove an
+                                ;; entry between this request finding it and using it.
+                                (setf (%entry-used-at e) now)
+                                e)))))
+               (sb-thread:with-mutex ((%entry-lock entry))
+                 (or (%entry-conversation entry)
+                     (setf (%entry-conversation entry)
+                           (funcall new-conversation key (funcall make))))))))
+         ;; CONVERSATION-FOR returns the request's conversation, or the response that refuses it.
          (conversation-for
-           (if conversation-key
-               (lambda (env)
-                 (let ((key (funcall conversation-key env)))
-                   (when key
-                     ;; MAKE-AGENT runs under the lock, so two first requests with one key
-                     ;; make one conversation, not two with one of them lost.
-                     (sb-thread:with-mutex (table-lock)
-                       (or (gethash key table)
-                           (setf (gethash key table)
-                                 (funcall new-conversation key (funcall make-agent key))))))))
-               (lambda (env) (declare (ignore env)) shared)))
+           (cond
+             (grant-verifier
+              (lambda (env)
+                (let ((grant (ws:session-grant sessions (%authorization env "Session"))))
+                  (if (null grant)
+                      (%unauthenticated "send an open session as: Authorization: Session <id>")
+                      (let ((principal (ceiling:grant-principal grant)))
+                        (funcall keyed principal
+                                 (lambda () (funcall make-agent principal grant))))))))
+             (conversation-key
+              (lambda (env)
+                (let ((key (funcall conversation-key env)))
+                  (if (null key)
+                      (%no-conversation)
+                      (funcall keyed key (lambda () (funcall make-agent key)))))))
+             (t (lambda (env) (declare (ignore env)) shared))))
          ;; The route table -- DATA, built once. `(hyperion/router:describe-routes …)`
          ;; prints what this surface answers; the `cond` this replaces could not be
          ;; enumerated by anything, including its author. The vendored assets arrive
          ;; as a MOUNT, so praxeon never names their paths.
          (routes
-           (router:router
-            (assets:mount)
-            (router:route :get "/"
-                          (lambda (env)
-                            (let ((conv (funcall conversation-for env)))
-                              (if (null conv)
-                                  (%no-conversation)
-                                  (multiple-value-bind (locale set-cookie)
-                                      (%negotiate-locale env dictionary)
-                                    ;; The bubbles and the cursor come from one read of the
-                                    ;; channel, so an item published while the page renders is
-                                    ;; either in the page or after its cursor, never both.
-                                    (multiple-value-bind (items next) (%items-since conv -1)
-                                      (list 200
-                                            (append '(:content-type "text/html; charset=utf-8")
-                                                    (when set-cookie (list :set-cookie set-cookie)))
-                                            (list (%page (%resolve-content title locale)
-                                                         (%resolve-content intro locale)
-                                                         (%resolve-content footer locale)
-                                                         dev
-                                                         (%agent-model-label (conversation-agent conv))
-                                                         (%items-html conv items)
-                                                         theme-css
-                                                         locale
-                                                         (and dictionary (i18n:supported-locales dictionary))
-                                                         (and gate (if (functionp gate)
-                                                                       (funcall gate locale)
-                                                                       gate))
-                                                         next))))))))
-                          :name :chat)
-            (router:route :get "/api/progress"
-                          (lambda (env)
-                            (let ((conv (funcall conversation-for env)))
-                              (if (null conv)
-                                  (%no-conversation)
-                                  (list 200 '(:content-type "text/html; charset=utf-8")
-                                        (list (%progress-fragment conv (%request-cursor env)))))))
-                          :name :progress)
-            (router:route :get "/api/reload-epoch"
-                          (lambda (env)
-                            (declare (ignore env))
-                            (list 200 '(:content-type "text/plain" :cache-control "no-store")
-                                  (list (princ-to-string dev:*reload-epoch*))))
-                          :name :reload-epoch)
-            (router:route :get "/api/dev-error"
-                          (lambda (env)
-                            (declare (ignore env))
-                            (list 200 '(:content-type "text/plain" :cache-control "no-store")
-                                  (list (or (dev:dev-error) ""))))
-                          :name :dev-error)
-            (router:route :post "/api/message"
-                          (lambda (env)
-                            (let ((conv (funcall conversation-for env)))
-                              (if (null conv)
-                                  (%no-conversation)
-                                  (%handle-message env conv dictionary))))
-                          :name :message))))
+           (apply
+            #'router:router
+            (remove
+             nil
+             (list
+              ;; The session exchange exists only on a service that takes grants.
+              (when grant-verifier
+                (router:route :post "/embed/session"
+                              (lambda (env) (%open-session env grant-verifier audience sessions))
+                              :name :embed-session))
+              (assets:mount)
+              (router:route :get "/"
+                            (lambda (env)
+                              (let ((conv (funcall conversation-for env)))
+                                (if (not (conversation-p conv))
+                                    conv
+                                    (multiple-value-bind (locale set-cookie)
+                                        (%negotiate-locale env dictionary)
+                                      ;; The bubbles and the cursor come from one read of the
+                                      ;; channel, so an item published while the page renders is
+                                      ;; either in the page or after its cursor, never both.
+                                      (multiple-value-bind (items next) (%items-since conv -1)
+                                        (list 200
+                                              (append '(:content-type "text/html; charset=utf-8")
+                                                      (when set-cookie (list :set-cookie set-cookie)))
+                                              (list (%page (%resolve-content title locale)
+                                                           (%resolve-content intro locale)
+                                                           (%resolve-content footer locale)
+                                                           dev
+                                                           (%agent-model-label (conversation-agent conv))
+                                                           (%items-html conv items)
+                                                           theme-css
+                                                           locale
+                                                           (and dictionary (i18n:supported-locales dictionary))
+                                                           (and gate (if (functionp gate)
+                                                                         (funcall gate locale)
+                                                                         gate))
+                                                           next))))))))
+                            :name :chat)
+              (router:route :get "/api/progress"
+                            (lambda (env)
+                              (let ((conv (funcall conversation-for env)))
+                                (if (not (conversation-p conv))
+                                    conv
+                                    (list 200 '(:content-type "text/html; charset=utf-8")
+                                          (list (%progress-fragment conv (%request-cursor env)))))))
+                            :name :progress)
+              (router:route :get "/api/reload-epoch"
+                            (lambda (env)
+                              (declare (ignore env))
+                              (list 200 '(:content-type "text/plain" :cache-control "no-store")
+                                    (list (princ-to-string dev:*reload-epoch*))))
+                            :name :reload-epoch)
+              (router:route :get "/api/dev-error"
+                            (lambda (env)
+                              (declare (ignore env))
+                              (list 200 '(:content-type "text/plain" :cache-control "no-store")
+                                    (list (or (dev:dev-error) ""))))
+                            :name :dev-error)
+              (router:route :post "/api/message"
+                            (lambda (env)
+                              (let ((conv (funcall conversation-for env)))
+                                (if (not (conversation-p conv))
+                                    conv
+                                    (%handle-message env conv dictionary))))
+                          :name :message))))))
     (lambda (env)
       ;; Render every response within the app's output style: dev = pretty HTML+JS
       ;; for readable "view source"; prod = compact/minified. Binds the Spinneret
@@ -721,8 +865,9 @@ agent cannot serve several keys."
 ;;; Lifecycle
 ;;; --------------------------------------------------------------------------
 (defun %build-app (agent agent-name title responder intro footer dev theme-css
-                   dictionary gate conversation-key make-agent)
-  "MAKE-APP, plus the output-style knob that goes with choosing an entry point.
+                   dictionary gate conversation-key make-agent
+                   grant-verifier audience sessions conversation-idle-seconds)
+  "The app START and SERVE-FOREVER serve: MAKE-APP, called with the arguments they share.
 
 BOTH ENTRY POINTS GO THROUGH HERE. START and SERVE-FOREVER differ in how they BLOCK, not
 in what they serve, and the argument list that defines the surface is long enough that two
@@ -731,35 +876,39 @@ copies of it would drift -- silently, and in whichever copy nobody drives intera
 Positional rather than keyword on purpose: the only callers are the two entry points below,
 both of which must pass all of it, so keywords here would buy nothing but the chance to
 forget one."
-  ;; NO GLOBAL ASSIGNMENT (pre-publication issue 469). The style travels on the conversation MAKE-APP builds, so
-  ;; starting this surface as a second server inside a host image leaves the host's rendering
-  ;; alone. `dev' still decides it; it is simply carried rather than published.
   (make-app :agent agent :agent-name agent-name :title title
             :responder responder :intro intro :footer footer
             :dev dev :theme-css theme-css :dictionary dictionary :gate gate
-            :conversation-key conversation-key :make-agent make-agent))
+            :conversation-key conversation-key :make-agent make-agent
+            :grant-verifier grant-verifier :audience audience
+            :sessions (or sessions (ws:make-session-table))
+            :conversation-idle-seconds (or conversation-idle-seconds 1800)))
 
 (defun start (&key agent (agent-name "Praxeon") (title "Praxeon")
                    (responder #'actor:run-turn) intro footer dev theme-css
                    dictionary gate conversation-key make-agent
+                   grant-verifier audience sessions conversation-idle-seconds
                    (server (default-server)) (port *default-port*)
                    (host "127.0.0.1") debug)
   "Start a web server exposing AGENT and return a handler; stop it with STOP.
 Builds the agent/chat Clack app and hands it to hyperion/server:start. SERVER is
 the Clack backend (DEFAULT-SERVER, re-exported from Hyperion). RESPONDER, INTRO,
-FOOTER, THEME-CSS, DICTIONARY, CONVERSATION-KEY, MAKE-AGENT and DEV pass through to MAKE-APP -- DICTIONARY turns
+FOOTER, THEME-CSS, DICTIONARY, CONVERSATION-KEY, MAKE-AGENT, GRANT-VERIFIER, AUDIENCE,
+SESSIONS, CONVERSATION-IDLE-SECONDS and DEV pass through to MAKE-APP -- DICTIONARY turns
 on per-request locale negotiation (title/intro/footer may be locale functions); DEV
 t embeds the hot-reload poller so the page auto-refreshes on (MARK-RELOADED).
 
 RETURNS IMMEDIATELY, which is what makes it the REPL entry. A binary's `main' wants
 SERVE-FOREVER instead."
   (srv:start (%build-app agent agent-name title responder intro footer dev theme-css
-                         dictionary gate conversation-key make-agent)
+                         dictionary gate conversation-key make-agent
+                         grant-verifier audience sessions conversation-idle-seconds)
              :server server :port port :host host :debug debug))
 
 (defun serve-forever (&key agent (agent-name "Praxeon") (title "Praxeon")
                            (responder #'actor:run-turn) intro footer dev theme-css
                            dictionary gate conversation-key make-agent
+                           grant-verifier audience sessions conversation-idle-seconds
                            (server (default-server)) (port *default-port*)
                            (host "127.0.0.1") debug (log t)
                            (name agent-name) (banner :derive) (signals t) on-ready)
@@ -773,8 +922,8 @@ name the app already answers to.
 
 WHY IT LIVES HERE RATHER THAN IN EACH APP (pre-publication issue 151). A praxeon app that wants to block used to
 have to reach past praxeon/web into hyperion/server, build the Clack app itself with
-MAKE-APP, and then remember the output-style knob -- which START sets, and which therefore
-is not part of the app but part of the entry point. That is three things to get right in
+MAKE-APP, and then remember the output-style knob -- which START set at the time, and which
+therefore was not part of the app but part of the entry point. That is three things to get right in
 order to do the ordinary thing.
 
 Elise did not reach past it. It hand-rolled `(loop (sleep 3600))' guarded by an
@@ -783,7 +932,8 @@ restored handlers, and a supervisor's stop signal could only be answered by kill
 process. The gap was one layer above where it showed, which is the argument for closing it
 here rather than porting the symptom."
   (srv:serve-forever (%build-app agent agent-name title responder intro footer dev
-                                 theme-css dictionary gate conversation-key make-agent)
+                                 theme-css dictionary gate conversation-key make-agent
+                                 grant-verifier audience sessions conversation-idle-seconds)
                      :server server :port port :host host :debug debug :log log
                      :name name :banner banner :signals signals :on-ready on-ready))
 

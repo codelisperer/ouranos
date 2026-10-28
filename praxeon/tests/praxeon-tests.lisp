@@ -670,6 +670,45 @@ effect did or did not happen."
                 "must fail on the signature, not the expiry: got ~S"
                 (ceiling:grant-invalid-reason c))))))))
 
+;;; --- a grant as one string (#67) ---------------------------------------------
+
+(test a-grant-token-round-trips-and-verifies
+  "ENCODE-GRANT-TOKEN signs with an `aion/signature' key; DECODE-GRANT-TOKEN gives back the
+payload and signature, and VERIFY-GRANT accepts them under the matching public key."
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (let* ((payload (%grant-json :principal "ü1"))
+           (token (ceiling:encode-grant-token payload priv)))
+      (is (= 1 (count #\. token)) "a token is two parts and one dot: ~S" token)
+      (is (notany (lambda (c) (find c "+/=")) token)
+          "a token is base64url without padding, so it fits a header unescaped: ~S" token)
+      (multiple-value-bind (text signature) (ceiling:decode-grant-token token)
+        (is (string= payload text) "the payload came back changed")
+        (is (string= "ü1" (ceiling:grant-principal
+                           (ceiling:verify-grant (ceiling:make-ed25519-verifier pub :audience "elise")
+                                                 text signature)))
+            "a non-ASCII principal survives the round trip")))))
+
+(test a-grant-token-with-a-changed-payload-does-not-verify
+  "The payload part is only base64url, so anyone can rewrite it. The signature is what stops it."
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (let* ((token (ceiling:encode-grant-token (%grant-json :token-cap 10) priv))
+           (forged-payload (subseq (ceiling:encode-grant-token (%grant-json :token-cap 999999) priv)
+                                   0 (position #\. (ceiling:encode-grant-token
+                                                     (%grant-json :token-cap 999999) priv))))
+           (forged (concatenate 'string forged-payload (subseq token (position #\. token)))))
+      (signals ceiling:grant-invalid
+        (multiple-value-bind (text signature) (ceiling:decode-grant-token forged)
+          (ceiling:verify-grant (ceiling:make-ed25519-verifier pub) text signature))))))
+
+(test a-malformed-grant-token-is-refused-with-a-reason
+  ;; The last four have letters or a digit from outside ASCII in the payload or the signature.
+  (dolist (bad (list "" "no-dot" "a.b.c" ".abc" "abc." "a+b.c/d" "abcde.QUJD" nil 42
+                     "QUJD.QUJé" "QUJD.ＱＵＪＤ" "ＱＵＪＤ.QUJD" "QUJD.QUJ٣"))
+    (is (eq :refused (handler-case (progn (ceiling:decode-grant-token bad) :accepted)
+                       (ceiling:grant-invalid (e)
+                         (if (search "base64url" (ceiling:grant-invalid-reason e)) :refused :no-reason))))
+        "~S was not refused with the reason" bad)))
+
 ;;; --- the ledger ------------------------------------------------------------
 
 (defun %ledger (&key (token-cap 1000) (call-cap 3) (capabilities '("search")))

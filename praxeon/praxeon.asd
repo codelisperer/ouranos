@@ -50,6 +50,8 @@
                "dexador"          ; HTTP client for LLM providers
                "com.inuoe.jzon"   ; JSON reader/writer
                "ironclad"         ; Ed25519 verification of signed grants (pre-publication issue 172)
+               "aion/signature"   ; signs and verifies a grant token (#67)
+               "cl-base64"        ; a grant token's two base64url parts (#67)
                "bordeaux-threads")  ; the session ledger is shared across a turn
   :serial t
   :components ((:module "src"
@@ -328,6 +330,7 @@
   :depends-on ("praxeon" "praxeon/web-search" "praxeon/translate" "aion/boundary" "aion/log"
                "log4cl"               ; the #807 test puts the log's setup back after capturing it
                "praxeon/image" "cl-base64"   ; the #758 tests encode the image the stub sends
+               "aion/signature"       ; the #67 tests mint grant tokens
                "praxeon/web-page" "aion/test-http"  ; the #757 tests serve pages from 127.0.0.1
                "aion/http-client"     ; the #719 tests build an http-error to stand for a refused connection
                "fiveam"
@@ -364,7 +367,8 @@
 (defsystem "praxeon/web/tests"
   :description "Test suite for praxeon/web: the blocking entry, and the surface."
   :depends-on ("praxeon/web" "praxeon" "hyperion"   ; web-tests.lisp calls actor: and server:
-               "clack-handler-hunchentoot" "fiveam" "aion/test-threads" "aion/log")
+               "clack-handler-hunchentoot" "fiveam" "aion/test-threads" "aion/log"
+               "aion/signature" "com.inuoe.jzon")  ; the #67 tests mint grants and read JSON
   :serial t
   :components ((:module "tests"
                 :serial t
@@ -382,6 +386,7 @@
   :license "MIT"
   :depends-on ("praxeon" "hyperion"          ; server, hot-reload, request utils, JS
                "aion/dynamic"                ; web.lisp wraps the turn thread in INHERITING
+               "aion/random"                 ; a session id (web-session.lisp, #67)
                "hyperion/assets"             ; vendored htmx/Bulma, embedded (no CDN)
                "spinneret" "com.inuoe.jzon"  ; still used directly by the chat UI
                ;; The HTTP backend is the APP's choice, not hyperion's (pre-publication issue 139) -- and it is
@@ -416,7 +421,7 @@
                ;; and is why nothing is substituted here.
                )
   :serial t
-  :components ((:file "src/web"))
+  :components ((:file "src/web-session") (:file "src/web"))
   ;; An unregistered suite, an unrun suite and a passing suite are identical at the exit
   ;; code, so the suite is wired to the system it tests rather than left to be remembered.
   :in-order-to ((test-op (test-op "praxeon/web/tests"))))
