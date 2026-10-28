@@ -1352,12 +1352,16 @@ header RETRY-AFTER."
       "a failure this client raised before sending is not transient"))
 
 (test a-refused-connection-is-a-connect-phase-failure
-  ;; A port nothing listens on: bound, then closed, so nothing can answer.
+  ;; A port nothing listens on: bound, then closed, so nothing can answer. The connect timeout
+  ;; is well above the time the refusal takes to arrive. Windows retries a refused connect to
+  ;; 127.0.0.1 for about two seconds before it reports the refusal, so with a two-second
+  ;; timeout WinHTTP reported 12002 (a timeout) on the CI Windows leg, not 12029 (#974, run
+  ;; 40653707988), and the test measured a timeout instead of a refusal.
   (let ((port (let ((s (usocket:socket-listen "127.0.0.1" 0)))
                 (prog1 (usocket:get-local-port s) (usocket:socket-close s)))))
     (let ((e (handler-case (progn (http:send-request
                                    (http:make-request :url (format nil "http://127.0.0.1:~D/" port)
-                                                      :connect-timeout 2 :read-timeout 2)
+                                                      :connect-timeout 15 :read-timeout 15)
                                    (list (http:ensure-2xx)))
                                   nil)
                (http:http-error (e) e))))
