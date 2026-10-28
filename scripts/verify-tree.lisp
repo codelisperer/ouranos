@@ -190,7 +190,7 @@ scripts/build-libuv.lisp first, so their absence here is not evidence of anythin
 Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ below.")
 
 (defparameter +test-systems+
-  '(:aion/tests :aion/tz/tests :aion/boundary/tests :aion/dynamic/tests :aion/test-threads/tests :aion/platform/tests :aion/fs/tests :aion/pool/tests :aion/interceptor/tests :aion/signature/tests :aion/http-client/tests :cons/tests :mnemosyne/tests :hyperion/tests :praxeon/tests :hermes/tests :hermes/payments/tests
+  '(:aion/tests :aion/sexp/tests :aion/tz/tests :aion/boundary/tests :aion/dynamic/tests :aion/test-threads/tests :aion/platform/tests :aion/fs/tests :aion/pool/tests :aion/interceptor/tests :aion/signature/tests :aion/http-client/tests :cons/tests :mnemosyne/tests :hyperion/tests :praxeon/tests :hermes/tests :hermes/payments/tests
     :elenchon/tests :klio/tests :hades/single-instance/tests :hades/credentials/tests
     :hades/notify/tests :hades/open/tests
     ;; aux suites that existed but were never run from here
