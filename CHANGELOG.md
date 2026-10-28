@@ -923,6 +923,9 @@ its tag.
     reader does not read them.
   - `hyperion/kit/page:empty-state` writes a heading, one line of text and an optional primary
     link.
+  - A breadcrumb href or an empty state's `:action-href` becomes a link only when it has no
+    scheme or its scheme is `http` or `https`. Any other, such as `javascript:` or `data:`, is
+    left out of the page, and the label is written as plain text. Nothing is signalled.
   - `hyperion/kit/toggle:segmented-control` (exactly one option pressed) and
     `hyperion/kit/toggle:toggle-group` (any number pressed) write buttons with `aria-pressed`
     in a `role="group"` with an `aria-label`. Each button loads its href with htmx.

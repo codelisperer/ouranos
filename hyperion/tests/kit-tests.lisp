@@ -134,6 +134,44 @@ the list's end, and an unclosed <p> ends at a block or at its parent's end."
     (is (equal "#main" (%attr hx "hx-target")))
     (is (equal "true" (%attr hx "hx-push-url")))))
 
+;;; An href goes into the page only with http, https or no scheme at all (#1005's review).
+(defparameter *unsafe-hrefs*
+  (list "javascript:alert(1)" " JavaScript:alert(1)"
+        (format nil "java~Cscript:alert(1)" #\Tab)
+        "data:text/html,<b>x</b>" "vbscript:msgbox(1)")
+  "Hrefs that must not become links, including the spellings a browser reads as javascript:.")
+
+(test a-script-href-is-written-as-text-and-not-as-a-link
+  (dolist (href *unsafe-hrefs*)
+    (let* ((crumbs (%dom (lambda ()
+                           (page:breadcrumbs (list (cons "Home" href) (cons "Now" "/now"))))))
+           (empty (%dom (lambda ()
+                          (page:empty-state "No drafts" :action-label "New draft"
+                                                        :action-href href)))))
+      (is (null (%all crumbs "a")) "breadcrumb ~S became a link" href)
+      (is (equal "Home" (%text (first (%all crumbs "li")))))
+      (is (null (%all empty "a")) "empty-state action ~S became a link" href)
+      (is (equal "New draft" (%text (%one empty "span"))))
+      (is (null (%attr (%one empty "span") "class"))
+          "the text does not keep the button's class"))))
+
+(test http-https-and-relative-hrefs-stay-links
+  (dolist (href '("/drafts" "drafts?a=b:c" "#top" "https://example.com/x" "HTTP://example.com"))
+    (is (equal href (%attr (%one (%dom (lambda ()
+                                         (page:breadcrumbs (list (cons "Home" href)
+                                                                 (cons "Now" "/now")))))
+                                 "a")
+                           "href")))))
+
+(test a-character-reference-in-an-href-stays-five-characters
+  "javascript&#58; has no colon for the scheme check to find. It is safe only because
+Spinneret writes the ampersand as &amp;, so the browser reads the href as those characters
+and not as javascript:."
+  (let ((html (spin:with-html-string
+                (page:breadcrumbs '(("Home" . "javascript&#58;alert(1)") ("Now" . "/now"))))))
+    (is-true (search "javascript&amp;#58;alert(1)" html))
+    (is (null (search "javascript&#58;" html)))))
+
 (test breadcrumbs-take-a-translated-label
   (is (equal "Fil d'Ariane" (%attr (%one (%crumbs :label "Fil d'Ariane") "nav") "aria-label"))))
 
@@ -218,9 +256,9 @@ the list's end, and an unclosed <p> ends at a block or at its parent's end."
     "an option without an href could not be pressed")
   (signals error (toggle:toggle-group "Show" '((:list "List" "/l")))))
 
-(test every-button-is-its-own-tab-stop
-  "Buttons take Enter and Space without script. Nothing takes a button out of the tab
-order."
+(test no-button-has-a-tabindex-or-is-disabled
+  "Nothing takes a button out of the tab order: no button has a tabindex or is disabled.
+Enter and Space are the browser's own behaviour for a <button>, which this does not test."
   (let ((dom (%dom (lambda ()
                      (toggle:segmented-control "View" *views* :selected "list")
                      (toggle:toggle-group "Show" *views* :pressed '("grid"))))))
@@ -251,3 +289,46 @@ order."
   (is (equal '(("list" "false") ("grid" "false") ("board" "false"))
              (%pressed (%dom (lambda () (toggle:toggle-group "Show" *views*)))))
       "none pressed is allowed"))
+
+
+;;; --- escaping -------------------------------------------------------------------
+
+(defparameter *hostile* "<script>alert(1)</script>\" onmouseover=\"x"
+  "Text that would add an element, or end an attribute and add another, if it were not
+escaped.")
+
+(defun %shown (element)
+  "ELEMENT's text as a browser shows it: each run of whitespace is one space. Spinneret
+breaks a long text onto a new line, which renders as a space."
+  (let ((text (%text element)))
+    (and text
+         (with-output-to-string (out)
+           (loop with gap = nil
+                 for c across text
+                 do (if (member c '(#\Space #\Newline #\Tab #\Return))
+                        (setf gap t)
+                        (progn (when gap (write-char #\Space out) (setf gap nil))
+                               (write-char c out))))))))
+
+(test text-and-attributes-are-escaped
+  "A title, a label and an attribute value come back from the parsed page exactly as given,
+and add no element and no attribute."
+  (let ((dom (%dom (lambda ()
+                     (page:page-header *hostile* :subtitle *hostile*
+                                                 :breadcrumbs (list (cons *hostile* "/a")
+                                                                    (cons "Now" "/now")))
+                     (toggle:segmented-control *hostile*
+                                               (list (list "list" *hostile* "/l?q=\"x"))
+                                               :selected "list")))))
+    (is (null (%all dom "script")))
+    (is (equal *hostile* (%shown (%one dom "h1"))) "the title")
+    (is (equal *hostile* (%shown (%one dom "p"))) "the subtitle")
+    (is (equal *hostile* (%shown (%one dom "a"))) "a breadcrumb's label")
+    (is (equal *hostile* (%shown (%one dom "button"))) "an option's label")
+    (is (equal *hostile* (%attr (find "group" (%all dom "div")
+                                      :key (lambda (d) (%attr d "role")) :test #'equal)
+                                "aria-label"))
+        "an attribute")
+    (is (equal "/l?q=\"x" (%attr (%one dom "button") "hx-get")) "a quote in an href")
+    (is (notany (lambda (e) (%attr e "onmouseover"))
+                (append (%all dom "a") (%all dom "button") (%all dom "div") (%all dom "h1"))))))
