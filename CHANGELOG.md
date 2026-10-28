@@ -888,6 +888,22 @@ its tag.
 
 ### Added
 
+- **`aion/sexp`: a safe reader and writer for s-expression data from outside the program**
+  (#972). `read-data` accepts plain data only -- lists, dotted pairs, strings, integers, ratios,
+  floats, `t`, `nil`, keywords that already exist, and the symbols in its `:symbols` list -- and
+  signals `aion/sexp:unsafe-data`, with a `reason`, for anything else. It is a parser of its
+  own, not `cl:read`, so it interns nothing (`:intern-keywords t` allows new keywords), refuses
+  every `#` form (`#S`, `#.`, `#+`, `#P`, `#n=`, `#(` and the rest), quote and backquote,
+  `|escaped|` symbols and package prefixes, and keeps its own stack, so deep nesting is
+  `unsafe-data :too-deep` and never a `storage-condition`. Limits: `:max-depth` (64),
+  `:max-elements` (100 000), `:max-string-length` (65 536), `:max-number-digits` (100) and
+  `:max-input` (1 MiB characters), each also a special variable. A float's type follows its
+  exponent marker, not `*read-default-float-format*`; an exponent past a float's range is
+  `:number-out-of-range` and `1/0` is `:division-by-zero`. Symbol tokens are folded to upper
+  case, as the standard reader folds them. `write-data` and `write-data-to-string` write only
+  what `read-data` accepts, and refuse anything else before writing a character. An app that
+  reads data it did not write with `cl:read`, even with `*read-eval*` nil, should move to it.
+
 - **praxeon/actor: every deliberation step records how many of the prompt's estimated tokens came
   from each source** (#317, step D). `praxeon/actor:request-messages` returns a third value, and
   `praxeon/actor:prompt-breakdown` computes it: a plist of estimated tokens under `:system`,

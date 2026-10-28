@@ -147,7 +147,7 @@
 
 (defparameter +systems+
   '(;; core
-    :aion :aion/csv :aion/tz :aion/platform :aion/fs :aion/clock :aion/log :aion/boundary :aion/dynamic :aion/pool :aion/interceptor :aion/signature :aion/http-client :cons :mnemosyne :elenchon :hyperion :praxeon
+    :aion :aion/csv :aion/sexp :aion/tz :aion/platform :aion/fs :aion/clock :aion/log :aion/boundary :aion/dynamic :aion/pool :aion/interceptor :aion/signature :aion/http-client :cons :mnemosyne :elenchon :hyperion :praxeon
     :hermes
     :klio
     :hades :hades/single-instance :hades/credentials :hades/notify :hades/program :hades/open
