@@ -912,8 +912,8 @@ its tag.
   connection ended") is `:response`. On Windows, where dexador uses WinHTTP, the phase comes
   from WinHTTP's error code: 12029 and 12007 are `:connect`; 12002, 12030 and 12152 are
   `:response`. aion/http-client now depends on `aion/retry` and defines the `transience` and
-  `retry-after` methods for `http-error`: 408, 425, 429, 503, 529 and `:connect` are `:transient`; 500, 502, 504 and
-  `:response` are `:unknown`.
+  `retry-after` methods for `http-error`: 408, 425, 429, 503, 529 and `:connect` are
+  `:transient`; 500, 502, 504 and `:response` are `:unknown`.
 
 - **praxeon/actor: every deliberation step records how many of the prompt's estimated tokens came
   from each source** (#317, step D). `praxeon/actor:request-messages` returns a third value, and
