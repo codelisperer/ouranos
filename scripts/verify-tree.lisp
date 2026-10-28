@@ -170,6 +170,10 @@
     :hyperion/http1
     :praxeon/translate :praxeon/web :praxeon/web-search :praxeon/memory-db :praxeon/results-db
     :praxeon/retrieval
+    ;; The chat widget's parts, which praxeon/web's page and its embed panel share (#67). It
+    ;; loads here on its own, so a dependency it uses but does not declare is not hidden by
+    ;; praxeon/web loading it first. Its tests are in praxeon/web/tests.
+    :praxeon/chat-ui
     ;; The MCP client and its OAuth sign-in (#527).
     :praxeon/mcp :aion/oauth :hyperion/oauth
     ;; The job scheduler and its database store (#689).
