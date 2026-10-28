@@ -345,3 +345,28 @@ main at 3ab171b."
     (let ((s (get-output-stream-string out)))
       (is (search "List-Unsubscribe: <https://app.example/u/abc>" s))
       (is (search "List-Unsubscribe-Post: List-Unsubscribe=One-Click" s)))))
+
+(test an-email-s-headers-cannot-be-replaced-after-the-checks
+  "#969: the checks run in MAKE-EMAIL, so a header list that could be swapped in afterwards would
+reach SendGrid unchecked. The slot is read-only, and the body builder checks again for a struct
+made inside hermes without MAKE-EMAIL."
+  (is (not (fboundp '(setf h:email-headers)))
+      "there is no (SETF EMAIL-HEADERS), so the checked list cannot be replaced")
+  (let ((m (hermes::%make-email :to "a@x.com" :from "b@x.com" :subject "Hi" :text "Body"
+                                :headers (list (cons "List-Unsubscribe"
+                                                     (format nil "<https://a.example/u>~C~CBcc: victim@example.com"
+                                                             #\Return #\Linefeed))))))
+    (signals h:invalid-message (hermes::%sendgrid-body m))
+    "a struct built without MAKE-EMAIL is refused where it becomes a request")
+  (let ((m (hermes::%make-email :to "a@x.com" :from "b@x.com" :subject "Hi" :text "Body"
+                                :headers '(("Bcc" . "victim@example.com")))))
+    (signals h:invalid-message (hermes::%sendgrid-body m)))
+  (let ((m (h:make-email :to "a@x.com" :from "b@x.com" :subject "Hi" :text "Body"
+                         :headers '(("X-Campaign" . "spring")))))
+    (is (string= "spring" (gethash "X-Campaign" (gethash "headers" (hermes::%sendgrid-body m))))
+        "control: a checked header still reaches the request")))
+
+(test an-improper-headers-list-is-an-invalid-message-not-a-type-error
+  ;; #969: EVERY on an improper list signals TYPE-ERROR, which is not hermes's refusal protocol.
+  (signals h:invalid-message (h:make-email :to "a" :from "b" :headers '(("X-A" . "1") . "tail")))
+  (signals h:invalid-message (h:make-email :to "a" :from "b" :headers '("X-A" . "1"))))

@@ -52,6 +52,10 @@ $SENDGRID_API_KEY."))
     ;; SendGrid's top-level headers object applies to every personalization. Only when there
     ;; are headers, so an email without any is the same request as before #106.
     (when (email-headers m)
+      ;; Checked again here, not only in MAKE-EMAIL: this is the one place the headers become a
+      ;; request, and a struct made inside this package without MAKE-EMAIL would otherwise reach
+      ;; the wire unchecked (the hub's review of #969).
+      (%check-email-headers (email-headers m))
       (let ((headers (make-hash-table :test #'equal)))
         (loop for (name . value) in (email-headers m) do (setf (gethash name headers) value))
         (setf (gethash "headers" body) headers)))

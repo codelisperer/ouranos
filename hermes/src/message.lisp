@@ -54,7 +54,11 @@ default (#106)."
   (html nil :type (or null string))
   (reply-to nil :type (or null string))
   (attachments '() :type list)
-  (headers '() :type list))
+  ;; READ-ONLY, so the checks MAKE-EMAIL runs cannot be stepped around (the hub's review of
+  ;; #969): there is no (SETF EMAIL-HEADERS), so a Bcc or a value holding CRLF cannot be put on
+  ;; an email after it was made. %SENDGRID-BODY checks again anyway, for a struct built inside
+  ;; this package without MAKE-EMAIL.
+  (headers '() :type list :read-only t))
 
 (defun reserved-email-headers ()
   "The header names an email's :HEADERS may not set (#106), as a fresh list, so a caller cannot
@@ -92,7 +96,9 @@ than +MAX-HEADER-LINE+. A carriage return or line feed in a name or value is ref
 would let the value end the header and add one of its own (header injection)."
   (flet ((bad (format &rest args)
            (error 'invalid-message :problem (apply #'format nil format args))))
-    (unless (and (listp headers) (every #'consp headers))
+    ;; IGNORE-ERRORS, because EVERY on an improper list signals a TYPE-ERROR, and every refusal
+    ;; here is an INVALID-MESSAGE (the hub's review of #969).
+    (unless (and (listp headers) (ignore-errors (every #'consp headers)))
       (bad ":headers must be a list of (name . value) conses"))
     (let ((seen '()))
       (dolist (header headers)
