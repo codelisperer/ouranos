@@ -33,6 +33,25 @@ its tag.
     spending and writing means are refused once such an item is in the prompt or the agent has
     searched.
 
+- **hyperion/server: an app that loads `hyperion/server-uv` is served by it, and `:uv` gets 2
+  workers from every entry point** (#710). Before, `default-server` took Woo or Hunchentoot
+  over `:uv` whenever a Clack handler was loaded too, so an app could serve on Hunchentoot
+  without knowing it. Now:
+  - `default-server` prefers `:uv` when `hyperion/server-uv` is loaded and libuv itself loads.
+    When libuv does not load, it skips `:uv` and takes the next loaded backend. It returns a
+    second value saying why, `:requested`, `:preferred` or `:libuv-unavailable`, and a third,
+    libuv's error message, when `:uv` was skipped. An app that logs its choice can log these.
+  - `HYPERION_SERVER`, when set, still decides, as before.
+  - `start` and `serve-forever` give `:uv` 2 workers when `:workers` is not given, as
+    `hyperion/desktop:run-app` (#472) and `hyperion/dev:serve` (#432) already did. The number
+    is the new `hyperion/server:default-workers`. Pass `:workers nil` to run handlers on the
+    loop thread as before. Handlers on more than one thread must not share one database
+    connection: see `hyperion/db-connection:wrap-connection`.
+  - **To keep Hunchentoot**, set `HYPERION_SERVER=hunchentoot`, pass
+    `:server :hunchentoot`, or do not load `hyperion/server-uv`.
+  - An app that chose `:uv` by hand (`HYPERION_SERVER`, else `:uv` when
+    `aion/uv:library-path` loads, else Hunchentoot) can call `default-server` instead.
+
 - **praxeon/retrieval and praxeon/memory-db on SQLite: similarity search works at real corpus
   sizes, and the stored embeddings change form** (#425). A SQLite store kept each embedding as
   text and parsed every one on every search, so at width 1024 `retrieve-similar` took about a
@@ -881,6 +900,19 @@ its tag.
   `praxeon/ceiling:meter` takes `:breakdown-fn`, and `record-usage` takes `:breakdown`; either
   one keeps the plist on the usage line as `:breakdown`, and it is not charged. These are
   estimates, characters over `*chars-per-token*`, not the provider's count.
+
+- **hyperion/desktop: `run-app :placement-file` now reopens the window where it was last time
+  on macOS too** (part of #485). Before, macOS accepted the option and ignored it. The file
+  holds the same one line as on Windows, with the frame in Cocoa points. When the window opens,
+  the saved frame is shrunk to fit the visible frame (the screen less the menu bar and the
+  Dock) of the screen it overlaps most, then moved the shortest distance that puts it inside;
+  a frame that overlaps no screen opens the window centred. A window saved zoomed opens zoomed.
+  The file is rewritten after each move, when a resize by dragging ends, on zoom and on close,
+  and not while the window is minimised or full screen. Windows does not move a saved frame
+  into a screen: it opens the window centred when the frame does not fit (#926). New
+  `hyperion-view --restore-placement PATH X0 Y0 X1 Y1 ...` prints where a saved frame would
+  open for a given list of screens, without opening a window. Rebuild `hyperion-view` to get
+  it.
 
 - **praxeon/actor: an agent can send its thread's observations in place of the messages they
   were distilled from** (#317, step C). `(praxeon/actor:attach-thread-memory agent store subject

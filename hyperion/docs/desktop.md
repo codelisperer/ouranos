@@ -206,7 +206,22 @@ on, hyperion-view does two more things. It converts the invisible borders, which
 the window as created, to that monitor's frame width before checking the fit. And it sets the
 rectangle a second time after Windows has rescaled the window, so the window keeps its saved
 size. Neither has been measured on two monitors, because CI has one. Put the file in the app's
-data directory. macOS and Linux accept the option and ignore it for now.
+data directory. Linux accepts the option and ignores it for now.
+
+On macOS, `:placement-file PATH` keeps the same line, with the frame in Cocoa points and in
+macOS's global screen coordinates (left, bottom, right, top), and a zoomed window records the
+frame it had before it was zoomed. hyperion-view rewrites the file after each move, when a
+resize made by dragging ends, when the window is zoomed or unzoomed, and when it is closed. It
+does not write while the window is minimised or full screen. When the window opens, the saved
+frame is moved into the screen whose visible frame it overlaps most: it is shrunk to that
+visible frame if it is larger, then moved the shortest distance that puts it inside. So a
+window saved partly behind the Dock, or on a display that has since become smaller, opens
+whole on that display. A frame that overlaps no screen, for example one saved on a display that
+is no longer connected, or a file that is not that line, opens the window centred as above. A
+window saved zoomed opens zoomed. Unlike Windows, macOS moves a saved frame into a screen rather
+than opening the window centred when it does not fit; whether Windows should do the same is
+#926. `hyperion-view --restore-placement PATH X0 Y0 X1 Y1 ...` prints the frame a window would
+open at for a given list of visible frames, without opening a window.
 
 **What the bundle holds, by platform (#98).** On Linux the app is one dumped executable,
 `<name>`. On macOS and Windows it is three files, because an operating system's code signature
