@@ -1,17 +1,28 @@
 /* trivial.c --- the load generator's own ceiling (#413).
  *
- *     cc -O2 -o /tmp/trivial hyperion/bench/trivial.c && /tmp/trivial 8098
+ *     cc -O2 -o /tmp/trivial hyperion/bench/trivial.c && /tmp/trivial 8098 [processes]
  *
- * A server that does as little as a server can: one thread, poll(), and the same response
- * to every request -- 200, "ok", keep-alive. run.sh drives it with the load generator before
- * any Hyperion backend, and the rate it reaches is the most the generator can measure on this
- * machine. A backend whose rate comes close to it is reported as limited by the generator,
- * not given a number.
+ * A server that does as little as a server can: the same response to every request -- 200,
+ * "ok", keep-alive -- from PROCESSES processes (default: one per online CPU), each running its
+ * own poll() loop on one shared listening socket. compare.py drives it with the load generator
+ * before any Hyperion backend. Because it uses every core and does no work per request, the
+ * rate it reaches is the most the generator can measure on this machine, and a backend whose
+ * rate comes within 80% of it is reported as limited by the generator, not given a number.
+ *
+ * The first version ran one process, so its rate was one core's limit, and on Linux Woo went
+ * past it (#413). The processes are forked after listen() and share the socket rather than
+ * each binding with SO_REUSEPORT, because macOS does not spread connections across
+ * SO_REUSEPORT sockets. The socket is non-blocking, so a process that loses the race for a
+ * connection goes back to poll().
+ *
+ * SIGTERM to the first process stops all of them.
  *
  * Not a web server: it answers once per "\r\n\r\n" it reads and never reads a body. That is
  * exactly what GET without a body sends, and all it needs to do.
  */
 #include <errno.h>
+#include <fcntl.h>
+#include <signal.h>
 #include <netinet/in.h>
 #include <netinet/tcp.h>
 #include <poll.h>
@@ -27,8 +38,16 @@ static const char RESPONSE[] =
     "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\n"
     "Connection: keep-alive\r\n\r\nok"; /* the header an HTTP/1.0 keep-alive client (ab -k) waits for */
 
+static void stop_all(int sig) {
+  signal(sig, SIG_IGN);
+  kill(0, SIGTERM); /* every process in the group, the first one's children included */
+  _exit(0);
+}
+
 int main(int argc, char **argv) {
   int port = argc > 1 ? atoi(argv[1]) : 8098;
+  long processes = argc > 2 ? atol(argv[2]) : sysconf(_SC_NPROCESSORS_ONLN);
+  if (processes < 1) processes = 1;
   int listener = socket(AF_INET, SOCK_STREAM, 0);
   int one = 1;
   setsockopt(listener, SOL_SOCKET, SO_REUSEADDR, &one, sizeof one);
@@ -40,8 +59,16 @@ int main(int argc, char **argv) {
     perror("trivial: bind/listen");
     return 1;
   }
-  printf("trivial: listening on 127.0.0.1:%d\n", port);
+  fcntl(listener, F_SETFL, fcntl(listener, F_GETFL) | O_NONBLOCK);
+  printf("trivial: listening on 127.0.0.1:%d with %ld processes\n", port, processes);
   fflush(stdout);
+
+  signal(SIGTERM, stop_all);
+  for (long p = 1; p < processes; p++) {
+    pid_t child = fork();
+    if (child < 0) { perror("trivial: fork"); break; }
+    if (child == 0) { signal(SIGTERM, SIG_DFL); break; }
+  }
 
   static struct pollfd fds[MAX_CONNS + 1];
   static int matched[MAX_CONNS + 1]; /* how much of "\r\n\r\n" each connection has seen */
@@ -55,6 +82,7 @@ int main(int argc, char **argv) {
     if ((fds[0].revents & POLLIN) && n <= MAX_CONNS) {
       int c = accept(listener, NULL, NULL);
       if (c >= 0) {
+        fcntl(c, F_SETFL, fcntl(c, F_GETFL) & ~O_NONBLOCK); /* macOS copies the listener's flag */
         setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &one, sizeof one);
         fds[n].fd = c; fds[n].events = POLLIN; matched[n] = 0; n++;
       }
