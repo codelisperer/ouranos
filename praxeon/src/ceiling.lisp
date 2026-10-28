@@ -87,14 +87,29 @@ because unpredictable output quality is a compliance problem and not merely a UX
 GRANT-INVALID. A protocol, so an application already issuing JWTs or HMAC tokens can supply
 a backend rather than adopting this one's format."))
 
-(defstruct (ed25519-verifier (:constructor make-ed25519-verifier (public-key &key audience)))
+(defstruct (ed25519-verifier (:constructor %make-ed25519-verifier (public-key audience)))
   "Verifies grants signed with the application's Ed25519 private key.
 
 Holds a PUBLIC key only: this component can check a grant and cannot issue one."
   public-key
   (audience "" :type string))
 
-(defun %now () (get-universal-time))
+(defun make-ed25519-verifier (public-key &key (audience ""))
+  "A verifier for grants signed with the private key of PUBLIC-KEY, an `aion/signature' public
+key or an ironclad Ed25519 public key. With AUDIENCE, a grant for another audience is refused.
+Signals an error when PUBLIC-KEY is neither, so a key that failed to load is found when the
+verifier is made, and not taken later for a grant whose signature does not verify."
+  (unless (or (sig:public-key-p public-key) (typep public-key 'ironclad:ed25519-public-key))
+    (error "praxeon/ceiling: make-ed25519-verifier needs an Ed25519 public key, not ~S." public-key))
+  (%make-ed25519-verifier public-key audience))
+
+(defvar *clock* #'get-universal-time
+  "A function of no arguments returning the time as a universal time. VERIFY-GRANT compares a
+grant's expiry with it, and the ledger stamps its lines with it. `praxeon/web:make-app' binds it
+to the app's own clock around the session exchange and around each turn, which is where grants
+are verified and usage is recorded, so a test can move the time.")
+
+(defun %now () (funcall *clock*))
 
 (defun %parse-payload (payload)
   "PAYLOAD is the signed JSON. Returns a GRANT, checking only that each claim has the right type:

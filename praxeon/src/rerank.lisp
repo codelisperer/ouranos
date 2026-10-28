@@ -120,9 +120,15 @@ as a generic function so that a test can answer in its place without a network."
           (gethash "truncation" body) nil)
     body))
 
+(defun %rerank-url (r)
+  (concatenate 'string (reranker-base-url r) "/rerank"))
+
+(defmethod provider-endpoint ((r voyage-reranker))
+  (parse-endpoint (reranker-base-url r)))
+
 (defmethod rerank-post ((r voyage-reranker) body)
   (let* ((payload (jzon:stringify body))
-         (url (concatenate 'string (reranker-base-url r) "/rerank"))
+         (url (%rerank-url r))
          (headers (append '(("content-type" . "application/json"))
                           (when (reranker-api-key r)
                             (list (cons "authorization"
