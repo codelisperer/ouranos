@@ -405,6 +405,8 @@ and add no element and no attribute."
     (is (equal "/drafts/delete" (%attr form "hx-post")))
     (is (equal "/drafts/delete" (%attr form "action")) "the form still posts without htmx")
     (is (%attr form "data-hy-close-on-success"))
+    (is (equal "find [type=submit]" (%attr form "hx-disabled-elt"))
+        "the action is disabled while its request is in flight")
     (is (equal "none" (%attr form "hx-swap")) "with no target the response goes nowhere")
     (is (equal "#drafts" (%attr targeted "hx-target")))
     (is (equal "outerHTML" (%attr targeted "hx-swap")))

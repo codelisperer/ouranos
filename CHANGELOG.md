@@ -918,7 +918,8 @@ its tag.
     loads the dialog's contents first and the dialog opens when they have settled.
   - `confirm-dialog` writes a dialog whose form posts to `:action-href` with htmx. Cancel is on
     the left and has the initial focus, so Enter cancels; the action is on the right, labelled
-    by `:action-label` and styled as danger. The dialog closes when the request succeeds. It
+    by `:action-label` and styled as danger. The action is disabled while its request is in
+    flight, so a double click posts once. The dialog closes when the request succeeds. It
     signals unless `:action-href` and `:action-label` are given.
   - `notice-region` writes an empty `role="status"` live region, and `undo-notice` writes a
     notice with Undo and Dismiss buttons and no timer. With `:oob t` a handler can return the

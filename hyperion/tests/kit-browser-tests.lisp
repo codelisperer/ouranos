@@ -45,14 +45,15 @@ var steps = [
   function () { log('loaded-return', act()); },
   function () { press('open-confirm'); log('confirm-focus', act());
     var b = byId('confirm').querySelectorAll('form button');
-    log('confirm-order', b[0].id + ',' + b[b.length - 1].id); byId('confirm-action').click(); },
+    log('confirm-order', b[0].id + ',' + b[b.length - 1].id);
+    byId('confirm-action').click(); byId('confirm-action').click(); },
   function () { log('confirm-closed', !byId('confirm').open); log('confirm-return', act());
     log('confirm-posted', byId('posted').textContent); },
   function () { byId('trash').click(); },
   function () { log('notice-count', notices()); log('notice-region-role', byId('hy-notices').getAttribute('role'));
     var n = byId('hy-notices').querySelector('[data-hy-dismiss]'); if (n) { n.click(); }
     log('notice-dismissed', notices()); byId('trash').click(); },
-  function () { var u = byId('hy-notices').querySelector('.hy-undo'); if (u) { u.click(); } },
+  function () { var u = byId('hy-notices').querySelector('.hy-undo'); if (u) { u.click(); u.click(); } },
   function () { log('undo-removed', notices()); log('undone', byId('posted').textContent);
     log('htmx', !!window.htmx); log('done', 'yes'); }
 ];
@@ -98,23 +99,27 @@ document.addEventListener('DOMContentLoaded', function () { setTimeout(next, 100
         (:script (:raw *kit-scenario*))))))
 
 (defun %kit-app ()
-  (router:to-app
-   (router:router
-    (assets:mount)
-    (router:route :get "/kit" (lambda (env) (declare (ignore env)) (%html (%kit-page))))
-    (router:route :get "/frag/dialog-body"
-                  (lambda (env) (declare (ignore env))
-                    (%html "<form><input id=\"loaded-field\" name=\"x\" autofocus></form>")))
-    (router:route :post "/confirm"
-                  (lambda (env) (declare (ignore env)) (%html "deleted")))
-    (router:route :post "/trash"
-                  (lambda (env) (declare (ignore env))
-                    (%html (spinneret:with-html-string
-                             (hyperion/kit/dialog:undo-notice "Moved to trash"
-                                                              :undo-href "/undo" :oob t)))))
-    (router:route :post "/undo"
-                  (lambda (env) (declare (ignore env))
-                    (%html "<p id=\"posted\" hx-swap-oob=\"true\">restored</p>"))))))
+  "The page's routes. /confirm and /undo answer with how many times each has been posted, so the
+page shows a second post of a double click."
+  (let ((confirms 0) (undos 0))
+    (router:to-app
+     (router:router
+      (assets:mount)
+      (router:route :get "/kit" (lambda (env) (declare (ignore env)) (%html (%kit-page))))
+      (router:route :get "/frag/dialog-body"
+                    (lambda (env) (declare (ignore env))
+                      (%html "<form><input id=\"loaded-field\" name=\"x\" autofocus></form>")))
+      (router:route :post "/confirm"
+                    (lambda (env) (declare (ignore env)) (%html (format nil "deleted-~D" (incf confirms)))))
+      (router:route :post "/trash"
+                    (lambda (env) (declare (ignore env))
+                      (%html (spinneret:with-html-string
+                               (hyperion/kit/dialog:undo-notice "Moved to trash"
+                                                                :undo-href "/undo" :oob t)))))
+      (router:route :post "/undo"
+                    (lambda (env) (declare (ignore env))
+                      (%html (format nil "<p id=\"posted\" hx-swap-oob=\"true\">restored-~D</p>"
+                                     (incf undos)))))))))
 
 (defun %kit-results (dom)
   "The key=value pairs the page logged in #results, as an alist of strings."
@@ -163,12 +168,15 @@ arrives in the status region, and dismiss and undo remove it."
                        "Cancel first, the action last")
                    (is (equal "true" (saw "confirm-closed")) "closed after its request succeeded")
                    (is (equal "open-confirm" (saw "confirm-return")))
-                   (is (equal "deleted" (saw "confirm-posted")))
+                   (is (equal "deleted-1" (saw "confirm-posted")) "a double click posts once: ~S"
+                       (saw "confirm-posted"))
                    (is (equal "1" (saw "notice-count")) "the notice arrived out of band")
                    (is (equal "status" (saw "notice-region-role")))
                    (is (equal "0" (saw "notice-dismissed")) "dismiss removes it")
                    (is (equal "0" (saw "undo-removed")) "undo replaces it with the response")
-                   (is (equal "restored" (saw "undone")))
+                   (is (equal "restored-1" (saw "undone"))
+                       "a double click on Undo posts once, because htmx drops a second request from a button whose first is in flight: ~S"
+                       (saw "undone"))
                    (is (equal "true" (saw "htmx")) "htmx is still loaded")))
             (ignore-errors (hyperion/server:stop handler))
             (is (ports:await-released port) "the port was still accepting after teardown"))))))

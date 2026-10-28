@@ -80,6 +80,7 @@ button labelled ACTION-LABEL, which names what it does (\"Delete 3 drafts\", nev
 styled as danger.
 
 The action posts to ACTION-HREF with htmx and closes the dialog when the request succeeds.
+It is disabled while its request is in flight, so a double click posts once.
 HX-TARGET receives the response, swapped by HX-SWAP (\"outerHTML\" by default); with no
 HX-TARGET the response is not swapped anywhere. Signals unless ACTION-HREF and ACTION-LABEL
 are given."
@@ -93,6 +94,10 @@ are given."
                     (:form :class "hy-confirm-actions" :method "post" :action action-href
                            :hx-post action-href :hx-target hx-target
                            :hx-swap (or hx-swap (if hx-target "outerHTML" "none"))
+                           ;; The form sends the request, so the submit button is found from
+                           ;; it. A disabled button cannot be pressed again while the request
+                           ;; is in flight, so a double click posts once.
+                           :hx-disabled-elt "find [type=submit]"
                            :data-hy-close-on-success "true"
                       (:button :type "button" :id (format nil "~A-cancel" id) :class "button"
                                :data-hy-dialog-close "true" :autofocus t
