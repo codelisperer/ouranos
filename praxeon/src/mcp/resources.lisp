@@ -257,7 +257,8 @@ tool call (%REQUEST-ANSWERING-INPUT, #626)."
                          collect content)))
         (log:info "praxeon/mcp: resource read"
                   :connection (connection-name (client-connection client))
-                  :resource (%uri-for-log uri) :contents (length found))
+                  :resource (evt:unless-withheld-from-logs (%uri-for-log uri))
+                  :contents (length found))
         found))))
 
 ;;; --- a resource in an agent's context --------------------------------------------------
@@ -312,8 +313,12 @@ nothing. The check is made now: a smaller budget set later can make an item too 
 
 The items stay in the context for every later turn, whoever its principal is. Add a resource
 read with one user's token only to an agent that serves that user alone, and call
-REMOVE-RESOURCE when the app forgets that user (#150)."
-  (let* ((name (connection-name (client-connection client)))
+REMOVE-RESOURCE when the app forgets that user (#150).
+
+For a private agent the log lines of this call, READ-RESOURCE's included, carry :WITHHELD in
+place of the resource, also when the app calls it outside a turn (#983)."
+  (let* ((evt:*withhold-from-logs* (or evt:*withhold-from-logs* (actor:agent-private agent)))
+         (name (connection-name (client-connection client)))
          (context (actor:agent-context agent))
          (budget (ctx:context-budget context))
          (items (mapcar (lambda (content)
@@ -328,7 +333,8 @@ REMOVE-RESOURCE when the app forgets that user (#150)."
     (remove-resource agent client uri)
     (dolist (item items) (ctx:add-item context item))
     (log:info "praxeon/mcp: resource added to an agent's context"
-              :connection name :resource (%uri-for-log uri) :items (length items)
+              :connection name :resource (evt:unless-withheld-from-logs (%uri-for-log uri))
+              :items (length items)
               :tokens (reduce #'+ items :key #'ctx:ctx-item-tokens)
               :untrusted (and untrusted t))
     items))

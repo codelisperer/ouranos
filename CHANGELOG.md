@@ -14,6 +14,22 @@ its tag.
 
 ### An app may have to act
 
+- **`aion/log:exception` no longer writes the condition's report or the backtrace's frame
+  arguments, by default** (#1013). Both can hold outside data: a database driver's report can
+  quote row values, and a frame's arguments can hold a request body, and `hyperion/logging:wrap`
+  logs every error that escapes a route this way, at ERROR.
+  - **What it writes now.** Its line has `error-type`, the condition's fully qualified type such
+    as `COMMON-LISP::SIMPLE-ERROR`, and `backtrace`, the names of up to 40 frames with no
+    arguments. The `error` field is gone. Log tooling that searched for `error` should search for
+    `error-type`.
+  - **The old detail is a development setting.** `aion/log:*log-condition-details*`, NIL by
+    default, brings back the report as `error` and the frames' arguments. The `:debug` level does
+    not turn it on.
+  - **Other log lines with a report.** These now carry the condition's type through the new
+    `aion/log:condition-type` instead of its report:
+    - `hyperion/server-uv`'s eight error and debug lines that had `:condition` (for example "server-uv: handler signalled"), and its "a loop could not be closed" line, whose `:error` became `:condition`;
+    - `praxeon`'s "llm request failed" lines, whose `:error` became `:condition`.
+
 - **`scripts/build-desktop-app.lisp` stops, instead of warning and exiting 0, when the bundle
   needs hyperion-view or a library the runtime links against and it is missing** (#956). For an
   app that loads `hyperion/desktop`, a `hyperion/hyperion-view/hyperion-view(.exe)` that was not
@@ -1018,6 +1034,41 @@ its tag.
   `claude-opus-5-5` where they named `claude-opus-4-8`.
 
 ### Added
+
+- **praxeon: a private agent keeps its prompts, tool arguments, tool results and replies out of
+  every log sink and out of events** (#983). `actor:make-agent` takes `:private`, default NIL.
+  While a private agent's turn runs, through `run-turn`, `continue-turn` or
+  `abandon-held-turn`, and on every thread the turn continues on:
+  - **Logs.** `aion/log:*log-condition-details*` is NIL, so `aion/log:exception` writes a
+    condition's type and frame names, never its report or a frame's arguments, even when an app
+    turned the setting on for development.
+    - This holds for handlers that run inside the turn, such as an app's `handler-bind` around
+      `run-turn`, which runs while the turn's bindings are in force. A `handler-case` outside
+      `run-turn` runs after the turn has unwound, so `log:exception` there with the setting on
+      writes the report, and the report can hold content.
+    - praxeon's own log lines record only counts, ids, durations and type names. The two "llm
+      request failed" lines changed to the condition's type in #1013, and each line was checked
+      for this change.
+    - The host `read-web-page` reads, and the resource an MCP resource line names, are logged as
+      `:withheld` for a private agent, because they say what the user asked about. This follows
+      the new `evt:*withhold-from-logs*`, which a private agent's turn binds whether or not the
+      agent retains content, and `mcp:add-resource` binds from the agent it is given, so a call
+      outside a turn is covered. `actor:agent-private` is now exported.
+  - **Events.** `evt:*withhold-content*` is true, and `evt:emit` replaces every content field
+    with `:withheld`. The content fields are `evt:+content-keys+`: `:arguments`, `:content`,
+    `:text`, `:message`, `:schema` and `:url`. This covers what the studio's status printer and
+    praxeon/web's progress line show. The other fields still arrive.
+    - A delegation's `:task` text is withheld by the emitter, through the new
+      `evt:unless-withheld`. `:task` is not a content key, because on the MCP task events it is
+      the task object an app answers with, and that always arrives.
+    - An MCP task records whether the turn that started it withheld content
+      (`mcp:task-private`, and `"private"` in `task-to-json`). Its events, such as
+      `:task-input-required`, withhold the server's message, schema and URL by that record,
+      whichever thread or turn polls the task.
+  - **Retaining content.** `:retain-content t` keeps content in events for a private agent, for
+    an app that shows a trace and means to. Logs stay without it either way.
+
+  A sub-agent delegated to from a private agent's turn runs under the same rules.
 
 - **praxeon/image: the generate-image means offers the model a `mask`, so it can change only part
   of an image** (#946). With `:resolve-reference` and a provider that takes a mask

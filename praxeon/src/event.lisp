@@ -132,11 +132,57 @@ client watching progress simply sees that part of the turn produce no events.")
 ;; lifetime should not inherit an observer belonging to somebody else's turn.
 (aion/dynamic:register-inheritable '*observer*)
 
+(defvar *withhold-content* nil
+  "When true, EMIT replaces the value of each content field of an event, those in +CONTENT-KEYS+,
+with :WITHHELD, so an observer, and whatever it prints or stores, receives no prompt, tool
+argument, tool result or reply (#983). A private agent's turn binds it (ACTOR:MAKE-AGENT
+:PRIVATE); counts, ids and names still arrive.")
+
+;; Inheritable for the reason *OBSERVER* is: a thread that continues the turn runs for the same
+;; agent (#158).
+(aion/dynamic:register-inheritable '*withhold-content*)
+
+(defparameter +content-keys+ '(:arguments :content :text :message :schema :url)
+  "The event fields that can hold content: a tool call's :ARGUMENTS, a tool result's :CONTENT, an
+answer's :TEXT, and an MCP task's :MESSAGE, :SCHEMA and :URL, which come from the server and can
+quote the request.
+
+:TASK is not one of them, because it means two things. On :TASK-INPUT-REQUIRED and the other
+MCP task events it is the task object an app passes back to answer, which holds no content of
+the turn and must arrive. On :DELEGATE it is the text a coordinating agent gave its sub-agent,
+which is content, and the emitter withholds it itself with UNLESS-WITHHELD (the hub's review of
+#1027).")
+
+(defun unless-withheld (value)
+  "VALUE, or :WITHHELD under *WITHHOLD-CONTENT*. For event content outside +CONTENT-KEYS+, such
+as a delegation's task text (#983). A log line uses UNLESS-WITHHELD-FROM-LOGS instead."
+  (if *withhold-content* :withheld value))
+
+(defvar *withhold-from-logs* nil
+  "When true, UNLESS-WITHHELD-FROM-LOGS returns :WITHHELD, so a log line carries no host or
+resource name that says what the user asked about (#983). It is true during a turn of a private
+agent, whether or not the agent retains content in events: :RETAIN-CONTENT is about events, and
+logs never carry content. MCP:ADD-RESOURCE binds it from the agent it is given, because an app
+usually calls it outside any turn (the hub's review of #1027).")
+
+;; Inheritable for the reason *WITHHOLD-CONTENT* is.
+(aion/dynamic:register-inheritable '*withhold-from-logs*)
+
+(defun unless-withheld-from-logs (value)
+  "VALUE, or :WITHHELD under *WITHHOLD-FROM-LOGS*. For a log field that can say what the user
+asked about, such as the host READ-WEB-PAGE reads or the resource an MCP resource line names."
+  (if *withhold-from-logs* :withheld value))
+
+(defun %withhold (payload)
+  (loop for (key value) on payload by #'cddr
+        append (list key (if (member key +content-keys+) :withheld value))))
+
 (defun emit (type &rest payload)
   "Send an event of TYPE (a keyword) with PAYLOAD (a plist) to *OBSERVER*, if one
-is bound. A no-op otherwise. Returns NIL."
+is bound. A no-op otherwise. Returns NIL. Under *WITHHOLD-CONTENT*, each content field is
+:WITHHELD (#983)."
   (when *observer*
-    (funcall *observer* (list* :type type payload)))
+    (funcall *observer* (list* :type type (if *withhold-content* (%withhold payload) payload))))
   nil)
 
 (defmacro with-observer ((observer) &body body)

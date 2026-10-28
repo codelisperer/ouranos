@@ -58,6 +58,37 @@ many times it ran."
 
 (defun %outcomes (results) (mapcar (lambda (r) (getf r :outcome)) results))
 
+;;; --- the host a private agent reads is not logged (#983) -------------------------------
+
+(defun %logged-read (&rest agent-keys)
+  "The log of a turn that reads https://mark983host.example/page, for an agent made with
+AGENT-KEYS."
+  (let* ((reader (make-instance '%stub-reader))
+         (ag (apply #'actor:make-agent
+                    :name "reading"
+                    :provider (make-instance 'scripted
+                                             :script (list (%calls (list "read-web-page"
+                                                                         (%args "url" "https://mark983host.example/page")))
+                                                           (llm:make-completion :text "Done." :stop-reason :end)))
+                    agent-keys))
+         (out (make-string-output-stream)))
+    (wp:register ag reader)
+    (unwind-protect
+         (progn (aion/log:setup :env :prod :level :trace :stream out)
+                (actor:run-turn ag "Summarise https://mark983host.example/page"))
+      (aion/log:setup :env :dev :level :warn :stream *standard-output*))
+    (is (equal '("https://mark983host.example/page") (stub-reader-read reader)) "the page was read")
+    (get-output-stream-string out)))
+
+(test a-private-agent-that-retains-content-does-not-log-the-host-it-reads
+  "#983, from the hub's review of #1027: :RETAIN-CONTENT keeps content in events, and the log
+still withholds the host. The control is an agent that is not private, whose log names it."
+  (let ((retaining (%logged-read :private t :retain-content t))
+        (open (%logged-read)))
+    (is (search "read-web-page" retaining) "the line was written: ~A" retaining)
+    (is (null (search "mark983host" retaining)) "a private agent's host: ~A" retaining)
+    (is (search "mark983host" open) "control: not private, the host is logged: ~A" open)))
+
 ;;; --- a page that tells the model to open another URL ----------------------------------
 
 (test a-page-cannot-send-the-model-to-another-site

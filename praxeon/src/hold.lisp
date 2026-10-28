@@ -710,6 +710,9 @@ approved call whose means is no longer registered with the same :SOURCE is not r
   (let* ((*principal* principal)
          (*on-hold* (if on-hold-p on-hold nil))
          (*hold-allowed* on-hold-p)
+         ;; The agent's privacy, as RUN-TURN has it (#983).
+         (evt:*withhold-content* (%withhold-content-for agent))
+         (aion/log:*log-condition-details* (%condition-details-for agent))
          (state (%check-held agent held principal)))
     (unless (%valid-decision-p decision held)
       (error 'held-turn-mismatch :reason "the decision does not cover every held call"))
@@ -743,6 +746,8 @@ are written as they were. Returns true, or NIL, :ALREADY-DECIDED and the decisio
 first when the turn was decided before; when that decision has no results in the history yet,
 the results it calls for are written, and nothing runs. Checked as CONTINUE-TURN checks."
   (let* ((*principal* principal)
+         (evt:*withhold-content* (%withhold-content-for agent))
+         (aion/log:*log-condition-details* (%condition-details-for agent))
          (state (%check-held agent held principal)))
     (when (eq state :answered)
       ;; Decided before: the decision recorded first comes from the claim, as in CONTINUE-TURN.

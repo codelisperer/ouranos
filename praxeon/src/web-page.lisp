@@ -453,7 +453,8 @@ with a host, when its host is not public, or when the page cannot be read or has
                          internal-time-units-per-second)))
       (handler-bind ((web-page-unreadable
                        (lambda (c)
-                         (log:info "read-web-page failed" :backend (reader-name reader) :host host
+                         (log:info "read-web-page failed" :backend (reader-name reader)
+                                                          :host (evt:unless-withheld-from-logs host)
                                                           :reason (web-page-unreadable-reason c)
                                                           :ms (ms)))))
         (when (typep reader 'public-fetch)
@@ -463,7 +464,8 @@ with a host, when its host is not public, or when the page cannot be read or has
           (when (zerop (length (page-text page)))
             (%unreadable url :empty "the page has no readable text; it may need a browser to run its scripts."))
           (multiple-value-bind (shown left-out) (%trim (page-text page) budget)
-            (log:info "read-web-page" :backend (reader-name reader) :host host
+            (log:info "read-web-page" :backend (reader-name reader)
+                                      :host (evt:unless-withheld-from-logs host)
                                       :chars (length (page-text page)) :shown (length shown)
                                       :ms (ms))
             (values (format nil "~A~:[~;~%[The page continues for ~:*~D more characters, not shown.]~]"
