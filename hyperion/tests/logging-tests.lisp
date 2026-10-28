@@ -182,13 +182,30 @@ the suite."
 
 (test query-keys-are-in-order-once-each-and-capped
   (is (equal '("page" "q") (hyperion/logging::%query-keys "page=1&q=x&page=2")))
-  (is (equal '("flag" "a b" "é") (hyperion/logging::%query-keys "flag&a+b=1&%C3%A9=2&=x&&")))
+  (multiple-value-bind (names bare) (hyperion/logging::%query-keys "flag&a+b=1&%C3%A9=2&=x&&")
+    (is (equal '("a b" "é") names) "a part with no = is not named: ~S" names)
+    (is (= 1 bare) "it is counted, and the empty parts are not: ~S" bare))
   (is (null (hyperion/logging::%query-keys "")))
   (is (null (hyperion/logging::%query-keys nil)))
   (let ((many (format nil "~{k~D=v~^&~}" (loop for i below 50 collect i))))
     (is (= 20 (length (hyperion/logging::%query-keys many))) "at most twenty names"))
   (let ((long (hyperion/logging::%query-keys (format nil "~A=1" (make-string 500 :initial-element #\n)))))
     (is (= 40 (length (first long))) "each cut to forty characters")))
+
+(test a-query-part-with-no-equals-is-counted-and-never-named
+  "The review of #1017: in /reset?<token>, the part with no = is usually a token, so the start
+line counts it as bare-parts and does not name it. The control is the same text before an =,
+where it is a name and is logged."
+  (let ((out (%log-start-line "TOKENQWERTYZXCV&page=2")))
+    (is (search "request start" out) "~A" out)
+    (is (null (search "TOKENQWERTYZXCV" out)) "the bare part is not logged: ~A" out)
+    (is (search "bare-parts" out) "it is counted: ~A" out)
+    (is (search "page" out) "the other names still are: ~A" out))
+  (let ((out (%log-start-line "TOKENQWERTYZXCV=1&page=2")))
+    (is (search "TOKENQWERTYZXCV" out) "control: as a name it is logged: ~A" out)
+    (is (null (search "bare-parts" out)) "and no bare part is counted: ~A" out))
+  (is (equal '(nil 2) (multiple-value-list (hyperion/logging::%query-keys "AAAA&BBBB")))
+      "two bare parts and no names"))
 
 (test a-query-that-does-not-parse-is-logged-as-unparsed-with-no-text-from-it
   (dolist (q '("ab%zz=SECRETVALUE" "%E2%82=SECRETVALUE" "a%2=SECRETVALUE"))

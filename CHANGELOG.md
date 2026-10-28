@@ -20,6 +20,8 @@ its tag.
   in it, went into the log, and an app could not stop it.
   - The `query` field is gone. The line has `query-keys` instead: the parameter names in the order
     they first appear, each once, at most 20, each cut to 40 characters, such as `(page q)`.
+  - A part with no `=`, as in `/reset?3f9a…`, is usually a token, so it is never named. The
+    line counts such parts as `bare-parts`.
   - A query whose names have a malformed `%` escape or are not UTF-8 is logged as
     `query-keys=unparsed`, with no text from it.
   - Log tooling that searched for `query` should search for `query-keys`.

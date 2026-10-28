@@ -149,23 +149,34 @@ when an escape is malformed or the octets are not UTF-8."
       (error () nil))))
 
 (defun %query-keys (query)
-  "The parameter names of QUERY, a raw query string, for the request start line: in the order
-they first appear, each once, at most +MAX-QUERY-KEYS+ of them, each cut to
-+MAX-QUERY-KEY-LENGTH+ characters. Never a value: a query string is a payload, and can carry
+  "The parameter names of QUERY, a raw query string, for the request start line, and how many of
+its parts have no = at all: (values NAMES BARE-PARTS).
+
+NAMES are in the order they first appear, each once, at most +MAX-QUERY-KEYS+ of them, each cut
+to +MAX-QUERY-KEY-LENGTH+ characters. Never a value: a query string is a payload, and can carry
 tokens and personal data (#1007). NIL for no query; :UNPARSED, with no text from it, when a name
-has a malformed escape or is not UTF-8."
-  (when (and (stringp query) (plusp (length query)))
-    (let ((names '()))
-      (dolist (part (uiop:split-string query :separator "&"))
-        (let* ((raw (subseq part 0 (or (position #\= part) (length part))))
-               (name (%decode-name raw)))
-          (cond ((null name) (return-from %query-keys :unparsed))
-                ((zerop (length name)))
-                (t (let ((cut (subseq name 0 (min (length name) +max-query-key-length+))))
-                     (unless (member cut names :test #'string=)
-                       (push cut names)
-                       (when (>= (length names) +max-query-keys+) (return))))))))
-      (nreverse names))))
+has a malformed escape or is not UTF-8.
+
+A part with no =, as in /reset?3f9a..., is counted in BARE-PARTS and never named, because such
+a part is usually a token rather than a name (the hub's review of #1017). An empty part, as in
+a&&b, is neither."
+  (if (and (stringp query) (plusp (length query)))
+      (let ((names '()) (bare 0) (full nil))
+        (dolist (part (uiop:split-string query :separator "&"))
+          (let ((equals (position #\= part)))
+            (cond ((zerop (length part)))
+                  ((null equals) (incf bare))
+                  (full)
+                  (t (let ((name (%decode-name (subseq part 0 equals))))
+                       (cond ((null name) (return-from %query-keys (values :unparsed bare)))
+                             ((zerop (length name)))
+                             (t (let ((cut (subseq name 0 (min (length name) +max-query-key-length+))))
+                                  (unless (member cut names :test #'string=)
+                                    (push cut names)
+                                    (when (>= (length names) +max-query-keys+)
+                                      (setf full t)))))))))))
+        (values (nreverse names) bare))
+      (values nil 0)))
 
 (defun wrap (app)
   "Clack middleware: give each request an id, bind it into the logging context so every
@@ -185,11 +196,14 @@ client sees."
           ;; The arrival line is redundant for quiet traffic -- the completion line already
           ;; says everything, and doubling the volume is the complaint.
           (unless quiet
-            (log:debug "request start" :method method :path path
-                                       ;; The names only, never the values (#1007).
-                                       :query-keys (%query-keys (getf env :query-string))
-                                       ;; The client, behind a trusted proxy too (#381).
-                                       :remote (proxy:client-address env)))
+            (multiple-value-bind (query-keys bare-parts) (%query-keys (getf env :query-string))
+             (log:debug "request start" :method method :path path
+                                        ;; The names only, never the values (#1007), and only
+                                        ;; a count of the parts with no = (the review of #1017).
+                                        :query-keys query-keys
+                                        :bare-parts (and (plusp bare-parts) bare-parts)
+                                        ;; The client, behind a trusted proxy too (#381).
+                                        :remote (proxy:client-address env))))
           (handler-bind
               ((cl:error (lambda (c)
                            ;; Never quieted, whatever the path.
