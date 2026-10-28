@@ -181,6 +181,38 @@ DSL covering both Spinneret-targeting HTML and Parenscript-targeting JS.
 Theming stays an **app-level hook** — neutral framework defaults plus app CSS passed in —
 so the generic layer never learns a specific app's colors.
 
+### Appearance: theme, contrast and look
+
+`hyperion/appearance` (#981) handles the three settings a visitor chooses. Each one is an
+attribute on `<html>`:
+
+| Attribute | Values | When absent |
+|---|---|---|
+| `data-theme` | `light`, `dark` | the system's `prefers-color-scheme` decides |
+| `data-contrast` | `normal`, `high` | the system's `prefers-contrast: more` decides |
+| `data-look` | `flat`, `gradient` | flat |
+
+**Storing the choice.** `read-appearance` and `persist-appearance` are the store protocol,
+the same shape as the locale store. Hyperion ships a cookie store. An app that keeps the
+choice in its own user table, or a desktop app that writes it to a file, supplies its own
+store. `html-attributes` turns a choice into the attributes for `<html>`, and it leaves out a
+setting that follows the system, so that the CSS media queries can decide.
+
+**Colours.** Components are coloured with the `--hy-*` tokens:
+- `surface`, `surface-raised`, `header`, `button`, `button-primary` and `button-danger`,
+  each with a `-text` token;
+- `--hy-space-1` to `--hy-space-7` for spacing.
+
+An app writes its values once, as a table with one plist per scheme (light, dark, and the
+high-contrast form of each). `appearance-css` generates the rules for all eight combinations.
+
+**Gradients and contrast.** The two looks use the same token names, so a component never
+checks which look is active. In the gradient look a background token may be a
+`linear-gradient`. Because of that, components set `background:`, not `background-color:`.
+`appearance-contrast-failures` checks every text token against its background in every
+combination, sampling along each gradient. An app runs it in its own tests, so a gradient that
+drops text below WCAG AA fails the build, not a visitor.
+
 ### The hot-reload dev loop — the signature feature
 
 The property everything else follows from: **state ≠ server.**

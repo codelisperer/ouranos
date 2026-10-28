@@ -108,6 +108,7 @@
                              (:file "i18n")     ; locale dictionaries + negotiation
                              (:file "page-meta") ; Open Graph + Twitter-card tags (#821); after i18n
                              (:file "consent")  ; cookie/tracking consent (GDPR/ePrivacy)
+                             (:file "appearance") ; theme, contrast and look, and the --hy-* tokens (#981)
                              (:file "static")   ; static asset serving
                              (:file "markdown") ; Markdown -> HTML (safe by default)
                              (:file "js")       ; Parenscript (poller + helpers)
@@ -733,5 +734,6 @@
                              (:file "import-tests")
                              (:file "markdown-tests")
                              (:file "html-attributes-tests")
-                             (:file "page-meta-tests"))))  ; after i18n-tests, whose %ATTR-P it uses
+                             (:file "page-meta-tests")  ; after i18n-tests, whose %ATTR-P it uses
+                             (:file "appearance-tests"))))
   :perform (test-op (op c) (uiop:symbol-call :hyperion/tests :run-tests)))
