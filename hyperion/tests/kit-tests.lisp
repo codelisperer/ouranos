@@ -149,6 +149,7 @@ the list's end, an unclosed <option> at the next one or at the select's end, and
 (defparameter *unsafe-hrefs*
   (list "javascript:alert(1)" " JavaScript:alert(1)"
         (format nil "java~Cscript:alert(1)" #\Tab)
+        (format nil "java~Cscript:alert(1)" #\Newline)
         "data:text/html,<b>x</b>" "vbscript:msgbox(1)")
   "Hrefs that must not become links, including the spellings a browser reads as javascript:.")
 
@@ -167,7 +168,10 @@ the list's end, an unclosed <option> at the next one or at the select's end, and
           "the text does not keep the button's class"))))
 
 (test http-https-and-relative-hrefs-stay-links
-  (dolist (href '("/drafts" "drafts?a=b:c" "#top" "https://example.com/x" "HTTP://example.com"))
+  ;; //host is a link to another host with the page's own scheme, http or https, so it is as
+  ;; safe as an https link written out.
+  (dolist (href '("/drafts" "drafts?a=b:c" "#top" "https://example.com/x" "HTTP://example.com"
+                  "//example.com/x"))
     (is (equal href (%attr (%one (%dom (lambda ()
                                          (page:breadcrumbs (list (cons "Home" href)
                                                                  (cons "Now" "/now")))))
@@ -428,6 +432,22 @@ and add no element and no attribute."
   (signals error (spin:with-html-string
                    (dlg:confirm-dialog "c" "Delete?" "Sure?" :action-label "Delete"))))
 
+(test the-confirm-refuses-an-action-with-a-script-scheme
+  "The confirm's action is a form's action, which a browser without htmx submits to, so an
+unsafe one is refused rather than written. A safe one is written as given."
+  (dolist (href *unsafe-hrefs*)
+    (signals error (spin:with-html-string
+                     (dlg:confirm-dialog "c" "Delete?" "Sure?" :action-href href
+                                                               :action-label "Delete"))
+      "the confirm was written with action ~S" href))
+  (dolist (href '("/drafts/delete" "https://example.com/d"))
+    (let ((form (%one (%dom (lambda ()
+                              (dlg:confirm-dialog "c" "Delete?" "Sure?" :action-href href
+                                                                        :action-label "Delete")))
+                      "form")))
+      (is (equal href (%attr form "action")))
+      (is (equal href (%attr form "hx-post"))))))
+
 (test the-notice-region-is-a-polite-status-region-that-starts-empty
   (let ((region (%one (%dom (lambda () (dlg:notice-region))) "div")))
     (is (equal dlg:*notice-region-id* (%attr region "id")))
@@ -516,13 +536,15 @@ the listeners do is checked in a browser by kit-browser-tests."
              "data-hy-dir")
       "the direction is marked for the script that drops it on a new sort key"))
 
-(test the-search-field-shows-the-current-search-and-survives-a-swap
+(test the-search-field-shows-the-current-search-and-is-marked-to-be-kept-by-htmx
   (let ((search (find "search" (%all (%toolbar "q=memo") "input")
                       :key (lambda (i) (%attr i "type")) :test #'equal)))
     (is (equal "q" (%attr search "name")))
     (is (equal "memo" (%attr search "value")))
     (is (equal "Search" (%attr search "aria-label")))
     (is (equal "hy-toolbar-search" (%attr search "id")) "htmx restores focus by id")
+    (is (equal "Apply" (%text (car (last (%all (%one (%toolbar "q=memo") "form") "button")))))
+        "the submit button's label is not the field's")
     (is (%attr search "hx-preserve"))))
 
 (test a-filter-select-starts-with-all-and-marks-the-current-value
@@ -556,7 +578,29 @@ request, and the trash toggle's value is looked up the same way."
                               :key (lambda (s) (%attr s "name")) :test #'equal)
                         "option")))
     (is (equal '("" "p1" "p2") (mapcar (lambda (o) (%attr o "value")) options)))
-    (is (equal '(nil nil t) (mapcar (lambda (o) (and (%attr o "selected") t)) options)))))
+    (is (equal '(nil nil t) (mapcar (lambda (o) (and (%attr o "selected") t)) options)))
+    (let ((trash (find "trash" (%all dom "button")
+                       :key (lambda (b) (%attr b "data-value")) :test #'equal)))
+      (is-true trash "the trash toggle was written from this request's choices")
+      (is (equal "false" (%attr trash "aria-pressed"))))))
+
+(test the-toolbar-signals-for-a-request-whose-choices-lack-the-trash-value
+  "TRASH-VALUE has to be among the trash filter's choices for each request, so a :values function
+that leaves it out for some requests makes LIST-TOOLBAR signal on those requests only."
+  (let ((spec (list:make-list-spec
+               :id "drafts" :tiebreak :id
+               :filters (list (list :where :values (lambda (env) (getf env :wheres)))))))
+    (flet ((writes (wheres)
+             (spin:with-html-string
+               (tb:list-toolbar (list:read-list-state spec (list :query-string "" :wheres wheres))
+                                :trash :where))))
+      (is (search "data-value=trash" (remove #\" (writes '("active" "trash"))))
+          "a request whose choices have it")
+      ;; The message is checked, so an error from somewhere else in the toolbar does not pass.
+      (let ((message (handler-case (progn (writes '("active" "archived")) nil)
+                       (error (e) (princ-to-string e)))))
+        (is (and message (search "\"trash\" is not a value of filter :WHERE" message))
+            "a request whose choices lack it: ~S" message)))))
 
 (test the-sort-select-marks-the-current-key
   (let ((select (find "sort" (%all (%toolbar "sort=title") "select")
@@ -611,19 +655,37 @@ request, and the trash toggle's value is looked up the same way."
 
 ;;; --- rows and the properties panel ------------------------------------------------
 
-(test a-selectable-row-loads-its-panel-and-says-which-it-controls
-  (let* ((row (%one (%dom (lambda ()
-                            (spin:with-html
-                              (:table (:tr :attrs (panel:selectable-row 7 "/drafts/7/panel")
-                                        (:td "Memo"))))))
-                    "tr")))
+(test a-selectable-row-is-chosen-by-its-button-and-by-a-click-on-the-row
+  "The row is not a tab stop and has no role: the button in its first cell is the control a
+keyboard reaches, and Enter and Space press it because it is a <button>. The row loads the same
+panel on a click that did not come from a control inside it."
+  (let* ((dom (%dom (lambda ()
+                      (spin:with-html
+                        (:table (:tr :attrs (panel:selectable-row 7 "/drafts/7/panel")
+                                  (:td (panel:row-activator 7 "/drafts/7/panel" "Memo"))
+                                  (:td (:button :type "button" "Star"))))))))
+         (row (%one dom "tr"))
+         (open (%by-id dom "row-7-open")))
     (is (equal "row-7" (%attr row "id")))
-    (is (equal "0" (%attr row "tabindex")) "a tab stop, so Enter can reach it")
+    (is (null (%attr row "tabindex")) "the row is not a tab stop")
+    (is (null (%attr row "role")))
     (is (equal "/drafts/7/panel" (%attr row "hx-get")))
     (is (equal "#hy-panel" (%attr row "hx-target")))
     (is (equal "hy-panel" (%attr row "aria-controls")))
-    (is (search "keydown[key=='Enter'" (%attr row "hx-trigger")))
-    (is (null (%attr row "aria-current")))))
+    (is (null (%attr row "aria-current")))
+    (let ((trigger (%attr row "hx-trigger")))
+      (is (search "click[" trigger) "the row answers a click")
+      (is (search "!target.closest('a, button, input, select, textarea" trigger)
+          "a click from an inner link, button or field is not the row's: ~S" trigger)
+      (is (null (search "keydown" trigger)) "keys are the button's"))
+    (is-true open "the button is in the first cell")
+    (is (equal "button" (plump:tag-name open)))
+    (is (equal "button" (%attr open "type")))
+    (is (equal "Memo" (%text open)))
+    (is (equal "/drafts/7/panel" (%attr open "hx-get")))
+    (is (equal "#hy-panel" (%attr open "hx-target")))
+    (is (equal "hy-panel" (%attr open "aria-controls")))
+    (is (%attr open "data-hy-row-activator"))))
 
 (test the-selected-row-is-current
   (is (equal "true" (getf (panel:selectable-row 7 "/p" :selected t) :aria-current)))

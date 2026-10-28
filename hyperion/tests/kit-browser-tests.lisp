@@ -222,8 +222,11 @@ toolbar drop it when the sort key changes.")
         (:table
           (:tbody
             (dolist (d rows)
-              (:tr :attrs (hyperion/kit/panel:selectable-row (first d) (format nil "/kit/panel/~D" (first d)))
-                (:td (second d))))))))))
+              (let ((href (format nil "/kit/panel/~D" (first d))))
+                (:tr :attrs (hyperion/kit/panel:selectable-row (first d) href)
+                  (:td (hyperion/kit/panel:row-activator (first d) href (second d)))
+                  ;; A control of the row's own, which must not open the panel.
+                  (:td (:button :type "button" :id (format nil "star-~D" (first d)) "Star")))))))))))
 
 (defparameter *kit-list-scenario* "
 var r = [];
@@ -248,12 +251,14 @@ var steps = [
     pick('select[name=status]', ''); },
   function () { log('all-url', location.search); byId('row-2').click(); },
   function () { log('click-panel', panelTitle()); log('click-current', current());
-    byId('row-1').focus(); key(byId('row-1'), 'Enter'); },
-  function () { log('enter-panel', panelTitle()); log('enter-current', current());
+    log('row-tabindex', byId('row-1').getAttribute('tabindex'));
+    byId('row-1-open').focus(); byId('row-1-open').click(); },
+  function () { log('button-panel', panelTitle()); log('button-current', current());
     q('#hy-panel [data-hy-panel-close]').focus(); key(document.activeElement, 'Escape');
     log('esc-empty', !q('#hy-panel .hy-properties')); log('esc-focus', act()); byId('row-2').click(); },
   function () { q('#hy-panel [data-hy-panel-close]').click();
-    log('x-empty', !q('#hy-panel .hy-properties')); log('x-focus', act());
+    log('x-empty', !q('#hy-panel .hy-properties')); log('x-focus', act()); byId('star-3').click(); },
+  function () { log('star-empty', !q('#hy-panel .hy-properties')); log('star-current', current());
     log('htmx', !!window.htmx); log('done', 'yes'); }
 ];
 var i = 0;
@@ -309,9 +314,11 @@ same parameters compare equal."
 
 (test the-list-toolbar-and-the-properties-panel-in-a-real-browser
   "The toolbar's requests carry the parameters LIST-HREF writes for the same change, and the
-search field keeps focus and its text across the swap; a row loads its panel on a click and on
-Enter and becomes the current row; Escape and the close button empty the panel and put focus
-back on the current row."
+search field keeps focus and its text across the swap; a row loads its panel on a click on the
+row and from its button, and becomes the current row, and a click on another control in the row
+loads nothing; Escape and the close button empty the panel and put focus back on the current
+row's button. The button is a <button>, so the browser presses it on Enter and Space; a script
+cannot test that with a keydown it makes, because a browser does not activate a button for one."
   (let ((browser (%smoke-browser)))
     (if (null browser)
         (skip "No Chrome or Edge found; set HYPERION_SMOKE_BROWSER to run the kit list page")
@@ -357,12 +364,15 @@ back on the current row."
                    (is (same-query "all-url" h4) "All leaves the filter out: ~S, ~S" (saw "all-url") h4)
                    (is (equal "Meeting_notes" (saw "click-panel")))
                    (is (equal "row-2" (saw "click-current")))
-                   (is (equal "Memo_to_staff" (saw "enter-panel")) "Enter on a row loads its panel")
-                   (is (equal "row-1" (saw "enter-current")) "and makes it the current row")
+                   (is (equal "null" (saw "row-tabindex")) "the row is not a tab stop")
+                   (is (equal "Memo_to_staff" (saw "button-panel")) "the row's button loads its panel")
+                   (is (equal "row-1" (saw "button-current")) "and makes it the current row")
                    (is (equal "true" (saw "esc-empty")) "Escape closes the panel")
-                   (is (equal "row-1" (saw "esc-focus")) "focus back on the current row")
+                   (is (equal "row-1-open" (saw "esc-focus")) "focus back on the current row's button")
                    (is (equal "true" (saw "x-empty")) "the close button closes it")
-                   (is (equal "row-2" (saw "x-focus")))
+                   (is (equal "row-2-open" (saw "x-focus")))
+                   (is (equal "true" (saw "star-empty")) "a control inside a row does not load its panel")
+                   (is (equal "row-2" (saw "star-current")) "nor change the current row")
                    (is (equal "true" (saw "htmx")))))
             (ignore-errors (hyperion/server:stop handler))
             (is (ports:await-released port) "the port was still accepting after teardown"))))))

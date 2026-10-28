@@ -241,9 +241,22 @@
   color: var(--hy-surface-raised-text, var(--bulma-text-strong));
 }
 
-.hy-row:focus-visible {
+/* The button that chooses a row, in its first cell. It looks like the cell's text, so the row
+   reads as a row, and shows the focus ring when the keyboard reaches it. */
+.hy-row-activator {
+  appearance: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+
+.hy-row-activator:focus-visible {
   outline: 2px solid var(--hy-focus-ring, var(--bulma-focus-color, var(--bulma-link)));
-  outline-offset: -2px;
+  outline-offset: 2px;
 }
 
 .hy-properties {

@@ -187,7 +187,7 @@ for long reading text.")
      :header "#23272e" :header-text "#f0f2f5"
      :button "#2a2e36" :button-text "#e6e8eb"
      :button-primary "#00d1b2" :button-primary-text "#0b0c0e"
-     :button-danger "#f14668" :button-danger-text "#0b0c0e"
+     :button-danger "#f14668" :button-danger-text "#000000"
      :focus-ring "#7a9cff"
      :gradient
      (:surface (:gradient "#181a1f" "#111317")
@@ -281,14 +281,15 @@ way, so an app can change one gradient token and keep the rest."
 (defun %merge-fixed (what defaults given)
   "DEFAULTS, a plist of CSS values, with each key in GIVEN replaced. Signals on a key DEFAULTS
 does not have, and on a value that is not a non-empty string or that holds a character that
-would end the declaration or the rule it is written into."
+would end the declaration or the rule it is written into: a semicolon, a brace, <, or a line
+break, LF or CR."
   (let ((out (copy-list defaults)))
     (loop for (key value) on given by #'cddr
           do (unless (getf defaults key)
                (error "~A: ~S is not one of ~S." what key
                       (loop for (k) on defaults by #'cddr collect k)))
              (unless (and (stringp value) (plusp (length value))
-                          (not (find-if (lambda (c) (find c (format nil ";{}<~%"))) value)))
+                          (not (find-if (lambda (c) (find c '(#\; #\{ #\} #\< #\Newline #\Return))) value)))
                (error "~A ~(~A~): ~S is not a CSS value." what key value))
              (setf (getf out key) value))
     out))
@@ -329,6 +330,12 @@ given for a text token or the focus ring."
                            (getf scheme token))))))
 
 ;;; --- CSS --------------------------------------------------------------------
+
+(defun %channels-of (hex)
+  "The red, green and blue of HEX, \"#rrggbb\", as integers from 0 to 255."
+  (list (parse-integer hex :start 1 :end 3 :radix 16)
+        (parse-integer hex :start 3 :end 5 :radix 16)
+        (parse-integer hex :start 5 :end 7 :radix 16)))
 
 (defun %css-value (value)
   (if (consp value)
@@ -391,15 +398,27 @@ the two kinds of rule never match the same page."
   "Bulma classes the gradient look applies its tokens to: the selector, the background
 token, and descendants that carry their own text colour and must take the token's text
 colour too. A button's outlined, light and inverted variants keep Bulma's own colours,
-because they are not filled with the button's colour. Hover is left to Bulma.")
+because they are not filled with the button's colour. The filled buttons, *GRADIENT-BUTTONS*,
+also get hover, press and focus rules, because the background given here replaces the one Bulma
+changes on hover.")
 
 (defparameter *gradient-buttons* '(:button-primary :button-danger)
   "The background tokens in *GRADIENT-TARGETS* that fill a button, which get hover, press and
 focus rules.")
 
-(defparameter *hover-overlay* "rgba(128, 128, 128, 0.14)"
-  "The layer drawn over a button's background on hover. Grey, so it darkens a light button and
-lightens a dark one.")
+(defparameter *hover-overlay-colour* "#808080"
+  "The colour of the layer drawn over a button's background on hover. Grey, so it darkens a
+light button and lightens a dark one.")
+
+(defparameter *hover-overlay-alpha* 0.14d0
+  "How opaque the hover layer is.")
+
+(defparameter *hover-overlay*
+  (format nil "rgba(~{~D, ~}~,2F)" (%channels-of *hover-overlay-colour*) *hover-overlay-alpha*)
+  "The hover layer as CSS. hyperion/kit's kit.css writes the same layer for its own buttons.")
+
+(defparameter *pressed-brightness* 0.92d0
+  "The brightness filter a pressed button gets, which darkens its text and its fill alike.")
 
 (defun %gradient-targets (out)
   (loop for (selector token . children) in *gradient-targets*
@@ -451,9 +470,7 @@ page without data-contrast it shows the bare :root rule's light, flat look."
 ;;; --- contrast check ------------------------------------------------------------
 
 (defun %channels (hex)
-  (list (parse-integer hex :start 1 :end 3 :radix 16)
-        (parse-integer hex :start 3 :end 5 :radix 16)
-        (parse-integer hex :start 5 :end 7 :radix 16)))
+  (%channels-of hex))
 
 (defun relative-luminance (hex)
   "WCAG 2 relative luminance of HEX, \"#rrggbb\"."
@@ -486,14 +503,36 @@ browser draws a gradient by default."
                                    (list b)))))
       (list value)))
 
-(defun %worst-sample (text background)
-  "The sample of BACKGROUND with the lowest contrast against TEXT, and that contrast, as a
-cons."
+(defun %brightness (hex factor)
+  "HEX with each channel multiplied by FACTOR, as CSS's brightness() filter draws it."
+  (format nil "#~{~2,'0X~}" (mapcar (lambda (c) (min 255 (round (* c factor)))) (%channels hex))))
+
+(defparameter *button-tokens* '(:button :button-primary :button-danger)
+  "The background tokens that fill a button. Their text is checked on the fill as it is drawn
+at rest, on hover and when pressed.")
+
+(defun %state-colours (state text sample)
+  "The (TEXT . BACKGROUND) colours a button with TEXT on SAMPLE is drawn in, in STATE. :HOVER
+lays the hover layer over the background. :PRESSED dims both by *PRESSED-BRIGHTNESS*, with and
+without the hover layer, because a pointer presses a hovered button and a keyboard presses one
+that is not hovered."
+  (let ((hovered (%mix sample *hover-overlay-colour* *hover-overlay-alpha*)))
+    (ecase state
+      (:resting (list (cons text sample)))
+      (:hover (list (cons text hovered)))
+      (:pressed (let ((dim (%brightness text *pressed-brightness*)))
+                  (list (cons dim (%brightness sample *pressed-brightness*))
+                        (cons dim (%brightness hovered *pressed-brightness*))))))))
+
+(defun %worst-sample (text background &optional (state :resting))
+  "The background colour, among BACKGROUND's samples drawn in STATE, with the lowest contrast
+against the text, and that contrast, as a cons."
   (let ((worst nil))
     (dolist (sample (background-samples background) worst)
-      (let ((ratio (contrast-ratio text sample)))
-        (when (or (null worst) (< ratio (cdr worst)))
-          (setf worst (cons sample ratio)))))))
+      (loop for (fg . bg) in (%state-colours state text sample)
+            for ratio = (contrast-ratio fg bg)
+            when (or (null worst) (< ratio (cdr worst)))
+              do (setf worst (cons bg ratio))))))
 
 (defparameter *minimum-contrast* 4.5d0
   "WCAG 2 level AA for normal-size text.")
@@ -504,10 +543,12 @@ cons."
 (defun appearance-contrast-failures (&optional (table (make-appearance-table)))
   "Every pair in TABLE that falls below WCAG AA, in any of the eight combinations of theme,
 contrast and look: each text token against its background at 4.5:1, and the focus ring against
-each of *RING-BACKGROUNDS* at 3:1. Each failure is a plist (:THEME :CONTRAST :LOOK :TEXT
-:BACKGROUND :COLOUR :RATIO :REQUIRED), where :TEXT is the text token or :FOCUS-RING, :COLOUR is
-the darkest or lightest sample of the background that failed, and :REQUIRED the ratio it had to
-reach. NIL means every pair passes. An app calls this in its own tests on its own table."
+each of *RING-BACKGROUNDS* at 3:1. A button's text is checked on its fill at rest, on hover and
+when pressed (*BUTTON-TOKENS*, %STATE-COLOURS). Each failure is a plist (:THEME :CONTRAST :LOOK
+:TEXT :BACKGROUND :STATE :COLOUR :RATIO :REQUIRED), where :TEXT is the text token or
+:FOCUS-RING, :STATE is :RESTING, :HOVER or :PRESSED, :COLOUR is the darkest or lightest
+background colour that failed, as drawn in that state, and :REQUIRED the ratio it had to reach.
+NIL means every pair passes. An app calls this in its own tests on its own table."
   (let ((failures '()))
     (dolist (theme *themes*)
       (dolist (contrast *contrasts*)
@@ -519,10 +560,15 @@ reach. NIL means every pair passes. An app calls this in its own tests on its ow
                                (loop for background in *ring-backgrounds*
                                      collect (list :focus-ring background
                                                    *minimum-ring-contrast*)))
-                  for worst = (%worst-sample (getf values fg-token) (getf values background))
-                  when (< (cdr worst) required)
-                    do (push (list :theme theme :contrast contrast :look look
-                                   :text fg-token :background background
-                                   :colour (car worst) :ratio (cdr worst) :required required)
-                             failures))))))
+                  do (dolist (state (if (member background *button-tokens*)
+                                        '(:resting :hover :pressed)
+                                        '(:resting)))
+                       (let ((worst (%worst-sample (getf values fg-token) (getf values background)
+                                                   state)))
+                         (when (< (cdr worst) required)
+                           (push (list :theme theme :contrast contrast :look look
+                                       :text fg-token :background background :state state
+                                       :colour (car worst) :ratio (cdr worst)
+                                       :required required)
+                                 failures)))))))))
     (nreverse failures)))

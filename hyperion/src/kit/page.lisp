@@ -11,7 +11,7 @@
   (:documentation
    "The page header (PAGE-HEADER), breadcrumbs (BREADCRUMBS) and empty state (EMPTY-STATE)
     of a collection page, written with Spinneret.")
-  (:export #:page-header #:breadcrumbs #:empty-state))
+  (:export #:page-header #:breadcrumbs #:empty-state #:safe-href-p))
 
 (in-package #:hyperion/kit/page)
 
@@ -30,8 +30,9 @@ an href, never allow one."
     (when (and colon (or (null stop) (< colon stop)))
       (string-downcase (subseq url 0 colon)))))
 
-(defun %safe-href-p (href)
-  "True when HREF is a string whose scheme is http or https, or which has no scheme. A
+(defun safe-href-p (href)
+  "True when HREF is a string whose scheme is http or https, or which has no scheme. Every kit
+component that writes an app's href into the page checks it with this first. A
 character reference cannot hide a colon from this check, because Spinneret escapes the
 ampersand, so the browser reads `&#58;' as those five characters."
   (and (stringp href)
@@ -47,7 +48,7 @@ into the page: BODY is written as plain text in a <span>, with no link and no CL
 does not look like something that can be pressed. Nothing is signalled, because the HREF
 usually comes from data the app stores, and a page that fails to render over one bad value is
 worse than a missing link."
-  (if (%safe-href-p href)
+  (if (safe-href-p href)
       (spin:with-html
         (:a :href href :class class
             :hx-get (and hx-target href) :hx-target hx-target
