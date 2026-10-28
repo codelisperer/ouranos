@@ -368,3 +368,57 @@ the number the earlier step passes in."
         "with one carried earlier:~%~A" one)
     (is (search "build-desktop-app: 0 of this tree's native libraries carried into the bundle." none)
         "with none carried earlier:~%~A" none)))
+
+;;; --- a carried tree library gets a relative install name on macOS (#957) ------------------
+
+(defun %tree-carry-install-name (stamp)
+  "Build the carry-natives fixture's dylibs under a fresh vendor/fix/lib/, then, in a child
+image with CFFI, open libfixb.dylib from there and run CARRY-NATIVE-LIBRARIES with that vendor/
+into a fresh bundle, with OURANOS-CARRY::*STAMP* bound to STAMP. Returns the carried copy's
+install name and the child's output, or NIL when the fixture could not be built. A child image,
+because CARRY-NATIVE-LIBRARIES carries what CFFI has open, and this suite does not load CFFI."
+  (let* ((tree (%fresh-tree))
+         (lib (ensure-directories-exist (merge-pathnames "vendor/fix/lib/" tree)))
+         (bundle (ensure-directories-exist (merge-pathnames "bundle/" tree))))
+    (unwind-protect
+         (when (%dylib-pair lib)
+           (let* ((forms
+                    (list "(require :asdf)"
+                          "(load (merge-pathnames \"quicklisp/setup.lisp\" (user-homedir-pathname)))"
+                          "(let ((*standard-output* (make-broadcast-stream))) (asdf:load-system :cffi))"
+                          (format nil "(load ~S)" (uiop:native-namestring
+                                                   (merge-pathnames "tree-natives.lisp" *scripts*)))
+                          (format nil "(setf ouranos-tree-natives:*vendor* (pathname ~S))"
+                                  (uiop:native-namestring (merge-pathnames "vendor/" tree)))
+                          (format nil "(cffi:load-foreign-library ~S)"
+                                  (uiop:native-namestring (merge-pathnames "libfixb.dylib" lib)))
+                          (format nil "(let ((ouranos-tree-natives:*bundle* (pathname ~S)) (ouranos-tree-natives::*carried-list* nil) (ouranos-tree-natives::*lazy-natives* nil) (ouranos-tree-natives::*label* \"test\") (ouranos-tree-natives::*product* \"the bundle\") (ouranos-carry::*stamp* ~S)) (ouranos-tree-natives:carry-native-libraries))"
+                                  (uiop:native-namestring bundle) stamp)))
+                  (out (uiop:run-program
+                        (append (list (uiop:native-namestring sb-ext:*runtime-pathname*)
+                                      "--noinform" "--no-userinit" "--no-sysinit" "--non-interactive")
+                                (loop for f in forms append (list "--eval" f)))
+                        :output :string :error-output :output :ignore-error-status t))
+                  (carried (merge-pathnames "libfixb.dylib" bundle)))
+             (values (and (probe-file carried)
+                          (second (uiop:split-string
+                                   (string-trim '(#\Newline)
+                                                (uiop:run-program (list "otool" "-D" (uiop:native-namestring carried))
+                                                                  :output :string :ignore-error-status t))
+                                   :separator '(#\Newline))))
+                     out)))
+      (aion/fs:delete-tree tree :if-does-not-exist :ignore))))
+
+(test a-carried-tree-library-is-stamped-with-a-relative-install-name
+  "#957: the tree's libuv was carried with the install name it was built with, an absolute path
+under vendor/. CARRY-NATIVE-LIBRARIES now stamps a carried library @executable_path/<name>.
+Control: with the stamp off, the carried copy keeps the path under the fixture's vendor/."
+  (let ((why (%relink-skip-reason)))
+    (if why
+        (skip why)
+        (progn
+          (multiple-value-bind (name out) (%tree-carry-install-name t)
+            (is (equal "@executable_path/libfixb.dylib" name) "install name ~S:~%~A" name out))
+          (multiple-value-bind (name out) (%tree-carry-install-name nil)
+            (is (and name (char= #\/ (char name 0)) (search "/vendor/fix/lib/libfixb.dylib" name))
+                "control: without the stamp, the vendor/ path, got ~S:~%~A" name out))))))

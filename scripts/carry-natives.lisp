@@ -42,6 +42,7 @@
            #:carry-declared-libraries
            #:carry-refused
            #:open-carried-libraries #:runtime-directory
+           #:stamp-install-name
            #:sqlite-file-name
            #:tree-sqlite-carry))
 
@@ -189,14 +190,52 @@ test turns it off, as the control for the relink.")
       (uiop:run-program args :output :string :error-output :string :ignore-error-status t)
     (values (concatenate 'string out err) code)))
 
+(defun %install-name (file)
+  "FILE's own install name, as otool -D prints it, or NIL for a file that has none."
+  (multiple-value-bind (out code) (%run-tool (list "otool" "-D" (uiop:native-namestring file)))
+    (and (eql code 0)
+         (second (uiop:split-string (string-trim '(#\Newline) out) :separator '(#\Newline))))))
+
+(defvar *stamp* t
+  "Whether STAMP-INSTALL-NAME changes anything. Only a test turns it off, as the control for
+the stamp.")
+
+(defun stamp-install-name (file &key (report *standard-output*))
+  "On macOS, when FILE, a dylib just copied into a bundle, has an absolute install name, set it
+to @executable_path/<file name> and re-sign FILE ad hoc (#957). Returns the new install name
+when it changed FILE, otherwise NIL.
+
+A dylib built outside a bundle keeps the path it was built at as its install name, such as the
+tree's vendor/libuv/lib/libuv.1.dylib or a Homebrew prefix. Nothing loads a carried copy by that
+name, but the shipped file would then carry a path from the build machine. @executable_path/ is
+where the copy is, beside the executable, and the form the runtime's own load commands use
+(ADR-0014). An install name that is already relative, such as ./libpdfium.dylib, names no
+machine and is left as it is. Changing the install name invalidates the signature, and arm64
+does not load an invalidly signed dylib, so FILE is re-signed with `codesign --force -s -'.
+
+Signals CARRY-REFUSED when install_name_tool or codesign fails."
+  (when (and *stamp* (uiop:os-macosx-p))
+    (let ((id (%install-name file))
+          (path (uiop:native-namestring file)))
+      (when (and id (plusp (length id)) (char= (char id 0) #\/))
+        (let ((new (concatenate 'string "@executable_path/" (file-namestring file))))
+          (multiple-value-bind (out code) (%run-tool (list "install_name_tool" "-id" new path))
+            (unless (eql code 0)
+              (error 'carry-refused :path file
+                                    :reason (format nil "install_name_tool could not set its install name to ~A: ~A" new out))))
+          (multiple-value-bind (out code) (%run-tool (list "codesign" "--force" "-s" "-" path))
+            (unless (eql code 0)
+              (error 'carry-refused :path file
+                                    :reason (format nil "codesign could not re-sign it after its install name changed: ~A" out))))
+          (format report "~&            install name is now ~A~%" new)
+          new)))))
+
 (defun %macho-dependencies (file)
   "The install names FILE's load commands name, as otool -L lists them, without FILE's own
 install name (otool -D). NIL for a file that is not a Mach-O."
   (multiple-value-bind (out code) (%run-tool (list "otool" "-L" (uiop:native-namestring file)))
     (when (eql code 0)
-      (let ((own (second (uiop:split-string
-                          (string-trim '(#\Newline) (%run-tool (list "otool" "-D" (uiop:native-namestring file))))
-                          :separator '(#\Newline)))))
+      (let ((own (%install-name file)))
         (loop for line in (rest (uiop:split-string out :separator '(#\Newline)))
               for trimmed = (string-trim '(#\Space #\Tab) line)
               for dep = (subseq trimmed 0 (or (position #\Space trimmed) (length trimmed)))
@@ -309,6 +348,7 @@ OPEN-CARRIED-LIBRARIES opens at startup."
                (unless (uiop:os-windows-p)
                  (uiop:run-program (list "chmod" "+x" (uiop:native-namestring dst)) :ignore-error-status t))
                (format report "~&  carry     ~A  <- ~A~%" name (uiop:native-namestring truename))
+               (stamp-install-name dst :report report)
                (dolist (license licenses)
                  (%copy-license license (pathname-name name) bundle report))
                (cond

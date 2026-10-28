@@ -2234,6 +2234,18 @@ its tag.
 
 ### Fixed
 
+- **macOS bundles: a carried dylib no longer keeps the build machine's path as its install
+  name** (#957). The tree's libuv was carried with the install name it was built with, an
+  absolute path under the build machine's `vendor/`, and a library the runtime links, such as
+  Homebrew's libzstd, kept its Homebrew path. Nothing loaded them by those names, but the
+  shipped files named paths on the build machine. `build-desktop-app.lisp` and `cons bin` now
+  set each carried dylib whose install name is an absolute path to
+  `@executable_path/<file name>` and re-sign it ad hoc, through the new
+  `ouranos-carry:stamp-install-name` in `scripts/carry-natives.lisp`. An install name that is
+  already relative, such as `./libpdfium.dylib`, is left as it is.
+  `scripts/verify-bundle-macos.sh` warns, in its new check 1b, about any carried dylib whose
+  install name is an absolute path outside the bundle.
+
 - **aion/http-client: a pinned https request refuses a certificate whose common name matches
   the host when its subject alternative names do not** (#917). On Linux and macOS, cl+ssl checks
   a certificate's common name whenever none of its alternative names match, which RFC 6125

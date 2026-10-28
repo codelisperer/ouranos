@@ -635,6 +635,10 @@ nothing."
                (uiop:copy-file source dst)
                (uiop:run-program (list "chmod" "+x" (namestring dst)) :ignore-error-status t)
                (format t "~&  carry     ~A  <- ~A~%" (file-namestring dst) (human-path:human-path source))
+               (handler-case (ouranos-carry:stamp-install-name dst) ; #957
+                 (ouranos-carry:carry-refused (e)
+                   (format *error-output* "~&build-desktop-app: ~A~%" e)
+                   (sb-ext:exit :code 3)))
                ;; Homebrew keeps the license at the formula prefix: <prefix>/lib/x.dylib
                ;; -> <prefix>/LICENSE*. We ship the code, so we ship the license.
                (let* ((prefix (uiop:pathname-parent-directory-pathname
