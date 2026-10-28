@@ -51,8 +51,10 @@ This is the decode point. JSON has four scalar shapes and CL has thousands of ty
 something has to choose -- and choosing here, once per field, is what lets the renderer be
 total. A real number and a boolean become JSON literals; everything else becomes a string,
 including symbols and keywords (downcased, as before) and any object at all via its printed
-representation. The result is opaque to this file: built by Coalton, handed straight back
-to it, never inspected."
+representation, except a condition, which becomes its type (CONDITION-TYPE), never its report.
+That rule is kept here so that it does not depend on every caller remembering it: a report can
+quote outside data (#1013). The result is opaque to this file: built by Coalton, handed
+straight back to it, never inspected."
   (let ((k (%name key)))
     (typecase value
       (null    (types:mk-field-raw k "false"))
@@ -67,6 +69,7 @@ to it, never inspected."
                      (types:mk-field-string k (princ-to-string value)))))
       (string  (types:mk-field-string k value))
       (symbol  (types:mk-field-string k (string-downcase (symbol-name value))))
+      (condition (types:mk-field-string k (condition-type value)))
       (t       (types:mk-field-string k (princ-to-string value))))))
 
 (defun %fields (extra)

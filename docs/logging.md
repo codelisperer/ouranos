@@ -49,7 +49,7 @@ request body. So a log line names a condition by its type, never by its report (
 
 ```lisp
 (log:exception e "request failed")                                ; type and frame names
-(log:warn "provider call failed" :error-type (type-of e))         ; yes
+(log:warn "provider call failed" :condition (log:condition-type e)) ; yes
 (log:warn "provider call failed" :error (princ-to-string e))      ; no: the report
 ```
 
