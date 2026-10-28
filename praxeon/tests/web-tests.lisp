@@ -137,6 +137,68 @@ a question that has nothing to do with the network."
           "praxeon/web does not export ~A (status ~S)" name status)
       (is-true (fboundp symbol) "praxeon/web:~A is exported but not fbound" name))))
 
+;;; --- calling the app as a server would ----------------------------------------
+;;;
+;;; The surface tests below call the Clack app with an env they build, rather than over a
+;;; socket: the property under test is what the app answers, and a server would add a port and
+;;; a thread to every one of them.
+
+(defun %call (app method path &key query json form)
+  "Call APP, a Clack app, with a request for METHOD and PATH, and return (values STATUS HEADERS
+BODY). QUERY is the query string. JSON or FORM, a string, is the body, sent as application/json
+or as a urlencoded form."
+  (let* ((headers (make-hash-table :test 'equal))
+         (env (list :request-method method :path-info path :query-string query
+                    :headers headers
+                    :content-type (cond (json "application/json")
+                                        (form "application/x-www-form-urlencoded")))))
+    (when (or json form)
+      (setf env (hyperion/http:cache-body-string env (or json form))))
+    (destructuring-bind (status hdrs body) (funcall app env)
+      (values status hdrs (format nil "~{~A~}" body)))))
+
+(defun %echo-app (&rest keys)
+  "An app whose turn answers \"echo: MESSAGE\" and fails for the message \"fail\". KEYS go to
+MAKE-APP."
+  (apply #'web:make-app
+         :agent-name "Echo"
+         :responder (lambda (agent message locale)
+                      (declare (ignore agent locale))
+                      (if (string= message "fail")
+                          (error "the responder failed")
+                          (format nil "echo: ~A" message)))
+         keys))
+
+(defun %say (app text &key query)
+  "Send TEXT through APP's JSON path, which runs the turn before it answers. Returns the status."
+  (values (%call app :post "/api/message" :query query
+                 :json (format nil "{\"message\":\"~A\"}" text))))
+
+(defun %poll (app after &key query)
+  "The body of a poll of APP from cursor AFTER (none when NIL). QUERY is added to the query
+string."
+  (nth-value 2 (%call app :get "/api/progress"
+                      :query (format nil "~@[after=~D~]~:[~;&~]~@[~A~]"
+                                     after (and after query) query))))
+
+(defun %sends-the-cursor-p (html)
+  "Whether HTML has an hx-include of #px-cursor, quoted or not."
+  (let ((at (search "hx-include=" html)))
+    (and at
+         (let ((v (+ at (length "hx-include="))))
+           (when (and (< v (length html)) (char= (char html v) #\")) (incf v))
+           (eql v (search "#px-cursor" html :start2 v))))))
+
+(defun %cursor-in (html)
+  "The index in HTML's px-cursor field, or NIL. Spinneret leaves an attribute value unquoted when
+it can, so the value is read after `value=' with or without a quote."
+  (let* ((at (search "px-cursor" html))
+         (v (and at (search "value=" html :start2 at)))
+         (start (and v (+ v 6))))
+    (when (and start (< start (length html)) (char= (char html start) #\"))
+      (incf start))
+    (and start (parse-integer html :start start :junk-allowed t))))
+
 ;;; --------------------------------------------------------------------------
 ;;; The output style is the app's, not the image's (pre-publication issue 469)
 ;;; --------------------------------------------------------------------------
@@ -144,19 +206,18 @@ a question that has nothing to do with the network."
 (in-suite praxeon-web)
 
 (defun %bubble-from-turn (style)
-  "Run one turn on a conversation rendering in STYLE and return the bubble it produced.
+  "Run one turn through an app rendering in STYLE and return the poll that shows its reply.
 
-Drives `%run-turn-async' directly rather than going through HTTP, because the property under
-test is that the TURN THREAD renders in the app's style -- and that thread is the thing HTTP
-would hide behind a poll."
-  (let ((conv (web::make-conversation
-               :agent-name "Test"
-               :output-style style
-               :responder (lambda (agent message locale)
-                            (declare (ignore agent message locale))
-                            "hello"))))
-    (aion/test-threads:join (web::%run-turn-async conv "hi" nil))
-    (format nil "~{~A~}" (web::%drain-bubbles conv))))
+Since #67 the turn publishes items and the poll renders them, on the request thread, inside the
+app's own dispatcher. So this goes through the app: that dispatcher is where the style is bound,
+and calling the renderer directly would test a binding the test made itself."
+  (let* ((app (%echo-app :dev (eq style :pretty)))
+         (poll (progn (%say app "hi") (%poll app 0)))
+         (start (search "<article class=\"message px-assistant\"" poll))
+         (end (and start (search "</article>" poll :start2 start))))
+    ;; Only the reply's bubble: the rest of the poll is fragments joined end to end, which are
+    ;; adjacent in either style.
+    (if end (subseq poll start (+ end (length "</article>"))) "")))
 
 (test starting-the-surface-does-not-change-the-image-s-output-style
   "pre-publication issue 469. praxeon/web can be started as a SECOND server inside a host app's image, so it must
@@ -172,21 +233,20 @@ rendering changed for the rest of the process."
   ;; the bug fully present. Measured: under the reverted fix this test failed `f.\', one of two.
   ;; So the non-dev case runs against a :pretty image and the dev case against a :compact one.
   (let ((out:*output-style* :pretty))
-    (web::%build-app nil "Guest" "Guest" #'identity nil nil nil nil nil nil)
+    (web::%build-app nil "Guest" "Guest" #'identity nil nil nil nil nil nil nil nil)
     (is (eq :pretty out:*output-style*)
         "a :pretty host survives a non-dev agent surface, which the defect would set :compact"))
   (let ((out:*output-style* :compact))
-    (web::%build-app nil "Guest" "Guest" #'identity nil nil t nil nil nil)
+    (web::%build-app nil "Guest" "Guest" #'identity nil nil t nil nil nil nil nil)
     (is (eq :compact out:*output-style*)
         "and a :compact host survives a :dev one, which the defect would set :pretty")))
 
-(test the-turn-thread-renders-in-the-app-s-style
-  "THE TRAP THIS FIX HAD TO AVOID. `%assistant-bubble' runs inside `%run-turn-async', and the
-request's WITH-OUTPUT-STYLE wraps the dispatcher on the REQUEST thread. Before pre-publication issue 469 the turn
-thread rendered correctly only because the style was a global assigned at startup, so removing
-that assignment without carrying the style would have rendered the assistant bubble in the
-wrong style -- only in the poller, only for the assistant, and visible as whitespace rather
-than as an error."
+(test the-poll-renders-the-reply-in-the-app-s-style
+  "The reply is rendered by the poll that reads it, inside the app's WITH-OUTPUT-STYLE. Before
+#67 it was rendered on the turn thread, which that binding does not reach, and pre-publication
+issue 469 carried the style to the turn thread for that reason. A reply rendered in the wrong
+style shows only in the poller, only for the assistant, and as whitespace rather than as an
+error."
   (let ((out:*output-style* :compact))   ; the image says compact; the app will say otherwise
     (let ((pretty (%bubble-from-turn :pretty))
           (compact (%bubble-from-turn :compact)))
@@ -197,7 +257,7 @@ than as an error."
       ;; independent of Spinneret. Newlines were a proxy for the property; `><' between two
       ;; tags is the property -- compact puts elements adjacent, pretty separates them.
       (is (search "><div" compact)
-          "a :compact app renders elements adjacent ON THE TURN THREAD: ~S" compact)
+          "a :compact app renders the reply's elements adjacent: ~S" compact)
       (is (not (search "><div" pretty))
           "and a :pretty app separates them, so the first is not merely always-true: ~S" pretty))))
 
@@ -309,3 +369,162 @@ used to add nothing for it, so the page showed no count at all."
              (is (every (lambda (l) (search "conversation=conv-160" l)) lines)
                  "and the rest of the request's context: ~S" lines)))
       (aion/log:setup :env :dev :level :warn :stream *standard-output*))))
+
+;;; --------------------------------------------------------------------------
+;;; The transcript channel and the conversation key (#67)
+;;; --------------------------------------------------------------------------
+;;;
+;;; Each conversation publishes its transcript to a hyperion/channel, and each page reads it
+;;; from its own cursor. These tests drive the app's routes. The JSON path runs the turn before
+;;; it answers, so a poll right after it sees the whole turn without waiting on a thread.
+
+(test two-readers-of-one-conversation-both-see-every-item
+  "The progress poll used to drain a mailbox, so of two tabs on one conversation, whichever polled
+first took the bubble and the other never showed it. Two polls from the same cursor now return
+the same items."
+  (let ((app (%echo-app)))
+    (%say app "hello")
+    (let ((first (%poll app 0))
+          (second (%poll app 0)))
+      (is (search "echo: hello" first) "the first reader did not get the reply: ~S" first)
+      (is (search "echo: hello" second) "the second reader did not get the reply: ~S" second)
+      (is (search "hello</p>" second)
+          "the second reader did not get the user's message: ~S" second))))
+
+(test a-poll-moves-the-cursor-past-what-it-returned
+  "A poll's response sets the page's cursor past the items it returned, so the next poll returns
+only what was published after them."
+  (let ((app (%echo-app)))
+    (%say app "one")
+    (let* ((first (%poll app 0))
+           (next (%cursor-in first)))
+      ;; One turn is three items: the message, the reply and the end of the turn.
+      (is (eql 3 next) "after one turn the cursor should be 3, not ~S" next)
+      (let ((again (%poll app next)))
+        (is (null (search "echo:" again)) "a poll at the cursor repeated the reply: ~S" again)
+        (is (eql 3 (%cursor-in again)) "and left the cursor where it was: ~S" again))
+      (%say app "two")
+      (let ((after (%poll app next)))
+        (is (search "echo: two" after) "the next turn's reply is missing: ~S" after)
+        (is (null (search "echo: one" after)) "the earlier reply was repeated: ~S" after)
+        (is (eql 6 (%cursor-in after)) "the cursor should now be 6: ~S" after)))))
+
+(test a-poll-without-a-cursor-returns-no-items-and-sets-one
+  "A page loaded before the cursor existed polls with no `after'. It gets no items, so its
+transcript is not repeated, and a cursor at the newest item, so it carries on from there."
+  (let ((app (%echo-app)))
+    (%say app "hello")
+    (let ((body (%poll app nil)))
+      (is (null (search "echo: hello" body)) "items were returned without a cursor: ~S" body)
+      (is (eql 3 (%cursor-in body)) "the cursor should be set to 3: ~S" body))))
+
+(test every-turn-ends-with-one-turn-ended-item
+  "Each turn publishes exactly one :TURN-ENDED item after its reply, :OK when the responder
+returned and :ERROR, with the error's text, when it signalled. The error shows in the agent's
+bubble, as before."
+  (let ((conv (web::make-conversation
+               :agent-name "Echo"
+               :responder (lambda (agent message locale)
+                            (declare (ignore agent locale))
+                            (if (string= message "fail")
+                                (error "the responder failed")
+                                (format nil "echo: ~A" message))))))
+    (is (equal '("echo: hi" nil) (multiple-value-list (web::%turn conv "hi" nil)))
+        "a turn that returned gives its reply and no error")
+    (multiple-value-bind (reply e) (web::%turn conv "fail" nil)
+      (is (null reply) "a turn that failed gives no reply")
+      (is (typep e 'error) "and gives the error: ~S" e))
+    (let ((items (web::%items-since conv 0)))
+      (is (equal '(:user :assistant :turn-ended :user :turn-ended)
+                 (mapcar (lambda (i) (getf i :kind)) items))
+          "the items were ~S" items)
+      (is (equal '(:ok :error)
+                 (loop for i in items
+                       when (eq (getf i :kind) :turn-ended) collect (getf i :outcome)))
+          "the outcomes were wrong: ~S" items)
+      (is (search "the responder failed" (web::%items-html conv items))
+          "the error is not in the agent's bubble"))))
+
+(test the-json-path-answers-500-for-a-turn-that-failed
+  (let ((app (%echo-app)))
+    (is (eql 200 (%say app "hello")))
+    (is (eql 500 (%say app "fail")))))
+
+(test the-page-shows-the-transcript-and-a-cursor-past-it
+  "GET / renders the transcript and the cursor from one read of the channel, so a poll from that
+cursor does not repeat what the page shows."
+  (let ((app (%echo-app)))
+    (%say app "hello")
+    (let ((page (nth-value 2 (%call app :get "/"))))
+      (is (search "echo: hello" page) "the page does not show the reply: ~S" page)
+      (is (eql 3 (%cursor-in page)) "the page's cursor should be 3")
+      (is-true (%sends-the-cursor-p page) "the poll does not send the cursor")
+      (is (null (search "echo: hello" (%poll app (%cursor-in page))))
+          "a poll from the page's cursor repeated the reply"))))
+
+(test an-agent-s-earlier-history-is-shown
+  "An agent that arrives with a history starts its conversation's transcript with it, without the
+tool calls, so the page shows it as it did before the channel."
+  (let* ((agent (actor:make-agent
+                 :name "restored"
+                 :history (list (llm:msg "user" "earlier question")
+                                (llm:msg "assistant" "earlier answer"))))
+         (app (web:make-app :agent agent :agent-name "Restored"))
+         (page (nth-value 2 (%call app :get "/"))))
+    (is (search "earlier question" page) "the user's earlier message is missing")
+    (is (search "earlier answer" page) "the earlier reply is missing")
+    (is (eql 2 (%cursor-in page)) "the cursor should be past the two earlier items")))
+
+(test an-htmx-message-is-published-and-asks-the-page-to-poll
+  "POST /api/message from the page returns nothing to swap and an HX-Trigger of px-poll. The
+user's message is already in the channel when it answers, so that poll shows it."
+  (let ((app (%echo-app)))
+    (multiple-value-bind (status headers body)
+        (%call app :post "/api/message" :form "message=hey")
+      (is (eql 200 status))
+      (is (equal "px-poll" (getf headers :hx-trigger)) "no HX-Trigger: ~S" headers)
+      (is (string= "" body) "the POST returned something to swap: ~S" body))
+    (is (search "hey</p>" (%poll app 0)) "the user's message was not published")
+    (is (await (lambda () (search "echo: hey" (%poll app 0))))
+        "the reply from the background turn never arrived")))
+
+(defun %keyed-app (made)
+  "An echo app with one conversation per `who' query parameter. MADE is a one-element list whose
+car counts the agents made."
+  (%echo-app :conversation-key (lambda (env) (hyperion/http:query-param env "who"))
+             :make-agent (lambda (key)
+                           (incf (car made))
+                           (actor:make-agent :name key))))
+
+(test each-key-has-its-own-conversation
+  "With :CONVERSATION-KEY, requests with one key share a conversation and requests with another
+key do not see it. One agent is made per key."
+  (let* ((made (list 0))
+         (app (%keyed-app made)))
+    (%say app "from-a" :query "who=a")
+    (%say app "from-b" :query "who=b")
+    (let ((a (%poll app 0 :query "who=a"))
+          (b (%poll app 0 :query "who=b")))
+      (is (search "echo: from-a" a) "a's conversation is missing its reply: ~S" a)
+      (is (null (search "from-b" a)) "a sees b's conversation: ~S" a)
+      (is (search "echo: from-b" b) "b's conversation is missing its reply: ~S" b)
+      (is (null (search "from-a" b)) "b sees a's conversation: ~S" b))
+    (%say app "again" :query "who=a")
+    (is (search "echo: again" (%poll app 3 :query "who=a"))
+        "a second request with key a did not reach a's conversation")
+    (is (= 2 (car made)) "one agent per key should have been made, not ~D" (car made))))
+
+(test a-request-without-a-key-is-refused
+  (let ((app (%keyed-app (list 0))))
+    (is (eql 403 (nth-value 0 (%call app :get "/"))))
+    (is (eql 403 (nth-value 0 (%call app :get "/api/progress" :query "after=0"))))
+    (is (eql 403 (%say app "hello")))))
+
+(test make-app-refuses-a-key-it-cannot-serve
+  "An agent holds one conversation's history, so :CONVERSATION-KEY needs :MAKE-AGENT, and neither
+goes with a single :AGENT."
+  (signals error (web:make-app :conversation-key (lambda (env) (declare (ignore env)) "k")))
+  (signals error (web:make-app :make-agent (lambda (k) (actor:make-agent :name k))))
+  (signals error (web:make-app :agent (actor:make-agent :name "one")
+                               :conversation-key (lambda (env) (declare (ignore env)) "k")
+                               :make-agent (lambda (k) (actor:make-agent :name k)))))

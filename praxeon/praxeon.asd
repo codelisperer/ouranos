@@ -386,7 +386,6 @@
                "aion/dynamic"                ; web.lisp wraps the turn thread in INHERITING
                "hyperion/assets"             ; vendored htmx/Bulma, embedded (no CDN)
                "spinneret" "com.inuoe.jzon"  ; still used directly by the chat UI
-               (:require "sb-concurrency")   ; thread-safe mailbox for the SSE channel
                ;; The HTTP backend is the APP's choice, not hyperion's (pre-publication issue 139) -- and it is
                ;; declared as the CLACK HANDLER system, not the bare server, because that
                ;; is what `clackup` resolves :woo / :hunchentoot through. Depending on the
