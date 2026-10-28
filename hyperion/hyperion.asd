@@ -347,6 +347,44 @@
   :components ((:file "tests/list-db-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/list-db/tests :run-tests)))
 
+(defsystem "hyperion/notifications"
+  :description "In-app notifications: a store protocol and a memory store, NOTIFY with per-kind delivery to the list or the app's email function, the bell and list components, their router, and a prune job (#792)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; hyperion for hyperion/http, i18n, router and csrf. aion/clock for the ids, aion/log for a
+  ;; failed email. No database (hyperion/notifications-db) and no hermes: email is the app's
+  ;; function, because nothing in the line depends on a satellite.
+  :depends-on ("hyperion" "spinneret" "bordeaux-threads" "aion/clock" "aion/log")
+  :components ((:file "src/notifications"))
+  :in-order-to ((test-op (test-op "hyperion/notifications/tests"))))
+
+(defsystem "hyperion/notifications/tests"
+  :description "Tests for hyperion/notifications: the store protocol on the memory store, collapsing by group key, delivery per kind, the link check, the components' markup and the routes."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion/notifications" "hyperion" "spinneret" "flexi-streams" "fiveam")
+  :components ((:file "tests/notifications-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/notifications/tests :run-tests)))
+
+(defsystem "hyperion/notifications-db"
+  :description "A mnemosyne store for hyperion/notifications, with the DDL for the app's migrations and a check that its tables exist (#792)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; mnemosyne is to hyperion's left in the DAG; bordeaux-threads for the one-connection lock.
+  :depends-on ("hyperion/notifications" "mnemosyne" "bordeaux-threads" "aion/log")
+  :components ((:file "src/notifications-db"))
+  :in-order-to ((test-op (test-op "hyperion/notifications-db/tests"))))
+
+(defsystem "hyperion/notifications-db/tests"
+  :description "Tests for hyperion/notifications-db against SQLite in memory, and Postgres when MNEMOSYNE_TEST_PG_URL is set."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion/notifications-db" "hyperion/notifications" "mnemosyne" "fiveam")
+  :components ((:file "tests/notifications-db-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/notifications-db/tests :run-tests)))
+
 (defsystem "hyperion/sidecar"
   :description "Dev sidecars: helper processes, such as a webhook forwarder, started and stopped with a dev server (#700)."
   :author "Bob <eternal.recursion@proton.me>"
