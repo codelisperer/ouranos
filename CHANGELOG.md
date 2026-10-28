@@ -57,6 +57,12 @@ its tag.
     shows it. The page's poll runs on `px-poll` as well as on its timer.
   - The JSON path (`Accept: application/json`) still answers `{"reply": ...}`. Its turns now
     appear on a page open on the same conversation, and count towards its token total.
+- **`hyperion/http:json` signals instead of returning `"{}"` for a value that is not a property
+  list** (#1041). An argument that is not a list, such as a string, a number or a vector, signals
+  a `type-error`. A property list with an odd number of elements, whose last key has no value,
+  signals an error; before, that key was written with `null`. A caller that passed the wrong
+  value used to store an empty or partial object without any error, and now gets one. A property
+  list, including the empty list, encodes as before.
 
 - **`scripts/build-desktop-app.lisp` stops, instead of warning and exiting 0, when the bundle
   needs hyperion-view or a library the runtime links against and it is missing** (#956). For an
