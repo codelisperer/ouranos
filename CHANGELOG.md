@@ -943,7 +943,9 @@ its tag.
   its turn** (part of #67). With `:conversation-key` or `:grant-verifier`, a key's conversation
   and its agent are dropped once no request has reached them for `:conversation-idle-seconds`
   (a new argument to `make-app`, `start` and `serve-forever`; 30 minutes by default, the same as
-  a session's idle limit) and no turn of theirs is running. The key's next request finds its
+  a session's idle limit), no turn of theirs is running, and their last turn ended at least that
+  long ago, so the reply to a turn that ran past the limit is kept for the page. The key's next
+  request finds its
   conversation stale, calls `:make-agent` again and starts with an empty transcript, and any
   request removes every stale conversation if a minute has passed since that was last done.
   Before this, conversations were kept for the app's lifetime. A page still open on a dropped

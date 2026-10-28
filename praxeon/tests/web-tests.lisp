@@ -784,15 +784,16 @@ publishes carry the same turn id."
                  (mapcar (lambda (i) (list (getf i :kind) (getf i :turn))) items))
           "the items were ~S" items))))
 
-(defun %expiring-app (made clock &key gate entered)
+(defun %expiring-app (made clock &key gate entered turn-thread)
   "An app with one conversation per `who' key and conversations that expire after 1800 idle
 seconds by CLOCK. The message \"slow\" signals ENTERED and then waits for GATE, both
-semaphores, before it is answered."
+semaphores, before it is answered. TURN-THREAD, a cons, gets the slow turn's thread in its car."
   (web:make-app
    :agent-name "Echo"
    :responder (lambda (agent message locale)
                 (declare (ignore agent locale))
                 (when (and gate (string= message "slow"))
+                  (when turn-thread (setf (car turn-thread) sb-thread:*current-thread*))
                   (sb-thread:signal-semaphore entered)
                   (sb-thread:wait-on-semaphore gate :timeout 10))
                 (format nil "echo: ~A" message))
@@ -842,6 +843,29 @@ ends."
            (sb-thread:signal-semaphore gate)
            (is-true (await (lambda () (search "echo: slow" (%poll app 0 :query "who=a"))))
                     "the running turn's conversation was dropped")
+           (is (= 1 (%made-for made "a")) "a second agent was made for key a"))
+      (sb-thread:signal-semaphore gate))))
+
+(test the-reply-to-a-turn-that-ran-past-the-idle-limit-is-kept
+  "A turn that runs past the idle limit with no request reaching its conversation meanwhile, and
+ends before the next one, leaves its conversation and reply in place: the idle time counts from
+when the turn ended."
+  (let* ((now 0)
+         (made (make-hash-table :test 'equal :synchronized t))
+         (gate (sb-thread:make-semaphore))
+         (entered (sb-thread:make-semaphore))
+         (turn (list nil))
+         (app (%expiring-app made (lambda () now) :gate gate :entered entered :turn-thread turn)))
+    (unwind-protect
+         (progn
+           (%call app :post "/api/message" :query "who=a" :form "message=slow")
+           (is-true (sb-thread:wait-on-semaphore entered :timeout 10) "the turn never started")
+           (setf now 2000)
+           (sb-thread:signal-semaphore gate)
+           ;; Joined, so the turn has let go of its lock before the next request looks.
+           (sb-thread:join-thread (car turn) :timeout 10 :default nil)
+           (is (search "echo: slow" (%poll app 0 :query "who=a"))
+               "the reply to the turn was dropped with its conversation")
            (is (= 1 (%made-for made "a")) "a second agent was made for key a"))
       (sb-thread:signal-semaphore gate))))
 

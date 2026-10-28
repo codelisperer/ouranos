@@ -119,7 +119,12 @@ translator agent, or a locale-aware guardrail. Overridable via :responder."
   ;; With grants: the capabilities and caps the agent was made from (%GRANT-TERMS), and how to
   ;; make the principal's agent from another grant.
   (built-with nil)
-  (rebuild nil))
+  (rebuild nil)
+  ;; When its last turn ended, by CLOCK, or NIL before the first ends. A conversation's idle time
+  ;; counts from this or from its last request, whichever is later, so the reply to a turn that
+  ;; ran longer than the idle limit is still there when the page next asks for it.
+  (ended-at nil)
+  (clock #'get-universal-time))
 
 (defun %next-turn (conv)
   "A new turn id for CONV: 1 for its first turn, then 2, and so on."
@@ -561,7 +566,11 @@ first. The progress observer records the status and token count while the turn r
                (%publish conv (list :kind :turn-ended :turn turn :outcome :error
                                     :message (princ-to-string e)))
                (values nil e)))
-        (%set-status conv "")))))
+        (%set-status conv "")
+        ;; Set while the turn lock is still held, so an expiry never sees the turn as neither
+        ;; running nor ended.
+        (sb-thread:with-mutex ((conversation-state-lock conv))
+          (setf (conversation-ended-at conv) (funcall (conversation-clock conv))))))))
 
 (defun %run-turn-async (conv message locale &optional grant)
   "Run one turn on a background thread so the web server's event loop stays free
@@ -664,12 +673,12 @@ band, with a notice that a new conversation has started and CONV's transcript so
        (list 200 '(:content-type "text/html; charset=utf-8" :hx-trigger "px-poll")
              (list ""))))))
 
-(defun %new-conversation (key agent agent-name responder &key built-with rebuild)
+(defun %new-conversation (key agent agent-name responder
+                          &key built-with rebuild (clock #'get-universal-time))
   "A conversation over AGENT, for KEY, whose transcript starts with AGENT's history. Its next turn
-is numbered after the history's last. BUILT-WITH and REBUILD are set with grants: see the
-CONVERSATION slots."
+is numbered after the history's last. BUILT-WITH, REBUILD and CLOCK: see the CONVERSATION slots."
   (let ((conv (make-conversation :key key :agent agent :agent-name agent-name
-                                 :responder responder :built-with built-with
+                                 :responder responder :built-with built-with :clock clock
                                  :rebuild rebuild))
         (history (%history-items agent)))
     (dolist (item history) (%publish conv item))
@@ -686,10 +695,16 @@ last reached it."
   (used-at 0 :type integer))
 
 (defun %entry-stale-p (entry now idle-seconds)
-  "Whether no request has reached ENTRY for IDLE-SECONDS by NOW, and none of its turns is running."
-  (and (>= (- now (%entry-used-at entry)) idle-seconds)
-       (let ((conv (%entry-conversation entry)))
-         (not (and conv (sb-thread:mutex-owner (conversation-turn-lock conv)))))))
+  "Whether, by NOW, IDLE-SECONDS have passed since a request last reached ENTRY and since its
+conversation's last turn ended, and none of its turns is running."
+  (let* ((conv (%entry-conversation entry))
+         (running (and conv (sb-thread:mutex-owner (conversation-turn-lock conv))))
+         ;; Read after RUNNING: a turn sets ENDED-AT before it lets go of the turn lock, so a
+         ;; turn that ended between the two reads has its end seen here.
+         (ended-at (and conv (sb-thread:with-mutex ((conversation-state-lock conv))
+                               (conversation-ended-at conv)))))
+    (and (not running)
+         (>= (- now (max (%entry-used-at entry) (or ended-at 0))) idle-seconds))))
 
 (defun %expire-conversations (table now idle-seconds)
   "Remove from TABLE, MAKE-APP's table of entries by key, every stale entry (%ENTRY-STALE-P).
@@ -766,7 +781,7 @@ MAKE-AGENT is a function of a key that returns a fresh agent for it. The first r
 key makes that key's conversation; later requests with an EQUAL key share it. A request whose
 key is NIL is answered 403. A key's conversation, and its agent, are dropped once no request
 has reached them for CONVERSATION-IDLE-SECONDS (30 minutes by default, the same as a session's
-idle limit) and no turn of theirs is running. The key's next request finds it stale and starts a
+idle limit), no turn of theirs is running, and their last turn ended at least that long ago. The key's next request finds it stale and starts a
 new one, and every request sweeps out all stale conversations if a minute (or the idle limit, if
 that is shorter) has passed since the last sweep. A page still open on a dropped conversation
 holds a cursor from it; its next poll replaces the page's transcript with the new conversation's
@@ -818,7 +833,7 @@ conversations the app holds."
   ;; does not render; it publishes items, and the poll that reads them renders them here.
   (let* ((style (if dev :pretty :compact))
          (new-conversation
-           (lambda (key agent) (%new-conversation key agent agent-name responder)))
+           (lambda (key agent) (%new-conversation key agent agent-name responder :clock clock)))
          (shared (unless (or conversation-key grant-verifier) (funcall new-conversation nil agent)))
          (table (make-hash-table :test 'equal))  ; key -> %ENTRY
          (table-lock (sb-thread:make-mutex :name "praxeon-web-conversations"))
@@ -870,7 +885,8 @@ conversations the app holds."
                                            (%new-conversation principal (funcall rebuild grant)
                                                               agent-name responder
                                                               :built-with (%grant-terms grant)
-                                                              :rebuild rebuild)))
+                                                              :rebuild rebuild
+                                                              :clock clock)))
                                 grant))))))
              (conversation-key
               (lambda (env)
