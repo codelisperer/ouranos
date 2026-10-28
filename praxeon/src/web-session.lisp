@@ -26,7 +26,8 @@
   (:export #:session-table #:session-table-p #:make-session-table
            #:session-table-idle-seconds #:session-table-max-seconds
            #:session-table-ticket-seconds #:session-table-clock
-           #:open-session #:session-grant #:close-session #:session-count #:prune-sessions
+           #:open-session #:session-grant #:session-open-p #:close-session #:session-count
+           #:prune-sessions
            #:issue-ticket #:redeem-ticket))
 
 (in-package #:praxeon/web-session)
@@ -108,6 +109,19 @@ that is found counts as used now."
                nil)
               (t (setf (%session-used-at s) now)
                  (%session-grant s)))))))
+
+(defun session-open-p (table id)
+  "True when session ID is open in TABLE. Unlike SESSION-GRANT this does not count as using the
+session, so a check made on a timer, such as an open stream's, does not keep an idle session
+open. An expired session is removed."
+  (let ((now (funcall (session-table-clock table))))
+    (sb-thread:with-mutex ((session-table-lock table))
+      (let ((s (and (stringp id) (gethash id (session-table-sessions table)))))
+        (cond ((null s) nil)
+              ((%expired-p table s now)
+               (remhash id (session-table-sessions table))
+               nil)
+              (t t))))))
 
 (defun issue-ticket (table id)
   "A stream ticket for session ID, 256 random bits as hex, or NIL when ID is not open. Asking
