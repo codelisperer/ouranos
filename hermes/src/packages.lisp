@@ -31,7 +31,8 @@
   (:export
    ;; neutral messages
    #:email #:make-email #:email-to #:email-from #:email-subject
-   #:email-text #:email-html #:email-reply-to #:email-attachments
+   #:email-text #:email-html #:email-reply-to #:email-attachments #:email-headers
+   #:+reserved-email-headers+
    #:attachment #:make-attachment #:attachment-p #:attachment-filename #:attachment-content-type
    #:attachment-content #:attachment-disposition #:attachment-content-id #:attachment-octets
    #:dev-last-email

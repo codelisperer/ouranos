@@ -888,6 +888,15 @@ its tag.
 
 ### Added
 
+- **hermes: `make-email` takes `:headers`, so an email can carry `List-Unsubscribe` and
+  `List-Unsubscribe-Post`** (#106). `:headers` is an alist of `(name . value)` strings, read
+  back with `email-headers`. SendGrid receives them as its `headers` object, and the dev
+  transport prints them. `make-email` signals `invalid-message` for a name that is not a valid
+  header name or is given twice, a reserved header (`To`, `From`, `Subject`, `Reply-To`, `Cc`,
+  `Bcc`, `Content-Type` and the others in `hermes:+reserved-email-headers+`), or a value with
+  a carriage return, line feed or other control character. An email without `:headers` sends
+  the same SendGrid request as before.
+
 - **praxeon/actor: every deliberation step records how many of the prompt's estimated tokens came
   from each source** (#317, step D). `praxeon/actor:request-messages` returns a third value, and
   `praxeon/actor:prompt-breakdown` computes it: a plist of estimated tokens under `:system`,

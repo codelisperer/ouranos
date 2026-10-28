@@ -42,24 +42,83 @@ inline attachment has a CONTENT-ID. Signals INVALID-MESSAGE otherwise, before an
         (coerce content '(simple-array (unsigned-byte 8) (*))))))
 
 (defstruct (email (:constructor %make-email
-                      (&key to from subject text html reply-to attachments)))
+                      (&key to from subject text html reply-to attachments headers)))
   "A provider-neutral email. TO and FROM are address strings; TEXT is the plain body; HTML is
 an optional rich body; REPLY-TO is optional. ATTACHMENTS is a list of ATTACHMENTs (#366), empty
-by default."
+by default. HEADERS is an alist of extra header names and values, (NAME . VALUE), empty by
+default (#106)."
   (to nil :type (or null string))
   (from nil :type (or null string))
   (subject "" :type string)
   (text "" :type string)
   (html nil :type (or null string))
   (reply-to nil :type (or null string))
-  (attachments '() :type list))
+  (attachments '() :type list)
+  (headers '() :type list))
 
-(defun make-email (&rest keys &key to from subject text html reply-to attachments)
+(defparameter +reserved-email-headers+
+  '("To" "From" "Subject" "Reply-To" "Cc" "Bcc" "Content-Type" "Content-Transfer-Encoding"
+    "MIME-Version" "Received" "DKIM-Signature" "X-SG-ID" "X-SG-EID")
+  "Header names an email's :HEADERS may not set (#106). The first four are set from MAKE-EMAIL's
+own arguments, and the rest are set by hermes or by the provider when the message is built and
+signed; SendGrid refuses all of them in its headers object. Compared without regard to case.")
+
+(defun %header-name-p (name)
+  "True for a header field name RFC 5322 allows: one or more printable US-ASCII characters
+other than the colon."
+  (and (stringp name) (plusp (length name))
+       (every (lambda (ch) (and (char<= #\! ch #\~) (char/= ch #\:))) name)))
+
+(defun %header-value-p (value)
+  "True for a header value that cannot end the header early or start a new one: a string with
+no carriage return, line feed or other control character, apart from the tab RFC 5322 allows."
+  (and (stringp value)
+       (notany (lambda (ch) (and (char/= ch #\Tab)
+                                 (or (< (char-code ch) 32) (= (char-code ch) 127))))
+               value)))
+
+(defun %check-email-headers (headers)
+  "Signal INVALID-MESSAGE unless HEADERS is a list of (NAME . VALUE) conses that MAKE-EMAIL
+accepts: each NAME a field name (%HEADER-NAME-P) that is not reserved and not given twice, each
+VALUE a string with no line break or control character. A carriage return or line feed in a
+name or value is refused because it would let the value end the header and add one of its own
+(header injection)."
+  (flet ((bad (format &rest args)
+           (error 'invalid-message :problem (apply #'format nil format args))))
+    (unless (and (listp headers) (every #'consp headers))
+      (bad ":headers must be a list of (name . value) conses"))
+    (let ((seen '()))
+      (dolist (header headers)
+        (destructuring-bind (name . value) header
+          (unless (%header-name-p name)
+            (bad "a header name must be a non-empty string of printable ASCII characters other than a colon, with no line break; got ~S" name))
+          (when (member name +reserved-email-headers+ :test #'string-equal)
+            (bad "the ~A header is set by hermes or the provider, not through :headers" name))
+          (when (member name seen :test #'string-equal)
+            (bad "the ~A header is given twice in :headers" name))
+          (unless (%header-value-p value)
+            (bad "the ~A header's value must be a string with no carriage return, line feed or other control character" name))
+          (push name seen))))))
+
+(defun make-email (&rest keys &key to from subject text html reply-to attachments headers)
   "A provider-neutral EMAIL. ATTACHMENTS, when given, is a list of values from MAKE-ATTACHMENT;
-anything else in it signals INVALID-MESSAGE."
+anything else in it signals INVALID-MESSAGE.
+
+HEADERS, when given, is an alist of extra headers, (NAME . VALUE) with both strings, sent as
+they are (#106). For example, one-click unsubscribe (RFC 8058), which Gmail and Yahoo expect
+from bulk senders:
+
+  (make-email :to ... :from ... :subject ... :text ...
+              :headers '((\"List-Unsubscribe\" . \"<https://app.example/u/abc>\")
+                         (\"List-Unsubscribe-Post\" . \"List-Unsubscribe=One-Click\")))
+
+A name that is not a valid field name, a reserved name (see +RESERVED-EMAIL-HEADERS+), a name
+given twice, or a value with a line break or control character signals INVALID-MESSAGE before
+anything is sent."
   (declare (ignore to from subject text html reply-to))
   (unless (and (listp attachments) (every #'attachment-p attachments))
     (error 'invalid-message :problem ":attachments must be a list of values from MAKE-ATTACHMENT"))
+  (%check-email-headers headers)
   (apply #'%make-email keys))
 
 (defstruct (sms (:constructor make-sms (&key to from text)))

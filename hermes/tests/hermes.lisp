@@ -253,3 +253,71 @@ main at 3ab171b."
   (signals h:invalid-message (h:make-email :to "a" :from "b" :attachments (list "not an attachment")))
   (is (h:attachment-p (h:make-attachment :filename "a.txt" :content-type "text/plain" :content ""))
       "an empty file is still a file"))
+
+;;; --- extra email headers (#106) ----------------------------------------------
+
+(defun %sendgrid-headers (m)
+  "The headers object of the SendGrid request for M, or NIL when there is none."
+  (gethash "headers" (hermes::%sendgrid-body m)))
+
+(test list-unsubscribe-reaches-sendgrid-as-given
+  (let* ((value "<https://app.example/u/abc>, <mailto:unsubscribe@app.example?subject=u-abc>")
+         (headers (%sendgrid-headers
+                   (h:make-email :to "a@x.com" :from "b@x.com" :subject "News" :text "Hi"
+                                 :headers (list (cons "List-Unsubscribe" value))))))
+    (is (string= value (gethash "List-Unsubscribe" headers))
+        "the value is sent exactly as given, both URIs included")
+    (is (= 1 (hash-table-count headers)) "and nothing else is added")))
+
+(test list-unsubscribe-post-reaches-sendgrid-beside-list-unsubscribe
+  ;; RFC 8058: one-click needs both headers, and an https URI in List-Unsubscribe.
+  (let ((headers (%sendgrid-headers
+                  (h:make-email :to "a@x.com" :from "b@x.com" :subject "News" :text "Hi"
+                                :headers '(("List-Unsubscribe" . "<https://app.example/u/abc>")
+                                           ("List-Unsubscribe-Post" . "List-Unsubscribe=One-Click"))))))
+    (is (string= "List-Unsubscribe=One-Click" (gethash "List-Unsubscribe-Post" headers)))
+    (is (string= "<https://app.example/u/abc>" (gethash "List-Unsubscribe" headers)))))
+
+(test an-email-without-headers-sends-no-headers-object
+  (is (null (nth-value 1 (gethash "headers" (hermes::%sendgrid-body
+                                             (h:make-email :to "a@x.com" :from "b@x.com"
+                                                           :subject "Hi" :text "Body"))))))
+  (is (null (h:email-headers (h:make-email :to "a@x.com" :from "b@x.com")))))
+
+(test a-line-break-in-a-header-name-or-value-is-refused
+  ;; Header injection: a CR or LF would end the header and let the value add one of its own.
+  (dolist (break (list (string #\Return) (string #\Linefeed) (format nil "~C~C" #\Return #\Linefeed)))
+    (signals h:invalid-message
+      (h:make-email :to "a" :from "b"
+                    :headers (list (cons "List-Unsubscribe"
+                                         (format nil "<https://a.example/u>~ABcc: victim@example.com" break)))))
+    (signals h:invalid-message
+      (h:make-email :to "a" :from "b"
+                    :headers (list (cons (format nil "X-Campaign~ABcc" break) "x"))))))
+
+(test a-header-hermes-or-the-provider-sets-cannot-be-given
+  (dolist (name '("To" "from" "SUBJECT" "Reply-To" "Bcc" "Content-Type" "DKIM-Signature"))
+    (signals h:invalid-message
+      (h:make-email :to "a" :from "b" :headers (list (cons name "x"))))))
+
+(test other-bad-headers-are-refused-and-good-ones-kept
+  (signals h:invalid-message (h:make-email :to "a" :from "b" :headers '(("" . "x"))))
+  (signals h:invalid-message (h:make-email :to "a" :from "b" :headers '(("X Campaign" . "x"))))
+  (signals h:invalid-message (h:make-email :to "a" :from "b" :headers '(("X-Campaign:" . "x"))))
+  (signals h:invalid-message (h:make-email :to "a" :from "b" :headers '(("X-Campaign" . 42))))
+  (signals h:invalid-message (h:make-email :to "a" :from "b" :headers '(("X-A" . "1") ("x-a" . "2"))))
+  (signals h:invalid-message (h:make-email :to "a" :from "b" :headers '("X-A: 1")))
+  (signals h:invalid-message (h:make-email :to "a" :from "b" :headers "X-A: 1"))
+  (let ((headers (list (cons "X-Campaign" (format nil "spring~Csale" #\Tab)) (cons "X-Empty" ""))))
+    (is (equal headers (h:email-headers (h:make-email :to "a" :from "b" :headers headers)))
+        "a tab and an empty value are allowed, and the alist is kept as given")))
+
+(test the-dev-transport-shows-the-headers-of-the-last-email
+  (let* ((out (make-string-output-stream))
+         (p (h:make-dev-transport :stream out)))
+    (h:deliver p (h:make-email :to "a@x.io" :from "b@y.io" :subject "News" :text "Hi"
+                               :headers '(("List-Unsubscribe" . "<https://app.example/u/abc>")
+                                          ("List-Unsubscribe-Post" . "List-Unsubscribe=One-Click"))))
+    (let ((s (get-output-stream-string out)))
+      (is (search "List-Unsubscribe: <https://app.example/u/abc>" s))
+      (is (search "List-Unsubscribe-Post: List-Unsubscribe=One-Click" s)))))
