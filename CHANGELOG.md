@@ -14,6 +14,26 @@ its tag.
 
 ### An app may have to act
 
+- **`scripts/build-desktop-app.lisp` stops, instead of warning and exiting 0, when the bundle
+  needs hyperion-view or a library the runtime links against and it is missing** (#956). For an
+  app that loads `hyperion/desktop`, a `hyperion/hyperion-view/hyperion-view(.exe)` that was not
+  built now ends the build with exit code 3, naming the file and the command that builds it
+  (`hyperion/hyperion-view/build.sh`, or `build.ps1` on Windows). On macOS the same happens for a
+  library the SBCL runtime links against that is not on the build machine; it was printed as
+  `MISSING`, and when the runtime could not be patched (an `install_name_tool` or `codesign`
+  error) none of those libraries was carried and the build said "continuing UNPATCHED" and
+  exited 0; each is now named and refused. A build that deliberately does not carry them passes
+  **`--allow-missing-natives`**: it warns, goes on, and the build's summary line names what is
+  missing.
+  - An app that does not load `hyperion/desktop`, such as a console tool, needs no launcher, so
+    a missing hyperion-view does not stop its build. The macOS runtime-linked libraries above
+    still apply to it.
+  - Such an app also **no longer gets hyperion-view copied into its bundle** when hyperion-view
+    is built: the build says "no launcher carried -- this image does not load
+    hyperion/desktop".
+  - The tree's lazily loaded libraries (libuv, mbedTLS, libgit2) and its SQLite already stopped
+    the build when missing, and still do, with no option to go on without them.
+
 - **MCP resources and retrieval passages are untrusted by default, so in a prompt they refuse
   `:requires-user-intent` means for the turn** (#907, after #906). `praxeon/mcp:add-resource` and
   `praxeon/retrieval:passage->ctx-item` put outside content into an agent's context with nothing
