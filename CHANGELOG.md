@@ -41,6 +41,24 @@ its tag.
   run after updating rebuilds libuv once on every checkout**, because no existing build has a
   stamp, so it needs the C toolchain build-libuv already requires. The stamp's format is shared
   with `build-sqlite.lisp`'s, in `scripts/built-from.lisp`.
+- **`cons --strict` refuses a target it cannot check, instead of running it and exiting 0**
+  (#960). `--strict` judges only what a target loads with `:load` or `:test`. A target whose work
+  is `:eval`, `:call` or `:sh` with neither -- for example an `:eval` that calls
+  `asdf:load-system` -- ran with nothing checked. A target with `:sh` is not judged either,
+  whatever else it has: cons runs `:sh` in place of the target's `:load` and `:test`, so
+  `(x :load "app" :sh (...))` never loaded `app`. Under `--strict` such a target now exits 1
+  before running, naming it and why, and a `:steps` target names each such step once. Give the
+  target a `:load` clause naming the systems it builds and put the shell work in a target of its
+  own, or run it without `--strict`.
+  - A strict load (`cons/run:load-system-strictly` with `:force-own`) whose root holds none of the
+    systems it loads now signals an error naming the root, instead of loading everything with
+    its warnings muffled. Under `--strict` each `:load` entry is loaded this way, so **a `:load`
+    list that names a library from outside the project, such as `:load ("swank" "app")`, is now
+    refused**. Load the library through the project's own system instead (add it to that
+    system's `:depends-on`), or keep it in a target run without `--strict`.
+  - A `:steps` cycle is refused with the cycle named, with or without `--strict`; it used to
+    recurse until the stack ran out.
+  - Without `--strict`, nothing else changes.
 
 - **MCP resources and retrieval passages are untrusted by default, so in a prompt they refuse
   `:requires-user-intent` means for the turn** (#907, after #906). `praxeon/mcp:add-resource` and
