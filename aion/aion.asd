@@ -88,6 +88,23 @@
                 :components ((:file "csv-types"))))
   :perform (test-op (o c) (uiop:symbol-call :aion/csv/types/tests :run-tests)))
 
+;;; aion/sexp --- a safe reader and writer for s-expression data from outside the program
+;;; (#972). Dependency-free on purpose, like aion/csv: plain CL, its own parser, no CL:READ.
+(defsystem "aion/sexp"
+  :description "Read and write s-expression data safely: plain data only, nothing interned, every size and depth bounded."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  :depends-on ()
+  :components ((:module "src/sexp" :components ((:file "sexp"))))
+  :in-order-to ((test-op (test-op "aion/sexp/tests"))))
+
+(defsystem "aion/sexp/tests"
+  :description "Each attack #972 names, refused, beside the standard reader that falls for it; the limits; and round trips."
+  :depends-on ("aion/sexp" "fiveam")
+  :components ((:module "tests" :components ((:file "sexp"))))
+  :perform (test-op (o c) (uiop:symbol-call :aion/sexp/tests :run-tests)))
+
 (defsystem "aion/csv/tests"
   :description "Conformance tests for aion/csv (RFC 4180 + edge cases)."
   :depends-on ("aion/csv" "fiveam")

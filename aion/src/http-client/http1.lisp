@@ -29,7 +29,8 @@
 
 (define-condition malformed-response (http-error) ()
   (:documentation "A response that does not follow HTTP/1.1's grammar, or that passed one of
-http1.lisp's limits, read on a pinned connection where this client reads the response itself."))
+http1.lisp's limits, read on a pinned connection where this client reads the response itself; or
+one WinHTTP refused as not HTTP, error 12152 (the hub's review of #979)."))
 
 (defconstant +max-line-octets+ (* 64 1024)
   "The longest status line, header line or trailer line accepted, CRLF included.")

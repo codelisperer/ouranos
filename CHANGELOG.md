@@ -33,6 +33,55 @@ its tag.
     hyperion/desktop".
   - The tree's lazily loaded libraries (libuv, mbedTLS, libgit2) and its SQLite already stopped
     the build when missing, and still do, with no option to go on without them.
+- **`scripts/build-libuv.lisp` rebuilds a libuv built from another release instead of keeping
+  it** (#977). It reused any `vendor/libuv/lib` library that existed, so after `libuv.pin` moved
+  (1.52.1 to 1.53.0 in train 77) a checkout kept the old build, said "already built" and exited 0,
+  and bundles carried the old release. It now writes `vendor/libuv/BUILT-FROM` with the version
+  and sha256 it built from, and reuses a library only when that stamp names the pin. **The first
+  run after updating rebuilds libuv once on every checkout**, because no existing build has a
+  stamp, so it needs the C toolchain build-libuv already requires. The stamp's format is shared
+  with `build-sqlite.lisp`'s, in `scripts/built-from.lisp`.
+- **`cons --strict` refuses a target it cannot check, instead of running it and exiting 0**
+  (#960). `--strict` judges only what a target loads with `:load` or `:test`. A target whose work
+  is `:eval`, `:call` or `:sh` with neither -- for example an `:eval` that calls
+  `asdf:load-system` -- ran with nothing checked. A target with `:sh` is not judged either,
+  whatever else it has: cons runs `:sh` in place of the target's `:load` and `:test`, so
+  `(x :load "app" :sh (...))` never loaded `app`. Under `--strict` such a target now exits 1
+  before running, naming it and why, and a `:steps` target names each such step once. Give the
+  target a `:load` clause naming the systems it builds and put the shell work in a target of its
+  own, or run it without `--strict`.
+  - A strict load (`cons/run:load-system-strictly` with `:force-own`) whose root holds none of the
+    systems it loads now signals an error naming the root, instead of loading everything with
+    its warnings muffled. Under `--strict` each `:load` entry is loaded this way, so **a `:load`
+    list that names a library from outside the project, such as `:load ("swank" "app")`, is now
+    refused**. Load the library through the project's own system instead (add it to that
+    system's `:depends-on`), or keep it in a target run without `--strict`.
+  - A `:steps` cycle is refused with the cycle named, with or without `--strict`; it used to
+    recurse until the stack ran out.
+  - Without `--strict`, nothing else changes.
+- **`bootstrap.lisp` no longer overwrites a source-registry drop-in that names another
+  checkout; it stops with exit code 3 before building anything** (#955). Bootstrap writes
+  `50-ouranos.conf` under the user's `common-lisp/source-registry.conf.d/`, which every Lisp
+  process the user runs reads. It used to rewrite the file on every run, so bootstrapping a
+  second checkout (a scratch clone pinned to an older Ouranos, or a worktree) silently moved
+  every other process on the machine to that checkout. Now:
+  - When the drop-in names another checkout that still exists, bootstrap prints both paths
+    and the command for each way forward on the current OS, and exits 3. The drop-in is left
+    byte for byte as it was. A drop-in that is not a single `(:tree "...")` form is refused
+    the same way.
+  - `OURANOS_BOOTSTRAP_LOCAL=1` builds this checkout without reading or writing the drop-in.
+    Bootstrap sets `CL_SOURCE_REGISTRY` to `<checkout>//:` (`//;` on Windows) for itself and
+    the child processes it starts, and prints that value to set in each shell that should use
+    this checkout.
+  - `OURANOS_BOOTSTRAP_FORCE=1` rewrites the drop-in to name this checkout, as bootstrap used
+    to do. Each switch is on only when its value is exactly `1`.
+  - A drop-in naming a checkout that no longer exists is still rewritten, with a line saying
+    which path it replaced, so moving a clone still needs only a second bootstrap.
+
+  A script or CI job that bootstraps a second checkout on a machine that already has one
+  (for example an app's scratch build of an older Ouranos) sets `OURANOS_BOOTSTRAP_LOCAL=1`,
+  and then `CL_SOURCE_REGISTRY` for the steps after bootstrap. A machine with one checkout,
+  and a fresh CI runner, need no change. The decision is in `scripts/source-registry.lisp`.
 
 - **MCP resources and retrieval passages are untrusted by default, so in a prompt they refuse
   `:requires-user-intent` means for the turn** (#907, after #906). `praxeon/mcp:add-resource` and
@@ -981,8 +1030,17 @@ its tag.
   protocol: `transient-p` covers failures after which the request was not acted on, and
   `transient-or-unknown-p` adds those after which it may have been, for idempotent calls.
   `with-retry` signals `retry-would-block` on an aion/uv loop thread, which binds the new
-  `aion/dynamic:*blocking-forbidden*`. Nothing in the tree retries yet; praxeon and hermes adopt
-  it, opt-in, in a later change.
+  `aion/dynamic:*blocking-forbidden*`.
+  - The wait happens after the failed attempt has unwound, so its `unwind-protect` cleanups
+    have run and its locks are free while the runner waits.
+  - `:retryable` takes a function, the name of one, or a list of condition types. A symbol
+    that names no function is refused when the policy is made.
+  - When a `:retryable` function, or a `transience` or `retry-after` method, signals while the
+    runner asks about a failure, the error is logged and the failure is not retried. The caller
+    sees the original condition.
+  - A `with-retry` inside another multiplies the attempts.
+
+  Nothing in the tree retries yet; praxeon and hermes adopt it, opt-in, in a later change.
 - **aion/http-client: `http-error` carries `http-error-retry-after` and `http-error-phase`**
   (#79). `ensure-2xx` reads the response's Retry-After header, in seconds or as an HTTP date,
   into `http-error-retry-after`. A transport failure has `http-error-phase` `:connect` when no
@@ -991,7 +1049,16 @@ its tag.
   failure, has no phase, so it is never retried. On the pinned path (`:connect-address`,
   `fetch-public`) the phase comes from where the call failed, not from the condition's type,
   and a connection that ends before the response does (a `malformed-response` saying "the
-  connection ended") is `:response`. On Windows, where dexador uses WinHTTP, the phase comes
+  connection ended") is `:response`.
+  - **Pooled connections.** Through dexador on Linux and macOS, a failure to connect is
+    `:connect` only for a request that could not have used dexador's connection pool. Otherwise
+    dexador may have sent the request on a pooled connection that then dropped, before its
+    reconnect failed. So a request whose method is not idempotent, such as POST or PATCH, is
+    now sent with `:use-connection-pool nil` and `:keep-alive nil`. A pooled request's failure
+    to connect, such as a GET's, is `:response`.
+  - **WinHTTP's 12152.** On Windows, a reply WinHTTP refuses as not HTTP (12152) is now
+    signalled as `malformed-response`, as this client's own reader signals one on the pinned
+    path, still with phase `:response`. It was a plain `http-error`. On Windows, where dexador uses WinHTTP, the phase comes
   from WinHTTP's error code: 12029 and 12007 are `:connect`; 12002, 12030 and 12152 are
   `:response`. aion/http-client now depends on `aion/retry` and defines the `transience` and
   `retry-after` methods for `http-error`: 408, 425, 429, 503, 529 and `:connect` are
@@ -1005,6 +1072,21 @@ its tag.
   `generate-image` is, and refused before any request with `image-input-invalid` when it does
   not fit. The `:image-usage` event of a request with a mask carries `:mask t`. Google's provider
   is not offered `mask`, and one the model gives anyway is refused with the reason.
+- **`aion/sexp`: a safe reader and writer for s-expression data from outside the program**
+  (#972). `read-data` accepts plain data only -- lists, dotted pairs, strings, integers, ratios,
+  floats, `t`, `nil`, keywords that already exist, and the symbols in its `:symbols` list -- and
+  signals `aion/sexp:unsafe-data`, with a `reason`, for anything else. It is a parser of its
+  own, not `cl:read`, so it interns nothing (`:intern-keywords t` allows new keywords), refuses
+  every `#` form (`#S`, `#.`, `#+`, `#P`, `#n=`, `#(` and the rest), quote and backquote,
+  `|escaped|` symbols and package prefixes, and keeps its own stack, so deep nesting is
+  `unsafe-data :too-deep` and never a `storage-condition`. Limits: `:max-depth` (64),
+  `:max-elements` (100 000, each list and each atom counted once), `:max-string-length` (65 536), `:max-number-digits` (100) and
+  `:max-input` (1 MiB characters), each also a special variable. A float's type follows its
+  exponent marker, not `*read-default-float-format*`; an exponent past a float's range is
+  `:number-out-of-range` and `1/0` is `:division-by-zero`. Symbol tokens are folded to upper
+  case, as the standard reader folds them. `write-data` and `write-data-to-string` write only
+  what `read-data` accepts, and refuse anything else before writing a character, including a symbol whose name would read back as a number or as CL's `t` or `nil`. An app that
+  reads data it did not write with `cl:read`, even with `*read-eval*` nil, should move to it.
 
 - **praxeon/actor: every deliberation step records how many of the prompt's estimated tokens came
   from each source** (#317, step D). `praxeon/actor:request-messages` returns a third value, and
