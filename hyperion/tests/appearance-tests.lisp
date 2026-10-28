@@ -190,6 +190,22 @@ flat and gradient: 48 pairs, and for a gradient every sample along it."
       (is (equal "#D0D0D0" (string-upcase (getf f :colour))))
       (is (< (getf f :ratio) 4.5d0)))))
 
+(test a-button-is-checked-on-hover-and-when-pressed-as-well-as-at-rest
+  "White on #767676 passes at rest, at 4.54:1. The hover layer lightens the fill and pressing
+dims the text, and each brings it below 4.5:1, which only a check of those states can find."
+  (let* ((failures (appr:appearance-contrast-failures
+                    (appr:make-appearance-table
+                     :light '(:button-primary "#767676" :button-primary-text "#ffffff"))))
+         (mine (remove-if-not (lambda (f) (and (eq :button-primary-text (getf f :text))
+                                               (eq :light (getf f :theme))
+                                               (eq :normal (getf f :contrast))
+                                               (eq :flat (getf f :look))))
+                              failures)))
+    (is (equal '(:hover :pressed) (mapcar (lambda (f) (getf f :state)) mine)) "~S" mine)
+    (is (every (lambda (f) (< (getf f :ratio) 4.5d0)) mine))
+    (is (equal "rgba(128, 128, 128, 0.14)" appr::*hover-overlay*)
+        "the layer the check models is the one the CSS draws")))
+
 (test a-gradient-whose-stops-pass-can-still-fail-between-them
   "#767676 passes on white and on black, and fails on the grey halfway between them, which
 only the samples between the stops can find."
@@ -245,6 +261,11 @@ background would stay under the token's text colour, which the contrast check ne
   (signals error (appr:make-appearance-table :type-scale '(:huge "3rem")))
   (signals error (appr:make-appearance-table :type-scale '(:body 14)))
   (signals error (appr:make-appearance-table :fonts '(:ui "Arial; } body { display: none")))
+  ;; A line break of either kind would end the declaration it is written into. The value holds
+  ;; nothing else that is refused, so only the line break can be what signals.
+  (dolist (break (list #\Newline #\Return))
+    (signals error (appr:make-appearance-table
+                    :fonts (list :ui (format nil "Arial~Csans-serif" break)))))
   (signals error (appr:make-appearance-table :fonts '(:mono "monospace"))))
 
 (test the-focus-ring-is-defined-in-every-combination

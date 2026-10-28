@@ -1074,21 +1074,26 @@ its tag.
     list's other parameters and the page's own parameters are hidden fields, and the page is
     left out, so a new search starts on page 1. With an htmx target the form re-requests the
     list 300ms after typing stops, when a select changes, and on submit. It signals when a name
-    is not a filter or sort key of the right kind.
+    is not a filter or sort key of the right kind, and, on that request only, when the trash
+    filter's choices for the request leave out `:trash-value`. The submit button is labelled by
+    `:submit-label`, "Apply" by default, so it does not share the search field's name.
   - `hyperion/kit/toolbar:toolbar-js`, included once per page, makes the toolbar's requests
     carry the same parameters `list-href` writes for the same change: it sends them to the
     page's own path, leaves out a filter set to All and the default sort key, and drops the
     direction when the sort key changes.
   - `hyperion/kit/panel:selectable-row` returns the attributes, for Spinneret's `:attrs`, of a
-    row that loads an item's properties into a `panel-region` on a click or on Enter.
-    `properties-panel` writes the panel, an `<aside>` named by its title with a close button.
-    `panel-js` marks the chosen row with `aria-current="true"`, and the close button or Escape
-    empties the panel and returns focus to that row.
+    row that loads an item's properties into a `panel-region`, and `row-activator` writes the
+    `<button>` for the row's first cell that does the same. The button is what a keyboard
+    reaches, and Enter and Space press it; the row is not a tab stop and has no role. A click on
+    the row also loads the panel, unless it comes from a link, button or form field inside the
+    row. `properties-panel` writes the panel, an `<aside>` named by its title with a close
+    button. `panel-js` marks the chosen row with `aria-current="true"`, and the close button or
+    Escape empties the panel and returns focus to that row's button.
   - `hyperion/list` exports `list-param-name`, the query-parameter name a spec reads for a
     filter or setting; `list-carried-params`, the hidden fields a GET form for the list needs;
     and the spec readers `list-spec-sorts`, `list-spec-default-sort`, `list-spec-filters` and
     `list-spec-hx-target`.
-  - `kit.css` styles the toolbar, the chosen row and the panel.
+  - `kit.css` styles the toolbar, the chosen row, the row's button and the panel.
 - **hyperion/list: a filter's choices can depend on the request** (#1014). The `:values` of a
   filter given to `hyperion/list:make-list-spec` may be a function of the request's env instead
   of a list of strings, for choices such as the projects the signed-in user may see.
@@ -1108,7 +1113,9 @@ its tag.
     the left and has the initial focus, so Enter cancels; the action is on the right, labelled
     by `:action-label` and styled as danger. The action is disabled while its request is in
     flight, so a double click posts once. The dialog closes when the request succeeds. It
-    signals unless `:action-href` and `:action-label` are given.
+    signals unless `:action-href` and `:action-label` are given, and when `:action-href` has a
+    scheme other than `http` or `https`, such as `javascript:`, because the form's action is
+    where a browser without htmx submits it.
   - `notice-region` writes an empty `role="status"` live region, and `undo-notice` writes a
     notice with Undo and Dismiss buttons and no timer. With `:oob t` a handler can return the
     notice with any response and htmx appends it to the region.
@@ -1133,7 +1140,8 @@ its tag.
     link.
   - A breadcrumb href or an empty state's `:action-href` becomes a link only when it has no
     scheme or its scheme is `http` or `https`. Any other, such as `javascript:` or `data:`, is
-    left out of the page, and the label is written as plain text. Nothing is signalled.
+    left out of the page, and the label is written as plain text. Nothing is signalled. The
+    check is exported as `hyperion/kit/page:safe-href-p`.
   - `hyperion/kit/toggle:segmented-control` (exactly one option pressed) and
     `hyperion/kit/toggle:toggle-group` (any number pressed) write buttons with `aria-pressed`
     in a `role="group"` with an `aria-label`. Each button loads its href with htmx.
@@ -1173,8 +1181,12 @@ its tag.
     unchanged.
   - `appearance-contrast-failures` checks every text token against its background in all eight
     combinations, at WCAG AA (4.5:1). For a gradient it checks every stop and 19 points between
-    each pair of stops. Hyperion's own table passes. An app calls the check in its own tests on
-    its own table. `contrast-ratio` and `relative-luminance` are exported.
+    each pair of stops. A button's text (`:button`, `:button-primary`, `:button-danger`) is also
+    checked on hover, under the grey hover layer, and when pressed, at `brightness(0.92)`, and
+    each failure names its `:state` (`:resting`, `:hover` or `:pressed`). Hyperion's own table
+    passes; its dark danger button's text is `#000000`, because `#0b0c0e` fell to 4.46:1 when
+    pressed. An app calls the check in its own tests on its own table. `contrast-ratio` and
+    `relative-luminance` are exported.
 
 - **praxeon/actor: every deliberation step records how many of the prompt's estimated tokens came
   from each source** (#317, step D). `praxeon/actor:request-messages` returns a third value, and
