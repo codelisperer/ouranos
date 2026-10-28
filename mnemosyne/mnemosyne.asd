@@ -100,10 +100,20 @@
   :components ((:file "tests/jobs-tests"))
   :perform (test-op (o c) (uiop:symbol-call :mnemosyne/jobs/tests :run-tests)))
 
+(defsystem "mnemosyne/test-template"
+  :description "Test support: migrate one SQLite database per test run and copy it for each test."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  ;; #1047. An app loads this in its test system only. The copy uses SQLite's backup API
+  ;; through cffi, on the database handle cl-sqlite (the "sqlite" system) keeps.
+  :depends-on ("mnemosyne" "dbi" "sqlite" "cffi")
+  :components ((:file "tests/test-template")))
+
 (defsystem "mnemosyne/tests"
   :description "Test suite for Mnemosyne."
   :depends-on ("aion/fs" "mnemosyne" "aion/secret" "aion/clock" "aion/log" "fiveam"   ; entity.lisp and backends.lisp
-               "aion/test-threads")   ; pool.lisp joins its threads with a deadline (#325)
+               "aion/test-threads"    ; pool.lisp joins its threads with a deadline (#325)
+               "mnemosyne/test-template")  ; template.lisp (#1047)
   :serial t
   :components ((:module "tests"
                 :serial t
@@ -123,5 +133,6 @@
                              (:file "sqlite-rewrite")  ; map-query and the in-place re-encode (#425)
                              (:file "pool")         ; uses sqlite-busy's helpers (#325)
                              (:file "sqlite-library")
+                             (:file "template")     ; mnemosyne/test-template (#1047)
                              (:file "smoke"))))
   :perform (test-op (o c) (uiop:symbol-call :mnemosyne/tests :run-tests)))

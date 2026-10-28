@@ -347,6 +347,44 @@ schema rather than hand-written. Three things it will not do for you, on purpose
 - Foreign keys are **off by default** in SQLite; enable per connection with
   `PRAGMA foreign_keys = ON` if you rely on them.
 
+## 10. Tests: migrate once per run, copy the database for each test
+
+A fixture that opens a fresh in-memory SQLite database for each test runs every migration for
+each test. The test-support system `mnemosyne/test-template` (#1047) runs them once, into a
+template database, and gives each test a copy of it. Load it from the app's **test** system
+only; it is not part of what the app ships.
+
+```lisp
+;; In the test system's :depends-on: "mnemosyne/test-template"
+(defvar *template* nil)
+
+(defun run-tests ()
+  (setf *template* (tmpl:make-sqlite-template *migrations*))
+  (unwind-protect (fiveam:run! 'my-app)
+    (tmpl:close-sqlite-template *template*)))
+
+(test a-test-with-its-own-database
+  (tmpl:with-sqlite-template-copy (c *template*)
+    ;; C is a mnemosyne connection to an in-memory database with every migration applied.
+    ...))
+```
+
+- `make-sqlite-template` applies the migrations with `mnemosyne/migrate:migrate` to an
+  in-memory database. `sqlite-template-applied` lists the ids it applied.
+- `copy-sqlite-template` returns a new connection to an in-memory database holding a copy of
+  the template's tables, rows and `schema_migrations`, made with SQLite's backup API.
+  `with-sqlite-template-copy` disconnects it afterwards.
+- A copy is a separate database. A row one test writes is not in the template or in the next
+  test's copy, and copies may be open at the same time.
+- Settings that belong to a connection rather than to the database, such as
+  `PRAGMA foreign_keys`, are not copied. Set them on the copy.
+- Measured on an Apple Silicon Mac with 300 migrations (150 tables and 150 indexes): about
+  15 ms per test to migrate a fresh database, 13 ms once for the template, and 0.5 ms per test
+  for a copy. A copy's cost grows with the size of the database, not with the number of
+  migrations.
+- SQLite only. On Postgres the same idea is `CREATE DATABASE … TEMPLATE …`, or a transaction
+  rolled back after each test; neither is provided yet.
+
 ## Checklist for a new DB-backed app
 
 - [ ] `src/migrations.lisp` holds one append-only, ordered `*migrations*`.
@@ -361,3 +399,5 @@ schema rather than hand-written. Three things it will not do for you, on purpose
       arrive at the defschema, and that is a claim worth checking on every database.
 - [ ] A column added to a `defschema` got a **new** migration; the applied one was not
       touched. `intro:drift-ddl` writes the `ALTER` for you.
+- [ ] On SQLite, the test suite migrates one template per run and copies it for each test
+      (`mnemosyne/test-template`, §10).

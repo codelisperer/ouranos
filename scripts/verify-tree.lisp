@@ -174,6 +174,9 @@
     :praxeon/mcp :aion/oauth :hyperion/oauth
     ;; The job scheduler and its database store (#689).
     :aion/schedule :mnemosyne/jobs
+    ;; Test support: one migrated SQLite template per run, a copy per test (#1047). Its
+    ;; tests are in mnemosyne/tests.
+    :mnemosyne/test-template
     ;; Dev sidecars (#700).
     :hyperion/sidecar
     ;; example apps -- they are the launch artifacts and the first thing a reader runs
