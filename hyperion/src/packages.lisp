@@ -511,10 +511,11 @@
    #:appearance-cookie-value #:parse-appearance-cookie
    ;; tokens
    #:appearance-table #:appearance-table-p #:make-appearance-table #:token-values
-   #:appearance-css #:*default-spacing*
+   #:appearance-css #:*default-spacing* #:*default-type-scale* #:*default-fonts*
    ;; contrast
    #:relative-luminance #:contrast-ratio #:background-samples
-   #:appearance-contrast-failures #:*minimum-contrast*))
+   #:appearance-contrast-failures #:*minimum-contrast* #:*minimum-ring-contrast*
+   #:*ring-backgrounds*))
 
 ;;; --- Link-preview tags: Open Graph, Twitter cards, canonical (#821) ------
 (cl:defpackage #:hyperion/page-meta

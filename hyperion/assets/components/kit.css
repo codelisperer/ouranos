@@ -20,7 +20,7 @@
 }
 
 .hy-page-title {
-  font-size: var(--bulma-size-3, 2rem);
+  font-size: var(--hy-text-title, 1.25rem);
   font-weight: 600;
   line-height: 1.2;
   margin: 0;
@@ -29,7 +29,7 @@
 
 .hy-page-subtitle {
   margin: var(--hy-space-1, 4px) 0 0;
-  font-size: var(--bulma-size-6, 1rem);
+  font-size: var(--hy-text-body, 0.875rem);
 }
 
 .hy-page-actions {
@@ -45,7 +45,7 @@
   list-style: none;
   margin: 0 0 var(--hy-space-2, 8px);
   padding: 0;
-  font-size: var(--bulma-size-7, 0.75rem);
+  font-size: var(--hy-text-meta, 0.75rem);
 }
 
 .hy-breadcrumbs li + li::before {
@@ -73,7 +73,7 @@
 }
 
 .hy-empty-title {
-  font-size: var(--bulma-size-4, 1.5rem);
+  font-size: var(--hy-text-heading, 1rem);
   font-weight: 600;
   margin: 0 0 var(--hy-space-2, 8px);
   color: inherit;
@@ -146,7 +146,7 @@
 }
 
 .hy-dialog-title {
-  font-size: var(--bulma-size-5, 1.25rem);
+  font-size: var(--hy-text-heading, 1rem);
   font-weight: 600;
   margin: 0;
   color: inherit;
@@ -223,7 +223,7 @@
   display: flex;
   flex-direction: column;
   gap: var(--hy-space-1, 4px);
-  font-size: var(--bulma-size-7, 0.75rem);
+  font-size: var(--hy-text-meta, 0.75rem);
 }
 
 .hy-toolbar-submit {
@@ -242,7 +242,7 @@
 }
 
 .hy-row:focus-visible {
-  outline: 2px solid var(--bulma-focus-color, var(--bulma-link));
+  outline: 2px solid var(--hy-focus-ring, var(--bulma-focus-color, var(--bulma-link)));
   outline-offset: -2px;
 }
 
@@ -265,7 +265,7 @@
 }
 
 .hy-properties-title {
-  font-size: var(--bulma-size-5, 1.25rem);
+  font-size: var(--hy-text-heading, 1rem);
   font-weight: 600;
   margin: 0;
   color: inherit;
@@ -273,4 +273,41 @@
 
 .hy-properties-body {
   padding: var(--hy-space-4, 16px);
+}
+
+/* Hover, press and keyboard focus for the buttons above. Their `background` replaces the one
+   Bulma changes on hover, so they would otherwise show no hover at all. A translucent grey
+   layer over the token's background darkens a light button and lightens a dark one, and works
+   whether the token is a colour or a gradient. */
+.hy-segmented > .button:hover,
+.hy-toggle-group > .button:hover,
+.hy-toolbar-submit:hover {
+  background: linear-gradient(rgba(128, 128, 128, 0.14), rgba(128, 128, 128, 0.14)),
+    var(--hy-button, var(--bulma-scheme-main));
+}
+
+.hy-segmented > .button[aria-pressed="true"]:hover,
+.hy-toggle-group > .button[aria-pressed="true"]:hover {
+  background: linear-gradient(rgba(128, 128, 128, 0.14), rgba(128, 128, 128, 0.14)),
+    var(--hy-button-primary, var(--bulma-primary));
+}
+
+.hy-confirm-actions .is-danger:hover {
+  background: linear-gradient(rgba(128, 128, 128, 0.14), rgba(128, 128, 128, 0.14)),
+    var(--hy-button-danger, var(--bulma-danger));
+}
+
+.hy-segmented > .button:active,
+.hy-toggle-group > .button:active,
+.hy-toolbar-submit:active,
+.hy-confirm-actions .is-danger:active {
+  filter: brightness(0.92);
+}
+
+.hy-segmented > .button:focus-visible,
+.hy-toggle-group > .button:focus-visible,
+.hy-toolbar-submit:focus-visible,
+.hy-confirm-actions .is-danger:focus-visible {
+  outline: 2px solid var(--hy-focus-ring, var(--bulma-focus-color, var(--bulma-link)));
+  outline-offset: 2px;
 }
