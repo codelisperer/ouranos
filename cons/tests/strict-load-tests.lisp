@@ -97,7 +97,11 @@ root fails the WARNING, as before."
         (declare (ignore printed))
         (is (typep err 'error) "a strict load under the wrong root must not pass")
         (is (search "found no system of the project" (princ-to-string err)) "~A" err)
-        (is (search (namestring elsewhere) (princ-to-string err)) "the root is named: ~A" err))
+        ;; By the directory's own name: the message names the root resolved with TRUENAME, and on
+        ;; a Windows runner the temporary directory's path can come back in its short 8.3 form
+        ;; (RUNNER~1) on one side and its long form on the other (run 40619640922).
+        (is (search (car (last (pathname-directory elsewhere))) (princ-to-string err))
+            "the root is named: ~A" err))
       (is (null (%strict-load name elsewhere))
           "control: without :FORCE-OWN the load of a system outside the root passes")))
   (%with-strict-project (dir name "rightroot" *strict-warning-source*)
