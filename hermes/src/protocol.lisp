@@ -39,7 +39,11 @@ answered."))
   (:documentation "Deliver MESSAGE (an EMAIL or SMS) via PROVIDER. Returns a DELIVERY-RESULT
 on success; signals DELIVERY-FAILURE on a rejected/failed request, UNSUPPORTED-MESSAGE if the
 provider does not implement the message's channel, or CONFIGURATION-ERROR when a required
-credential is missing."))
+credential is missing.
+
+A method for EMAIL sends every header in EMAIL-HEADERS, or, for a provider that cannot send
+extra headers, signals INVALID-MESSAGE when EMAIL-HEADERS is not empty. It never drops them
+silently: an unsubscribe header that was set and not sent is not visible to anyone (#106)."))
 
 (defmethod deliver ((p provider) message)
   "Default: the provider does not handle this kind of message."

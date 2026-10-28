@@ -43,9 +43,10 @@ bulk senders, needs both of these:
 
 `make-email` signals `invalid-message`, before anything is sent, for a name that is not a valid
 header name, a name given twice, a header hermes or the provider sets itself (`To`, `From`,
-`Subject`, `Reply-To`, `Cc`, `Bcc`, `Content-Type` and the others in
-`hermes:+reserved-email-headers+`), or a value containing a carriage return, line feed or other control
-character, which could otherwise add a header of its own.
+`Subject`, `Reply-To`, `Cc`, `Bcc`, `Content-Type` and the others `hermes:reserved-email-headers`
+returns), a header longer than the 998 characters a line of email may have, or a value with
+anything but printable ASCII and tabs. A carriage return or line feed could otherwise add a
+header of its own. hermes does not encode non-ASCII text in a header.
 
 **Transport selection (env):**
 - `HERMES_TRANSPORT=dev` → the **dev transport** for every channel: *renders* the message

@@ -312,6 +312,30 @@ main at 3ab171b."
     (is (equal headers (h:email-headers (h:make-email :to "a" :from "b" :headers headers)))
         "a tab and an empty value are allowed, and the alist is kept as given")))
 
+(test a-header-value-outside-printable-ascii-is-refused
+  ;; NEL (U+0085) and the line separator (U+2028) end a line for some parsers; a non-ASCII
+  ;; letter is not valid in a raw header, and hermes does not RFC 2047-encode one.
+  (dolist (ch (list (code-char #x85) (code-char #x9B) (code-char #x2028) (code-char #xE9)
+                    (code-char 127) (code-char 0)))
+    (signals h:invalid-message
+      (h:make-email :to "a" :from "b"
+                    :headers (list (cons "X-Campaign" (format nil "spring~Csale" ch)))))))
+
+(test a-header-longer-than-an-email-line-is-refused
+  ;; "X-Long: " is 8 characters, so a 990-character value makes a 998-character line.
+  (is (h:email-headers (h:make-email :to "a" :from "b"
+                                     :headers (list (cons "X-Long" (make-string 990 :initial-element #\a)))))
+      "998 characters is allowed")
+  (signals h:invalid-message
+    (h:make-email :to "a" :from "b"
+                  :headers (list (cons "X-Long" (make-string 991 :initial-element #\a))))))
+
+(test the-reserved-header-list-cannot-be-changed-by-a-caller
+  (let ((list (h:reserved-email-headers)))
+    (setf (first list) "X-Not-Reserved")
+    (is (member "To" (h:reserved-email-headers) :test #'string=) "a fresh list each time")
+    (signals h:invalid-message (h:make-email :to "a" :from "b" :headers '(("To" . "x"))))))
+
 (test the-dev-transport-shows-the-headers-of-the-last-email
   (let* ((out (make-string-output-stream))
          (p (h:make-dev-transport :stream out)))
