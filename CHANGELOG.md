@@ -14,6 +14,15 @@ its tag.
 
 ### An app may have to act
 
+- **`scripts/build-libuv.lisp` rebuilds a libuv built from another release instead of keeping
+  it** (#977). It reused any `vendor/libuv/lib` library that existed, so after `libuv.pin` moved
+  (1.52.1 to 1.53.0 in train 77) a checkout kept the old build, said "already built" and exited 0,
+  and bundles carried the old release. It now writes `vendor/libuv/BUILT-FROM` with the version
+  and sha256 it built from, and reuses a library only when that stamp names the pin. **The first
+  run after updating rebuilds libuv once on every checkout**, because no existing build has a
+  stamp, so it needs the C toolchain build-libuv already requires. The stamp's format is shared
+  with `build-sqlite.lisp`'s, in `scripts/built-from.lisp`.
+
 - **MCP resources and retrieval passages are untrusted by default, so in a prompt they refuse
   `:requires-user-intent` means for the turn** (#907, after #906). `praxeon/mcp:add-resource` and
   `praxeon/retrieval:passage->ctx-item` put outside content into an agent's context with nothing
