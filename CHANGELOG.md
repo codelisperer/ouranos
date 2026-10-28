@@ -910,6 +910,22 @@ its tag.
 
 ### Added
 
+- **`hyperion/kit/dock`: a panel that loads its contents from a route into an element the page
+  already has** (part of #67). It is for a second view beside a page's own content, such as a
+  chat or a help pane.
+  - `dock-panel` writes a `<section>` that htmx fills from a URL. It has no width, position or
+    overlay of its own, so it fills the column, tab or drawer it is put in and resizes with it.
+    With `:load :at-once` (the default) it loads with the page, also inside a tab that is not
+    shown, and switching tabs does not reload it. With `:load :on-open` it loads the first time
+    it receives the event `hy-dock-open`.
+  - `dock-launcher` writes a button that shows and hides a panel and keeps `aria-expanded` in
+    step. `dock-js`, included once per page, makes it work and sends `hy-dock-open` to a panel it
+    opens. A page's own tab or drawer code can send the same event.
+  - Nothing in it loads a script or changes `window.htmx`; the page's own htmx loads the
+    contents. `dock-panel` signals when its content URL is not http, https or relative
+    (`hyperion/kit/page:safe-href-p`), because the host's htmx would fetch a `data:` or
+    `javascript:` URL. `*dock-id*` is the default id, `hy-dock`. The styles are in `kit.css`.
+
 - **hyperion/appearance: text-size roles, a UI font and a prose font, and a focus-ring colour**
   (#981). `appearance-css` writes seven text-size tokens: `--hy-text-caps` 0.6875rem,
   `--hy-text-meta` 0.75rem, `--hy-text-dense` 0.8125rem, `--hy-text-body` 0.875rem,
