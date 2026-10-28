@@ -910,6 +910,36 @@ its tag.
 
 ### Added
 
+- **hyperion/appearance: theme, contrast and look as one visitor setting, and the `--hy-*`
+  appearance tokens** (#981, part one). A page's appearance is three attributes on `<html>`:
+  `data-theme` (`light` or `dark`), `data-contrast` (`normal` or `high`) and the new
+  `data-look` (`flat` or `gradient`). The default for theme and for contrast is the system:
+  with the attribute absent, `prefers-color-scheme` and `prefers-contrast: more` decide. With
+  `data-look` absent the look is flat.
+  - `make-appearance` and `appearance-from-strings` build the setting, and `html-attributes`
+    returns the attributes for `<html>`, leaving out any setting that follows the system.
+  - `read-appearance` and `persist-appearance` are a store protocol.
+    `make-cookie-appearance-store` keeps the setting in one cookie, named `appearance` by
+    default, for example `dark.system.gradient`. An app that stores it elsewhere supplies its
+    own store.
+  - `make-appearance-table` takes token values for the light, dark, light high-contrast and dark
+    high-contrast schemes, merged over hyperion's defaults. Each scheme has a `:gradient` plist
+    for the values the gradient look changes. `appearance-css` writes CSS for every combination,
+    plus `--hy-space-1` to `--hy-space-7` (a 4px base).
+  - The tokens are `--hy-surface`, `--hy-surface-raised`, `--hy-header`, `--hy-button`,
+    `--hy-button-primary` and `--hy-button-danger`, each with a `-text` token. Their names are
+    the same in both looks. A background token is a colour in the flat look and may be a
+    `linear-gradient` in the gradient look, so use it with `background:`, not
+    `background-color:`.
+  - In the gradient look, the CSS also applies the tokens to Bulma's `.button.is-primary`,
+    `.button.is-danger`, `.navbar`, `.modal-card-head`, `.card-header`, `.box` and `.card`.
+  - The type scale is Bulma's `--bulma-size-1` to `--bulma-size-7`, set through
+    `hyperion/assets:theme`.
+  - `appearance-contrast-failures` checks every text token against its background in all eight
+    combinations, at WCAG AA (4.5:1). For a gradient it checks every stop and 19 points between
+    each pair of stops. Hyperion's own table passes. An app calls the check in its own tests on
+    its own table. `contrast-ratio` and `relative-luminance` are exported.
+
 - **praxeon/actor: every deliberation step records how many of the prompt's estimated tokens came
   from each source** (#317, step D). `praxeon/actor:request-messages` returns a third value, and
   `praxeon/actor:prompt-breakdown` computes it: a plist of estimated tokens under `:system`,
