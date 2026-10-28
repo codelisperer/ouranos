@@ -229,7 +229,8 @@ The components so far:
   group. They need no script for the keyboard, because a `<button>` already takes Enter and
   Space;
 - `dialog`, `dialog-opener`, `confirm-dialog`, `notice-region` and `undo-notice`, described
-  below.
+  below;
+- `list-toolbar`, and `selectable-row` with `properties-panel`, described below.
 
 The tests parse the HTML the components write and check roles, names and pressed state. They
 do not search the HTML as a string.
@@ -259,6 +260,21 @@ The tests for these come in two parts. `hyperion/kit/tests` parses the markup. I
 in the same headless browser as the htmx smoke page. A script on that page presses the
 controls and records which element has focus and whether each dialog is open, and the test
 reads that record back from the page.
+
+`list-toolbar` (`hyperion/kit/toolbar`) is built on `hyperion/list`. It is a GET form with
+`role="search"`, so it works without JavaScript; the list's other parameters ride along as
+hidden fields. With htmx it re-requests the list as the visitor types or picks, and
+`toolbar-js` makes each request carry the same parameters as the `list-href` link for the same
+change, so the address bar shows the same URL a link would. Put the toolbar inside the element
+the list's htmx target replaces, so its hidden fields follow every change the pager and sort
+headings make. The search field keeps its text and focus across those swaps.
+
+A master/detail page uses `hyperion/kit/panel`. The app writes its own rows and gives each the
+attributes `selectable-row` returns, so a click or Enter loads the item's `properties-panel`
+into a `panel-region` beside the list. `panel-js` moves `aria-current` to the chosen row, and
+closing the panel, with its button or Escape, returns focus to that row. The browser test
+checks the toolbar's URLs against `list-href` and the panel's focus handling on a small list
+page.
 
 ### The hot-reload dev loop — the signature feature
 

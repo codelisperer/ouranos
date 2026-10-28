@@ -410,3 +410,30 @@ a tag's angle brackets removed."
       (is (search ">1–25 von 60<" html) "~A" html)
       (is (search ">Weiter</a>" html) "~A" html)
       (is (search ">Previous</span>" html) "a key the source lacks is English: ~A" html))))
+
+;;; --- form fields (#981) ----------------------------------------------------------
+
+(test a-param-name-carries-the-prefix
+  (let ((spec (list:make-list-spec :id "t" :prefix "tasks." :filters '((:q :text t)))))
+    (is (equal "tasks.q" (list:list-param-name spec :q)))
+    (is (equal "tasks.sort" (list:list-param-name spec "sort"))))
+  (is (equal "status" (list:list-param-name *spec* :status))))
+
+(test a-form-carries-the-other-parameters-and-not-the-page
+  "The hidden fields a GET form needs to change only its own fields: the page's own parameters
+first, then the list's, without the page and without the names the form shows itself."
+  (let ((state (%state "tab=2&page=3&size=50&sort=name&dir=desc&status=open&q=ab")))
+    (is (equal '(("tab" . "2") ("size" . "50") ("sort" . "name") ("dir" . "desc")
+                 ("status" . "open") ("q" . "ab"))
+               (list:list-carried-params state)))
+    (is (equal '(("tab" . "2") ("size" . "50") ("dir" . "desc"))
+               (list:list-carried-params state :except '("sort" "status" "q")))))
+  (is (null (list:list-carried-params (%state "page=2"))) "the page alone carries nothing"))
+
+(test the-spec-says-its-sorts-filters-and-target
+  (let ((spec (list:make-list-spec :id "t" :sorts '((:a :column :a)) :tiebreak :id
+                                   :filters '((:s :values ("x"))) :hx-target "#t")))
+    (is (equal '(:a) (mapcar #'first (list:list-spec-sorts spec))))
+    (is (eq :a (list:list-spec-default-sort spec)) "the first key when none is named")
+    (is (equal '(:s) (mapcar #'first (list:list-spec-filters spec))))
+    (is (equal "#t" (list:list-spec-hx-target spec)))))
