@@ -213,6 +213,25 @@ checks which look is active. In the gradient look a background token may be a
 combination, sampling along each gradient. An app runs it in its own tests, so a gradient that
 drops text below WCAG AA fails the build, not a visitor.
 
+### Collection-page components (`hyperion/kit`)
+
+`hyperion/kit` (#981) holds the generic parts of a page that lists things. Domain components,
+such as a row for a particular kind of record, stay in the apps. Each component is a plain
+function that writes into Spinneret's `*html*`, like `hyperion/list:pager`, so it can sit
+inside any page body. When #38's `render` protocol lands, each can become a method without
+changing the HTML it writes.
+
+The components so far:
+- `page-header`;
+- `breadcrumbs`;
+- `empty-state`;
+- `segmented-control` and `toggle-group`, which are buttons with `aria-pressed` in a labelled
+  group. They need no script for the keyboard, because a `<button>` already takes Enter and
+  Space.
+
+The tests parse the HTML the components write and check roles, names and pressed state. They
+do not search the HTML as a string.
+
 ### The hot-reload dev loop — the signature feature
 
 The property everything else follows from: **state ≠ server.**
