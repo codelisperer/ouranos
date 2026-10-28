@@ -27,31 +27,54 @@ read to the end."))
 (defstruct (request-cancel (:constructor make-request-cancel ())
                            (:predicate request-cancel-p))
   "A handle that cancels the requests opened with it (OPEN-RESPONSE-STREAM's :CANCEL). Make one
-before the request, give it to the thread that may cancel, and call CANCEL-REQUEST there."
-  (watch (%make-watch)))
+before the request, give it to the thread that may cancel, and call CANCEL-REQUEST there. One
+handle may serve several requests at once, from several threads: each open request has a watch
+of its own in WATCHES, and a cancel shuts down every one of them. Every field is read and written
+with LOCK held."
+  (lock (sb-thread:make-mutex :name "request cancel"))
+  (fired nil)
+  (watches '()))
 
 (defun cancel-request (cancel)
-  "Cancel the request using CANCEL, a REQUEST-CANCEL, from any thread: shut its socket down, so a
-read blocked on it returns and the server sees the connection close. A request opened with
-CANCEL after this is shut down as soon as it connects. Returns T."
-  (%fire (request-cancel-watch cancel))
+  "Cancel every request using CANCEL, a REQUEST-CANCEL, from any thread: shut each one's socket
+down, so a read blocked on it returns and the server sees the connection close. A request opened
+with CANCEL after this is shut down as soon as it connects. Returns T."
+  (dolist (watch (sb-thread:with-mutex ((request-cancel-lock cancel))
+                   (setf (request-cancel-fired cancel) t)
+                   (copy-list (request-cancel-watches cancel))))
+    (%fire watch))
   t)
 
 (defun request-cancelled-p (cancel)
   "True once CANCEL-REQUEST has been called on CANCEL."
-  (%fired-p (request-cancel-watch cancel)))
+  (sb-thread:with-mutex ((request-cancel-lock cancel)) (request-cancel-fired cancel)))
+
+(defun %add-watch (cancel watch)
+  "Register WATCH, a new request's, with CANCEL. When CANCEL has already fired, fire WATCH now."
+  (when (sb-thread:with-mutex ((request-cancel-lock cancel))
+          (push watch (request-cancel-watches cancel))
+          (request-cancel-fired cancel))
+    (%fire watch)))
+
+(defun %remove-watch (cancel watch)
+  "Take WATCH, a request's that has ended, back from CANCEL."
+  (when cancel
+    (sb-thread:with-mutex ((request-cancel-lock cancel))
+      (setf (request-cancel-watches cancel) (remove watch (request-cancel-watches cancel))))))
 
 ;;; --- the body ------------------------------------------------------------------------------
 
 (defclass %response-stream (sb-gray:fundamental-binary-input-stream)
   ((inner :initarg :inner :reader %inner)
    (watch :initarg :watch :reader %stream-watch)
+   (cancel :initarg :cancel :reader %stream-cancel)
    (socket :initarg :socket :reader %stream-socket)
    (closed :initform nil :accessor %stream-closed))
   (:documentation "OPEN-RESPONSE-STREAM's body. Reads come from INNER, the body as the
 connection frames it. A read that fails or ends after the request was cancelled signals
 REQUEST-CANCELLED instead, so a body cut short by a cancel is never taken for a whole one.
-CLOSE takes the socket back from the watch and then closes the connection."))
+CLOSE takes the socket back from the watch, takes the watch back from CANCEL, the request's
+REQUEST-CANCEL or NIL, and then closes the connection."))
 
 (defmethod stream-element-type ((s %response-stream)) '(unsigned-byte 8))
 
@@ -79,6 +102,7 @@ CLOSE takes the socket back from the watch and then closes the connection."))
     (let ((*%watch* (%stream-watch s)))
       (%take-back-socket)
       (ignore-errors (close (%inner s))))
+    (%remove-watch (%stream-cancel s) (%stream-watch s))
     (when (%stream-socket s) (ignore-errors (usocket:socket-close (%stream-socket s)))))
   t)
 
@@ -93,7 +117,7 @@ first. A connect or TLS failure signals HTTP-ERROR.
 
 The request asks for an uncompressed body (Accept-Encoding: identity), so each piece can be
 read as it arrives. RESOLVE is for tests."
-  (let* ((watch (if cancel (request-cancel-watch cancel) (%make-watch)))
+  (let* ((watch (%make-watch))
          (*%watch* watch)
          (uri (quri:uri (request-url request)))
          (address (or (first (funcall resolve (quri:uri-host uri)))
@@ -107,23 +131,31 @@ read as it arrives. RESOLVE is for tests."
           (request-headers req) (cons '("Accept-Encoding" . "identity")
                                       (remove "accept-encoding" (request-headers req)
                                               :key #'car :test #'string-equal)))
-    (flet ((cancelled () (error 'request-cancelled :detail "the request was cancelled")))
-      (when (%fired-p watch) (cancelled))
-      (multiple-value-bind (body status headers)
-          (handler-bind ((error (lambda (e)
-                                  (when (and (%fired-p watch)
-                                             (not (typep e 'request-cancelled)))
-                                    (cancelled)))))
-            (handler-case (%request-pinned req)
-              (http-error (e) (error e))
-              (error (e) (error 'http-error :detail (format nil "transport error: ~A" e)))))
-        (let ((socket (sb-thread:with-mutex ((%watch-lock watch)) (%watch-socket watch))))
-          (values (make-instance '%response-stream
-                                 :inner (if (streamp body)
-                                            body
-                                            (make-instance '%octets-input :octets (%as-octets body)))
-                                 :watch watch :socket socket)
-                  status headers))))))
+    (when cancel (%add-watch cancel watch))
+    (let ((opened nil))
+      (unwind-protect
+           (flet ((cancelled () (error 'request-cancelled :detail "the request was cancelled")))
+             (when (%fired-p watch) (cancelled))
+             (multiple-value-bind (body status headers)
+                 (handler-bind ((error (lambda (e)
+                                         (when (and (%fired-p watch)
+                                                    (not (typep e 'request-cancelled)))
+                                           (cancelled)))))
+                   (handler-case (%request-pinned req)
+                     (http-error (e) (error e))
+                     (error (e) (error 'http-error :detail (format nil "transport error: ~A" e)))))
+               (let ((socket (sb-thread:with-mutex ((%watch-lock watch)) (%watch-socket watch))))
+                 (multiple-value-prog1
+                     (values (make-instance '%response-stream
+                                            :inner (if (streamp body)
+                                                       body
+                                                       (make-instance '%octets-input
+                                                                      :octets (%as-octets body)))
+                                            :watch watch :cancel cancel :socket socket)
+                             status headers)
+                   (setf opened t)))))
+        ;; The body's CLOSE takes the watch back; with no body, nothing else will.
+        (unless opened (%remove-watch cancel watch))))))
 
 (defclass %octets-input (sb-gray:fundamental-binary-input-stream)
   ((octets :initarg :octets :reader %octets)
@@ -172,15 +204,15 @@ lines with LF. Returns NIL at the end of the stream before any octet."
   "The next Server-Sent Event on STREAM, a binary input stream such as OPEN-RESPONSE-STREAM's
 body, as (values DATA EVENT ID OCTETS): DATA the event's data lines joined with newlines, EVENT
 its event field or NIL, ID its id field or NIL, OCTETS the octets read for it, comments
-included. Returns NIL at the end of the stream. Comments (lines starting with a colon) and
+included. Returns NIL at the end of the stream. An event is complete only when a blank line
+follows it, so one the stream ends in the middle of is discarded, as the event-stream format
+says: a provider's connection that drops mid-event must not pass for a whole event. Comments (lines starting with a colon) and
 events with no data are skipped. Signals HTTP-ERROR when an event is longer than
 *MAX-EVENT-OCTETS*."
   (let ((data '()) (event nil) (id nil) (used 0) (saw-data nil))
     (loop
       (multiple-value-bind (line n) (%read-event-line stream (- *max-event-octets* used))
-        (cond ((null line)
-               (return (and saw-data
-                            (values (format nil "~{~A~^~%~}" (reverse data)) event id used))))
+        (cond ((null line) (return nil))
               (t
                (incf used n)
                (cond ((zerop (length line))

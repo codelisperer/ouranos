@@ -1307,8 +1307,16 @@ b" nil nil) ("é" nil nil))
              (%events-of (concatenate
                           'string
                           (format nil ": hello~%event: start~%id: 7~%data: one~%~%data:two~%~%")
-                          (format nil "event: empty~%~%data: a~C~%data: b~C~%~C~%data: é"
+                          (format nil "event: empty~%~%data: a~C~%data: b~C~%~C~%data: é~%~%"
                                   #\Return #\Return #\Return))))))
+
+(test read-event-discards-an-event-the-stream-ends-in
+  "An event with no blank line after it when the stream ends is not returned, whether the stream
+ends after a whole data line or in the middle of one: the connection dropped before the event was
+finished. The events before it are returned."
+  (is (equal '(("whole" nil nil)) (%events-of (format nil "data: whole~%~%data: cut~%"))))
+  (is (equal '(("whole" nil nil)) (%events-of (format nil "data: whole~%~%data: {\"a\":"))))
+  (is (null (%events-of (format nil "event: x~%data: only~%")))))
 
 (test read-event-refuses-an-event-over-its-limit
   "An event longer than *MAX-EVENT-OCTETS* signals HTTP-ERROR rather than being read whole."
@@ -1438,6 +1446,52 @@ the connection open, until the server gave up after 10 seconds."
           (when (car closed-at)
             (is (< (/ (- (car closed-at) cancelled-at) internal-time-units-per-second) 2)
                 "within two seconds of the cancel")))))))
+
+(defun %cancellable-reader (server cancel first outcome)
+  "A thread that opens a stream to SERVER with CANCEL, stores its first event in FIRST's car, then
+reads on and stores :CANCELLED or :ENDED in OUTCOME's car."
+  ;; THREAD-LIFETIME: reads the stream until a cancel wakes it with REQUEST-CANCELLED, or until
+  ;; the server ends the stream after 10 seconds; it then closes the body and returns. The caller
+  ;; joins it.
+  (bt:make-thread
+   (lambda ()
+     (multiple-value-bind (body)
+         (http:open-response-stream (http:make-request :url (%local server "/") :read-timeout 30)
+                                    :cancel cancel)
+       (unwind-protect
+            (handler-case
+                (progn (setf (car first) (http:read-event body))
+                       (http:read-event body)
+                       (setf (car outcome) :ended))
+              (http:request-cancelled () (setf (car outcome) :cancelled)))
+         (close body))))
+   :name "streamed request reader"))
+
+(test one-cancel-stops-every-request-opened-with-it
+  "Two threads each have a stream open with the same REQUEST-CANCEL, the way two calls made under
+one turn's cancel would. One CANCEL-REQUEST wakes both with REQUEST-CANCELLED, and both servers
+see their connection close. When both bodies are closed the handle holds no request."
+  (let ((closed-a (list nil)) (closed-b (list nil))
+        (cancel (http:make-request-cancel)))
+    (with-server (sa (%silent-handler closed-a))
+      (with-server (sb (%silent-handler closed-b))
+        (let* ((first-a (list nil)) (first-b (list nil))
+               (outcome-a (list nil)) (outcome-b (list nil))
+               (reader-a (%cancellable-reader sa cancel first-a outcome-a))
+               (reader-b (%cancellable-reader sb cancel first-b outcome-b)))
+          (loop repeat 50 until (and (car first-a) (car first-b)) do (sleep 0.1))
+          (is (equal '("first" "first") (list (car first-a) (car first-b)))
+              "both first events arrived before the cancel")
+          (http:cancel-request cancel)
+          (aion/test-threads:join reader-a :timeout 15)
+          (aion/test-threads:join reader-b :timeout 15)
+          (is (equal '(:cancelled :cancelled) (list (car outcome-a) (car outcome-b)))
+              "both readers were woken with REQUEST-CANCELLED")
+          (loop repeat 30 until (and (car closed-a) (car closed-b)) do (sleep 0.1))
+          (is-true (car closed-a) "the first server saw its connection close")
+          (is-true (car closed-b) "the second server saw its connection close")
+          (is (null (http::request-cancel-watches cancel))
+              "the closed bodies took their requests back from the handle"))))))
 
 (test a-request-cancelled-before-it-is-opened-never-connects
   "OPEN-RESPONSE-STREAM with a handle that was already cancelled signals REQUEST-CANCELLED and

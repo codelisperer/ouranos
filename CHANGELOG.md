@@ -1005,6 +1005,14 @@ its tag.
     head has arrived, and **`read-event`** reads Server-Sent Events from it. A
     **`make-request-cancel`** handle passed as `:cancel` lets another thread call
     **`cancel-request`**, which shuts the socket down; reads then signal `request-cancelled`.
+    One handle can serve several requests at once, from several threads, and a cancel stops all
+    of them. `read-event` does not return an event that the stream ends in the middle of, before
+    the blank line that finishes it.
+  - A streamed reply that ends before the provider's end event (`message_stop` for Anthropic;
+    `[DONE]` or a finish reason for an OpenAI-compatible server), or that carries an event that
+    is not JSON, signals **`praxeon/conditions:provider-request-failed`**, rather than returning
+    what arrived as the whole reply. A tool call cut off halfway through its arguments signals it
+    too. Of the body of a non-2xx streamed request, the first 64 KiB are read and kept.
 
 - **praxeon/image: the generate-image means offers the model a `mask`, so it can change only part
   of an image** (#946). With `:resolve-reference` and a provider that takes a mask

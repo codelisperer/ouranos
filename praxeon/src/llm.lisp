@@ -465,10 +465,16 @@ the token counts the provider has reported, each NIL until it reports one."
          :estimated-output (%tally-octets tally)
          :text (get-output-stream-string (%tally-text tally))))
 
-(defun %read-text (stream)
-  "The rest of STREAM, a binary stream, decoded as UTF-8."
+(defparameter *max-error-body-octets* (* 64 1024)
+  "The most octets of a streamed request's error body %READ-TEXT keeps. A provider's error body is
+a short JSON object; a server that sends more is not read further.")
+
+(defun %read-text (stream &optional (limit *max-error-body-octets*))
+  "STREAM, a binary stream, read to its end or to LIMIT octets, whichever comes first, decoded as
+UTF-8."
   (let ((out (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
-    (loop for b = (read-byte stream nil nil) while b do (vector-push-extend b out))
+    (loop for b = (and (< (fill-pointer out) limit) (read-byte stream nil nil))
+          while b do (vector-push-extend b out))
     (sb-ext:octets-to-string (coerce out '(vector (unsigned-byte 8)))
                              :external-format '(:utf-8 :replacement #\?))))
 
@@ -481,6 +487,36 @@ body, and the detail gives DATA's length, never DATA."
                     :error-type type :error-code code :body data
                     :detail (format nil "~A: an error event in the stream~@[, ~A~]~@[, code ~A~], ~D characters"
                                     label type code (length data)))))
+
+(defun %stream-failure (label detail &rest arguments)
+  "The PROVIDER-REQUEST-FAILED for a stream that went wrong after its 200: LABEL, then DETAIL
+formatted with ARGUMENTS."
+  (make-condition 'praxeon/conditions:provider-request-failed
+                  :detail (format nil "~A: ~?" label detail arguments)))
+
+(defun %event-json (label data)
+  "DATA, an event's data, parsed as JSON. Data that is not JSON signals PROVIDER-REQUEST-FAILED,
+whose report gives DATA's length, never DATA: an event the reader cannot parse may have carried
+text or a tool call, and dropping it would return a reply with a piece missing."
+  (handler-case (jzon:parse data)
+    (error ()
+      (error (%stream-failure label "an event in the stream is not JSON, ~D characters"
+                              (length data))))))
+
+(defun %ended-early (label tally)
+  "The PROVIDER-REQUEST-FAILED for a stream that ended before the provider's end event: the
+connection closed early, so the reply may be cut short. The report gives how much output had
+arrived, never the output."
+  (%stream-failure label "the stream ended before its end event, after ~D octets of output"
+                   (%tally-octets tally)))
+
+(defun %tool-input-json (label raw)
+  "RAW, a tool call's arguments as streamed, parsed as JSON. Arguments that are not JSON signal
+PROVIDER-REQUEST-FAILED with their length, never their text."
+  (handler-case (jzon:parse raw)
+    (error ()
+      (error (%stream-failure label "a tool call's streamed arguments are not JSON, ~D characters"
+                              (length raw))))))
 
 (defun %stream-events (url headers payload label tally on-event)
   "POST PAYLOAD to URL asking for a stream, and call ON-EVENT with the data and event name of
@@ -616,21 +652,28 @@ response Anthropic sends without streaming, which %PARSE-COMPLETION reads:
   content_block_delta  text for a text block, or a piece of a tool_use block's input JSON;
   message_delta        the stop reason and the output count;
   error                a failure after the stream began.
-Other events (ping, content_block_stop, message_stop, thinking) carry nothing the completion
-keeps; a thinking block's text is counted as output for a cancel, since it is billed as output."
+  message_stop         the end of the reply.
+Other events (ping, content_block_stop, thinking) carry nothing the completion keeps; a thinking
+block's text is counted as output for a cancel, since it is billed as output.
+
+A stream that ends without message_stop was cut off, and an event that is not JSON cannot be
+read; either signals PROVIDER-REQUEST-FAILED rather than returning what had arrived as the whole
+reply."
   (setf (gethash "stream" body) t)
   (let ((tally (%make-tally))
         (blocks '())                    ; (index type id name input-json-stream text-stream start-input)
         (stop-reason nil)
+        (stopped nil)
         (label "Anthropic request failed"))
     (flet ((block-at (index) (find index blocks :key #'first)))
       (%stream-events
        (anthropic-endpoint p) (%auth-headers p) (jzon:stringify body) label tally
        (lambda (data event)
          (declare (ignore event))
-         (let* ((ev (handler-case (jzon:parse data) (error () nil)))
+         (let* ((ev (%event-json label data))
                 (type (and (hash-table-p ev) (gethash "type" ev))))
            (cond
+             ((equal type "message_stop") (setf stopped t))
              ((equal type "message_start")
               (let* ((message (gethash "message" ev))
                      (usage (and (hash-table-p message) (gethash "usage" message))))
@@ -673,6 +716,7 @@ keeps; a thinking block's text is counted as output for a cancel, since it is bi
                     (setf (%tally-cache-write tally) w)))))
              ((equal type "error")
               (error (%error-event label data))))))))
+    (unless stopped (error (%ended-early label tally)))
     (let ((parsed (make-hash-table :test #'equal))
           (usage (make-hash-table :test #'equal)))
       (setf (gethash "content" parsed)
@@ -688,7 +732,7 @@ keeps; a thinking block's text is counted as output for a cancel, since it is bi
                                  (gethash "name" ht) name
                                  (gethash "input" ht)
                                  (if (plusp (length raw))
-                                     (jzon:parse raw)
+                                     (%tool-input-json label raw)
                                      (or start-input (make-hash-table :test #'equal)))))))
                    collect ht)
              'vector))
@@ -1011,7 +1055,12 @@ choices[0].delta carries a piece of the text or of a tool call, keyed by the cal
 finish reason comes with the last of them, and with stream_options.include_usage the usage comes
 in a chunk of its own at the end. They are put back together into the response sent without
 streaming, which %PARSE-OPENAI reads. The data [DONE] ends the stream; a chunk carrying an
-error object is a failure after the stream began."
+error object is a failure after the stream began.
+
+A stream that ends with neither [DONE] nor a finish reason was cut off, and a chunk that is not
+JSON cannot be read; either signals PROVIDER-REQUEST-FAILED rather than returning what had arrived
+as the whole reply. A finish reason without [DONE] is accepted, because some OpenAI-compatible
+servers close the connection after it; the usage chunk may then be missing."
   (let ((options (make-hash-table :test #'equal)))
     (setf (gethash "include_usage" options) t
           (gethash "stream" body) t
@@ -1019,13 +1068,15 @@ error object is a failure after the stream began."
   (let ((tally (%make-tally))
         (calls '())                     ; (index id name arguments-stream)
         (finish nil)
+        (done nil)
         (usage nil))
     (%stream-events
      url headers (jzon:stringify body) label tally
      (lambda (data event)
        (declare (ignore event))
-       (let ((chunk (and (not (equal data "[DONE]"))
-                         (handler-case (jzon:parse data) (error () nil)))))
+       (let ((chunk (if (equal data "[DONE]")
+                        (progn (setf done t) nil)
+                        (%event-json label data))))
          (when (hash-table-p chunk)
            (when (hash-table-p (gethash "error" chunk))
              (error (%error-event label data)))
@@ -1062,6 +1113,7 @@ error object is a failure after the stream began."
                      (%tally-cache-read tally)
                      (let ((details (gethash "prompt_tokens_details" u)))
                        (and (hash-table-p details) (gethash "cached_tokens" details))))))))))
+    (unless (or done finish) (error (%ended-early label tally)))
     (let ((parsed (make-hash-table :test #'equal))
           (choice (make-hash-table :test #'equal))
           (message (make-hash-table :test #'equal)))

@@ -178,6 +178,72 @@ the same completion as the whole reply. The streamed request asks for the usage 
     (is (search "\"stream\":true" (second bodies)))
     (is (search "\"include_usage\":true" (second bodies)))))
 
+;;; --- a stream cut short ---------------------------------------------------------------------
+
+(defun %streamed-outcome (provider-at events)
+  "Complete with *ON-TEXT* bound against a server answering with EVENTS and then closing the
+connection. Returns the completion, or the condition COMPLETE signalled."
+  (multiple-value-bind (handler) (%provider-server "{}" events)
+    (aion/test-http:with-server (s handler)
+      (handler-case (let ((llm:*on-text* (lambda (x) x)))
+                      (llm:complete (funcall provider-at s) (list (llm:msg "user" "hi"))))
+        (error (c) c)))))
+
+(defun %ended-early-p (outcome)
+  "Whether OUTCOME is the PROVIDER-REQUEST-FAILED for a stream that ended before its end event."
+  (and (typep outcome 'cnd:provider-request-failed)
+       (search "ended before its end event" (princ-to-string outcome))))
+
+(test an-anthropic-stream-cut-off-in-its-text-is-a-failed-request
+  "A stream that closes after the first piece of text, with no message_stop, signals
+PROVIDER-REQUEST-FAILED, rather than returning the first piece as the whole reply."
+  (let ((outcome (%streamed-outcome #'%streaming-anthropic (subseq +anthropic-events+ 0 4))))
+    (is-true (%ended-early-p outcome) "got ~A" outcome)))
+
+(test an-anthropic-stream-cut-off-in-a-tool-call-is-a-failed-request
+  "A stream that closes halfway through a tool call's arguments signals PROVIDER-REQUEST-FAILED,
+not the JSON parser's error about the half it got."
+  (let ((outcome (%streamed-outcome #'%streaming-anthropic (subseq +anthropic-events+ 0 8))))
+    (is-true (%ended-early-p outcome) "got ~A" outcome)))
+
+(test an-anthropic-event-that-is-not-json-is-a-failed-request
+  "An event whose data is not JSON signals PROVIDER-REQUEST-FAILED, whose report gives the data's
+length and not the data, rather than being dropped and the reply returned without it."
+  (let* ((events (substitute '("content_block_delta" . "{\"type\":\"content_block_delta\",\"ind")
+                             (fourth +anthropic-events+) +anthropic-events+ :test #'equal))
+         (outcome (%streamed-outcome #'%streaming-anthropic events)))
+    (is (typep outcome 'cnd:provider-request-failed) "got ~A" outcome)
+    (is (search "not JSON" (princ-to-string outcome)))
+    (is (null (search "content_block_delta" (princ-to-string outcome))))))
+
+(test an-openai-stream-cut-off-in-its-text-or-a-tool-call-is-a-failed-request
+  "A stream that closes with neither a finish reason nor [DONE] signals PROVIDER-REQUEST-FAILED,
+both after a piece of text and halfway through a tool call's arguments."
+  (is-true (%ended-early-p (%streamed-outcome #'%streaming-openai (subseq +openai-events+ 0 1))))
+  (is-true (%ended-early-p (%streamed-outcome #'%streaming-openai (subseq +openai-events+ 0 4)))))
+
+(test an-openai-stream-with-a-finish-reason-and-no-done-is-whole
+  "Some OpenAI-compatible servers close the connection after the finish reason without sending
+[DONE]. The completion is the whole one, without the usage the stream did not send."
+  (let ((outcome (%streamed-outcome #'%streaming-openai (subseq +openai-events+ 0 7))))
+    (is (not (typep outcome 'condition)) "got ~A" outcome)
+    (unless (typep outcome 'condition)
+      (is (= 2 (length (llm:completion-tool-calls outcome))))
+      (is (equal "Checking — één." (llm:completion-text outcome))))))
+
+(test a-streamed-request-reads-at-most-its-cap-of-an-error-body
+  "The body of a status other than 2xx is read up to *MAX-ERROR-BODY-OCTETS* and no further."
+  (aion/test-http:with-server
+      (s (lambda (request stream)
+           (declare (ignore request))
+           (aion/test-http:write-response stream 500 '() (make-string 5000 :initial-element #\x))))
+    (let* ((llm::*max-error-body-octets* 100)
+           (c (handler-case (let ((llm:*on-text* (lambda (x) x)))
+                              (llm:complete (%streaming-anthropic s) (list (llm:msg "user" "hi"))))
+                (cnd:provider-request-failed (c) c))))
+      (is (eql 500 (and c (cnd:provider-request-failed-status c))))
+      (is (eql 100 (length (and c (cnd:provider-request-failed-body c))))))))
+
 ;;; --- cancelling -----------------------------------------------------------------------------
 
 (defun %stalling-server (events closed-at)
