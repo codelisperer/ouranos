@@ -1102,6 +1102,36 @@ its tag.
     is not JSON, signals **`praxeon/conditions:provider-request-failed`**, rather than returning
     what arrived as the whole reply. A tool call cut off halfway through its arguments signals it
     too. Of the body of a non-2xx streamed request, the first 64 KiB are read and kept.
+- **praxeon/web: another site's page can show the chat in a frame** (part of #67). `make-app`,
+  `start` and `serve-forever` take `:embed-origins`, a list of origins such as
+  `"https://app.example.com"`, which needs `:grant-verifier`. With it:
+  - `GET /embed.js` serves a loader that a host page includes with one `<script src>` tag. Its
+    `data-grant-url` names a URL on the host's own origin that answers a POST with
+    `{"grant": TOKEN}` for the signed-in viewer. Without `data-container`, it docks a launcher
+    button and the panel it opens at the side `data-position` names (`right` by default);
+    `data-label` sets the button's text. With `data-container`, the frame fills that element.
+    Its styles use class names starting with `praxeon-embed-`.
+  - `GET /embed/panel` is the chat for the frame. It needs no session. It asks its host page for
+    a grant with `postMessage`, takes one only from its parent and only from an origin in
+    `:embed-origins`, and exchanges it at `POST /embed/session`. Until then the composer is
+    disabled and nothing is polled or streamed. A 401 makes it ask for a new grant. The grant is
+    never put in a URL.
+  - The panel's `Content-Security-Policy` names `:embed-origins` in `frame-ancestors`, and it
+    sends no `X-Frame-Options`. Every other route keeps the defaults, so it still cannot be
+    framed.
+  - `make-app` refuses `:embed-origins` that are not a list of lowercase `http://` or `https://`
+    origins with no path.
+  - Nothing in the panel or the loader loads an AMD or UMD loader or assigns `window.htmx`, so a
+    host page's own htmx is left alone.
+  - The chat page's parts (the stylesheet, the bubbles, the composer, the gate and the scripts)
+    moved to a new system, `praxeon/chat-ui`, which `praxeon/web` depends on. The page is
+    unchanged, except that the Send button now has the id `px-send`.
+
+- **hyperion/security-headers: a route can drop a header by setting it to NIL** (part of #67). A
+  response that sets one of the headers `wrap-security-headers` manages to NIL is sent without
+  that header; before, the NIL entry was passed on. The embed panel uses this to drop
+  `X-Frame-Options`.
+
 - **praxeon/web: the chat page can read its updates from a Server-Sent Events stream instead of
   polling** (part of #67). `make-app` takes `:transport`, `:poll` (the default) or `:sse`. With
   `:sse`, `GET /api/events` streams what `GET /api/progress` would answer, whenever it changes:

@@ -369,6 +369,8 @@
 (defsystem "praxeon/web/tests"
   :description "Test suite for praxeon/web: the blocking entry, and the surface."
   :depends-on ("praxeon/web" "praxeon" "hyperion"   ; web-tests.lisp calls actor: and server:
+               "praxeon/chat-ui" "hyperion/assets"  ; the bubble and embed tests (#67)
+               "hyperion/assets/tests" "hyperion/test-ports"  ; the embed test's headless browser
                "clack-handler-hunchentoot" "fiveam" "aion/test-threads" "aion/log"
                "aion/signature" "com.inuoe.jzon")  ; the #67 tests mint grants and read JSON
   :serial t
@@ -378,6 +380,16 @@
   :perform (test-op (op c)
              (uiop:symbol-call :fiveam :run!
                                (uiop:find-symbol* :praxeon-web :praxeon/web/tests))))
+
+;;; The chat widget's parts: the stylesheet, bubbles, composer, gate and scripts that the full
+;;; chat page and the embed panel are both made of (#67).
+(defsystem "praxeon/chat-ui"
+  :description "The chat widget's parts, shared by praxeon/web's page and its embed panel."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion"                    ; js helpers, markdown, output style
+               "spinneret" "parenscript")
+  :components ((:file "src/chat-ui")))
 
 ;;; A Clack-based web + REST surface for Praxeon agents (HTMX UI). The server backend is
 ;;; the APPLICATION's choice and is declared by the application -- this system deliberately
@@ -390,6 +402,7 @@
                "aion/dynamic"                ; web.lisp wraps the turn thread in INHERITING
                "aion/random"                 ; a session id (web-session.lisp, #67)
                "hyperion/assets"             ; vendored htmx/Bulma, embedded (no CDN)
+               "praxeon/chat-ui"             ; the page's parts, shared with the embed panel
                "spinneret" "com.inuoe.jzon"  ; still used directly by the chat UI
                "parenscript"                 ; the page's stream client (#67)
                ;; The HTTP backend is the APP's choice, not hyperion's (pre-publication issue 139) -- and it is
