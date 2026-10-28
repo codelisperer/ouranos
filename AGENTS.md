@@ -464,10 +464,11 @@ not about an expression inside it; an `ok` line is about failures, not about cov
 - **A push to a pull request that conflicts with `main` gets no CI run, so confirm a run exists
   for every head you push.** A `pull_request` run checks out `refs/pull/N/merge`, and GitHub
   cannot create that ref while the branch conflicts, so the push queues nothing and reports
-  nothing. The pull request keeps showing the checks of its last run before the conflict, which
-  were about an older head. On 2026-10-28 seven pull requests' fix pushes got no run this way
-  (#1025). After pushing, run `gh run list --branch <branch> --json headSha,databaseId` and look
-  for the head you pushed. If no run has it and the pull request conflicts with `main`, run
+  nothing. Checks belong to a commit, so the new head has none, and the checks still shown in the
+  pull request's conversation belong to an earlier head. On 2026-10-28 seven pull requests' fix
+  pushes got no run this way (#1025). After pushing, run
+  `gh run list --branch <branch> --json headSha,databaseId` and look for the head you pushed.
+  If no run has it and the pull request conflicts with `main`, run
   `gh workflow run verify.yml --ref <branch>`, which runs the branch head without a merge ref.
   A conflict in `CHANGELOG.md` alone does not need a merge from `main`, because the hub resolves
   those when it builds a train; a conflict in code does.
