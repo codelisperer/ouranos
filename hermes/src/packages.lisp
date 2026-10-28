@@ -41,6 +41,8 @@
    #:telegram-message-photo #:escape-markdown-v2 #:escape-telegram-html #:dev-last-telegram
    #:facebook-post #:make-facebook-post #:facebook-post-p #:facebook-post-page
    #:facebook-post-link #:facebook-post-message #:facebook-post-image-url #:dev-last-facebook
+   #:facebook-post-image-octets #:facebook-post-image-type
+   #:+facebook-photo-max-octets+ #:+facebook-photo-types+
    ;; delivery result
    #:delivery-result #:make-delivery-result #:delivery-result-provider #:delivery-result-id
    #:delivery-result-status #:delivery-result-raw #:delivery-result-destination
@@ -51,6 +53,11 @@
    #:telegram-added-chat-type #:telegram-added-chat-title #:telegram-added-chat-status
    #:telegram-added-chat-date
    #:facebook-provider #:facebook-page-health #:post-to-page
+   #:facebook-page-status #:+facebook-required-scopes+
+   #:facebook-token-info #:facebook-token-info-p #:facebook-token-info-valid-p
+   #:facebook-token-info-scopes #:facebook-token-info-expires-at
+   #:facebook-token-info-data-access-expires-at #:facebook-token-info-page-id
+   #:facebook-token-info-app-id
    #:facebook-page #:facebook-page-p #:facebook-page-id #:facebook-page-name
    #:facebook-page-token #:facebook-page-tasks #:facebook-page-can-post-p
    #:facebook-connect-state #:facebook-connect-url #:facebook-connect-pages

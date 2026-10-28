@@ -14,6 +14,14 @@ its tag.
 
 ### An app may have to act
 
+- **hermes/facebook: `facebook-page-health` answers `:missing-permission`, with the missing
+  scopes, where it answered `:reconnect`** (#978). A Page token that `debug_token` says is valid,
+  and is for the right Page, but lacks a scope in the new `+facebook-required-scopes+`
+  (`pages_manage_posts`), used to be `:reconnect`. It is now `:missing-permission`, and the
+  missing scope names are a third value. An app that shows "reconnect" for `:reconnect` shows it
+  for `:missing-permission` too, and can name the permission. The statuses are the exported type
+  `facebook-page-status`, documented value by value.
+
 - **MCP resources and retrieval passages are untrusted by default, so in a prompt they refuse
   `:requires-user-intent` means for the turn** (#907, after #906). `praxeon/mcp:add-resource` and
   `praxeon/retrieval:passage->ctx-item` put outside content into an agent's context with nothing
@@ -887,6 +895,19 @@ its tag.
   `claude-opus-5-5` where they named `claude-opus-4-8`.
 
 ### Added
+
+- **hermes/facebook: `facebook-token-info` reports a Page token's scopes and expiry, and a post
+  can upload a photo's octets** (#978).
+  - `facebook-token-info provider page` returns a `facebook-token-info` from Graph's
+    `debug_token`: `facebook-token-info-valid-p`, `-scopes`, `-expires-at` (a universal time, or
+    `:never` for an `expires_at` of 0, which is observed, not documented), `-data-access-expires-at`,
+    `-page-id` and `-app-id`. It needs the app's id and secret and signals `configuration-error`
+    without them. A token that never expires still has a data-access expiry; show both.
+  - `make-facebook-post` takes `:image-octets` and `:image-type`, for a photo the app already holds
+    (from `hermes/blob:get-blob`, say). It is uploaded to `POST /{page}/photos` as
+    `multipart/form-data` (field `source`), with the message and link as its caption. Refused with
+    `invalid-message`: octets together with `:image-url`, more than `+facebook-photo-max-octets+`
+    (Meta's 10MB), or a type outside `+facebook-photo-types+`. A photo alone is a post.
 
 - **praxeon/actor: every deliberation step records how many of the prompt's estimated tokens came
   from each source** (#317, step D). `praxeon/actor:request-messages` returns a third value, and

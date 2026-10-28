@@ -119,7 +119,10 @@ TELEGRAM-MESSAGE sent, so it is recognised by its provider."
   (%dev-render (dev-stream p) "FACEBOOK POST"
                (list "Page:" (facebook-post-page m)
                      "Link:" (facebook-post-link m)
-                     "Image:" (facebook-post-image-url m)
+                     "Image:" (or (facebook-post-image-url m)
+                                  (and (facebook-post-image-octets m)
+                                       (format nil "~A, ~D bytes" (facebook-post-image-type m)
+                                               (length (facebook-post-image-octets m)))))
                      "Body:" (facebook-post-message m)))
   (make-delivery-result :provider :dev :id (%dev-id) :status :logged
                         :destination (facebook-post-page m) :raw m))

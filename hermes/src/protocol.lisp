@@ -25,15 +25,39 @@
 (defclass facebook-provider (provider) ()
   (:documentation "A provider that can deliver FACEBOOK-POSTs to Facebook Pages (#822)."))
 
+(deftype facebook-page-status ()
+  "What FACEBOOK-PAGE-HEALTH says about a Page, for an admin screen (#822, #978). One of:
+
+  :CONNECTED           the stored Page token works for this Page and has every scope in
+                       +FACEBOOK-REQUIRED-SCOPES+.
+  :MISSING-PERMISSION  the token works for this Page but lacks a scope hermes needs; the missing
+                       scopes come back as FACEBOOK-PAGE-HEALTH's third value. An admin connects
+                       again and grants them.
+  :RECONNECT           the token no longer works: expired, revoked, the admin's password
+                       changed, or the admin lost their role on the Page. An admin connects again.
+  :NOT-PERMITTED       Facebook refused with a permission error: the admin cannot do the
+                       CREATE_CONTENT task on this Page.
+  :NOT-FOUND           no such Page, or the token cannot see it.
+  :WRONG-PAGE          the token stored for this Page belongs to another Page.
+  :NOT-CONNECTED       no token is stored for this Page."
+  '(member :connected :missing-permission :reconnect :not-permitted :not-found :wrong-page
+    :not-connected))
+
 (defgeneric facebook-page-health (provider page)
   (:documentation "Whether PROVIDER can post to the Facebook Page PAGE (its id), for an admin
-screen (#822). Returns two values: a status and the Page's name when Facebook gave it. STATUS is
-:CONNECTED, :RECONNECT (the Page token no longer works, or lacks pages_manage_posts: send an
-admin through the connect flow again), :NOT-PERMITTED (the token works but may not post to this
-Page), :WRONG-PAGE (the token stored for PAGE belongs to another Page), :NOT-FOUND (no such
-Page, or the token cannot see it), or :NOT-CONNECTED (no token is stored for PAGE). A PAGE that
+screen (#822). Returns up to three values: a FACEBOOK-PAGE-STATUS, the Page's name when Facebook
+gave it, and for :MISSING-PERMISSION the list of missing scope names. Checking the scopes needs
+the app's id and secret; without them a token that reads its own Page is :CONNECTED. A PAGE that
 is not a Page id signals INVALID-MESSAGE; a rate limit or a network failure is signalled, not
 answered."))
+
+(defgeneric facebook-token-info (provider page)
+  (:documentation "What Facebook says about the Page token PROVIDER holds for the Page PAGE (its
+id), as a FACEBOOK-TOKEN-INFO, from the Graph API's debug_token (#978): whether it is valid, its
+scopes, when it expires and when its access to data expires. An admin screen shows the last two
+together, because a token that never expires still loses data access. Needs the app's id and
+secret (debug_token is called with the app's token) and a stored token for PAGE, and signals
+CONFIGURATION-ERROR without them. A PAGE that is not a Page id signals INVALID-MESSAGE."))
 
 (defgeneric deliver (provider message)
   (:documentation "Deliver MESSAGE (an EMAIL or SMS) via PROVIDER. Returns a DELIVERY-RESULT

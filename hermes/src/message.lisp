@@ -149,18 +149,33 @@ character."
            (and (> (length url) 7) (string-equal "http://" url :end2 7)))
        (notany (lambda (ch) (<= (char-code ch) 32)) url)))
 
-(defstruct (facebook-post (:constructor %make-facebook-post (page link message image-url)))
+(defstruct (facebook-post (:constructor %make-facebook-post
+                              (page link message image-url image-octets image-type)))
   "A post to a Facebook Page (#822). PAGE is the Page's id, as a string of digits. LINK is the
 URL the post shares, or NIL; Facebook builds the link card from the target page's Open Graph
 tags, and refuses the post when it cannot fetch LINK (a page behind a sign-in, or not public).
 MESSAGE is the post's text, or NIL. IMAGE-URL, when given, is an http(s) URL of a photo, and the
-post is made as a photo with MESSAGE and LINK as its caption. Built with MAKE-FACEBOOK-POST,
-which checks each of them."
-  page link message image-url)
+post is made as a photo with MESSAGE and LINK as its caption. IMAGE-OCTETS, instead, is the photo
+itself, as a vector of octets, with IMAGE-TYPE its media type, such as \"image/png\"; it is
+uploaded with the post (#978). Built with MAKE-FACEBOOK-POST, which checks each of them."
+  page link message image-url image-octets image-type)
 
-(defun make-facebook-post (&key page link message image-url)
+(defparameter +facebook-photo-max-octets+ (* 10 1024 1024)
+  "The largest photo MAKE-FACEBOOK-POST accepts as :IMAGE-OCTETS. Meta's Page Photos reference:
+\"Files can not exceed 10MB\" (read 2026-10-28; 10 MiB here).")
+
+(defparameter +facebook-photo-types+
+  '("image/jpeg" "image/png" "image/gif" "image/bmp" "image/tiff")
+  "The media types MAKE-FACEBOOK-POST accepts as :IMAGE-TYPE: the formats Meta's Page Photos
+reference lists, \".jpeg, .bmp, .png, .gif, .tiff\" (read 2026-10-28).")
+
+(defun make-facebook-post (&key page link message image-url image-octets image-type)
   "A FACEBOOK-POST, checked: PAGE is a Page id (a positive integer or a string of digits), LINK
 and IMAGE-URL are NIL or http(s) URLs, MESSAGE is NIL or a string, and LINK or MESSAGE is given.
+IMAGE-OCTETS, when given, is a non-empty octet vector of at most +FACEBOOK-PHOTO-MAX-OCTETS+ with
+IMAGE-TYPE one of +FACEBOOK-PHOTO-TYPES+, and is not given together with IMAGE-URL. An app that
+keeps its images in hermes/blob reads them with GET-BLOB and passes the octets here, and a post
+with a photo needs neither LINK nor MESSAGE.
 A PAGE that names a Facebook Group (a URL with /groups/ in it, or \"group:...\") signals
 FACEBOOK-GROUPS-UNSUPPORTED: Meta removed apps' access to Groups on 2024-04-22. Anything else
 that is wrong signals INVALID-MESSAGE, before anything is sent."
@@ -173,8 +188,20 @@ that is wrong signals INVALID-MESSAGE, before anything is sent."
     (unless (or (null image-url) (%http-url-p image-url))
       (bad "an :image-url that is an http or https URL"))
     (unless (or (null message) (stringp message)) (bad "a string :message"))
-    (unless (or link (plusp (length (or message "")))) (bad "a :link or a non-empty :message"))
-    (%make-facebook-post (princ-to-string page) link message image-url)))
+    (when image-octets
+      (when image-url (bad "either :image-url or :image-octets, not both"))
+      (unless (and (typep image-octets '(vector (unsigned-byte 8))) (plusp (length image-octets)))
+        (bad "an :image-octets that is a non-empty vector of octets"))
+      (when (> (length image-octets) +facebook-photo-max-octets+)
+        (bad (format nil "an :image-octets of at most ~D octets (Facebook's limit is 10MB)"
+                     +facebook-photo-max-octets+)))
+      (unless (member image-type +facebook-photo-types+ :test #'string-equal)
+        (bad (format nil "an :image-type Facebook accepts (~{~A~^, ~})" +facebook-photo-types+))))
+    (unless (or link image-url image-octets (plusp (length (or message ""))))
+      (bad "a :link, a photo or a non-empty :message"))
+    (%make-facebook-post (princ-to-string page) link message image-url
+                         (and image-octets (coerce image-octets '(simple-array (unsigned-byte 8) (*))))
+                         (and image-octets (string-downcase image-type)))))
 
 (defparameter +markdown-v2-special+ "\\_*[]()~`>#+-=|{}.!"
   "The characters Telegram's MarkdownV2 requires to be escaped with a backslash in ordinary
