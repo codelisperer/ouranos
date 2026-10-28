@@ -649,8 +649,11 @@
   ;; window runs on :uv (#472, ADR-0017), whose libuv the bundle carries and the
   ;; desktop-release dry runs check is the one loaded. The web modes (`start', `serve') keep
   ;; Hunchentoot, which is pure CL.
+  ;; hyperion/update: the release workflow builds this app, so a release build is given its
+  ;; product, public key, update source and channel, and checks for an update at start (#408).
   :depends-on ("hyperion" "hyperion/desktop" "hyperion/assets" "cons/coalton-repl"
-               "spinneret" "lass" "clack-handler-hunchentoot" "hyperion/server-uv")
+               "spinneret" "lass" "clack-handler-hunchentoot" "hyperion/server-uv"
+               "hyperion/update" "aion/log" "aion/dynamic")
   :serial t
   :components ((:module "examples/coalton-repl"
                 :serial t

@@ -27,6 +27,7 @@
                     (#:assets #:hyperion/assets)
                     (#:router #:hyperion/router)
                     (#:repl #:cons/coalton-repl)
+                    (#:up #:hyperion/update)
                     (#:spin #:spinneret))
   ;; Parenscript matches its own macros (chain / @ / regex) by symbol identity -- import the
   ;; reals. A same-named symbol from another package compiles to a bare `chain(...)` /
@@ -455,7 +456,29 @@ The web modes above keep the default server."
                                   :server :uv :workers 2)
       (setf *on-exit-request* previous))))
 
+(defun %check-for-update-in-background ()
+  "Ask the update source whether a newer build exists, on a thread of its own, and log the
+answer's status. Returns the thread.
+
+The release workflow builds this app with --product, --public-key-file, --update-source and
+--default-channel, which set HYPERION/UPDATE's variables in the image (#408). A build made without
+them has the null source and no key, and the check answers at once without touching the network.
+CHECK-FOR-UPDATE never signals, so the thread cannot take the app down, and the window does not
+wait for it. There is no update UI here: the status is logged, so a release build shows in its log
+that its settings reach the client."
+  ;; THREAD-LIFETIME: independent -- one check at start, for no caller's request, so it
+  ;; carries no caller's context. INTERRUPTS: unblocked first, as every long-lived thread here.
+  (sb-thread:make-thread
+   (lambda ()
+     (aion/dynamic:unblock-interrupts)
+     (let ((status (up:check-for-update)))
+       (aion/log:info "coalton-repl update check" :status (getf status :status)
+                                                  :version (getf status :version))))
+   :name "coalton-repl update check"))
+
 (defun main ()
-  "Native-binary entry: open the REPL desktop window, then quit when it closes."
+  "Native-binary entry: check for an update in the background, open the REPL desktop window,
+then quit when it closes."
+  (%check-for-update-in-background)
   (desktop)
   (uiop:quit 0))

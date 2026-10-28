@@ -888,6 +888,15 @@ its tag.
 
 ### Added
 
+- **The coalton-repl example checks for an update when it starts, and `desktop-release.yml`
+  builds it with its release settings** (part of #408). `hyperion/examples/coalton-repl` now
+  depends on `hyperion/update`, and `main` runs `hyperion/update:check-for-update` on a thread
+  of its own and logs the status; there is no update UI. The workflow's dump step passes
+  `--product`, `--display-name`, `--default-channel`, `--update-source` (the channel pointer
+  release) and `--release`, with `OURANOS_PUBLIC_KEY` in its environment, so a build without the
+  key or a source is refused instead of shipping an app that can never update. The dmg step no
+  longer passes `--display-name`; `build-dmg.sh` reads it from the bundle's `RELEASE` file.
+
 - **praxeon/actor: every deliberation step records how many of the prompt's estimated tokens came
   from each source** (#317, step D). `praxeon/actor:request-messages` returns a third value, and
   `praxeon/actor:prompt-breakdown` computes it: a plist of estimated tokens under `:system`,

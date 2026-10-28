@@ -195,12 +195,26 @@ jobs:
       - name: Build the pinned libgit2
         run: sbcl --dynamic-space-size 4096 --script scripts/build-libgit2.lisp
 
+      # THE RELEASE SETTINGS GO INTO THE IMAGE HERE (#408). --product, --display-name,
+      # --default-channel and --update-source set hyperion/update's variables before the dump,
+      # and --release refuses to dump an image without the public key or a source, so no build
+      # of this workflow ships an app that can never update. The key is the repository variable
+      # the publish step already requires, which scripts/release-settings.lisp reads from the
+      # environment. The source is the channel pointer release "Move the channel pointer"
+      # writes. The product and display name also go into the bundle's RELEASE file, which
+      # build-installer.ps1 and build-dmg.sh read, so they are named only here.
       - name: Dump the app image
         shell: bash
+        env:
+          OURANOS_PUBLIC_KEY: ${{ vars.OURANOS_PUBLIC_KEY }}
         run: |
           sbcl --dynamic-space-size 4096 --script scripts/build-desktop-app.lisp \
             --system "$APP_SYSTEM" --entry "$APP_ENTRY" \
             --name "$APP_NAME" --version "$APP_VERSION" \
+            --product "$APP_NAME" --display-name "Coalton REPL" \
+            --default-channel "$APP_CHANNEL" \
+            --update-source "github=https://github.com/${RELEASE_REPO}/releases/download/${APP_NAME}-${APP_CHANNEL}/" \
+            --release \
             --icon hyperion/examples/coalton-repl/assets/lambda.ico \
             --window-icon "hyperion/examples/coalton-repl/assets/lambda.$(if [ "$RUNNER_OS" = Windows ]; then echo ico; else echo png; fi)"
 
@@ -298,12 +312,12 @@ jobs:
       # The .app is packed twice from one build: as the .app.tar.gz update payload the
       # manifest lists for macos-arm64, and as the .dmg a person downloads (#135).
       # build-dmg.sh checks the payload's layout before this step can pass: one .app at the
-      # archive root, no extended attributes, and the same binary as the bundle.
+      # archive root, no extended attributes, and the same binary as the bundle. It takes the
+      # display name from the bundle's RELEASE file, written by the dump step (#408).
       - name: Package the .app and its update payload (macOS)
         if: runner.os == 'macOS'
         run: |
           ./scripts/build-dmg.sh "dist/${APP_NAME}-${APP_VERSION}-${{ matrix.platform }}" \
-            --display-name "Coalton REPL" \
             --icon hyperion/examples/coalton-repl/assets/lambda.png
           test -f "dist/${APP_NAME}-${APP_VERSION}-${{ matrix.platform }}.app.tar.gz"
 
