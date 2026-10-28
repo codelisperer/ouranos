@@ -909,11 +909,11 @@ its tag.
   failure, has no phase, so it is never retried. On the pinned path (`:connect-address`,
   `fetch-public`) the phase comes from where the call failed, not from the condition's type,
   and a connection that ends before the response does (a `malformed-response` saying "the
-  connection ended") is `:response`; on Windows a read timeout arrives that way. On Windows,
-  where dexador uses WinHTTP, the phase comes from WinHTTP's error code: 12029 and 12007 are
-  `:connect`; 12002, 12030 and 12152 are `:response`. aion/http-client now depends on `aion/retry` and defines the `transience` and `retry-after` methods for
-  `http-error`: 408, 425, 429, 503, 529 and `:connect` are `:transient`; 500, 502, 504 and
-  `:response` are `:unknown`.
+  connection ended") is `:response`. On Windows, where dexador uses WinHTTP, the phase comes
+  from WinHTTP's error code: 12029 and 12007 are `:connect`; 12002, 12030 and 12152 are
+  `:response`. aion/http-client now depends on `aion/retry` and defines the `transience` and
+  `retry-after` methods for `http-error`: 408, 425, 429, 503, 529 and `:connect` are
+  `:transient`; 500, 502, 504 and `:response` are `:unknown`.
 
 - **praxeon/actor: every deliberation step records how many of the prompt's estimated tokens came
   from each source** (#317, step D). `praxeon/actor:request-messages` returns a third value, and
