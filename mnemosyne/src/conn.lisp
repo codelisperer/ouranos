@@ -209,20 +209,36 @@ here, and is the fallback for connections mnemosyne does not open.")
     cl-postgres:*ssl-root-ca-file* #+(and sbcl unix) cl-postgres:*unix-socket-dir*)
   "cl-postgres's settings for opening a connection, which %CALL-WITHIN-SECONDS passes from the
 caller's thread to the thread that connects. A new thread sees only global values, so an app
-that binds one of these around CONNECT would otherwise connect without it.")
+that binds one of these around CONNECT would otherwise connect without it. These four are the
+only ones passed. Any other cl-postgres or cl+ssl special, such as cl+ssl's verification
+settings, is read on the connecting thread at its global value, so an app that changes one sets
+it globally rather than binding it around CONNECT.")
+
+(defun %stop-thread (thread)
+  "Ask THREAD to stop, ignoring a thread that has already ended."
+  (handler-case (sb-thread:terminate-thread thread)
+    (sb-thread:interrupt-thread-error () nil)))
 
 (defun %call-within-seconds (seconds thunk on-timeout on-late)
   "THUNK's value, computed on a thread of its own and waited for at most SECONDS. When SECONDS
 pass first, stop the thread and call ON-TIMEOUT, which is expected to signal. If THUNK returns a
-value after the caller stopped waiting, ON-LATE is called with it on the thread, to close it. An
-error inside THUNK is re-signalled in the caller. SECONDS NIL calls THUNK directly.
+value after the caller stopped waiting, whether because SECONDS passed or because the caller was
+unwound, ON-LATE is called with it on the thread, to close it. A condition that ends THUNK is
+re-signalled in the caller. SECONDS NIL calls THUNK directly.
 
 cl-postgres makes its socket and connects it itself, with no timeout, so a timeout cannot be
 given to the socket the way aion/http-client gives one to usocket. The thread is stopped rather
 than left to finish, because a server that completed the TCP handshake and then never answers
-would hold it forever: the operating system's connect limit covers only the handshake. Stopping
-it unwinds out of cl-postgres's read; the socket it made is unreachable afterwards, and SBCL
-closes its file descriptor when the socket is collected."
+would hold it forever: the operating system's connect limit covers only the handshake.
+
+Stopping it unwinds out of whatever cl-postgres was doing. During the TCP connect, the startup
+message or authentication, that leaves only the socket, which nothing references afterwards; SBCL
+closes its file descriptor when the socket object is collected, not at once. During the TLS
+handshake the thread is inside OpenSSL through cl+ssl, and the stop takes effect when that
+foreign call returns to Lisp. Measured on Linux against a server that answered the SSL request
+and then sent nothing: the timeout fired after 1 s and the thread had ended within 5 s, while
+the server still held the connection. The SSL stream is left for the collector in the same way. The stop is only delivered while THUNK runs: once THUNK has
+returned, the thread hands its result over or closes it before it can be stopped."
   (if (null seconds)
       (funcall thunk)
       (let ((state (list :running))   ; CAR moves once, to :DONE or :ABANDONED, by CAS
@@ -236,24 +252,36 @@ closes its file descriptor when the socket is collected."
               (sb-thread:make-thread
                (lambda ()
                  (progv symbols bound
-                   (let ((v nil) (e nil))
-                     (handler-case (setf v (funcall thunk))
-                       (error (c) (setf e c)))
-                     ;; Not stopped part way through handing the result over or closing it. A
-                     ;; late result means the caller has already asked for this thread to
-                     ;; stop, so ON-LATE runs with that request still deferred.
-                     (sb-sys:without-interrupts
+                   ;; A stop is taken only inside THUNK. One that arrives after THUNK returned
+                   ;; waits until the result has been handed over or, when the caller has given
+                   ;; up, closed by ON-LATE, so a connected session is never dropped half way.
+                   (sb-sys:without-interrupts
+                     (let ((v nil) (e nil))
+                       (handler-case (sb-sys:with-local-interrupts (setf v (funcall thunk)))
+                         (serious-condition (c) (setf e c)))
                        (setf value v failure e)
                        (if (eq (sb-ext:compare-and-swap (car state) :running :done) :running)
                            (sb-thread:signal-semaphore done)
                            (when v (funcall on-late v)))))))
                :name "mnemosyne-connect"))
-        (unless (sb-thread:wait-on-semaphore done :timeout seconds)
-          (when (eq (sb-ext:compare-and-swap (car state) :running :abandoned) :running)
-            (sb-thread:terminate-thread thread)
-            (funcall on-timeout))
-          ;; The thread finished between the timeout and the CAS: its result is ready.
-          (sb-thread:wait-on-semaphore done))
+        (let ((waited nil))
+          (unwind-protect
+               (progn
+                 (unless (sb-thread:wait-on-semaphore done :timeout seconds)
+                   (when (eq (sb-ext:compare-and-swap (car state) :running :abandoned) :running)
+                     (%stop-thread thread)
+                     (funcall on-timeout))
+                   ;; The thread finished between the timeout and the CAS: its result is ready.
+                   (sb-thread:wait-on-semaphore done))
+                 (setf waited t))
+            ;; Unwound while waiting, by an outer deadline for example. If the connect is still
+            ;; running, give it up, so a connection it opens later is closed on the thread. If
+            ;; it had already handed a connection over, close that one here.
+            (unless waited
+              (if (eq (sb-ext:compare-and-swap (car state) :running :abandoned) :running)
+                  (%stop-thread thread)
+                  (when (and (eq (car state) :done) value)
+                    (funcall on-late value))))))
         (when failure (error failure))
         value)))
 
@@ -279,7 +307,7 @@ past it, DB-CONNECT-TIMEOUT is signalled. STATEMENT-TIMEOUT is the milliseconds 
 may run before the server cancels it, or NIL to leave the server's setting. See
 *POSTGRES-CONNECT-TIMEOUT-SECONDS* and *POSTGRES-STATEMENT-TIMEOUT-MS*. SQLite ignores both."
   (check-type connect-timeout (or null (real (0))))
-  (check-type statement-timeout (or null (integer 1)))
+  (check-type statement-timeout (or null (integer 1 2147483647)))
   (%wrapping-db-errors "connect"
     (let ((name (be:backend-name backend)))
       (cond
@@ -547,7 +575,7 @@ checkout timeout. A web app answers it with 503."))
   (checkout-timeout 30 :type (real 0))
   (idle-check 30 :type (or null (real 0)))
   (connect-timeout nil :type (or null (real (0))))
-  (statement-timeout nil :type (or null (integer 1)))
+  (statement-timeout nil :type (or null (integer 1 2147483647)))
   ;; Everything below is read and written with LOCK held.
   (idle '())                                   ; (connection . internal-real-time-returned)
   (open 0 :type unsigned-byte)                 ; lent + idle + being opened
@@ -582,7 +610,7 @@ other's connections. Close the pool with CLOSE-POOL."
   (check-type checkout-timeout (real 0))
   (check-type idle-check (or null (real 0)))
   (check-type connect-timeout (or null (real (0))))
-  (check-type statement-timeout (or null (integer 1)))
+  (check-type statement-timeout (or null (integer 1 2147483647)))
   (%make-pool :backend backend :size size :checkout-timeout checkout-timeout
               :idle-check idle-check :connect-timeout connect-timeout
               :statement-timeout statement-timeout))

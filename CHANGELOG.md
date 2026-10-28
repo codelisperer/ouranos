@@ -14,6 +14,23 @@ its tag.
 
 ### An app may have to act
 
+- **mnemosyne/conn: a Postgres connect gives up after 10 seconds, and an optional statement
+  timeout** (#959). `connect` and `make-pool` take `:connect-timeout`, in seconds, defaulting to
+  `*postgres-connect-timeout-seconds*` (10), and `:statement-timeout`, in milliseconds,
+  defaulting to `*postgres-statement-timeout-ms*` (NIL).
+  - A connect that is not finished in time, TCP connect through authentication, signals
+    `db-connect-timeout` (a `db-error`, with `db-connect-timeout-host`, `-port` and
+    `-seconds`). Before, a server that did not answer held the caller for about 127 s on Linux,
+    or forever if it accepted the TCP connection and sent nothing, and held a pool slot for that
+    long. A pooled connect that times out frees its slot at once. **This is a new default:** an
+    app whose Postgres connects take longer than 10 s passes a larger `:connect-timeout`, or
+    NIL for no limit.
+  - `:statement-timeout` sets `statement_timeout` on each new connection, and a pool sets it
+    again after its reset, which runs `RESET ALL`. A statement the server cancels for it
+    signals `db-statement-timeout` (a `db-error`), from `exec`, `query` and `map-query`.
+  - `mnemosyne/docs/user-guide.md` describes both, and the server-side fallback
+    `ALTER ROLE ... SET statement_timeout`.
+
 - **MCP resources and retrieval passages are untrusted by default, so in a prompt they refuse
   `:requires-user-intent` means for the turn** (#907, after #906). `praxeon/mcp:add-resource` and
   `praxeon/retrieval:passage->ctx-item` put outside content into an agent's context with nothing
@@ -887,23 +904,6 @@ its tag.
   `claude-opus-5-5` where they named `claude-opus-4-8`.
 
 ### Added
-
-- **mnemosyne/conn: a Postgres connect gives up after 10 seconds, and an optional statement
-  timeout** (#959). `connect` and `make-pool` take `:connect-timeout`, in seconds, defaulting to
-  `*postgres-connect-timeout-seconds*` (10), and `:statement-timeout`, in milliseconds,
-  defaulting to `*postgres-statement-timeout-ms*` (NIL).
-  - A connect that is not finished in time, TCP connect through authentication, signals
-    `db-connect-timeout` (a `db-error`, with `db-connect-timeout-host`, `-port` and
-    `-seconds`). Before, a server that did not answer held the caller for about 127 s on Linux,
-    or forever if it accepted the TCP connection and sent nothing, and held a pool slot for that
-    long. A pooled connect that times out frees its slot at once. **This is a new default:** an
-    app whose Postgres connects take longer than 10 s passes a larger `:connect-timeout`, or
-    NIL for no limit.
-  - `:statement-timeout` sets `statement_timeout` on each new connection, and a pool sets it
-    again after its reset, which runs `RESET ALL`. A statement the server cancels for it
-    signals `db-statement-timeout` (a `db-error`), from `exec`, `query` and `map-query`.
-  - `mnemosyne/docs/user-guide.md` describes both, and the server-side fallback
-    `ALTER ROLE ... SET statement_timeout`.
 
 - **praxeon/actor: every deliberation step records how many of the prompt's estimated tokens came
   from each source** (#317, step D). `praxeon/actor:request-messages` returns a third value, and

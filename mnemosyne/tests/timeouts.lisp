@@ -97,6 +97,20 @@ sends a byte."
                (is (< elapsed 5) "without waiting for the first one's slot: ~,2F s" elapsed)))
         (conn:close-pool pool)))))
 
+(test a-caller-unwound-while-connecting-stops-the-connect
+  ;; An outer deadline unwinds the caller long before its own 30 s connect timeout. The connect
+  ;; thread must not be left holding the silent server's connection.
+  (with-silent-server (port)
+    (let ((outcome (handler-case
+                       (sb-sys:with-deadline (:seconds 1)
+                         (conn:connect (%silent-backend port) :connect-timeout 30)
+                         :connected)
+                     (sb-sys:deadline-timeout () :outer-deadline)
+                     (error (e) e))))
+      (is (eq :outer-deadline outcome) "the outer deadline unwound the caller: ~S" outcome)
+      (loop repeat 50 while (%connect-threads) do (sleep 0.1))
+      (is (null (%connect-threads)) "and the thread that was connecting is gone"))))
+
 (test the-timeout-settings-are-checked
   (signals type-error (conn:connect (mnemosyne/backend:make-sqlite ":memory:") :connect-timeout 0))
   (signals type-error (conn:connect (mnemosyne/backend:make-sqlite ":memory:")
@@ -104,7 +118,14 @@ sends a byte."
   (signals type-error (conn:make-pool (mnemosyne/backend:make-sqlite ":memory:")
                                       :connect-timeout -1))
   (signals type-error (conn:make-pool (mnemosyne/backend:make-sqlite ":memory:")
-                                      :statement-timeout 0)))
+                                      :statement-timeout 0))
+  ;; Postgres stores statement_timeout as a 32-bit integer of milliseconds.
+  (signals type-error (conn:make-pool (mnemosyne/backend:make-sqlite ":memory:")
+                                      :statement-timeout 2147483648))
+  (let ((pool (conn:make-pool (mnemosyne/backend:make-sqlite ":memory:")
+                              :statement-timeout 2147483647)))
+    (is (conn:poolp pool) "the largest value Postgres accepts is accepted")
+    (conn:close-pool pool)))
 
 (defun %show-statement-timeout (c)
   (second (first (conn:query c "SHOW statement_timeout"))))
