@@ -307,7 +307,8 @@
   (:export #:grant #:grant-p #:grant-principal #:grant-group #:grant-capabilities
            #:grant-token-cap #:grant-call-cap #:grant-expires-at #:grant-audience
            #:grant-permits-p #:grant-permit-fn
-           #:verify-grant #:ed25519-verifier #:make-ed25519-verifier
+           #:verify-grant #:ed25519-verifier #:make-ed25519-verifier #:ed25519-verifier-public-key
+           #:*clock*
            #:encode-grant-token #:decode-grant-token
            #:grant-invalid #:grant-invalid-reason
            #:budget-exhausted #:budget-exhausted-principal
