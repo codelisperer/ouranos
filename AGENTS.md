@@ -192,7 +192,8 @@ ends, rather than running until something interrupts it.
 1. `scripts/board.sh` — read the whole board before touching anything.
 2. **Rule on `Blocked` first.** A lane blocked on a decision is the only thing that cannot
    proceed without the hub. Everything else can wait a pass.
-3. **Merge what is green.** `In Review` + evidence in the issue → verify cold, merge, close.
+3. **Merge what is green.** `scripts/pr-runs.sh` first, so a head with no run is found before
+   it is read as green. `In Review` + evidence in the issue → verify cold, merge, close.
 4. **File what arrived as a message.** A finding, defect or proposal a lane *sent* is filed
    before the pass ends, or it dies with that session. The hub is the last place to catch it.
 5. **Set the next `Todo`** and name who takes it.
@@ -472,6 +473,9 @@ not about an expression inside it; an `ok` line is about failures, not about cov
   `gh workflow run verify.yml --ref <branch>`, which runs the branch head without a merge ref.
   A conflict in `CHANGELOG.md` alone does not need a merge from `main`, because the hub resolves
   those when it builds a train; a conflict in code does.
+  `scripts/pr-runs.sh` does this check for every open pull request at once: it prints each head
+  with the verify run for that commit, prints NO RUN where there is none, and exits 1 if any
+  head has no run.
 - **A marker that identifies a tree must be older than the change that reads it.** When a script
   locates its own root by looking for landmark files, a landmark introduced by that same change
   makes every older checkout read as "not a checkout at all", and the refusal then blames the
