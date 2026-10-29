@@ -1092,6 +1092,14 @@ its tag.
 
 ### Added
 
+- **`mnemosyne/test-template`: a test suite can migrate one SQLite database per run and give
+  each test a copy** (#1047). `make-sqlite-template` applies an app's migrations to an in-memory
+  database once (`:setup` configures its connection first); `copy-sqlite-template` and
+  `with-sqlite-template-copy` give a test its own in-memory copy, made with SQLite's backup API,
+  and `close-sqlite-template` closes the template. A copy is a separate database, so what one
+  test writes is not seen by the next. With 300 migrations on an Apple Silicon Mac, a copy took
+  0.5 ms per test against 15 ms to migrate a fresh database. It is test support: load it from
+  the app's test system. SQLite only. See `docs/migrations.md`, §10.
 - **`hyperion/auth-db:*pbkdf2-iterations*` is exported, so an app's test suite can lower the
   password hashing cost** (#1045). It was internal, reachable only as
   `hyperion/auth-db::*pbkdf2-iterations*`. The default stays 100000. A test runner can
