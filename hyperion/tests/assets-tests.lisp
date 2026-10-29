@@ -19,7 +19,8 @@
   (:local-nicknames (#:assets #:hyperion/assets)
                     (#:router #:hyperion/router)
                     (#:http #:hyperion/http)
-                    (#:ports #:hyperion/test-ports)))
+                    (#:ports #:hyperion/test-ports)
+                    (#:appr #:hyperion/appearance)))
 
 (in-package #:hyperion/assets/tests)
 
@@ -328,4 +329,19 @@ teardown waits until the port stops accepting, as the server-tests teardowns do.
 (defun %occurrences (needle text)
   (loop with start = 0 for at = (search needle text :start2 start)
         while at count t do (setf start (1+ at))))
+
+(test the-kit-stylesheet-draws-the-hover-layer-and-press-filter-the-contrast-check-models
+  "kit.css cannot read hyperion/appearance's values, so it writes them out. Every hover layer in
+it is *HOVER-OVERLAY* and every press filter is *PRESSED-BRIGHTNESS*, the values
+APPEARANCE-CONTRAST-FAILURES checks the button text against."
+  (let ((css (sb-ext:octets-to-string (assets:asset-bytes (assets:asset :kit))
+                                      :external-format :utf-8))
+        (layer (format nil "linear-gradient(~A, ~A)" appr::*hover-overlay* appr::*hover-overlay*))
+        (press (format nil "filter: brightness(~,2F);" appr::*pressed-brightness*)))
+    (is (plusp (%occurrences "linear-gradient(" css)))
+    (is (= (%occurrences "linear-gradient(" css) (%occurrences layer css))
+        "a hover layer in kit.css is not ~A" layer)
+    (is (plusp (%occurrences "filter: brightness(" css)))
+    (is (= (%occurrences "filter: brightness(" css) (%occurrences press css))
+        "a press filter in kit.css is not ~A" press)))
 

@@ -418,7 +418,9 @@ light button and lightens a dark one.")
   "The hover layer as CSS. hyperion/kit's kit.css writes the same layer for its own buttons.")
 
 (defparameter *pressed-brightness* 0.92d0
-  "The brightness filter a pressed button gets, which darkens its text and its fill alike.")
+  "The brightness filter a pressed button gets, which darkens its text and its fill alike. The
+generated :active rules write it with two decimals, and hyperion/kit's kit.css writes the same
+value for its own buttons.")
 
 (defun %gradient-targets (out)
   (loop for (selector token . children) in *gradient-targets*
@@ -438,7 +440,7 @@ light button and lightens a dark one.")
            (when (member token *gradient-buttons*)
              (format out "~A:hover {~%  background: linear-gradient(~A, ~A), var(--hy-~(~A~));~%}~%"
                      scope *hover-overlay* *hover-overlay* token)
-             (format out "~A:active {~%  filter: brightness(0.92);~%}~%" scope)
+             (format out "~A:active {~%  filter: brightness(~,2F);~%}~%" scope *pressed-brightness*)
              (format out "~A:focus-visible {~%  outline: 2px solid var(--hy-focus-ring);~%  outline-offset: 2px;~%}~%"
                      scope))))
 

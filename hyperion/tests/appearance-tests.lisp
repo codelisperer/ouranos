@@ -203,8 +203,12 @@ dims the text, and each brings it below 4.5:1, which only a check of those state
                               failures)))
     (is (equal '(:hover :pressed) (mapcar (lambda (f) (getf f :state)) mine)) "~S" mine)
     (is (every (lambda (f) (< (getf f :ratio) 4.5d0)) mine))
-    (is (equal "rgba(128, 128, 128, 0.14)" appr::*hover-overlay*)
-        "the layer the check models is the one the CSS draws")))
+    (let ((css (appr:appearance-css)))
+      (is (search (format nil "linear-gradient(~A, ~A)" appr::*hover-overlay* appr::*hover-overlay*)
+                  css)
+          "the generated hover rule draws the layer the check models")
+      (is (search (format nil "filter: brightness(~,2F);" appr::*pressed-brightness*) css)
+          "the generated press rule uses the brightness the check models"))))
 
 (test a-gradient-whose-stops-pass-can-still-fail-between-them
   "#767676 passes on white and on black, and fails on the grey halfway between them, which
