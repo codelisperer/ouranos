@@ -477,7 +477,7 @@ jobs:
           fi
           echo "APP_VERSION=${v:-0.0.0-dev}" >> "$GITHUB_ENV"
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           path: incoming
 
@@ -585,7 +585,7 @@ jobs:
           [ "$v" = "${GITHUB_REF_NAME}" ] && v=""
           echo "APP_VERSION=${v:-0.0.0-dev}" >> "$GITHUB_ENV"
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           path: incoming
 
