@@ -100,11 +100,22 @@
   :components ((:file "tests/jobs-tests"))
   :perform (test-op (o c) (uiop:symbol-call :mnemosyne/jobs/tests :run-tests)))
 
+(defsystem "mnemosyne/test-template"
+  :description "Test support: migrate one SQLite database per test run and copy it for each test."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  ;; #1047. An app loads this in its test system only. The copy uses SQLite's backup API
+  ;; through cffi, on the database handle cl-sqlite keeps; cl-sqlite arrives with mnemosyne's
+  ;; dbd-sqlite3, the way mnemosyne/conn reads the same handle.
+  :depends-on ("mnemosyne" "dbi" "cffi")
+  :components ((:file "tests/test-template")))
+
 (defsystem "mnemosyne/tests"
   :description "Test suite for Mnemosyne."
   :depends-on ("aion/fs" "mnemosyne" "aion/secret" "aion/clock" "aion/log" "fiveam"   ; entity.lisp and backends.lisp
                "aion/test-threads"    ; pool.lisp joins its threads with a deadline (#325)
-               "log4cl")              ; migrate.lisp puts the log's setup back after capturing it (#1046)
+               "log4cl"               ; migrate.lisp puts the log's setup back after capturing it (#1046)
+               "mnemosyne/test-template")  ; template.lisp (#1047)
   :serial t
   :components ((:module "tests"
                 :serial t
@@ -125,5 +136,6 @@
                              (:file "pool")         ; uses sqlite-busy's helpers (#325)
                              (:file "sqlite-library")
                              (:file "migrate")      ; what MIGRATE logs (#1046)
+                             (:file "template")     ; mnemosyne/test-template (#1047)
                              (:file "smoke"))))
   :perform (test-op (o c) (uiop:symbol-call :mnemosyne/tests :run-tests)))
