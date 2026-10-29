@@ -9502,3 +9502,20 @@ MOVE-CONVERSATION must then copy, or as configuration."
         (is (eq (funcall reader from) (funcall reader to)) "~A was not moved" name)))
     (is (string= "to" (actor:agent-name to)))
     (is (string= "new" (actor:agent-system-prompt to)) "the new agent's configuration was replaced")))
+
+(test move-conversation-gives-the-new-agent-the-higher-taint
+  "The new agent's conversation taint is the higher of the two, so moving a conversation does not
+lower a value the app recorded on the new agent. NIL, not recorded, is lower than any value."
+  (flet ((moved (from-taint to-taint)
+           (let ((from (actor:make-agent :name "from"))
+                 (to (actor:make-agent :name "to")))
+             (setf (praxeon/actor::agent-conversation-taint from) from-taint
+                   (praxeon/actor::agent-conversation-taint to) to-taint)
+             (praxeon/actor::agent-conversation-taint (actor:move-conversation from to)))))
+    (is (eq :untrusted (moved :clean :untrusted)) "a recorded :untrusted on the new agent stays")
+    (is (eq :untrusted (moved :untrusted :clean)))
+    (is (eq :delegated (moved :clean :delegated)))
+    (is (eq :untrusted (moved :untrusted :delegated)))
+    (is (eq :clean (moved :clean nil)) "a new agent that recorded nothing takes the old value")
+    (is (eq :delegated (moved nil :delegated)))
+    (is (null (moved nil nil)))))

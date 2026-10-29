@@ -132,11 +132,18 @@ client rendering `agent-history' still shows the whole conversation."
   (conversation-taint nil)
   (history '() :type list))               ; list of praxeon/llm messages
 
+(defun %higher-taint (a b)
+  "The higher of two conversation-taint values, in the order NIL, :CLEAN, :DELEGATED, :UNTRUSTED.
+NIL means not recorded, so either recorded value is kept over it."
+  (let ((order '(nil :clean :delegated :untrusted)))
+    (if (< (position a order) (position b order)) b a)))
+
 (defun move-conversation (from to)
   "Give TO, an agent just made, FROM's conversation, and return TO. What moves is the history and
 the state needed to read it as it was read before: the retrieved context, the offloaded and
-cleared tool results with the store they are in, the untrusted-content records and the
-conversation's taint, the turn guard, and the thread memory. TO keeps its own configuration:
+cleared tool results with the store they are in, the untrusted-content records, the turn guard,
+and the thread memory. TO's conversation taint becomes the higher of the two agents' values
+(%HIGHER-TAINT), so a value the app gave TO is not lowered. TO keeps its own configuration:
 provider, system prompt, means, budgets and taint scope. An app does this when what an agent may
 do changes and its conversation should go on, such as praxeon/web when a session's grant
 changes (#67). The two agents share the moved tables afterwards, so FROM is not used again."
@@ -147,7 +154,8 @@ changes (#67). The two agents share the moved tables afterwards, so FROM is not 
         (agent-guard to) (agent-guard from)
         (agent-untrusted-inputs to) (agent-untrusted-inputs from)
         (agent-untrusted-calls to) (agent-untrusted-calls from)
-        (agent-conversation-taint to) (agent-conversation-taint from)
+        (agent-conversation-taint to) (%higher-taint (agent-conversation-taint from)
+                                                     (agent-conversation-taint to))
         (agent-thread-memory to) (agent-thread-memory from))
   ;; The result index names results in FROM's store, so the store goes with it.
   (when (agent-result-store from)
