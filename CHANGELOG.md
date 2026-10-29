@@ -2844,6 +2844,15 @@ its tag.
 
 ### Fixed
 
+- **praxeon/actor: `move-conversation` no longer lowers the new agent's conversation taint.** It
+  copied the old agent's `agent-conversation-taint` over the new agent's, so a new agent made with
+  `:conversation-taint :untrusted` and given a conversation recorded as `:clean` ended up `:clean`.
+  The new agent now gets the higher of the two, in the order not recorded (`nil`), `:clean`,
+  `:delegated`, `:untrusted`. A new agent made without the argument still takes the old agent's
+  value. When a session's grant changes, `praxeon/web` moves the conversation onto the agent the
+  app's rebuild function makes; that agent keeps the old value unless the rebuild function passes
+  a higher one.
+
 - **praxeon/ceiling: `verify-grant` refuses a signed payload that is not a grant** (part of #67).
   A payload that is not a JSON object, a `principal`, `group` or `audience` that is not a string,
   or `capabilities` that is not an array of strings now signals `grant-invalid`, which
