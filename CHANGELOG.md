@@ -1218,6 +1218,45 @@ its tag.
     `multipart/form-data` (field `source`), with the message and link as its caption. Refused with
     `invalid-message`: octets together with `:image-url`, more than `+facebook-photo-max-octets+`
     (Meta's 10MB), or a type outside `+facebook-photo-types+`. A photo alone is a post.
+- **praxeon: a private agent keeps its prompts, tool arguments, tool results and replies out of
+  every log sink and out of events** (#983). `actor:make-agent` takes `:private`, default NIL.
+  While a private agent's turn runs, through `run-turn`, `continue-turn` or
+  `abandon-held-turn`, and on every thread the turn continues on:
+  - **Logs.** `aion/log:*log-condition-details*` is NIL, so `aion/log:exception` writes a
+    condition's type and frame names, never its report or a frame's arguments, even when an app
+    turned the setting on for development.
+    - This holds for handlers that run inside the turn, such as an app's `handler-bind` around
+      `run-turn`, which runs while the turn's bindings are in force. A `handler-case` outside
+      `run-turn` runs after the turn has unwound, so `log:exception` there with the setting on
+      writes the report, and the report can hold content.
+    - praxeon's own log lines record only counts, ids, durations and type names. The two "llm
+      request failed" lines changed to the condition's type in #1013, and each line was checked
+      for this change.
+    - The host `read-web-page` reads, and the resource an MCP resource line names, are logged as
+      `:withheld` for a private agent, because they say what the user asked about. This follows
+      the new `evt:*withhold-from-logs*`, which a private agent's turn binds whether or not the
+      agent retains content, and `mcp:add-resource` binds from the agent it is given, so a call
+      outside a turn is covered. `actor:agent-private` is now exported.
+    - `actor:continue-turn` and `actor:abandon-held-turn` run with the same privacy as
+      `actor:run-turn`, so the rest of a held turn is covered too.
+    - `actor:move-conversation` leaves the new agent private when either agent was, so an app
+      whose factory leaves out `:private` does not make a private conversation public. The new
+      agent's `:retain-content` is its own.
+  - **Events.** `evt:*withhold-content*` is true, and `evt:emit` replaces every content field
+    with `:withheld`. The content fields are `evt:+content-keys+`: `:arguments`, `:content`,
+    `:text`, `:message`, `:schema` and `:url`. This covers what the studio's status printer and
+    praxeon/web's progress line show. The other fields still arrive.
+    - A delegation's `:task` text is withheld by the emitter, through the new
+      `evt:unless-withheld`. `:task` is not a content key, because on the MCP task events it is
+      the task object an app answers with, and that always arrives.
+    - An MCP task records whether the turn that started it withheld content
+      (`mcp:task-private`, and `"private"` in `task-to-json`). Its events, such as
+      `:task-input-required`, withhold the server's message, schema and URL by that record,
+      whichever thread or turn polls the task.
+  - **Retaining content.** `:retain-content t` keeps content in events for a private agent, for
+    an app that shows a trace and means to. Logs stay without it either way.
+
+  A sub-agent delegated to from a private agent's turn runs under the same rules.
 - **`mnemosyne/test-template`: a test suite can migrate one SQLite database per run and give
   each test a copy** (#1047). `make-sqlite-template` applies an app's migrations to an in-memory
   database once (`:setup` configures its connection first); `copy-sqlite-template` and

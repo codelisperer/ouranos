@@ -1306,6 +1306,33 @@ that Mcp-Name carries the URI, and an https URI is read through the server."
         (is (= 1 (mcp:remove-resource agent client "file:///notes")))
         (is (null (%context-items agent)))))))
 
+(test a-private-agent-s-resource-is-withheld-from-the-log-outside-a-turn
+  "#983, from the hub's review of #1027: an app calls ADD-RESOURCE outside any turn, so the
+agent's own privacy decides what its log lines carry, ADD-RESOURCE's and READ-RESOURCE's. The
+control is the same call for an agent that is not private, whose log names the resource."
+  (flet ((log-of (agent)
+           (let ((fake (make-fake))
+                 (out (make-string-output-stream)))
+             (setf (fake-contents fake)
+                   (list (cons "https://mark983resource.example/notes"
+                               (%contents (%obj "uri" "https://mark983resource.example/notes"
+                                                "text" "notes")))))
+             (with-fake (client fake)
+               (unwind-protect
+                    (progn (aion/log:setup :env :prod :level :trace :stream out)
+                           (mcp:add-resource agent client "https://mark983resource.example/notes"))
+                 (aion/log:setup :env :dev :level :warn :stream *standard-output*)))
+             (get-output-stream-string out))))
+    (let ((private (log-of (actor:make-agent :private t)))
+          (open (log-of (actor:make-agent))))
+      (is (search "resource added" private) "the line was written: ~A" private)
+      (is (null (search "mark983resource" private)) "a private agent's resource: ~A" private)
+      (is (= 2 (loop with text = (string-downcase private)
+                     for at = (search "withheld" text) then (search "withheld" text :start2 (1+ at))
+                     while at count t))
+          "the resource-read and resource-added lines both withhold it: ~A" private)
+      (is (search "mark983resource" open) "control: not private, the resource is logged: ~A" open))))
+
 (test a-resource-larger-than-the-context-budget-signals-and-adds-nothing
   (let ((fake (make-fake)))
     (setf (fake-contents fake)
@@ -1857,6 +1884,28 @@ it read before, changes nothing, and its own finish is refused, so the task is r
                                                 "Mcp-Name")))
         (is (null (mcp:due-tasks (mcp:client-task-store client) "docs" most-positive-fixnum)))))))
 
+(test a-task-s-events-are-withheld-by-its-own-agent-not-by-the-polling-turn
+  "#983, from the hub's review of #1027: a task started by a private agent's turn has PRIVATE,
+and its events withhold the server's message whichever thread polls it, while the task object
+an app answers with still arrives. A task started by an agent that is not private is not
+withheld even when a private turn polls it."
+  (flet ((event-for (task polled-privately)
+           (let ((seen nil))
+             (let ((evt:*withhold-content* polled-privately))
+               (evt:with-observer ((lambda (e) (setf seen e)))
+                 (praxeon/mcp::%task-event :task-input-required task :input-key "i1" :mode :form
+                                           :message "MARK983ASK" :schema nil :url nil :task task)))
+             seen)))
+    (let* ((private (praxeon/mcp::%make-task :key "k" :connection "docs" :id "t" :private t))
+           (open (praxeon/mcp::%make-task :key "k2" :connection "docs" :id "t2"))
+           (outside (event-for private nil))
+           (inside (event-for open t)))
+      (is (eq :withheld (getf outside :message)) "a private task's message, polled outside a turn")
+      (is (eq private (getf outside :task)) "the task object still arrives, to answer with")
+      (is (equal "MARK983ASK" (getf inside :message))
+          "control: a task that is not private is not withheld inside a private turn")
+      (is (eq open (getf inside :task))))))
+
 (test a-task-record-survives-json-and-a-store-removes-it-once
   (let* ((task (praxeon/mcp::%make-task :key "k" :connection "docs" :id "task-9" :principal "u1"
                                         :tool "long" :means "docs__long"
@@ -1864,7 +1913,8 @@ it read before, changes nothing, and its own finish is refused, so the task is r
                                         :agent "a" :conversation nil :call-id "c1" :started 100
                                         :seen 101 :deadline nil :interval 5 :next-poll 105
                                         :status "working" :outcome :cancelled :text "gone"
-                                        :announced-at 106 :failures 3 :failure :sign-in))
+                                        :announced-at 106 :failures 3 :failure :sign-in
+                                        :private t))
          (back (mcp:task-from-json (mcp:task-to-json task)))
          (store (mcp:make-memory-task-store)))
     (is (equalp task back))
