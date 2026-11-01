@@ -265,27 +265,27 @@ for CONDITION, logging why at :info when the reason is the policy's limits."
        (multiple-value-bind (asked ok)
            (%ask "retry-after" (lambda () (retry-after condition)) condition)
          (let* ((computed (retry-delay policy next (funcall *random-function*)))
-               (deadline (retry-policy-deadline policy)))
-          (cond
-            ((not ok) nil)
-            ((and asked (> asked (retry-policy-max-delay policy)))
-             (log:info "retry not taken" :reason "retry-after longer than max-delay"
-                                         :policy (retry-policy-name policy) :attempt attempt
-                                         :condition (%type-name condition)
-                                         :retry-after-s asked
-                                         :max-delay-s (retry-policy-max-delay policy))
-             nil)
-            (t
-             (let ((wait (if asked (max computed asked) computed)))
-               (cond ((and deadline (> (+ (%elapsed start) wait) deadline))
-                      (log:info "retry not taken" :reason "deadline"
-                                                  :policy (retry-policy-name policy)
-                                                  :attempt attempt
-                                                  :condition (%type-name condition)
-                                                  :wait-ms (%ms wait) :deadline-s deadline
-                                                  :retry-after-s asked)
-                      nil)
-                     (t wait)))))))))))
+                (deadline (retry-policy-deadline policy)))
+           (cond
+             ((not ok) nil)
+             ((and asked (> asked (retry-policy-max-delay policy)))
+              (log:info "retry not taken" :reason "retry-after longer than max-delay"
+                                          :policy (retry-policy-name policy) :attempt attempt
+                                          :condition (%type-name condition)
+                                          :retry-after-s asked
+                                          :max-delay-s (retry-policy-max-delay policy))
+              nil)
+             (t
+              (let ((wait (if asked (max computed asked) computed)))
+                (cond ((and deadline (> (+ (%elapsed start) wait) deadline))
+                       (log:info "retry not taken" :reason "deadline"
+                                                   :policy (retry-policy-name policy)
+                                                   :attempt attempt
+                                                   :condition (%type-name condition)
+                                                   :wait-ms (%ms wait) :deadline-s deadline
+                                                   :retry-after-s asked)
+                       nil)
+                      (t wait)))))))))))
 
 (defun %on-failure (policy condition attempt start retry)
   "The runner's handler: invoke RETRY with the seconds to wait, or return, which declines the

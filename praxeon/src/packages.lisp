@@ -42,7 +42,9 @@
 (defpackage #:praxeon/event
   (:use #:cl)
   (:export #:*observer* #:emit #:with-observer
-           #:event-type #:event-get #:event-plist))
+           #:event-type #:event-get #:event-plist
+           #:*withhold-content* #:+content-keys+ #:unless-withheld
+           #:*withhold-from-logs* #:unless-withheld-from-logs))
 
 (defpackage #:praxeon/conditions
   (:use #:cl)
@@ -354,7 +356,7 @@
    #:agent #:make-agent #:agent-name #:agent-provider #:agent-means
    #:agent-context #:agent-history #:agent-history-budget #:agent-system-prompt
    #:move-conversation
-   #:agent-cache-system #:agent-system-parts #:agent-max-tokens
+   #:agent-cache-system #:agent-system-parts #:agent-max-tokens #:agent-private
    #:request-messages #:prompt-breakdown
    #:means-entry #:means-entry-source #:register-means #:means-permitted-p #:agent-means-for
    ;; untrusted content in a turn (#827)

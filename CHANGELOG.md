@@ -21,6 +21,52 @@ its tag.
   `delivery-rate-limited-retry-after` for the wait the response asked for. Telegram and Facebook
   already signalled it; every backend does now.
 
+- **mnemosyne/conn: a Postgres connect gives up after 10 seconds, and an optional statement
+  timeout** (#959). `connect` and `make-pool` take `:connect-timeout`, in seconds, defaulting to
+  `*postgres-connect-timeout-seconds*` (10), and `:statement-timeout`, in milliseconds,
+  defaulting to `*postgres-statement-timeout-ms*` (NIL).
+  - A connect that is not finished in time, TCP connect through authentication, signals
+    `db-connect-timeout` (a `db-error`, with `db-connect-timeout-host`, `-port` and
+    `-seconds`). Before, a server that did not answer held the caller for about 127 s on Linux,
+    or forever if it accepted the TCP connection and sent nothing, and held a pool slot for that
+    long. A pooled connect that times out frees its slot at once. **This is a new default:** an
+    app whose Postgres connects take longer than 10 s passes a larger `:connect-timeout`, or
+    NIL for no limit.
+  - `:statement-timeout` sets `statement_timeout` on each new connection, and a pool sets it
+    again after its reset, which runs `RESET ALL`. A statement the server cancels for it
+    signals `db-statement-timeout` (a `db-error`), from `exec`, `query` and `map-query`.
+  - `mnemosyne/docs/user-guide.md` describes both, and the server-side fallback
+    `ALTER ROLE ... SET statement_timeout`.
+- **hermes/blob: `MNEMOSYNE_S3_SECURE=false` is refused unless the endpoint is local, and an
+  empty `MNEMOSYNE_S3_SESSION_TOKEN` is now no token** (#124).
+  - `make-s3-store` refuses `MNEMOSYNE_S3_SECURE=false` when `MNEMOSYNE_S3_ENDPOINT` is not a
+    loopback, private or link-local address, signalling `blob-configuration-error`. Before, that
+    one variable put a store still aimed at the default `s3.amazonaws.com` on plain http, sending
+    its signed requests and any session token across the internet in the clear. `localhost`, an
+    address in those ranges, and a name that resolves only to such addresses (a Docker Compose
+    service name, say) are all accepted. **An app that set `MNEMOSYNE_S3_SECURE=false` against a
+    public endpoint now fails to start** and should either point the endpoint at its local double
+    or, if plaintext to that endpoint is really meant, pass `:secure nil` in code, which is not
+    checked.
+  - An empty `MNEMOSYNE_S3_SESSION_TOKEN` is now no token, where it used to be sent as an empty
+    one.
+- **hermes/facebook: `facebook-page-health` answers `:missing-permission`, with the missing
+  scopes, where it answered `:reconnect`** (#978). A Page token that `debug_token` says is valid,
+  and is for the right Page, but lacks a scope in the new `+facebook-required-scopes+`
+  (`pages_manage_posts`), used to be `:reconnect`. It is now `:missing-permission`, and the
+  missing scope names are a third value. An app that shows "reconnect" for `:reconnect` shows it
+  for `:missing-permission` too, and can name the permission. The statuses are the exported type
+  `facebook-page-status`, documented value by value.
+- **A page that writes `hyperion/notice:notice-region` shows htmx error responses that it used
+  to drop** (#980). htmx 2 does not swap a 4xx or 5xx response, so an error answer to an htmx
+  request showed the user nothing. The region's script now adds the response's notices to the
+  region, or a fixed message when it has none (`:notice/failed`), `:notice/unreachable` when the
+  request failed without a response (`htmx:sendError`), and `:notice/timeout` when it timed out
+  (`htmx:timeout`). A page without the region is unchanged. Before adding the region, check what
+  the app's error responses say, because users will now read them. An element whose error responses
+  the app handles itself takes `data-hyperion-notices="off"`; `(notice-region :htmx-errors nil)`
+  turns the htmx handling off, and the script then only makes Dismiss work. The script does not act on a response the app already swaps, through
+  `htmx.config.responseHandling` or its own `htmx:beforeSwap` listener.
 - **`mnemosyne/migrate:migrate` logs each applied migration at DEBUG and one INFO line per
   call** (#1046). The per-migration line `"migrate: applied"` (with `id`, `description` and `ms`)
   is now DEBUG, as is `"migrate: applying"`. A call that had migrations to apply ends with one
@@ -1146,7 +1192,11 @@ its tag.
   failure, has no phase, so it is never retried. On the pinned path (`:connect-address`,
   `fetch-public`) the phase comes from where the call failed, not from the condition's type,
   and a connection that ends before the response does (a `malformed-response` saying "the
-  connection ended") is `:response`.
+  connection ended") is `:response`. On Windows, where dexador uses WinHTTP, the phase comes
+  from WinHTTP's error code: 12029 and 12007 are `:connect`; 12002, 12030 and 12152 are
+  `:response`. aion/http-client now depends on `aion/retry` and defines the `transience` and
+  `retry-after` methods for `http-error`: 408, 425, 429, 503, 529 and `:connect` are
+  `:transient`; 500, 502, 504 and `:response` are `:unknown`.
   - **Pooled connections.** Through dexador on Linux and macOS, a failure to connect is
     `:connect` only for a request that could not have used dexador's connection pool. Otherwise
     dexador may have sent the request on a pooled connection that then dropped, before its
@@ -1155,11 +1205,105 @@ its tag.
     to connect, such as a GET's, is `:response`.
   - **WinHTTP's 12152.** On Windows, a reply WinHTTP refuses as not HTTP (12152) is now
     signalled as `malformed-response`, as this client's own reader signals one on the pinned
-    path, still with phase `:response`. It was a plain `http-error`. On Windows, where dexador uses WinHTTP, the phase comes
-  from WinHTTP's error code: 12029 and 12007 are `:connect`; 12002, 12030 and 12152 are
-  `:response`. aion/http-client now depends on `aion/retry` and defines the `transience` and
-  `retry-after` methods for `http-error`: 408, 425, 429, 503, 529 and `:connect` are
-  `:transient`; 500, 502, 504 and `:response` are `:unknown`.
+    path, still with phase `:response`. It was a plain `http-error`.
+- **hyperion/page-meta: `:visibility :unlisted` writes the full preview card plus `robots
+  noindex`** (#947). `page-meta`, `meta-tags` and `meta-tags-string` accept `:unlisted` beside
+  `:public`, `:noindex` and `:private`. It is for a page anyone with the link may see and
+  share but that should not appear in search results. An app that added its own robots tag
+  next to `:visibility :public` for this can pass `:unlisted` and drop that tag. `:noindex` and
+  `:private` are unchanged: they still write only the site's name and fallback image. Robots
+  noindex is a request crawlers may ignore, so a page whose content must stay private still
+  uses `:private`.
+- **hermes: `make-email` takes `:headers`, so an email can carry `List-Unsubscribe` and
+  `List-Unsubscribe-Post`** (#106). `:headers` is an alist of `(name . value)` strings, read
+  back with `email-headers`. SendGrid receives them as its `headers` object, and the dev
+  transport prints them. `make-email` signals `invalid-message` for a name that is not a valid
+  header name or is given twice, a reserved header (`To`, `From`, `Subject`, `Reply-To`, `Cc`,
+  `Bcc`, `Content-Type` and the others `hermes:reserved-email-headers` returns), a header
+  longer than 998 characters, or a value with anything but printable ASCII and tabs, so a
+  carriage return or line feed cannot add a header of its own. Non-ASCII header text is not
+  encoded and is refused. An email without `:headers` sends the same SendGrid request as
+  before. A new email backend's `deliver` sends `email-headers` or signals `invalid-message`
+  when there are any; it never drops them.
+- **hermes/blob: `make-s3-store` reads `MNEMOSYNE_S3_SECURE`, so a local S3 double can be
+  configured from the environment alone** (#124). Before, `:secure` was the one setting with no
+  environment fallback, and `store-from-env` could only make an https store. Now
+  `MNEMOSYNE_S3_SECURE=false` with `MNEMOSYNE_S3_PATH_STYLE=true` and
+  `MNEMOSYNE_S3_ENDPOINT=localhost:9000` reaches a MinIO. Unset or empty still means https, the
+  value is read as `true` or `false` without regard to case, and anything else signals
+  `blob-configuration-error`. An app that registered its own store with `:secure nil` for this,
+  such as an `"s3-local"` store, can set the variable and use `"s3"` instead. The `MNEMOSYNE_`
+  prefix on the blob variables is historical; the `make-s3-store` and `store-from-env`
+  docstrings now say they are hermes settings.
+- **hermes/blob: a blob setting set to the empty string means the same as an unset one** (#124).
+  `MNEMOSYNE_BLOB_IMPL`, `MNEMOSYNE_BLOB_ROOT`, `MNEMOSYNE_BLOB_BASE_URL` and every
+  `MNEMOSYNE_S3_*` variable now fall back to their defaults when empty, as a blank line in a
+  `.env` file sets them. Before, an empty `MNEMOSYNE_BLOB_IMPL` made `store-from-env` look for a
+  store named `""` and signal, and an empty `MNEMOSYNE_S3_ENDPOINT` failed `make-s3-store`.
+- **hermes/facebook: `facebook-token-info` reports a Page token's scopes and expiry, and a post
+  can upload a photo's octets** (#978).
+  - `facebook-token-info provider page` returns a `facebook-token-info` from Graph's
+    `debug_token`: `facebook-token-info-valid-p`, `-scopes`, `-expires-at` (a universal time, or
+    `:never` for an `expires_at` of 0, which is observed, not documented), `-data-access-expires-at`,
+    `-page-id` and `-app-id`. It needs the app's id and secret and signals `configuration-error`
+    without them. A token that never expires still has a data-access expiry; show both.
+  - `make-facebook-post` takes `:image-octets` and `:image-type`, for a photo the app already holds
+    (from `hermes/blob:get-blob`, say). It is uploaded to `POST /{page}/photos` as
+    `multipart/form-data` (field `source`), with the message and link as its caption. Refused with
+    `invalid-message`: octets together with `:image-url`, more than `+facebook-photo-max-octets+`
+    (Meta's 10MB), or a type outside `+facebook-photo-types+`. A photo alone is a post.
+- **praxeon: a private agent keeps its prompts, tool arguments, tool results and replies out of
+  every log sink and out of events** (#983). `actor:make-agent` takes `:private`, default NIL.
+  While a private agent's turn runs, through `run-turn`, `continue-turn` or
+  `abandon-held-turn`, and on every thread the turn continues on:
+  - **Logs.** `aion/log:*log-condition-details*` is NIL, so `aion/log:exception` writes a
+    condition's type and frame names, never its report or a frame's arguments, even when an app
+    turned the setting on for development.
+    - This holds for handlers that run inside the turn, such as an app's `handler-bind` around
+      `run-turn`, which runs while the turn's bindings are in force. A `handler-case` outside
+      `run-turn` runs after the turn has unwound, so `log:exception` there with the setting on
+      writes the report, and the report can hold content.
+    - praxeon's own log lines record only counts, ids, durations and type names. The two "llm
+      request failed" lines changed to the condition's type in #1013, and each line was checked
+      for this change.
+    - The host `read-web-page` reads, and the resource an MCP resource line names, are logged as
+      `:withheld` for a private agent, because they say what the user asked about. This follows
+      the new `evt:*withhold-from-logs*`, which a private agent's turn binds whether or not the
+      agent retains content, and `mcp:add-resource` binds from the agent it is given, so a call
+      outside a turn is covered. `actor:agent-private` is now exported.
+    - `actor:continue-turn` and `actor:abandon-held-turn` run with the same privacy as
+      `actor:run-turn`, so the rest of a held turn is covered too.
+    - `actor:move-conversation` leaves the new agent private when either agent was, so an app
+      whose factory leaves out `:private` does not make a private conversation public. The new
+      agent's `:retain-content` is its own.
+  - **Events.** `evt:*withhold-content*` is true, and `evt:emit` replaces every content field
+    with `:withheld`. The content fields are `evt:+content-keys+`: `:arguments`, `:content`,
+    `:text`, `:message`, `:schema` and `:url`. This covers what the studio's status printer and
+    praxeon/web's progress line show. The other fields still arrive.
+    - A delegation's `:task` text is withheld by the emitter, through the new
+      `evt:unless-withheld`. `:task` is not a content key, because on the MCP task events it is
+      the task object an app answers with, and that always arrives.
+    - An MCP task records whether the turn that started it withheld content
+      (`mcp:task-private`, and `"private"` in `task-to-json`). Its events, such as
+      `:task-input-required`, withhold the server's message, schema and URL by that record,
+      whichever thread or turn polls the task.
+  - **Retaining content.** `:retain-content t` keeps content in events for a private agent, for
+    an app that shows a trace and means to. Logs stay without it either way.
+
+  A sub-agent delegated to from a private agent's turn runs under the same rules.
+- **hyperion/notice: in-page notices for an error, a warning or a success** (#980). In core
+  `hyperion`:
+  - `notice` writes one notice;
+  - `notice-oob` writes one for an htmx response to add out of band;
+  - `notice-region` writes the place they appear, with errors in `role="alert"
+    aria-live="assertive"` and the rest in `role="status" aria-live="polite"`;
+  - `notices-script` returns the region's script, for a Content-Security-Policy that needs it
+    served or hashed; pass `:script nil` to `notice-region` then.
+
+  A notice's Dismiss button has no inline handler, so it works under a Content-Security-Policy
+  with nonces; the region's script handles the click. The fixed texts are the i18n keys
+  `:notice/failed`, `:notice/unreachable`, `:notice/timeout` and `:notice/dismiss`. See `hyperion/docs/notice.md`. A notice is not stored; the notification list
+  is #792.
 - **`mnemosyne/test-template`: a test suite can migrate one SQLite database per run and give
   each test a copy** (#1047). `make-sqlite-template` applies an app's migrations to an in-memory
   database once (`:setup` configures its connection first); `copy-sqlite-template` and

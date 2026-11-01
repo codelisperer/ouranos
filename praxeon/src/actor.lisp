@@ -119,6 +119,12 @@ client rendering `agent-history' still shows the whole conversation."
   ;; prompt in place of the messages they were distilled from, once enough has been observed.
   (thread-memory nil)
   (taint-scope :turn)
+  ;; #983: PRIVATE keeps the agent's content out of every log line and out of events, so an app
+  ;; whose agent works over content it may not keep, such as a writer's manuscript, can rely on
+  ;; that. RETAIN-CONTENT lets events carry content for a private agent again, for an app that
+  ;; shows a trace and means to; logs stay without it either way. See %WITH-AGENT-PRIVACY.
+  (private nil)
+  (retain-content nil)
   ;; A new slot that holds part of the conversation, rather than how the agent is configured,
   ;; is also copied by MOVE-CONVERSATION; the actor tests list every slot as one or the other.
   ;; #948: whether untrusted content has entered this conversation, recorded as it happens, so
@@ -143,8 +149,10 @@ NIL means not recorded, so either recorded value is kept over it."
 the state needed to read it as it was read before: the retrieved context, the offloaded and
 cleared tool results with the store they are in, the untrusted-content records, the turn guard,
 and the thread memory. TO's conversation taint becomes the higher of the two agents' values
-(%HIGHER-TAINT), so a value the app gave TO is not lowered. TO keeps its own configuration:
-provider, system prompt, means, budgets and taint scope. An app does this when what an agent may
+(%HIGHER-TAINT), so a value the app gave TO is not lowered. TO is private when either agent is,
+so a conversation that was private stays private on an agent the app built without :PRIVATE
+(#983, the hub's review of #1027). TO keeps the rest of its own configuration: provider, system
+prompt, means, budgets, taint scope and RETAIN-CONTENT. An app does this when what an agent may
 do changes and its conversation should go on, such as praxeon/web when a session's grant
 changes (#67). The two agents share the moved tables afterwards, so FROM is not used again."
   (setf (agent-history to) (agent-history from)
@@ -156,6 +164,7 @@ changes (#67). The two agents share the moved tables afterwards, so FROM is not 
         (agent-untrusted-calls to) (agent-untrusted-calls from)
         (agent-conversation-taint to) (%higher-taint (agent-conversation-taint from)
                                                      (agent-conversation-taint to))
+        (agent-private to) (or (agent-private from) (agent-private to))
         (agent-thread-memory to) (agent-thread-memory from))
   ;; The result index names results in FROM's store, so the store goes with it.
   (when (agent-result-store from)
@@ -1349,6 +1358,46 @@ and ends the turn when nothing handles it, as before."
   (let ((entry (gethash name (agent-means agent))))
     (and entry (means-entry-source entry))))
 
+;;; --- a private agent (#983) -----------------------------------------------------------------
+;;;
+;;; Praxeon's own log lines record counts, ids, durations and type names, never a prompt, a tool
+;;; argument, a tool result or a reply (docs/logging.md). Two routes could still carry content
+;;; while an agent runs, and a private agent closes both for the whole of its turn, on every
+;;; thread the turn continues on:
+;;;   - AION/LOG:*LOG-CONDITION-DETAILS*, a development setting, would make AION/LOG:EXCEPTION
+;;;     write a condition's report and the backtrace's arguments, which can quote any of these.
+;;;     It is bound to NIL.
+;;;   - Events: a tool call's arguments, a tool result, an answer's text and a delegated task
+;;;     reach EVT:*OBSERVER*, which the studio's status printer and praxeon/web print. They are
+;;;     :WITHHELD (EVT:*WITHHOLD-CONTENT*), unless the agent says RETAIN-CONTENT.
+;;; A sub-agent delegated to from a private agent's turn runs under the same bindings.
+
+(aion/dynamic:register-inheritable 'aion/log:*log-condition-details*)
+
+(defun %withhold-content-for (agent)
+  "What EVT:*WITHHOLD-CONTENT* is during a turn of AGENT: true when an enclosing turn already
+withholds, or AGENT is private and does not retain content."
+  (or evt:*withhold-content* (and (agent-private agent) (not (agent-retain-content agent)))))
+
+(defun %withhold-from-logs-for (agent)
+  "What EVT:*WITHHOLD-FROM-LOGS* is during a turn of AGENT: true when an enclosing turn already
+withholds, or AGENT is private. RETAIN-CONTENT does not change it, because it is about events."
+  (or evt:*withhold-from-logs* (and (agent-private agent) t)))
+
+(defun %condition-details-for (agent)
+  "What AION/LOG:*LOG-CONDITION-DETAILS* is during a turn of AGENT: NIL when AGENT is private,
+and otherwise what it already was, which an enclosing private turn has made NIL."
+  (and (not (agent-private agent)) aion/log:*log-condition-details*))
+
+(defmacro %with-agent-privacy ((agent) &body body)
+  "Run BODY, a turn of AGENT, with its privacy in force (#983)."
+  (let ((a (gensym "AGENT")))
+    `(let* ((,a ,agent)
+            (evt:*withhold-content* (%withhold-content-for ,a))
+            (evt:*withhold-from-logs* (%withhold-from-logs-for ,a))
+            (aion/log:*log-condition-details* (%condition-details-for ,a)))
+       ,@body)))
+
 (defun %append-history (agent &rest messages)
   (setf (agent-history agent) (append (agent-history agent) messages)))
 
@@ -1431,10 +1480,11 @@ as it is written, and the turn emits a :TEXT-DELTA event for each piece."
                           ((eq *on-hold* :hold) nil)
                           (t *on-hold*)))
          (*hold-allowed* on-hold-p))
-    (%settle-unanswered agent held claim)
-    (multiple-value-prog1 (%run-turn agent user-input max-steps permit max-tokens)
-      ;; The observer is given the history after every turn (#317, step C).
-      (%observe-after-turn agent))))
+    (%with-agent-privacy (agent)
+      (%settle-unanswered agent held claim)
+      (multiple-value-prog1 (%run-turn agent user-input max-steps permit max-tokens)
+        ;; The observer is given the history after every turn (#317, step C).
+        (%observe-after-turn agent)))))
 
 (defun %run-turn (agent user-input max-steps permit max-tokens)
   "RUN-TURN's steps, with *PRINCIPAL* and *ON-HOLD* already bound."
@@ -1623,7 +1673,7 @@ acyclic to stay finite."
        (let ((task (cond ((hash-table-p args) (gethash arg args))
                          ((stringp args) args)
                          (t nil))))
-         (evt:emit :delegate :agent (agent-name sub) :task task)
+         (evt:emit :delegate :agent (agent-name sub) :task (evt:unless-withheld task))
          ;; The sub-turn runs with the COORDINATOR's authority, not with none. A delegated
          ;; subtask that silently lost the permit would be a capability-bearing means becoming
          ;; unreachable one level down -- the same defect pre-publication issue 400 found in RUN-TURN, reached by
