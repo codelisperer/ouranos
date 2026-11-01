@@ -110,3 +110,58 @@
   (signals ddl:unsupported-ddl
     (ddl:ddl-statements '(:alter-table :t (:add-column :a :string)) :dialect "jet"))
   (signals error (sch:schema-ddl (sch:find-schema 'test-user) :dialect :jet)))
+
+(test jet-date-forms-work-wherever-a-value-is-bound
+  "BETWEEN, an IN list, INSERT and UPDATE bind values without going through the expression
+compiler, so each has to recognise the date forms itself (review of #1064)."
+  (is (equal (list (concatenate 'string
+                     "SELECT [a] FROM [t] WHERE ([d] BETWEEN #2026-09-01# AND #2026-09-30#"
+                     " AND [s] IN (#2026-09-14 08:00:00#, ?))")
+                   '("x"))
+             (jet '(:select (:a) :from (:t)
+                    :where (:and (:between :d (:date 2026 9 1) (:date 2026 9 30))
+                                 (:in :s ((:timestamp 2026 9 14 8 0 0) "x")))))))
+  (is (equal (list "INSERT INTO [t] ([d], [n]) VALUES (#2026-09-14#, ?)" '(1))
+             (jet '(:insert-into :t :values ((:d (:date 2026 9 14) :n 1))))))
+  (is (equal (list "UPDATE [t] SET [d] = #2026-09-14# WHERE [id] = ?" '(2))
+             (jet '(:update :t :set (:d (:date 2026 9 14)) :where (:= :id 2)))))
+  (is (equal (list "SELECT a FROM t WHERE d BETWEEN ? AND ?" '("2026-09-01" "2026-09-30"))
+             (gen '(:select (:a) :from (:t) :where (:between :d (:date 2026 9 1) (:date 2026 9 30)))
+                  :dialect :sqlite))
+      "the control: SQLite binds the ISO text"))
+
+(test jet-aggregate-aliases-avoid-the-names-of-other-columns
+  (is (equal (list "SELECT [t].[count], COUNT(*) AS [count_2] FROM [t] GROUP BY [t].[count]" '())
+             (jet '(:select (:t.count (:count :*)) :from (:t) :group-by (:t.count))))
+      "a plain column named count is not given a twin")
+  (is (equal (list (concatenate 'string
+                     "SELECT [a] AS [Count], [Sum], COUNT(*) AS [count_2], SUM([x]) AS [sum_x]"
+                     " FROM [t]")
+                   '())
+             (jet '(:select ((:as :a (:quoted "Count")) (:quoted "Sum") (:count :*) (:sum :x))
+                    :from (:t))))
+      "quoted names and quoted aliases are reserved, case-insensitively, and do not crash")
+  (is (equal (list "SELECT [a] AS [Total Amount] FROM [t]" '())
+             (jet '(:select ((:as :a (:quoted "Total Amount"))) :from (:t))))))
+
+(test jet-nests-more-than-one-join-in-parentheses
+  (is (equal (list (concatenate 'string
+                     "SELECT [a].[x] FROM (([a] INNER JOIN [b] ON [a].[id] = [b].[aid])"
+                     " LEFT JOIN [c] ON [b].[id] = ?) INNER JOIN [d] ON [d].[n] = ?")
+                   '(1 2))
+             (jet '(:select (:a.x) :from (:a)
+                    :join ((:inner :b (:= :a.id :b.aid)) (:left :c (:= :b.id 1))
+                           (:inner :d (:= :d.n 2)))))))
+  (is (equal (list "SELECT [x] FROM [a] INNER JOIN [b] ON [a].[id] = [b].[aid]" '())
+             (jet '(:select (:x) :from (:a) :join ((:inner :b (:= :a.id :b.aid))))))
+      "one join needs no parentheses")
+  (dolist (q '((:select (:x) :from (:a) :join ((:full :b (:= :a.id :b.id))))
+               (:select (:x) :from (:a) :join ((:cross :b)))
+               (:select (:x) :from (:a :e) :join ((:inner :b (:= :a.id :b.id))
+                                                   (:inner :c (:= :b.id :c.id))))))
+    (signals q:unsupported-query (jet q)))
+  (is (equal (list "SELECT x FROM a INNER JOIN b ON a.id = b.aid INNER JOIN c ON b.id = c.bid" '())
+             (gen '(:select (:x) :from (:a) :join ((:inner :b (:= :a.id :b.aid))
+                                                    (:inner :c (:= :b.id :c.bid))))
+                  :dialect :sqlite))
+      "the control: SQLite stays flat"))

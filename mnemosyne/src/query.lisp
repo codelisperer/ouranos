@@ -42,7 +42,7 @@
 ;;;; provisional seam, not yet verified end-to-end.
 ;;;;
 ;;;; :jet is Microsoft Access SQL (Jet/ACE), for queries only (#1061): mnemosyne renders it and
-;;;; has no backend that runs it. It differs from the others in six places, each tested:
+;;;; has no backend that runs it. It differs from the others in seven places, each tested:
 ;;;;   * :limit renders as a prefix, SELECT TOP n, with n written into the SQL as a number,
 ;;;;     because Jet does not accept a parameter there. Jet's TOP also returns rows tied with
 ;;;;     the last one on the ORDER BY columns, so a query can return more than n rows.
@@ -54,6 +54,8 @@
 ;;;;     binds them in, since it binds by position.
 ;;;;   * An aggregate in the SELECT list without an alias gets one, COUNT(*) AS [count], so
 ;;;;     the column can be read by name: Jet names it Expr1000 otherwise.
+;;;;   * More than one join nests in parentheses, FROM ([a] INNER JOIN [b] ON ...) INNER JOIN
+;;;;     [c] ON ..., and :full and :cross joins signal UNSUPPORTED-QUERY: Jet has neither.
 
 (in-package #:mnemosyne/query)
 
@@ -403,6 +405,14 @@ nothing but digits, dashes, colons and a space can reach the SQL."
           (format nil "#~A#" text)
           (%placeholder ctx text)))))
 
+(defun %value (ctx v)
+  "V bound as a param, or V compiled as a date when it is a (:date ...) or (:timestamp ...)
+form. Used where a value is bound without going through %EXPR: the endpoints of :between, an
+:in list, and the values of INSERT and UPDATE."
+  (if (and (consp v) (member (car v) '(:date :timestamp)))
+      (%datetime ctx (car v) (cdr v))
+      (%placeholder ctx v)))
+
 (defun %days-in-month (year month)
   "The number of days in MONTH of YEAR, in the Gregorian calendar; 31 when MONTH is out of
 range, which the caller refuses separately."
@@ -449,10 +459,10 @@ explicitly, for example with LOWER on both sides."
              (format nil "~A IN ~A" (e (first args)) (e rhs))
              (format nil "~A IN (~{~A~^, ~})"       ; col IN (?, ?, ...)
                      (e (first args))
-                     (mapcar (lambda (v) (%placeholder ctx v)) rhs)))))
+                     (mapcar (lambda (v) (%value ctx v)) rhs)))))
       ((:between) (format nil "~A BETWEEN ~A AND ~A"
-                          (e (first args)) (%placeholder ctx (second args))
-                          (%placeholder ctx (third args))))
+                          (e (first args)) (%value ctx (second args))
+                          (%value ctx (third args))))
       ((:exists) (format nil "EXISTS ~A" (e (first args))))
       ((:distinct) (format nil "DISTINCT ~A" (e (first args))))
       ((:excluded) (format nil "EXCLUDED.~A" (%ident (first args) :excluded)))
@@ -512,15 +522,32 @@ which was invisible while it only ever rendered identifiers."
         (t (%ident item :select))))
 
 (defun %joins (ctx specs)
-  "Compile an ordered list of JOIN specs (KIND SOURCE &optional ON-EXPR)."
-  (with-output-to-string (o)
-    (dolist (j specs)
-      (destructuring-bind (kind source &optional on) j
-        (format o " ~A JOIN ~A"
-                (ecase kind (:inner "INNER") (:left "LEFT") (:right "RIGHT")
-                            (:full "FULL") (:cross "CROSS"))
-                (%from-item ctx source))
-        (when on (format o " ON ~A" (%expr ctx on)))))))
+  "Compile an ordered list of JOIN specs (KIND SOURCE &optional ON-EXPR), one string each."
+  (mapcar (lambda (j)
+            (destructuring-bind (kind source &optional on) j
+              (when (and (%jet-p ctx) (member kind '(:full :cross)))
+                (error 'unsupported-query :dialect "jet" :clause (format nil "~A JOIN" kind)))
+              (with-output-to-string (o)
+                (format o " ~A JOIN ~A"
+                        (ecase kind (:inner "INNER") (:left "LEFT") (:right "RIGHT")
+                                    (:full "FULL") (:cross "CROSS"))
+                        (%from-item ctx source))
+                (when on (format o " ON ~A" (%expr ctx on))))))
+          specs))
+
+(defun %from-and-joins (ctx q s)
+  "Write the FROM list and the joins to S. Jet needs each join but the last in parentheses,
+FROM ([a] INNER JOIN [b] ON ...) INNER JOIN [c] ON ..., and rejects the flat form."
+  (let* ((from (mapcar (lambda (f) (%from-item ctx f)) (getf q :from)))
+         (joins (%joins ctx (getf q :join)))
+         (nest (and (%jet-p ctx) (rest joins))))
+    (when (and nest (rest from))
+      (error 'unsupported-query :dialect "jet" :clause "join after a list of FROM tables"
+                                :detail "Jet nests joins in parentheses around one table"))
+    (when from
+      (format s " FROM ~A~{~A~^, ~}"
+              (if nest (make-string (1- (length joins)) :initial-element #\() "") from))
+    (format s (if nest "~{~A~^)~}" "~{~A~}") joins)))
 
 (defun %returning (ctx cols)
   (format nil " RETURNING ~{~A~^, ~}" (mapcar (lambda (c) (%item ctx c :returning)) cols)))
@@ -551,12 +578,22 @@ SUM(o.total) is sum_total. A clash takes _2, _3 and so on."
           for name = (if (= n 1) base (format nil "~A_~D" base n))
           unless (member name taken :test #'string-equal) return name)))
 
+(defun %output-name (item)
+  "The name the column for SELECT item ITEM is read back by, or NIL when Jet would make one
+up: an alias, or the last part of a plain or quoted column name."
+  (flet ((name-of (x)
+           (cond ((and (consp x) (eq (car x) :quoted)) (car (last (rest x))))
+                 ((or (symbolp x) (stringp x))
+                  (let ((last (car (last (%name-parts (string x))))))
+                    (and (string/= last "*") last))))))
+    (if (and (consp item) (eq (car item) :as))
+        (name-of (third item))
+        (and (or (atom item) (eq (car item) :quoted)) (name-of item)))))
+
 (defun %jet-select-items (ctx items)
   "ITEMS rendered for Jet, with an alias given to each aggregate that has none, so the column
-can be read back by name (#128, row 8)."
-  (let ((taken (loop for it in items
-                     when (and (consp it) (eq (car it) :as))
-                       collect (string-downcase (string (third it))))))
+can be read back by name (#128, row 8). The alias avoids every name already in the list."
+  (let ((taken (remove nil (mapcar #'%output-name items))))
     (mapcar (lambda (it)
               (if (and (consp it) (member (car it) +aggregate-ops+))
                   (let ((alias (%aggregate-alias it taken)))
@@ -582,9 +619,7 @@ does not take a parameter there, so it must be a positive integer."
       (if (%jet-p ctx)
           (format s "SELECT ~A~{~A~^, ~}" (%top q) (%jet-select-items ctx items))
           (format s "SELECT ~{~A~^, ~}" (mapcar (lambda (it) (%select-item ctx it)) items))))
-    (when (getf q :from) (format s " FROM ~{~A~^, ~}"
-                                 (mapcar (lambda (f) (%from-item ctx f)) (getf q :from))))
-    (when (getf q :join)     (write-string (%joins ctx (getf q :join)) s))
+    (%from-and-joins ctx q s)
     (when (getf q :where)    (format s " WHERE ~A" (%expr ctx (getf q :where))))
     (when (getf q :group-by) (format s " GROUP BY ~{~A~^, ~}" (mapcar (lambda (g) (%item ctx g :group-by)) (getf q :group-by))))
     (when (getf q :having)   (format s " HAVING ~A" (%expr ctx (getf q :having))))
@@ -614,7 +649,7 @@ does not take a parameter there, so it must be a positive integer."
               (mapcar (lambda (c) (%ident c :insert-into)) cols)
               (mapcar (lambda (row)
                         (format nil "(~{~A~^, ~})"
-                                (mapcar (lambda (c) (%placeholder ctx (getf row c))) cols)))
+                                (mapcar (lambda (c) (%value ctx (getf row c))) cols)))
                       rows))
       (%on-conflict ctx q s)
       (when (getf q :returning) (write-string (%returning ctx (getf q :returning)) s)))))
@@ -625,7 +660,7 @@ does not take a parameter there, so it must be a positive integer."
     (format s "UPDATE ~A SET ~{~A~^, ~}"
             (%ident (getf q :update) :update)
             (loop for (k v) on (getf q :set) by #'cddr
-                  collect (format nil "~A = ~A" (%ident k :set) (%placeholder ctx v))))
+                  collect (format nil "~A = ~A" (%ident k :set) (%value ctx v))))
     (when (getf q :where) (format s " WHERE ~A" (%expr ctx (getf q :where))))
     (when (getf q :returning) (write-string (%returning ctx (getf q :returning)) s))))
 

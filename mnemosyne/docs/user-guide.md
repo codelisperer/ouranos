@@ -209,7 +209,7 @@ and on `:returning` (XTDB DML has none — read the value back with a separate q
 
 `:jet` is Microsoft Access SQL (Jet/ACE), for **queries only** (#1061): mnemosyne renders it and
 has no backend that runs it, and `ddl:ddl` and `schema:schema-ddl` refuse it. It differs from the
-others in six places:
+others in seven places:
 
 | Query | `:jet` renders | Why |
 |---|---|---|
@@ -218,7 +218,8 @@ others in six places:
 | `:c.email`, `(:quoted "First Name")` | `[c].[email]`, `[First Name]` | Bracket quoting. A name holding a period, `!`, a backquote, a bracket, a control character or a leading space is refused. |
 | `(:date 2026 9 14)`, `(:timestamp 2026 9 14 8 5 3)` | `#2026-09-14#`, `#2026-09-14 08:05:03#` | Jet reads this form the same way in every locale. Other dialects bind the ISO text. |
 | any value | `?`, params in placeholder order | ADO binds by position. |
-| `(:count :*)` without `:as` | `COUNT(*) AS [count]` | Jet otherwise names the column `Expr1000`. |
+| `(:count :*)` without `:as` | `COUNT(*) AS [count]` | Jet otherwise names the column `Expr1000`. The alias avoids the names of the other columns, so a clash gives `[count_2]`. |
+| two or more `:join`s | `FROM ([a] INNER JOIN [b] ON …) INNER JOIN [c] ON …` | Jet rejects the flat form. It has no `FULL` or `CROSS` join, so those signal `unsupported-query`. |
 
 **One vocabulary, three spellings** ([ADR-0003](adr/0003-one-dialect-vocabulary.md), pre-publication issue 432).
 A dialect is a *designator*: the keyword `:postgres`, the string `"postgres"` and a typed

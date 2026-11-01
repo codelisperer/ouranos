@@ -1101,7 +1101,9 @@ its tag.
   `(:timestamp y m d h mi s)` render as `#2026-09-14#` and `#2026-09-14 08:05:03#` on Jet and
   are bound as ISO text on the other dialects. Values bind as `?`, and the param list is in
   placeholder order, which is the order ADO binds them in. An aggregate in the SELECT list
-  without an alias gets one (`COUNT(*) AS [count]`, `SUM(o.total) AS [sum_total]`). The dialect
+  without an alias gets one (`COUNT(*) AS [count]`, `SUM(o.total) AS [sum_total]`), avoiding
+  the names of the other columns. More than one join renders in nested parentheses, as Jet
+  requires, and `:full` and `:cross` joins signal `unsupported-query`. The dialect
   renders queries only: mnemosyne has no backend that runs them, `ddl:ddl` signals
   `unsupported-ddl` for `:jet`, and `schema:schema-ddl` refuses it. `mnemosyne/field:Dialect`
   has a new constructor, `D-Jet`, and `mnemosyne/field-shell:+dialects+` lists it, so Coalton
