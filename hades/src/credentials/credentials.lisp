@@ -274,42 +274,52 @@ FN returns."
             (t (%keychain-fail status service account :delete)))))
 
   (defun %accounts (service account operation)
-    "The accounts of the generic-password items for SERVICE, and with ACCOUNT for that one item
-(#1035).
+    "The accounts of the generic-password items for SERVICE, and with ACCOUNT only that one
+item's (#1035).
 
 ATTRIBUTES ONLY, AND NO PROMPT. The query carries kSecReturnAttributes and kSecMatchLimitAll,
-and never kSecReturnData, which is the only thing that returns a value. kSecUseAuthenticationUI
-is kSecUseAuthenticationUIFail, so a locked keychain answers errSecInteractionNotAllowed instead
-of showing an unlock dialog; that becomes CREDENTIAL-STORE-UNAVAILABLE saying so, as the issue
-asks, rather than a prompt."
-    (cffi:with-foreign-object (out :pointer)
-      (setf (cffi:mem-ref out :pointer) (cffi:null-pointer))
-      (let ((status (%call-with-query
-                     service (or account "")
-                     (list* (cons "kSecReturnAttributes" (darwin:cf-constant "kCFBooleanTrue"))
-                            (cons "kSecMatchLimit" (darwin:cf-constant "kSecMatchLimitAll"))
-                            (cons "kSecUseAuthenticationUI"
-                                  (darwin:cf-constant "kSecUseAuthenticationUIFail"))
-                            (unless account
-                              ;; No account in the query: every item of this service matches.
-                              (list (cons "kSecAttrAccount" :omit))))
-                     (lambda (query) (ffi:sec-item-copy-matching query out)))))
-        (cond ((= status ffi:+err-sec-item-not-found+) (return-from %accounts '()))
-              ((= status ffi:+err-sec-interaction-not-allowed+)
-               (error 'credential-store-unavailable
-                      :service service :account account :operation operation
-                      :reason "the Keychain is locked, and this reads it without asking you to unlock it; unlock the Keychain and try again"))
-              ((/= status ffi:+err-sec-success+)
-               (%keychain-fail status service account operation))))
-      (darwin:with-cf ((items (cffi:mem-ref out :pointer)))
-        (loop for i below (darwin:cf-array-get-count items)
-              for item = (darwin:cf-array-get-value-at-index items i)
-              for name = (unless (cffi:null-pointer-p item)
-                           (let ((value (darwin:cf-dictionary-get-value
-                                         item (darwin:cf-constant "kSecAttrAccount"))))
-                             (unless (cffi:null-pointer-p value)
-                               (darwin:cf-string-to-lisp value))))
-              when name collect name))))
+and never kSecReturnData, which is the only key that returns a value. kSecUseAuthenticationUI is
+kSecUseAuthenticationUIFail, so a locked Keychain answers errSecInteractionNotAllowed instead of
+showing an unlock dialog; that becomes CREDENTIAL-STORE-UNAVAILABLE saying so, as the issue
+asks, rather than a prompt.
+
+The query is built here rather than through %CALL-WITH-QUERY, because that one always names an
+account and this must be able to ask for every account of a service."
+    (darwin:with-cf ((s (darwin:make-cf-string service))
+                     (a (when account (darwin:make-cf-string account))))
+      (cffi:with-foreign-object (out :pointer)
+        (setf (cffi:mem-ref out :pointer) (cffi:null-pointer))
+        (let* ((entries (append
+                         (list (cons (darwin:cf-constant "kSecClass")
+                                     (darwin:cf-constant "kSecClassGenericPassword"))
+                               (cons (darwin:cf-constant "kSecAttrService") s)
+                               (cons (darwin:cf-constant "kSecReturnAttributes")
+                                     (darwin:cf-constant "kCFBooleanTrue"))
+                               (cons (darwin:cf-constant "kSecMatchLimit")
+                                     (darwin:cf-constant "kSecMatchLimitAll"))
+                               (cons (darwin:cf-constant "kSecUseAuthenticationUI")
+                                     (darwin:cf-constant "kSecUseAuthenticationUIFail")))
+                         (when account
+                           (list (cons (darwin:cf-constant "kSecAttrAccount") a)))))
+               (status (darwin:with-cf ((query (darwin:make-cf-dictionary entries)))
+                         (ffi:sec-item-copy-matching query out))))
+          (cond ((= status ffi:+err-sec-item-not-found+) (return-from %accounts '()))
+                ((= status ffi:+err-sec-interaction-not-allowed+)
+                 (error 'credential-store-unavailable
+                        :service service :account account :operation operation
+                        :reason "the Keychain is locked, and this reads it without asking you to unlock it; unlock the Keychain and try again"))
+                ((/= status ffi:+err-sec-success+)
+                 (%keychain-fail status service account operation))))
+        ;; SecItemCopyMatching is a Copy: the CFArray it returned is ours to release.
+        (darwin:with-cf ((items (cffi:mem-ref out :pointer)))
+          (loop for i below (ffi:cf-array-get-count items)
+                for item = (ffi:cf-array-get-value-at-index items i)
+                for name = (unless (cffi:null-pointer-p item)
+                             (let ((value (ffi:cf-dictionary-get-value
+                                           item (darwin:cf-constant "kSecAttrAccount"))))
+                               (unless (cffi:null-pointer-p value)
+                                 (darwin:cf-string-to-lisp value))))
+                when name collect name)))))
 
   (defun %exists-p (service account)
     (and (member account (%accounts service account :exists-p) :test #'string=) t))

@@ -180,6 +180,15 @@
   (type dword)
   (flags dword))
 
+(cffi:defcfun ("CredEnumerateW" cred-enumerate-w) :int32
+  ;; Filter is "SERVICE/*" or NULL for everything; Count and Credentials are out parameters, and
+  ;; Windows allocates the array, which the caller frees with CredFree (#1035). Only each
+  ;; credential's TARGET-NAME is read from it: the blob holds the value and is never touched.
+  (filter :pointer)
+  (flags dword)
+  (count :pointer)                      ; DWORD*
+  (credentials :pointer))               ; PCREDENTIALW** -- Windows allocates
+
 (cffi:defcfun ("CredFree" cred-free) :void
   (buffer :pointer))
 

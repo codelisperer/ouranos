@@ -347,13 +347,18 @@ fetches by name only the items this run created."
 ;;; --- the value is never read, whichever backend is compiled (#1035) ----------------------
 
 (defparameter +value-reading-entry-points+
-  '(("win32" . "cred-read-w")
-    ("darwin" . "sec-item-copy-matching")
-    ("linux" . "secret-password-lookupv-binary-sync"))
-  "The one call in each backend that returns a credential's VALUE. CREDENTIAL-EXISTS-P and
-CREDENTIAL-NAMES must reach none of them. On macOS SEC-ITEM-COPY-MATCHING is also the call the
-attributes-only query uses, so it is the query that is checked there, not the call; see
-THE-VALUE-IS-NEVER-FETCHED-TO-ANSWER-EXISTS-OR-NAMES.")
+  '(("win32" . "(ffi:cred-read-w")
+    ("darwin" . "(ffi:sec-item-copy-matching")
+    ("linux" . "(ffi:secret-password-lookupv-binary-sync"))
+  "The one call in each backend that returns a credential's VALUE, written AS CALLED. The call
+syntax, not the bare name: these names appear in the backends' own docstrings, which say what
+each function does and does not read, and a bare-name search finds those sentences instead of
+any call. That is how this sweep first went green while checking one backend, and then failed on
+a docstring once it checked all three.
+
+CREDENTIAL-EXISTS-P and CREDENTIAL-NAMES must reach none of them. On macOS
+SEC-ITEM-COPY-MATCHING is also the call the attributes-only query uses, so it is the query that
+is checked there, not the call; see THE-VALUE-IS-NEVER-FETCHED-TO-ANSWER-EXISTS-OR-NAMES.")
 
 (defun %credentials-source ()
   "hades/src/credentials/credentials.lisp as a list of lines. Every backend is in this file
@@ -363,17 +368,29 @@ whichever one is compiled, so a sweep of it checks all three on any operating sy
                     (asdf:system-source-directory "hades/credentials"))))
 
 (defun %definition-lines (lines name)
-  "The lines of the top-level or nested definition of NAME in LINES: from its (defun NAME line to
-the line before the next definition at the same indentation."
-  (let* ((start (position-if (lambda (l) (search (format nil "(defun ~A " name) l)) lines)))
-    (when start
-      (let* ((indent (- (length (nth start lines)) (length (string-left-trim " " (nth start lines)))))
-             (rest (nthcdr (1+ start) lines))
-             (end (position-if (lambda (l)
-                                 (and (search "(defun " l)
-                                      (= indent (- (length l) (length (string-left-trim " " l))))))
-                               rest)))
-        (subseq lines start (if end (+ 1 start end) (length lines)))))))
+  "The lines of EVERY definition of NAME in LINES, appended: each from its (defun NAME line to
+the line before the next definition at the same indentation.
+
+EVERY definition, not the first. The three backends each define %ACCOUNTS, %EXISTS-P and %NAMES
+inside their own #+ block, so a search that stopped at the first match read the Windows backend
+and reported on all three. It passed, and it was checking one (found by reading this file after
+it had already gone green)."
+  (let ((found '())
+        (from 0))
+    (loop
+      (let ((start (position-if (lambda (l) (search (format nil "(defun ~A " name) l))
+                                lines :start from)))
+        (unless start (return (nreverse found)))
+        (let* ((line (nth start lines))
+               (indent (- (length line) (length (string-left-trim " " line))))
+               (rest (nthcdr (1+ start) lines))
+               (end (position-if (lambda (l)
+                                   (and (search "(defun " l)
+                                        (= indent (- (length l) (length (string-left-trim " " l))))))
+                                 rest))
+               (stop (if end (+ 1 start end) (length lines))))
+          (setf found (append (reverse (subseq lines start stop)) found)
+                from stop))))))
 
 (test the-value-is-never-fetched-to-answer-exists-or-names
   "#1035: neither CREDENTIAL-EXISTS-P nor CREDENTIAL-NAMES may decrypt or copy a secret. Read
@@ -385,17 +402,32 @@ compiled here are still in the file, and a change to the Windows backend fails t
       (let ((body (%definition-lines lines name)))
         (when body
           (loop for (os . entry) in +value-reading-entry-points+
-                do (is (notany (lambda (l) (search entry l)) body)
-                       "~A does not call ~A, the ~A backend's value read" name entry os)))))
+                ;; SEC-ITEM-COPY-MATCHING is both the Keychain's value read and the call its
+                ;; attributes-only query uses, so naming it proves nothing on macOS. What proves
+                ;; it there is the absence of kSecReturnData, checked below; every other entry
+                ;; point must be absent outright.
+                unless (string= os "darwin")
+                  do (is (notany (lambda (l) (search entry l)) body)
+                         "~A does not call ~A, the ~A backend's value read" name entry os)))))
     ;; The macOS query must not ask for the data: kSecReturnData is the only key that returns a
     ;; value, and the attributes-only query shares its entry point with %FETCH.
     (let ((body (append (%definition-lines lines "%accounts")
                         (%definition-lines lines "%exists-p")
                         (%definition-lines lines "%names"))))
-      (is (notany (lambda (l) (search "kSecReturnData" l)) body)
-          "the attributes-only Keychain query never asks for kSecReturnData"))
+      ;; Quoted, because it is a string literal in the query and bare prose in the docstrings.
+      (is (notany (lambda (l) (search "\"kSecReturnData\"" l)) body)
+          "the attributes-only Keychain query never asks for kSecReturnData")
+      (is (some (lambda (l) (search "\"kSecUseAuthenticationUIFail\"" l)) body)
+          "and it asks the Keychain to fail rather than prompt")
+      ;; The control for the exemption above: %FETCH, which does want the value, names both the
+      ;; entry point and kSecReturnData, so the checks would see a query that asked for data.
+      (let ((fetch (%definition-lines lines "%fetch")))
+        (is (some (lambda (l) (search "\"kSecReturnData\"" l)) fetch)
+            "control: %FETCH asks for kSecReturnData, so this check can tell the two apart")
+        (is (some (lambda (l) (search "(ffi:sec-item-copy-matching" l)) fetch)
+            "control: and the matcher finds a real call, so the entry-point checks are not vacuous")))
     ;; The Linux search must not ask to unlock or to load secrets.
-    (is (notany (lambda (l) (search "secret-search-unlock" (string-downcase l)))
+    (is (notany (lambda (l) (search "+secret-search-unlock+" (string-downcase l)))
                 (%credentials-source))
         "the Secret Service search never asks to unlock a collection")))
 
@@ -433,8 +465,7 @@ must not happen is the read being reached at all."
     ;; control cannot run and says so rather than passing emptily. CI has a store on all three
     ;; operating systems, so it runs there.
     (if (not (cred:credential-store-available-p))
-        (skip "no store on this machine, so the control for the stub could not run (the ~
-assertion above still held: the read was not reached)")
+        (skip "no store on this machine, so the control for the stub could not run; the assertion above still held, the read was not reached")
         (let ((reached 0))
           (unwind-protect
                (progn
