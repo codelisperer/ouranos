@@ -173,6 +173,9 @@
     that takes either.")
   (:export #:connect #:disconnect #:with-connection #:call-with-connection
            #:*sqlite-busy-timeout-ms*
+           #:*postgres-connect-timeout-seconds* #:*postgres-statement-timeout-ms*
+           #:db-connect-timeout #:db-connect-timeout-host #:db-connect-timeout-port
+           #:db-connect-timeout-seconds #:db-statement-timeout
            #:exec #:query #:map-query #:with-transaction
            #:db-error #:db-error-message #:db-error-cause
            ;; the connection pool (#325)
