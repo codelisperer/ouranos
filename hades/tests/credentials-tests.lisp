@@ -185,15 +185,16 @@ Linux match exactly; this asserts all three agree."
              (cred:store-credential outer "user" (sec:make-secret (%marker)))
              (cred:store-credential inner "y" (sec:make-secret (%marker)))
              (let ((names (cred:credential-names outer)))
-               (is* (member "user" names :test #'string=) "its own account is listed")
-               (is* (null (member "x/y" names :test #'string=))
-                    "and the nested service's item is not: ~S" names)
-               (is* (null (member "y" names :test #'string=))
-                    "under any spelling: ~S" names))
-             (is* (null (cred:credential-exists-p outer "x/y"))
-                  "nor does EXISTS-P claim it")
-             (is* (eq t (cred:credential-exists-p inner "y"))
-                  "control: the nested item does exist under its own service"))
+               (is-true (member "user" names :test #'string=)
+                        "its own account is listed, in ~S" names)
+               (is-false (member "x/y" names :test #'string=)
+                         "the nested service's item is not listed, in ~S" names)
+               (is-false (member "y" names :test #'string=)
+                         "nor under any other spelling, in ~S" names))
+             (is-false (cred:credential-exists-p outer "x/y")
+                       "nor does EXISTS-P claim the nested item for this service")
+             (is-true (cred:credential-exists-p inner "y")
+                      "control: the nested item does exist under its own service"))
         (%cleanup outer "user")
         (%cleanup inner "y"))))
 
@@ -753,6 +754,48 @@ there is no backend, the fetch says the store is unavailable instead."
                                 (cred:fetch-credential service account))))
 
 ;;; --- the review of #1066: the flags, the exact target, and the wildcard ------------------
+
+(defun %assertion-operators-used ()
+  "Every token in this file that starts a form and begins with \"is\", as a list of strings.
+
+Textual on purpose: READing this file on Linux would fail on the Windows and macOS forms, whose
+packages are not loaded here. Only tokens whose open paren is the first thing on the line are
+collected, so prose inside a docstring is not mistaken for a call."
+  (let ((lines (uiop:read-file-lines
+                (merge-pathnames "tests/credentials-tests.lisp"
+                                 (asdf:system-source-directory "hades/credentials"))))
+        (found '()))
+    (dolist (line lines)
+      (let* ((text (string-left-trim '(#\Space #\Tab) line)))
+        (when (and (> (length text) 3) (char= (char text 0) #\()
+                   (string= "is" text :start2 1 :end2 3))
+          (let* ((end (or (position-if (lambda (c)
+                                         (member c '(#\Space #\Tab #\( #\)) :test #'char=))
+                                       text :start 1)
+                          (length text))))
+            (pushnew (subseq text 1 end) found :test #'string=)))))
+    found))
+
+(test every-assertion-operator-this-file-uses-is-defined
+  "A fiveam assertion operator that does not exist compiles without complaint and only fails
+when the test RUNS, so a test guarded by a store this machine has not got never reaches it. That
+is what happened to #1066: the live test below used IS*, which is defined in
+mnemosyne/tests/backends.lisp and not here, the suite skipped the live block on WSL, and CI
+found it. Neither check-compile nor a cold rebuild reports an undefined function, so this check
+is textual and runs everywhere."
+  (let ((tokens (%assertion-operators-used)))
+    ;; The control, so this cannot pass by finding nothing.
+    (is-true (member "is" tokens :test #'string=) "the sweep finds the plain IS: ~S" tokens)
+    (is-true (member "is-true" tokens :test #'string=) "and IS-TRUE: ~S" tokens)
+    (dolist (token tokens)
+      (let ((symbol (find-symbol (string-upcase token) :hades/credentials/tests)))
+        (is-true (and symbol (or (macro-function symbol) (fboundp symbol)))
+                 "~A is defined here; an assertion operator that is not fails only when the test runs"
+                 token)))
+    ;; The other direction: a name that is not defined is judged missing.
+    (let ((symbol (find-symbol "IS-ABSOLUTELY-NOT-DEFINED" :hades/credentials/tests)))
+      (is-false (and symbol (or (macro-function symbol) (fboundp symbol)))
+                "control: an operator that does not exist is judged missing"))))
 
 #+linux
 (test the-secret-service-search-passes-only-the-all-flag
