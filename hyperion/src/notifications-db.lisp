@@ -243,16 +243,26 @@ which names the migrations to add, when they cannot."
 
 ;;; --- the protocol -----------------------------------------------------------------------
 
-(defun %unique-violation-p (condition)
-  "Whether CONDITION, a MNEMOSYNE/CONN:DB-ERROR, is a unique-constraint violation: SQLSTATE 23505
-on Postgres, and SQLite's CONSTRAINT code with a UNIQUE message (cl-dbi reports both as
-DBI-DATABASE-ERROR, the cause the DB-ERROR keeps). Every other database error is not one."
+(defun %unread-key-violation-p (condition table)
+  "Whether CONDITION, a MNEMOSYNE/CONN:DB-ERROR, is a violation of TABLE's unread-key index
+(NOTIFICATIONS-UNREAD-KEY-DDL), the one conflict NOTIFICATION-PUT expects from a concurrent call.
+cl-dbi reports both databases' errors as DBI-DATABASE-ERROR, the cause the DB-ERROR keeps.
+Postgres: SQLSTATE 23505, and the message names the index, uq_TABLE_unread_group. SQLite: the
+CONSTRAINT code, and a message naming the index's columns, \"UNIQUE constraint failed:
+TABLE.recipient, TABLE.group_key\", since SQLite does not name the index. Both are compared
+without case, as Postgres folds an unquoted name to lower case.
+
+Any other unique violation is not this one. Before the hub's review of #1012 every unique
+violation counted, so re-putting a notification whose id was already stored, with no unread item
+to collapse into, was swallowed as if it had lost a race, instead of reaching the caller."
   (let* ((cause (conn:db-error-cause condition))
-         (code (ignore-errors (uiop:symbol-call "DBI.ERROR" "DATABASE-ERROR-CODE" cause))))
-    (or (equal code "23505")
-        (and (eq code :constraint)
-             (search "UNIQUE" (or (ignore-errors (princ-to-string cause)) ""))
-             t))))
+         (code (ignore-errors (uiop:symbol-call "DBI.ERROR" "DATABASE-ERROR-CODE" cause)))
+         (message (or (ignore-errors (princ-to-string cause)) "")))
+    (flet ((names (text) (and (search text message :test #'char-equal) t)))
+      (cond ((equal code "23505") (names (format nil "uq_~A_unread_group" table)))
+            ((eq code :constraint)
+             (names (format nil "UNIQUE constraint failed: ~A.recipient, ~A.group_key" table table)))
+            (t nil)))))
 
 (defvar *%after-a-missed-collapse* nil
   "For a test only: a function of the connection and store that NOTIFICATION-PUT calls after its
@@ -273,7 +283,8 @@ competing row in that gap, which is what two concurrent calls do. NIL in use.")
               ;; that refusal is caught: any other database error is the caller's.
               ((progn (when *%after-a-missed-collapse* (funcall *%after-a-missed-collapse* c store))
                       (handler-case (progn (%insert c store x) t)
-                        (conn:db-error (e) (if (%unique-violation-p e) nil (error e)))))
+                        (conn:db-error (e)
+                          (if (%unread-key-violation-p e (%table store)) nil (error e)))))
                (stored))
               (t (%collapse c store x) (stored)))))))
 

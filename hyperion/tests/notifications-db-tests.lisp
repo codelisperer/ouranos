@@ -145,6 +145,24 @@ the unread-key index. Forced here by inserting the competing row in that gap."
       (is (equal "lost the race" (n:notification-title stored)))
       (is (= 1 (n:unread-count s "u1"))))))
 
+(backend-test another-unique-violation-reaches-the-caller (s c)
+  "Only the unread-key index's refusal is the conflict NOTIFICATION-PUT expects (the hub's review
+of #1012). Putting a notification again under an id that is already stored, after its row was
+read so there is nothing unread to collapse into, makes the insert break the primary key: that
+error reaches the caller. Before, every unique violation was taken for the conflict and
+swallowed. The control is the race the index exists for, which is still collapsed."
+  (let ((x (n:make-notification "u1" :db-test-reply :title "once" :group-key "g")))
+    (n:notification-put s x)
+    (n:mark-read s "u1" (n:notification-id x))
+    (signals conn:db-error (n:notification-put s x))
+    (is (= 0 (n:unread-count s "u1")) "nothing was added"))
+  (let ((ndb::*%after-a-missed-collapse*
+          (lambda (conn store)
+            (ndb::%insert conn store (n:make-notification "u1" :db-test-reply :title "won"
+                                                                               :group-key "h")))))
+    (is (= 2 (n:notification-count (%put s "u1" "lost" :group-key "h")))
+        "control: the unread-key conflict is still collapsed")))
+
 (test a-database-error-other-than-the-conflict-is-not-swallowed
   "Only the unread-key conflict is caught. A trigger here refuses the insert with its own message,
 in the gap after the missed collapse; that error reaches the caller as it is. Catching every
