@@ -494,6 +494,12 @@ never falls back to the environment, because the app chose it."
   (let ((key (if api-key-p api-key (funcall env-key))))
     (and (stringp key) (plusp (length key)) key)))
 
+(defun %openai-images-url (p path)
+  (concatenate 'string (openai-images-base-url p) path))
+
+(defmethod llm:provider-endpoint ((p openai-images))
+  (llm:parse-endpoint (openai-images-base-url p)))
+
 (defun make-openai-images (&key (api-key nil api-key-p) model base-url read-timeout)
   "An OPENAI-IMAGES provider. An API-KEY that is given is used, NIL included; the environment
 is read only when none is given (PRAXEON_OPENAI_API_KEY, then the deprecated
@@ -695,7 +701,7 @@ multipart/form-data to /images/edits."
             (values octets type "/images/edits" (edit-body-count body)))
           (values (jzon:stringify body) "application/json" "/images/generations"
                   (gethash "n" body)))
-    (%image-post p (concatenate 'string (openai-images-base-url p) path)
+    (%image-post p (%openai-images-url p path)
                  content content-type count)))
 
 (defun %send (label url headers content &key read-timeout connect-timeout max-body-bytes

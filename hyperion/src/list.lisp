@@ -40,7 +40,7 @@
    ;; the state
    #:read-list-state #:list-state #:list-state-p #:list-state-spec #:list-state-page
    #:list-state-page-size #:list-state-sort #:list-state-direction #:list-state-filters
-   #:list-state-adjusted #:filter-value #:clamp-page #:page-count
+   #:list-state-adjusted #:filter-value #:filter-choices #:clamp-page #:page-count
    ;; the query
    #:list-clauses #:filter-where
    ;; links
@@ -60,7 +60,7 @@
   (sorts '() :type list)        ; ((key :column column :direction dir) ...)
   (default-sort nil :type symbol)
   (tiebreak nil :type symbol)
-  (filters '() :type list)      ; ((name :values (...) :column c) | (name :text t :max-length n))
+  (filters '() :type list)      ; ((name :values (...)|fn :column c) | (name :text t :max-length n))
   (page-size 25 :type (integer 1))
   (page-sizes '(25) :type list)
   (hx-target nil :type (or null string)))
@@ -82,11 +82,11 @@
       (if (listp entry) entry (list entry))
     (unless (keywordp name) (%spec-error "a filter name must be a keyword, got ~S" name))
     (unless (or values text)
-      (%spec-error "filter ~S needs :values (a list of strings) or :text t" name))
+      (%spec-error "filter ~S needs :values (a list of strings, or a function of the request that returns one) or :text t" name))
     (when (and values text) (%spec-error "filter ~S has both :values and :text" name))
     (when values
-      (unless (and (listp values) (every #'stringp values))
-        (%spec-error "filter ~S: :values must be a list of strings, got ~S" name values)))
+      (unless (or (functionp values) (and (listp values) (every #'stringp values)))
+        (%spec-error "filter ~S: :values must be a list of strings or a function of the request, got ~S" name values)))
     (when (and column (not (symbolp column)))
       (%spec-error "filter ~S: :column must be a keyword, got ~S" name column))
     (when (and column text)
@@ -111,7 +111,10 @@ rows with equal sort values keep one order and no row repeats or is skipped betw
 
 FILTERS is a list of (NAME :values (STRING ...) [:column COLUMN]), a closed set, or (NAME :text
 t [:max-length N]), free text cut to N characters (100 by default). The request names a filter
-by NAME's lowercase name.
+by NAME's lowercase name. :VALUES may instead be a function of the request (the Clack env) that
+returns the list of strings, for a set that changes, such as the projects a user can see.
+READ-LIST-STATE calls it once per request, and that one result is what the request's value is
+checked against, what FILTER-CHOICES returns and what LIST-HREF accepts.
 
 PAGE-SIZE is the default page size, and PAGE-SIZES the sizes the request may choose from; it
 defaults to PAGE-SIZE alone, and its largest member is the most rows a page can have.
@@ -173,6 +176,7 @@ prefix, so a form field named by it is read as that filter or setting."
   (sort nil :type symbol)
   (direction :asc :type (member :asc :desc))
   (filters '() :type list)      ; ((name . validated-string) ...)
+  (choices '() :type list)      ; ((name . (string ...)) ...) for every :values filter
   (adjusted '() :type list)     ; parameter names whose value was replaced by a default
   (query-string nil :type (or null string))
   (remembering nil :type boolean))  ; read with a store: links always name the page
@@ -194,10 +198,25 @@ becoming an offset no database should be asked for.")
 a text value with an error, and none of them belongs in a search term."
   (let ((code (char-code c))) (or (< code 32) (= code 127))))
 
-(defun %parse-params (spec lookup)
+(defun %resolve-choices (spec env)
+  "Each :values filter of SPEC with its choices for the request ENV, as ((NAME . (STRING ...))
+...): the list itself, or what the filter's function returns for ENV. Signals when a function
+returns anything but a list of strings, because the function is the app's code."
+  (loop for (name . options) in (list-spec-filters spec)
+        for values = (getf options :values)
+        when values
+          collect (cons name
+                        (if (functionp values)
+                            (let ((got (funcall values env)))
+                              (unless (and (listp got) (every #'stringp got))
+                                (%spec-error "filter ~S: the :values function returned ~S, not a list of strings" name got))
+                              got)
+                            values))))
+
+(defun %parse-params (spec lookup choices)
   "The validated state for SPEC from LOOKUP, a function from a parameter name to its first
-value or NIL. Returns the page, page size, sort, direction, filters and the names of
-parameters that were present and replaced."
+value or NIL, with CHOICES from %RESOLVE-CHOICES. Returns the page, page size, sort, direction,
+filters and the names of parameters that were present and replaced."
   (let ((adjusted '()))
     (flet ((raw (name) (funcall lookup (%param spec name)))
            (adjust (name) (push (%param spec name) adjusted)))
@@ -224,7 +243,7 @@ parameters that were present and replaced."
                      for text = (raw (%lower name))
                      for value = (cond ((null text) nil)
                                        ((getf options :values)
-                                        (or (find text (getf options :values) :test #'string=)
+                                        (or (find text (cdr (assoc name choices)) :test #'string=)
                                             (progn (adjust (%lower name)) nil)))
                                        (t (let* ((clean (remove-if #'%control-char-p text))
                                                  (cut (subseq clean 0 (min (length clean)
@@ -244,7 +263,8 @@ parameters that were present and replaced."
 
 Every value is checked against the spec, and one that does not fit is replaced by the
 default: an unknown sort key, a direction other than asc or desc, a page that is not 1 to 9
-digits, a page size not in :page-sizes, a filter value outside its set. A text filter loses
+digits, a page size not in :page-sizes, a filter value outside its set. A filter whose
+:values is a function is called once with ENV, and its value is checked against that result. A text filter loses
 its control characters and is cut to its :max-length. LIST-STATE-ADJUSTED lists the parameters
 that were replaced, cleaned or cut.
 
@@ -259,11 +279,13 @@ always shows what it says."
          (request-has-own (some (lambda (pair) (member (car pair) own :test #'string=)) alist))
          (stored (and store (not request-has-own)
                       (load-list-state store env (list-spec-id spec))))
-         (source (if (stringp stored) stored query-string)))
+         (source (if (stringp stored) stored query-string))
+         (choices (%resolve-choices spec env)))
     (multiple-value-bind (page size sort direction filters adjusted)
-        (%parse-params spec (%first-value-function source))
+        (%parse-params spec (%first-value-function source) choices)
       (let ((state (%make-list-state :spec spec :page page :page-size size :sort sort
-                                     :direction direction :filters filters :adjusted adjusted
+                                     :direction direction :filters filters :choices choices
+                                     :adjusted adjusted
                                      :query-string query-string
                                      :remembering (and store t))))
         (when (and store request-has-own)
@@ -275,6 +297,15 @@ always shows what it says."
   "The validated value of filter NAME in STATE, a string, or NIL when the request gave none
 or gave one that did not fit."
   (cdr (assoc name (list-state-filters state))))
+
+(defun filter-choices (state name)
+  "The values the :values filter NAME accepts for STATE's request, a list of strings: the
+spec's list, or what its function returned when READ-LIST-STATE read the request. Signals
+when NAME is not a :values filter of the list."
+  (let ((entry (assoc name (list-state-choices state))))
+    (unless entry
+      (%spec-error "~S is not a :values filter of list ~S" name (list-spec-id (list-state-spec state))))
+    (cdr entry)))
 
 (defun page-count (state total)
   "How many pages TOTAL rows make at STATE's page size; at least 1."
@@ -406,7 +437,7 @@ app's code, not from the request."
                (when value
                  (unless (and (stringp value)
                               (if (getf options :values)
-                                  (member value (getf options :values) :test #'string=)
+                                  (member value (filter-choices state name) :test #'string=)
                                   (and (<= (length value) (getf options :max-length))
                                        (not (find-if #'%control-char-p value)))))
                    (%spec-error "~S is not a value filter ~S accepts" value name)))
