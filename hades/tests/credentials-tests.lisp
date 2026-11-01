@@ -173,6 +173,30 @@ service is listed, so no credential of whoever runs this is read."
         (%cleanup service "user")
         (%cleanup (%item service "second") "second"))))
 
+  (test names-under-one-service-do-not-include-another-services-items
+    "#1066's review: a target is SERVICE/ACCOUNT and either part may hold a slash, as this
+file's own \"soloflow/anthropic-api-key\" example shows. On Windows the filter SERVICE/* matched
+those too, so CREDENTIAL-NAMES \"S\" reported \"x/y\", an account of the service \"S/x\". macOS and
+Linux match exactly; this asserts all three agree."
+    (let* ((outer (%item (%service) "user"))
+           (inner (%item (concatenate 'string outer "/x") "y")))
+      (unwind-protect
+           (progn
+             (cred:store-credential outer "user" (sec:make-secret (%marker)))
+             (cred:store-credential inner "y" (sec:make-secret (%marker)))
+             (let ((names (cred:credential-names outer)))
+               (is* (member "user" names :test #'string=) "its own account is listed")
+               (is* (null (member "x/y" names :test #'string=))
+                    "and the nested service's item is not: ~S" names)
+               (is* (null (member "y" names :test #'string=))
+                    "under any spelling: ~S" names))
+             (is* (null (cred:credential-exists-p outer "x/y"))
+                  "nor does EXISTS-P claim it")
+             (is* (eq t (cred:credential-exists-p inner "y"))
+                  "control: the nested item does exist under its own service"))
+        (%cleanup outer "user")
+        (%cleanup inner "y"))))
+
   (test names-with-non-ascii-characters-round-trip
     (let* ((account (concatenate 'string "b" (string (code-char #xF6)) "b"))
            (service (%item (concatenate 'string (%service) (string (code-char #x6587))) account))
@@ -404,8 +428,18 @@ from the source, so all three backends are checked wherever this runs: the two t
 compiled here are still in the file, and a change to the Windows backend fails this on Linux."
   (let ((lines (%credentials-source)))
     (is (plusp (length lines)) "the backend source was read")
+    ;; THE COUNTS, so a rename cannot empty this sweep (the review of #1066). %DEFINITION-LINES
+    ;; returning nothing used to mean "nothing to check" and the sweep passed: renaming %ACCOUNTS
+    ;; would have made every assertion below vanish. %ACCOUNTS is defined once per backend;
+    ;; %EXISTS-P and %NAMES also have the no-backend definition; the two public functions once.
+    (dolist (entry '(("%accounts" 3) ("%exists-p" 4) ("%names" 4)
+                     ("credential-exists-p" 1) ("credential-names" 1)))
+      (destructuring-bind (name expected) entry
+        (is (= expected (count-if (lambda (l) (search (format nil "(defun ~A " name) l)) lines))
+            "~A is defined ~D time~:P, as this sweep assumes" name expected)))
     (dolist (name '("%exists-p" "%names" "%accounts" "credential-exists-p" "credential-names"))
       (let ((body (%definition-lines lines name)))
+        (is-true body "~A has a definition to sweep" name)
         (when body
           (loop for (os . entry) in +value-reading-entry-points+
                 ;; SEC-ITEM-COPY-MATCHING is both the Keychain's value read and the call its
@@ -432,10 +466,12 @@ compiled here are still in the file, and a change to the Windows backend fails t
             "control: %FETCH asks for kSecReturnData, so this check can tell the two apart")
         (is (some (lambda (l) (search "(ffi:sec-item-copy-matching" l)) fetch)
             "control: and the matcher finds a real call, so the entry-point checks are not vacuous")))
-    ;; The Linux search must not ask to unlock or to load secrets.
-    (is (notany (lambda (l) (search "+secret-search-unlock+" (string-downcase l)))
-                (%credentials-source))
-        "the Secret Service search never asks to unlock a collection")))
+    ;; The Linux search's flags are asserted for real in
+    ;; THE-SECRET-SERVICE-SEARCH-PASSES-ONLY-THE-ALL-FLAG below. The check that used to sit here
+    ;; looked for "+secret-search-unlock+", a constant that does not exist in the tree, so it
+    ;; could never fail and adding LOAD_SECRETS to the flags would have passed it (the review of
+    ;; #1066).
+    ))
 
 (test asking-whether-a-credential-exists-never-calls-the-value-read
   "#1035, on the backend compiled here, and without needing a store: the value-reading entry
@@ -715,3 +751,45 @@ there is no backend, the fetch says the store is unavailable instead."
               (signals cred:credential-store-unavailable (cred:fetch-credential service account)))
     #-(or win32 darwin linux) (signals cred:credential-store-unavailable
                                 (cred:fetch-credential service account))))
+
+;;; --- the review of #1066: the flags, the exact target, and the wildcard ------------------
+
+#+linux
+(test the-secret-service-search-passes-only-the-all-flag
+  "The flags are asserted, not assumed. The sweep used to look for a constant name that does not
+exist in the tree, so adding SECRET_SEARCH_LOAD_SECRETS -- which fetches every matching item's
+secret -- would have passed every test (the review of #1066). This stubs the search and reads
+the flags it was given."
+  (let ((seen :never-called)
+        (original (fdefinition 'ffi:secret-service-search-sync)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'ffi:secret-service-search-sync)
+                 (lambda (service schema attributes flags cancellable error)
+                   (declare (ignore service schema attributes cancellable error))
+                   (setf seen flags)
+                   (cffi:null-pointer)))
+           ;; Any outcome is allowed: without a store this signals before or after the search.
+           (handler-case (cred:credential-names (%service)) (error () nil)))
+      (setf (fdefinition 'ffi:secret-service-search-sync) original))
+    (if (eq seen :never-called)
+        (skip "no Secret Service on this machine, so the search was never reached")
+        (progn
+          (is (eql ffi:+secret-search-all+ seen)
+              "exactly SECRET_SEARCH_ALL: not UNLOCK, which would prompt, and not LOAD_SECRETS, which would fetch every value")
+          (is (zerop (logand seen 4)) "SECRET_SEARCH_UNLOCK (4) is not set")
+          (is (zerop (logand seen 8)) "SECRET_SEARCH_LOAD_SECRETS (8) is not set")))))
+
+(test a-service-name-with-a-star-is-refused-for-listing
+  "#1066's review: on Windows the service goes into CredEnumerateW's filter, where `*' is a
+wildcard, so a service of \"*\" would enumerate -- and so decrypt -- every credential of every
+application. Refused on every platform, so the three agree."
+  (dolist (service '("*" "a*" "soloflow/*" "*/x"))
+    (signals cred:credential-error (cred:credential-names service))
+    (signals cred:credential-error (cred:credential-exists-p service "user")))
+  ;; The control: an ordinary service name is not refused by this check. Without a store it
+  ;; still signals, but CREDENTIAL-STORE-UNAVAILABLE rather than the refusal above.
+  (let ((c (handler-case (progn (cred:credential-names (%service)) nil)
+             (cred:credential-error (e) e))))
+    (is (or (null c) (typep c 'cred:credential-store-unavailable))
+        "an ordinary service name is not refused for its name: ~S" c)))

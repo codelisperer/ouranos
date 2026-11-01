@@ -159,11 +159,35 @@ gives its length, not its content."))
                                          :code code)))
           t)))
 
+  (defun %zero-blob (cred)
+    "Write zeros over CRED's CredentialBlob, the plaintext value Windows decrypted into this
+process (#1035, the review of #1066). Called for every credential CredEnumerateW returned,
+before CredFree, so a listing does not leave secrets in freed memory."
+    (let ((size (cffi:foreign-slot-value cred '(:struct ffi:credential-w) 'ffi:credential-blob-size))
+          (blob (cffi:foreign-slot-value cred '(:struct ffi:credential-w) 'ffi:credential-blob)))
+      (when (and (integerp size) (plusp size) (not (cffi:null-pointer-p blob)))
+        (dotimes (i size) (setf (cffi:mem-aref blob :uint8 i) 0)))))
+
   (defun %accounts (service operation)
     "The accounts stored under SERVICE, from CredEnumerateW with the filter SERVICE/* (#1035).
 
-READS TARGET NAMES ONLY. Each returned CREDENTIAL_W's TARGET-NAME is read and its
-CREDENTIAL-BLOB, which holds the value, is never touched; the array is freed with CredFree.
+WINDOWS DECRYPTS THE VALUES, AND THIS ERASES THEM. There is no Windows call that lists
+credentials without their values: CredEnumerateW returns a whole CREDENTIALW for every match,
+and for a generic credential that includes CredentialBlob, the plaintext after DPAPI
+decryption, in this process's heap. CredReadW does the same. So the issue's requirement that
+this function not decrypt a value cannot be met here, and what it was for is met instead: every
+blob is zeroed (%ZERO-BLOB) before CredFree, so a listing of ten items does not leave ten
+plaintext values in freed memory. Writing zeros over a blob is not reading it. No test can see
+this, because the decryption happens inside Windows (the review of #1066).
+
+THE TARGET IS MATCHED EXACTLY, not by prefix. A target is SERVICE/ACCOUNT and either part may
+hold a slash, so the filter SERVICE/* also matches items of other services: with
+\"soloflow/anthropic-api-key\" stored under account \"user\", a prefix match reported
+\"anthropic-api-key/user\" as an account of \"soloflow\". hades writes UserName = account, so each
+target is compared with (%TARGET SERVICE USER-NAME), and the type must be CRED_TYPE_GENERIC,
+which is what FETCH-CREDENTIAL reads with. macOS and Linux match service and account exactly,
+so this is what makes the three agree.
+
 CredEnumerateW does not prompt. ERROR_NOT_FOUND means the store holds no item matching the
 filter, which is an empty list and not a failure."
     (cffi:with-foreign-objects ((count :uint32) (creds :pointer))
@@ -175,19 +199,29 @@ filter, which is an empty list and not a failure."
                 (error 'credential-error :service service :account nil :operation operation
                                          :code code)))))
       (let ((array (cffi:mem-ref creds :pointer))
-            (n (cffi:mem-ref count :uint32))
-            (prefix (concatenate 'string service "/")))
+            (n (cffi:mem-ref count :uint32)))
         (unwind-protect
              (loop for i below n
                    for cred = (cffi:mem-aref array :pointer i)
-                   for target = (unless (cffi:null-pointer-p cred)
-                                  (aion/windows:wide-string-to-lisp
-                                   (cffi:foreign-slot-value cred '(:struct ffi:credential-w)
-                                                            'ffi:target-name)))
-                   when (and target
-                             (> (length target) (length prefix))
-                             (string= prefix target :end2 (length prefix)))
-                     collect (subseq target (length prefix)))
+                   unless (cffi:null-pointer-p cred)
+                     append (let ((target (aion/windows:wide-string-to-lisp
+                                           (cffi:foreign-slot-value cred '(:struct ffi:credential-w)
+                                                                    'ffi:target-name)))
+                                  (user (let ((p (cffi:foreign-slot-value
+                                                  cred '(:struct ffi:credential-w) 'ffi:user-name)))
+                                          (unless (cffi:null-pointer-p p)
+                                            (aion/windows:wide-string-to-lisp p))))
+                                  (kind (cffi:foreign-slot-value cred '(:struct ffi:credential-w)
+                                                                 'ffi::type)))
+                              (when (and target user
+                                         (eql kind ffi:+cred-type-generic+)
+                                         (string= target (%target service user)))
+                                (list user))))
+          ;; Every blob is erased before the array is freed, whether the loop above finished or
+          ;; unwound.
+          (loop for i below n
+                for cred = (cffi:mem-aref array :pointer i)
+                unless (cffi:null-pointer-p cred) do (%zero-blob cred))
           (ffi:cred-free array)))))
 
   (defun %exists-p (service account)
@@ -628,18 +662,36 @@ there was none."
   (%check-names service account)
   (%delete service account))
 
+(defun %check-listing-service (service operation)
+  "Signal CREDENTIAL-ERROR when SERVICE cannot be used to list items (#1035, the review of
+#1066). A `*' is refused because on Windows the service goes into CredEnumerateW's filter, where
+it is a wildcard: a service of \"*\" or \"a*\" would make Windows enumerate, and therefore decrypt,
+every credential of every application, or every one beginning with `a', before anything of ours
+looked at it. It is refused on every platform so the three agree; on macOS and Linux a `*' is an
+ordinary character in an attribute and would simply match nothing."
+  (when (find #\* service)
+    (error 'credential-error :service service :account nil :operation operation
+                             :code "a service name used for listing may not contain `*'")))
+
 (defun credential-exists-p (service account)
   "Whether a credential is stored for SERVICE and ACCOUNT, WITHOUT READING ITS VALUE (#1035).
 
 An app that shows \"a key is saved\", or offers to remove one, asks this instead of fetching the
-secret to decide a label, which would put it in memory for nothing. Nothing is decrypted and no
-value is copied: Credential Manager is enumerated by target name, the Keychain is asked for
-attributes only, and the Secret Service is searched for items and read for their attributes,
-which it stores unencrypted.
+secret to decide a label. The Keychain is asked for attributes only, and the Secret Service is
+searched and read for item attributes, which it stores unencrypted; neither decrypts a value.
 
-NOTHING HERE PROMPTS. Where a backend could only answer by asking the person to unlock the
-store, it signals CREDENTIAL-STORE-UNAVAILABLE saying so instead: that is the macOS Keychain
-when it is locked. On Linux a locked keyring still answers, so this can be true for an item
+ON WINDOWS THE VALUE IS DECRYPTED AND THEN ERASED, because Windows offers no other way. Every
+call that lists or reads a credential, CredEnumerateW and CredReadW alike, returns the whole
+CREDENTIALW including the plaintext CredentialBlob. hades writes zeros over every blob before
+freeing what Windows returned, so nothing is left in freed memory, but the value does pass
+through this process. See %ACCOUNTS (the review of #1066).
+
+NOTHING HERE PROMPTS, as far as is tested. The macOS query sets kSecUseAuthenticationUIFail so
+that a Keychain which could only answer by asking signals CREDENTIAL-STORE-UNAVAILABLE instead;
+**that path is not covered by a test**, because no test here locks a keychain, and Apple
+documents the flag for items under access control while a file-based login keychain's prompting
+is governed by SecKeychainSetUserInteractionAllowed (the review of #1066). On Linux a locked
+keyring answers without prompting, which IS exercised, so this can be true for an item
 FETCH-CREDENTIAL would refuse to read until the keyring is unlocked.
 
 WHAT THE ANSWER REVEALS is whether the credential exists, and never its value. Existence is
@@ -648,8 +700,10 @@ attribute in the Secret Service -- so answering from it discloses nothing the va
 (the hub's ruling on #1035).
 
 Signals CREDENTIAL-STORE-UNAVAILABLE where this system has no store or it cannot be reached,
-and CREDENTIAL-ERROR for any other failure. A name that is empty signals, as elsewhere."
+and CREDENTIAL-ERROR for any other failure. A name that is empty signals, as elsewhere, and so
+does a SERVICE holding `*' (%CHECK-LISTING-SERVICE)."
   (%check-names service account)
+  (%check-listing-service service :exists-p)
   (%exists-p service account))
 
 (defun credential-names (service)
@@ -665,4 +719,5 @@ Nothing here is logged. hades/credentials depends on no logging facade, and an a
 the kind of thing a log must not carry, so the names are returned to the caller and written
 nowhere."
   (%check-names service "unused")
+  (%check-listing-service service :names)
   (%names service))

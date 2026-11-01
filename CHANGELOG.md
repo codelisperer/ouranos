@@ -1098,15 +1098,26 @@ its tag.
   or copying a value. An app showing "a key is saved", or offering to remove one, no longer
   fetches the secret to decide a label, and no longer has to keep its own list of what it saved,
   which could drift from the store.
-  - Windows reads target names with `CredEnumerateW` and never a credential blob; macOS asks the
-    Keychain for attributes only (`kSecReturnAttributes`, never `kSecReturnData`); Linux searches
-    the Secret Service and reads item attributes, which it stores unencrypted, without
-    `SECRET_SEARCH_LOAD_SECRETS` and without `SECRET_SEARCH_UNLOCK`.
-  - **Neither prompts.** On macOS the query sets `kSecUseAuthenticationUIFail`, so a locked
-    Keychain signals `credential-store-unavailable` saying it is locked instead of showing a
-    dialog. On Linux a locked keyring still answers, so `credential-exists-p` can be true for an
-    item `fetch-credential` would refuse to read until the keyring is unlocked; both docstrings
-    say so.
+  - macOS asks the Keychain for attributes only (`kSecReturnAttributes`, never
+    `kSecReturnData`), and Linux searches the Secret Service and reads item attributes, which it
+    stores unencrypted, without `SECRET_SEARCH_LOAD_SECRETS` and without `SECRET_SEARCH_UNLOCK`.
+    Neither decrypts a value.
+  - **On Windows the value is decrypted and then erased**, because Windows offers no other way:
+    `CredEnumerateW` and `CredReadW` both return the whole `CREDENTIALW`, including the plaintext
+    `CredentialBlob`. hades writes zeros over every blob before freeing what Windows returned, so
+    a listing leaves nothing in freed memory, but the value does pass through the process. An app
+    on Windows should treat `credential-names` as it treats `fetch-credential` in that respect.
+  - A service name containing `*` is refused for both functions, on every platform, because on
+    Windows it would widen `CredEnumerateW`'s filter and make Windows enumerate, and so decrypt,
+    other applications' credentials.
+  - On Windows a target is matched exactly against the service and the stored account, not by
+    prefix, so `credential-names "S"` does not report an item of the service `"S/x"`. macOS and
+    Linux already matched exactly; this makes the three agree.
+  - **Neither prompts.** On macOS the query sets `kSecUseAuthenticationUIFail`, so a Keychain that
+    could only answer by asking signals `credential-store-unavailable` instead of showing a
+    dialog; **that path is not covered by a test**, since nothing here locks a keychain. On Linux
+    a locked keyring answers without prompting, which is exercised, so `credential-exists-p` can
+    be true for an item `fetch-credential` would refuse to read until the keyring is unlocked.
   - Nothing is logged by either, so no account name can reach a log.
   - `aion/libsecret` gains `search-attribute-values` and the bindings it needs
     (`secret_service_search_sync`, `secret_item_get_attributes`, `g_hash_table_lookup`,
