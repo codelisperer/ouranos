@@ -153,9 +153,15 @@ POST so a test can read the body that is built."
                (setf (gethash "imageConfig" config) image-config))
              config))))
 
+(defun %google-images-url (p)
+  (format nil "~A/models/~A:generateContent" (google-images-base-url p) (image-model-of p)))
+
+(defmethod llm:provider-endpoint ((p google-images))
+  (llm:parse-endpoint (google-images-base-url p)))
+
 (defmethod image-post ((p google-images) body)
   (%send "google images"
-         (format nil "~A/models/~A:generateContent" (google-images-base-url p) (image-model-of p))
+         (%google-images-url p)
          (list (cons "content-type" "application/json")
                (cons "x-goog-api-key" (google-images-api-key p)))
          (jzon:stringify body)
