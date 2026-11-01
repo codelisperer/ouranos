@@ -1198,12 +1198,17 @@ origin is localhost:PORT."
            (format nil "<!doctype html><script>~A send('~A',typeof window.hyperionDialog+','+typeof window.__hyperion_dialog_raw+','+location.origin).then(function(){if(window.parent!==window)window.parent.postMessage('~A','*');});</script>" +dialog-send-js+ key key)))
     (cond
       ;; The first run's top-level page.
+      ;; The listener for the frames' messages is registered before the frames exist, so a frame
+      ;; that reports quickly is not missed. It counts a message only when it comes from the frame
+      ;; whose data-key it names, so another page cannot stand in for a frame (the hub's review
+      ;; of #999).
       ((string= path "/")
-       (format nil "<!doctype html><html><body><iframe src=\"http://localhost:~D/child\"></iframe><iframe src=\"/same\"></iframe><script>~A
+       (format nil "<!doctype html><html><body><script>
+var framesIn=new Promise(function(resolve){var seen={};window.addEventListener('message',function(e){var fs=document.getElementsByTagName('iframe');for(var i=0;i<fs.length;i++){if(fs[i].contentWindow===e.source&&fs[i].getAttribute('data-key')===e.data)seen[e.data]=true;}if(seen.child&&seen.same)resolve();});setTimeout(resolve,10000);});
+</script><iframe data-key=\"child\" src=\"http://localhost:~D/child\"></iframe><iframe data-key=\"same\" src=\"/same\"></iframe><script>~A
 var sent=send('top',typeof window.hyperionDialog+','+typeof window.__hyperion_dialog_raw+','+location.origin);
 var noUser=(window.hyperionDialog?window.hyperionDialog({kind:'open'}):Promise.resolve({error:'absent'}))
 .then(function(r){return send('nouser',JSON.stringify(r));});
-var framesIn=new Promise(function(resolve){var seen={};window.addEventListener('message',function(e){seen[e.data]=true;if(seen.child&&seen.same)resolve();});setTimeout(resolve,10000);});
 Promise.all([sent,noUser,framesIn]).then(function(){return send('navigating','1');}).then(function(){setTimeout(function(){location.href='http://localhost:~D/away';},100);});
 </script></body></html>" port +dialog-send-js+ port))
       ((string= path "/child") (reporter "child"))
