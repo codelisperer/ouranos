@@ -1103,7 +1103,11 @@ its tag.
   placeholder order, which is the order ADO binds them in. An aggregate in the SELECT list
   without an alias gets one (`COUNT(*) AS [count]`, `SUM(o.total) AS [sum_total]`), avoiding
   the names of the other columns. More than one join renders in nested parentheses, as Jet
-  requires, and `:full` and `:cross` joins signal `unsupported-query`. The dialect
+  requires, and `:full` and `:cross` joins signal `unsupported-query`. A leading
+  `(:distinct …)` item gives `SELECT DISTINCT TOP n`. `unsupported-query` also refuses what
+  Access rejects when it runs: `:escape` on `:like`, `:lower`, `:upper`, `:length` and
+  `:coalesce` (use `(:call :lcase …)` and the other Jet functions), `(:count (:distinct …))`,
+  `:returning`, `:on-conflict` and an INSERT of more than one row. The dialect
   renders queries only: mnemosyne has no backend that runs them, `ddl:ddl` signals
   `unsupported-ddl` for `:jet`, and `schema:schema-ddl` refuses it. `mnemosyne/field:Dialect`
   has a new constructor, `D-Jet`, and `mnemosyne/field-shell:+dialects+` lists it, so Coalton

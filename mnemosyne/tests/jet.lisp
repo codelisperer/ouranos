@@ -165,3 +165,38 @@ compiler, so each has to recognise the date forms itself (review of #1064)."
                                                     (:inner :c (:= :b.id :c.bid))))
                   :dialect :sqlite))
       "the control: SQLite stays flat"))
+
+(test jet-writes-distinct-before-top
+  "Jet reads SELECT DISTINCT TOP n and rejects SELECT TOP n DISTINCT (cold review of #1064)."
+  (is (equal (list "SELECT DISTINCT TOP 5 [x], [y] FROM [t]" '())
+             (jet '(:select ((:distinct :x) :y) :from (:t) :limit 5))))
+  (is (equal (list "SELECT DISTINCT [x] FROM [t]" '())
+             (jet '(:select ((:distinct :x)) :from (:t)))))
+  (is (equal (list "SELECT DISTINCT x FROM t LIMIT ?" '(5))
+             (gen '(:select ((:distinct :x)) :from (:t) :limit 5) :dialect :sqlite))
+      "the control: SQLite keeps DISTINCT on the item and LIMIT at the end"))
+
+(test jet-refuses-what-access-would-reject-when-it-runs
+  "Each of these renders SQL that Access rejects, so it is refused when the query is compiled,
+the way OFFSET is (cold review of #1064). Each compiles on SQLite."
+  (dolist (q '((:select (:a) :from (:t) :where (:like :a "x" :escape "\\"))
+               (:select ((:lower :a)) :from (:t))
+               (:select ((:upper :a)) :from (:t))
+               (:select ((:length :a)) :from (:t))
+               (:select ((:coalesce :a 0)) :from (:t))
+               (:select ((:count (:distinct :a))) :from (:t))
+               (:insert-into :t :values ((:a 1) (:a 2)))
+               (:insert-into :t :values ((:a 1)) :returning (:a))
+               (:insert-into :t :values ((:a 1)) :on-conflict (:a) :do-nothing t)
+               (:update :t :set (:a 1) :returning (:a))
+               (:delete-from :t :returning (:a))))
+    (signals q:unsupported-query (jet q))
+    (is-true (q:sql q :dialect :sqlite) "~S compiles on SQLite" q)))
+
+(test jet-still-renders-what-it-supports-next-to-those-refusals
+  (is (equal (list "SELECT lcase([a]), COUNT([a]) AS [count_a] FROM [t] WHERE [a] LIKE ?" '("x%"))
+             (jet '(:select ((:call :lcase :a) (:count :a)) :from (:t) :where (:like :a "x%")))))
+  (is (equal (list "INSERT INTO [t] ([a]) VALUES (?)" '(1))
+             (jet '(:insert-into :t :values ((:a 1))))))
+  (is (equal (list "DELETE FROM [t] WHERE [a] = ?" '(1))
+             (jet '(:delete-from :t :where (:= :a 1))))))

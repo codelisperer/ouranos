@@ -42,7 +42,7 @@
 ;;;; provisional seam, not yet verified end-to-end.
 ;;;;
 ;;;; :jet is Microsoft Access SQL (Jet/ACE), for queries only (#1061): mnemosyne renders it and
-;;;; has no backend that runs it. It differs from the others in seven places, each tested:
+;;;; has no backend that runs it. It differs from the others in these places, each tested:
 ;;;;   * :limit renders as a prefix, SELECT TOP n, with n written into the SQL as a number,
 ;;;;     because Jet does not accept a parameter there. Jet's TOP also returns rows tied with
 ;;;;     the last one on the ORDER BY columns, so a query can return more than n rows.
@@ -56,6 +56,9 @@
 ;;;;     the column can be read by name: Jet names it Expr1000 otherwise.
 ;;;;   * More than one join nests in parentheses, FROM ([a] INNER JOIN [b] ON ...) INNER JOIN
 ;;;;     [c] ON ..., and :full and :cross joins signal UNSUPPORTED-QUERY: Jet has neither.
+;;;;   * UNSUPPORTED-QUERY also refuses what Jet would reject when it runs: LIKE ... ESCAPE,
+;;;;     LOWER, UPPER, LENGTH and COALESCE (Jet has LCase, UCase, Len and Nz, through :call),
+;;;;     COUNT(DISTINCT ...), RETURNING, ON CONFLICT, and an INSERT of more than one row.
 
 (in-package #:mnemosyne/query)
 
@@ -94,6 +97,7 @@ that have no CTX.")
                      (unsupported-query-detail c))))
   (:documentation "A query clause the target dialect cannot express, signalled when the query
 is compiled rather than dropped from the SQL (#1061). Jet's missing OFFSET is the first."))
+
 (defun %dialect-name (ctx) (fld:dialect-name (ctx-dialect ctx)))
 
 (defun %sql-escape (s)
@@ -353,9 +357,12 @@ signals INVALID-IDENTIFIER (#862)."
 (defun %escape-suffix (ctx escape)
   "\" ESCAPE ?\" with ESCAPE bound as a parameter, or \"\" when ESCAPE is NIL. Bound, like every
 value, so no quoting rule applies to it; Postgres and SQLite both accept a parameter there."
-  (if (null escape)
-      ""
-      (format nil " ESCAPE ~A" (%placeholder ctx (string (%escape-char escape))))))
+  (cond ((null escape) "")
+        ;; Access SQL has no ESCAPE clause; it takes a wildcard literally inside brackets, [%].
+        ((%jet-p ctx)
+         (error 'unsupported-query :dialect "jet" :clause "LIKE ... ESCAPE"
+                                   :detail "Jet takes a wildcard literally in brackets, [%]"))
+        (t (format nil " ESCAPE ~A" (%placeholder ctx (string (%escape-char escape)))))))
 
 (defun like-escape (text &key (escape #\\))
   "TEXT with ESCAPE, %, and _ each preceded by ESCAPE, so that a LIKE or ILIKE pattern built
@@ -472,8 +479,24 @@ explicitly, for example with LOWER on both sides."
       ((:date :timestamp) (%datetime ctx op args))
       ((:<-> :<=> :<#>) (%vector-distance ctx op args))
       (t (if (member op +fn-ops+)
-             (format nil "~A(~{~A~^, ~})" (symbol-name op) (mapcar #'e args))
+             (progn (when (%jet-p ctx) (%check-jet-function op args))
+                    (format nil "~A(~{~A~^, ~})" (symbol-name op) (mapcar #'e args)))
              (error "mnemosyne/query: unknown operator ~S" op))))))
+
+(defparameter +jet-function-names+
+  '((:lower . "LCase") (:upper . "UCase") (:length . "Len") (:coalesce . "Nz or IIf"))
+  "The functions in +FN-OPS+ that Jet does not have, each with the Jet function that does the
+same job, which a caller writes with (:call ...).")
+
+(defun %check-jet-function (op args)
+  "Signal UNSUPPORTED-QUERY for a function Jet does not have, or for COUNT(DISTINCT ...)."
+  (let ((jet-name (cdr (assoc op +jet-function-names+))))
+    (when jet-name
+      (error 'unsupported-query :dialect "jet" :clause (format nil "~A()" (symbol-name op))
+                                :detail (format nil "use Jet's ~A through (:call ...)" jet-name)))
+    (when (and (eq op :count) (consp (first args)) (eq (car (first args)) :distinct))
+      (error 'unsupported-query :dialect "jet" :clause "COUNT(DISTINCT ...)"
+                                :detail "count the rows of a SELECT DISTINCT subquery instead"))))
 
 (defun %order (ctx specs)
   "ORDER BY specs: a column, (column :asc|:desc), or ((expression) [:asc|:desc]).
@@ -562,6 +585,19 @@ so ON CONFLICT is meaningless; and its DML has no RETURNING (read the value back
     (when (getf q :returning)
       (error "mnemosyne/query: RETURNING is unsupported on XTDB 2 DML -- read the value back with a separate query. Drop :returning for the :xtdb dialect."))))
 
+(defun %check-jet (ctx q)
+  "Signal UNSUPPORTED-QUERY on DML that Jet cannot express: RETURNING, ON CONFLICT, and an
+INSERT of more than one row, which Jet writes as one INSERT per row."
+  (when (%jet-p ctx)
+    (when (getf q :returning)
+      (error 'unsupported-query :dialect "jet" :clause "RETURNING"
+                                :detail "read the value back with a separate query"))
+    (when (getf q :on-conflict)
+      (error 'unsupported-query :dialect "jet" :clause "ON CONFLICT"))
+    (when (rest (getf q :values))
+      (error 'unsupported-query :dialect "jet" :clause "multi-row VALUES"
+                                :detail "insert one row per statement"))))
+
 (defparameter +aggregate-ops+ '(:count :sum :avg :min :max)
   "The aggregates that Jet names Expr1000 and so on when they have no alias (#1061).")
 
@@ -617,7 +653,12 @@ does not take a parameter there, so it must be a positive integer."
   (with-output-to-string (s)
     (let ((items (or (getf q :select) '(:*))))
       (if (%jet-p ctx)
-          (format s "SELECT ~A~{~A~^, ~}" (%top q) (%jet-select-items ctx items))
+          ;; Jet writes DISTINCT before TOP: SELECT DISTINCT TOP 5 [x], not SELECT TOP 5 DISTINCT.
+          (let ((distinct (and (consp (first items)) (eq (car (first items)) :distinct))))
+            (format s "SELECT ~:[~;DISTINCT ~]~A~{~A~^, ~}" distinct (%top q)
+                    (%jet-select-items ctx (if distinct
+                                               (cons (second (first items)) (rest items))
+                                               items))))
           (format s "SELECT ~{~A~^, ~}" (mapcar (lambda (it) (%select-item ctx it)) items))))
     (%from-and-joins ctx q s)
     (when (getf q :where)    (format s " WHERE ~A" (%expr ctx (getf q :where))))
@@ -641,6 +682,7 @@ does not take a parameter there, so it must be a positive integer."
 
 (defun %insert (ctx q)
   (%check-xtdb ctx q)
+  (%check-jet ctx q)
   (let* ((rows (getf q :values))
          (cols (loop for (k) on (first rows) by #'cddr collect k)))
     (with-output-to-string (s)
@@ -656,6 +698,7 @@ does not take a parameter there, so it must be a positive integer."
 
 (defun %update (ctx q)
   (%check-xtdb ctx q)
+  (%check-jet ctx q)
   (with-output-to-string (s)
     (format s "UPDATE ~A SET ~{~A~^, ~}"
             (%ident (getf q :update) :update)
@@ -666,6 +709,7 @@ does not take a parameter there, so it must be a positive integer."
 
 (defun %delete (ctx q)
   (%check-xtdb ctx q)
+  (%check-jet ctx q)
   (with-output-to-string (s)
     (format s "DELETE FROM ~A" (%ident (getf q :delete-from) :delete-from))
     (when (getf q :where) (format s " WHERE ~A" (%expr ctx (getf q :where))))
