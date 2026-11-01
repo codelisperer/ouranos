@@ -100,13 +100,22 @@ is NIL, Connection: close, and BODY, a string (sent as UTF-8) or octets."
                     (uiop:symbol-call :aion/tls :make-certificate-chain (%file-octets certificate))
                     (uiop:symbol-call :aion/tls :make-private-key (%file-octets key))))
 
-(defun start-server (handler &key tls-certificate tls-key (name "aion/test-http server"))
+(defun start-server (handler &key tls-certificate tls-key (name "aion/test-http server")
+                                concurrent)
   "Start a server on 127.0.0.1, on a port the system chooses, and return it. HANDLER is a
 function of (REQUEST STREAM) that writes the response. Every request is recorded, and so is
 its head (SERVER-HEADS, newest first). With TLS-CERTIFICATE and TLS-KEY, pathnames of PEM
 files, the server speaks TLS: through cl+ssl, and on Windows, where nothing in the tree loads
 OpenSSL, through aion/tls (#536). Either is reached by name, so the system that asks for TLS
-loads the library and this one does not."
+loads the library and this one does not.
+
+By default the server answers one connection at a time, in the order accepted. With CONCURRENT
+true, each connection is served on a thread of its own, and HANDLER must be safe to call from
+several threads at once. A browser needs this: it can open a connection and send nothing on it
+until it closes it, and a server that serves one connection at a time then answers nothing
+else meanwhile (#999, where the request for one page waited 38 seconds behind such a
+connection). A connection's thread ends when the client closes the connection; STOP-SERVER does
+not wait for it."
   (let* ((tls-config #+os-windows (and tls-certificate (%aion-tls-server-config tls-certificate tls-key))
                      #-os-windows nil)
          (listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t
@@ -128,25 +137,30 @@ loads the library and this one does not."
                                     (usocket:socket-accept listener))
                              (error () (return)))))
                  (when conn
-                   (unwind-protect
-                        (ignore-errors
-                         (let ((stream (usocket:socket-stream conn)))
-                           #-os-windows
-                           (when tls-certificate
-                             (setf stream (uiop:symbol-call
-                                           :cl+ssl :make-ssl-server-stream stream
-                                           :certificate (namestring tls-certificate)
-                                           :key (namestring tls-key))))
-                           #+os-windows
-                           (when tls-config
-                             (setf stream (uiop:symbol-call :aion/tls :make-tls-stream
-                                                            stream tls-config)))
-                           (let ((request (%read-request stream)))
-                             (bt:with-lock-held (lock)
-                               (push (request-head request) (server-heads server))
-                               (push request (server-requests server)))
-                             (funcall handler request stream))))
-                     (ignore-errors (usocket:socket-close conn)))))))
+                   (flet ((serve (conn)
+                            (unwind-protect
+                                 (ignore-errors
+                                  (let ((stream (usocket:socket-stream conn)))
+                                    #-os-windows
+                                    (when tls-certificate
+                                      (setf stream (uiop:symbol-call
+                                                    :cl+ssl :make-ssl-server-stream stream
+                                                    :certificate (namestring tls-certificate)
+                                                    :key (namestring tls-key))))
+                                    #+os-windows
+                                    (when tls-config
+                                      (setf stream (uiop:symbol-call :aion/tls :make-tls-stream
+                                                                     stream tls-config)))
+                                    (let ((request (%read-request stream)))
+                                      (bt:with-lock-held (lock)
+                                        (push (request-head request) (server-heads server))
+                                        (push request (server-requests server)))
+                                      (funcall handler request stream))))
+                              (ignore-errors (usocket:socket-close conn)))))
+                     (if concurrent
+                         (bt:make-thread (lambda () (serve conn))
+                                         :name (format nil "~A connection" name))
+                         (serve conn)))))))
            :name name))
     server))
 

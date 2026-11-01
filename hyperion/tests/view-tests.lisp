@@ -1252,8 +1252,13 @@ send('trapready',location.origin);
   "Run BODY with SERVER serving %DIALOG-PAGE on 127.0.0.1, and PORT its port. REQUESTS is bound to
 a cons whose car lists every request the server answered, newest first, as \"SECONDS PATH\", with
 SECONDS counted from the server's start. A failure message prints it, so a missing report shows
-whether its page was ever requested. The handler runs on the server's thread, so the list is kept
-in this cons and not in a special variable bound on the test's thread."
+whether its page was ever requested. The handler runs on the server's threads, so the list is kept
+in this cons and not in a special variable bound on the test's thread.
+
+The server serves each connection on its own thread (:CONCURRENT). WebView2 can open a connection
+and send nothing on it until the window closes; served one at a time, the request for /away then
+waited behind that connection until the view exited, 38 seconds after the page asked for it, and
+its report never arrived (run 41333548687, which printed the requests and their times)."
   (let ((start (gensym "START")))
     `(let ((,port nil)
            (,requests (list nil))
@@ -1269,7 +1274,8 @@ in this cons and not in a special variable bound on the test's thread."
                         (if page
                             (aion/test-http:write-response
                              stream 200 '(("Content-Type" . "text/html; charset=utf-8")) page)
-                            (aion/test-http:write-response stream 404 '() "")))))
+                            (aion/test-http:write-response stream 404 '() ""))))
+                    :concurrent t)
          (setf ,port (aion/test-http:server-port ,server))
          ,@body))))
 
