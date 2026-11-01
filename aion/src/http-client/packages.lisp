@@ -42,7 +42,7 @@
            #:add-header #:ensure-2xx
            #:send-request #:header-value
            #:http-error #:http-error-status #:http-error-body #:http-error-label
-           #:http-error-detail
+           #:http-error-detail #:http-error-retry-after #:http-error-phase
            ;; fetching a URL a user supplied (#295)
            #:fetch-public #:*fetch-public-max-body-bytes*
            #:address-category #:parse-address #:address-string #:resolve-host
@@ -58,4 +58,8 @@
            #:fetch-refused-reason
            #:too-many-redirects #:too-many-redirects-url #:too-many-redirects-limit
            #:fetch-deadline-exceeded #:fetch-deadline-exceeded-url
-           #:fetch-deadline-exceeded-deadline))
+           #:fetch-deadline-exceeded-deadline
+           ;; a response read as it arrives, and cancelling it (#984)
+           #:open-response-stream #:read-event #:*max-event-octets*
+           #:request-cancel #:make-request-cancel #:request-cancel-p
+           #:cancel-request #:request-cancelled-p #:request-cancelled))

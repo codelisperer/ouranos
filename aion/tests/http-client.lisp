@@ -1177,9 +1177,21 @@ the self-signed test certificate as CERTIFICATE-UNTRUSTED-ROOT."
   "Whether CONDITION is a failure of the runner's network rather than of this client: the host
 did not resolve, a socket could not connect or timed out, or the fetch ran past its deadline. A
 TLS error, a refused certificate or a malformed response is not one of these, and still fails the
-test below (#931)."
+test below (#931).
+
+The client wraps a transport failure, such as a USOCKET:TIMEOUT-ERROR, in an HTTP:HTTP-ERROR
+whose HTTP-ERROR-PHASE is :CONNECT or :RESPONSE, and that counts too (#976). It failed the
+Windows leg of train 78 when only the unwrapped types were matched. An HTTP-ERROR with a status,
+or one the client raised itself before sending, has no phase and does not count."
   (or (and (typep condition 'http:fetch-refused)
            (eq :unresolvable (http:fetch-refused-reason condition)))
+      ;; A MALFORMED-RESPONSE carries :RESPONSE too, when the connection ended early or WinHTTP
+      ;; refused the reply (12152), and it is this client's or the server's doing, not the
+      ;; network's (the hub's review of #979).
+      (and (typep condition 'http:http-error)
+           (not (typep condition 'http:malformed-response))
+           (member (http:http-error-phase condition) '(:connect :response))
+           t)
       (typep condition '(or http:fetch-deadline-exceeded usocket:socket-condition
                          usocket:ns-condition sb-sys:io-timeout))))
 
@@ -1224,7 +1236,43 @@ response and a refused private address are not."
              (make-condition 'http:fetch-refused :url "https://x.test/" :reason :private)))
   (is-false (%runner-network-failure-p
              (make-condition 'http:certificate-expired :host "x.test" :verdict :expired :code 0)))
-  (is-false (%runner-network-failure-p (make-condition 'http:malformed-response :detail "x"))))
+  (is-false (%runner-network-failure-p (make-condition 'http:malformed-response :detail "x")))
+  (is-false (%runner-network-failure-p
+             (make-condition 'http:malformed-response :detail "the connection ended" :phase :response))
+            "a malformed response is not the network's, though it carries :RESPONSE")
+  (is-true (%runner-network-failure-p
+            (make-condition 'http:http-error :detail "transport error" :phase :response))
+           "control: another :RESPONSE transport failure is")
+  #+os-windows
+  (is (eq 'http::malformed-response
+          (http::%transport-error-class (make-condition 'winhttp::win-error :code 12152)))
+      "WinHTTP's 12152 is signalled as a MALFORMED-RESPONSE")
+  #+os-windows
+  (is (eq 'http:http-error
+          (http::%transport-error-class (make-condition 'winhttp::win-error :code 12002)))
+      "control: a WinHTTP timeout is not"))
+
+(test a-wrapped-transport-failure-is-a-runner-network-failure
+  "#976: the client wraps a socket timeout in an HTTP-ERROR, \"transport error\". A refused
+connection on 127.0.0.1 comes back that way, wrapping USOCKET:TIMEOUT-ERROR on Linux, which is
+the condition from the Windows leg of train 78."
+  (let* ((port (let ((s (usocket:socket-listen "127.0.0.1" 0)))
+                 (prog1 (usocket:get-local-port s) (usocket:socket-close s))))
+         (wrapped (handler-case (progn (http:send-request
+                                        (http:make-request :url (format nil "http://127.0.0.1:~D/" port)
+                                                           :connect-timeout 2 :read-timeout 2)
+                                        '())
+                                       nil)
+                    (http:http-error (e) e))))
+    (is (typep wrapped 'http:http-error) "control: the failure arrived wrapped: ~S" wrapped)
+    (is-true (%runner-network-failure-p wrapped)))
+  (is-true (%runner-network-failure-p (make-condition 'http:http-error :phase :response
+                                                                       :detail "transport error: read timed out"))
+           "a failure after the request was sent, such as a read timeout, counts too")
+  (is-false (%runner-network-failure-p (make-condition 'http:http-error :status 503 :body "busy"))
+            "an HTTP status is the server's answer, not the runner's network")
+  (is-false (%runner-network-failure-p (make-condition 'http:http-error :detail "not a header name: \"a b\""))
+            "nor is a failure the client raised before sending"))
 
 ;;; --- the hub's review of #913 ---------------------------------------------------------------
 
@@ -1288,3 +1336,474 @@ also asked about as ::1, the form %TLS-NAMES gives and the one Linux and macOS v
                                               :connect-address "127.0.0.1" :read-timeout 5)
                            '())
         (is (equal '("::1") seen) "for ~A the verifier was asked about ~S" host seen)))))
+
+;;; --- what aion/retry reads from an HTTP-ERROR (#79) ------------------------------
+
+(defun %refusal (status &optional retry-after)
+  "The HTTP-ERROR ENSURE-2XX signals for a response with STATUS and, when given, a Retry-After
+header RETRY-AFTER."
+  (let ((headers (make-hash-table :test #'equal)))
+    (when retry-after (setf (gethash "retry-after" headers) retry-after))
+    (handler-case (progn (http:send-request (http:make-request :url "u") (list (http:ensure-2xx))
+                                            :perform (%ok :status status :headers headers))
+                         nil)
+      (http:http-error (e) e))))
+
+(test ensure-2xx-reads-retry-after
+  (is (eql 30 (http:http-error-retry-after (%refusal 429 "30"))))
+  (is (eql 30 (aion/retry:retry-after (%refusal 429 "30"))) "and AION/RETRY:RETRY-AFTER reads it")
+  (is (null (http:http-error-retry-after (%refusal 429))) "no header is NIL")
+  (is (null (http:http-error-retry-after (%refusal 503 "later"))) "nor is one it cannot read"))
+
+(test transience-of-an-http-error-follows-its-status
+  (dolist (status '(408 425 429 503 529))
+    (is (eq :transient (aion/retry:transience (%refusal status))) "~D" status))
+  (dolist (status '(500 502 504))
+    (is (eq :unknown (aion/retry:transience (%refusal status))) "~D" status))
+  (dolist (status '(400 401 403 404 409 422))
+    (is (null (aion/retry:transience (%refusal status))) "~D" status)))
+
+(test transience-of-a-transport-failure-follows-how-far-it-got
+  (is (eq :transient (aion/retry:transience (make-condition 'http:http-error :phase :connect))))
+  (is (eq :unknown (aion/retry:transience (make-condition 'http:http-error :phase :response))))
+  (is (null (aion/retry:transience (make-condition 'http:http-error :detail "a refused header")))
+      "a failure this client raised before sending is not transient"))
+
+(test a-refused-connection-is-a-connect-phase-failure
+  ;; A port nothing listens on: bound, then closed, so nothing can answer. The connect timeout
+  ;; is well above the time the refusal takes to arrive. Windows retries a refused connect to
+  ;; 127.0.0.1 for about two seconds before it reports the refusal, so with a two-second
+  ;; timeout WinHTTP reported 12002 (a timeout) on the CI Windows leg, not 12029 (#974, run
+  ;; 40653707988), and the test measured a timeout instead of a refusal.
+  (let ((port (let ((s (usocket:socket-listen "127.0.0.1" 0)))
+                (prog1 (usocket:get-local-port s) (usocket:socket-close s)))))
+    ;; A POST, which never uses dexador's connection pool (the hub's review of #974), so a
+    ;; refusal shows the request was not sent. A GET's refusal may have followed a send on a
+    ;; pooled connection, and is :RESPONSE on the dexador path.
+    (let ((e (handler-case (progn (http:send-request
+                                   (http:make-request :method :post
+                                                      :url (format nil "http://127.0.0.1:~D/" port)
+                                                      :content "x"
+                                                      :connect-timeout 15 :read-timeout 15)
+                                   (list (http:ensure-2xx)))
+                                  nil)
+               (http:http-error (e) e))))
+      ;; Each message names the failure, so a platform whose transport signals a type the
+      ;; classifier does not know shows which one (#974: WinHTTP's 12029 on Windows).
+      (is (typep e 'http:http-error) "got ~S" e)
+      (is (eq :connect (and e (http:http-error-phase e))) "phase ~S for: ~A"
+          (and e (http:http-error-phase e)) e)
+      (is (aion/retry:transient-p e) "so the default policy retries it: ~A" e))))
+
+;;; --- where a pinned connection failed, from the call that failed (review of #974) -------
+
+(defun %pinned-failure (port &key (scheme "http") (read-timeout 2))
+  "The HTTP-ERROR a pinned request to 127.0.0.1:PORT signals."
+  (handler-case (progn (http:send-request
+                        (http:make-request :url (format nil "~A://pinned.test:~D/" scheme port)
+                                           :connect-address "127.0.0.1"
+                                           :connect-timeout 2 :read-timeout read-timeout)
+                        '())
+                       nil)
+    (http:http-error (e) e)))
+
+(defmacro with-silent-listener ((port-var &key reply) &body body)
+  "Run BODY with PORT-VAR bound to a port on 127.0.0.1 whose server accepts one connection,
+writes REPLY (a string) when given, and then sends nothing more until BODY ends."
+  (let ((listener (gensym)) (thread (gensym)))
+    `(let* ((,listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t))
+            (,port-var (usocket:get-local-port ,listener))
+            (,thread (bt:make-thread
+                      (lambda ()
+                        (ignore-errors
+                         (let ((c (usocket:socket-accept ,listener :element-type '(unsigned-byte 8))))
+                           (when ,reply
+                             (write-sequence (sb-ext:string-to-octets ,reply)
+                                             (usocket:socket-stream c))
+                             (finish-output (usocket:socket-stream c)))
+                           (sleep 5)
+                           (usocket:socket-close c)))))))
+       (unwind-protect (progn ,@body)
+         (ignore-errors (bt:destroy-thread ,thread))
+         (usocket:socket-close ,listener)))))
+
+(test a-pinned-connection-that-was-refused-is-a-connect-failure
+  (let* ((port (let ((s (usocket:socket-listen "127.0.0.1" 0)))
+                 (prog1 (usocket:get-local-port s) (usocket:socket-close s))))
+         (e (%pinned-failure port)))
+    (is (typep e 'http:http-error))
+    (is (eq :connect (and e (http:http-error-phase e))))))
+
+(test a-pinned-failure-after-connecting-is-a-response-failure-whatever-its-type
+  ;; The connection is made and the request sent; the server never answers, and the read times
+  ;; out. It happened after the connection was made, so it is :RESPONSE, and a POST is not
+  ;; resent. Before #985 the condition that arrived here was dexador's attempt to reconnect by
+  ;; resolving pinned.test, a USOCKET:NS-HOST-NOT-FOUND-ERROR, which by its type is :CONNECT.
+  (with-silent-listener (port)
+    (let ((e (%pinned-failure port :read-timeout 1)))
+      (is (typep e 'http:http-error) "got ~S" e)
+      (is (eq :response (and e (http:http-error-phase e))) "got ~S: ~A" (and e (http:http-error-phase e)) e)
+      (is (not (aion/retry:transient-p e)) "the default policy does not resend it"))))
+
+#-os-windows
+(test a-tls-failure-on-a-pinned-connection-has-no-phase
+  ;; A server that answers the TLS handshake with plain text. Retrying cannot fix that, so it
+  ;; must not be classed as a transport failure either way.
+  (with-silent-listener (port :reply (format nil "HTTP/1.1 400 Bad Request~C~C~C~C" #\Return #\Linefeed #\Return #\Linefeed))
+    (let ((e (%pinned-failure port :scheme "https")))
+      (is (typep e 'http:http-error) "got ~S" e)
+      (is (null (and e (http:http-error-phase e))) "got ~S: ~A" (and e (http:http-error-phase e)) e)
+      (is (not (aion/retry:transient-or-unknown-p e))))))
+
+;;; --- a pinned request uses one connection (#985) -----------------------------------------
+
+(defmacro with-counting-listener ((port-var count-var) &body body)
+  "Run BODY with PORT-VAR bound to a port on 127.0.0.1 whose server accepts every connection and
+never answers, and COUNT-VAR to a function returning how many connections it accepted."
+  (let ((listener (gensym)) (thread (gensym)) (accepted (gensym)) (held (gensym)))
+    `(let* ((,listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t :backlog 8))
+            (,port-var (usocket:get-local-port ,listener))
+            (,accepted 0)
+            (,held '())
+            (,thread (bt:make-thread
+                      (lambda ()
+                        (ignore-errors
+                         (loop (let ((c (usocket:socket-accept ,listener)))
+                                 (incf ,accepted)
+                                 (push c ,held)))))))
+            (,count-var (lambda () ,accepted)))
+       (unwind-protect (progn ,@body)
+         (ignore-errors (bt:destroy-thread ,thread))
+         (dolist (c ,held) (ignore-errors (usocket:socket-close c)))
+         (usocket:socket-close ,listener)))))
+
+(test a-pinned-request-that-times-out-uses-one-connection
+  "#985: the URL names localhost, which resolves, and the request is pinned to 127.0.0.1. The
+server accepts and never answers. Before #985, dexador reconnected through DNS after the read
+timed out and sent the request again, and this server counted two connections."
+  (with-counting-listener (port accepted)
+    (let ((e (handler-case
+                 (progn (http:send-request
+                         (http:make-request :url (format nil "http://localhost:~D/" port)
+                                            :connect-address "127.0.0.1"
+                                            :connect-timeout 2 :read-timeout 1)
+                         '())
+                        nil)
+               (http:http-error (e) e))))
+      (sleep 0.5)                       ; a second connection, if one were made, has arrived
+      (is (= 1 (funcall accepted)) "the server accepted ~D connections" (funcall accepted))
+      (is (typep e 'http:http-error))
+      (is (eq :response (and e (http:http-error-phase e))))
+      (is (search "timeout" (string-downcase (or (and e (http:http-error-detail e)) "")))
+          "the caller gets the read timeout: ~A" (and e (http:http-error-detail e))))))
+
+(test fetch-public-stops-at-its-deadline-when-the-server-never-answers
+  "#985: a real socket, not a stub. The server accepts and never answers, and there is no read
+timeout, so only the deadline can end the fetch. On Windows the deadline used to shut the socket
+down, which did not wake the read: the fetch was still waiting after 20 seconds. An outer limit
+of 30 seconds makes that a failure here rather than a hang."
+  (with-counting-listener (port accepted)
+    (let* ((start (get-internal-real-time))
+           (result (handler-case
+                       (sb-ext:with-timeout 30
+                         (handler-case
+                             (progn (http:fetch-public (format nil "http://silent.test:~D/" port)
+                                                       :resolve (%resolver '(("silent.test" "127.0.0.1")))
+                                                       :address-policy #'%loopback-allowed
+                                                       :deadline 2)
+                                    :returned)
+                           (http:fetch-deadline-exceeded () :deadline)))
+                     (sb-ext:timeout () :still-waiting)))
+           (seconds (/ (- (get-internal-real-time) start) internal-time-units-per-second)))
+      (is (eq :deadline result) "got ~S after ~,1F s" result seconds)
+      (is (< seconds 10) "and within a few seconds of the deadline: ~,1F s" seconds)
+      (is (= 1 (funcall accepted)) "on one connection: ~D" (funcall accepted)))))
+
+(test a-pinned-request-sends-dexadors-user-agent-and-accept-unless-given
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "ok")))
+    (http:send-request (http:make-request :url (%local s "/" "pinned.test")
+                                          :connect-address "127.0.0.1" :read-timeout 5)
+                       '())
+    (http:send-request (http:make-request :url (%local s "/" "pinned.test")
+                                          :connect-address "127.0.0.1" :read-timeout 5
+                                          :headers '(("User-Agent" . "probe/1")
+                                                     ("Accept" . "text/html")))
+                       '())
+    (destructuring-bind (second first) (server-heads s)
+      (is (string= dexador.util:*default-user-agent* (%head-header first "User-Agent"))
+          "as a request through dexador sent")
+      (is (string= "*/*" (%head-header first "Accept")))
+      (is (string= "probe/1" (%head-header second "User-Agent")) "a caller's own wins")
+      (is (string= "text/html" (%head-header second "Accept"))))))
+
+(test a-pinned-request-frames-its-body-as-dexador-did
+  "#985: string content without a Content-Type is text/plain, and a POST with no content says
+Content-Length: 0, as dexador wrote them; a GET with no content says neither."
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "ok")))
+    (flet ((send (&rest args)
+             (http:send-request (apply #'http:make-request :url (%local s "/" "pinned.test")
+                                       :connect-address "127.0.0.1" :read-timeout 5 args)
+                                '())
+             (first (server-heads s))))
+      (let ((head (send :method :post :content "hello")))
+        (is (string= "text/plain" (%head-header head "Content-Type")))
+        (is (string= "5" (%head-header head "Content-Length"))))
+      (let ((head (send :method :post :content "{}" :headers '(("Content-Type" . "application/json")))))
+        (is (string= "application/json" (%head-header head "Content-Type")) "a caller's own wins"))
+      (let ((head (send :method :post)))
+        (is (string= "0" (%head-header head "Content-Length")))
+        (is (null (%head-header head "Content-Type"))))
+      (let ((head (send :method :get)))
+        (is (null (%head-header head "Content-Length")))))))
+
+;;; --- a pooled request's failure to connect is not known to be before the send (#974 review) --
+
+(test a-request-that-may-have-used-a-pooled-connection-does-not-fail-in-the-connect-phase
+  "dexador pools connections, and a request it sent on a pooled connection that then dropped is
+sent again by dexador on a new one. A refusal of that new connection does not show the request
+was not acted on. So on the dexador path a failure to connect is :CONNECT only for a request
+that could not have used the pool, and a request that is not idempotent never uses it."
+  (let ((refused (make-condition 'usocket:connection-refused-error :socket nil)))
+    (is (eq :response (http::%transport-phase refused nil :pooled t))
+        "a pooled request's refused reconnect is :RESPONSE")
+    (is (eq :connect (http::%transport-phase refused nil :pooled nil))
+        "control: a request on a new connection is :CONNECT"))
+  (flet ((args (method) (http::%dex-args (http:make-request :method method :url "http://x.test/"))))
+    (is (and (member :use-connection-pool (args :post))
+             (null (getf (args :post) :use-connection-pool))
+             (null (getf (args :post) :keep-alive)))
+        "a POST gets a new connection: ~S" (args :post))
+    (is (null (member :use-connection-pool (args :get)))
+        "control: a GET may use the pool: ~S" (args :get))))
+;;; --- a response read as it arrives, and cancelling it (#984) --------------------------------
+
+(defun %octets-of (string) (sb-ext:string-to-octets string :external-format :utf-8))
+
+(defun %events-of (text)
+  "Every event READ-EVENT finds in TEXT, as lists (DATA EVENT ID)."
+  (let ((in (make-instance 'http::%octets-input :octets (%octets-of text))))
+    (loop for (data event id) = (multiple-value-list (http:read-event in))
+          while data collect (list data event id))))
+
+(test read-event-reads-data-event-and-id-and-skips-comments
+  "Data lines are joined with newlines; a comment, an event with no data and a CR before the LF are
+dropped; the event and id fields belong to their own event only."
+  (is (equal '(("one" "start" "7") ("two" nil nil) ("a
+b" nil nil) ("é" nil nil))
+             (%events-of (concatenate
+                          'string
+                          (format nil ": hello~%event: start~%id: 7~%data: one~%~%data:two~%~%")
+                          (format nil "event: empty~%~%data: a~C~%data: b~C~%~C~%data: é~%~%"
+                                  #\Return #\Return #\Return))))))
+
+(test read-event-discards-an-event-the-stream-ends-in
+  "An event with no blank line after it when the stream ends is not returned, whether the stream
+ends after a whole data line or in the middle of one: the connection dropped before the event was
+finished. The events before it are returned."
+  (is (equal '(("whole" nil nil)) (%events-of (format nil "data: whole~%~%data: cut~%"))))
+  (is (equal '(("whole" nil nil)) (%events-of (format nil "data: whole~%~%data: {\"a\":"))))
+  (is (null (%events-of (format nil "event: x~%data: only~%")))))
+
+(test read-event-refuses-an-event-over-its-limit
+  "An event longer than *MAX-EVENT-OCTETS* signals HTTP-ERROR rather than being read whole."
+  (let ((http:*max-event-octets* 16))
+    (signals http:http-error (%events-of (format nil "data: ~A~%~%" (make-string 40 :initial-element #\x))))
+    (is (equal '(("short" nil nil)) (%events-of (format nil "data: short~%~%"))))))
+
+(defun %sse-server-handler (first-sent next-allowed)
+  "A handler that sends one event, sets FIRST-SENT's car, waits until NEXT-ALLOWED's car is true
+(at most 10 seconds), then sends a second event and ends the stream."
+  (lambda (path head stream)
+    (declare (ignore path head))
+    (ignore-errors
+     (aion/test-http:write-head stream 200 '(("Content-Type" . "text/event-stream")
+                                             ("Connection" . "close")))
+     (write-sequence (%octets-of (format nil "data: first~%~%")) stream)
+     (finish-output stream)
+     (setf (car first-sent) t)
+     (loop repeat 100 until (car next-allowed) do (sleep 0.1))
+     (write-sequence (%octets-of (format nil "data: second~%~%")) stream)
+     (finish-output stream))))
+
+(test a-streamed-response-gives-each-event-before-the-next-is-sent
+  "OPEN-RESPONSE-STREAM returns once the head has arrived, and READ-EVENT returns the first event
+while the server is still holding back the second."
+  (let ((first-sent (list nil)) (next-allowed (list nil)))
+    (with-server (s (%sse-server-handler first-sent next-allowed))
+      (multiple-value-bind (body status headers)
+          (http:open-response-stream (http:make-request :url (%local s "/events") :read-timeout 15))
+        (unwind-protect
+             (progn
+               (is (= 200 status))
+               (is (equal "text/event-stream" (http:header-value headers "content-type")))
+               (is (equal "first" (http:read-event body)))
+               (is (null (car next-allowed)) "the second event had not been allowed yet")
+               (setf (car next-allowed) t)
+               (is (equal "second" (http:read-event body)))
+               (is (null (http:read-event body)) "then the stream ends"))
+          (setf (car next-allowed) t)
+          (close body)))
+      (is (search "Accept-Encoding: identity" (first (server-heads s)))
+          "the request asks for an uncompressed body"))))
+
+(test a-streamed-error-response-is-returned-with-its-body
+  "A non-2xx is returned with its status, and its body can be read."
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 429 '() "{\"error\":\"slow down\"}")))
+    (multiple-value-bind (body status)
+        (http:open-response-stream (http:make-request :url (%local s "/") :read-timeout 5))
+      (unwind-protect
+           (progn
+             (is (= 429 status))
+             (is (equal "{\"error\":\"slow down\"}"
+                        (sb-ext:octets-to-string
+                         (coerce (loop for b = (read-byte body nil nil) while b collect b)
+                                 '(vector (unsigned-byte 8)))
+                         :external-format :utf-8))))
+        (close body)))))
+
+(defun %silent-handler (closed-at)
+  "A handler that sends one event and then sends nothing, the way a provider's connection is quiet
+while the model thinks, for at most 10 seconds. A thread of its own reads the connection, and
+when the read returns, because the client closed the connection or shut it down, stores the time
+in CLOSED-AT's car. The handler returns once that happens or the 10 seconds pass."
+  (lambda (path head stream)
+    (declare (ignore path head))
+    (ignore-errors
+     (aion/test-http:write-head stream 200 '(("Content-Type" . "text/event-stream")
+                                             ("Connection" . "close")))
+     (write-sequence (%octets-of (format nil "data: first~%~%")) stream)
+     (finish-output stream)
+     (let* ((ending (list nil))
+            ;; THREAD-LIFETIME: blocks reading the connection until the client closes it, or
+            ;; until this handler returns and the server closes it. The JOIN below waits for it.
+            (watcher (bt:make-thread
+                      (lambda ()
+                        (ignore-errors (read-byte stream nil nil))
+                        (unless (car ending) (setf (car closed-at) (get-internal-real-time))))
+                      :name "test server close watcher")))
+       (loop repeat 100 until (car closed-at) do (sleep 0.1))
+       (setf (car ending) t)
+       (unless (car closed-at)
+         ;; The client has not closed it: close it from here, so the watcher's read returns.
+         (ignore-errors (close stream :abort t)))
+       (aion/test-threads:join watcher :timeout 15)))))
+
+(test cancelling-a-streamed-request-closes-its-connection
+  "A thread blocked reading a stream that the server keeps open is woken by CANCEL-REQUEST from
+another thread, with REQUEST-CANCELLED, and the server sees the connection close within two
+seconds of the cancel. The server sends nothing after the first event, so the reader is blocked
+in a read when the cancel comes: a cancel that only marked the request would leave it there, and
+the connection open, until the server gave up after 10 seconds."
+  (let ((closed-at (list nil))
+        (cancel (http:make-request-cancel)))
+    (with-server (s (%silent-handler closed-at))
+      (let* ((outcome (list nil))
+             (first (list nil))
+             ;; THREAD-LIFETIME: reads the stream until the cancel below wakes it with
+             ;; REQUEST-CANCELLED, or until the server ends the stream after 10 seconds; it then
+             ;; closes the body and returns. The JOIN waits for it.
+             (reader (bt:make-thread
+                      (lambda ()
+                        (multiple-value-bind (body)
+                            (http:open-response-stream
+                             (http:make-request :url (%local s "/") :read-timeout 30)
+                             :cancel cancel)
+                          (unwind-protect
+                               (handler-case
+                                   (progn (setf (car first) (http:read-event body))
+                                          (http:read-event body)
+                                          (setf (car outcome) :ended))
+                                 (http:request-cancelled () (setf (car outcome) :cancelled)))
+                            (close body))))
+                      :name "streamed request reader")))
+        (loop repeat 50 until (car first) do (sleep 0.1))
+        (is (equal "first" (car first)) "the first event arrived before the cancel")
+        (sleep 0.3)
+        (is (null (car closed-at)) "the connection was open before the cancel")
+        (let ((cancelled-at (get-internal-real-time)))
+          (http:cancel-request cancel)
+          (is (http:request-cancelled-p cancel))
+          (aion/test-threads:join reader :timeout 15)
+          (is (eq :cancelled (car outcome)) "the reader was woken with REQUEST-CANCELLED")
+          (loop repeat 30 until (car closed-at) do (sleep 0.1))
+          (is-true (car closed-at) "the server saw the connection close")
+          (when (car closed-at)
+            (is (< (/ (- (car closed-at) cancelled-at) internal-time-units-per-second) 2)
+                "within two seconds of the cancel")))))))
+
+(defun %cancellable-reader (server cancel first outcome)
+  "A thread that opens a stream to SERVER with CANCEL, stores its first event in FIRST's car, then
+reads on and stores :CANCELLED or :ENDED in OUTCOME's car."
+  ;; THREAD-LIFETIME: reads the stream until a cancel wakes it with REQUEST-CANCELLED, or until
+  ;; the server ends the stream after 10 seconds; it then closes the body and returns. The caller
+  ;; joins it.
+  (bt:make-thread
+   (lambda ()
+     (multiple-value-bind (body)
+         (http:open-response-stream (http:make-request :url (%local server "/") :read-timeout 30)
+                                    :cancel cancel)
+       (unwind-protect
+            (handler-case
+                (progn (setf (car first) (http:read-event body))
+                       (http:read-event body)
+                       (setf (car outcome) :ended))
+              (http:request-cancelled () (setf (car outcome) :cancelled)))
+         (close body))))
+   :name "streamed request reader"))
+
+(test one-cancel-stops-every-request-opened-with-it
+  "Two threads each have a stream open with the same REQUEST-CANCEL, the way two calls made under
+one turn's cancel would. One CANCEL-REQUEST wakes both with REQUEST-CANCELLED, and both servers
+see their connection close. When both bodies are closed the handle holds no request."
+  (let ((closed-a (list nil)) (closed-b (list nil))
+        (cancel (http:make-request-cancel)))
+    (with-server (sa (%silent-handler closed-a))
+      (with-server (sb (%silent-handler closed-b))
+        (let* ((first-a (list nil)) (first-b (list nil))
+               (outcome-a (list nil)) (outcome-b (list nil))
+               (reader-a (%cancellable-reader sa cancel first-a outcome-a))
+               (reader-b (%cancellable-reader sb cancel first-b outcome-b)))
+          (loop repeat 50 until (and (car first-a) (car first-b)) do (sleep 0.1))
+          (is (equal '("first" "first") (list (car first-a) (car first-b)))
+              "both first events arrived before the cancel")
+          (http:cancel-request cancel)
+          (aion/test-threads:join reader-a :timeout 15)
+          (aion/test-threads:join reader-b :timeout 15)
+          (is (equal '(:cancelled :cancelled) (list (car outcome-a) (car outcome-b)))
+              "both readers were woken with REQUEST-CANCELLED")
+          (loop repeat 30 until (and (car closed-a) (car closed-b)) do (sleep 0.1))
+          (is-true (car closed-a) "the first server saw its connection close")
+          (is-true (car closed-b) "the second server saw its connection close")
+          (is (null (http::request-cancel-watches cancel))
+              "the closed bodies took their requests back from the handle"))))))
+
+(test a-request-cancelled-before-it-is-opened-never-connects
+  "OPEN-RESPONSE-STREAM with a handle that was already cancelled signals REQUEST-CANCELLED and
+sends nothing."
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "x")))
+    (let ((cancel (http:make-request-cancel)))
+      (http:cancel-request cancel)
+      (signals http:request-cancelled
+        (http:open-response-stream (http:make-request :url (%local s "/") :read-timeout 5)
+                                   :cancel cancel))
+      (sleep 0.2)
+      (is (zerop (%requests s)) "no request reached the server"))))
+
+(test closing-a-streamed-body-closes-its-connection
+  "Closing the body before the response has ended closes the connection, so the server stops."
+  (let ((closed-at (list nil)))
+    (with-server (s (%silent-handler closed-at))
+      (multiple-value-bind (body)
+          (http:open-response-stream (http:make-request :url (%local s "/") :read-timeout 5))
+        (is (equal "first" (http:read-event body)))
+        (close body))
+      (loop repeat 30 until (car closed-at) do (sleep 0.1))
+      (is-true (car closed-at) "the server saw the connection close"))))
