@@ -132,7 +132,8 @@ troubleshooting — is in [`docs/user-guide.md`](docs/user-guide.md).
 ## Opt-in systems beside the core
 
 - **`praxeon/web`** — a Clack-based web + REST surface (HTMX chat UI, `POST /api/message`,
-  `GET /api/progress`), rendering the same event stream the CLI does.
+  `GET /api/progress`, or a Server-Sent Events stream at `GET /api/events` on a server that can
+  hold one), rendering the same event stream the CLI does.
 - **`praxeon/web-search`** — web search as a registered *means*, over the same
   provider-neutral protocol as the LLM layer.
 - **`praxeon/web-page`** — the `read-web-page` means: the model opens a URL the user gave

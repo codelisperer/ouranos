@@ -243,8 +243,13 @@ pointed at it."
 (defun %logged-exception (thunk)
   "Call THUNK inside a HANDLER-BIND that logs any serious condition with AION/LOG:EXCEPTION, the
 way a request middleware does (hyperion's dev server binds SERIOUS-CONDITION, its request log
-CL:ERROR), and return the log text."
-  (let ((out (make-string-output-stream)))
+CL:ERROR), and return the log text.
+
+With AION/LOG:*LOG-CONDITION-DETAILS* on, so the report and every frame's arguments are written:
+by default EXCEPTION writes neither (#1013), and the token must stay out of the log for an app
+that turns them on for a development run too."
+  (let ((out (make-string-output-stream))
+        (aion/log:*log-condition-details* t))
     (unwind-protect
          (progn (aion/log:setup :env :dev :level :error :stream out)
                 (handler-case
