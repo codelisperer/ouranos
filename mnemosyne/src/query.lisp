@@ -40,11 +40,26 @@
 ;;;; **transaction gotchas** (see docs/xtdb-notes.md). Its temporal SELECT extensions
 ;;;; (FOR VALID_TIME AS OF ...) layer on later; the :xtdb placeholder path here is a
 ;;;; provisional seam, not yet verified end-to-end.
+;;;;
+;;;; :jet is Microsoft Access SQL (Jet/ACE), for queries only (#1061): mnemosyne renders it and
+;;;; has no backend that runs it. It differs from the others in six places, each tested:
+;;;;   * :limit renders as a prefix, SELECT TOP n, with n written into the SQL as a number,
+;;;;     because Jet does not accept a parameter there. Jet's TOP also returns rows tied with
+;;;;     the last one on the ORDER BY columns, so a query can return more than n rows.
+;;;;   * Jet has no OFFSET, so :offset signals UNSUPPORTED-QUERY rather than being dropped.
+;;;;   * Names render in brackets, [u].[email]; (:quoted "First Name") renders [First Name].
+;;;;   * (:date y m d) and (:timestamp y m d h mi s) render as #yyyy-mm-dd# and
+;;;;     #yyyy-mm-dd hh:nn:ss#, written into the SQL. Every other dialect binds them as strings.
+;;;;   * Values bind as ? and the param list is in placeholder order, which is the order ADO
+;;;;     binds them in, since it binds by position.
+;;;;   * An aggregate in the SELECT list without an alias gets one, COUNT(*) AS [count], so
+;;;;     the column can be read by name: Jet names it Expr1000 otherwise.
 
 (in-package #:mnemosyne/query)
 
 (defvar *dialect* :sqlite
-  "The SQL dialect SQL compiles for: :sqlite | :postgres (both use \"?\") | :xtdb.
+  "The SQL dialect SQL compiles for: :sqlite | :postgres (both use \"?\") | :xtdb | :jet
+(Microsoft Access, queries only; see the header of this file).
 
 A DESIGNATOR, not a vocabulary of its own (pre-publication issue 432, ADR-0003): a keyword, a string or a typed
 MNEMOSYNE/FIELD:DIALECT all name the same thing, and SQL normalises whichever it is through
@@ -60,6 +75,23 @@ MNEMOSYNE/FIELD-SHELL:DIALECT-FOR before anything branches on it.")
 
 (defun %postgres-p (ctx) (eq (ctx-dialect ctx) fld:D-Postgres))
 (defun %xtdb-p (ctx) (eq (ctx-dialect ctx) fld:D-Xtdb))
+(defun %jet-p (ctx) (eq (ctx-dialect ctx) fld:D-Jet))
+
+(defvar *bracket-identifiers* nil
+  "True while SQL compiles for the Jet dialect, where %IDENT and %QUOTED write names in
+brackets. Bound by SQL; a special rather than a CTX slot because %IDENT is called from places
+that have no CTX.")
+
+(define-condition unsupported-query (error)
+  ((dialect :initarg :dialect :reader unsupported-query-dialect)
+   (clause :initarg :clause :reader unsupported-query-clause)
+   (detail :initarg :detail :initform nil :reader unsupported-query-detail))
+  (:report (lambda (c s)
+             (format s "mnemosyne/query: the ~A dialect has no ~A~@[ -- ~A~]"
+                     (unsupported-query-dialect c) (unsupported-query-clause c)
+                     (unsupported-query-detail c))))
+  (:documentation "A query clause the target dialect cannot express, signalled when the query
+is compiled rather than dropped from the SQL (#1061). Jet's missing OFFSET is the first."))
 (defun %dialect-name (ctx) (fld:dialect-name (ctx-dialect ctx)))
 
 (defun %sql-escape (s)
@@ -107,22 +139,45 @@ underscores."
        (every (lambda (c) (or (char<= #\a (char-downcase c) #\z) (char<= #\0 c #\9) (char= c #\_)))
               part)))
 
+(defun %name-parts (name)
+  "NAME split at each dot: \"u.email\" is (\"u\" \"email\")."
+  (loop with start = 0
+        for dot = (position #\. name :start start)
+        collect (subseq name start dot)
+        while dot do (setf start (1+ dot))))
+
 (defun %safe-identifier-p (name)
   "True when NAME is one or more identifier parts separated by dots (u.email, public.users),
 or ends in .* (u.*), or is * alone."
-  (let ((parts (loop with start = 0
-                     for dot = (position #\. name :start start)
-                     collect (subseq name start dot)
-                     while dot do (setf start (1+ dot)))))
+  (let ((parts (%name-parts name)))
     (loop for (part . more) on parts
           always (if more
                      (%identifier-part-p part)
                      (or (%identifier-part-p part) (string= part "*"))))))
 
+(defun %jet-name-part-p (part)
+  "True when PART can stand inside Jet's brackets: a non-empty string with no control
+character, none of . ! ` [ ], and no leading space. Access refuses those in a name, and a
+closing bracket cannot be escaped, so a name holding one could end the bracket early."
+  (and (stringp part) (plusp (length part))
+       (char/= (char part 0) #\Space)
+       (notany (lambda (c) (or (< (char-code c) 32) (find c ".!`[]"))) part)))
+
+(defun %bracketed (parts clause)
+  "PARTS, one or more strings, as a Jet name in brackets: [Client Data].[First Name]."
+  (unless (and parts (every #'%jet-name-part-p parts))
+    (error 'invalid-identifier
+           :text (princ-to-string parts) :clause clause
+           :expected "a Jet name: no leading space, no control character, none of . ! ` [ ]"))
+  (format nil "~{[~A]~^.~}" parts))
+
 (defun %quoted (parts clause)
   "PARTS, one or more strings, as a double-quoted SQL identifier: \"schema\".\"MyTable\".
 Each part is quoted and an embedded double quote is doubled, which is how Postgres, SQLite and
-XTDB all read a quoted name. A part must be a non-empty string without a NUL (#860)."
+XTDB all read a quoted name. A part must be a non-empty string without a NUL (#860). Under the
+Jet dialect the parts go in brackets instead; see %BRACKETED."
+  (when *bracket-identifiers*
+    (return-from %quoted (%bracketed parts clause)))
   (unless (and parts (every (lambda (p) (and (stringp p) (plusp (length p))
                                               (not (find (code-char 0) p))))
                             parts))
@@ -162,7 +217,13 @@ with (:raw \"...\"), the one way to do so, visible at the call site."
     (unless (%safe-identifier-p name)
       (error 'invalid-identifier :text name :clause clause
                                  :expected "a safe SQL identifier (letters, digits and underscores, dot-separated)"))
-    name))
+    ;; Jet writes every name in brackets, except a function name in (:call ...), which is
+    ;; not a name in the table sense, and *, which is not a name at all (#1061).
+    (if (and *bracket-identifiers* (not (eq clause :call)))
+        (format nil "~{~A~^.~}"
+                (mapcar (lambda (part) (if (string= part "*") part (format nil "[~A]" part)))
+                        (%name-parts name)))
+        name)))
 
 (defun %item (ctx x clause)
   "A name or an expression in CLAUSE: GROUP BY, ON CONFLICT and RETURNING take either. A list
@@ -316,6 +377,40 @@ what makes the escaping mean the same thing on SQLite, which has no default esca
 and Postgres, whose default is the backslash (#862)."
   (concatenate 'string "%" (like-escape text :escape escape) "%"))
 
+(defun %datetime (ctx op args)
+  "Compile (:date y m d) or (:timestamp y m d h mi s). Under Jet, a #...# literal written into
+the SQL; under every other dialect, the ISO text bound as a value, the form mnemosyne stores
+dates and timestamps in.
+
+WRITTEN INTO THE SQL ON JET, NOT BOUND (#1061). Jet reads #yyyy-mm-dd# the same way whatever
+the machine's locale, and a date passed as text is converted by locale rules. Writing the
+value into the SQL is safe because every part is checked to be an integer in range (the year
+from 100 to 9999, the range Jet accepts), so
+nothing but digits, dashes, colons and a space can reach the SQL."
+  (destructuring-bind (year month day &optional (hour 0) (minute 0) (second 0)) args
+    (flet ((in-range (x lo hi) (and (integerp x) (<= lo x hi))))
+      (unless (and (in-range year 100 9999) (in-range month 1 12)
+                   (in-range day 1 (%days-in-month year month))
+                   (in-range hour 0 23) (in-range minute 0 59) (in-range second 0 59)
+                   (or (eq op :timestamp) (= 3 (length args))))
+        (error "mnemosyne/query: ~S is not a valid ~(~A~); every part must be an integer in range."
+               (cons op args) op)))
+    (let ((text (if (eq op :date)
+                    (format nil "~4,'0D-~2,'0D-~2,'0D" year month day)
+                    (format nil "~4,'0D-~2,'0D-~2,'0D ~2,'0D:~2,'0D:~2,'0D"
+                            year month day hour minute second))))
+      (if (%jet-p ctx)
+          (format nil "#~A#" text)
+          (%placeholder ctx text)))))
+
+(defun %days-in-month (year month)
+  "The number of days in MONTH of YEAR, in the Gregorian calendar; 31 when MONTH is out of
+range, which the caller refuses separately."
+  (case month
+    ((4 6 9 11) 30)
+    (2 (if (and (zerop (mod year 4)) (or (plusp (mod year 100)) (zerop (mod year 400)))) 29 28))
+    (t 31)))
+
 (defun %ilike (ctx args)
   "Compile a case-insensitive match. Postgres only (#138).
 
@@ -364,6 +459,7 @@ explicitly, for example with LOWER on both sides."
       ((:call) (format nil "~A(~{~A~^, ~})" (%ident (first args) :call) (mapcar #'e (rest args))))
       ((:quoted) (%quoted args :expression))
       ((:raw) (first args))
+      ((:date :timestamp) (%datetime ctx op args))
       ((:<-> :<=> :<#>) (%vector-distance ctx op args))
       (t (if (member op +fn-ops+)
              (format nil "~A(~{~A~^, ~})" (symbol-name op) (mapcar #'e args))
@@ -439,10 +535,53 @@ so ON CONFLICT is meaningless; and its DML has no RETURNING (read the value back
     (when (getf q :returning)
       (error "mnemosyne/query: RETURNING is unsupported on XTDB 2 DML -- read the value back with a separate query. Drop :returning for the :xtdb dialect."))))
 
+(defparameter +aggregate-ops+ '(:count :sum :avg :min :max)
+  "The aggregates that Jet names Expr1000 and so on when they have no alias (#1061).")
+
+(defun %aggregate-alias (item taken)
+  "An alias for the unaliased aggregate ITEM that is not in TAKEN: the function's name, then
+_ and the column's last part when the argument is a plain column. COUNT(*) is count and
+SUM(o.total) is sum_total. A clash takes _2, _3 and so on."
+  (let* ((arg (second item))
+         (base (format nil "~(~A~)~@[_~A~]" (first item)
+                       (and (or (symbolp arg) (stringp arg))
+                            (let ((last (car (last (%name-parts (string-downcase (string arg)))))))
+                              (and (%identifier-part-p last) last))))))
+    (loop for n from 1
+          for name = (if (= n 1) base (format nil "~A_~D" base n))
+          unless (member name taken :test #'string-equal) return name)))
+
+(defun %jet-select-items (ctx items)
+  "ITEMS rendered for Jet, with an alias given to each aggregate that has none, so the column
+can be read back by name (#128, row 8)."
+  (let ((taken (loop for it in items
+                     when (and (consp it) (eq (car it) :as))
+                       collect (string-downcase (string (third it))))))
+    (mapcar (lambda (it)
+              (if (and (consp it) (member (car it) +aggregate-ops+))
+                  (let ((alias (%aggregate-alias it taken)))
+                    (push alias taken)
+                    (format nil "~A AS ~A" (%expr ctx it) (%ident alias :as)))
+                  (%select-item ctx it)))
+            items)))
+
+(defun %top (q)
+  "The \"TOP n \" prefix for Jet's row limit, or \"\". N is written into the SQL, because Jet
+does not take a parameter there, so it must be a positive integer."
+  (let ((n (getf q :limit)))
+    (cond ((null n) "")
+          ((typep n '(integer 1)) (format nil "TOP ~D " n))
+          (t (error "mnemosyne/query: :limit ~S must be a positive integer for TOP n on jet." n)))))
+
 (defun %select (ctx q)
+  (when (and (%jet-p ctx) (getf q :offset))
+    (error 'unsupported-query :dialect "jet" :clause "OFFSET"
+                              :detail "page with a WHERE on the last key seen and :limit instead"))
   (with-output-to-string (s)
-    (format s "SELECT ~{~A~^, ~}"
-            (mapcar (lambda (it) (%select-item ctx it)) (or (getf q :select) '(:*))))
+    (let ((items (or (getf q :select) '(:*))))
+      (if (%jet-p ctx)
+          (format s "SELECT ~A~{~A~^, ~}" (%top q) (%jet-select-items ctx items))
+          (format s "SELECT ~{~A~^, ~}" (mapcar (lambda (it) (%select-item ctx it)) items))))
     (when (getf q :from) (format s " FROM ~{~A~^, ~}"
                                  (mapcar (lambda (f) (%from-item ctx f)) (getf q :from))))
     (when (getf q :join)     (write-string (%joins ctx (getf q :join)) s))
@@ -450,7 +589,8 @@ so ON CONFLICT is meaningless; and its DML has no RETURNING (read the value back
     (when (getf q :group-by) (format s " GROUP BY ~{~A~^, ~}" (mapcar (lambda (g) (%item ctx g :group-by)) (getf q :group-by))))
     (when (getf q :having)   (format s " HAVING ~A" (%expr ctx (getf q :having))))
     (when (getf q :order-by) (format s " ORDER BY ~A" (%order ctx (getf q :order-by))))
-    (when (getf q :limit)    (format s " LIMIT ~A"  (%placeholder ctx (getf q :limit))))
+    (when (and (getf q :limit) (not (%jet-p ctx)))
+      (format s " LIMIT ~A"  (%placeholder ctx (getf q :limit))))
     (when (getf q :offset)   (format s " OFFSET ~A" (%placeholder ctx (getf q :offset))))))
 
 (defun %on-conflict (ctx q s)
@@ -522,6 +662,7 @@ DIALECT is a designator -- :postgres, \"postgres\" or a typed MNEMOSYNE/FIELD:DI
 is normalised and checked once here: an unknown spelling used to take the SQLite branch
 silently. See %CHECK-DIALECT."
   (let* ((ctx (make-ctx (%check-dialect dialect) inline))
+         (*bracket-identifiers* (%jet-p ctx))
          (str (cond ((getf query :select)      (%select ctx query))
                     ((getf query :insert-into)  (%insert ctx query))
                     ((getf query :update)       (%update ctx query))

@@ -1092,6 +1092,21 @@ its tag.
 
 ### Added
 
+- **`mnemosyne/query:sql` renders Microsoft Access (Jet/ACE) SQL with `:dialect :jet`**
+  (#1061). `:limit` renders as `SELECT TOP n`, with `n` written into the SQL, so it must be a
+  positive integer; Jet's `TOP` also returns rows tied with the last one on the `ORDER BY`
+  columns. `:offset` signals the new condition `mnemosyne/query:unsupported-query` when the
+  query is compiled, because Jet has no `OFFSET`. Names render in brackets (`[c].[email]`,
+  `(:quoted "First Name")` as `[First Name]`). The new forms `(:date y m d)` and
+  `(:timestamp y m d h mi s)` render as `#2026-09-14#` and `#2026-09-14 08:05:03#` on Jet and
+  are bound as ISO text on the other dialects. Values bind as `?`, and the param list is in
+  placeholder order, which is the order ADO binds them in. An aggregate in the SELECT list
+  without an alias gets one (`COUNT(*) AS [count]`, `SUM(o.total) AS [sum_total]`). The dialect
+  renders queries only: mnemosyne has no backend that runs them, `ddl:ddl` signals
+  `unsupported-ddl` for `:jet`, and `schema:schema-ddl` refuses it. `mnemosyne/field:Dialect`
+  has a new constructor, `D-Jet`, and `mnemosyne/field-shell:+dialects+` lists it, so Coalton
+  code that matches on `Dialect` without a wildcard arm needs a `D-Jet` arm. See
+  `mnemosyne/docs/user-guide.md`, "Dialects".
 - **`mnemosyne/test-template`: a test suite can migrate one SQLite database per run and give
   each test a copy** (#1047). `make-sqlite-template` applies an app's migrations to an in-memory
   database once (`:setup` configures its connection first); `copy-sqlite-template` and
