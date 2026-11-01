@@ -54,9 +54,11 @@
   "REQUEST as (values method path params), PARAMS from the query or the form body."
   (multiple-value-bind (path query) (%split-path (aion/test-http:request-path request))
     (values (aion/test-http:request-method request) path
-            (if (string= "POST" (aion/test-http:request-method request))
-                (%decode-params (aion/test-http:request-body-string request))
-                query))))
+            (cond ((not (string= "POST" (aion/test-http:request-method request))) query)
+                  ;; A photo upload's body is binary; its test reads the parts itself (#978).
+                  ((search "multipart/" (or (aion/test-http:request-header request "Content-Type") ""))
+                   '())
+                  (t (%decode-params (aion/test-http:request-body-string request)))))))
 
 (defmacro with-graph ((server provider handler &rest provider-args) &body body)
   "Run BODY with SERVER answering every Graph request with HANDLER, a function of (METHOD PATH
@@ -224,8 +226,10 @@ MAKE-FACEBOOK's, before the defaults."
              (multiple-value-list (h:facebook-page-health fb (or (getf args :page) +page-id+))))))
     (is (equal '(:connected "My Page") (health (%health-handler))))
     (is (eq :reconnect (first (health (%health-handler :debug-json "{\"data\":{\"is_valid\":false}}")))))
-    (is (eq :reconnect (first (health (%health-handler :debug-json "{\"data\":{\"is_valid\":true,\"profile_id\":\"1234567890\",\"scopes\":[\"pages_show_list\"]}}"))))
-        "a token without pages_manage_posts cannot post")
+    (is (equal '(:missing-permission "My Page" ("pages_manage_posts"))
+               (health (%health-handler :debug-json "{\"data\":{\"is_valid\":true,\"profile_id\":\"1234567890\",\"scopes\":[\"pages_show_list\"]}}")))
+        "a valid token without pages_manage_posts cannot post, and says which scope is missing (#978)")
+    (is (typep :missing-permission 'h:facebook-page-status))
     (is (eq :reconnect (first (health (%health-handler :me-status 400 :me-json (%fb-error 190 "expired"))))))
     (is (eq :not-permitted (first (health (%health-handler :me-status 403 :me-json (%fb-error 10 "denied"))))))
     (is (eq :not-found (first (health (%health-handler :me-status 400 :me-json (%fb-error 100 "missing" 33))))))
@@ -437,3 +441,152 @@ FACEBOOK_PAGE_TOKEN_<id> (and FACEBOOK_APP_ID / FACEBOOK_APP_SECRET for the heal
         (let ((fb (h:make-facebook)))
           (is (eq :connected (h:facebook-page-health fb page)))
           (is (stringp (h:post-to-page page nil :message "hermes live test (#822)" :provider fb)))))))
+
+;;; --- the token's scopes and expiry, and a photo from octets (#978) ---------------------
+
+(defun %unix (universal) (- universal (encode-universal-time 0 0 0 1 1 1970 0)))
+
+(test facebook-token-info-reads-debug-token
+  (let ((expires (encode-universal-time 0 0 12 1 3 2027 0))
+        (data-access (encode-universal-time 0 0 12 1 1 2027 0)))
+    (flet ((info (json)
+             (with-graph (server fb (%health-handler :debug-json json))
+               (h:facebook-token-info fb +page-id+))))
+      (let ((i (info (format nil "{\"data\":{\"is_valid\":true,\"app_id\":\"111\",\"profile_id\":\"1234567890\",\"expires_at\":~D,\"data_access_expires_at\":~D,\"scopes\":[\"pages_show_list\",\"pages_manage_posts\"]}}"
+                             (%unix expires) (%unix data-access)))))
+        (is (h:facebook-token-info-valid-p i))
+        (is (equal '("pages_show_list" "pages_manage_posts") (h:facebook-token-info-scopes i)))
+        (is (= expires (h:facebook-token-info-expires-at i)) "a unixtime becomes a universal time")
+        (is (= data-access (h:facebook-token-info-data-access-expires-at i)))
+        (is (string= "1234567890" (h:facebook-token-info-page-id i)))
+        (is (string= "111" (h:facebook-token-info-app-id i))))
+      (let ((i (info (format nil "{\"data\":{\"is_valid\":true,\"expires_at\":0,\"data_access_expires_at\":~D,\"scopes\":[]}}"
+                             (%unix data-access)))))
+        (is (eq :never (h:facebook-token-info-expires-at i)) "an expires_at of 0 is :never")
+        (is (= data-access (h:facebook-token-info-data-access-expires-at i))
+            "and the data access still expires"))
+      (let ((i (info "{\"data\":{\"is_valid\":false}}")))
+        (is (not (h:facebook-token-info-valid-p i)))
+        (is (eq :never (h:facebook-token-info-expires-at i)))
+        (is (null (h:facebook-token-info-data-access-expires-at i)))
+        (is (null (h:facebook-token-info-scopes i))))
+      (signals h:delivery-failure (info "{\"nothing\":true}")))))
+
+(test facebook-token-info-needs-the-app-credentials-and-a-token
+  (aion/test-http:with-server
+      (server (lambda (request stream) (declare (ignore request))
+                (%fb-reply stream 200 +debug-ok+)))
+    (let ((fb (h:make-facebook :app-id nil :app-secret nil
+                               :page-tokens (list (cons +page-id+ +page-token+))
+                               :graph-base (aion/test-http:server-url server ""))))
+      (signals h:configuration-error (h:facebook-token-info fb +page-id+))
+      (is (null (aion/test-http:server-requests server)) "nothing was sent")))
+  (with-graph (server fb (%health-handler))
+    (signals h:configuration-error (h:facebook-token-info fb "999"))
+    (signals h:invalid-message (h:facebook-token-info fb "../x"))))
+
+(defun %multipart-parts (request)
+  "The parts of REQUEST's multipart/form-data body, as a list of (NAME FILENAME TYPE OCTETS)."
+  (let* ((type (aion/test-http:request-header request "Content-Type"))
+         (boundary (subseq type (+ (search "boundary=" type) 9)))
+         (body (aion/test-http:request-body request))
+         (text (sb-ext:octets-to-string body :external-format :latin-1))
+         (marker (format nil "--~A" boundary))
+         (parts '()))
+    (loop with start = (+ (search marker text) (length marker))
+          for next = (search marker text :start2 start)
+          while next
+          do (let* ((part (subseq text (+ start 2) (- next 2)))
+                    (split (search (format nil "~C~C~C~C" #\Return #\Newline #\Return #\Newline) part))
+                    (head (subseq part 0 split))
+                    (content (subseq part (+ split 4))))
+               (flet ((attr (key)
+                        (let ((at (search (format nil "~A=\"" key) head)))
+                          (and at (let ((from (+ at (length key) 2)))
+                                    (subseq head from (position #\" head :start from))))))
+                      (ctype ()
+                        (let ((at (search "Content-Type: " head)))
+                          (and at (subseq head (+ at 14) (or (position #\Return head :start at)
+                                                             (length head)))))))
+                 (push (list (attr "name") (attr "filename") (ctype)
+                             (sb-ext:string-to-octets content :external-format :latin-1))
+                       parts)))
+             (setf start (+ next (length marker))))
+    (nreverse parts)))
+
+(test facebook-post-with-photo-octets-uploads-them-to-photos-as-multipart
+  (let ((png (coerce #(137 80 78 71 13 10 26 10 0 1 2 255 13 10 45 45) '(vector (unsigned-byte 8)))))
+    (with-graph (server fb (%fb-always 200 "{\"id\":\"555\",\"post_id\":\"1234567890_555\"}"))
+      (is (string= "1234567890_555"
+                   (h:delivery-result-id
+                    (h:deliver fb (h:make-facebook-post :page +page-id+ :link "https://example.com/a"
+                                                        :message "Look" :image-octets png
+                                                        :image-type "image/png")))))
+      (let* ((request (first (aion/test-http:server-requests server)))
+             (parts (%multipart-parts request)))
+        (is (string= "POST" (aion/test-http:request-method request)))
+        (is (string= "/v26.0/1234567890/photos" (aion/test-http:request-path request)))
+        (is (search "multipart/form-data; boundary=" (aion/test-http:request-header request "Content-Type")))
+        (flet ((part (name) (find name parts :key #'first :test #'equal)))
+          (is (string= +page-token+ (sb-ext:octets-to-string (fourth (part "access_token"))))
+              "the token is a form field of the body")
+          (is (= 64 (length (fourth (part "appsecret_proof")))))
+          (is (string= (format nil "Look~%https://example.com/a")
+                       (sb-ext:octets-to-string (fourth (part "caption")) :external-format :utf-8)))
+          (let ((source (part "source")))
+            (is (string= "photo.png" (second source)))
+            (is (string= "image/png" (third source)))
+            (is (equalp png (fourth source)) "the photo's octets arrive byte for byte"))
+          (is (null (part "url")) "no url field"))
+        (is (notany (lambda (head) (search +page-token+ head)) (aion/test-http:server-heads server))
+            "and the token is not in the request line or a header")))))
+
+(test facebook-photo-octets-failure-shows-no-secret
+  (with-graph (server fb (%fb-always 400 (%fb-error 324 "Missing or invalid image file")))
+    (let ((c (handler-case (h:deliver fb (h:make-facebook-post
+                                          :page +page-id+ :image-octets (make-array 3 :element-type '(unsigned-byte 8) :initial-element 1)
+                                          :image-type "image/jpeg"))
+               (h:delivery-failure (e) e))))
+      (is (typep c 'h:delivery-failure))
+      (is (search "Missing or invalid image file" (princ-to-string c)))
+      (is (%no-secret-p c)))))
+
+(test facebook-photo-octets-are-checked-when-the-post-is-made
+  (let ((one (make-array 1 :element-type '(unsigned-byte 8) :initial-element 0)))
+    (signals h:invalid-message (h:make-facebook-post :page +page-id+ :image-octets one
+                                                     :image-type "image/png"
+                                                     :image-url "https://example.com/i.png"))
+    (signals h:invalid-message (h:make-facebook-post :page +page-id+ :image-octets one
+                                                     :image-type "image/webp"))
+    (signals h:invalid-message (h:make-facebook-post :page +page-id+ :image-octets one))
+    (signals h:invalid-message (h:make-facebook-post :page +page-id+
+                                                     :image-octets (make-array 0 :element-type '(unsigned-byte 8))
+                                                     :image-type "image/png"))
+    (signals h:invalid-message (h:make-facebook-post :page +page-id+ :image-octets "not octets"
+                                                     :image-type "image/png"))
+    (signals h:invalid-message
+      (h:make-facebook-post :page +page-id+ :image-type "image/png"
+                            :image-octets (make-array (1+ h:+facebook-photo-max-octets+)
+                                                      :element-type '(unsigned-byte 8))))
+    (is (h:facebook-post-p (h:make-facebook-post :page +page-id+ :image-octets one
+                                                 :image-type "IMAGE/JPEG"))
+        "a photo alone, with no link or message, is a post, and the type's case does not matter")
+    (is (string= "image/jpeg"
+                 (h:facebook-post-image-type (h:make-facebook-post :page +page-id+ :image-octets one
+                                                                   :image-type "IMAGE/JPEG"))))))
+
+(test facebook-a-failure-while-the-request-is-built-shows-no-secret
+  "#994: SENT holds the access token and appsecret_proof in plain text, so every function it is
+passed to is below %FACEBOOK-CALL's HANDLER-CASE. A failure while the body is built is reported
+redacted, with no frame holding the token, exactly as one while it is sent."
+  (with-graph (server fb (%fb-always 200 "{\"id\":\"1\"}"))
+    ;; %MULTIPART is given octets it cannot write: the error comes from building the body.
+    (let* ((broken (make-array 3 :element-type t :initial-element :not-an-octet))
+           (post (hermes::%make-facebook-post +page-id+ nil "x" nil broken "image/png"))
+           (c (handler-case (progn (h:deliver fb post) nil)
+                (h:hermes-error (e) e))))
+      (is (typep c 'h:delivery-failure) "got ~S" c)
+      (is (%no-secret-p c) "the report shows no secret")
+      (is (%no-secret-p (with-output-to-string (out)
+                          (let ((*print-escape* nil)) (print-object c out))))
+          "nor does printing it"))))

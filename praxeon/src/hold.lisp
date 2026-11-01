@@ -707,34 +707,36 @@ the outcome is unknown and the call is never run again.
 
 A held turn past its EXPIRES-AT is declined, as \"not run: the user did not confirm in time\". An
 approved call whose means is no longer registered with the same :SOURCE is not run."
-  (let* ((*principal* principal)
-         (*on-hold* (if on-hold-p on-hold nil))
-         (*hold-allowed* on-hold-p)
-         (state (%check-held agent held principal)))
-    (unless (%valid-decision-p decision held)
-      (error 'held-turn-mismatch :reason "the decision does not cover every held call"))
-    (when (eq state :answered)
-      (multiple-value-bind (first recorded) (%claim claim (held-turn-id held) decision)
-        (return-from continue-turn (values nil :already-decided (if first decision recorded)))))
-    (let ((decision (if (and (held-turn-expires-at held)
-                             (> (get-universal-time) (held-turn-expires-at held)))
-                        :expired
-                        decision)))
-      (multiple-value-bind (first recorded) (%claim claim (held-turn-id held) decision)
-        (unless first
-          (%write-held-results agent held recorded permit :recorded t)
-          (return-from continue-turn (values nil :already-decided recorded)))
-        (%write-held-results agent held decision permit)
-        ;; The steps left after the step that held. With none left the turn ends as an ordinary
-        ;; turn does after its last step's calls, rather than asking the model once more.
-        (let ((steps (held-turn-steps held)))
-          (if (and (integerp steps) (plusp steps))
-              (multiple-value-prog1 (%turn-loop agent steps permit (held-turn-max-tokens held))
-                ;; A continued turn ends here, so the observer is given the history, as after
-                ;; RUN-TURN (#317, step C).
-                (%observe-after-turn agent))
-              (error 'cnd:deliberation-failure
-                     :detail "no final answer within the turn's steps: the decided calls were on its last step")))))))
+  ;; The agent's privacy, as RUN-TURN has it (#983).
+  (%with-agent-privacy (agent)
+    (let* ((*principal* principal)
+           (*on-hold* (if on-hold-p on-hold nil))
+           (*hold-allowed* on-hold-p)
+           (state (%check-held agent held principal)))
+      (unless (%valid-decision-p decision held)
+        (error 'held-turn-mismatch :reason "the decision does not cover every held call"))
+      (when (eq state :answered)
+        (multiple-value-bind (first recorded) (%claim claim (held-turn-id held) decision)
+          (return-from continue-turn (values nil :already-decided (if first decision recorded)))))
+      (let ((decision (if (and (held-turn-expires-at held)
+                               (> (get-universal-time) (held-turn-expires-at held)))
+                          :expired
+                          decision)))
+        (multiple-value-bind (first recorded) (%claim claim (held-turn-id held) decision)
+          (unless first
+            (%write-held-results agent held recorded permit :recorded t)
+            (return-from continue-turn (values nil :already-decided recorded)))
+          (%write-held-results agent held decision permit)
+          ;; The steps left after the step that held. With none left the turn ends as an ordinary
+          ;; turn does after its last step's calls, rather than asking the model once more.
+          (let ((steps (held-turn-steps held)))
+            (if (and (integerp steps) (plusp steps))
+                (multiple-value-prog1 (%turn-loop agent steps permit (held-turn-max-tokens held))
+                  ;; A continued turn ends here, so the observer is given the history, as after
+                  ;; RUN-TURN (#317, step C).
+                  (%observe-after-turn agent))
+                (error 'cnd:deliberation-failure
+                       :detail "no final answer within the turn's steps: the decided calls were on its last step"))))))))
 
 (defun abandon-held-turn (agent held &key principal claim)
   "Close HELD without a decision: its held calls get \"not run: the user did not confirm\", after
@@ -742,17 +744,19 @@ approved call whose means is no longer registered with the same :SOURCE is not r
 are written as they were. Returns true, or NIL, :ALREADY-DECIDED and the decision recorded
 first when the turn was decided before; when that decision has no results in the history yet,
 the results it calls for are written, and nothing runs. Checked as CONTINUE-TURN checks."
-  (let* ((*principal* principal)
-         (state (%check-held agent held principal)))
-    (when (eq state :answered)
-      ;; Decided before: the decision recorded first comes from the claim, as in CONTINUE-TURN.
+  ;; The agent's privacy, as RUN-TURN has it (#983).
+  (%with-agent-privacy (agent)
+    (let* ((*principal* principal)
+           (state (%check-held agent held principal)))
+      (when (eq state :answered)
+        ;; Decided before: the decision recorded first comes from the claim, as in CONTINUE-TURN.
+        (multiple-value-bind (first recorded) (%claim claim (held-turn-id held) :unanswered)
+          (return-from abandon-held-turn
+            (values nil :already-decided (if first :unanswered recorded)))))
       (multiple-value-bind (first recorded) (%claim claim (held-turn-id held) :unanswered)
-        (return-from abandon-held-turn
-          (values nil :already-decided (if first :unanswered recorded)))))
-    (multiple-value-bind (first recorded) (%claim claim (held-turn-id held) :unanswered)
-      (cond (first (%write-held-results agent held :unanswered nil) t)
-            (t (%write-held-results agent held recorded nil :recorded t)
-               (values nil :already-decided recorded))))))
+        (cond (first (%write-held-results agent held :unanswered nil) t)
+              (t (%write-held-results agent held recorded nil :recorded t)
+                 (values nil :already-decided recorded)))))))
 
 (defun %unanswered-ids (agent)
   "The ids of the tool calls in the history's last message, when it is a model message whose
