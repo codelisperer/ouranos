@@ -185,7 +185,13 @@ in its migrations (MISSING-NOTIFICATION-TABLES). Returns STORE."
 one open mnemosyne connection; BACKEND lets the store reconnect when Postgres ends that
 connection. TABLE and DELIVERY-TABLE name the tables. With ENSURE, create them; otherwise, with
 REQUIRE-TABLES (the default), check they can be read and signal MISSING-NOTIFICATION-TABLES,
-which names the migrations to add, when they cannot."
+which names the migrations to add, when they cannot.
+
+The store needs Postgres 9.5 or later, or SQLite 3.35 or later: NOTIFICATION-PUT is one INSERT
+... ON CONFLICT ... RETURNING (this file's header). An older SQLite refuses RETURNING when the
+first notification is put, with a MNEMOSYNE/CONN:DB-ERROR for a syntax error at RETURNING. The
+SQLite a desktop bundle carries is pinned in sqlite.pin (docs/dependencies.md);
+elsewhere it is the system's copy, which mnemosyne/sqlite-library:loaded-library names."
   (let ((store (make-instance 'db-notification-store
                               :source source :backend backend
                               :table (%check-table table)

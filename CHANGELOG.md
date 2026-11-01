@@ -1123,7 +1123,10 @@ its tag.
     and `delivery-ddl`. The store refuses to start without its tables
     (`missing-notification-tables`). A table name is 1 to 47 ASCII letters, digits and
     underscores. The database store needs Postgres 9.5 or later, or SQLite 3.35 or later, for
-    `INSERT ... ON CONFLICT ... RETURNING`.
+    `INSERT ... ON CONFLICT ... RETURNING`. With an older SQLite, the first `notification-put`
+    signals `mnemosyne/conn:db-error` for a syntax error at `RETURNING`. A
+    desktop bundle carries the SQLite pinned in `sqlite.pin`; elsewhere the system's copy is
+    used, and `mnemosyne/sqlite-library:loaded-library` names it.
 
   How it behaves:
   - A notification with the group key of an unread item collapses into it and raises its `count`.
