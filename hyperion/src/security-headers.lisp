@@ -33,7 +33,10 @@
 ;;;; OVERRIDING. Each header has a special variable and a keyword argument of the same name
 ;;;; (without earmuffs). A string replaces the default; NIL turns the header off. A header the
 ;;;; application sets on its own response is never replaced, so a single route can loosen or
-;;;; tighten one header without the wrapper knowing about the route.
+;;;; tighten one header without the wrapper knowing about the route. A route that sets one of
+;;;; these headers to NIL gets none of it: the wrapper adds no default and removes the NIL entry.
+;;;; That is how a route that may be framed by named origins drops X-Frame-Options, which can
+;;;; only deny or allow the same origin, and relies on its own frame-ancestors.
 
 (in-package #:hyperion/security-headers)
 
@@ -68,6 +71,13 @@ an application that spelled it differently is still respected."
         thereis (and (or (symbolp k) (stringp k))
                      (string-equal (string k) (string key)))))
 
+(defun %without-nil-headers (headers keys)
+  "HEADERS without the entries for KEYS whose value is NIL, compared without regard to case."
+  (loop for (k v) on headers by #'cddr
+        unless (and (null v) (or (symbolp k) (stringp k))
+                    (member (string k) keys :key #'string :test #'string-equal))
+          append (list k v)))
+
 (defun wrap-security-headers (app &key (content-type-options *content-type-options*)
                                        (frame-options *frame-options*)
                                        (referrer-policy *referrer-policy*)
@@ -76,8 +86,8 @@ an application that spelled it differently is still respected."
   "Ring middleware adding security headers to every response APP returns as (status headers
 body), including a streamed body. Each keyword takes a string to send or NIL to omit; the
 defaults come from the special variables of the same names, read when this is called. A header
-already on the response is left as the application set it. Any other response shape is passed
-through unchanged."
+already on the response is left as the application set it, and one the application set to NIL
+is left off the response. Any other response shape is passed through unchanged."
   (let ((add (remove nil
                      (list (and content-type-options (cons :x-content-type-options content-type-options))
                            (and frame-options (cons :x-frame-options frame-options))
@@ -90,7 +100,10 @@ through unchanged."
         (if (and (consp res) (= (length res) 3) (listp (second res)))
             (destructuring-bind (status headers body) res
               (list status
-                    (append headers
+                    (append (%without-nil-headers headers
+                                                  '(:x-content-type-options :x-frame-options
+                                                    :referrer-policy :content-security-policy
+                                                    :strict-transport-security))
                             (loop for (key . value) in add
                                   unless (%header-present-p headers key)
                                     append (list key value)))

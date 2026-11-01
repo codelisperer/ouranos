@@ -87,31 +87,63 @@ because unpredictable output quality is a compliance problem and not merely a UX
 GRANT-INVALID. A protocol, so an application already issuing JWTs or HMAC tokens can supply
 a backend rather than adopting this one's format."))
 
-(defstruct (ed25519-verifier (:constructor make-ed25519-verifier (public-key &key audience)))
+(defstruct (ed25519-verifier (:constructor %make-ed25519-verifier (public-key audience)))
   "Verifies grants signed with the application's Ed25519 private key.
 
 Holds a PUBLIC key only: this component can check a grant and cannot issue one."
   public-key
   (audience "" :type string))
 
-(defun %now () (get-universal-time))
+(defun make-ed25519-verifier (public-key &key (audience ""))
+  "A verifier for grants signed with the private key of PUBLIC-KEY, an `aion/signature' public
+key or an ironclad Ed25519 public key. With AUDIENCE, a grant for another audience is refused.
+Signals an error when PUBLIC-KEY is neither, so a key that failed to load is found when the
+verifier is made, and not taken later for a grant whose signature does not verify."
+  (unless (or (sig:public-key-p public-key) (typep public-key 'ironclad:ed25519-public-key))
+    (error "praxeon/ceiling: make-ed25519-verifier needs an Ed25519 public key, not ~S." public-key))
+  (%make-ed25519-verifier public-key audience))
+
+(defvar *clock* #'get-universal-time
+  "A function of no arguments returning the time as a universal time. VERIFY-GRANT compares a
+grant's expiry with it, and the ledger stamps its lines with it. `praxeon/web:make-app' binds it
+to the app's own clock around the session exchange and around each turn, which is where grants
+are verified and usage is recorded, so a test can move the time.")
+
+(defun %now () (funcall *clock*))
 
 (defun %parse-payload (payload)
-  "PAYLOAD is the signed JSON. Returns a GRANT with no validity checking of its own."
-  (let ((o (jzon:parse payload)))
-    (flet ((s (k) (or (gethash k o) ""))
+  "PAYLOAD is the signed JSON. Returns a GRANT, checking only that each claim has the right type:
+a payload that is not a JSON object, a principal, group or audience that is not a string, or
+capabilities that are not an array of strings signals GRANT-INVALID. The signer is trusted, but a
+mistake in what it signed is the caller's to hear about as a refused grant, not as an error of
+this code."
+  (let ((o (handler-case (jzon:parse payload)
+             (error () (error 'grant-invalid :reason "the payload is not JSON")))))
+    (unless (hash-table-p o)
+      (error 'grant-invalid :reason "the payload is not a JSON object"))
+    (flet ((s (k) (let ((v (gethash k o "")))
+                    (if (stringp v)
+                        v
+                        (error 'grant-invalid :reason (format nil "~A is not a string" k)))))
            (i (k) (let ((v (gethash k o))) (if (integerp v) v 0))))
-      (%make-grant :principal (s "principal") :group (s "group")
-                   :capabilities (coerce (or (gethash "capabilities" o) #()) 'list)
-                   :token-cap (i "token_cap") :call-cap (i "call_cap")
-                   :expires-at (i "expires_at") :audience (s "audience")))))
+      (let ((capabilities (gethash "capabilities" o #())))
+        (unless (and (vectorp capabilities) (not (stringp capabilities))
+                     (every #'stringp capabilities))
+          (error 'grant-invalid :reason "capabilities is not an array of strings"))
+        (%make-grant :principal (s "principal") :group (s "group")
+                     :capabilities (coerce capabilities 'list)
+                     :token-cap (i "token_cap") :call-cap (i "call_cap")
+                     :expires-at (i "expires_at") :audience (s "audience"))))))
 
 (defmethod verify-grant ((v ed25519-verifier) payload signature)
   "Signature first, then claims. Order matters: nothing in an unverified payload is worth
-reading, including its expiry."
-  (let ((bytes (sb-ext:string-to-octets payload :external-format :utf-8)))
-    (unless (ignore-errors
-             (ironclad:verify-signature (ed25519-verifier-public-key v) bytes signature))
+reading, including its expiry. The verifier's key is an `aion/signature' public key or an
+ironclad Ed25519 public key."
+  (let ((bytes (sb-ext:string-to-octets payload :external-format :utf-8))
+        (key (ed25519-verifier-public-key v)))
+    (unless (if (sig:public-key-p key)
+                (sig:verify key bytes signature)
+                (ignore-errors (ironclad:verify-signature key bytes signature)))
       (error 'grant-invalid :reason "signature does not verify")))
   (let ((g (%parse-payload payload)))
     (when (<= (grant-expires-at g) (%now))
@@ -121,6 +153,59 @@ reading, including its expiry."
         (error 'grant-invalid :reason (format nil "grant is for audience ~S, not ~S"
                                               (grant-audience g) want))))
     g))
+
+;;; --- a grant as one string (#67) ------------------------------------------
+;;;
+;;; A browser passes a grant to the agent service in an Authorization header, so the payload
+;;; and its signature travel as one string: the base64url of the payload's UTF-8 bytes, a
+;;; dot, and the base64url of the 64-byte signature, both without padding. That is the shape
+;;; of a JWT's last two parts, with no header part, because there is one algorithm.
+;;;
+;;; The application mints with `aion/signature', the Ed25519 module hyperion already loads
+;;; for its updater, so the format adds no crypto dependency. An application that already
+;;; issues its own tokens decodes them itself and calls VERIFY-GRANT through its own
+;;; verifier, as before.
+
+(defun %base64url (octets)
+  (string-right-trim "="
+                     (substitute #\_ #\/ (substitute #\- #\+ (cl-base64:usb8-array-to-base64-string octets)))))
+
+(defun %from-base64url (text)
+  "The octets TEXT encodes, or NIL when it is not unpadded base64url."
+  (when (and (plusp (length text))
+             ;; ASCII only: ALPHANUMERICP is also true of letters and digits in other scripts.
+             (every (lambda (c) (and (< (char-code c) 128)
+                                     (or (alphanumericp c) (char= c #\-) (char= c #\_))))
+                    text)
+             (/= 1 (mod (length text) 4)))
+    (ignore-errors
+     (cl-base64:base64-string-to-usb8-array
+      (concatenate 'string
+                   (substitute #\/ #\_ (substitute #\+ #\- text))
+                   (make-string (mod (- (length text)) 4) :initial-element #\=))))))
+
+(defun encode-grant-token (payload private-key)
+  "PAYLOAD, the grant's JSON as a string, signed with PRIVATE-KEY, an `aion/signature' private
+key, as one string: base64url(payload) \".\" base64url(signature). DECODE-GRANT-TOKEN reverses
+it. For an application that mints grants in Lisp."
+  (check-type payload string)
+  (let ((bytes (sb-ext:string-to-octets payload :external-format :utf-8)))
+    (concatenate 'string (%base64url bytes) "." (%base64url (sig:sign private-key bytes)))))
+
+(defun decode-grant-token (token)
+  "The payload and signature in TOKEN, as (values PAYLOAD SIGNATURE), ready for VERIFY-GRANT.
+Signals GRANT-INVALID when TOKEN is not two base64url parts joined by one dot, or the payload
+is not UTF-8. Nothing here checks the signature: that is VERIFY-GRANT's."
+  (let* ((dot (and (stringp token) (position #\. token)))
+         (payload (and dot (%from-base64url (subseq token 0 dot))))
+         ;; A second dot is refused here too: it is not in the base64url alphabet.
+         (signature (and dot (%from-base64url (subseq token (1+ dot)))))
+         (text (and payload
+                    (ignore-errors (sb-ext:octets-to-string payload :external-format :utf-8)))))
+    (unless (and text signature)
+      (error 'grant-invalid
+             :reason "the token is not a base64url payload and signature joined by a dot"))
+    (values text signature)))
 
 ;;; --- the session ledger ---------------------------------------------------
 
@@ -223,6 +308,7 @@ line and collapsed only here, where a sum has to be a number."
             (* (%weight :cache-write) (or cache-write 0)))))
 
 (defun record-usage (ledger &key (input 0) (output 0) cache-read cache-write
+                                 estimated-input estimated-output
                                  (model "") (means "") breakdown)
   "Charge one completion's tokens to LEDGER and record the line. Returns the usage line.
 
@@ -244,17 +330,32 @@ how to say no leaves that unanswerable.
 
 BREAKDOWN, when given, is the prompt's estimated tokens by source, the plist
 PRAXEON/ACTOR:PROMPT-BREAKDOWN returns and each :USAGE event carries (#317, step D). It is kept
-on the line as :BREAKDOWN and charges nothing: what is charged is the provider's counts above."
+on the line as :BREAKDOWN and charges nothing: what is charged is the provider's counts above.
+
+ESTIMATED-INPUT and ESTIMATED-OUTPUT are praxeon's own counts, charged in place of INPUT or
+OUTPUT when that one is NIL (#984). A model call stopped by a cancel is the case they exist for:
+the provider had generated output it never reported a count for, and charging nothing for it
+would let a cancelled turn spend without limit. The line keeps the reported count as it was,
+NIL, and records the estimate charged in its place as :ESTIMATED-INPUT or :ESTIMATED-OUTPUT,
+with :ESTIMATED T, so a report can show it as an estimate apart from the reported counts. An
+estimate given beside a reported count is not charged and not recorded."
   (bt:with-lock-held ((ledger-lock ledger))
-    (let ((line (list :principal (grant-principal (ledger-grant ledger))
-                      :group (grant-group (ledger-grant ledger))
-                      :model model :means means
-                      :input input :output output
-                      :cache-read cache-read :cache-write cache-write
-                      :charged (chargeable-tokens :input input :output output
-                                                  :cache-read cache-read
-                                                  :cache-write cache-write)
-                      :at (%now))))
+    (let* ((input-estimate (and (null input) estimated-input))
+           (output-estimate (and (null output) estimated-output))
+           (line (list :principal (grant-principal (ledger-grant ledger))
+                       :group (grant-group (ledger-grant ledger))
+                       :model model :means means
+                       :input input :output output
+                       :cache-read cache-read :cache-write cache-write
+                       :charged (chargeable-tokens :input (or input input-estimate)
+                                                   :output (or output output-estimate)
+                                                   :cache-read cache-read
+                                                   :cache-write cache-write)
+                       :at (%now))))
+      (when (or input-estimate output-estimate)
+        (setf line (append line (list :estimated t)
+                           (and input-estimate (list :estimated-input input-estimate))
+                           (and output-estimate (list :estimated-output output-estimate)))))
       (when breakdown
         (setf line (append line (list :breakdown breakdown))))
       ;; :CHARGED is on the line as well as the four raw counts, because the weights are
@@ -264,6 +365,23 @@ on the line as :BREAKDOWN and charges nothing: what is charged is the provider's
       (incf (ledger-calls ledger))
       (push line (ledger-usage ledger))
       line)))
+
+(defun record-usage-event (ledger event &key (model "") (means ""))
+  "Charge the :USAGE event EVENT, a plist as PRAXEON/EVENT emits it, to LEDGER with
+RECORD-USAGE, and return the usage line. The four counts are passed as the event has them. For
+an event with :CANCELLED T, from a model call a cancel stopped (#984), its :ESTIMATED-INPUT and
+:ESTIMATED-OUTPUT are passed too, so whichever count the provider had not reported is charged as
+an estimate. Another event's :ESTIMATED-INPUT is the prompt estimate beside a reported count, and
+is not charged. The event's :BREAKDOWN goes on the line."
+  (let ((cancelled (getf event :cancelled)))
+    (record-usage ledger :input (getf event :input)
+                         :output (getf event :output)
+                         :cache-read (getf event :cache-read)
+                         :cache-write (getf event :cache-write)
+                         :estimated-input (and cancelled (getf event :estimated-input))
+                         :estimated-output (and cancelled (getf event :estimated-output))
+                         :breakdown (getf event :breakdown)
+                         :model model :means means)))
 
 (defun usage-report (ledger)
   "Every usage line for this session, oldest first -- what the caller returns IN-BAND for
@@ -339,7 +457,8 @@ cheaper model -- unpredictable output quality is a compliance problem, not a UX 
          (turn:halt-with tn (format nil "grant does not permit ~A" capability))))))
 
 (defun meter (ledger &key (model "") (means "")
-                          input-fn output-fn cache-read-fn cache-write-fn breakdown-fn)
+                          input-fn output-fn cache-read-fn cache-write-fn breakdown-fn
+                          estimated-input-fn estimated-output-fn)
   "A leave stage that charges the turn's usage to LEDGER.
 
 The four functions are read at leave time -- the CL shell knows what the provider reported,
@@ -357,7 +476,11 @@ is the one compatibility promise here and also the reason pre-publication issue 
 read as complete.
 
 BREAKDOWN-FN, when supplied, returns the turn's prompt breakdown for RECORD-USAGE's BREAKDOWN, for
-example the :BREAKDOWN of the turn's last :USAGE event (#317, step D)."
+example the :BREAKDOWN of the turn's last :USAGE event (#317, step D).
+
+ESTIMATED-INPUT-FN and ESTIMATED-OUTPUT-FN, when supplied, return the estimates RECORD-USAGE
+charges when INPUT-FN or OUTPUT-FN returns NIL, such as the :ESTIMATED-OUTPUT of a :USAGE event
+with :CANCELLED T (#984)."
   (turn:leave-stage
    "meter"
    (lambda (tn)
@@ -368,5 +491,7 @@ example the :BREAKDOWN of the turn's last :USAGE event (#317, step D)."
                      :cache-read (and cache-read-fn (funcall cache-read-fn))
                      :cache-write (and cache-write-fn (funcall cache-write-fn))
                      :breakdown (and breakdown-fn (funcall breakdown-fn))
+                     :estimated-input (and estimated-input-fn (funcall estimated-input-fn))
+                     :estimated-output (and estimated-output-fn (funcall estimated-output-fn))
                      :model model :means means))
      tn)))

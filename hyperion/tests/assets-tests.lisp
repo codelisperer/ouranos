@@ -19,7 +19,8 @@
   (:local-nicknames (#:assets #:hyperion/assets)
                     (#:router #:hyperion/router)
                     (#:http #:hyperion/http)
-                    (#:ports #:hyperion/test-ports)))
+                    (#:ports #:hyperion/test-ports)
+                    (#:appr #:hyperion/appearance)))
 
 (in-package #:hyperion/assets/tests)
 
@@ -308,3 +309,39 @@ teardown waits until the port stops accepting, as the server-tests teardowns do.
         (%split-response (%raw-get port "/_hyperion/assets/nope-00000000.min.js"))
       (declare (ignore body))
       (is (search "404" headers)))))
+
+(test the-kit-stylesheet-uses-the-text-roles-and-the-focus-ring
+  "kit.css sizes its text with the --hy-text-* roles, not Bulma's sizes, and its buttons, whose
+`background' replaces the one Bulma changes on hover, have hover, press and focus rules."
+  (let ((css (sb-ext:octets-to-string (assets:asset-bytes (assets:asset :kit))
+                                      :external-format :utf-8)))
+    (is (null (search "--bulma-size-" css)) "kit.css still uses a Bulma size")
+    (dolist (role '("title" "body" "meta" "heading"))
+      (is (search (format nil "var(--hy-text-~A," role) css) "--hy-text-~A is not used" role))
+    (dolist (selector '(".hy-segmented > .button" ".hy-toggle-group > .button"
+                        ".hy-toolbar-submit" ".hy-confirm-actions .is-danger"))
+      (is (search (format nil "~A:hover" selector) css) "~A has no hover" selector)
+      (is (search (format nil "~A:active" selector) css) "~A has no press state" selector)
+      (is (search (format nil "~A:focus-visible" selector) css) "~A has no focus rule" selector))
+    (is (= 2 (%occurrences "outline: 2px solid var(--hy-focus-ring," css))
+        "the row and the buttons should both draw the focus ring")))
+
+(defun %occurrences (needle text)
+  (loop with start = 0 for at = (search needle text :start2 start)
+        while at count t do (setf start (1+ at))))
+
+(test the-kit-stylesheet-draws-the-hover-layer-and-press-filter-the-contrast-check-models
+  "kit.css cannot read hyperion/appearance's values, so it writes them out. Every hover layer in
+it is *HOVER-OVERLAY* and every press filter is *PRESSED-BRIGHTNESS*, the values
+APPEARANCE-CONTRAST-FAILURES checks the button text against."
+  (let ((css (sb-ext:octets-to-string (assets:asset-bytes (assets:asset :kit))
+                                      :external-format :utf-8))
+        (layer (format nil "linear-gradient(~A, ~A)" appr::*hover-overlay* appr::*hover-overlay*))
+        (press (format nil "filter: brightness(~,2F);" appr::*pressed-brightness*)))
+    (is (plusp (%occurrences "linear-gradient(" css)))
+    (is (= (%occurrences "linear-gradient(" css) (%occurrences layer css))
+        "a hover layer in kit.css is not ~A" layer)
+    (is (plusp (%occurrences "filter: brightness(" css)))
+    (is (= (%occurrences "filter: brightness(" css) (%occurrences press css))
+        "a press filter in kit.css is not ~A" press)))
+

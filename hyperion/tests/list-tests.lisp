@@ -437,3 +437,66 @@ first, then the list's, without the page and without the names the form shows it
     (is (eq :a (list:list-spec-default-sort spec)) "the first key when none is named")
     (is (equal '(:s) (mapcar #'first (list:list-spec-filters spec))))
     (is (equal "#t" (list:list-spec-hx-target spec)))))
+
+;;; --- a :values filter whose choices depend on the request (#1014) -------------------
+
+(defun %projects-spec (calls)
+  "A list with a :project filter whose choices are the :projects of the request's env. CALLS is
+a one-element list whose car counts the calls."
+  (list:make-list-spec :id "drafts" :sorts '((:title :column :title)) :tiebreak :id
+                       :filters (list (list :project
+                                            :values (lambda (env)
+                                                      (incf (car calls))
+                                                      (getf env :projects))
+                                            :column :project_id))))
+
+(defun %projects-state (spec query projects &rest options)
+  (apply #'list:read-list-state spec (list :query-string query :projects projects) options))
+
+(test a-values-function-is-called-once-with-the-request
+  (let* ((calls (list 0))
+         (spec (%projects-spec calls))
+         (state (%projects-state spec "project=p1" '("p1" "p2"))))
+    (is (= 1 (car calls)) "the function was called ~D times for one request" (car calls))
+    (is (equal "p1" (list:filter-value state :project)))
+    (is (equal '("p1" "p2") (list:filter-choices state :project)))
+    (is (equal '(:= :project_id "p1") (list:filter-where state)))))
+
+(test a-value-outside-this-request-s-choices-is-dropped
+  "Each request is checked against its own choices: a value another user may choose is
+dropped, as a value outside a closed set is."
+  (let* ((spec (%projects-spec (list 0)))
+         (theirs (%projects-state spec "project=p3" '("p1" "p2")))
+         (mine (%projects-state spec "project=p3" '("p3"))))
+    (is (null (list:filter-value theirs :project)))
+    (is (equal '("project") (list:list-state-adjusted theirs)))
+    (is (null (list:filter-where theirs)) "a dropped value adds no WHERE")
+    (is (equal "p3" (list:filter-value mine :project)))))
+
+(test a-link-accepts-only-this-request-s-choices
+  (let ((state (%projects-state (%projects-spec (list 0)) "" '("p1" "p2"))))
+    (is (equal "?project=p2" (list:list-href state :filters '(:project "p2"))))
+    (signals error (list:list-href state :filters '(:project "p3")))))
+
+(test a-stored-value-is-checked-against-this-request-s-choices
+  (let ((store (make-instance 'memory-store))
+        (spec (%projects-spec (list 0))))
+    (setf (gethash "drafts" (table store)) "project=p1")
+    (is (equal "p1" (list:filter-value (%projects-state spec nil '("p1") :store store) :project)))
+    (is (null (list:filter-value (%projects-state spec nil '("p2") :store store) :project))
+        "a project the user can no longer see was restored")))
+
+(test a-values-function-must-return-strings
+  (let ((spec (list:make-list-spec :id "x" :filters (list (list :p :values (lambda (env)
+                                                                             (declare (ignore env))
+                                                                             '(1 2)))))))
+    ;; No value in the request, so nothing but the check on the result can signal.
+    (signals error (list:read-list-state spec (%env ""))))
+  (signals error (list:make-list-spec :id "x" :filters '((:p :values "p1"))))
+  (signals error (list:make-list-spec :id "x" :filters '((:p :values (1 2))))))
+
+(test filter-choices-is-only-for-a-values-filter
+  (let ((state (%state "")))
+    (is (equal '("open" "closed") (list:filter-choices state :status)))
+    (signals error (list:filter-choices state :q))
+    (signals error (list:filter-choices state :nope))))
