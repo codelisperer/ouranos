@@ -57,6 +57,10 @@
    #:provider-request-failed-error-type #:provider-request-failed-error-code
    #:provider-request-failed-body
    #:unknown-tool-choice #:unknown-tool-choice-value #:value-shape
+   #:completion-cancelled #:completion-cancelled-input-tokens #:completion-cancelled-output-tokens
+   #:completion-cancelled-cache-read-tokens #:completion-cancelled-cache-write-tokens
+   #:completion-cancelled-estimated-output #:completion-cancelled-text
+   #:completion-cancelled-estimated-input
    #:output-limit-reached #:output-limit-reached-max-tokens
    #:output-truncated #:output-truncated-step #:output-truncated-max-tokens
    #:translation-truncated #:translation-truncated-text
@@ -145,6 +149,11 @@
   (:export
    ;; protocol
    #:provider #:complete
+   ;; streaming and cancelling a completion (#984)
+   #:*on-text* #:*cancel* #:supports-streaming-p
+   ;; where a provider sends its requests (#1034)
+   #:endpoint #:endpoint-p #:endpoint-scheme #:endpoint-host #:endpoint-port
+   #:parse-endpoint #:provider-endpoint #:endpoint-loopback-p
    ;; the embedding seam (#138, #150) -- a SEPARATE hierarchy, not a capability on PROVIDER
    #:embedding-provider #:embed #:embed-batch #:embed-documents #:embed-query
    #:embedding-dimensions #:embedding-model-of
@@ -292,6 +301,7 @@
   (:local-nicknames (#:cnd #:praxeon/conditions)
                     (#:turn #:praxeon/turn)
                     (#:jzon #:com.inuoe.jzon)
+                    (#:sig #:aion/signature)
                     (#:bt #:bordeaux-threads))
   (:documentation
    "What a caller may spend, and refusing before it is spent (pre-publication issue 172). Two ceilings, not
@@ -308,13 +318,15 @@
   (:export #:grant #:grant-p #:grant-principal #:grant-group #:grant-capabilities
            #:grant-token-cap #:grant-call-cap #:grant-expires-at #:grant-audience
            #:grant-permits-p #:grant-permit-fn
-           #:verify-grant #:ed25519-verifier #:make-ed25519-verifier
+           #:verify-grant #:ed25519-verifier #:make-ed25519-verifier #:ed25519-verifier-public-key
+           #:*clock*
+           #:encode-grant-token #:decode-grant-token
            #:grant-invalid #:grant-invalid-reason
            #:budget-exhausted #:budget-exhausted-principal
            #:budget-exhausted-requested #:budget-exhausted-remaining
            #:ledger #:make-ledger #:ledger-grant #:ledger-tokens #:ledger-calls
            #:remaining-tokens #:remaining-calls #:affordable-p
-           #:record-usage #:usage-report
+           #:record-usage #:record-usage-event #:usage-report
            #:chargeable-tokens #:*token-weights*
            #:budget-guard #:capability-guard #:meter))
 
@@ -331,6 +343,7 @@
                     (#:llm #:praxeon/llm)
                     (#:prompt #:praxeon/prompt)
                     (#:evt #:praxeon/event)
+                    (#:http #:aion/http-client)
                     (#:turn #:praxeon/turn)
                     (#:res #:praxeon/results)
                     (#:jzon #:com.inuoe.jzon)
@@ -342,6 +355,7 @@
    #:agent-clear-target #:agent-keep-recent #:agent-never-clear
    #:agent #:make-agent #:agent-name #:agent-provider #:agent-means
    #:agent-context #:agent-history #:agent-history-budget #:agent-system-prompt
+   #:move-conversation
    #:agent-cache-system #:agent-system-parts #:agent-max-tokens #:agent-private
    #:request-messages #:prompt-breakdown
    #:means-entry #:means-entry-source #:register-means #:means-permitted-p #:agent-means-for
@@ -363,6 +377,8 @@
    #:means-entry-name #:means-entry-description #:means-entry-capability #:agent-tool-specs #:register-agent-as-means
    #:deliberate #:act #:run-turn #:converse-repl
    #:run-turn-through #:*principal*
+   ;; cancelling a turn (#984)
+   #:turn-cancel #:make-turn-cancel #:cancel-turn #:turn-cancelled-p #:*turn-cancel*
    ;; work that finishes after the call that started it (#532)
    #:started-result #:started-result-p #:started-result-text #:*tool-call-id*
    ;; holding a call until the user decides (#531)

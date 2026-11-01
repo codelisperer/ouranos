@@ -170,10 +170,17 @@
     :hyperion/http1
     :praxeon/translate :praxeon/web :praxeon/web-search :praxeon/memory-db :praxeon/results-db
     :praxeon/retrieval
+    ;; The chat widget's parts, which praxeon/web's page and its embed panel share (#67). It
+    ;; loads here on its own, so a dependency it uses but does not declare is not hidden by
+    ;; praxeon/web loading it first. Its tests are in praxeon/web/tests.
+    :praxeon/chat-ui
     ;; The MCP client and its OAuth sign-in (#527).
     :praxeon/mcp :aion/oauth :hyperion/oauth
     ;; The job scheduler and its database store (#689).
     :aion/schedule :mnemosyne/jobs
+    ;; Test support: one migrated SQLite template per run, a copy per test (#1047). Its
+    ;; tests are in mnemosyne/tests.
+    :mnemosyne/test-template
     ;; Dev sidecars (#700).
     :hyperion/sidecar
     ;; example apps -- they are the launch artifacts and the first thing a reader runs

@@ -23,6 +23,7 @@
 (load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
 (load (merge-pathnames "bundle-sources.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))  ; a library that travels with its source (#429)
 (load (merge-pathnames "fs.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))  ; aion/fs:link-p, for the carried list (#564)
+(load (merge-pathnames "built-from.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))  ; the BUILT-FROM stamp (#1001)
 
 (defpackage #:ouranos-tree-natives
   (:use #:cl)
@@ -234,6 +235,23 @@ shows up as an app that cannot start on a machine without its own copy."
         (format t "copy -- which is every developer's and no user's (pre-publication issue 329, ADR-0011).~%"))
       (sb-ext:exit :code 3))))
 
+(defparameter *stamped-builds*
+  '(("build-libuv.lisp" . "libuv.pin"))
+  "The build scripts that write a BUILT-FROM stamp, and the pin each builds from (#977, #1001).
+A library one of them built is carried only when its stamp names that pin. SQLite has the same
+rule in carry-natives.lisp, which carries it.")
+
+(defun %stamp-refusal-for (resolved build-script)
+  "NIL, or why the vendored library at RESOLVED, built by BUILD-SCRIPT, must not be carried: its
+BUILT-FROM stamp is missing or names another release than the pin (#1001)."
+  (let ((pin (cdr (assoc build-script *stamped-builds* :test #'string=))))
+    (when pin
+      ;; vendor/<pkg>/lib/<file> -> vendor/<pkg>/, as VENDOR-PACKAGE-DIRECTORY below does.
+      (ouranos-built-from:stamp-refusal (uiop:pathname-parent-directory-pathname
+                                         (uiop:pathname-directory-pathname resolved))
+                                        (merge-pathnames pin (uiop:pathname-parent-directory-pathname *vendor*))
+                                        (%build-command build-script)))))
+
 (defun verify-natives-will-be-carried ()
   "Refuse to build a bundle whose lazily-loaded libraries will not travel with it.
 
@@ -268,6 +286,13 @@ natives, so they never reach this pass."
              (let ((*standard-output* *error-output*))
                (format t "~&~A: ~A woke but recorded no library path.~%" *label* package)
                (format t "Cannot show ~A will carry it, so refusing (pre-publication issue 325).~%" *product*))
+             (sb-ext:exit :code 3))
+            ((and (vendored-library-p resolved) (%stamp-refusal-for resolved build-script))
+             ;; Built, but from another release than the pin, or from before the stamp: a
+             ;; checkout that pulled a pin bump and did not rebuild (#977, #1001).
+             (let ((*standard-output* *error-output*))
+               (format t "~&~A: ~A will not be carried: ~A~%" *label* package
+                       (%stamp-refusal-for resolved build-script)))
              (sb-ext:exit :code 3))
             ((vendored-library-p resolved)
              (format t "~&  will carry  ~A  <- ~A~%" package (human-path:human-path path)))
