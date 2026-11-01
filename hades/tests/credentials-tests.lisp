@@ -22,6 +22,12 @@
   (:use #:cl #:fiveam)
   (:local-nicknames (#:cred #:hades/credentials) (#:sec #:aion/secret))
   #+linux (:local-nicknames (#:libsecret #:aion/libsecret) (#:ffi #:aion/libsecret/ffi))
+  ;; The stub test replaces THIS platform's value-reading entry point, so it needs that
+  ;; platform's FFI package under the same nickname hades/credentials uses (#1035). Only the
+  ;; Linux line existed, so the #+darwin and #+win32 branches of that test named a package
+  ;; that does not exist there, and the file failed to READ on both.
+  #+win32 (:local-nicknames (#:ffi #:aion/windows/ffi))
+  #+darwin (:local-nicknames (#:ffi #:aion/darwin/ffi) (#:darwin #:aion/darwin))
   (:export #:run-tests))
 
 (in-package #:hades/credentials/tests)
@@ -444,14 +450,26 @@ must not happen is the read being reached at all."
          (symbol #+win32 'ffi:cred-read-w
                  #+darwin 'ffi:sec-item-copy-matching
                  #+linux 'ffi:secret-password-lookupv-binary-sync)
-         (original (fdefinition symbol)))
+         (original (fdefinition symbol))
+         ;; ON MACOS THE ENTRY POINT IS SHARED. SecItemCopyMatching is both the Keychain's value
+         ;; read and the call the attributes-only query uses, so counting calls to it would count
+         ;; the legitimate one and this test would fail for the wrong reason. There the stub reads
+         ;; the QUERY: it records only a query that asks for kSecReturnData, which is the only key
+         ;; that returns a value, and passes anything else through to the real call. On Windows
+         ;; and Linux the entry point returns a value and nothing else, so the call itself counts.
+         (stub #+darwin (lambda (query out)
+                          (if (cffi:null-pointer-p
+                               (ffi:cf-dictionary-get-value query (darwin:cf-constant "kSecReturnData")))
+                              (funcall original query out)
+                              (progn (incf called)
+                                     (error "the value read was called to answer a question about existence"))))
+               #-darwin (lambda (&rest args)
+                          (declare (ignore args))
+                          (incf called)
+                          (error "the value read was called to answer a question about existence"))))
     (unwind-protect
          (progn
-           (setf (fdefinition symbol)
-                 (lambda (&rest args)
-                   (declare (ignore args))
-                   (incf called)
-                   (error "the value read was called to answer a question about existence")))
+           (setf (fdefinition symbol) stub)
            (dolist (call (list (lambda () (cred:credential-exists-p (%service) "user"))
                                (lambda () (cred:credential-names (%service)))))
              ;; Any outcome is allowed; the recorder is what is asserted.

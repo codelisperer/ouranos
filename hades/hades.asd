@@ -64,7 +64,9 @@
 
 (defsystem "hades/credentials/tests"
   :description "Tests for hades/credentials: the round trip, a missing item, and the value never appearing in text."
-  :depends-on ("hades/credentials" "aion/secret" "fiveam" (:feature :linux "aion/libsecret"))
+  ;; Each platform's FFI package, for the stub test that replaces its value read (#1035).
+  :depends-on ("hades/credentials" "aion/secret" "fiveam" (:feature :linux "aion/libsecret")
+               (:feature :win32 "aion/windows") (:feature :darwin "aion/darwin"))
   :serial t
   :components ((:module "tests"
                 :serial t
