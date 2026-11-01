@@ -36,10 +36,26 @@ The test is: **would you want this line in production, forever?**
 | `:info` | One line per meaningful unit of work. Readable at a glance in prod. | one line per HTTP request (method, path, status, ms); a migration applied |
 | `:debug` | The detail you turn on to diagnose something. Off by default. | each SQL statement + row count + ms; LLM request/response metadata; connect/disconnect |
 | `:warn` | Recoverable, but somebody should know. | an LLM provider call failed (the caller may retry or fail over); a rollback target missing from the known set |
-| `:error` | Use `log:exception` — it attaches the condition report **and a backtrace**. | an unhandled error in a request |
+| `:error` | Use `log:exception`. It attaches the condition's type (`error-type`) and a backtrace of frame names, with no arguments. The condition's report is not written, because it can quote outside data; see **Conditions** below. | an unhandled error in a request |
 
 Two habits that keep this honest: don't log at `:info` inside a loop, and don't log the same
 event twice at two layers — the outer seam usually owns it.
+
+## Conditions
+
+A condition's report can quote outside data: a database driver's error can hold row values, and
+an HTTP error can hold a response body. A backtrace that prints each frame's arguments can hold a
+request body. So a log line names a condition by its type, never by its report (#1013):
+
+```lisp
+(log:exception e "request failed")                                ; type and frame names
+(log:warn "provider call failed" :condition (log:condition-type e)) ; yes
+(log:warn "provider call failed" :error (princ-to-string e))      ; no: the report
+```
+
+`aion/log:*log-condition-details*`, NIL by default, makes `log:exception` also write the report,
+as `error`, and the frames' arguments. Turn it on for a development run only. Nothing turns it on
+for you, and the `:debug` level does not imply it.
 
 ## Structured fields, not string interpolation
 
