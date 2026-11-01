@@ -38,7 +38,10 @@ adds DX** — it does not reinvent dependency resolution on day one.
 **Real today:**
 - **`cons init <name> --template {lib,cli,web,agent}`** — scaffold a project (the
   `.asd`, packages, `src/`, tests, `.gitignore`, `.vscode` Alive config, a `cons.lisp`
-  build spec, README). `web` scaffolds a minimal, runnable Hyperion app.
+  build spec, README). `web` scaffolds a minimal, runnable Hyperion app on `hyperion/server-uv`,
+  with a test suite that starts it and checks that server-uv answered. `--db sqlite` or
+  `--db postgres` adds a database: one mnemosyne pool from `DATABASE_URL`, shared by a session
+  store and a user store (#711).
 - **`cons <target> KEY=VALUE`** — the **build-spec task runner**. A project declares its
   tasks in a root **`cons.lisp`** (a declarative, Lispy manifest); `cons build | test |
   repl | run | serve | dev …` then works identically on Linux / macOS / Windows, with no

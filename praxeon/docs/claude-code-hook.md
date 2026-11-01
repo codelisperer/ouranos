@@ -1,4 +1,4 @@
-# praxeon-claude-code: a report on tool-output tokens, and a hook that summarises large search outputs
+# praxeon-claude-code: a report on tool-output tokens, and a hook that shortens large search outputs
 
 `praxeon-claude-code` is an executable built from `praxeon/claude-code` (#452). It has two
 commands:
@@ -7,17 +7,17 @@ commands:
   sessions read came from large tool outputs, and how much of that the hook would replace. Run
   it first: whether the hook is worth installing depends on your own sessions.
 - **`hook`** is a Claude Code `PostToolUse` hook. When a search command or an MCP tool returns
-  a large output, it asks a second model for a short list of facts from it, checks the list
-  against the output, and replaces what the main model reads with the list and the path of the
-  saved original. When anything goes wrong it prints nothing, so the original output goes
-  through unchanged.
+  a large output, it replaces what the main model reads with some of the output's lines, copied
+  unchanged, and the path of the saved original. For `rg` and `grep` it groups the matches by
+  file, with no model call; otherwise a second model chooses which lines to keep (#465). When
+  anything goes wrong it prints nothing, so the original output goes through unchanged.
 
 ## Why a large output costs more than its size
 
 A tool result stays in the conversation. Every later model call reads it again, usually from
 the prompt cache, until the session compacts or ends. So a 30,000-token search result read by
-the next 80 calls costs 2.4 million cache-read tokens, and replacing it with a 1,500-token list
-removes most of that. How much this saves depends entirely on how often your sessions produce
+the next 80 calls costs 2.4 million cache-read tokens, and replacing it with 1,500 tokens of its
+lines removes most of that. How much this saves depends entirely on how often your sessions produce
 large search outputs, which is what `report` measures.
 
 ## Building
@@ -54,7 +54,7 @@ prints:
   with its tokens (estimated as characters / 4) and "read again": its size times the number of
   later calls before a compaction;
 - an upper bound on the saving: if every output the hook would replace were replaced by the
-  largest summary it accepts, how many fewer tokens the later calls would read, as a share of
+  largest replacement it accepts, how many fewer tokens the later calls would read, as a share of
   all their input-side tokens;
 - why the large outputs the hook would not replace were passed through;
 - the categories most read again: the tool's name, or `Bash:` and the command's base name.
@@ -120,7 +120,7 @@ matcher is safe, only slower.
 - a search for a pattern that matches every line (`''`, `^`, `$`, `.`, `.*`), which prints whole
   files;
 - an output Claude Code has already saved to a file: its event carries `persistedOutputPath`, and
-  the model is shown a preview of about 2,000 characters, so a summary would give it more to
+  the model is shown a preview of about 2,000 characters, so a replacement would give it more to
   read, not less. Recorded on 2026-09-30: an output of 205,926 characters arrived with `stdout`
   cut to 29,999, and on two transcripts the model was shown 2,053 and 2,213 characters of
   outputs whose events carried 29,869 and 30,000;
@@ -139,36 +139,48 @@ matcher is safe, only slower.
   from the raw output. A search over a saved gate log is refused only when the lines it matched
   carry one; the gate prints SHAs in its provenance block, not on its suite lines.
 
-## The check on the summary
+## How the replacement is made (#465)
 
-The second model's list is refused, and the original passes through, when:
+Every line of a replacement is either a line of the output, copied whole and unchanged, or a line
+the hook writes itself, which starts with `[praxeon-claude-code: `. The hook writes three kinds:
+the header, a marker where lines were left out, and, for grouped matches, one line per file. No
+model writes any text that the main model reads.
 
-- any file path (including a dotfile such as `.envrc`), identifier-shaped token or hexadecimal
-  identifier in it does not occur in the raw output on name boundaries, or any run of digits in
-  it does not occur there as a whole run. Identifier-shaped means: with `_`, a hyphen between
-  names (`%write-response`, so also hyphenated words such as `read-only`), a colon between names
-  (`pkg:sym`, checked as one name), a dot between names, letters and digits together, camelCase,
-  or a leading `%`, `*` or `+`. On name boundaries means not inside a longer name or path:
-  `lib/server.lisp` does not match `mylib/server.lisp`, `foo_bar` does not match `foo_bar_baz`,
-  and `src/http` does not match `src/http.lisp`, but `src/http` matches `src/http/server.lisp`;
-- it is over the size budget (1,800 tokens by default);
-- it is less than 30% smaller than the original.
+1. **Grouped, with no model.** When the command is `rg` or `grep` and every line of its output
+   names a file (`path:line:text` or `path:text`), the matches are grouped by file in the order
+   the files first appear. Each file gets one line saying how many lines matched in it, followed
+   by its first five matching lines, or fewer when five per file do not fit the budget. If even
+   one line per file does not fit, or a line names no file (a heading, a context line, a
+   single-file search), this step is skipped.
+2. **Chosen by a second model.** Otherwise the output is sent with each line numbered, and the
+   model answers only with ranges of line numbers, most important first (at most 40, held to
+   that by the reply's schema, which allows no other field). The hook cuts each range to the
+   output, drops reversed ones and ones wholly outside it, and takes them in the model's order,
+   leaving out any range that would take the replacement over budget. The kept lines are printed
+   in the output's order, with `[praxeon-claude-code: N lines omitted]` for every gap.
 
-Markdown's backticks and `**` are ignored on both sides (a single `*` is kept, since `*name*` is a
-Lisp special variable), a possessive `'s` is removed, and `name:12` is checked as the name and
-the number separately. Nothing else is relaxed.
+Either way the replacement is refused, and the original passes through, when it keeps no line of
+the output, is over the budget (1,800 tokens by default), or is less than 30% smaller than the
+original. A replacement made of copied lines cannot name a file, a line number or an identifier
+the output does not contain, so #454's check for invented names is no longer needed and has been
+removed.
 
-What the check does not catch: a real name, path or number attached to the wrong thing. A line
-number is refused when it occurs nowhere in the output, not when it occurs only beside another
-path. It catches invention, not misattribution.
+**An instruction in a tool's output.** Because the model writes nothing, an instruction planted in
+an output (a web page, a file, an MCP server's answer) reaches the main model only as that line of
+the output, as it would have without the hook. At most it can influence which lines are kept. The
+whole output stays in the archive.
 
-The replacement starts with one line saying it is a summary, its size, the model that wrote it,
-and where the original is:
+The replacement starts with a header saying where its lines came from, for example:
 
 ```
-[praxeon-claude-code: a summary of 3,868 tokens of output in 812 tokens, written by claude-sonnet-5-5. The full output is in /home/you/.cache/praxeon-claude-code/archive/<sha256>.txt]
-- docs/ci.md:7 says ...
+[praxeon-claude-code: lines selected by claude-sonnet-5-5 from 5,668 tokens of output, 1,790 tokens kept. Every line that does not start with [praxeon-claude-code: is copied unchanged from the output. The full output is in /home/you/.cache/praxeon-claude-code/archive/<sha256>.txt]
+[praxeon-claude-code: 12 lines omitted]
+hyperion/src/html.lisp:54:    '("autocomplete")      ; allowed on <textarea> (WHATWG), rejected by Spinneret there
+...
 ```
+
+For grouped matches the header says `lines selected by praxeon-claude-code, grouping the matches
+by file`.
 
 ## Settings
 
@@ -181,8 +193,8 @@ All environment variables, so they can be set in the hook's `command`:
 | `PRAXEON_CC_EFFORT` | `medium` | the effort, for the `claude` backend |
 | `PRAXEON_CC_CLAUDE` | `claude` | the `claude` program |
 | `PRAXEON_CC_THRESHOLD` | 3500 | outputs under this many tokens pass through |
-| `PRAXEON_CC_SUMMARY_BUDGET` | 1800 | the largest summary accepted, in tokens |
-| `PRAXEON_CC_TIMEOUT` | 90 | seconds the summarizer may take; set the hook's own `timeout` above it |
+| `PRAXEON_CC_SUMMARY_BUDGET` | 1800 | the largest replacement accepted, in tokens, not counting its header |
+| `PRAXEON_CC_TIMEOUT` | 90 | seconds the second model may take; set the hook's own `timeout` above it |
 | `PRAXEON_CC_ARCHIVE_DAYS` | 7 | archived originals older than this are deleted |
 | `PRAXEON_CC_CACHE_DIR` | `$XDG_CACHE_HOME/praxeon-claude-code/` or `~/.cache/praxeon-claude-code/` | the archive and the log |
 
@@ -190,7 +202,7 @@ Every whole-number setting must be above zero; anything else is ignored and the 
 
 The `claude` backend's call cannot run this hook, a tool or an MCP server:
 `claude -p --tools "" --strict-mcp-config --no-session-persistence --setting-sources ""
---settings '{"disableAllHooks": true}'`, with `--json-schema` for the list and
+--settings '{"disableAllHooks": true}'`, with `--json-schema` for the ranges and
 `CLAUDE_CODE_PROMPT_CACHE_TTL=5m`, since a one-shot call never reads a longer-lived cache back.
 `--bare` is not used because it ignores the Claude Code login. The call runs in the temporary
 directory, not the session's: from inside this repository the same call's prompt was 1,175 tokens
@@ -206,8 +218,8 @@ link.
 ## The log
 
 One JSON line per event in `<cache dir>/hook.log`, with counts only: the category, the raw
-tokens, the tokens sent to the model when it was replaced, the decision and its reason, the
-backend, the time taken, and for a backend failure the condition's type
+tokens, the tokens sent to the model when it was replaced, the decision and its reason, how the
+replacement was made (`grouped` or `selected`), the backend when a model was asked, the time taken, and for a backend failure the condition's type
 (`summarizer-timeout`, `summarizer-exit` or `summarizer-bad-reply`). To see your own rejection
 rate:
 
@@ -217,6 +229,38 @@ grep -o '"reason":"[a-z-]*"' ~/.cache/praxeon-claude-code/hook.log | sort | uniq
 ```
 
 ## What the measurements show
+
+### With lines copied from the output (#465)
+
+`praxeon/scripts/claude-code-trials.lisp` runs three searches over this repository and asks five
+questions of each, fixed before any model run: the lines at 10%, 30%, 50%, 70% and 90% of the
+output, each phrased as the question that line answers. A question counts as answered when its
+line is in the replacement, whole. Without `PRAXEON_CC_TRIALS=run` the script calls no model.
+
+The searches were chosen to be eligible and inside the band the hook acts on. #454's two
+searches no longer are: on the tree of 2026-10-24, `rg -n "defun %" mnemosyne hyperion` printed
+67,063 characters, which Claude Code would save to a file, and `rg -n -i windows docs` was
+passed through as `credential`. Of 18 searches inside the band tried for the trials, 14 were
+passed through as `credential` (two of those judged by a grep for the rule's markers rather than
+by the rule itself) and 4 were eligible. The 14 contain the words `secret` (the `aion/secret`
+module), `credentials`, `machine` or `_token`, which the rule treats as credentials. On this
+repository the credential rule, not the replacement, decides most of what the hook can touch.
+
+Offline results, macOS, at commit 4126aea:
+
+| search | size | how it was replaced | sent | questions answered |
+|---|---|---|---|---|
+| T1 `rg -n "defun %" klio mnemosyne/src` (24 files) | 4,165 tokens | grouped | 1,869 tokens | 2 of 5 |
+| T2 `rg -n -i webview hyperion/docs docs` (21 files) | 4,285 tokens | grouped | 1,824 tokens | 1 of 5 |
+| T3 `rg -n -i spinneret hyperion` (46 files) | 5,668 tokens | does not group within the budget; needs the model | | |
+
+Grouping is accepted every time, since it can only copy lines, but it keeps each file's first
+lines, so a question about a line further down a file is not answered from it. The main model
+then has to read the archived original, which the header names. The model's selection on all
+three searches has not been run yet: it uses the Claude Code login of whoever runs the script,
+and the maintainer decides when that happens.
+
+### With a list of facts (#454, replaced by #465)
 
 From one machine (WSL2, Claude Code 2.1.270, the `claude` backend with Sonnet at medium effort),
 on 2026-09-30. They are a starting point rather than a result.

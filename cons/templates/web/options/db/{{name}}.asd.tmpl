@@ -1,0 +1,29 @@
+;;;; {{name}}.asd --- system definition for {{name}}.
+
+(defsystem "{{name}}"
+  :description ""
+  :author "{{author}}"
+  :license ""
+  :version "0.0.0"
+  :depends-on ({{deps}})
+  :serial t
+  :components ((:module "src"
+                :serial t
+                :components ((:file "packages")
+                             (:file "db")
+                             (:file "{{name}}"))))
+  :in-order-to ((test-op (test-op "{{name}}/tests"))))
+
+(defsystem "{{name}}/tests"
+  :description "Test suite for {{name}}."
+  :depends-on ("{{name}}" "fiveam" (:require "sb-bsd-sockets"))
+  :serial t
+  :components ((:module "tests"
+                :serial t
+                :components ((:file "{{name}}-tests"))))
+  :perform (test-op (o c)
+             (declare (ignore o c))
+             (unless (uiop:symbol-call :fiveam :run!
+                                       (uiop:find-symbol* (string-upcase "{{name}}")
+                                                          (string-upcase "{{name}}/tests")))
+               (error "{{name}}: tests failed"))))

@@ -145,8 +145,12 @@ handle, the submission queue, and the set of handles to close on teardown."))
 (defun ensure-available ()
   "Load libuv if it is not loaded yet, and verify it matches this binding.
 Called by every entry point, so a missing library fails at USE with instructions
-rather than at LOAD with a broken system."
-  (unless (ffi:libuv-loaded-p)
+rather than at LOAD with a broken system.
+
+The check runs until it has passed, not only while libuv is unloaded. LOAD-LIBUV marks libuv
+loaded before VERIFY-ABI runs, so a libuv that failed the check used to count as available on
+every later call (#940). Now every call signals LIBUV-ABI-MISMATCH until a check passes."
+  (unless (ffi:abi-verified-p)
     (ffi::ensure-loaded)
     (ffi:verify-abi))
   t)

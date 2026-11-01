@@ -994,6 +994,159 @@ but it must not end the turn with an untyped error."
       (is (and result (eq :not-run (getf result :outcome))) "~S" result)
       (is (search "could not be read" (getf result :content)) "~A" (getf result :content)))))
 
+;;; --- a mask through the means (#946) ---------------------------------------------------
+
+(defun %mask-agent (call-args resolve &key provider (base-url nil))
+  "An agent whose model calls generate-image once with CALL-ARGS and then answers, registered
+with RESOLVE as :RESOLVE-REFERENCE and with PROVIDER, or an OpenAI provider against BASE-URL (a
+closed port when none is given, so that any request fails to connect)."
+  (let ((ag (actor:make-agent
+             :name "designer"
+             :provider (make-instance 'scripted
+                                      :script (list (%call-completion "generate-image"
+                                                                      (apply #'%args call-args))
+                                                    (llm:make-completion :text "Done."
+                                                                         :stop-reason :end))))))
+    (praxeon/image:register ag (or provider
+                                   (praxeon/image:make-openai-images
+                                    :api-key "k" :base-url (or base-url "http://127.0.0.1:9/v1")))
+                            :on-image (constantly "img-2") :resolve-reference resolve)
+    ag))
+
+(defun %means-property (agent name)
+  (gethash name (gethash "properties"
+                         (actor::means-entry-schema
+                          (gethash "generate-image" (actor:agent-means agent))))))
+
+(test the-schema-offers-a-mask-only-with-a-resolver-and-a-provider-that-takes-one
+  "#946: an OpenAI provider with a resolver is offered mask; without a resolver, or with Google's
+provider, which takes no mask, it is not."
+  (flet ((agent (provider resolve)
+           (let ((ag (actor:make-agent :name "a" :provider (make-instance 'scripted :script '()))))
+             (apply #'praxeon/image:register ag provider :on-image #'identity
+                    (and resolve (list :resolve-reference resolve)))
+             ag)))
+    (let ((openai (praxeon/image:make-openai-images :api-key "k"))
+          (google (praxeon/image:make-google-images :api-key "k")))
+      (is (equal "string" (gethash "type" (%means-property (agent openai (constantly nil)) "mask"))))
+      (is (null (%means-property (agent openai nil) "mask")) "no resolver, no mask")
+      (is (null (%means-property (agent google (constantly nil)) "mask")) "Google takes no mask")
+      (is (%means-property (agent google (constantly nil)) "reference_images")
+          "Google is still offered reference_images"))))
+
+(test in-a-turn-the-model-edits-only-the-region-a-mask-marks
+  "#946: the model names img-1 as the image and mask-1 as the mask. The app resolves both through
+its resolver; the request carries the mask as its mask part, byte for byte, and the usage event
+records that a mask was used."
+  (let ((png (%png 8 6 :color-type 2))
+        (mask (%png 8 6))
+        (asked '()))
+    (multiple-value-bind (port server) (%serve-replies (list (%image-reply)))
+      (let ((requests nil) (events nil))
+        (unwind-protect
+             (let ((ag (%mask-agent
+                        (list "prompt" "replace the sky" "reference_images" (vector "img-1")
+                              "mask" "mask-1")
+                        (lambda (ref) (push ref asked)
+                          (cond ((equal ref "img-1") (%ref png ref))
+                                ((equal ref "mask-1") (%ref mask ref))))
+                        :base-url (format nil "http://127.0.0.1:~D/v1" port))))
+               (setf events (nth-value 1 (%collecting-events (lambda () (actor:run-turn ag "x"))))))
+          (setf requests (aion/test-threads:join server :timeout 10)))
+        (is (equal '("img-1" "mask-1") (reverse asked)) "~S" asked)
+        (multiple-value-bind (request-line type parts) (%edit-request requests)
+          (declare (ignore request-line type))
+          (is (equalp png (cdr (first (%part-named parts "image[]")))))
+          (is (equalp mask (cdr (first (%part-named parts "mask"))))))
+        (let ((result (find :tool-result events :key #'evt:event-type)))
+          (is (and result (not (getf result :is-error))) "~S" result))
+        (is (eq t (getf (find :image-usage events :key #'evt:event-type) :mask))
+            "the usage event records the mask")))))
+
+(test in-a-turn-without-a-mask-the-edit-sends-none-and-the-usage-event-says-none
+  "#946, the control for the test above: the same edit with no mask argument sends no mask part,
+and the usage event has no :MASK."
+  (multiple-value-bind (port server) (%serve-replies (list (%image-reply)))
+    (let ((requests nil) (events nil))
+      (unwind-protect
+           (let ((ag (%mask-agent (list "prompt" "replace the sky" "reference_images" (vector "img-1"))
+                                  (lambda (ref) (%ref (%png 8 6 :color-type 2) ref))
+                                  :base-url (format nil "http://127.0.0.1:~D/v1" port))))
+             (setf events (nth-value 1 (%collecting-events (lambda () (actor:run-turn ag "x"))))))
+        (setf requests (aion/test-threads:join server :timeout 10)))
+      (multiple-value-bind (request-line type parts) (%edit-request requests)
+        (declare (ignore request-line type))
+        (is (null (%part-named parts "mask"))))
+      (let ((usage (find :image-usage events :key #'evt:event-type)))
+        (is-true usage)
+        (is (null (getf usage :mask)) "~S" usage)))))
+
+(test in-a-turn-a-mask-the-provider-cannot-take-is-refused-and-the-model-told-why
+  "#946: Google's provider takes no mask and is not offered one. A model that gives one anyway is
+refused with IMAGE-INPUT-INVALID before any request (the provider points at a closed port), and the
+result tells it why. A mask the resolver does not know is refused as well, and so is a mask with no
+reference image."
+  (flet ((result-of (provider call-args)
+           (let* ((ag (%mask-agent call-args (lambda (ref) (%ref (%png 8 6) ref)) :provider provider))
+                  (events (nth-value 1 (%collecting-events (lambda () (actor:run-turn ag "x"))))))
+             (find :tool-result events :key #'evt:event-type))))
+    (let ((r (result-of (praxeon/image:make-google-images :api-key "k" :base-url "http://127.0.0.1:9/v1beta")
+                        (list "prompt" "x" "reference_images" (vector "img-1") "mask" "mask-1"))))
+      (is (eq :not-run (getf r :outcome)) "~S" r)
+      (is (search "takes no mask" (getf r :content)) "~A" (getf r :content)))
+    (let ((r (result-of nil (list "prompt" "x" "mask" "mask-1"))))
+      (is (eq :not-run (getf r :outcome)) "~S" r)
+      (is (search "no reference image" (getf r :content)) "~A" (getf r :content))))
+  (let* ((ag (%mask-agent (list "prompt" "x" "reference_images" (vector "img-1") "mask" "other")
+                          (lambda (ref) (and (equal ref "img-1") (%ref (%png 8 6) ref)))))
+         (r (find :tool-result (nth-value 1 (%collecting-events (lambda () (actor:run-turn ag "x"))))
+                  :key #'evt:event-type)))
+    (is (eq :not-run (getf r :outcome)) "~S" r)
+    (is (search "\"other\" is not an image reference" (getf r :content)) "~A" (getf r :content))))
+
+(test a-mask-that-cannot-be-sent-is-refused-before-the-resolver-reads-it
+  "#946's review: for a provider that takes no mask, and for a call with no reference image, the
+mask is refused before the app's resolver is asked for it, so no image is read for a call that
+cannot be sent. Control: OpenAI with a reference asks the resolver for the mask."
+  (flet ((asked-for (provider call-args)
+           (let* ((asked '())
+                  (ag (%mask-agent call-args
+                                   (lambda (ref) (push ref asked) (%ref (%png 8 6) ref))
+                                   :provider provider)))
+             (%collecting-events (lambda () (actor:run-turn ag "x")))
+             (reverse asked))))
+    (is (equal '("img-1")
+               (asked-for (praxeon/image:make-google-images :api-key "k"
+                                                            :base-url "http://127.0.0.1:9/v1beta")
+                          (list "prompt" "x" "reference_images" (vector "img-1") "mask" "mask-1")))
+        "Google: only the reference image is resolved")
+    (is (null (asked-for nil (list "prompt" "x" "mask" "mask-1")))
+        "no reference image: nothing is resolved")
+    (is (equal '("img-1" "mask-1")
+               (asked-for nil (list "prompt" "x" "reference_images" (vector "img-1")
+                                    "mask" "mask-1")))
+        "control: OpenAI with a reference resolves the mask")))
+
+(test a-mask-naming-a-reference-image-is-resolved-once
+  "#946's review: the model names img-1 as both a reference image and the mask. The resolver is
+asked for img-1 once, and the request carries that image as both the image and the mask part."
+  (let ((png (%png 8 6))
+        (asked '()))
+    (multiple-value-bind (port server) (%serve-replies (list (%image-reply)))
+      (let ((requests nil))
+        (unwind-protect
+             (let ((ag (%mask-agent
+                        (list "prompt" "x" "reference_images" (vector "img-1") "mask" "img-1")
+                        (lambda (ref) (push ref asked) (%ref png ref))
+                        :base-url (format nil "http://127.0.0.1:~D/v1" port))))
+               (%collecting-events (lambda () (actor:run-turn ag "x"))))
+          (setf requests (aion/test-threads:join server :timeout 10)))
+        (is (equal '("img-1") asked) "~S" asked)
+        (multiple-value-bind (request-line type parts) (%edit-request requests)
+          (declare (ignore request-line type))
+          (is (equalp png (cdr (first (%part-named parts "image[]")))))
+          (is (equalp png (cdr (first (%part-named parts "mask"))))))))))
+
 (test the-file-name-sent-is-praxeons-not-the-callers
   "A name with a quote and a line break, as an app or a model might supply, never reaches the
 part's header; the provider is given image-1.png."

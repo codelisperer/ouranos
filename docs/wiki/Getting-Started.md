@@ -88,7 +88,11 @@ variants, no platform branches for you to get wrong. It does these things in one
    `(:tree <repo-root>)` entry that covers every framework at once. This is the
    monorepo-era replacement for symlinking each project into
    `~/quicklisp/local-projects` or pushing onto `asdf:*central-registry*`. It is rewritten
-   on each bootstrap, so it self-heals if you move the repo.
+   when it names this checkout or a checkout that no longer exists, so moving the repo needs
+   only a second bootstrap. When it names another checkout that still exists, bootstrap
+   stops with exit code 3 before building, names both, and prints the two ways forward:
+   `OURANOS_BOOTSTRAP_LOCAL=1` (build this checkout through `CL_SOURCE_REGISTRY` and leave
+   the drop-in alone) or `OURANOS_BOOTSTRAP_FORCE=1` (make the drop-in name this checkout).
 4. **Warms the stack** — compiles the six core frameworks in DAG order plus hermes, in a
    throwaway SBCL, so your first `cons build` or editor load is instant instead of a cold,
    multi-minute Coalton compile.
@@ -223,7 +227,9 @@ the build machine.
 **The first Coalton compile is slow, or OOMs.** Expected. Give SBCL
 `--dynamic-space-size 4096` and let it finish; it's cached afterward.
 
-**A system isn't found.** Re-run the seed once — it rewrites the drop-in. Then confirm
+**A system isn't found.** Re-run the seed once, which rewrites the drop-in. If you
+bootstrapped with `OURANOS_BOOTSTRAP_LOCAL=1`, there is no drop-in for that checkout: set the
+`CL_SOURCE_REGISTRY` value bootstrap printed. Then confirm
 `~/.config/common-lisp/source-registry.conf.d/50-ouranos.conf` exists and points at your
 actual checkout. If you moved the repo without re-bootstrapping, this is why.
 

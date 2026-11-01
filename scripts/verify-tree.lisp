@@ -147,7 +147,7 @@
 
 (defparameter +systems+
   '(;; core
-    :aion :aion/csv :aion/tz :aion/platform :aion/fs :aion/clock :aion/log :aion/boundary :aion/dynamic :aion/pool :aion/interceptor :aion/signature :aion/http-client :cons :mnemosyne :elenchon :hyperion :praxeon
+    :aion :aion/csv :aion/sexp :aion/tz :aion/platform :aion/fs :aion/clock :aion/log :aion/boundary :aion/dynamic :aion/pool :aion/interceptor :aion/signature :aion/http-client :cons :mnemosyne :elenchon :hyperion :praxeon
     :hermes
     :klio
     :hades :hades/single-instance :hades/credentials :hades/notify :hades/program :hades/open
@@ -158,7 +158,7 @@
     :cons/env :cons/cli :cons/coalton-repl
     :hermes/blob
     :hermes/payments
-    :hyperion/import :hyperion/desktop :hyperion/update :hyperion/update-ui :hyperion/assets :hyperion/calendar :hyperion/session-db
+    :hyperion/import :hyperion/desktop :hyperion/update :hyperion/update-ui :hyperion/assets :hyperion/calendar :hyperion/kit :hyperion/session-db
     :hyperion/auth-db :hyperion/db-connection :hyperion/cli
     ;; The query-string list component and its mnemosyne half (#488).
     :hyperion/list :hyperion/list-db
@@ -170,10 +170,17 @@
     :hyperion/http1
     :praxeon/translate :praxeon/web :praxeon/web-search :praxeon/memory-db :praxeon/results-db
     :praxeon/retrieval
+    ;; The chat widget's parts, which praxeon/web's page and its embed panel share (#67). It
+    ;; loads here on its own, so a dependency it uses but does not declare is not hidden by
+    ;; praxeon/web loading it first. Its tests are in praxeon/web/tests.
+    :praxeon/chat-ui
     ;; The MCP client and its OAuth sign-in (#527).
     :praxeon/mcp :aion/oauth :hyperion/oauth
     ;; The job scheduler and its database store (#689).
     :aion/schedule :mnemosyne/jobs
+    ;; Test support: one migrated SQLite template per run, a copy per test (#1047). Its
+    ;; tests are in mnemosyne/tests.
+    :mnemosyne/test-template
     ;; Dev sidecars (#700).
     :hyperion/sidecar
     ;; example apps -- they are the launch artifacts and the first thing a reader runs
@@ -190,7 +197,7 @@ scripts/build-libuv.lisp first, so their absence here is not evidence of anythin
 Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ below.")
 
 (defparameter +test-systems+
-  '(:aion/tests :aion/tz/tests :aion/boundary/tests :aion/dynamic/tests :aion/test-threads/tests :aion/platform/tests :aion/fs/tests :aion/pool/tests :aion/interceptor/tests :aion/signature/tests :aion/http-client/tests :cons/tests :mnemosyne/tests :hyperion/tests :praxeon/tests :hermes/tests :hermes/payments/tests
+  '(:aion/tests :aion/sexp/tests :aion/tz/tests :aion/boundary/tests :aion/dynamic/tests :aion/test-threads/tests :aion/platform/tests :aion/fs/tests :aion/pool/tests :aion/interceptor/tests :aion/signature/tests :aion/http-client/tests :cons/tests :mnemosyne/tests :hyperion/tests :praxeon/tests :hermes/tests :hermes/payments/tests
     :elenchon/tests :klio/tests :hades/single-instance/tests :hades/credentials/tests
     :hades/notify/tests :hades/open/tests
     ;; aux suites that existed but were never run from here
@@ -201,6 +208,8 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
     ;; (#355), registered in the commit that adds the suite.
     :hyperion/examples/coalton-repl/tests
     :hyperion/assets/tests :hyperion/calendar/tests :hermes/blob/tests
+    ;; The collection-page components (#981), registered in the commit that adds them.
+    :hyperion/kit/tests
     ;; The list component (#488), registered in the commit that adds it. The -db suite
     ;; reports Postgres, and +REQUIRED-BACKEND-REPORTS+ holds it to that.
     :hyperion/list/tests :hyperion/list-db/tests

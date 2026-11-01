@@ -49,8 +49,10 @@ the tree's own systems reachable, so a template may depend on hyperion or praxeo
         "--eval" (format nil "(ql:quickload \"~A/tests\")" name)
         "--eval" "(uiop:quit 0)"))
 
-(defun check (designator &key (name *check-project-name*) keep (stream *standard-output*))
-  "Generate DESIGNATOR into a temporary directory and BUILD what comes out.
+(defun check (designator &key (name *check-project-name*) keep (stream *standard-output*)
+                                options)
+  "Generate DESIGNATOR, with OPTIONS (a plist such as (:DB :SQLITE), passed to
+CONS/INIT:SCAFFOLD), into a temporary directory and BUILD what comes out.
 
 Returns (values OK-P ROOT OUTPUT). KEEP leaves the directory in place, which is what you
 want the moment it fails. Never signals for a template that simply does not work -- a
@@ -66,12 +68,12 @@ failed check is a result, and the caller decides whether that is fatal."
          (output ""))
     (unwind-protect
          (progn
-           (format stream "~&checking template ~(~A~) (~A)~%"
-                   (cons/init:template-name template)
+           (format stream "~&checking template ~(~A~)~{ --~(~A~) ~(~A~)~} (~A)~%"
+                   (cons/init:template-name template) options
                    (namestring (cons/init:template-directory template)))
            ;; 1. Generate. The scaffold log is noise here; what matters is what it left.
            (let ((*standard-output* (make-broadcast-stream)))
-             (cons/init:scaffold name :template designator :target work))
+             (cons/init:scaffold name :template designator :target work :options options))
            (format stream "  generated ~D files~%" (%count-files root))
            ;; 2. Build it, in a fresh sbcl. `sbcl` from PATH, as every other cons
            ;; subprocess does -- and a cold image is the point: it proves the generated
@@ -98,13 +100,17 @@ failed check is a result, and the caller decides whether that is fatal."
           (aion/fs:delete-tree work :if-does-not-exist :ignore)))))
 
 (defun check-all (&key (stream *standard-output*))
-  "Check every built-in template. Returns T when all of them build."
-  (let ((failed '()))
+  "Check every built-in template, once with no options and once per choice of each option.
+Returns T when all of them build."
+  (let ((failed '()) (count 0))
     (dolist (template (cons/init:templates))
-      (unless (check (cons/init:template-name template) :stream stream)
-        (push (cons/init:template-name template) failed)))
+      (dolist (options (cons/init:template-variants template))
+        (incf count)
+        (unless (check (cons/init:template-name template) :stream stream :options options)
+          (push (format nil "~(~A~)~{ --~(~A~) ~(~A~)~}" (cons/init:template-name template) options)
+                failed))))
     (if failed
-        (format stream "~&~D of ~D templates failed: ~{~(~A~)~^ ~}~%"
-                (length failed) (length (cons/init:templates)) (reverse failed))
-        (format stream "~&all ~D built-in templates build~%" (length (cons/init:templates))))
+        (format stream "~&~D of ~D template variants failed: ~{~A~^, ~}~%"
+                (length failed) count (reverse failed))
+        (format stream "~&all ~D built-in template variants build~%" count))
     (null failed)))

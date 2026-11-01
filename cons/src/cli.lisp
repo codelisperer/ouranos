@@ -3,7 +3,7 @@
 ;;;; The command surface. Lives in its own system (cons/cli) so the core library
 ;;;; never pulls the CLI dep (clingon). Subcommands:
 ;;;;
-;;;;   cons init NAME [--template T]  scaffold a new project        (real)
+;;;;   cons init NAME [--template T] [--db D]  scaffold a new project  (real)
 ;;;;   cons template check [DIR]      generate a template and BUILD it (real)
 ;;;;   cons setup                     bootstrap the Lisp environment (planned)
 ;;;;   cons conform [--force]         install the AI-conformance pack (real)
@@ -77,14 +77,16 @@ dependency's source. Exits 1 when a REQUIRED key is missing, so it can gate a de
 
 (defun init/handler (cmd)
   (let ((name (first (clingon:command-arguments cmd)))
-        (template (clingon:getopt cmd :template)))
+        (template (clingon:getopt cmd :template))
+        (db (clingon:getopt cmd :db)))
     (unless name
       (format *error-output* "cons init: NAME required~%")
       (uiop:quit 1))
     (handler-case
         (progn
           (init:scaffold name
-                         :template (intern (string-upcase template) :keyword))
+                         :template (intern (string-upcase template) :keyword)
+                         :options (and db (list :db (intern (string-upcase db) :keyword))))
           (uiop:quit 0))
       (error (e)
         (format *error-output* "cons init: ~A~%" e)
@@ -148,7 +150,10 @@ manifest here means they probably meant the built-ins, so check those."
          :string :description (format nil "project template: ~{~(~A~)~^ | ~}"
                                       (init:template-names))
          :short-name #\t :long-name "template" :initial-value "lib"
-         :key :template)))
+         :key :template)
+        (clingon:make-option
+         :string :description "a database for the app, sqlite | postgres (templates: web)"
+         :long-name "db" :key :db)))
 
 (defun db-repl-options ()
   (list (clingon:make-option
@@ -188,7 +193,7 @@ manifest here means they probably meant the built-ins, so check those."
    :description "cons the magnificent: project & dev tooling for Common Lisp."
    :handler (lambda (cmd) (clingon:print-usage-and-exit cmd t))
    :sub-commands
-   (list (subcommand "init" "scaffold a new project (NAME [--template T])"
+   (list (subcommand "init" "scaffold a new project (NAME [--template T] [--db sqlite|postgres])"
                      #'init/handler (init-options))
          (template-command)
          (subcommand "setup" "put this project on the ASDF path (source-registry drop-in)"
