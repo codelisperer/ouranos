@@ -693,7 +693,7 @@ message."
                     (let ((ok (not (typep result 'condition))))
                       (unless ok
                         (log:error "server-uv: streaming body signalled"
-                                   :condition (princ-to-string result)))
+                                   :condition (log:condition-type result)))
                       (%on-loop loop* (lambda () (%stream-finish so ok))
                                 "a streamed response's finish"))))
          ;; :STREAMING, not NIL. The connection is NOT free yet -- the stream owns it until
@@ -819,7 +819,7 @@ the wire: short, and with the connection closed."
           (%file-emit fo nil))
     (error (e)
       (log:error "server-uv: a file body could not be read"
-                 :condition (princ-to-string e))
+                 :condition (log:condition-type e))
       (%file-finish fo))))
 
 (defun %file-outcome (fo)
@@ -1443,7 +1443,7 @@ written into a closed socket."
               (cond
                 ((typep result 'condition)
                  (log:error "server-uv: handler signalled"
-                            :condition (princ-to-string result))
+                            :condition (log:condition-type result))
                  (%write-error conn 500)
                  nil)
                 ;; Encoded on the worker (#430). Written as it is, unless a drain has turned
@@ -1458,7 +1458,7 @@ written into a closed socket."
                                 (encoded-keep-alive result))
                        (error (e)
                          (log:error "server-uv: response could not be written"
-                                    :condition (princ-to-string e))
+                                    :condition (log:condition-type e))
                          nil))))
                 (t (%complete-response conn app state result keep-alive head-request)))))
         ;; THREE ANSWERS, not two. :STREAMING means the response has begun and the stream
@@ -1529,7 +1529,7 @@ request, which gets the head only."
       ;; send, a body we cannot render. Same answer as a handler that
       ;; signalled, because from the peer's side it is the same event.
       (log:error "server-uv: response could not be written"
-                 :condition (princ-to-string e))
+                 :condition (log:condition-type e))
       (%write-error conn 500)
       nil)))
 
@@ -1574,7 +1574,7 @@ one level up."
       (handler-case
           (funcall (%dispatcher state) app env k)
         (error (e)
-          (log:error "server-uv: dispatch failed" :condition (princ-to-string e))
+          (log:error "server-uv: dispatch failed" :condition (log:condition-type e))
           (funcall k e))))))
 
 ;;; --- lifecycle -------------------------------------------------------------
@@ -1860,7 +1860,7 @@ Clack -- owning the socket is what makes it available at all."
                   :on-error (lambda (e connection)
                               (%finish connection state)
                               (log:debug "server-uv: connection error"
-                                         :condition (princ-to-string e))))))
+                                         :condition (log:condition-type e))))))
              (hand-off (conn next)
                ;; ON THE FIRST LOOP: give CONN to the next shard in turn (:HANDOFF).
                (let ((target (aref shards (mod (sb-ext:atomic-incf (car next)) loops))))
@@ -1878,7 +1878,7 @@ Clack -- owning the socket is what makes it available at all."
                                                               (shard-loop target) fd))
                                          (error (e)
                                            (log:debug "server-uv: a handed-off connection could not be adopted"
-                                                      :condition (princ-to-string e))))
+                                                      :condition (log:condition-type e))))
                                     (sb-ext:atomic-decf (car handoffs))))
                                 "a connection handed to another loop")
                          ;; The target loop is closing, so the socket goes nowhere: close it.
@@ -1941,7 +1941,7 @@ Clack -- owning the socket is what makes it available at all."
                   do (handler-case (%close-shard-loop shard i)
                        (error (e)
                          (log:warn "server-uv: a loop could not be closed after START failed"
-                                   :shard i :error (princ-to-string e)))))
+                                   :shard i :condition (log:condition-type e)))))
           (when workers-pool
             (%stop-workers workers-pool)))))))
 

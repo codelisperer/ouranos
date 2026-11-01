@@ -288,7 +288,14 @@ its own keys -- keeps this domain-neutral."
     (ignore-errors (jzon:parse body))))
 
 (defun json (plist)
-  "Encode a flat PLIST as a JSON object string (keys and values via jzon)."
+  "Encode a flat PLIST as a JSON object string (keys and values via jzon). Signals a TYPE-ERROR
+when PLIST is not a list, and an ERROR when it has an odd number of elements, so its last key has
+no value. Before #1041 the first came back as \"{}\" and the second wrote the key with null, so a
+caller that passed the wrong value stored an empty or partial object without any error."
+  (check-type plist list)
+  (unless (evenp (length plist))
+    (error "hyperion/http:json needs a property list with a value for every key; ~D elements is an odd number."
+           (length plist)))
   (with-output-to-string (s)
     (write-char #\{ s)
     (loop for (k v) on plist by #'cddr

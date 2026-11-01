@@ -1232,6 +1232,14 @@ praxeon stops asking for more. Your function still reads each image it returns, 
 stored size first and return NIL for an image over 50 MB rather than reading it. Without
 `:resolve-reference` the model can only create images from a prompt, as before.
 
+With `:resolve-reference` and a provider that takes a mask (OpenAI's), the schema also offers
+`mask`: one reference, resolved by the same function, to a PNG with transparency the size of the
+first image in `reference_images`, whose transparent pixels mark the part to change (#946). The
+checks on a mask passed to `generate-image` apply to it, and a mask that fails them is refused
+with the reason. The `:image-usage` event of a request with a mask carries `:mask t`. Google's
+provider takes no mask, so it is not offered one, and a mask the model gives anyway is refused
+before any request with a result telling it to describe the part to change in the prompt.
+
 **Google as the provider.** `register-google-image` takes the same arguments as
 `register-openai-image` and sends requests to Google's Gemini API:
 
