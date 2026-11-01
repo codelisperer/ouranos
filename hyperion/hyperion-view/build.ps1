@@ -364,7 +364,7 @@ function Build-Msvc($inc) {
   & cl.exe /nologo /std:c++17 /EHsc /O2 /MT `
     /I "$Here" /I "$inc" `
     "$Src" /Fo:"$obj\" /Fe:"$Out" `
-    /link /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup oleaut32.lib
+    /link /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup oleaut32.lib uuid.lib bcrypt.lib
   if ($LASTEXITCODE -ne 0) { Die "cl.exe failed (exit $LASTEXITCODE)" }
   Remove-Item $obj -Recurse -Force -ErrorAction SilentlyContinue
 }
@@ -376,7 +376,7 @@ function Build-Mingw($inc) {
   $env:PATH = "$(Split-Path -Parent $cxx);$env:PATH"
   Info "compiling with $cxx -> $Out"
   & $cxx -std=c++17 -O2 "$Src" -I "$Here" -I "$inc" -o "$Out" `
-    -ladvapi32 -lole32 -loleaut32 -lshell32 -lshlwapi -luser32 -lversion `
+    -ladvapi32 -lole32 -loleaut32 -lshell32 -lshlwapi -luser32 -lversion -luuid -lbcrypt `
     -mwindows -static
   if ($LASTEXITCODE -ne 0) { Die "g++ failed (exit $LASTEXITCODE)" }
 }
