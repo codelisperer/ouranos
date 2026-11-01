@@ -1105,6 +1105,17 @@ its tag.
   `claude-sonnet-5-5` allows 128,000 output tokens, so `*default-max-tokens*` (8,192) is
   unchanged. The documentation's examples now name
   `claude-opus-5-5` where they named `claude-opus-4-8`.
+- **`aion/tests` runs its four sub-suites through ASDF, and a red aion run stops at the first
+  failing one** (#992). `aion/tests` has no components now. It names `aion/csv/tests`,
+  `aion/csv/types/tests`, `aion/clock/tests` and `aion/log/tests` in
+  `:in-order-to ((test-op (test-op …)))`, and each of those signals an error from its
+  `:perform` when a check fails, so `asdf:test-system` on any of them reports a failure through
+  the exit code. A green run counts the same checks as before (623 on macOS arm64). **When a
+  sub-suite fails, ASDF does not run the sub-suites after it**, so their reports are missing
+  from that run; before, all four ran and the verdict came at the end. The function
+  `aion/tests:run-tests` and the file `aion/tests/all.lisp` are gone: code that called
+  `aion/tests:run-tests` calls `(asdf:test-system :aion/tests)` instead, as `aion/cons.lisp`'s
+  `test` target now does.
 
 ### Added
 

@@ -14,24 +14,26 @@
   (load (merge-pathnames "unrun-suites.lisp" *scripts*)))
 
 (defun %unrun-fixture ()
-  "Write and load an .asd in a fresh tree, and return the prefix of the systems it defines:
-<p>, which has <p>/tests; <p>/extra, whose <p>/extra/tests only <p>/tests depends on, through a
-(:version ...) form; <p>/versioned, whose <p>/versioned/tests nothing depends on; <p>/here and
-<p>/absent, whose /tests systems <p>/tests depends on under a feature that holds on SBCL and
-one that holds nowhere; and <p>/plain, which has no /tests system."
+  "Write and load an .asd in a fresh tree, and return the prefix of the systems it defines.
+<p>/tests runs, through :in-order-to ((test-op (test-op ...))): <p>/extra/tests, named with a
+(:version ...) form; <p>/here/tests, under a feature that holds on SBCL; and <p>/absent/tests,
+under a feature that holds nowhere. It only :depends-on <p>/loaded/tests. Nothing names
+<p>/versioned/tests, and <p>/plain has no /tests system."
   (let* ((dir (%fresh-tree))
          (prefix (format nil "unrunfx-~(~36R~)" (random (expt 2 40) (make-random-state t))))
          (asd (merge-pathnames (format nil "~A.asd" prefix) dir)))
-    (with-open-file (out asd :direction :output)
-      (format out "(defsystem ~S)~%" prefix)
-      (format out "(defsystem ~S :depends-on (~S (:version ~S \"0\") ~A ~A))~%"
-              (format nil "~A/tests" prefix) prefix (format nil "~A/extra/tests" prefix)
-              (format nil "(:feature :sbcl ~S)" (format nil "~A/here/tests" prefix))
-              (format nil "(:feature :ouranos-no-such-feature ~S)"
-                      (format nil "~A/absent/tests" prefix)))
-      (dolist (suffix '("extra" "extra/tests" "versioned" "versioned/tests" "plain"
-                        "here" "here/tests" "absent" "absent/tests"))
-        (format out "(defsystem ~S)~%" (format nil "~A/~A" prefix suffix))))
+    (flet ((name (suffix) (format nil "~A/~A" prefix suffix)))
+      (with-open-file (out asd :direction :output)
+        (format out "(defsystem ~S)~%" prefix)
+        (format out "(defsystem ~S :depends-on (~S ~S) :in-order-to ((test-op (test-op ~A))))~%"
+                (name "tests") prefix (name "loaded/tests")
+                (format nil "(:version ~S \"0\") (:feature :sbcl ~S) ~A"
+                        (name "extra/tests") (name "here/tests")
+                        (format nil "(:feature :ouranos-no-such-feature ~S)"
+                                (name "absent/tests"))))
+        (dolist (suffix '("extra" "extra/tests" "versioned" "versioned/tests" "plain"
+                          "here" "here/tests" "absent" "absent/tests" "loaded" "loaded/tests"))
+          (format out "(defsystem ~S)~%" (name suffix)))))
     (asdf:load-asd asd)
     prefix))
 
@@ -49,28 +51,42 @@ both. The control is the same tree with the suite in the run list."
                                                  (list (intern (string-upcase tests) :keyword))))
         "keywords, as verify-tree.lisp writes its lists, name the same systems")))
 
-(test a-suite-another-run-suite-depends-on-counts-as-run
-  "#992: aion/tests runs aion/csv/tests, aion/clock/tests and aion/log/tests, which it depends
-on, so they are not in the run list themselves. A /tests system that a suite in the run list
-depends on counts as run, including through a (:version ...) form. One that nothing in the run
-list depends on is still reported."
+(test a-suite-another-run-suite-runs-through-test-op-counts-as-run
+  "#992: aion/tests runs aion/csv/tests, aion/clock/tests and aion/log/tests through
+:in-order-to ((test-op (test-op ...))), so they are not in the run list themselves. A /tests
+system a run suite reaches that way counts as run, including through a (:version ...) form.
+One that nothing in the run list reaches is still reported."
   (let* ((p (%unrun-fixture))
          (extra (format nil "~A/extra" p))
          (versioned (format nil "~A/versioned" p))
          (run (list (format nil "~A/tests" p))))
     (is (null (ouranos-unrun-suites:unrun-suites (list p extra) run))
-        "<p>/tests depends on <p>/extra/tests")
+        "<p>/tests runs <p>/extra/tests")
     (is (equal (list (cons p (first run)) (cons extra (format nil "~A/tests" extra)))
                (ouranos-unrun-suites:unrun-suites (list p extra) '()))
         "control: without <p>/tests in the run list, nothing runs <p>/extra/tests")
     (is (equal (list (cons versioned (format nil "~A/tests" versioned)))
                (ouranos-unrun-suites:unrun-suites (list p extra versioned) run))
-        "nothing depends on <p>/versioned/tests")))
+        "nothing runs <p>/versioned/tests")))
+
+(test a-suite-a-run-suite-only-depends-on-is-reported
+  "The hub's ruling on #992, after the review of #1072: ASDF loads a :depends-on and does not
+run its tests, so a suite reached only that way is reported. praxeon/web/tests depends on
+hyperion/assets/tests for its browser helpers and does not run it. The control is the same
+suite in the run list."
+  (let* ((p (%unrun-fixture))
+         (loaded (format nil "~A/loaded" p))
+         (run (list (format nil "~A/tests" p))))
+    (is (equal (list (cons loaded (format nil "~A/tests" loaded)))
+               (ouranos-unrun-suites:unrun-suites (list loaded) run)))
+    (is (null (ouranos-unrun-suites:unrun-suites (list loaded)
+                                                 (cons (format nil "~A/tests" loaded) run)))
+        "control: the same suite in the run list")))
 
 (test a-dependency-under-a-feature-that-does-not-hold-is-not-run
   "Review of #1072: ASDF skips (:feature expression name) when EXPRESSION does not hold, so a
-suite named that way is not run on this host and is reported. The control is the same form
-under :sbcl, which holds here."
+suite a run suite names that way in its test-op wiring is not run on this host and is
+reported. The control is the same form under :sbcl, which holds here."
   (let* ((p (%unrun-fixture))
          (here (format nil "~A/here" p))
          (absent (format nil "~A/absent" p)))
