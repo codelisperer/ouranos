@@ -114,7 +114,19 @@ is loaded, such as a toplevel `warn`, fails the load in the same way.
 A fasl that is already current is loaded without compiling, so a warning in it is not seen
 again. That happens when the fasl was compiled while warnings were muffled, for example by
 a `cons` from before #303 or by `ql:quickload` at the REPL. `--strict` recompiles the
-project's own systems every time, so CI should use it.
+project's own systems every time, so CI should use it. That includes fasls written outside
+`cons`, by a plain ASDF or Quicklisp build step that ran first.
+
+`--strict` judges only what a target loads with `:load` or `:test`. A target that does its work
+with `:eval`, `:call` or `:sh` and has neither, such as one whose `:eval` calls
+`asdf:load-system`, would run with nothing checked, so `cons --strict` refuses it with exit
+code 1 and names it, and names each such step of a `:steps` target (#960). A target with `:sh`
+is refused too, whatever else it has, because cons runs `:sh` in place of its `:load` and
+`:test`. Give the target a `:load` clause naming the systems it builds, and put shell work in a
+target of its own. A strict load whose project directory holds none of the systems it loads is
+refused for the same reason, so under `--strict` every `:load` entry must be one of the
+project's systems: load an outside library, such as `swank`, through the project's own system's
+`:depends-on`.
 
 **Still ahead:** dependency management — `cons add`, Quicklisp/ocicl backends, a native
 resolver + lockfiles (see

@@ -489,9 +489,15 @@ can read the body that is actually built."))
   (:documentation "Send BODY to PROVIDER's endpoint and return the parsed reply. The transport,
 as a generic function so that a test can answer in its place without a network."))
 
+(defun %embeddings-url (p)
+  (concatenate 'string (embedding-base-url p) "/embeddings"))
+
+(defmethod provider-endpoint ((p remote-embedding-provider))
+  (parse-endpoint (embedding-base-url p)))
+
 (defmethod embedding-post ((p remote-embedding-provider) body)
   (let* ((payload (jzon:stringify body))
-         (url (concatenate 'string (embedding-base-url p) "/embeddings"))
+         (url (%embeddings-url p))
          (headers (append '(("content-type" . "application/json"))
                           (when (embedding-api-key p)
                             (list (cons "authorization"

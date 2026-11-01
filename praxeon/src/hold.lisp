@@ -283,7 +283,7 @@ calls held so far are written as not run."
                  (incf (gethash name (turn-guard-counts guard) 0))
                  ;; Before the call, so a reader that fails partway still counts.
                  (when (means-entry-untrusted entry)
-                   (setf (turn-guard-untrusted guard) t))))
+                   (%taint-guard guard))))
              (let ((*current-guard* guard)
                    (*decided-after-untrusted* after-untrusted)
                    (*call-taint* (list nil)))
