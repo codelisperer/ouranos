@@ -1,0 +1,33 @@
+# pdfium.pin --- the prebuilt pdfium that aion/pdfium loads (#997).
+#
+# pdfium is Chromium's PDF renderer. It is not built here: its build needs Chromium's toolchain
+# (gn, ninja and a checkout of several gigabytes). bblanchon/pdfium-binaries builds it from
+# pdfium's own sources for each platform and publishes the archives, and
+# scripts/fetch-pdfium.lisp fetches the one for this machine, checks its sha256 against the
+# line below, and unpacks it into vendor/pdfium/.
+#
+# These archives are built without V8 and XFA (args.gn: pdf_enable_v8 = false,
+# pdf_enable_xfa = false), so a PDF's JavaScript and XFA forms are never run.
+#
+# The sha256 lines were computed on 2026-10-28 from the release's own archives; the release
+# publishes no checksums of its own, so they record what was reviewed and must not change
+# without a new review. The release was 16 days old when it was pinned.
+#
+# The archives are fetched from
+# https://github.com/bblanchon/pdfium-binaries/releases/download/<version>/pdfium-<os>-<cpu>.tgz.
+#
+# Licences: pdfium-binaries' build scripts are MIT (the archive's LICENSE); pdfium is
+# BSD-3-Clause; the libraries built into it (abseil, dragonbox, freetype, harfbuzz, icu, lcms,
+# libjpeg-turbo, libopenjpeg, simdutf, zlib) are under permissive licences, each in the
+# archive's licenses/ directory, which a desktop bundle carries.
+
+version chromium/8100
+sha256-win-x64     51621bcc1d9be9ea448f4b84b0516862b928e3968d3fca899af1a6d6e2848d6d
+sha256-win-arm64   cca9b28d406ae2a902b0b710a92ab699c4c2931564ab6efe44630014d492a9ca
+sha256-linux-x64   1c1894a12d4d96ee01400c3874444126254180c5c7d2ab628576b67f8120320a
+sha256-linux-arm64 58c87a95a40a24c914a9c755fae798843f46f06adf9e5e9f2c893302d4bdb040
+sha256-mac-x64     d513a0530a0f0c1ca9929ded06660e27edb9a108a7d18d9df55a5fb060b091c8
+sha256-mac-arm64   7ea647c7a7a9c1169be3f947000bc071ece2fade2cd6bd7e401e3675c6560cce
+licence MIT (pdfium-binaries), BSD-3-Clause (pdfium), permissive third-party licences in licenses/
+advisories https://chromereleases.googleblog.com/ (pdfium ships in Chrome; its security fixes are announced there) and https://github.com/bblanchon/pdfium-binaries/releases
+reviewed   2026-10-28

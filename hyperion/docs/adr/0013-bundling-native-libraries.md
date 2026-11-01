@@ -242,6 +242,60 @@ DLL and requires the probe to fail. The job uploads nothing.
 
 This covers desktop bundles. A binary that `cons bin` builds does not carry SQLite yet.
 
+## Amendment, 2026-10-28: pdfium, fetched prebuilt rather than built (#997)
+
+**Status of this amendment:** Proposed (pending maintainer). The maintainer approved pdfium as a
+dependency on 2026-10-28; this amendment records the exception to decision 3 that it needs.
+
+Decision 3 says we carry what we build: every library under `vendor/` is produced by this tree
+from a pinned source. pdfium, which `aion/pdfium` loads to render a PDF page to an image (#997),
+is the one library under `vendor/` that is not.
+
+**1. Why it is fetched, not built.** pdfium is Chromium's PDF library, and its build needs
+Chromium's toolchain: `depot_tools`, `gn`, `ninja`, and a source checkout of several gigabytes.
+That is out of proportion to the other build scripts here, which compile with the platform's own
+C compiler and no build system, and it could not run on every CI leg in reasonable time.
+`scripts/fetch-pdfium.lisp` instead fetches a release of `bblanchon/pdfium-binaries`, a project
+that builds pdfium from pdfium's own sources for each platform and publishes the archives. The
+pinned build has `pdf_enable_v8 = false` and `pdf_enable_xfa = false`, recorded in the archive's
+`args.gn`, so a PDF's JavaScript and XFA forms are never run.
+
+**2. What the trust rests on.** Two things, and they are weaker than decision 3's.
+- *That bblanchon's build is pdfium built from pdfium's sources with the arguments it records.*
+  We do not reproduce the build, so we cannot check this. It is the trust any user of those
+  archives places in that project.
+- *That the archive is the one that was reviewed.* `pdfium.pin` records a sha256 for each
+  platform's archive, and the fetch script checks it every time, including for an archive already
+  in `vendor/`, and deletes a file that does not match. The release publishes no checksums of its
+  own, so these sha256s were computed by us from the archives when the pin was written
+  (2026-10-28). They guard against the archive changing after that, a replaced release asset or a
+  substituted download. They do not guard against a bad archive at the first download: what was
+  fetched then is what was pinned.
+
+The release pinned was 16 days old when it was pinned, not the newest, so it had been public
+for some time before we trusted it.
+
+**3. How it is still carried.** As every other library is, by decisions 1, 2 and 4:
+- `aion/pdfium` loads it lazily, and `scripts/lazy-natives.lisp` lists it, so the bundler wakes
+  it, carries the file beside the executable, and closes it before the dump.
+- Its loader searches `AION_PDFIUM_LIBRARY`, beside the image, `vendor/pdfium/lib/` (not in a
+  bundle), and the bare name, as `aion/libgit`'s does.
+- Its licences are permissive: MIT for pdfium-binaries' build scripts (the archive's `LICENSE`),
+  BSD-3-Clause for pdfium, and permissive licences for the libraries built into it, each in the
+  archive's `licenses/` directory. `scripts/tree-natives.lisp`'s `license-files` now carries a
+  vendored package's `licenses/` directory too, so a bundle has `LICENSES/pdfium-LICENSE` and
+  one `LICENSES/pdfium-<file>` per library.
+
+**4. What bumping the pin requires.**
+- Choose a release that has been public for some days, not the newest, and read its notes.
+- Download each of the six archives (win, linux and mac, each x64 and arm64), compute their
+  sha256, and record them in `pdfium.pin` with the new `version`.
+- Check each archive's `args.gn` still has V8 and XFA off, and that its `LICENSE` and
+  `licenses/` still hold only permissive licences.
+- Set `reviewed` to the date.
+- CI's legs then fetch and test the new archives against the new sha256s; `check-upstream
+  --online` reports when the pin falls behind.
+
 ## Alternatives considered
 
 - **`$ORIGIN` in `DT_RUNPATH`** — the conventional Linux answer, and the initial lean here.

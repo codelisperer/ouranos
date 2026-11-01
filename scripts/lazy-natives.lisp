@@ -32,7 +32,12 @@
     ;; bundle that carries it also carries its source tarball under SOURCES/: see
     ;; scripts/bundle-sources.lisp and ADR-0013's amendment of 2026-10-01.
     ("AION/LIBGIT" "LOAD-LIBGIT2" "UNLOAD-LIBGIT2" "*PATH*" "*LIBRARY-NAMES*"
-     "build-libgit2.lisp" "aion/libgit"))
+     "build-libgit2.lisp" "aion/libgit")
+    ;; pdfium (#997), fetched prebuilt and pinned by scripts/fetch-pdfium.lisp rather than built.
+    ;; Its licences are permissive: the archive's LICENSE and the licenses/ directory of the
+    ;; libraries built into it, which LICENSE-FILES carries.
+    ("AION/PDFIUM" "LOAD-PDFIUM" "UNLOAD-PDFIUM" "*PATH*" "*LIBRARY-NAMES*"
+     "fetch-pdfium.lisp" "aion/pdfium"))
   "Foreign libraries this tree loads LAZILY, and how to wake and release each one: (package
 loader unloader path-variable names-variable build-script system), all strings. Lazy loading is
 deliberate (ADR-0011: binding at load time is what made a missing library unloadable rather

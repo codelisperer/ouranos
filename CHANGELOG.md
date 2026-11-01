@@ -1092,6 +1092,22 @@ its tag.
 
 ### Added
 
+- **aion/pdfium: render a PDF page to a PNG, through the native pdfium** (#997). It is a new
+  optional system, and core aion never loads it.
+  - **The API.** `open-pdf` takes octets or a pathname, with `:password`; `with-pdf` and
+    `close-pdf` close it; `page-count` counts its pages; `render-page` renders a page at a whole
+    number of DPI, in grey by default, with `:color t` for colour. `render-page` returns the PNG's
+    octets, then the width and the height. A PDF's JavaScript and XFA forms never run.
+  - **Limits.** Each is checked before pdfium is asked: `*max-pdf-bytes*` (64 MiB),
+    `*max-pdf-pages*` (1000) and `*max-render-pixels*` (25 million). A refusal is `pdf-refused`,
+    with a reason keyword, such as `:too-large` or `:format`, and a sentence naming the limit.
+  - **The PNG** is uncompressed, which keeps it free of a new dependency. A grey index card at
+    200 DPI is about 600 KB.
+  - **The library.** `scripts/fetch-pdfium.lisp` fetches it, pinned and sha256-checked by the root
+    `pdfium.pin`, into `vendor/pdfium/`. It is loaded from `AION_PDFIUM_LIBRARY`, from beside the
+    image, or from there. A desktop bundle carries it, with the licences in its `licenses/`
+    directory. If no copy is found, `pdfium-not-found` says to run the fetch script.
+  - **The gate.** The verify-tree axis is `OURANOS_WITH_PDFIUM=1`.
 - **`mnemosyne/test-template`: a test suite can migrate one SQLite database per run and give
   each test a copy** (#1047). `make-sqlite-template` applies an app's migrations to an in-memory
   database once (`:setup` configures its connection first); `copy-sqlite-template` and

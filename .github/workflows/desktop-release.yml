@@ -195,6 +195,10 @@ jobs:
       - name: Build the pinned libgit2
         run: sbcl --dynamic-space-size 4096 --script scripts/build-libgit2.lisp
 
+      # And pdfium, which the bundler wakes when the app loads aion/pdfium (#997).
+      - name: Fetch the pinned pdfium
+        run: sbcl --dynamic-space-size 4096 --script scripts/fetch-pdfium.lisp
+
       - name: Dump the app image
         shell: bash
         run: |

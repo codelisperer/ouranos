@@ -88,6 +88,11 @@
  :where ((:field "libgit2.pin" "version"))
  :upstream (:github-release "libgit2/libgit2"))
 
+;;; pdfium is fetched prebuilt (#997); the release's tag is the version, such as chromium/8100.
+(:name "pdfium" :category :native
+ :where ((:field "pdfium.pin" "version"))
+ :upstream (:github-release "bblanchon/pdfium-binaries"))
+
 ;;; sqlite.pin is the source desktop bundles carry (#899); versions.env is sqlite.org's
 ;;; prebuilt DLL that setup.ps1 installs for the Windows toolchain. One entry, so the two
 ;;; cannot drift apart.
