@@ -73,7 +73,8 @@
    #:FT-String #:FT-Text #:FT-Integer #:FT-Float #:FT-Boolean #:FT-Uuid #:FT-Timestamp #:FT-Date
    #:field-type-name #:field-type-sql #:field-type-from #:field-type-width
    #:FT-Vector
-   #:Dialect #:D-Sqlite #:D-Postgres #:D-Xtdb #:dialect-name #:dialect-from #:dialect-known? #:dialect-required
+   #:Dialect #:D-Sqlite #:D-Postgres #:D-Xtdb #:D-Jet
+   #:dialect-name #:dialect-from #:dialect-known? #:dialect-required
    #:Sql-Type #:Native #:Emulated #:Unsupported #:sql-type-tag #:sql-type-text
    #:field-type-support))
 
@@ -227,6 +228,9 @@
            #:invalid-identifier-clause
            ;; LIKE patterns that match a user's %, _ and backslash literally (#862)
            #:like-escape #:like-contains
+           ;; a clause the dialect cannot express, such as OFFSET on Jet (#1061)
+           #:unsupported-query #:unsupported-query-dialect #:unsupported-query-clause
+           #:unsupported-query-detail
            #:+vector-distance-ops+ #:vector-distance-opclass
            #:*warn-unindexed-vector-distance* #:unindexed-vector-distance
            #:unindexed-vector-distance-operator #:unindexed-vector-distance-opclass))

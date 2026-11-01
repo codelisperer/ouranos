@@ -10,7 +10,8 @@
 (in-package #:mnemosyne/field-shell)
 
 (defparameter +dialects+
-  (list mnemosyne/field:D-Sqlite mnemosyne/field:D-Postgres mnemosyne/field:D-Xtdb)
+  (list mnemosyne/field:D-Sqlite mnemosyne/field:D-Postgres mnemosyne/field:D-Xtdb
+        mnemosyne/field:D-Jet)
   "Every dialect, as typed values. THE tree-wide list (pre-publication issue 432, ADR-0003).
 
 It lives here rather than in each module because a per-module list is the defect this ADR

@@ -66,6 +66,13 @@ DSL: a keyword or symbol is an identifier, a string passes through."
     (error 'unsupported-ddl :dialect "xtdb" :operation operation
                             :detail "XTDB 2 is schemaless -- it has no DDL. See docs/xtdb-notes.md")))
 
+(defun %check-not-jet (dialect)
+  "DIALECT is a typed MNEMOSYNE/FIELD:DIALECT. Jet renders queries only (#1061)."
+  (when (eq dialect fld:D-Jet)
+    (error 'unsupported-ddl
+           :dialect "jet" :operation "DDL"
+           :detail "it renders queries for Microsoft Access; mnemosyne has no DDL for it")))
+
 (defun %sqlite-p (dialect) (eq dialect fld:D-Sqlite))
 
 ;;; --- indexes ---------------------------------------------------------------
@@ -254,6 +261,7 @@ it, rather than as a driver error mid-migration."
   ;; NORMALISED ONCE, HERE (pre-publication issue 432). Every branch below compares a typed value, so there is no
   ;; arm that an unrecognised spelling can reach by not matching the other one.
   (setf dialect (fldsh:dialect-for dialect))
+  (%check-not-jet dialect)
   (let ((op (first form)))
     (case op
       (:create-index (%create-index (rest form) dialect))
@@ -296,5 +304,7 @@ which takes one statement at a time. An :alter-table with three actions yields t
       ;; %ALTER-TABLE is below the entry point, so it is reached here without passing
       ;; through DDL -- normalise on this path too, or the one form that bypasses DDL is
       ;; the one form with no check (pre-publication issue 432).
-      (%alter-table form (fldsh:dialect-for dialect))
+      (let ((dialect (fldsh:dialect-for dialect)))
+        (%check-not-jet dialect)
+        (%alter-table form dialect))
       (list (ddl form :dialect dialect))))

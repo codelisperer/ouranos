@@ -1138,6 +1138,27 @@ its tag.
 
 ### Added
 
+- **`mnemosyne/query:sql` renders Microsoft Access (Jet/ACE) SQL with `:dialect :jet`**
+  (#1061). `:limit` renders as `SELECT TOP n`, with `n` written into the SQL, so it must be a
+  positive integer; Jet's `TOP` also returns rows tied with the last one on the `ORDER BY`
+  columns. `:offset` signals the new condition `mnemosyne/query:unsupported-query` when the
+  query is compiled, because Jet has no `OFFSET`. Names render in brackets (`[c].[email]`,
+  `(:quoted "First Name")` as `[First Name]`). The new forms `(:date y m d)` and
+  `(:timestamp y m d h mi s)` render as `#2026-09-14#` and `#2026-09-14 08:05:03#` on Jet and
+  are bound as ISO text on the other dialects. Values bind as `?`, and the param list is in
+  placeholder order, which is the order ADO binds them in. An aggregate in the SELECT list
+  without an alias gets one (`COUNT(*) AS [count]`, `SUM(o.total) AS [sum_total]`), avoiding
+  the names of the other columns. More than one join renders in nested parentheses, as Jet
+  requires, and `:full` and `:cross` joins signal `unsupported-query`. A leading
+  `(:distinct …)` item gives `SELECT DISTINCT TOP n`. `unsupported-query` also refuses what
+  Access rejects when it runs: `:escape` on `:like`, `:lower`, `:upper`, `:length` and
+  `:coalesce` (use `(:call :lcase …)` and the other Jet functions), `(:count (:distinct …))`,
+  `:returning`, `:on-conflict` and an INSERT of more than one row. The dialect
+  renders queries only: mnemosyne has no backend that runs them, `ddl:ddl` signals
+  `unsupported-ddl` for `:jet`, and `schema:schema-ddl` refuses it. `mnemosyne/field:Dialect`
+  has a new constructor, `D-Jet`, and `mnemosyne/field-shell:+dialects+` lists it, so Coalton
+  code that matches on `Dialect` without a wildcard arm needs a `D-Jet` arm. See
+  `mnemosyne/docs/user-guide.md`, "Dialects".
 - **aion/retry: a retry policy as data, and `with-retry`, which retries through restarts**
   (#79). `make-retry-policy` takes `:max-attempts`, `:base-delay`, `:multiplier`, `:max-delay`,
   `:jitter` (`:full`, `:equal` or `:none`), `:deadline` and `:retryable`, and `retry-delay`

@@ -128,6 +128,7 @@
                              (:file "field-type")
                              (:file "schema")
                              (:file "ddl")
+                             (:file "jet")          ; the Jet dialect of query (#1061)
                              (:file "introspect")
                              (:file "entity")
                              (:file "url")
