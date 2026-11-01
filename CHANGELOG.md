@@ -14,6 +14,22 @@ its tag.
 
 ### An app may have to act
 
+- **mnemosyne/conn: a Postgres connect gives up after 10 seconds, and an optional statement
+  timeout** (#959). `connect` and `make-pool` take `:connect-timeout`, in seconds, defaulting to
+  `*postgres-connect-timeout-seconds*` (10), and `:statement-timeout`, in milliseconds,
+  defaulting to `*postgres-statement-timeout-ms*` (NIL).
+  - A connect that is not finished in time, TCP connect through authentication, signals
+    `db-connect-timeout` (a `db-error`, with `db-connect-timeout-host`, `-port` and
+    `-seconds`). Before, a server that did not answer held the caller for about 127 s on Linux,
+    or forever if it accepted the TCP connection and sent nothing, and held a pool slot for that
+    long. A pooled connect that times out frees its slot at once. **This is a new default:** an
+    app whose Postgres connects take longer than 10 s passes a larger `:connect-timeout`, or
+    NIL for no limit.
+  - `:statement-timeout` sets `statement_timeout` on each new connection, and a pool sets it
+    again after its reset, which runs `RESET ALL`. A statement the server cancels for it
+    signals `db-statement-timeout` (a `db-error`), from `exec`, `query` and `map-query`.
+  - `mnemosyne/docs/user-guide.md` describes both, and the server-side fallback
+    `ALTER ROLE ... SET statement_timeout`.
 - **`mnemosyne/migrate:migrate` logs each applied migration at DEBUG and one INFO line per
   call** (#1046). The per-migration line `"migrate: applied"` (with `id`, `description` and `ms`)
   is now DEBUG, as is `"migrate: applying"`. A call that had migrations to apply ends with one
@@ -1136,6 +1152,25 @@ its tag.
   `:response`. aion/http-client now depends on `aion/retry` and defines the `transience` and
   `retry-after` methods for `http-error`: 408, 425, 429, 503, 529 and `:connect` are
   `:transient`; 500, 502, 504 and `:response` are `:unknown`.
+- **hyperion/page-meta: `:visibility :unlisted` writes the full preview card plus `robots
+  noindex`** (#947). `page-meta`, `meta-tags` and `meta-tags-string` accept `:unlisted` beside
+  `:public`, `:noindex` and `:private`. It is for a page anyone with the link may see and
+  share but that should not appear in search results. An app that added its own robots tag
+  next to `:visibility :public` for this can pass `:unlisted` and drop that tag. `:noindex` and
+  `:private` are unchanged: they still write only the site's name and fallback image. Robots
+  noindex is a request crawlers may ignore, so a page whose content must stay private still
+  uses `:private`.
+- **hermes: `make-email` takes `:headers`, so an email can carry `List-Unsubscribe` and
+  `List-Unsubscribe-Post`** (#106). `:headers` is an alist of `(name . value)` strings, read
+  back with `email-headers`. SendGrid receives them as its `headers` object, and the dev
+  transport prints them. `make-email` signals `invalid-message` for a name that is not a valid
+  header name or is given twice, a reserved header (`To`, `From`, `Subject`, `Reply-To`, `Cc`,
+  `Bcc`, `Content-Type` and the others `hermes:reserved-email-headers` returns), a header
+  longer than 998 characters, or a value with anything but printable ASCII and tabs, so a
+  carriage return or line feed cannot add a header of its own. Non-ASCII header text is not
+  encoded and is refused. An email without `:headers` sends the same SendGrid request as
+  before. A new email backend's `deliver` sends `email-headers` or signals `invalid-message`
+  when there are any; it never drops them.
 - **`mnemosyne/test-template`: a test suite can migrate one SQLite database per run and give
   each test a copy** (#1047). `make-sqlite-template` applies an app's migrations to an in-memory
   database once (`:setup` configures its connection first); `copy-sqlite-template` and
