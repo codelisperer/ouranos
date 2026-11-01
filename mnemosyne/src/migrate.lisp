@@ -36,27 +36,47 @@ order preserved. Operational mirror of the typed mnemosyne/backend:pending."
 (defun migrate (backend connection migrations)
   "Ensure `schema_migrations` exists (DDL from BACKEND), then apply every PENDING
 migration's up-SQL in order -- each in its own transaction, recording its id. Idempotent.
-Returns the list of ids applied this run (NIL when already up to date)."
+Returns the list of ids applied this run (NIL when already up to date).
+
+Logging (#1046): each applied migration is one DEBUG line, \"migrate: applied\", with its id,
+description and milliseconds. A call that had migrations to apply ends with one INFO line,
+\"migrate: finished\", giving how many were pending, how many were applied and the
+milliseconds for the whole call; when a migration signalled, the line also names it in :FAILED.
+A call with nothing to apply logs \"migrate: up to date\" at DEBUG."
   (conn:exec connection (be:schema-migrations-ddl backend))
   (let ((applied '())
-        (todo (pending connection migrations)))
-    ;; :info, not :debug -- a schema change is the one DB event an operator wants in the
-    ;; record at default level, and it happens once per deploy, not per request.
-    (if todo
-        (log:info "migrate: applying" :count (length todo)
-                                      :ids (format nil "~{~A~^,~}" (mapcar #'be:migration-id todo)))
-        (log:debug "migrate: up to date"))
-    (dolist (m todo (nreverse applied))
-      (let ((start (get-internal-real-time)))
-        (conn:with-transaction (connection)
-          (conn:exec connection (be:migration-up m))
-          (conn:exec connection "INSERT INTO schema_migrations (id) VALUES (?)"
-                     (be:migration-id m)))
-        (log:info "migrate: applied" :id (be:migration-id m)
-                                     :description (be:migration-description m)
-                                     :ms (round (* 1000 (- (get-internal-real-time) start))
-                                                internal-time-units-per-second)))
-      (push (be:migration-id m) applied))))
+        (todo (pending connection migrations))
+        (started (get-internal-real-time))
+        (current nil))
+    (flet ((ms-since (start)
+             (round (* 1000 (- (get-internal-real-time) start)) internal-time-units-per-second)))
+      (unless todo
+        (log:debug "migrate: up to date")
+        (return-from migrate nil))
+      (log:debug "migrate: applying" :count (length todo)
+                                     :ids (format nil "~{~A~^,~}" (mapcar #'be:migration-id todo)))
+      ;; One INFO line per call, not per migration: a test suite that migrates a fresh database
+      ;; for every test would otherwise write one line per migration per test. A schema change is
+      ;; still in the record at the default level, as this line, including when it stopped.
+      (unwind-protect
+           (dolist (m todo)
+             (setf current (be:migration-id m))
+             (let ((start (get-internal-real-time)))
+               (conn:with-transaction (connection)
+                 (conn:exec connection (be:migration-up m))
+                 (conn:exec connection "INSERT INTO schema_migrations (id) VALUES (?)"
+                            (be:migration-id m)))
+               (log:debug "migrate: applied" :id (be:migration-id m)
+                                             :description (be:migration-description m)
+                                             :ms (ms-since start)))
+             (push (be:migration-id m) applied)
+             (setf current nil))
+        (if current
+            (log:info "migrate: finished" :pending (length todo) :applied (length applied)
+                                          :ms (ms-since started) :failed current)
+            (log:info "migrate: finished" :pending (length todo) :applied (length applied)
+                                          :ms (ms-since started))))
+      (reverse applied))))
 
 (defun rollback (backend connection migrations &key (steps 1))
   "Roll back the last STEPS applied migrations: run each one's down-SQL (newest first)

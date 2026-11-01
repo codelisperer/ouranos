@@ -114,7 +114,10 @@ the suite."
                              (lambda (env) (declare (ignore env)) (error "boom")))
                             (%log-env "/api/ping")))))))
       (is (search "request failed" out))
-      (is (search "boom" out)))))
+      ;; The condition's type, not its report: aion/log:exception no longer writes the report,
+      ;; which can quote outside data (#1013).
+      (is (search "SIMPLE-ERROR" out) "~A" out)
+      (is (null (search "boom" out)) "~A" out))))
 
 (test errors-are-re-signalled-not-swallowed
   ;; Observing a request must not change whether it failed -- Clack still decides the 500.
@@ -160,3 +163,71 @@ the suite."
                                 (funcall app (%log-env "/api/reload-epoch"))
                                 (funcall app (%log-env "/api/dev-error"))))))
       (is (string= "" (string-trim '(#\Space #\Newline) out))))))
+
+;;; --- the request start line logs the query's names, never its values (#1007) ---------
+
+(defun %log-start-line (query)
+  "What WRAP logs at DEBUG for a GET of /x with QUERY as its query string."
+  (with-clean-quiet-paths
+    (%log-capture :debug (lambda ()
+                           (funcall (hyperion/logging:wrap (%log-ok-app))
+                                    (list* :query-string query (%log-env "/x")))))))
+
+(test the-start-line-logs-the-query-names-and-not-the-values
+  ;; Not "abc", which the issue used: the line carries a random hex request id, and one run's id
+  ;; (7e72abcfdde3187c) held "abc", so the check failed with the value nowhere in the line.
+  (let ((out (%log-start-line "secret=hunter-two&page=2")))
+    (is (search "request start" out) "~A" out)
+    (is (search "secret" out) "the name: ~A" out)
+    (is (search "page" out) "~A" out)
+    (is (null (search "hunter" out)) "not the value: ~A" out)
+    (is (null (search "query=" out)) "and no raw query field: ~A" out)))
+
+(test query-keys-are-in-order-once-each-and-capped
+  (is (equal '("page" "q") (hyperion/logging::%query-keys "page=1&q=x&page=2")))
+  (multiple-value-bind (names bare) (hyperion/logging::%query-keys "flag&a+b=1&%C3%A9=2&=x&&")
+    (is (equal '("a b" "é") names) "a part with no = is not named: ~S" names)
+    (is (= 1 bare) "it is counted, and the empty parts are not: ~S" bare))
+  (is (null (hyperion/logging::%query-keys "")))
+  (is (null (hyperion/logging::%query-keys nil)))
+  (let ((many (format nil "~{k~D=v~^&~}" (loop for i below 50 collect i))))
+    (is (= 20 (length (hyperion/logging::%query-keys many))) "at most twenty names"))
+  (let ((long (hyperion/logging::%query-keys (format nil "~A=1" (make-string 500 :initial-element #\n)))))
+    (is (= 40 (length (first long))) "each cut to forty characters")))
+
+(test a-query-part-with-no-equals-is-counted-and-never-named
+  "The review of #1017: in /reset?<token>, the part with no = is usually a token, so the start
+line counts it as bare-parts and does not name it. The control is the same text before an =,
+where it is a name and is logged."
+  (let ((out (%log-start-line "TOKENQWERTYZXCV&page=2")))
+    (is (search "request start" out) "~A" out)
+    (is (null (search "TOKENQWERTYZXCV" out)) "the bare part is not logged: ~A" out)
+    (is (search "bare-parts" out) "it is counted: ~A" out)
+    (is (search "page" out) "the other names still are: ~A" out))
+  (let ((out (%log-start-line "TOKENQWERTYZXCV=1&page=2")))
+    (is (search "TOKENQWERTYZXCV" out) "control: as a name it is logged: ~A" out)
+    (is (null (search "bare-parts" out)) "and no bare part is counted: ~A" out))
+  (is (equal '(nil 2) (multiple-value-list (hyperion/logging::%query-keys "AAAA&BBBB")))
+      "two bare parts and no names"))
+
+(test a-query-part-whose-value-is-empty-or-padding-is-counted-and-never-named
+  "The second review of #1017: a base64 token ends in = padding, so it splits into a name and
+a value of only =, and a token written as ?token= has an empty value. Both are counted as
+bare-parts and not named. The control is a name with a real value, which is logged."
+  (dolist (q '("dGhpcyBpcyBhIHNlY3JldCB0b2tlbg==" "abc123secret=" "QUJDREVGR0g="))
+    (let ((out (%log-start-line q)))
+      (is (search "bare-parts" out) "~S is counted: ~A" q out)
+      (is (null (search (subseq q 0 (position #\= q)) out)) "~S is not named: ~A" q out)))
+  (let ((out (%log-start-line "dGhpcyBpcyBhIHNlY3JldCB0b2tlbg=1")))
+    (is (search "dGhpcyBpcyBhIHNlY3JldCB0b2tlbg" out)
+        "control: with a real value the same text is a name, and is logged: ~A" out))
+  (is (equal '(("page") 2)
+             (multiple-value-list (hyperion/logging::%query-keys "x==&page=2&y=")))))
+
+(test a-query-that-does-not-parse-is-logged-as-unparsed-with-no-text-from-it
+  (dolist (q '("ab%zz=SECRETVALUE" "%E2%82=SECRETVALUE" "a%2=SECRETVALUE"))
+    (is (eq :unparsed (hyperion/logging::%query-keys q)) "~S" q))
+  (let ((out (%log-start-line "x%zz=SECRETVALUE")))
+    (is (search "unparsed" out) "~A" out)
+    (is (null (search "SECRETVALUE" out)) "~A" out)
+    (is (null (search "x%zz" out)) "not even the name: ~A" out)))
