@@ -65,11 +65,16 @@ entry ASDF cannot find is skipped here; the gate fails it when it runs."
 
 (defun unrun-suites (systems test-systems)
   "The suites the gate would compile around without running, as a list of
-(system . suite) name pairs, in the order of SYSTEMS. A pair names a system in SYSTEMS whose
-<system>/tests ASDF can find, when that suite is neither in TEST-SYSTEMS nor run by one of
-them through :in-order-to test-op wiring (see %RUN-CLOSURE). NIL when every such suite runs."
+(system . suite) name pairs, in the order of SYSTEMS, and as a second value the number of
+systems in SYSTEMS that have a /tests suite, which is how many were checked. A pair names a
+system in SYSTEMS whose <system>/tests ASDF can find, when that suite is neither in
+TEST-SYSTEMS nor run by one of them through :in-order-to test-op wiring (see %RUN-CLOSURE).
+The list is NIL when every such suite runs."
   (let ((run (%run-closure test-systems)))
     (loop for system in systems
           for suite = (format nil "~A/tests" (%name system))
-          when (and (asdf:find-system suite nil) (not (gethash suite run)))
-            collect (cons (%name system) suite))))
+          for found = (asdf:find-system suite nil)
+          when found count t into checked
+          when (and found (not (gethash suite run)))
+            collect (cons (%name system) suite) into unrun
+          finally (return (values unrun checked)))))

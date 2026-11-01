@@ -52,10 +52,10 @@ both. The control is the same tree with the suite in the run list."
         "keywords, as verify-tree.lisp writes its lists, name the same systems")))
 
 (test a-suite-another-run-suite-runs-through-test-op-counts-as-run
-  "#992: aion/tests runs aion/csv/tests, aion/clock/tests and aion/log/tests through
-:in-order-to ((test-op (test-op ...))), so they are not in the run list themselves. A /tests
-system a run suite reaches that way counts as run, including through a (:version ...) form.
-One that nothing in the run list reaches is still reported."
+  "#992: aion/tests runs aion/csv/tests, aion/csv/types/tests, aion/clock/tests and
+aion/log/tests through :in-order-to ((test-op (test-op ...))), so they are not in the run list
+themselves. A /tests system a run suite reaches that way counts as run, including through a
+(:version ...) form. One that nothing in the run list reaches is still reported."
   (let* ((p (%unrun-fixture))
          (extra (format nil "~A/extra" p))
          (versioned (format nil "~A/versioned" p))
@@ -95,8 +95,18 @@ reported. The control is the same form under :sbcl, which holds here."
                                                   (list (format nil "~A/tests" p)))))))
 
 (test a-system-with-no-tests-system-is-not-reported
+  "A system with no /tests suite is neither reported nor counted as checked. The second value
+counts only systems that have one, so the gate can fail when it checked nothing (review of
+#1072). The control is a system that has one, counted whether or not its suite runs."
   (let ((p (%unrun-fixture)))
-    (is (null (ouranos-unrun-suites:unrun-suites (list (format nil "~A/plain" p)) '())))))
+    (multiple-value-bind (unrun checked)
+        (ouranos-unrun-suites:unrun-suites (list (format nil "~A/plain" p)) '())
+      (is (null unrun))
+      (is (eql 0 checked)))
+    (is (eql 2 (nth-value 1 (ouranos-unrun-suites:unrun-suites
+                             (list p (format nil "~A/plain" p) (format nil "~A/extra" p))
+                             (list (format nil "~A/tests" p)))))
+        "control: <p> and <p>/extra have a /tests suite, <p>/plain does not")))
 
 (defun %gate-list (name)
   "The value of the DEFPARAMETER NAME in verify-tree.lisp, read from the file, because loading
@@ -110,15 +120,17 @@ the gate runs it."
 
 (test this-tree-runs-every-suite-of-every-system-the-gate-compiles
   "#992, the other direction: this tree passes the check. Every system in the gate's compile
-lists, the optional axes' included, has its /tests system in the gate's run lists or a
-dependency of one. The platform packages are not covered here; the gate checks those on the
-host that owns them."
+lists, the optional axes' included, has its /tests system in the gate's run lists, or reached
+from them through :in-order-to test-op wiring. The platform packages are not covered here; the
+gate checks those on the host that owns them."
   (let ((systems (append (%gate-list "+systems+") (%gate-list "+uv-systems+")
                          (%gate-list "+tls-systems+") (%gate-list "+libgit-systems+")))
         (tests (append (%gate-list "+test-systems+") (%gate-list "+uv-test-systems+")
                        (%gate-list "+tls-test-systems+") (%gate-list "+libgit-test-systems+"))))
     (is (< 50 (length systems)) "the compile lists were read (~D systems)" (length systems))
-    (is (null (ouranos-unrun-suites:unrun-suites systems tests)))
+    (multiple-value-bind (unrun checked) (ouranos-unrun-suites:unrun-suites systems tests)
+      (is (null unrun))
+      (is (< 50 checked) "the systems with a /tests suite were counted (~D)" checked))
     (is (member :aion/sexp/tests tests) "the suite #973 left out is in the run list now")))
 
 (test the-gate-resolves-systems-in-its-own-tree
@@ -141,4 +153,6 @@ and its toplevel calls CHECK-UNRUN-SUITES before the LOADING section."
          (loading (search "(format t \"~%========== LOADING" text)))
     (is-true (search "\"unrun-suites.lisp\"" text) "verify-tree.lisp loads unrun-suites.lisp")
     (is-true call "the toplevel calls CHECK-UNRUN-SUITES")
-    (is-true (and call loading (< call loading)) "the call comes before LOADING")))
+    (is-true (and call loading (< call loading)) "the call comes before LOADING")
+    (is-true (search "((zerop checked)" text)
+             "CHECK-UNRUN-SUITES fails when it found no /tests suite to check")))
