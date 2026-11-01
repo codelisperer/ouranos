@@ -230,10 +230,20 @@ would discard digits the database went to the trouble of storing."
   `((,ffi:+vt-ui1+ . :uint8) (,ffi:+vt-i1+ . :int8) (,ffi:+vt-i2+ . :int16)
     (,ffi:+vt-ui2+ . :uint16) (,ffi:+vt-i4+ . :int32) (,ffi:+vt-ui4+ . :uint32)
     (,ffi:+vt-int+ . :int32) (,ffi:+vt-uint+ . :uint32) (,ffi:+vt-i8+ . :int64)
-    (,ffi:+vt-ui8+ . :uint64) (,ffi:+vt-r4+ . :float) (,ffi:+vt-r8+ . :double))
-  "The element types of a one-dimensional SAFEARRAY read as numbers, with the CFFI type of
-each element. VT_BSTR and VT_VARIANT elements are read by %SAFEARRAY-ELEMENT; any other element
-type is refused.")
+    (,ffi:+vt-ui8+ . :uint64) (,ffi:+vt-r4+ . :float) (,ffi:+vt-r8+ . :double)
+    (,ffi:+vt-bool+ . :int16))
+  "The element types of a one-dimensional SAFEARRAY read from fixed-size elements, with the CFFI
+type of each element. All are read as numbers except VT_BOOL, whose 2-byte elements are T when
+nonzero and NIL when zero, as a single VT_BOOL is read. VT_BSTR and VT_VARIANT elements are read
+by %SAFEARRAY-ELEMENT; any other element type is refused.")
+
+(define-condition safearray-unlock-failed (warning)
+  ((hresult :initarg :hresult :reader safearray-unlock-failed-hresult))
+  (:report (lambda (c stream)
+             (format stream "SafeArrayUnaccessData failed with HRESULT #x~8,'0X while an earlier error unwound; that error is the one signalled" (safearray-unlock-failed-hresult c))))
+  (:documentation "Signalled with WARN when a SAFEARRAY could not be unlocked after copying its
+elements had already signalled. The copy's error is the one the caller gets; this warning reports
+the unlock failure, and an app that wants it in its log can handle it (#966's review)."))
 
 (defun %safearray-check (hr what)
   (when (minusp hr)
@@ -250,13 +260,15 @@ type is refused.")
                                                  :count (* 2 (ffi:sys-string-len bstr))))))
         ((= element-type ffi:+vt-variant+)
          (variant-to-lisp (cffi:mem-aptr data '(:struct ffi:variant) index)))
+        ((= element-type ffi:+vt-bool+)
+         (not (zerop (cffi:mem-aref data :int16 index))))
         (t (cffi:mem-aref data (cdr (assoc element-type +array-element-readers+)) index))))
 
 (defun safearray-to-lisp (psa element-type)
   "The one-dimensional SAFEARRAY PSA, whose elements are of the VT ELEMENT-TYPE, as a Lisp vector,
 copied out: an (UNSIGNED-BYTE 8) vector for VT_UI1, the type ADO, DAO and Automation byte[]
-values arrive as, and a simple vector of numbers, strings or converted VARIANTs for the other
-element types +ARRAY-ELEMENT-READERS+ names and for VT_BSTR and VT_VARIANT (#964).
+values arrive as, and a simple vector of numbers, booleans, strings or converted VARIANTs for the
+other element types +ARRAY-ELEMENT-READERS+ names and for VT_BSTR and VT_VARIANT (#964).
 
 The array belongs to the VARIANT holding it and is freed when that is cleared, so nothing here
 frees it. It is locked with SafeArrayAccessData only while the elements are copied, and unlocked
@@ -293,8 +305,8 @@ and for an element type this does not read; a NULL array is the empty vector."
       (%safearray-check (ffi:safe-array-access-data psa pdata) "SafeArrayAccessData")
       ;; THE UNLOCK MUST NOT HIDE THE ERROR IT CLEANS UP AFTER. When copying an element
       ;; signals and the unlock then fails too, the element's error is the one the caller
-      ;; gets, and the unlock failure is logged; only after a normal copy does a failed unlock
-      ;; signal (#966's review).
+      ;; gets, and the unlock failure is a SAFEARRAY-UNLOCK-FAILED warning; only after a normal
+      ;; copy does a failed unlock signal an error (#966's review).
       (let ((copied nil))
         (unwind-protect
              (multiple-value-prog1
@@ -310,8 +322,7 @@ and for an element type this does not read; a NULL array is the empty vector."
           (let ((hr (ffi:safe-array-unaccess-data psa)))
             (cond (copied (%safearray-check hr "SafeArrayUnaccessData"))
                   ((minusp hr)
-                   (log:warn "SafeArrayUnaccessData failed while an earlier error unwound"
-                             :hresult (ldb (byte 32 0) hr))))))))))
+                   (warn 'safearray-unlock-failed :hresult (ldb (byte 32 0) hr))))))))))
 
 (defun variant-to-lisp (variant)
   "Read VARIANT as a Lisp value. Does not clear it -- the owner does that.

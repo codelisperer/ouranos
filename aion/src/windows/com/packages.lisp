@@ -65,7 +65,6 @@
 (cl:defpackage #:aion/windows/com
   (:use #:common-lisp)
   (:local-nicknames (#:ffi #:aion/windows/com/ffi)
-                    (#:log #:aion/log)
                     (#:reg #:aion/windows/registry)
                     (#:w #:aion/windows)
                     (#:wffi #:aion/windows/ffi))
@@ -98,4 +97,5 @@
    #:dispatch-error-description #:unknown-member
    #:typelib-error #:no-type-information
    #:typelib-name-collision #:typelib-name-collision-clashes
-   #:typelib-version-mismatch))
+   #:typelib-version-mismatch
+   #:safearray-unlock-failed #:safearray-unlock-failed-hresult))

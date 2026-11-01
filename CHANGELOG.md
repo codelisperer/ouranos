@@ -1096,11 +1096,14 @@ its tag.
   value arrives as an octet vector** (#964). `VT_ARRAY|VT_UI1` (8209), the type of an ADO or DAO
   long-binary column, of `GetChunk` and of an Automation `byte[]`, signalled "no Lisp mapping for
   VARIANT type 8209"; it is now an `(unsigned-byte 8)` vector. Arrays of the integer and float
-  types, of `VT_BSTR` and of `VT_VARIANT` become simple vectors; a NULL BSTR element is NIL, as a
-  single NULL BSTR is. A single `VT_I1` or `VT_UINT` value, which signalled before, is now read
+  types, of `VT_BOOL` (as `T` and `NIL`), of `VT_BSTR` and of `VT_VARIANT` become simple vectors,
+  and a NULL array is an empty vector; a NULL BSTR element is NIL, as a single NULL BSTR is. A single `VT_I1` or `VT_UINT` value, which signalled before, is now read
   as an integer too. A multi-dimensional array, an array of any other element type and a
-  `VT_ARRAY|VT_BYREF` value signal `com-error` with the reason. The elements are copied out under `SafeArrayAccessData`, and the array is unlocked
-  however the copy ends; the VARIANT's owner frees it, as before. New in
+  `VT_ARRAY|VT_BYREF` value signal `com-error` with the reason. The elements are copied out under
+  `SafeArrayAccessData`, and the array is unlocked however the copy ends; when the copy signalled
+  and the unlock fails too, the copy's error is signalled and the unlock failure is a
+  `safearray-unlock-failed` warning, which carries the HRESULT. The VARIANT's owner frees the
+  array, as before. New in
   `aion/windows/com/ffi`: `+vt-array+`, `safearraybound` and the oleaut32 SAFEARRAY functions
   (`safe-array-get-dim`, `safe-array-access-data` and the rest).
 - **`mnemosyne/test-template`: a test suite can migrate one SQLite database per run and give

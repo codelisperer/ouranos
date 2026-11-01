@@ -294,6 +294,30 @@ every byte, 0 and 255 included. VariantClear then answers S_OK, so the read unlo
         (is (typep octets '(vector (unsigned-byte 8))))
         (is (zerop (length octets)))))))
 
+(test a-null-array-is-an-empty-vector
+  "#966's review: a VT_ARRAY VARIANT whose SAFEARRAY pointer is NULL reads as an empty vector,
+an (UNSIGNED-BYTE 8) one for VT_UI1 as a non-NULL empty byte array is, and a simple vector for
+another element type."
+  (with-array-variant (v ffi:+vt-ui1+ (cffi:null-pointer))
+    (let ((octets (com:variant-to-lisp v)))
+      (is (typep octets '(vector (unsigned-byte 8))) "~S" (type-of octets))
+      (is (zerop (length octets)))))
+  (with-array-variant (v ffi:+vt-i4+ (cffi:null-pointer))
+    (let ((out (com:variant-to-lisp v)))
+      (is (typep out 'simple-vector) "~S" (type-of out))
+      (is (zerop (length out))))))
+
+(test a-boolean-array-becomes-a-vector-of-t-and-nil
+  "#964 asks for BOOL by name, and #966's review found it refused. An Automation Boolean() is
+VT_ARRAY|VT_BOOL with 2-byte elements: VARIANT_TRUE (-1) and any other nonzero value read as T,
+zero as NIL, as a single VT_BOOL is read."
+  (let ((psa (ffi:safe-array-create-vector ffi:+vt-bool+ 0 3)))
+    (is (= 2 (ffi:safe-array-get-elemsize psa)))
+    (%fill-array psa :int16 '(-1 0 1))
+    (with-array-variant (v ffi:+vt-bool+ psa)
+      (is (equalp #(t nil t) (com:variant-to-lisp v)) "~S" (com:variant-to-lisp v))
+      (is (zerop (ffi:variant-clear v)) "VariantClear refused the array: it was left locked"))))
+
 (test an-array-whose-lower-bound-is-not-zero-is-read-whole
   "A SAFEARRAY may count from any lower bound; VBA's default is 1 under Option Base 1."
   (let ((psa (ffi:safe-array-create-vector ffi:+vt-i4+ 1 3)))
