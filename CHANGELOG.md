@@ -2888,6 +2888,30 @@ its tag.
 
 ### Fixed
 
+- **aion/http-client: a failure on a pinned connection no longer reconnects through DNS or sends
+  the request again** (#985). A request with `:connect-address`, which `fetch-public` always
+  makes, handed its connection to dexador on Linux and macOS. After any failure on it, such as a
+  read timeout or a reset, dexador opened a second connection by resolving the URL's host name,
+  bypassing the address `fetch-public` had checked, and sent the request again, a POST included.
+  The pinned path now writes the request and reads the response itself on every platform, as it
+  already did on Windows (#536), so it uses exactly one connection. Visible differences on Linux
+  and macOS: the request asks for `Accept-Encoding: identity` instead of gzip; a pinned
+  `send-request` does not follow redirects itself (`fetch-public` follows them, as before);
+  responses are read under http1.lisp's limits and refused with `malformed-response` outside
+  HTTP/1.1's grammar; an alist `:content` whose values are pathnames (dexador's multipart) is not
+  supported there. As through dexador, the default `User-Agent` and `Accept: */*` are sent,
+  string or octet content without a Content-Type is `text/plain`, and a request without content
+  other than GET or HEAD sends `Content-Length: 0`. Those four are now also what the Windows
+  pinned path sends.
+
+- **aion/http-client: on Windows, a pinned request's `:read-timeout` and `fetch-public`'s
+  `:deadline` end a read from a server that never answers** (#985). Neither did before: the
+  socket's receive timeout had no effect on Windows, and the deadline shut the socket down,
+  which did not wake the read there. Measured, a `fetch-public` with `:deadline 2` to such a
+  server was still waiting after 20 seconds, so a user-supplied URL could hold a Windows caller
+  for as long as the server kept the connection open. The read timeout now ends the read with
+  an `http-error` whose phase is `:response` and whose detail says "I/O timeout", and the
+  deadline closes the socket on Windows, so the fetch ends with `fetch-deadline-exceeded`.
 - **praxeon/actor: `move-conversation` no longer lowers the new agent's conversation taint.** It
   copied the old agent's `agent-conversation-taint` over the new agent's, so a new agent made with
   `:conversation-taint :untrusted` and given a conversation recorded as `:clean` ended up `:clean`.
