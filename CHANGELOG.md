@@ -1138,7 +1138,11 @@ its tag.
   failure, has no phase, so it is never retried. On the pinned path (`:connect-address`,
   `fetch-public`) the phase comes from where the call failed, not from the condition's type,
   and a connection that ends before the response does (a `malformed-response` saying "the
-  connection ended") is `:response`.
+  connection ended") is `:response`. On Windows, where dexador uses WinHTTP, the phase comes
+  from WinHTTP's error code: 12029 and 12007 are `:connect`; 12002, 12030 and 12152 are
+  `:response`. aion/http-client now depends on `aion/retry` and defines the `transience` and
+  `retry-after` methods for `http-error`: 408, 425, 429, 503, 529 and `:connect` are
+  `:transient`; 500, 502, 504 and `:response` are `:unknown`.
   - **Pooled connections.** Through dexador on Linux and macOS, a failure to connect is
     `:connect` only for a request that could not have used dexador's connection pool. Otherwise
     dexador may have sent the request on a pooled connection that then dropped, before its
@@ -1147,11 +1151,7 @@ its tag.
     to connect, such as a GET's, is `:response`.
   - **WinHTTP's 12152.** On Windows, a reply WinHTTP refuses as not HTTP (12152) is now
     signalled as `malformed-response`, as this client's own reader signals one on the pinned
-    path, still with phase `:response`. It was a plain `http-error`. On Windows, where dexador uses WinHTTP, the phase comes
-  from WinHTTP's error code: 12029 and 12007 are `:connect`; 12002, 12030 and 12152 are
-  `:response`. aion/http-client now depends on `aion/retry` and defines the `transience` and
-  `retry-after` methods for `http-error`: 408, 425, 429, 503, 529 and `:connect` are
-  `:transient`; 500, 502, 504 and `:response` are `:unknown`.
+    path, still with phase `:response`. It was a plain `http-error`.
 - **hyperion/page-meta: `:visibility :unlisted` writes the full preview card plus `robots
   noindex`** (#947). `page-meta`, `meta-tags` and `meta-tags-string` accept `:unlisted` beside
   `:public`, `:noindex` and `:private`. It is for a page anyone with the link may see and
