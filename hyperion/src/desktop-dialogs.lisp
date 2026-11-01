@@ -17,15 +17,25 @@
 
 (defparameter +dialog-kinds+ '(:open :open-many :save :folder))
 
-(defun %dialog-refuse (control &rest args)
-  (error "hyperion/desktop: ~?" control args))
+(define-condition dialog-request-refused (error)
+  ((reason :initarg :reason :reader dialog-request-refused-reason)
+   (detail :initarg :detail :reader dialog-request-refused-detail))
+  (:report (lambda (c stream)
+             (format stream "hyperion/desktop: ~A" (dialog-request-refused-detail c))))
+  (:documentation "Signalled where a page is built, by DIALOG-REQUEST-JSON and DIALOG-ONCLICK, for
+a dialog request hyperion-view would refuse. REASON is the keyword whose name is the reason
+hyperion-view gives for the same request (dialog-request.h): :KIND, :TITLE, :FOLDER, :NAME,
+:FILTERS, :FILTER-LABEL, :FILTER-PATTERNS or :PATTERN. The report says what was wrong."))
 
-(defun %dialog-text (what text max)
-  (unless (stringp text) (%dialog-refuse "~A must be a string, not ~S" what text))
+(defun %dialog-refuse (reason control &rest args)
+  (error 'dialog-request-refused :reason reason :detail (format nil "~?" control args)))
+
+(defun %dialog-text (reason what text max)
+  (unless (stringp text) (%dialog-refuse reason "~A must be a string, not ~S" what text))
   (when (> (length (sb-ext:string-to-octets text :external-format :utf-8)) max)
-    (%dialog-refuse "~A is longer than ~D bytes" what max))
+    (%dialog-refuse reason "~A is longer than ~D bytes" what max))
   (when (find-if (lambda (c) (let ((code (char-code c))) (or (< code 32) (= code 127)))) text)
-    (%dialog-refuse "~A holds a control character" what))
+    (%dialog-refuse reason "~A holds a control character" what))
   text)
 
 (defun %dialog-pattern-p (pattern)
@@ -42,10 +52,10 @@ refuses."
 
 (defun %check-dialog-request (kind title filters folder name)
   (unless (member kind +dialog-kinds+)
-    (%dialog-refuse "the dialog KIND must be one of ~{~S~^, ~}, not ~S" +dialog-kinds+ kind))
-  (when title (%dialog-text "the dialog's TITLE" title 200))
+    (%dialog-refuse :kind "the dialog KIND must be one of ~{~S~^, ~}, not ~S" +dialog-kinds+ kind))
+  (when title (%dialog-text :title "the dialog's TITLE" title 200))
   (when folder
-    (%dialog-text "the dialog's FOLDER" folder 4096)
+    (%dialog-text :folder "the dialog's FOLDER" folder 4096)
     ;; Only a local drive path, as hyperion-view checks it (dialog_folder_ok): the dialog opens
     ;; FOLDER as a shell parsing name, so \\host\share, file://host/share and \??\UNC\host\share
     ;; all reach a network share, which makes Windows send the user's credentials to that host.
@@ -53,24 +63,29 @@ refuses."
                  (or (char<= #\A (char folder 0) #\Z) (char<= #\a (char folder 0) #\z))
                  (char= (char folder 1) #\:)
                  (find (char folder 2) "\\/"))
-      (%dialog-refuse "FOLDER must be a local drive path such as C:\\Users, not ~S" folder)))
+      (%dialog-refuse :folder "FOLDER must be a local drive path such as C:\\Users, not ~S" folder)))
   (when name
-    (unless (eq kind :save) (%dialog-refuse "NAME is for a :SAVE dialog only"))
-    (%dialog-text "the dialog's NAME" name 260)
+    (unless (eq kind :save) (%dialog-refuse :name "NAME is for a :SAVE dialog only"))
+    (%dialog-text :name "the dialog's NAME" name 260)
     (when (find-if (lambda (c) (find c "/\\")) name)
-      (%dialog-refuse "NAME is a file name, not a path: ~S" name)))
+      (%dialog-refuse :name "NAME is a file name, not a path: ~S" name)))
   (when filters
-    (when (eq kind :folder) (%dialog-refuse "a :FOLDER dialog takes no FILTERS"))
+    (when (eq kind :folder) (%dialog-refuse :filters "a :FOLDER dialog takes no FILTERS"))
     (unless (and (listp filters) (<= (length filters) 32))
-      (%dialog-refuse "FILTERS must be a list of at most 32 filters"))
+      (%dialog-refuse :filters "FILTERS must be a list of at most 32 filters"))
     (dolist (filter filters)
       (destructuring-bind (label &rest patterns)
-          (if (consp filter) filter (%dialog-refuse "a filter is (LABEL PATTERN ...), not ~S" filter))
+          (if (consp filter)
+              filter
+              (%dialog-refuse :filters "a filter is (LABEL PATTERN ...), not ~S" filter))
         (unless (and (stringp label) (plusp (length label)))
-          (%dialog-refuse "a filter's LABEL must be a non-empty string, not ~S" label))
-        (%dialog-text "a filter's LABEL" label 100)
-        (unless (and patterns (<= (length patterns) 32) (every #'%dialog-pattern-p patterns))
-          (%dialog-refuse "a filter's patterns must be 1 to 32 of \"*\" or \"*.EXT\", not ~S" patterns))))))
+          (%dialog-refuse :filter-label "a filter's LABEL must be a non-empty string, not ~S" label))
+        (%dialog-text :filter-label "a filter's LABEL" label 100)
+        (unless (and patterns (<= (length patterns) 32))
+          (%dialog-refuse :filter-patterns "a filter has 1 to 32 patterns, not ~S" patterns))
+        (dolist (pattern patterns)
+          (unless (%dialog-pattern-p pattern)
+            (%dialog-refuse :pattern "a filter's pattern is \"*\" or \"*.EXT\", not ~S" pattern)))))))
 
 ;;; --- rendering the call -------------------------------------------------------------------
 
@@ -81,8 +96,10 @@ refuses."
           for code = (char-code c)
           do (cond ((char= c #\") (write-string "\\\"" out))
                    ((char= c #\\) (write-string "\\\\" out))
-                   ;; < and > as escapes too, so the JSON can sit inside an HTML attribute or a
-                   ;; script element without closing either.
+                   ;; <, >, & and ' as escapes too, so the JSON can sit inside a script element
+                   ;; without closing it. Its " stays a JSON escape, \", so in an HTML attribute
+                   ;; it is safe only because Spinneret escapes attribute values, as
+                   ;; DIALOG-ONCLICK's attribute is.
                    ((or (< code 32) (char= c #\<) (char= c #\>) (char= c #\&) (char= c #\'))
                     (format out "\\u~(~4,'0x~)" code))
                    (t (write-char c out))))

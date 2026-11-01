@@ -25,36 +25,42 @@
       "a character past ASCII is written as itself, which hyperion-view reads as UTF-8"))
 
 (test dialog-request-json-refuses-what-hyperion-view-would-refuse
-  (flet ((refused (&rest request)
-           (signals error (apply #'hyperion/desktop:dialog-request-json request))))
-    (refused :kind :delete)
-    (refused :kind "open")
-    (refused :title (format nil "a~Cb" #\Tab))
-    (refused :title (format nil "a~Cb" (code-char 127)))
-    (refused :title (make-string 201 :initial-element #\a))
-    (refused :title (make-string 101 :initial-element (code-char #xe9)))   ; 202 bytes
-    (refused :title 12)
-    (refused :folder (concatenate 'string "C:\\" (make-string 4094 :initial-element #\a)))
+  "Each refusal is a DIALOG-REQUEST-REFUSED whose REASON is the reason hyperion-view gives for the
+same request (the hub's review of #999)."
+  (flet ((refused (reason &rest request)
+           (is (eq reason (handler-case (progn (apply #'hyperion/desktop:dialog-request-json request)
+                                               :accepted)
+                            (hyperion/desktop:dialog-request-refused (c)
+                              (hyperion/desktop:dialog-request-refused-reason c))))
+               "~S" request)))
+    (refused :kind :kind :delete)
+    (refused :kind :kind "open")
+    (refused :title :title (format nil "a~Cb" #\Tab))
+    (refused :title :title (format nil "a~Cb" (code-char 127)))
+    (refused :title :title (make-string 201 :initial-element #\a))
+    (refused :title :title (make-string 101 :initial-element (code-char #xe9)))   ; 202 bytes
+    (refused :title :title 12)
+    (refused :folder :folder (concatenate 'string "C:\\" (make-string 4094 :initial-element #\a)))
     ;; Only a local drive path: every other form a folder can take includes ones that reach a
     ;; network share, which would send the user's credentials to its host.
     (dolist (folder '("\\\\server\\share" "//server/share" "/\\server" "file://host/share"
                       "FILE:///C:/x" "\\??\\UNC\\h\\s" "\\\\?\\C:\\x" "Users\\me" "/home/me"
                       "C:" "C:x" "1:\\x" ""))
-      (refused :folder folder))
-    (refused :filters (list (list "Odd" (format nil "*.~C" (code-char #x212A)))))   ; KELVIN SIGN
-    (refused :kind :open :name "a.txt")
-    (refused :kind :save :name "dir/a.txt")
-    (refused :kind :save :name "dir\\a.txt")
-    (refused :kind :folder :filters '(("All" "*")))
-    (refused :filters "*.txt")
-    (refused :filters '("*.txt"))
-    (refused :filters (loop repeat 33 collect '("All" "*")))
-    (refused :filters '(("" "*")))
-    (refused :filters '((nil "*")))
-    (refused :filters '(("All")))
-    (refused :filters (list (cons "Many" (loop for i below 33 collect (format nil "*.e~D" i)))))
+      (refused :folder :folder folder))
+    (refused :pattern :filters (list (list "Odd" (format nil "*.~C" (code-char #x212A)))))   ; KELVIN SIGN
+    (refused :name :kind :open :name "a.txt")
+    (refused :name :kind :save :name "dir/a.txt")
+    (refused :name :kind :save :name "dir\\a.txt")
+    (refused :filters :kind :folder :filters '(("All" "*")))
+    (refused :filters :filters "*.txt")
+    (refused :filters :filters '("*.txt"))
+    (refused :filters :filters (loop repeat 33 collect '("All" "*")))
+    (refused :filter-label :filters '(("" "*")))
+    (refused :filter-label :filters '((nil "*")))
+    (refused :filter-patterns :filters '(("All")))
+    (refused :filter-patterns :filters (list (cons "Many" (loop for i below 33 collect (format nil "*.e~D" i)))))
     (dolist (pattern '("*." "a.txt" "*.t t" "*.*" "*.12345678901234567"))
-      (refused :filters (list (list "Odd" pattern)))))
+      (refused :pattern :filters (list (list "Odd" pattern)))))
   (is (stringp (hyperion/desktop:dialog-request-json :folder "C:\\Users\\me" :filters '(("K" "*.K")))))
   (is (stringp (hyperion/desktop:dialog-request-json :folder "c:/data")) "a drive path with a slash")
   (is (stringp (hyperion/desktop:dialog-request-json
@@ -86,7 +92,9 @@
     "a bad request is refused where the page is built"))
 
 (test the-launcher-is-asked-for-dialogs-only-when-run-app-wants-them
-  (is (equal '("--dialogs") (hyperion/desktop::%dialog-arguments t)))
+  ;; Only where the view shows a dialog: an older view elsewhere would exit 2 on the option
+  ;; (the hub's review of #999).
+  (is (equal #+win32 '("--dialogs") #-win32 nil (hyperion/desktop::%dialog-arguments t)))
   (is (null (hyperion/desktop::%dialog-arguments nil)))
   (is (eq #+win32 t #-win32 nil (hyperion/desktop::%dialog-platform-p))
       "only Windows shows a dialog in this change; macOS and Linux answer unavailable")

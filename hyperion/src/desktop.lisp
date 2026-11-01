@@ -29,7 +29,8 @@
            ;; the :browser shell opens http and https URLs only, with no shell (#851)
            #:unsupported-browser-url #:unsupported-browser-url-url
            ;; native open, save-as and folder dialogs shown by hyperion-view (#986)
-           #:dialogs-available-p #:dialog-request-json #:dialog-onclick))
+           #:dialogs-available-p #:dialog-request-json #:dialog-onclick
+           #:dialog-request-refused #:dialog-request-refused-reason))
 
 (in-package #:hyperion/desktop)
 
@@ -419,8 +420,12 @@ window.hyperionDialog, and the app shows its own field for a pasted path instead
   *dialogs-available*)
 
 (defun %dialog-arguments (dialogs)
-  "The argument RUN-APP passes the launcher for DIALOGS: --dialogs, or none."
-  (and dialogs (list "--dialogs")))
+  "The argument RUN-APP passes the launcher for DIALOGS: --dialogs when DIALOGS is true on an
+operating system whose hyperion-view shows a dialog, or none. Not passed elsewhere, because a
+hyperion-view built before #986 exits 2 on an option it does not know, so a macOS or Linux app
+with an older view would get no window for a feature that does nothing there (the hub's review
+of #999)."
+  (and dialogs (%dialog-platform-p) (list "--dialogs")))
 
 (defun run-app (app &key (title "App") (width 1200) (height 800)
                          (backend :embedded)

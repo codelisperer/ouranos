@@ -21,6 +21,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 #include <string>
 #include <thread>
 #include <vector>
@@ -1190,8 +1191,20 @@ static std::string show_file_dialog(HWND owner, const dialog_request &r) {
     std::vector<COMDLG_FILTERSPEC> types;
     for (size_t i = 0; i < names.size(); i++) types.push_back({names[i].c_str(), specs[i].c_str()});
     dialog->SetFileTypes(static_cast<UINT>(types.size()), types.data());
+    dialog->SetFileTypeIndex(1);  // the first filter, counted from 1
+    // A save dialog adds an extension to a name typed without one: the first filter's first
+    // pattern's, when it names one, and the dialog follows the filter the user picks after that.
+    // Without it, a user who types "notes" under a "*.txt" filter saves a file named notes.
+    const std::string &first = r.filters.front().patterns.front();
+    std::wstring extension;
+    if (save && first.size() > 2 && first.compare(0, 2, "*.") == 0 &&
+        widen_utf8(first.substr(2).c_str(), &extension))
+      dialog->SetDefaultExtension(extension.c_str());
   }
   if (!r.folder.empty() && widen_utf8(r.folder.c_str(), &wide)) {
+    // A shell parsing name takes backslashes; a request may use forward slashes ("c:/data"),
+    // which the request checks accept, so they are turned into backslashes first.
+    std::replace(wide.begin(), wide.end(), L'/', L'\\');
     IShellItem *folder = nullptr;
     if (SUCCEEDED(SHCreateItemFromParsingName(wide.c_str(), nullptr, IID_IShellItem,
                                               reinterpret_cast<void **>(&folder)))) {
@@ -1711,7 +1724,7 @@ int main(int argc, char **argv) {
     } else if (std::strcmp(argv[i], "--dialog-request") == 0) {
       // The checks a page's dialog call passes before any dialog is shown, on their own, with no
       // window: for the tests, which run them on every OS (#986). TOKEN stands for the launch's
-      // token; PARAMS is the JSON array the binding receives, [TOKEN, REQUEST].
+      // token; PARAMS is the JSON array the binding receives, [TOKEN, ID, REQUEST].
       if (i != 1 || argc != 4) {
         std::fprintf(stderr, "hyperion-view: --dialog-request takes TOKEN and PARAMS and nothing else\n\n");
         print_usage(stderr);

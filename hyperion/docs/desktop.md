@@ -340,7 +340,7 @@ user's machine cannot put a shipped app into fake mode.
 Testing without a window: `hyperion-view --dialog-request TOKEN PARAMS` prints `ok KIND ...` or
 `refuse REASON` for a call, and `hyperion-view --dialog-origin URL` prints the origin the function
 is offered to. `hyperion/view/tests` runs both on every OS. On a GitHub Actions runner it also
-starts a real window with `--dialogs --exit-after 20` and checks the frame and origin rules, the
+starts a real window with `--dialogs --exit-after 40` and checks the frame and origin rules, the
 token refusal and the user-action refusal.
 
 ## Milestones

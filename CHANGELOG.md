@@ -1094,13 +1094,17 @@ its tag.
 
 - **hyperion/desktop: a desktop app's page can show the native open, save-as and folder dialogs,
   on Windows, and the page receives the path the user chooses** (#986). `run-app` takes
-  `:dialogs`, default T, and passes `--dialogs` to hyperion-view, which then defines
+  `:dialogs`, default T, and on Windows passes `--dialogs` to hyperion-view, which then defines
   `window.hyperionDialog(request)` in the app's page. It resolves to `{path}`, `{paths}` for
   `:open-many`, `{cancelled: true}`, or `{error}`. `hyperion/desktop:dialog-onclick` renders a
   button's onclick that shows the dialog and posts the choice to one of the app's routes with htmx,
   as the field `path`, or `paths` (a JSON array) for `:open-many`.
-  `hyperion/desktop:dialog-request-json` renders the request on its own, and both signal an error
-  for a request hyperion-view would refuse. `hyperion/desktop:dialogs-available-p` says whether the
+  `hyperion/desktop:dialog-request-json` renders the request on its own, and both signal
+  `hyperion/desktop:dialog-request-refused` for a request hyperion-view would refuse; its
+  `dialog-request-refused-reason` is the keyword for hyperion-view's reason (`:kind`, `:title`,
+  `:folder`, `:name`, `:filters`, `:filter-label`, `:filter-patterns` or `:pattern`). A save
+  dialog with filters starts on the first filter and adds its first pattern's extension to a name
+  typed without one. `hyperion/desktop:dialogs-available-p` says whether the
   page has the function now; when it does not, show a field for a pasted path instead.
   - **The page's script receives the path, which says something about the user's machine.** The
     function exists only in the top-level frame and only while it shows the origin of the URL
@@ -1114,18 +1118,24 @@ its tag.
     (`\\host\share`, `file://host/share`) reach a network share, and opening one makes Windows
     send the user's credentials to that host. An app that shows
     third-party content in its window should pass `:dialogs nil`.
-  - **Only Windows shows a dialog in this change.** On macOS and Linux the function exists and
-    answers `{error: "unavailable"}`, and `dialogs-available-p` is NIL; their dialogs follow in
-    separate changes.
+  - **Only Windows shows a dialog in this change.** On macOS and Linux `run-app` does not pass
+    `--dialogs`, so a hyperion-view built before this change still starts there; the page has no
+    `window.hyperionDialog`, and `dialogs-available-p` is NIL. Their dialogs follow in separate
+    changes. A view built with this change answers `{error: "unavailable"}` there if it is started
+    with `--dialogs` directly.
   - hyperion-view gains `--dialogs`, `--exit-after SECONDS` (closes the window after SECONDS, for
     tests), and two modes that make no window: `--dialog-request TOKEN PARAMS` prints how a call is
     checked, and `--dialog-origin URL` prints the origin the function is offered to. With
     `--dialogs`, hyperion-view exits 2 if it cannot make the launch's token or the URL has no
     origin. For tests, `HYPERION_VIEW_FAKE_DIALOG=1`, honoured only when `GITHUB_ACTIONS` is set
     too, answers every call with `{path: "fake-path"}` after three seconds, shows no dialog, skips
-    the user-action check, and says so on stderr. A
-    hyperion-view built before this change refuses `--dialogs` as an unknown option, so rebuild it
-    with `hyperion/hyperion-view/build.ps1` (it now links `uuid.lib` and `bcrypt.lib`).
+    the user-action check, and says so on stderr. On Windows, a
+    hyperion-view built before this change refuses `--dialogs` as an unknown option and opens no
+    window, so rebuild it with `hyperion/hyperion-view/build.ps1` (it now links `uuid.lib` and
+    `bcrypt.lib`).
+  - `aion/test-http`'s `start-server` and `with-server` take `:concurrent`, which serves each
+    connection on a thread of its own, so a connection that sends nothing, as a browser opens,
+    does not hold up the next request. The default is unchanged.
 - **aion/retry: a retry policy as data, and `with-retry`, which retries through restarts**
   (#79). `make-retry-policy` takes `:max-attempts`, `:base-delay`, `:multiplier`, `:max-delay`,
   `:jitter` (`:full`, `:equal` or `:none`), `:deadline` and `:retryable`, and `retry-delay`

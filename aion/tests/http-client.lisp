@@ -328,6 +328,45 @@ IPv4 list."
   (is (equalp #(10 0 0 5) (http:parse-address "10.0.0.5")))
   (is (string= "0:0:0:0:0:0:0:1" (http:address-string (http:parse-address "::1")))))
 
+;;; --- aion/test-http :concurrent (#999) ---------------------------------------------------
+
+(defun %answered-past-an-idle-connection-p (concurrent)
+  "Whether a server started with CONCURRENT answers a request while another connection to it is
+open and has sent nothing: true when the answer's first byte arrives within two seconds."
+  (aion/test-http:with-server (s (lambda (request stream)
+                                   (declare (ignore request))
+                                   (aion/test-http:write-response stream 200 '() "answered"))
+                                 :concurrent concurrent)
+    (let ((idle (usocket:socket-connect "127.0.0.1" (aion/test-http:server-port s)
+                                        :element-type '(unsigned-byte 8)))
+          (asking nil))
+      (unwind-protect
+           (progn
+             (sleep 0.3)                ; the server takes the idle connection first
+             (setf asking (usocket:socket-connect "127.0.0.1" (aion/test-http:server-port s)
+                                                  :element-type '(unsigned-byte 8)))
+             (let ((out (usocket:socket-stream asking)))
+               (write-sequence (sb-ext:string-to-octets
+                                (format nil "GET / HTTP/1.1~C~CHost: x~C~C~C~C"
+                                        #\Return #\Newline #\Return #\Newline #\Return #\Newline)
+                                :external-format :latin-1)
+                               out)
+               (finish-output out))
+             (and (usocket:wait-for-input asking :timeout 2 :ready-only t) t))
+        ;; Closing the idle connection lets a server that serves one at a time go on, so its
+        ;; thread can be stopped.
+        (ignore-errors (usocket:socket-close idle))
+        (when asking (ignore-errors (usocket:socket-close asking)))))))
+
+(test a-concurrent-test-server-answers-while-another-connection-is-idle
+  "#999, from the hub's review: aion/test-http's :CONCURRENT serves each connection on its own
+thread, so a connection that sends nothing does not hold up the next request. The control is the
+default server, which serves one connection at a time and does not answer meanwhile. A browser
+opens such connections, and the window test that needs this runs only on CI."
+  (is-true (%answered-past-an-idle-connection-p t) "with :concurrent, the request is answered")
+  (is-false (%answered-past-an-idle-connection-p nil)
+            "control: one connection at a time, the request waits behind the idle one"))
+
 ;;; --- redirect control and the body cap (every platform) ------------------------------
 
 (defun %redirecting (path head stream)

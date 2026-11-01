@@ -114,8 +114,9 @@ true, each connection is served on a thread of its own, and HANDLER must be safe
 several threads at once. A browser needs this: it can open a connection and send nothing on it
 until it closes it, and a server that serves one connection at a time then answers nothing
 else meanwhile (#999, where the request for one page waited 38 seconds behind such a
-connection). A connection's thread ends when the client closes the connection; STOP-SERVER does
-not wait for it."
+connection). A connection's thread ends when the client closes the connection. STOP-SERVER does
+not wait for it, so a client that never closes its connection leaves that thread blocked in
+%READ-REQUEST after STOP-SERVER has returned."
   (let* ((tls-config #+os-windows (and tls-certificate (%aion-tls-server-config tls-certificate tls-key))
                      #-os-windows nil)
          (listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t
