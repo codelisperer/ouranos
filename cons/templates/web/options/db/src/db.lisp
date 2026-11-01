@@ -63,13 +63,24 @@ Signals when the database is already open. If a store cannot be made, the pool i
          (prog1 (setf *sessions* (session-db:make-db-store *pool* :dialect +dialect+ :ensure t)
                       *users* (auth:make-db-auth *pool* :dialect +dialect+ :ensure t))
            (setf made t))
-      (unless made (close-database)))))
+      (unless made (close-database-during-cleanup)))))
 
 (defun close-database ()
-  "Close the pool, and with it every connection the stores and requests used."
+  "Close the pool, and with it every connection the stores and requests used. *POOL*,
+*SESSIONS* and *USERS* are NIL afterwards even when closing the pool signals, so a later
+OPEN-DATABASE is not refused (#1006)."
   (when *pool*
-    (conn:close-pool *pool*)
-    (setf *pool* nil *sessions* nil *users* nil)))
+    (let ((pool *pool*))
+      (unwind-protect (conn:close-pool pool)
+        (setf *pool* nil *sessions* nil *users* nil)))))
+
+(defun close-database-during-cleanup ()
+  "CLOSE-DATABASE for cleanup code that runs while another error unwinds. A failure to close the
+pool is logged with its condition type and nothing else, and does not replace the error that is
+unwinding, which is the one the caller needs to see (#1006)."
+  (handler-case (close-database)
+    (error (e)
+      (log:error "{{name}}: closing the database failed during cleanup" :condition (type-of e)))))
 
 (defun app-with-database (app)
   "APP with a session from *SESSIONS*, inside a request that holds its own connection in *DB*.

@@ -120,6 +120,68 @@ a streaming response owns its own headers."
              (cddr response))
       response))
 
+;;; --- the query's parameter names, never its values (#1007) ----------------------------
+
+(defparameter +max-query-keys+ 20
+  "The most parameter names the request start line records.")
+
+(defparameter +max-query-key-length+ 40
+  "The most characters of one parameter name the request start line records.")
+
+(defun %decode-name (text)
+  "TEXT, a query parameter name, with + read as a space and %XX escapes decoded as UTF-8, or NIL
+when an escape is malformed or the octets are not UTF-8."
+  (let ((octets (make-array (length text) :element-type '(unsigned-byte 8) :fill-pointer 0))
+        (i 0) (n (length text)))
+    (loop while (< i n)
+          do (let ((c (char text i)))
+               (cond ((char= c #\%)
+                      (let ((hi (and (< (+ i 2) n) (digit-char-p (char text (+ i 1)) 16)))
+                            (lo (and (< (+ i 2) n) (digit-char-p (char text (+ i 2)) 16))))
+                        (unless (and hi lo) (return-from %decode-name nil))
+                        (vector-push (+ (* 16 hi) lo) octets)
+                        (incf i 3)))
+                     ((> (char-code c) 127) (return-from %decode-name nil))
+                     (t (vector-push (if (char= c #\+) 32 (char-code c)) octets)
+                        (incf i)))))
+    (handler-case (sb-ext:octets-to-string (coerce octets '(simple-array (unsigned-byte 8) (*)))
+                                           :external-format '(:utf-8 :replacement nil))
+      (error () nil))))
+
+(defun %query-keys (query)
+  "The parameter names of QUERY, a raw query string, for the request start line, and how many of
+its parts have no = at all: (values NAMES BARE-PARTS).
+
+NAMES are in the order they first appear, each once, at most +MAX-QUERY-KEYS+ of them, each cut
+to +MAX-QUERY-KEY-LENGTH+ characters. Never a value: a query string is a payload, and can carry
+tokens and personal data (#1007). NIL for no query; :UNPARSED, with no text from it, when a name
+has a malformed escape or is not UTF-8.
+
+A part with no value is counted in BARE-PARTS and never named, because such a part is usually
+a token rather than a name (the hub's reviews of #1017): one with no = at all, as in
+/reset?3f9a..., and one whose value is empty or only = signs, as in ?abc123secret= or a base64
+token with its padding, ?dGhpcyBpcyBhIHNlY3JldCB0b2tlbg==. An empty part, as in a&&b, is
+neither."
+  (if (and (stringp query) (plusp (length query)))
+      (let ((names '()) (bare 0) (full nil))
+        (dolist (part (uiop:split-string query :separator "&"))
+          (let ((equals (position #\= part)))
+            (cond ((zerop (length part)))
+                  ((or (null equals)
+                       (every (lambda (c) (char= c #\=)) (subseq part equals)))
+                   (incf bare))
+                  (full)
+                  (t (let ((name (%decode-name (subseq part 0 equals))))
+                       (cond ((null name) (return-from %query-keys (values :unparsed bare)))
+                             ((zerop (length name)))
+                             (t (let ((cut (subseq name 0 (min (length name) +max-query-key-length+))))
+                                  (unless (member cut names :test #'string=)
+                                    (push cut names)
+                                    (when (>= (length names) +max-query-keys+)
+                                      (setf full t)))))))))))
+        (values (nreverse names) bare))
+      (values nil 0)))
+
 (defun wrap (app)
   "Clack middleware: give each request an id, bind it into the logging context so every
 framework's events correlate, and log the request's arrival, outcome, and latency.
@@ -138,10 +200,15 @@ client sees."
           ;; The arrival line is redundant for quiet traffic -- the completion line already
           ;; says everything, and doubling the volume is the complaint.
           (unless quiet
-            (log:debug "request start" :method method :path path
-                                       :query (getf env :query-string)
-                                       ;; The client, behind a trusted proxy too (#381).
-                                       :remote (proxy:client-address env)))
+            (multiple-value-bind (query-keys bare-parts) (%query-keys (getf env :query-string))
+              (log:debug "request start" :method method :path path
+                                         ;; The names only, never the values (#1007), and only
+                                         ;; a count of the parts with no value (the reviews of
+                                         ;; #1017).
+                                         :query-keys query-keys
+                                         :bare-parts (and (plusp bare-parts) bare-parts)
+                                         ;; The client, behind a trusted proxy too (#381).
+                                         :remote (proxy:client-address env))))
           (handler-bind
               ((cl:error (lambda (c)
                            ;; Never quieted, whatever the path.

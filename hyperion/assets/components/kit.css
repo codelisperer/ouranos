@@ -1,0 +1,348 @@
+/* kit.css --- styles for hyperion/kit: the page header, breadcrumbs, empty state, segmented
+   control, toggle group, dialogs, undo notices, list toolbar and properties panel (#981).
+   Coloured with the --hy-* tokens of hyperion/appearance (serve appearance-css). Each token
+   falls back to a Bulma custom property, so the components still read on a page that does
+   not serve the tokens. Backgrounds use `background`, because in the gradient look a token
+   may be a linear-gradient. */
+
+.hy-page-header {
+  background: var(--hy-header, var(--bulma-scheme-main-bis));
+  color: var(--hy-header-text, var(--bulma-text-strong));
+  padding: var(--hy-space-5, 24px) var(--hy-space-5, 24px) var(--hy-space-4, 16px);
+}
+
+.hy-page-header-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--hy-space-3, 12px);
+}
+
+.hy-page-title {
+  font-size: var(--hy-text-title, 1.25rem);
+  font-weight: 600;
+  line-height: 1.2;
+  margin: 0;
+  color: inherit;
+}
+
+.hy-page-subtitle {
+  margin: var(--hy-space-1, 4px) 0 0;
+  font-size: var(--hy-text-body, 0.875rem);
+}
+
+.hy-page-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hy-space-2, 8px);
+}
+
+/* Breadcrumbs: the separator is generated content, which screen readers skip. */
+.hy-breadcrumbs ol {
+  display: flex;
+  flex-wrap: wrap;
+  list-style: none;
+  margin: 0 0 var(--hy-space-2, 8px);
+  padding: 0;
+  font-size: var(--hy-text-meta, 0.75rem);
+}
+
+.hy-breadcrumbs li + li::before {
+  content: "/";
+  padding: 0 var(--hy-space-2, 8px);
+  opacity: 0.7;
+}
+
+.hy-breadcrumbs a {
+  color: inherit;
+  text-decoration: underline;
+}
+
+.hy-breadcrumbs [aria-current="page"] {
+  font-weight: 600;
+}
+
+/* Empty state */
+.hy-empty-state {
+  background: var(--hy-surface-raised, var(--bulma-scheme-main-bis));
+  color: var(--hy-surface-raised-text, var(--bulma-text));
+  text-align: center;
+  padding: var(--hy-space-7, 48px) var(--hy-space-5, 24px);
+  border-radius: var(--bulma-radius-large, 8px);
+}
+
+.hy-empty-title {
+  font-size: var(--hy-text-heading, 1rem);
+  font-weight: 600;
+  margin: 0 0 var(--hy-space-2, 8px);
+  color: inherit;
+}
+
+.hy-empty-text {
+  margin: 0 0 var(--hy-space-4, 16px);
+}
+
+/* Segmented control and toggle group: a row of buttons. The pressed state is drawn from
+   aria-pressed, so the markup and the look cannot disagree. */
+.hy-segmented,
+.hy-toggle-group {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 0;
+}
+
+.hy-toggle-group {
+  gap: var(--hy-space-2, 8px);
+}
+
+.hy-segmented > .button,
+.hy-toggle-group > .button {
+  background: var(--hy-button, var(--bulma-scheme-main));
+  color: var(--hy-button-text, var(--bulma-text));
+}
+
+.hy-segmented > .button:not(:first-child) {
+  border-top-left-radius: 0;
+  border-bottom-left-radius: 0;
+  margin-left: -1px;
+}
+
+.hy-segmented > .button:not(:last-child) {
+  border-top-right-radius: 0;
+  border-bottom-right-radius: 0;
+}
+
+.hy-segmented > .button[aria-pressed="true"],
+.hy-toggle-group > .button[aria-pressed="true"] {
+  background: var(--hy-button-primary, var(--bulma-primary));
+  color: var(--hy-button-primary-text, var(--bulma-primary-invert));
+  border-color: transparent;
+  z-index: 1;
+}
+
+/* Dialogs. The browser draws the dialog over an inert page (showModal); this sizes it and
+   colours it from the raised-surface tokens. */
+.hy-dialog {
+  background: var(--hy-surface-raised, var(--bulma-scheme-main));
+  color: var(--hy-surface-raised-text, var(--bulma-text));
+  border: 1px solid var(--bulma-border, #ccc);
+  border-radius: var(--bulma-radius-large, 8px);
+  padding: 0;
+  width: min(32rem, calc(100vw - 2 * var(--hy-space-4, 16px)));
+  max-height: calc(100vh - 2 * var(--hy-space-4, 16px));
+}
+
+.hy-dialog::backdrop {
+  background: rgba(10, 10, 10, 0.5);
+}
+
+.hy-dialog-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--hy-space-3, 12px);
+  padding: var(--hy-space-4, 16px) var(--hy-space-5, 24px) 0;
+}
+
+.hy-dialog-title {
+  font-size: var(--hy-text-heading, 1rem);
+  font-weight: 600;
+  margin: 0;
+  color: inherit;
+}
+
+.hy-dialog-body {
+  padding: var(--hy-space-4, 16px) var(--hy-space-5, 24px) var(--hy-space-5, 24px);
+}
+
+/* The destructive confirm: Cancel on the left, the action on the right. */
+.hy-confirm-text {
+  margin: 0 0 var(--hy-space-4, 16px);
+}
+
+.hy-confirm-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--hy-space-2, 8px);
+}
+
+.hy-confirm-actions .is-danger {
+  background: var(--hy-button-danger, var(--bulma-danger));
+  color: var(--hy-button-danger-text, var(--bulma-danger-invert));
+  border-color: transparent;
+}
+
+/* Notices: the region stays on the page, and each notice stays until it is dismissed or
+   undone. */
+.hy-notices {
+  position: fixed;
+  bottom: var(--hy-space-4, 16px);
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: var(--hy-space-2, 8px);
+  z-index: 30;
+  max-width: calc(100vw - 2 * var(--hy-space-4, 16px));
+}
+
+.hy-undo-notice {
+  display: flex;
+  align-items: center;
+  gap: var(--hy-space-3, 12px);
+  background: var(--hy-surface-raised, var(--bulma-scheme-main));
+  color: var(--hy-surface-raised-text, var(--bulma-text));
+  border: 1px solid var(--bulma-border, #ccc);
+  border-radius: var(--bulma-radius, 4px);
+  padding: var(--hy-space-2, 8px) var(--hy-space-3, 12px);
+}
+
+/* List toolbar: the search form and the trash toggle on one wrapping row. */
+.hy-toolbar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: var(--hy-space-3, 12px);
+  margin-bottom: var(--hy-space-4, 16px);
+}
+
+.hy-toolbar-form {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: var(--hy-space-2, 8px);
+}
+
+.hy-toolbar-search {
+  width: min(20rem, 100%);
+}
+
+.hy-toolbar-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hy-space-1, 4px);
+  font-size: var(--hy-text-meta, 0.75rem);
+}
+
+.hy-toolbar-submit {
+  background: var(--hy-button, var(--bulma-scheme-main));
+  color: var(--hy-button-text, var(--bulma-text));
+}
+
+/* Rows that open the properties panel. The chosen row is drawn from aria-current. */
+.hy-row {
+  cursor: pointer;
+}
+
+.hy-row[aria-current="true"] {
+  background: var(--hy-surface-raised, var(--bulma-scheme-main-ter));
+  color: var(--hy-surface-raised-text, var(--bulma-text-strong));
+}
+
+/* The button that chooses a row, in its first cell. It looks like the cell's text, so the row
+   reads as a row, and shows the focus ring when the keyboard reaches it. */
+.hy-row-activator {
+  appearance: none;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: inherit;
+  cursor: pointer;
+}
+
+.hy-row-activator:focus-visible {
+  outline: 2px solid var(--hy-focus-ring, var(--bulma-focus-color, var(--bulma-link)));
+  outline-offset: 2px;
+}
+
+.hy-properties {
+  background: var(--hy-surface-raised, var(--bulma-scheme-main));
+  color: var(--hy-surface-raised-text, var(--bulma-text));
+  border: 1px solid var(--bulma-border, #ccc);
+  border-radius: var(--bulma-radius-large, 8px);
+}
+
+.hy-properties-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--hy-space-3, 12px);
+  background: var(--hy-header, var(--bulma-scheme-main-bis));
+  color: var(--hy-header-text, var(--bulma-text-strong));
+  padding: var(--hy-space-3, 12px) var(--hy-space-4, 16px);
+  border-radius: var(--bulma-radius-large, 8px) var(--bulma-radius-large, 8px) 0 0;
+}
+
+.hy-properties-title {
+  font-size: var(--hy-text-heading, 1rem);
+  font-weight: 600;
+  margin: 0;
+  color: inherit;
+}
+
+.hy-properties-body {
+  padding: var(--hy-space-4, 16px);
+}
+
+/* The dock panel fills the element the page puts it in, and has no width or position of its
+   own, so it resizes with that element. */
+.hy-dock {
+  display: flex;
+  flex-direction: column;
+  box-sizing: border-box;
+  width: 100%;
+  height: 100%;
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+}
+
+.hy-dock[hidden] {
+  display: none;
+}
+
+.hy-dock-loading {
+  padding: var(--hy-space-4, 16px);
+  color: var(--bulma-text-weak);
+}
+
+/* Hover, press and keyboard focus for the buttons above. Their `background` replaces the one
+   Bulma changes on hover, so they would otherwise show no hover at all. A translucent grey
+   layer over the token's background darkens a light button and lightens a dark one, and works
+   whether the token is a colour or a gradient. */
+.hy-segmented > .button:hover,
+.hy-toggle-group > .button:hover,
+.hy-toolbar-submit:hover {
+  background: linear-gradient(rgba(128, 128, 128, 0.14), rgba(128, 128, 128, 0.14)),
+    var(--hy-button, var(--bulma-scheme-main));
+}
+
+.hy-segmented > .button[aria-pressed="true"]:hover,
+.hy-toggle-group > .button[aria-pressed="true"]:hover {
+  background: linear-gradient(rgba(128, 128, 128, 0.14), rgba(128, 128, 128, 0.14)),
+    var(--hy-button-primary, var(--bulma-primary));
+}
+
+.hy-confirm-actions .is-danger:hover {
+  background: linear-gradient(rgba(128, 128, 128, 0.14), rgba(128, 128, 128, 0.14)),
+    var(--hy-button-danger, var(--bulma-danger));
+}
+
+.hy-segmented > .button:active,
+.hy-toggle-group > .button:active,
+.hy-toolbar-submit:active,
+.hy-confirm-actions .is-danger:active {
+  filter: brightness(0.92);
+}
+
+.hy-segmented > .button:focus-visible,
+.hy-toggle-group > .button:focus-visible,
+.hy-toolbar-submit:focus-visible,
+.hy-confirm-actions .is-danger:focus-visible {
+  outline: 2px solid var(--hy-focus-ring, var(--bulma-focus-color, var(--bulma-link)));
+  outline-offset: 2px;
+}
