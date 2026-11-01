@@ -30,6 +30,19 @@ its tag.
     signals `db-statement-timeout` (a `db-error`), from `exec`, `query` and `map-query`.
   - `mnemosyne/docs/user-guide.md` describes both, and the server-side fallback
     `ALTER ROLE ... SET statement_timeout`.
+- **hermes/blob: `MNEMOSYNE_S3_SECURE=false` is refused unless the endpoint is local, and an
+  empty `MNEMOSYNE_S3_SESSION_TOKEN` is now no token** (#124).
+  - `make-s3-store` refuses `MNEMOSYNE_S3_SECURE=false` when `MNEMOSYNE_S3_ENDPOINT` is not a
+    loopback, private or link-local address, signalling `blob-configuration-error`. Before, that
+    one variable put a store still aimed at the default `s3.amazonaws.com` on plain http, sending
+    its signed requests and any session token across the internet in the clear. `localhost`, an
+    address in those ranges, and a name that resolves only to such addresses (a Docker Compose
+    service name, say) are all accepted. **An app that set `MNEMOSYNE_S3_SECURE=false` against a
+    public endpoint now fails to start** and should either point the endpoint at its local double
+    or, if plaintext to that endpoint is really meant, pass `:secure nil` in code, which is not
+    checked.
+  - An empty `MNEMOSYNE_S3_SESSION_TOKEN` is now no token, where it used to be sent as an empty
+    one.
 - **`mnemosyne/migrate:migrate` logs each applied migration at DEBUG and one INFO line per
   call** (#1046). The per-migration line `"migrate: applied"` (with `id`, `description` and `ms`)
   is now DEBUG, as is `"migrate: applying"`. A call that had migrations to apply ends with one
@@ -1171,6 +1184,21 @@ its tag.
   encoded and is refused. An email without `:headers` sends the same SendGrid request as
   before. A new email backend's `deliver` sends `email-headers` or signals `invalid-message`
   when there are any; it never drops them.
+- **hermes/blob: `make-s3-store` reads `MNEMOSYNE_S3_SECURE`, so a local S3 double can be
+  configured from the environment alone** (#124). Before, `:secure` was the one setting with no
+  environment fallback, and `store-from-env` could only make an https store. Now
+  `MNEMOSYNE_S3_SECURE=false` with `MNEMOSYNE_S3_PATH_STYLE=true` and
+  `MNEMOSYNE_S3_ENDPOINT=localhost:9000` reaches a MinIO. Unset or empty still means https, the
+  value is read as `true` or `false` without regard to case, and anything else signals
+  `blob-configuration-error`. An app that registered its own store with `:secure nil` for this,
+  such as an `"s3-local"` store, can set the variable and use `"s3"` instead. The `MNEMOSYNE_`
+  prefix on the blob variables is historical; the `make-s3-store` and `store-from-env`
+  docstrings now say they are hermes settings.
+- **hermes/blob: a blob setting set to the empty string means the same as an unset one** (#124).
+  `MNEMOSYNE_BLOB_IMPL`, `MNEMOSYNE_BLOB_ROOT`, `MNEMOSYNE_BLOB_BASE_URL` and every
+  `MNEMOSYNE_S3_*` variable now fall back to their defaults when empty, as a blank line in a
+  `.env` file sets them. Before, an empty `MNEMOSYNE_BLOB_IMPL` made `store-from-env` look for a
+  store named `""` and signal, and an empty `MNEMOSYNE_S3_ENDPOINT` failed `make-s3-store`.
 - **`mnemosyne/test-template`: a test suite can migrate one SQLite database per run and give
   each test a copy** (#1047). `make-sqlite-template` applies an app's migrations to an in-memory
   database once (`:setup` configures its connection first); `copy-sqlite-template` and

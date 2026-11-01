@@ -41,7 +41,11 @@
   (:use #:cl)
   (:local-nicknames (#:k #:hermes/blob-key)
                     (#:clock #:aion/clock)
-                    (#:log #:aion/log))
+                    (#:log #:aion/log)
+                    ;; ADDRESS-CATEGORY and RESOLVE-HOST, to decide whether an endpoint a
+                    ;; plaintext store is aimed at is one only this machine or network can
+                    ;; reach (#970).
+                    (#:http #:aion/http-client))
   (:documentation
    "The neutral blob-store protocol and its backends. Bytes live in object storage; rows
     hold metadata and a storage key, never the bytes. STORE is a class, and PUT-BLOB /

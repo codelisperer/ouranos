@@ -110,6 +110,9 @@
                "aion/log"   ; the framework logging facade -- already hermes core's
                "coalton"    ; the key/visibility core is typed
                "dexador"    ; the S3 backend's only transport
+               ;; address-category and resolve-host: a plaintext store is refused unless its
+               ;; endpoint is local (#970). Already hermes core's, so no new external dep.
+               "aion/http-client"
                "ironclad")  ; SHA-256 checksums on the way past, HMAC for SigV4
   :serial t
   :components ((:module "blob"
