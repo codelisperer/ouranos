@@ -244,7 +244,10 @@ MODE is :DEFAULT (until no active handles), :ONCE (block for one round of events
                       (:nowait ffi:+uv-run-nowait+))))
     (setf (loop-running-p loop) t)
     (unwind-protect
-         (ffi:uv-run (loop-pointer loop) mode-value)
+         ;; Every callback runs inside this call, so code that must not block a loop, such as
+         ;; aion/retry's wait, can tell it is on one (#79).
+         (let ((aion/dynamic:*blocking-forbidden* "an aion/uv loop"))
+           (ffi:uv-run (loop-pointer loop) mode-value))
       (setf (loop-running-p loop) nil))))
 
 (defun stop (loop)
