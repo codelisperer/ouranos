@@ -355,6 +355,16 @@ CHAIN), both for the caller to free. A directory is refused: aion/tls reads one 
    (timed-out :initform nil :accessor %timed-out)))
 
 #+os-windows
+(defun %watch-fire (s state)
+  "What %CALL-WATCHED's timer does when it fires: when STATE, a cons whose car is the read's
+state, is still :READING, claim it as :FIRED, mark S timed out and close its socket. When the
+read has already claimed it as :DONE, do nothing, so a timer that fires between the read's
+return and its unscheduling cannot end a read that finished (#1063)."
+  (when (eq :reading (sb-ext:compare-and-swap (car state) :reading :fired))
+    (setf (%timed-out s) t)
+    (ignore-errors (usocket:socket-close (%watched-socket s)))))
+
+#+os-windows
 (defun %call-watched (s thunk)
   "Call THUNK, a read from S's inner stream. When the read would wait, a timer closes S's socket
 after S's seconds; a read woken that way signals SB-SYS:IO-TIMEOUT.
@@ -372,12 +382,8 @@ that, its result is returned, and the closed socket makes the next read signal t
              ;; finishes first unschedules the timer below, and then no thread is made.
              ;; INTERRUPTS: not needed -- SBCL makes the thread, which runs one socket close and
              ;; ends.
-             (timer (sb-ext:make-timer
-                     (lambda ()
-                       (when (eq :reading (sb-ext:compare-and-swap (car state) :reading :fired))
-                         (setf (%timed-out s) t)
-                         (ignore-errors (usocket:socket-close (%watched-socket s)))))
-                     :thread t :name "aion/http-client read timeout")))
+             (timer (sb-ext:make-timer (lambda () (%watch-fire s state))
+                                       :thread t :name "aion/http-client read timeout")))
         (sb-ext:schedule-timer timer (%watch-seconds s))
         (multiple-value-bind (result returned)
             (unwind-protect (%unless-timed-out s thunk)
