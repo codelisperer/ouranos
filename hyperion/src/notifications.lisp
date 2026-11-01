@@ -192,7 +192,13 @@ With a GROUP-KEY, when RECIPIENT has an unread item with the same group key, tha
 the new title, body, link, kind, stamp and created-at, its COUNT goes up by one, and it keeps
 its id; NOTIFICATION itself is not stored. Otherwise NOTIFICATION is stored as a new item with
 COUNT 1. A read item is never collapsed into, so after the user reads it the next notification
-with that key starts a new item. A notification without a group key never collapses."))
+with that key starts a new item. A notification without a group key never collapses.
+
+A notification is stored under its own id, and a store refuses one whose id it already holds,
+when the notification does not collapse: the memory store signals INVALID-NOTIFICATION, and a
+database store the database's error from its primary key. Putting the same notification object
+twice is therefore an error unless it collapses; make a new one with MAKE-NOTIFICATION for each
+event (the hub's review of #1012)."))
 
 (defgeneric notification-list (store recipient &key unread-only limit before)
   (:documentation "RECIPIENT's notifications, newest first (by STAMP), at most LIMIT of them,
@@ -260,7 +266,13 @@ process that does not need notifications to survive a restart."))
                    (notification-created-at into) (notification-created-at n))
              (incf (notification-count into))
              (%copy into))
-            (t (push (%copy n) (gethash recipient (%items store)))
+            (t (let ((id (notification-id n)))
+                 (maphash (lambda (who items)
+                            (declare (ignore who))
+                            (when (find id items :key #'notification-id :test #'string=)
+                              (%refuse "a notification with id ~S is already stored" id)))
+                          (%items store)))
+               (push (%copy n) (gethash recipient (%items store)))
                (%copy n))))))
 
 (defmethod notification-list ((store memory-notification-store) recipient
@@ -561,7 +573,8 @@ X-CSRF-Token header (HYPERION/CSRF:TOKEN-HEADERS)."
                         (:button :type "button" :class "hyperion-notification-mark-read"
                                  :hx-post (%url prefix "/read") :hx-target target
                                  :hx-swap "innerHTML" :hx-headers headers
-                                 :hx-vals (format nil "{\"id\": \"~A\"}" (notification-id i))
+                                 ;; Encoded, not formatted: an id holding " or \ is still JSON.
+                                 :hx-vals (http:json (list "id" (notification-id i)))
                           (%text locale :notifications/mark-read source)))))))
               (when more
                 (:button :type "button" :class "hyperion-notification-older"
@@ -611,9 +624,13 @@ and is replaced by the answer; SAVED adds a line saying the choices were saved."
   (list status '(:content-type "text/html; charset=utf-8") (list body)))
 
 (defun %parse-integer (text)
-  (and (stringp text) (plusp (length text)) (<= (length text) 30)
-       (every #'digit-char-p text)
-       (parse-integer text)))
+  "TEXT as a non-negative integer that fits a signed 64-bit column, or NIL. A larger value would
+be refused by Postgres as out of range for BIGINT, which the route would answer with a 500 (the
+hub's review of #1012)."
+  (and (stringp text) (plusp (length text)) (<= (length text) 19)
+       (every (lambda (c) (char<= #\0 c #\9)) text)
+       (let ((n (parse-integer text)))
+         (and (<= n (1- (expt 2 63))) n))))
 
 (defun notification-router (store &key recipient-fn (prefix *prefix*) (poll-seconds 60)
                                        (page-size 20) (locale-fn (constantly "en"))
@@ -666,8 +683,12 @@ The POST routes rely on the app's CSRF check (HYPERION/CSRF:WRAP-CSRF), as every
       (lambda (env)
         (with-recipient env
           (lambda (recipient locale source)
-            (panel-and-bell recipient locale source
-                            :before (%parse-integer (http:query-param env "before"))))))
+            (let* ((raw (http:query-param env "before"))
+                   (before (%parse-integer raw)))
+              (if (and raw (null before))
+                  (list 400 '(:content-type "text/plain; charset=utf-8")
+                        (list "before must be a stamp: digits, at most 2^63-1"))
+                  (panel-and-bell recipient locale source :before before))))))
       :name :notifications-list)
      (router:route
       :post "/read"

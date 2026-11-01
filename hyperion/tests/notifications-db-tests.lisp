@@ -13,6 +13,9 @@
 
 (def-suite notifications-db :description "hyperion/notifications-db on SQLite.")
 (def-suite notifications-db-postgres :description "The same checks on Postgres.")
+;; Plain TEST forms below belong to the SQLite suite. Without this they went to FiveAM's default
+;; suite, which RUN-TESTS does not run, so they never ran in the gate.
+(in-suite notifications-db)
 
 (n:define-notification-kind :db-test-reply :default :in-app)
 (n:define-notification-kind :db-test-alert :default :both)
@@ -133,51 +136,100 @@ and key cannot be inserted, while a read one does not block a new one."
     (n:mark-read s "u1" (n:notification-id first))
     (finishes (ndb::%insert c s (n:make-notification "u1" :db-test-reply :title "new" :group-key "g")))))
 
-(backend-test a-collapse-that-loses-the-race-collapses-into-the-row-that-won (s c)
-  "Two calls with one group key: both find no unread item, and the second's insert is refused by
-the unread-key index. Forced here by inserting the competing row in that gap."
-  (let ((ndb::*%after-a-missed-collapse*
-          (lambda (conn store)
-            (ndb::%insert conn store (n:make-notification "u1" :db-test-reply :title "won the race"
-                                                                               :group-key "g")))))
-    (let ((stored (%put s "u1" "lost the race" :group-key "g")))
-      (is (= 2 (n:notification-count stored)) "collapsed into the row that won")
-      (is (equal "lost the race" (n:notification-title stored)))
-      (is (= 1 (n:unread-count s "u1"))))))
+(backend-test an-unread-row-another-writer-inserted-is-collapsed-into (s c)
+  "The row a concurrent call inserted is collapsed into, in the same statement that would have
+inserted (one INSERT ... ON CONFLICT). The competing row is inserted directly here."
+  (ndb::%insert c s (n:make-notification "u1" :db-test-reply :title "won" :group-key "g"))
+  (let ((stored (%put s "u1" "second" :group-key "g")))
+    (is (= 2 (n:notification-count stored)) "collapsed into the other writer's row")
+    (is (equal "second" (n:notification-title stored)))
+    (is (= 1 (n:unread-count s "u1")))))
 
 (backend-test another-unique-violation-reaches-the-caller (s c)
-  "Only the unread-key index's refusal is the conflict NOTIFICATION-PUT expects (the hub's review
-of #1012). Putting a notification again under an id that is already stored, after its row was
-read so there is nothing unread to collapse into, makes the insert break the primary key: that
-error reaches the caller. Before, every unique violation was taken for the conflict and
-swallowed. The control is the race the index exists for, which is still collapsed."
+  "Putting a notification again under an id already stored, after its row was read so there is
+nothing unread to collapse into, breaks the primary key, and that error reaches the caller: the
+ON CONFLICT clause names only the unread-key index. The hub's review of #1012."
   (let ((x (n:make-notification "u1" :db-test-reply :title "once" :group-key "g")))
     (n:notification-put s x)
     (n:mark-read s "u1" (n:notification-id x))
     (signals conn:db-error (n:notification-put s x))
     (is (= 0 (n:unread-count s "u1")) "nothing was added"))
-  (let ((ndb::*%after-a-missed-collapse*
-          (lambda (conn store)
-            (ndb::%insert conn store (n:make-notification "u1" :db-test-reply :title "won"
-                                                                               :group-key "h")))))
-    (is (= 2 (n:notification-count (%put s "u1" "lost" :group-key "h")))
-        "control: the unread-key conflict is still collapsed")))
+  (let ((y (n:make-notification "u1" :db-test-reply :title "keyless")))
+    (n:notification-put s y)
+    (signals conn:db-error (n:notification-put s y) "a keyless one too, as the memory store does")))
+
+(backend-test a-title-that-no-longer-reads-back-is-shown-as-its-text (s c)
+  "The hub's review of #1012: a row is built as it is stored, not through MAKE-NOTIFICATION. A
+title whose key's package is gone does not read back; it is shown as the stored text, and the
+recipient's list still works."
+  (%put s "u1" "fine")
+  (conn:exec c (format nil "UPDATE ~A SET title = ? WHERE title = ?" (ndb::%table s))
+             "(:KEY NO-SUCH-PACKAGE-1012::KEY :ARGS NIL)" (ndb::%print "fine"))
+  (let ((items (n:notification-list s "u1")))
+    (is (= 1 (length items)))
+    (is (equal "(:KEY NO-SUCH-PACKAGE-1012::KEY :ARGS NIL)" (n:notification-title (first items)))
+        "~S" (n:notification-title (first items)))))
 
 (test a-database-error-other-than-the-conflict-is-not-swallowed
-  "Only the unread-key conflict is caught. A trigger here refuses the insert with its own message,
-in the gap after the missed collapse; that error reaches the caller as it is. Catching every
-DB-ERROR, as the code did before the review of #1012, swallowed it and failed later, elsewhere."
+  "A trigger here refuses the insert with its own message; that error reaches the caller as it
+is."
   (call-with-sqlite
    (lambda (c table delivery)
      (let ((s (ndb:make-db-notification-store c :table table :delivery-table delivery :ensure t)))
-       (let* ((ndb::*%after-a-missed-collapse*
-                (lambda (conn store)
-                  (conn:exec conn (format nil "CREATE TRIGGER refuse_insert BEFORE INSERT ON ~A BEGIN SELECT RAISE(ABORT, 'refused by the test'); END"
-                                          (ndb::%table store)))))
-              (e (handler-case (progn (%put s "u1" "x" :group-key "g") nil)
-                   (error (e) e))))
+       (conn:exec c (format nil "CREATE TRIGGER refuse_insert BEFORE INSERT ON ~A BEGIN SELECT RAISE(ABORT, 'refused by the test'); END"
+                            table))
+       (let ((e (handler-case (progn (%put s "u1" "x" :group-key "g") nil)
+                  (error (e) e))))
          (is (typep e 'conn:db-error) "got ~S" e)
          (is (search "refused by the test" (princ-to-string e)) "the insert's own error: ~A" e))))))
+
+(test table-names-are-ascii-and-short-enough-for-their-index-names
+  "The hub's review of #1012: Postgres cuts identifiers to 63 bytes, and uq_TABLE_unread_group
+adds 16 to TABLE, so a table name is at most 47 characters. Non-ASCII letters are refused, since
+Postgres folds their case by the server's locale."
+  (flet ((refused (name)
+           (signals error (ndb:notifications-ddl :table name))))
+    (refused (make-string 48 :initial-element #\a))
+    (refused (format nil "caf~C" (code-char #xe9)))
+    (refused "1table")
+    (refused "a-b")
+    (refused ""))
+  (is (stringp (ndb:notifications-ddl :table (make-string 47 :initial-element #\a))) "47 is allowed")
+  (is (stringp (ndb:notifications-ddl :table "App_Notifications_2")) "letters, digits, underscores"))
+
+(test (a-put-inside-an-app-transaction-waits-for-a-concurrent-unread-row
+      :suite notifications-db-postgres)
+  "The hub's review of #1012, on Postgres: another connection holds an uncommitted unread row
+with the same key while the store, inside the app's own transaction, puts a notification. The
+put waits for that transaction and then collapses into the row. Before, its insert was refused
+with 23505, which aborted the app's transaction, and the retry failed with 25P02."
+  (call-with-postgres
+   (lambda (c table delivery)
+     (let* ((s (ndb:make-db-notification-store c :table table :delivery-table delivery :ensure t))
+            (other (conn:connect (url:backend-from-url (%pg-url))))
+            (inserted (sb-thread:make-semaphore))
+            (release (sb-thread:make-semaphore))
+            (writer (sb-thread:make-thread
+                     (lambda ()
+                       (conn:with-transaction (other)
+                         (ndb::%insert other s (n:make-notification "u1" :db-test-reply
+                                                                         :title "other" :group-key "g"))
+                         (sb-thread:signal-semaphore inserted)
+                         (sb-thread:wait-on-semaphore release :timeout 30)))
+                     :name "notifications-db test: the other writer")))
+       (unwind-protect
+            (progn
+              (is-true (sb-thread:wait-on-semaphore inserted :timeout 30))
+              ;; The other transaction commits half a second after the put has started waiting.
+              (sb-thread:make-thread (lambda () (sleep 0.5) (sb-thread:signal-semaphore release))
+                                     :name "notifications-db test: release")
+              (let ((stored (conn:with-transaction (c) (%put s "u1" "mine" :group-key "g"))))
+                (is (= 2 (n:notification-count stored)) "collapsed into the committed row")
+                (is (equal "mine" (n:notification-title stored)))
+                (is (= 1 (n:unread-count s "u1")))))
+         (sb-thread:signal-semaphore release)
+         (ignore-errors (sb-thread:join-thread writer :timeout 30))
+         (conn:disconnect other))))))
 
 (backend-test the-list-is-newest-first-and-pages (s c)
   (dotimes (i 5) (%put s "u1" (format nil "n~D" i)))

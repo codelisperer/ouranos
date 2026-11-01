@@ -10,10 +10,20 @@
 ;;;; needs "count = count + 1", which the query builder's SET does not express, and the unread
 ;;;; index is a partial unique index, which no schema form declares.
 ;;;;
-;;;; COLLAPSING IS SAFE UNDER CONCURRENCY. NOTIFICATION-PUT with a group key first updates the
-;;;; recipient's unread item with that key, and inserts only when there is none. Two calls at
-;;;; once could both find none; the unique index on (recipient, group_key) over unread rows lets
-;;;; only one insert succeed, and the other then updates the row the first one made.
+;;;; COLLAPSING IS SAFE UNDER CONCURRENCY. NOTIFICATION-PUT with a group key is one statement:
+;;;; INSERT ... ON CONFLICT (recipient, group_key) WHERE read_at IS NULL AND group_key IS NOT NULL
+;;;; DO UPDATE ... RETURNING. The partial unique index NOTIFICATIONS-UNREAD-KEY-DDL makes, over
+;;;; unread rows, is the conflict target, which Postgres 9.5+ and SQLite 3.24+ infer from that
+;;;; clause, and RETURNING (Postgres, SQLite 3.35+) gives back the row stored or collapsed into.
+;;;; So no state can come between finding the unread item and writing it. The hub's review of
+;;;; #1012 found what the earlier update, then insert, then update again could do: a mark-all-read
+;;;; or a prune between the refused insert and the second update lost the notification, and on
+;;;; Postgres the refused insert's 23505 aborted a transaction the app had the connection in. A
+;;;; call that meets another call's uncommitted unread row waits for that transaction, then
+;;;; collapses into the row when it commits, or inserts when it rolls back.
+;;;;
+;;;; A notification whose id is already stored is refused with the database's error, from the
+;;;; primary key, whether or not it has a group key, unless it collapses into an unread item.
 ;;;;
 ;;;; A title or body is stored as its printed form, a string or (:KEY KEY :ARGS PLIST), and read
 ;;;; back with *READ-EVAL* NIL in the keyword package, as hyperion/session-db stores a session.
@@ -40,14 +50,22 @@
 (defvar *notifications-table* "hyperion_notifications")
 (defvar *delivery-table* "hyperion_notification_delivery")
 
+(defparameter +max-table-length+ 47
+  "The longest table name: Postgres cuts an identifier to 63 bytes, and the longest name made
+from it, uq_TABLE_unread_group, adds 16, so a longer TABLE would give an index whose stored name
+is not the one the migration's DROP INDEX names (the hub's review of #1012).")
+
 (defun %check-table (table)
-  "TABLE, when it is a table name: letters, digits and underscores, not starting with a digit.
-It is written into SQL, so anything else is refused rather than quoted."
-  (unless (and (stringp table) (plusp (length table))
-               (not (digit-char-p (char table 0)))
-               (every (lambda (ch) (or (alphanumericp ch) (char= ch #\_))) table))
-    (error "hyperion/notifications-db: ~S is not a table name (letters, digits and underscores)"
-           table))
+  "TABLE, when it is a table name: ASCII letters, digits and underscores, not starting with a
+digit, at most +MAX-TABLE-LENGTH+ characters. It is written into SQL, so anything else is refused
+rather than quoted. ASCII only, because Postgres folds a non-ASCII letter's case by the server's
+locale, so the stored name of an index made from it could differ from the name written here."
+  (flet ((ascii-letter-p (ch) (or (char<= #\a ch #\z) (char<= #\A ch #\Z) (char= ch #\_))))
+    (unless (and (stringp table) (<= 1 (length table) +max-table-length+)
+                 (ascii-letter-p (char table 0))
+                 (every (lambda (ch) (or (ascii-letter-p ch) (char<= #\0 ch #\9))) table))
+      (error "hyperion/notifications-db: ~S is not a table name (1 to ~D ASCII letters, digits and underscores, not starting with a digit)"
+             table +max-table-length+)))
   table)
 
 ;;; --- DDL, for the app's migrations ------------------------------------------------------
@@ -189,6 +207,14 @@ which names the migrations to add, when they cannot."
       (let ((*read-eval* nil) (*package* (find-package '#:keyword)))
         (handler-case (read-from-string string) (error () nil))))))
 
+(defun %read-text (string)
+  "A stored title or body read back: a string or (:KEY KEY :ARGS PLIST), as stored. When it does
+not read back as one, for example a key whose package is gone, the stored text itself, so that
+one item cannot keep a recipient's list from being shown (the hub's review of #1012)."
+  (when string
+    (let ((x (%read string)))
+      (if (n::%text-or-key-p x) x string))))
+
 (defun %int (v)
   (cond ((integerp v) v)
         ((stringp v) (parse-integer v :junk-allowed t))
@@ -200,93 +226,39 @@ which names the migrations to add, when they cannot."
   "id, recipient, kind, title, body, link, group_key, count, stamp, created_at, read_at")
 
 (defun %row->notification (row)
+  "The notification ROW holds, built directly rather than through MAKE-NOTIFICATION, which would
+check it again and make a new id for each row only to replace it: what the store holds is shown
+as it is (the hub's review of #1012)."
   (flet ((v (k) (param:row-value row k)))
-    (let ((x (n:make-notification (v :recipient)
-                                  (intern (string-upcase (v :kind)) '#:keyword)
-                                  :title (%read (v :title)) :body (%read (v :body))
-                                  :link (v :link) :group-key (v :group_key))))
-      (setf (n:notification-id x) (v :id)
-            (n:notification-count x) (%int (v :count))
-            (n:notification-stamp x) (%int (v :stamp))
-            (n:notification-created-at x) (%int (v :created_at))
-            (n:notification-read-at x) (%int (v :read_at)))
-      x)))
+    (n::%make-notification :id (v :id) :recipient (v :recipient)
+                           :kind (intern (string-upcase (v :kind)) '#:keyword)
+                           :title (%read-text (v :title)) :body (%read-text (v :body))
+                           :link (v :link) :group-key (v :group_key)
+                           :count (%int (v :count)) :stamp (%int (v :stamp))
+                           :created-at (%int (v :created_at)) :read-at (%int (v :read_at)))))
 
-(defun %select-by-id (c store recipient id)
-  (first (conn:query c (format nil "SELECT ~A FROM ~A WHERE recipient = ? AND id = ?"
-                               +columns+ (%table store))
-                     recipient id)))
-
-(defun %collapse (c store x)
-  "Update RECIPIENT's unread item with X's group key from X. The number of rows changed."
-  (conn:exec c (format nil "UPDATE ~A SET kind = ?, title = ?, body = ?, link = ?, stamp = ?, created_at = ?, count = count + 1 WHERE recipient = ? AND group_key = ? AND read_at IS NULL"
-                       (%table store))
-             (%kind-name (n:notification-kind x)) (%print (n:notification-title x))
-             (and (n:notification-body x) (%print (n:notification-body x)))
-             (n:notification-link x) (n:notification-stamp x) (n:notification-created-at x)
-             (n:notification-recipient x) (n:notification-group-key x)))
-
-(defun %insert (c store x)
-  (conn:exec c (format nil "INSERT INTO ~A (~A) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
-                       (%table store) +columns+)
-             (n:notification-id x) (n:notification-recipient x)
-             (%kind-name (n:notification-kind x)) (%print (n:notification-title x))
-             (and (n:notification-body x) (%print (n:notification-body x)))
-             (n:notification-link x) (n:notification-group-key x)
-             (n:notification-count x) (n:notification-stamp x)
-             (n:notification-created-at x) nil))
-
-(defun %unread-by-key (c store recipient key)
-  (first (conn:query c (format nil "SELECT ~A FROM ~A WHERE recipient = ? AND group_key = ? AND read_at IS NULL"
-                               +columns+ (%table store))
-                     recipient key)))
+(defun %insert (c store x &key collapse)
+  "Insert X and return the rows RETURNING gives: the one row stored. With COLLAPSE, an unread row
+with X's recipient and group key takes X's kind, title, body, link, stamp and created-at and
+counts one more instead, in the same statement, and that row is returned (this file's header)."
+  (conn:query c (format nil "INSERT INTO ~A (~A) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)~@[ ON CONFLICT (recipient, group_key) WHERE read_at IS NULL AND group_key IS NOT NULL DO UPDATE SET kind = excluded.kind, title = excluded.title, body = excluded.body, link = excluded.link, stamp = excluded.stamp, created_at = excluded.created_at, count = ~A.count + 1~] RETURNING ~A"
+                        (%table store) +columns+ (and collapse (%table store)) +columns+)
+              (n:notification-id x) (n:notification-recipient x)
+              (%kind-name (n:notification-kind x)) (%print (n:notification-title x))
+              (and (n:notification-body x) (%print (n:notification-body x)))
+              (n:notification-link x) (n:notification-group-key x)
+              (n:notification-count x) (n:notification-stamp x)
+              (n:notification-created-at x) nil))
 
 ;;; --- the protocol -----------------------------------------------------------------------
 
-(defun %unread-key-violation-p (condition table)
-  "Whether CONDITION, a MNEMOSYNE/CONN:DB-ERROR, is a violation of TABLE's unread-key index
-(NOTIFICATIONS-UNREAD-KEY-DDL), the one conflict NOTIFICATION-PUT expects from a concurrent call.
-cl-dbi reports both databases' errors as DBI-DATABASE-ERROR, the cause the DB-ERROR keeps.
-Postgres: SQLSTATE 23505, and the message names the index, uq_TABLE_unread_group. SQLite: the
-CONSTRAINT code, and a message naming the index's columns, \"UNIQUE constraint failed:
-TABLE.recipient, TABLE.group_key\", since SQLite does not name the index. Both are compared
-without case, as Postgres folds an unquoted name to lower case.
-
-Any other unique violation is not this one. Before the hub's review of #1012 every unique
-violation counted, so re-putting a notification whose id was already stored, with no unread item
-to collapse into, was swallowed as if it had lost a race, instead of reaching the caller."
-  (let* ((cause (conn:db-error-cause condition))
-         (code (ignore-errors (uiop:symbol-call "DBI.ERROR" "DATABASE-ERROR-CODE" cause)))
-         (message (or (ignore-errors (princ-to-string cause)) "")))
-    (flet ((names (text) (and (search text message :test #'char-equal) t)))
-      (cond ((equal code "23505") (names (format nil "uq_~A_unread_group" table)))
-            ((eq code :constraint)
-             (names (format nil "UNIQUE constraint failed: ~A.recipient, ~A.group_key" table table)))
-            (t nil)))))
-
-(defvar *%after-a-missed-collapse* nil
-  "For a test only: a function of the connection and store that NOTIFICATION-PUT calls after its
-UPDATE found no unread item to collapse into and before it inserts, so a test can insert a
-competing row in that gap, which is what two concurrent calls do. NIL in use.")
-
 (defmethod n:notification-put ((store db-notification-store) (x n:notification))
+  ;; One statement each way, which returns the row it stored or collapsed into. See this file's
+  ;; header for why the keyed one is a single INSERT ... ON CONFLICT.
   (with-connection (c store)
-    (let ((recipient (n:notification-recipient x)) (key (n:notification-group-key x)))
-      (flet ((stored () (%row->notification
-                         (if key
-                             (%unread-by-key c store recipient key)
-                             (%select-by-id c store recipient (n:notification-id x))))))
-        (cond ((null key) (%insert c store x) (stored))
-              ((plusp (or (%int (%collapse c store x)) 0)) (stored))
-              ;; None to collapse into: insert. When a concurrent call inserted first, the
-              ;; unread-key index refuses this one, and the row it made is collapsed into. Only
-              ;; that refusal is caught: any other database error is the caller's.
-              ((progn (when *%after-a-missed-collapse* (funcall *%after-a-missed-collapse* c store))
-                      (handler-case (progn (%insert c store x) t)
-                        (conn:db-error (e)
-                          (if (%unread-key-violation-p e (%table store)) nil (error e)))))
-               (stored))
-              (t (%collapse c store x) (stored)))))))
+    (%row->notification (first (if (n:notification-group-key x)
+                                   (%insert c store x :collapse t)
+                                   (%insert c store x))))))
 
 (defmethod n:notification-list ((store db-notification-store) recipient
                                 &key unread-only (limit 20) before)

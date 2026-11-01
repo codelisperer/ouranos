@@ -198,7 +198,7 @@
       (is (search "body &amp; more" html) "~A" html)
       (is (search "href=\"/t/1\"" html) "~A" html)
       (is (search "2 times" html) "a collapsed item says how many: ~A" html)
-      (is (search (format nil "&quot;id&quot;: &quot;~A&quot;" (n:notification-id b)) html)
+      (is (search (format nil "&quot;id&quot;:&quot;~A&quot;" (n:notification-id b)) html)
           "the unread item has its mark-read button: ~A" html)
       (is (null (search (n:notification-id a) html)) "the read one has none")
       (is (search "hx-post=\"/notes/read-all\"" html) "~A" html)
@@ -244,6 +244,40 @@
     (router:dispatch r (apply #'%env method path keys))))
 
 (defun %body (response) (or (first (third response)) ""))
+
+(test the-list-route-refuses-a-before-that-is-not-a-stamp
+  "The hub's review of #1012: BEFORE comes from the query string and goes to a BIGINT column, so a
+value above 2^63-1 is answered 400 rather than sent to the database. The control is the largest
+value that fits, which lists."
+  (let ((s (n:make-memory-notification-store)))
+    (%put s "u1" "a")
+    (dolist (bad '("9223372036854775808" "99999999999999999999" "12x" "-1" ""))
+      (is (eql 400 (first (%call s "u1" :get "/list" :query (format nil "before=~A" bad))))
+          "before=~A" bad))
+    (is (eql 200 (first (%call s "u1" :get "/list" :query "before=9223372036854775807")))
+        "control: the largest stamp that fits")
+    (is (eql 200 (first (%call s "u1" :get "/list"))) "control: no before")))
+
+(test an-id-with-a-quote-is-still-json-in-the-mark-read-button
+  "The hub's review of #1012: hx-vals is encoded with jzon, so an id an app or a migration wrote
+with \" or \\ in it still gives JSON htmx can read."
+  (let* ((x (n:make-notification "u1" :test-reply :title "t")))
+    (setf (n:notification-id x) "a\"b\\c")
+    (let ((html (%html (lambda () (n:notification-panel (list x))))))
+      (is (search "{&quot;id&quot;:&quot;a\\&quot;b\\\\c&quot;}" html) "~A" html))))
+
+(test putting-a-stored-id-again-is-refused
+  "The hub's review of #1012: the memory store refuses an id it already holds, as a database store
+does through its primary key, unless the notification collapses."
+  (let* ((s (n:make-memory-notification-store))
+         (x (n:make-notification "u1" :test-reply :title "once")))
+    (n:notification-put s x)
+    (signals n:invalid-notification (n:notification-put s x))
+    (is (= 1 (n:unread-count s "u1")) "nothing was added")
+    (let ((k (n:make-notification "u1" :test-reply :title "keyed" :group-key "g")))
+      (n:notification-put s k)
+      (is (= 2 (n:notification-count (n:notification-put s k)))
+          "control: the same keyed notification again collapses"))))
 
 (test the-routes-answer-only-a-signed-in-recipient
   (let ((s (n:make-memory-notification-store)))

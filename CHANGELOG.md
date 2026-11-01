@@ -1121,10 +1121,16 @@ its tag.
   - `hyperion/notifications-db` has `make-db-notification-store`, and the DDL for the app's
     migrations: `notifications-ddl`, `notifications-index-ddl`, `notifications-unread-key-ddl`
     and `delivery-ddl`. The store refuses to start without its tables
-    (`missing-notification-tables`).
+    (`missing-notification-tables`). A table name is 1 to 47 ASCII letters, digits and
+    underscores. The database store needs Postgres 9.5 or later, or SQLite 3.35 or later, for
+    `INSERT ... ON CONFLICT ... RETURNING`.
 
   How it behaves:
   - A notification with the group key of an unread item collapses into it and raises its `count`.
+    In the database store this is one statement, so it is safe when two calls race, including
+    inside the app's own transaction.
+  - A store refuses a notification whose id it already holds, unless it collapses:
+    `invalid-notification` from the memory store, the database's error from the database store.
   - A link must be a path on the app's own site.
   - The router takes the recipient from the app's `:recipient-fn`, never from the request.
   - The bell announces the unread count through a status region, once per change.
