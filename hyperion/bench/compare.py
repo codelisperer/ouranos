@@ -9,10 +9,13 @@ this imports, plus a load generator for throughput, because Python threads canno
 servers hard enough to measure them.
 
 wrk is used when it is installed, otherwise ab; the one used is named in the output. Before any
-backend, the generator is run against trivial.c, a single-threaded C server with one poll() loop
-that does nothing but answer, and its rate is printed as a REFERENCE. It is not the generator's
-ceiling: a server that uses several cores can go past it, and on Linux Woo did (#413). No
-verdict is drawn from it.
+backend, the generator is run against trivial.c, a C server that does nothing but answer, with
+one process per CPU, and its rate is printed as the generator's CEILING: the most this
+generator measures on this machine. A backend rate of 80% of the ceiling or more is reported as
+limited by the generator instead of as a number, because the generator, not the backend, may be
+what set it. The ceiling is measured with the generator and trivial.c sharing the machine's
+cores, which is also how the backends are measured. (trivial.c used to run one process, so its
+rate was one core's limit and Woo went past it on Linux; #413.)
 
 :uv closes a kept-alive connection after *MAX-REQUESTS-PER-CONNECTION* requests (100 by
 default); Woo and Hunchentoot run with their own defaults. So that :uv is not the only backend
@@ -136,18 +139,26 @@ def drive(gen, url, connections, seconds):
     return rps, failed + (int(non2xx.group(1)) if non2xx else 0), share
 
 
-def reference(gen, connections, seconds):
-    """The generator's rate against trivial.c, a single-threaded server that does nothing but
-    answer. A point of comparison, not a ceiling."""
+GENERATOR_BOUND = 0.8   # a rate at this share of the ceiling or above is not given a number
+
+
+def ceiling(gen, connections, seconds):
+    """The generator's rate against trivial.c running one process per CPU and doing nothing but
+    answer: the most this generator measures on this machine."""
     exe = os.path.join(tempfile.mkdtemp(prefix="bench-trivial-"), "trivial")
     subprocess.run(["cc", "-O2", "-o", exe, os.path.join(HERE, "trivial.c")], check=True)
     port = free_port()
-    proc = subprocess.Popen([exe, str(port)], stdout=subprocess.DEVNULL)
+    # Its own process group, so that the processes trivial.c forks are stopped with it.
+    proc = subprocess.Popen([exe, str(port), str(os.cpu_count() or 1)],
+                            stdout=subprocess.DEVNULL, start_new_session=True)
     try:
         wait_for(f"http://127.0.0.1:{port}/", proc, 10)
         return drive(gen, f"http://127.0.0.1:{port}/", connections, seconds)[0]
     finally:
-        proc.terminate()
+        try:
+            os.killpg(proc.pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass   # trivial.c already exited, for example on a failed bind; keep the real error
         proc.wait()
 
 
@@ -215,7 +226,10 @@ def measure(backend, gen, args):
 
 # --- the table -----------------------------------------------------------------------
 
-def cell(m):
+def cell(m, top):
+    if m["rps"] >= GENERATOR_BOUND * top:
+        return (f"limited by the generator ({m['rps']:,.0f}, "
+                f"{m['rps'] / top:.0%} of its ceiling {top:,.0f})")
     notes = []
     if m["errors"]:
         notes.append(f"{m['errors']} errors")
@@ -237,7 +251,7 @@ def cpu_cell(m):
     return f"{m['cpu_process']:.2f} / {loops}{spread}"
 
 
-def table(rows, gen_line, ref, args):
+def table(rows, gen_line, top, args):
     workers_text = (f"Workers: {args.workers} (Woo `:worker-num`, `:uv` `:workers`)."
                     if args.workers else
                     "Workers: none; handlers run inline (on `:uv`, on the loop thread).")
@@ -245,8 +259,9 @@ def table(rows, gen_line, ref, args):
     lines = [
         f"**{osname}** ({platform.machine()}, {os.cpu_count()} CPUs). Generator: `{gen_line}`, "
         f"{args.connections} keep-alive connections for {args.seconds} s. "
-        f"Reference: the same generator against trivial.c (single-threaded, one poll() loop) "
-        f"reached {ref:,.0f} requests/s; that is not the generator's ceiling. "
+        f"Generator ceiling: {top:,.0f} requests/s, against trivial.c with {os.cpu_count()} "
+        f"processes; a rate of {GENERATOR_BOUND:.0%} of it or more is shown as limited by the "
+        "generator. "
         f"`:uv` requests per connection: {args.uv_max_requests:,} (shipped default 100). "
         f"{workers_text} "
         f"`:uv` loops: {args.loops or 'the default'}, scheme: {args.scheme or 'the default'}. "
@@ -262,8 +277,8 @@ def table(rows, gen_line, ref, args):
     for r in rows:
         lat, idle = r["latency"], r["idle"]
         lines.append(
-            f"| {r['backend']} | {cell(r['/ping'])} | {cpu_cell(r['/ping'])} "
-            f"| {cell(r['/tile'])} | {cpu_cell(r['/tile'])} "
+            f"| {r['backend']} | {cell(r['/ping'], top)} | {cpu_cell(r['/ping'])} "
+            f"| {cell(r['/tile'], top)} | {cpu_cell(r['/tile'])} "
             f"| {lat.get('p50_ms')} / {lat.get('p95_ms')} / {lat.get('p99_ms')} "
             f"| {idle['before']['rss_mb']} / {idle['during']['rss_mb']} "
             f"| {idle['before']['threads']} / {idle['during']['threads']} |")
@@ -288,13 +303,13 @@ def main():
     args = ap.parse_args()
 
     gen, gen_line = generator()
-    ref = reference(gen, args.connections, args.seconds)
-    print(f"compare: {gen_line}; {ref:,.0f} requests/s against trivial.c", file=sys.stderr)
+    top = ceiling(gen, args.connections, args.seconds)
+    print(f"compare: {gen_line}; ceiling {top:,.0f} requests/s against trivial.c", file=sys.stderr)
     rows = []
     for b in args.backends:
         print(f"compare: measuring {b} ...", file=sys.stderr)
         rows.append(measure(b, gen, args))
-    print(table(rows, gen_line, ref, args))
+    print(table(rows, gen_line, top, args))
 
 
 if __name__ == "__main__":

@@ -164,6 +164,22 @@ parser keeps that part's raw text instead of signalling."
     (is (string= "dark" (http:cookie env "theme")))
     (is (null (http:cookie env "missing")))))
 
+(test json-refuses-a-value-that-is-not-a-property-list
+  "A string, a number or a vector is a TYPE-ERROR, not \"{}\". A property list still encodes, an
+empty one as {}."
+  (signals type-error (http:json "abc"))
+  (signals type-error (http:json 42))
+  (signals type-error (http:json #("a" 1)))
+  (is (equal "{\"a\":1}" (http:json '("a" 1))))
+  (is (equal "{}" (http:json '()))))
+
+(test json-refuses-a-property-list-with-a-key-and-no-value
+  "An odd number of elements is an error naming the count, not a last key written with null."
+  (let ((message (handler-case (progn (http:json '("a" 1 "b")) nil)
+                   (error (e) (princ-to-string e)))))
+    (is (and message (search "odd number" message)) "got ~S" message))
+  (is (equal "{\"a\":1,\"b\":null}" (http:json (list "a" 1 "b" 'null)))))
+
 (test wants-json-reads-accept-or-content-type
   (is (http:wants-json (%http-env :headers '("Accept" "application/json"))))
   (is (not (http:wants-json (%http-env :headers '("Accept" "text/html")))))
