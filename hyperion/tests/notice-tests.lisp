@@ -1,7 +1,8 @@
 ;;;; notice-tests.lisp --- in-page notices and their region (#980).
 ;;;;
 ;;;; The markup and the script NOTICE-REGION writes. Whether the script does what it says with a
-;;;; real htmx is checked in hyperion/view/tests, on a real window, on CI.
+;;;; real htmx is checked in hyperion/assets/tests (notice-smoke-tests.lisp), which loads the
+;;;; vendored htmx in a headless Chrome or Edge.
 
 (in-package #:hyperion/tests)
 
@@ -60,7 +61,8 @@
 
 (test the-htmx-error-script-acts-only-where-htmx-would-drop-the-response
   ;; The conditions the script tests, read from the script itself. Whether htmx passes these
-  ;; fields is checked against the vendored htmx in hyperion/view/tests.
+  ;; fields is checked against the vendored htmx in hyperion/assets/tests
+  ;; (notice-smoke-tests.lisp).
   (let ((js (hyperion/notice:notices-script)))
     (is (search "addEventListener('htmx:beforeSwap'" js))
     (is (search "x.status<400" js) "only a status of 400 or more")
