@@ -14,7 +14,8 @@
   :version "0.0.0"
   :depends-on ("aion/http-client"  ; the interceptor-shaped client, shared (pre-publication issue 202)
                ;; aion/retry for TRANSIENCE and RETRY-AFTER on hermes's own failures, so an app
-               ;; can ask what is worth another send (#79 step two). hermes never waits itself.
+               ;; can ask what is worth another send (#79 step two). hermes never sleeps or
+               ;; retries by itself.
                "aion/retry"
                "dexador"           ; still direct for hermes/blob's streaming needs
                "com.inuoe.jzon"    ; JSON (SendGrid body, Twilio response)

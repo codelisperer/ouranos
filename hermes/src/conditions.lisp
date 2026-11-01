@@ -193,26 +193,30 @@ AION/RETRY:TRANSIENCE can tell a message that was never sent from one that may h
 
 ;;; --- what an app may try again, in AION/RETRY's vocabulary (#79 step two) -----------------
 ;;;
-;;; hermes classifies; it never waits. These two methods let an app, or AION/RETRY's own
-;;; predicates, ask about a hermes failure without reading statuses itself. WITH-RETRY is
-;;; deliberately not used inside hermes: it sleeps, and a send is not safe to repeat blindly.
+;;; hermes classifies; it never sleeps and never retries by itself. These two methods let an
+;;; app, or AION/RETRY's own predicates, ask about a hermes failure without reading statuses
+;;; itself. WITH-RETRY is deliberately not used inside hermes: it sleeps, and a send is not safe
+;;; to repeat blindly.
+;;;
+;;; "Never sleeps or retries by itself" is the whole claim, and it is narrower than "never
+;;; waits": SendGrid and Twilio build their requests without a connect or read timeout, and the
+;;; client defaults both to NIL, so a server that accepts a connection and never answers holds
+;;; DELIVER for as long as it likes. That is a real gap, filed as #1077; it is not
+;;; something these methods can fix (the review of #1067).
 
 (defmethod aion/retry:transience ((c delivery-failure))
   "For a DELIVERY-FAILURE: :TRANSIENT when the provider's status says the message was not acted
 on, :UNKNOWN when it may have been, and NIL when trying again cannot help.
 
-The statuses are AION/HTTP-CLIENT's own lists, so hermes and the HTTP client agree rather than
-keeping two copies. With no status the phase decides: :CONNECT means no connection was made, so
-the message was not sent (:TRANSIENT); :RESPONSE means it may have been (:UNKNOWN). A failure
-hermes raised itself, such as an answer with no message id, has neither and is NIL: repeating
-the send would not fix it and might deliver twice."
-  (let ((status (delivery-failure-status c)))
-    (cond ((member status aion/http-client:+transient-statuses+) :transient)
-          ((member status aion/http-client:+unknown-statuses+) :unknown)
-          (status nil)
-          ((eq (delivery-failure-phase c) :connect) :transient)
-          ((eq (delivery-failure-phase c) :response) :unknown)
-          (t nil))))
+The verdict is AION/HTTP-CLIENT:STATUS-TRANSIENCE, so hermes and the HTTP client cannot reach
+different answers: this calls the client's own function rather than repeating its COND over the
+client's two status lists, which is what it did until the review of #1067 pointed out that
+sharing the lists still left two copies of the logic. With no status the phase decides: :CONNECT
+means no connection was made, so the message was not sent (:TRANSIENT); :RESPONSE means it may
+have been (:UNKNOWN). A failure hermes raised itself, such as an answer with no message id, has
+neither and is NIL: repeating the send would not fix it and might deliver twice."
+  (aion/http-client:status-transience (delivery-failure-status c)
+                                      (delivery-failure-phase c)))
 
 (defmethod aion/retry:transience ((c delivery-rate-limited))
   "A rate limit is :TRANSIENT: the provider refused the message, so it was not sent, and the

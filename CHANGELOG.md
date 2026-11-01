@@ -1145,9 +1145,15 @@ its tag.
 
 ### Added
 
+- **`aion/http-client:status-transience` is exported**: given an HTTP status and a transport
+  phase, either of which may be `nil`, it returns `:transient`, `:unknown` or `nil`. It is the
+  one place that mapping is written, so a library turning HTTP failures into its own conditions
+  reaches the same verdict by calling it instead of repeating the `cond` over
+  `+transient-statuses+` and `+unknown-statuses+`. `aion/http-client:transience` on an
+  `http-error` and `hermes`'s method on a `delivery-failure` both call it.
 - **hermes: `aion/retry:transience` and `aion/retry:retry-after` answer for hermes's own
   failures, so an app can ask what is worth sending again** (#79 step two). `hermes` depends on
-  `aion/retry` for this and **still never waits**: a rate limit or a transient failure is
+  `aion/retry` for this and **still never sleeps or retries by itself**: a rate limit or a transient failure is
   classified, and the app schedules the next attempt, for example with
   `aion/schedule:schedule-once`. `aion/retry:with-retry` is deliberately not used inside hermes,
   because it sleeps, and a send is not safe to repeat blindly.

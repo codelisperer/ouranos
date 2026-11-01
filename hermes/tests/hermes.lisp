@@ -374,7 +374,8 @@ made inside hermes without MAKE-EMAIL."
 ;;; --- what an app may send again, in aion/retry's vocabulary (#79 step two) ---------------
 
 (test a-rate-limit-from-any-backend-is-transient-and-carries-its-wait
-  "#79 step two: hermes classifies, and never waits. A 429 from SendGrid or Twilio used to
+  "#79 step two: hermes classifies, and never sleeps or retries by itself. A 429 from SendGrid
+or Twilio used to
 arrive as a plain DELIVERY-FAILURE, so an app had to read the status to tell a rate limit from a
 rejection."
   ;; AS-DELIVERY is the one place SendGrid's and Twilio's HTTP failures become hermes
@@ -394,12 +395,28 @@ rejection."
     (is (typep c 'h:delivery-failure))
     (is (not (typep c 'h:delivery-rate-limited)))
     (is (eq :connect (h:delivery-failure-phase c)) "and a transport failure keeps its phase"))
-  (let ((limited (make-condition 'h:delivery-rate-limited :provider :sendgrid :status 429
-                                                          :detail "too many" :retry-after 30)))
+  ;; The classification is asserted on the condition AS-DELIVERY produced, not on one built by
+  ;; hand: a hand-built DELIVERY-RATE-LIMITED proves the methods work on a shape the test chose,
+  ;; which is a weaker claim than hermes producing that shape from a provider's 429 (the review
+  ;; of #1067).
+  (let ((limited (handler-case
+                     (hermes::as-delivery :sendgrid
+                       (error 'aion/http-client:http-error :status 429 :body "too many requests"
+                                                           :retry-after 30))
+                   (h:hermes-error (e) e))))
     (is (eq :transient (aion/retry:transience limited))
         "a rate limit means the message was refused, so the same message may be sent later")
     (is-true (aion/retry:transient-p limited))
-    (is (eql 30 (aion/retry:retry-after limited)) "and the provider's wait is what an app schedules by")))
+    (is (eql 30 (aion/retry:retry-after limited))
+        "and the provider's wait is what an app schedules by"))
+  ;; The control: a rejection through the same path is not worth sending again.
+  (let ((rejected (handler-case
+                      (hermes::as-delivery :sendgrid
+                        (error 'aion/http-client:http-error :status 400 :body "bad address"))
+                    (h:hermes-error (e) e))))
+    (is (null (aion/retry:transience rejected))
+        "control: a 400 through AS-DELIVERY is not transient, so the verdict follows the status")
+    (is-false (aion/retry:transient-p rejected))))
 
 (test a-delivery-failure-says-whether-the-message-may-have-been-sent
   "#79: :CONNECT means nothing was sent, so sending again is safe; :RESPONSE means the provider
@@ -429,28 +446,96 @@ Each becomes DELIVERY-RATE-LIMITED, so each is :TRANSIENT and carries the wait F
     (setf (gethash "x-business-use-case-usage" headers)
           "{\"1234\":[{\"estimated_time_to_regain_access\":2}]}")
     (is (eql 120 (hermes::%facebook-retry-after headers))))
-  (let ((limited (make-condition 'h:delivery-rate-limited :provider :facebook :status 400
-                                                          :detail "limit" :retry-after 120)))
+  ;; Through %FACEBOOK-REFUSAL, which is what the backend actually calls, so this asserts on a
+  ;; condition hermes produced from a Graph body and a usage header rather than on one built here
+  ;; to the shape the assertions want (the review of #1067).
+  (let* ((headers (make-hash-table :test #'equal))
+         (limited (progn
+                    (setf (gethash "x-business-use-case-usage" headers)
+                          "{\"1234\":[{\"estimated_time_to_regain_access\":2}]}")
+                    (hermes::%facebook-refusal
+                     400 "{\"error\":{\"code\":4,\"message\":\"User request limit reached\"}}"
+                     headers #'identity nil))))
+    (is (typep limited 'h:delivery-rate-limited)
+        "a Graph code 4 is produced as a rate limit, not a plain failure: ~S" limited)
     (is (eq :transient (aion/retry:transience limited)))
     (is (eql 120 (aion/retry:retry-after limited))
-        "which is what an app passes to its scheduler, not to a sleep")))
+        "which is what an app passes to its scheduler, not to a sleep")
+    ;; The control, through the same function: a refusal that is not a rate limit.
+    (let ((rejected (hermes::%facebook-refusal
+                     400 "{\"error\":{\"code\":100,\"message\":\"Invalid parameter\"}}"
+                     headers #'identity nil)))
+      (is-false (typep rejected 'h:delivery-rate-limited)
+                "control: Graph code 100 is not a rate limit: ~S" rejected)
+      (is (null (aion/retry:transience rejected))
+          "so it is not worth sending again, and the wait is not read"))))
+
+(defun %calls-p (text name)
+  "Whether TEXT contains a CALL to NAME: an open paren, an optional PACKAGE: or PACKAGE:: prefix,
+NAME, then whitespace or a close paren.
+
+One matcher, called by the sweep and by every control below, so a control cannot pass against a
+copy of the expression it is meant to be checking (the review of #1067). The prefix is the reason
+it exists: the first version searched for the literal strings \"(sleep \" and \"(with-retry\", and
+hermes imports neither name, so the calls a future change would actually write -- (cl:sleep 1),
+or (aion/retry:with-retry ...) -- would not have matched. Nor would (sleep) or a newline after
+the name. The character before NAME must be the open paren itself or the colon of a prefix, so
+NO-SLEEP and MY-SLEEP are not calls to SLEEP."
+  (let ((limit (length text))
+        (n (length name))
+        (i 0))
+    (loop
+      (let ((p (search name text :start2 i)))
+        (unless p (return nil))
+        (let* ((after (+ p n))
+               (next (if (< after limit) (char text after) #\Space))
+               (before (if (plusp p) (char text (1- p)) #\Space)))
+          (when (and (or (member next '(#\Space #\Tab #\Newline #\Return) :test #'char=)
+                         (char= next #\)))
+                     (or (char= before #\()
+                         ;; A package prefix: walk left over the colons and the package name,
+                         ;; which must itself begin right after an open paren.
+                         (and (char= before #\:)
+                              (let ((k (1- p)))
+                                (loop while (and (plusp k)
+                                                 (let ((c (char text (1- k))))
+                                                   (or (alphanumericp c)
+                                                       (member c '(#\: #\- #\/ #\. #\%)
+                                                               :test #'char=))))
+                                      do (decf k))
+                                (and (plusp k) (char= (char text (1- k)) #\())))))
+            (return t)))
+        (setf i (1+ p))))))
+
+(defun %waits-in-source-p (text)
+  "Whether TEXT calls either of the two things hermes must never call itself."
+  (or (%calls-p text "with-retry") (%calls-p text "sleep")))
 
 (test hermes-never-sleeps-to-retry
   "#79 step two's rule, as a check on the source rather than a claim: hermes classifies and the
 app schedules, so no hermes source CALLS with-retry or sleep.
 
-It matches the call syntax, \"(with-retry\" and \"(sleep \", not the bare names. The names appear
-in prose here on purpose -- DELIVERY-RATE-LIMITED's docstring explains why with-retry is not used
--- and a plain substring search over the file found those sentences and failed, which is this
-check answering about the wrong object."
-  (let ((offenders '()))
-    (dolist (path (directory (merge-pathnames "src/**/*.lisp"
-                                              (asdf:system-source-directory "hermes"))))
-      (let ((text (string-downcase (uiop:read-file-string path))))
-        (when (or (search "(with-retry" text) (search "(sleep " text))
-          (push (file-namestring path) offenders))))
+It matches call syntax through %CALLS-P, not the bare names. The names appear in prose here and
+in DELIVERY-RATE-LIMITED's docstring on purpose, and a plain substring search over the file found
+those sentences and failed, which was this check answering about the wrong object. An offender is
+reported by its path under src/, because src/blob/ and src/payments/ have subdirectories and a
+bare file name does not say which of them a hit is in (the review of #1067)."
+  (let ((offenders '())
+        (root (merge-pathnames "src/" (asdf:system-source-directory "hermes"))))
+    (dolist (path (directory (merge-pathnames "**/*.lisp" root)))
+      (when (%waits-in-source-p (string-downcase (uiop:read-file-string path)))
+        (push (enough-namestring path root) offenders)))
     (is (null offenders) "these hermes sources wait instead of letting the app schedule: ~S" offenders)
-    ;; The control: the check can see a call, so a green result means something.
-    (is-true (let ((text (string-downcase "  (sleep 5)")))
-               (or (search "(with-retry" text) (search "(sleep " text)))
-             "control: the matcher does find a real call")))
+    ;; The controls run through the same matcher the sweep uses. Every call form a future change
+    ;; could plausibly write must be found, the package-qualified ones included.
+    (dolist (source '("  (sleep 5)" "(cl:sleep 1)" "(sleep)" "  (sleep~%   2)"
+                      "(with-retry (p) (send))" "(aion/retry:with-retry (p) (send))"
+                      "(aion/retry::with-retry (p) (send))"))
+      (let ((text (string-downcase (format nil source))))
+        (is-true (%waits-in-source-p text) "control: ~S reads as a call" text)))
+    ;; And the other direction, so a matcher that simply said yes would fail here.
+    (dolist (source '("with-retry is deliberately not used inside hermes, because it sleeps"
+                      "  (no-sleep 5)" "(my-sleep)" "sleep" "(sleeper 1)"
+                      ";; a comment naming with-retry and sleep"))
+      (let ((text (string-downcase source)))
+        (is-false (%waits-in-source-p text) "control: ~S is not a call" text)))))

@@ -62,17 +62,27 @@ does, classifies them the same way rather than keeping a second copy of the list
 (defparameter +unknown-statuses+ '(500 502 504)
   "Statuses that may be temporary, but after which the server may have acted on the request.")
 
+(defun status-transience (status phase)
+  "The AION/RETRY:TRANSIENCE verdict for a failure with HTTP STATUS and transport PHASE, where
+either may be NIL: :TRANSIENT for a status in +TRANSIENT-STATUSES+ or, with no status, the
+:CONNECT phase; :UNKNOWN for a status in +UNKNOWN-STATUSES+ or the :RESPONSE phase; NIL
+otherwise, a 4xx such as 400, 401 or 404 included.
+
+Exported, and not only the two lists, so that a caller mapping these failures into its own
+conditions reaches the same verdict by calling this rather than by repeating the COND. hermes
+does that for DELIVERY-FAILURE: sharing the lists alone left the two COND forms as separate
+copies that could be changed apart while both still passed their own tests (the review of
+#1067)."
+  (cond ((member status +transient-statuses+) :transient)
+        ((member status +unknown-statuses+) :unknown)
+        (status nil)
+        ((eq phase :connect) :transient)
+        ((eq phase :response) :unknown)
+        (t nil)))
+
 (defmethod aion/retry:transience ((c http-error))
-  "For HTTP-ERROR: :TRANSIENT for a status in +TRANSIENT-STATUSES+ or a failure in the :CONNECT
-phase; :UNKNOWN for a status in +UNKNOWN-STATUSES+ or a failure in the :RESPONSE phase; NIL
-otherwise, a 4xx such as 400, 401 or 404 included."
-  (let ((status (http-error-status c)))
-    (cond ((member status +transient-statuses+) :transient)
-          ((member status +unknown-statuses+) :unknown)
-          (status nil)
-          ((eq (http-error-phase c) :connect) :transient)
-          ((eq (http-error-phase c) :response) :unknown)
-          (t nil))))
+  "For HTTP-ERROR: STATUS-TRANSIENCE of its status and phase."
+  (status-transience (http-error-status c) (http-error-phase c)))
 
 (defmethod aion/retry:retry-after ((c http-error))
   (http-error-retry-after c))
