@@ -29,12 +29,15 @@
   (string-downcase (string designator)))
 
 (defun %dependency-names (system)
-  "The names of the systems SYSTEM's :depends-on names. (:version name ...) and
-(:feature feature name) give their system's name; (:require module) names no ASDF system."
+  "The names of the systems SYSTEM's :depends-on names on this host. (:version name ...) gives
+its system's name, and so does (:feature expression name) when EXPRESSION holds here, because
+ASDF skips the dependency when it does not (review of #1072). (:require module) names no ASDF
+system."
   (labels ((name-of (dep)
              (cond ((or (stringp dep) (symbolp dep)) dep)
                    ((and (consp dep) (eq (first dep) :version)) (name-of (second dep)))
-                   ((and (consp dep) (eq (first dep) :feature)) (name-of (third dep))))))
+                   ((and (consp dep) (eq (first dep) :feature))
+                    (when (uiop:featurep (second dep)) (name-of (third dep)))))))
     (loop for dep in (asdf:system-depends-on system)
           for name = (name-of dep)
           when name collect (%name name))))

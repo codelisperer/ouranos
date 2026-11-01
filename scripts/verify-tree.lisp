@@ -585,6 +585,12 @@ inventing a suite name that does not exist would fail the gate for the wrong rea
    (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*)))
   "The repo root -- the parent of scripts/.")
 
+;;; This image resolves systems too, in CHECK-UNRUN-SUITES and PLATFORM-REQUIRED-TEST-SYSTEMS,
+;;; so it searches THIS tree first, as CHILD-ENVIRONMENT makes every child do. Otherwise a
+;;; registry naming another checkout answers for this one, and a suite added only in this
+;;; tree is not found (review of #1072).
+(asdf:initialize-source-registry `(:source-registry (:tree ,*root*) :inherit-configuration))
+
 (defparameter *quicklisp*
   (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))
 

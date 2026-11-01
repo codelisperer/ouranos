@@ -16,16 +16,21 @@
 (defun %unrun-fixture ()
   "Write and load an .asd in a fresh tree, and return the prefix of the systems it defines:
 <p>, which has <p>/tests; <p>/extra, whose <p>/extra/tests only <p>/tests depends on, through a
-(:version ...) form; <p>/versioned, whose <p>/versioned/tests nothing depends on; and
-<p>/plain, which has no /tests system."
+(:version ...) form; <p>/versioned, whose <p>/versioned/tests nothing depends on; <p>/here and
+<p>/absent, whose /tests systems <p>/tests depends on under a feature that holds on SBCL and
+one that holds nowhere; and <p>/plain, which has no /tests system."
   (let* ((dir (%fresh-tree))
          (prefix (format nil "unrunfx-~(~36R~)" (random (expt 2 40) (make-random-state t))))
          (asd (merge-pathnames (format nil "~A.asd" prefix) dir)))
     (with-open-file (out asd :direction :output)
       (format out "(defsystem ~S)~%" prefix)
-      (format out "(defsystem ~S :depends-on (~S (:version ~S \"0\")))~%"
-              (format nil "~A/tests" prefix) prefix (format nil "~A/extra/tests" prefix))
-      (dolist (suffix '("extra" "extra/tests" "versioned" "versioned/tests" "plain"))
+      (format out "(defsystem ~S :depends-on (~S (:version ~S \"0\") ~A ~A))~%"
+              (format nil "~A/tests" prefix) prefix (format nil "~A/extra/tests" prefix)
+              (format nil "(:feature :sbcl ~S)" (format nil "~A/here/tests" prefix))
+              (format nil "(:feature :ouranos-no-such-feature ~S)"
+                      (format nil "~A/absent/tests" prefix)))
+      (dolist (suffix '("extra" "extra/tests" "versioned" "versioned/tests" "plain"
+                        "here" "here/tests" "absent" "absent/tests"))
         (format out "(defsystem ~S)~%" (format nil "~A/~A" prefix suffix))))
     (asdf:load-asd asd)
     prefix))
@@ -62,6 +67,17 @@ list depends on is still reported."
                (ouranos-unrun-suites:unrun-suites (list p extra versioned) run))
         "nothing depends on <p>/versioned/tests")))
 
+(test a-dependency-under-a-feature-that-does-not-hold-is-not-run
+  "Review of #1072: ASDF skips (:feature expression name) when EXPRESSION does not hold, so a
+suite named that way is not run on this host and is reported. The control is the same form
+under :sbcl, which holds here."
+  (let* ((p (%unrun-fixture))
+         (here (format nil "~A/here" p))
+         (absent (format nil "~A/absent" p)))
+    (is (equal (list (cons absent (format nil "~A/tests" absent)))
+               (ouranos-unrun-suites:unrun-suites (list here absent)
+                                                  (list (format nil "~A/tests" p)))))))
+
 (test a-system-with-no-tests-system-is-not-reported
   (let ((p (%unrun-fixture)))
     (is (null (ouranos-unrun-suites:unrun-suites (list (format nil "~A/plain" p)) '())))))
@@ -88,6 +104,18 @@ host that owns them."
     (is (< 50 (length systems)) "the compile lists were read (~D systems)" (length systems))
     (is (null (ouranos-unrun-suites:unrun-suites systems tests)))
     (is (member :aion/sexp/tests tests) "the suite #973 left out is in the run list now")))
+
+(test the-gate-resolves-systems-in-its-own-tree
+  "Review of #1072: the gate's own image resolves systems for this check, so it searches the
+tree it is verifying first, as its children do. Otherwise a registry naming another checkout
+answers, and a suite added only in this tree is not found. The registry is set before the
+toplevel form that runs the gate."
+  (let* ((text (uiop:read-file-string (merge-pathnames "verify-tree.lisp" *scripts*)))
+         (init (search "(asdf:initialize-source-registry `(:source-registry (:tree ,*root*)"
+                       text))
+         (toplevel (search "(let ((t0 (get-internal-real-time)))" text)))
+    (is-true init "verify-tree.lisp puts its own tree in the source registry")
+    (is-true (and init toplevel (< init toplevel)) "before the gate runs")))
 
 (test the-gate-calls-the-check-before-it-loads-anything
   "#992: a check the gate never calls is not a check. verify-tree.lisp loads unrun-suites.lisp,
