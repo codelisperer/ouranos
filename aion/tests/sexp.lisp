@@ -309,7 +309,10 @@ datum, reason :SYNTAX, as it was before."
 ; more
 (2) ; after")
     (is (equal '(1) (sexp:read-data in :comments :skip)))
-    (is (equal '(2) (sexp:read-data in :comments :skip)))))
+    (is (eql #\Space (peek-char nil in nil nil))
+        "the space after the datum is still unread")
+    (is (equal '(2) (sexp:read-data in :comments :skip)))
+    (is (eql #\Space (peek-char nil in nil nil)))))
 
 (test the-comments-argument-must-be-refuse-or-skip
   (signals error (sexp:read-data "1" :comments t))
