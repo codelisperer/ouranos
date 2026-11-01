@@ -56,7 +56,8 @@ failure that is not of the socket or stream, such as a TLS failure (%TRANSPORT-P
 (defparameter +transient-statuses+ '(408 425 429 503 529)
   "Statuses after which the request was not acted on and may succeed later: request timeout, too
 early, too many requests, service unavailable, and 529, which Anthropic's API sends when it is
-overloaded.")
+overloaded. Exported so a caller that maps these statuses into its own conditions, as hermes
+does, classifies them the same way rather than keeping a second copy of the list (#79).")
 
 (defparameter +unknown-statuses+ '(500 502 504)
   "Statuses that may be temporary, but after which the server may have acted on the request.")

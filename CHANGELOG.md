@@ -14,6 +14,13 @@ its tag.
 
 ### An app may have to act
 
+- **hermes: a 429 from SendGrid or Twilio is now `delivery-rate-limited`, not a plain
+  `delivery-failure`** (#79 step two). An app that caught `delivery-failure` still catches it,
+  since `delivery-rate-limited` is a subtype, but one that *distinguished* a rate limit by
+  reading `delivery-failure-status` can now match on the class, and read
+  `delivery-rate-limited-retry-after` for the wait the response asked for. Telegram and Facebook
+  already signalled it; every backend does now.
+
 - **`mnemosyne/migrate:migrate` logs each applied migration at DEBUG and one INFO line per
   call** (#1046). The per-migration line `"migrate: applied"` (with `id`, `description` and `ms`)
   is now DEBUG, as is `"migrate: applying"`. A call that had migrations to apply ends with one
@@ -1091,6 +1098,23 @@ its tag.
   `claude-opus-5-5` where they named `claude-opus-4-8`.
 
 ### Added
+
+- **hermes: `aion/retry:transience` and `aion/retry:retry-after` answer for hermes's own
+  failures, so an app can ask what is worth sending again** (#79 step two). `hermes` depends on
+  `aion/retry` for this and **still never waits**: a rate limit or a transient failure is
+  classified, and the app schedules the next attempt, for example with
+  `aion/schedule:schedule-once`. `aion/retry:with-retry` is deliberately not used inside hermes,
+  because it sleeps, and a send is not safe to repeat blindly.
+  - `delivery-rate-limited` is `:transient`, and its `retry-after` is what to schedule by. The
+    Graph codes 4, 17, 32, 613 and 80001 reach it with the wait from
+    `X-Business-Use-Case-Usage`, and Telegram's with its own `retry_after`.
+  - `delivery-failure` is classified from its status, using aion/http-client's own
+    `+transient-statuses+` and `+unknown-statuses+` rather than a second copy of those lists; and
+    where there is no status, from the new `delivery-failure-phase`, carried from
+    `http-error-phase`: `:connect` means the message was never sent (`:transient`), `:response`
+    that the provider may already have sent it (`:unknown`). A failure hermes raised itself is
+    neither, so the default policy will not send a message twice.
+  - `aion/http-client` exports `+transient-statuses+` and `+unknown-statuses+` for this.
 
 - **aion/retry: a retry policy as data, and `with-retry`, which retries through restarts**
   (#79). `make-retry-policy` takes `:max-attempts`, `:base-delay`, `:multiplier`, `:max-delay`,

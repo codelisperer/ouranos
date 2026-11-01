@@ -253,3 +253,87 @@ main at 3ab171b."
   (signals h:invalid-message (h:make-email :to "a" :from "b" :attachments (list "not an attachment")))
   (is (h:attachment-p (h:make-attachment :filename "a.txt" :content-type "text/plain" :content ""))
       "an empty file is still a file"))
+
+;;; --- what an app may send again, in aion/retry's vocabulary (#79 step two) ---------------
+
+(test a-rate-limit-from-any-backend-is-transient-and-carries-its-wait
+  "#79 step two: hermes classifies, and never waits. A 429 from SendGrid or Twilio used to
+arrive as a plain DELIVERY-FAILURE, so an app had to read the status to tell a rate limit from a
+rejection."
+  ;; AS-DELIVERY is the one place SendGrid's and Twilio's HTTP failures become hermes
+  ;; conditions, so the mapping is driven through it rather than over the network.
+  (let ((c (handler-case
+               (hermes::as-delivery :sendgrid
+                 (error 'aion/http-client:http-error :status 429 :body "too many requests"
+                                                     :retry-after 30))
+             (h:hermes-error (e) e))))
+    (is (typep c 'h:delivery-rate-limited) "a 429 is a rate limit, not a plain failure: ~S" c)
+    (is (eql 30 (h:delivery-rate-limited-retry-after c)) "with the response's Retry-After")
+    (is (eq :sendgrid (h:delivery-failure-provider c))))
+  (let ((c (handler-case
+               (hermes::as-delivery :twilio
+                 (error 'aion/http-client:http-error :detail "transport error" :phase :connect))
+             (h:hermes-error (e) e))))
+    (is (typep c 'h:delivery-failure))
+    (is (not (typep c 'h:delivery-rate-limited)))
+    (is (eq :connect (h:delivery-failure-phase c)) "and a transport failure keeps its phase"))
+  (let ((limited (make-condition 'h:delivery-rate-limited :provider :sendgrid :status 429
+                                                          :detail "too many" :retry-after 30)))
+    (is (eq :transient (aion/retry:transience limited))
+        "a rate limit means the message was refused, so the same message may be sent later")
+    (is-true (aion/retry:transient-p limited))
+    (is (eql 30 (aion/retry:retry-after limited)) "and the provider's wait is what an app schedules by")))
+
+(test a-delivery-failure-says-whether-the-message-may-have-been-sent
+  "#79: :CONNECT means nothing was sent, so sending again is safe; :RESPONSE means the provider
+may already have sent it, so only a caller that knows the send is safe to repeat should."
+  (flet ((failure (&rest args) (apply #'make-condition 'h:delivery-failure :provider :sendgrid args)))
+    (is (eq :transient (aion/retry:transience (failure :phase :connect))))
+    (is (eq :unknown (aion/retry:transience (failure :phase :response))))
+    (is (null (aion/retry:transience (failure)))
+        "a failure hermes raised itself is not worth sending again")
+    (is (null (aion/retry:transience (failure :status 400 :detail "bad address")))
+        "nor is a rejection")
+    (is (eq :transient (aion/retry:transience (failure :status 503))) "503 was not acted on")
+    (is (eq :unknown (aion/retry:transience (failure :status 502))) "502 may have been")
+    ;; The default policy resends only what was certainly not sent.
+    (is-true (aion/retry:transient-p (failure :phase :connect)))
+    (is-false (aion/retry:transient-p (failure :phase :response)))
+    (is-true (aion/retry:transient-or-unknown-p (failure :phase :response)))))
+
+(test the-facebook-rate-limit-codes-are-transient-with-their-wait
+  "#79's brief names Graph codes 4, 17, 32 and 613; 80001 is the Page-token one posting uses.
+Each becomes DELIVERY-RATE-LIMITED, so each is :TRANSIENT and carries the wait Facebook gave."
+  (dolist (code '(4 17 32 613 80001))
+    (let ((class (hermes::%facebook-failure-class code nil "limit reached" nil)))
+      (is (eq 'h:delivery-rate-limited class) "Graph code ~D is a rate limit" code)))
+  ;; A wait of 2 minutes in X-Business-Use-Case-Usage becomes 120 seconds.
+  (let ((headers (make-hash-table :test #'equal)))
+    (setf (gethash "x-business-use-case-usage" headers)
+          "{\"1234\":[{\"estimated_time_to_regain_access\":2}]}")
+    (is (eql 120 (hermes::%facebook-retry-after headers))))
+  (let ((limited (make-condition 'h:delivery-rate-limited :provider :facebook :status 400
+                                                          :detail "limit" :retry-after 120)))
+    (is (eq :transient (aion/retry:transience limited)))
+    (is (eql 120 (aion/retry:retry-after limited))
+        "which is what an app passes to its scheduler, not to a sleep")))
+
+(test hermes-never-sleeps-to-retry
+  "#79 step two's rule, as a check on the source rather than a claim: hermes classifies and the
+app schedules, so no hermes source CALLS with-retry or sleep.
+
+It matches the call syntax, \"(with-retry\" and \"(sleep \", not the bare names. The names appear
+in prose here on purpose -- DELIVERY-RATE-LIMITED's docstring explains why with-retry is not used
+-- and a plain substring search over the file found those sentences and failed, which is this
+check answering about the wrong object."
+  (let ((offenders '()))
+    (dolist (path (directory (merge-pathnames "src/**/*.lisp"
+                                              (asdf:system-source-directory "hermes"))))
+      (let ((text (string-downcase (uiop:read-file-string path))))
+        (when (or (search "(with-retry" text) (search "(sleep " text))
+          (push (file-namestring path) offenders))))
+    (is (null offenders) "these hermes sources wait instead of letting the app schedule: ~S" offenders)
+    ;; The control: the check can see a call, so a green result means something.
+    (is-true (let ((text (string-downcase "  (sleep 5)")))
+               (or (search "(with-retry" text) (search "(sleep " text)))
+             "control: the matcher does find a real call")))

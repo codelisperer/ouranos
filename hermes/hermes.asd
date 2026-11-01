@@ -13,6 +13,9 @@
   :license "MIT"
   :version "0.0.0"
   :depends-on ("aion/http-client"  ; the interceptor-shaped client, shared (pre-publication issue 202)
+               ;; aion/retry for TRANSIENCE and RETRY-AFTER on hermes's own failures, so an app
+               ;; can ask what is worth another send (#79 step two). hermes never waits itself.
+               "aion/retry"
                "dexador"           ; still direct for hermes/blob's streaming needs
                "com.inuoe.jzon"    ; JSON (SendGrid body, Twilio response)
                "cl-base64"         ; Twilio Basic auth + inbound-signature encoding
@@ -39,6 +42,7 @@
 (defsystem "hermes/tests"
   :description "Test suite for hermes."
   :depends-on ("hermes" "aion/http-client" "fiveam"   ; hermes.lisp calls http: directly
+               "aion/retry"   ; the #79 tests ask TRANSIENCE and RETRY-AFTER about hermes's failures
                "aion/test-http" "aion/log" "aion/secret")  ; telegram.lisp: a local Bot API server, log lines, the token
   :serial t
   :components ((:module "tests"

@@ -43,6 +43,7 @@
            #:send-request #:header-value
            #:http-error #:http-error-status #:http-error-body #:http-error-label
            #:http-error-detail #:http-error-retry-after #:http-error-phase
+           #:+transient-statuses+ #:+unknown-statuses+
            ;; fetching a URL a user supplied (#295)
            #:fetch-public #:*fetch-public-max-body-bytes*
            #:address-category #:parse-address #:address-string #:resolve-host
