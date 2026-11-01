@@ -119,6 +119,8 @@ client rendering `agent-history' still shows the whole conversation."
   ;; prompt in place of the messages they were distilled from, once enough has been observed.
   (thread-memory nil)
   (taint-scope :turn)
+  ;; A new slot that holds part of the conversation, rather than how the agent is configured,
+  ;; is also copied by MOVE-CONVERSATION; the actor tests list every slot as one or the other.
   ;; #948: whether untrusted content has entered this conversation, recorded as it happens, so
   ;; :CONVERSATION works for an app that rebuilds the history from text with no tool calls in
   ;; it. :UNTRUSTED when the agent read untrusted content; :DELEGATED when the only such
@@ -129,6 +131,37 @@ client rendering `agent-history' still shows the whole conversation."
   ;; See %CONVERSATION-TAINTED-P.
   (conversation-taint nil)
   (history '() :type list))               ; list of praxeon/llm messages
+
+(defun %higher-taint (a b)
+  "The higher of two conversation-taint values, in the order NIL, :CLEAN, :DELEGATED, :UNTRUSTED.
+NIL means not recorded, so either recorded value is kept over it."
+  (let ((order '(nil :clean :delegated :untrusted)))
+    (if (< (position a order) (position b order)) b a)))
+
+(defun move-conversation (from to)
+  "Give TO, an agent just made, FROM's conversation, and return TO. What moves is the history and
+the state needed to read it as it was read before: the retrieved context, the offloaded and
+cleared tool results with the store they are in, the untrusted-content records, the turn guard,
+and the thread memory. TO's conversation taint becomes the higher of the two agents' values
+(%HIGHER-TAINT), so a value the app gave TO is not lowered. TO keeps its own configuration:
+provider, system prompt, means, budgets and taint scope. An app does this when what an agent may
+do changes and its conversation should go on, such as praxeon/web when a session's grant
+changes (#67). The two agents share the moved tables afterwards, so FROM is not used again."
+  (setf (agent-history to) (agent-history from)
+        (agent-context to) (agent-context from)
+        (agent-result-index to) (agent-result-index from)
+        (agent-cleared to) (agent-cleared from)
+        (agent-guard to) (agent-guard from)
+        (agent-untrusted-inputs to) (agent-untrusted-inputs from)
+        (agent-untrusted-calls to) (agent-untrusted-calls from)
+        (agent-conversation-taint to) (%higher-taint (agent-conversation-taint from)
+                                                     (agent-conversation-taint to))
+        (agent-thread-memory to) (agent-thread-memory from))
+  ;; The result index names results in FROM's store, so the store goes with it.
+  (when (agent-result-store from)
+    (setf (agent-result-store to) (agent-result-store from)
+          (agent-conversation to) (agent-conversation from)))
+  to)
 
 (defvar *principal* nil
   "The user the current turn runs for, as the app identifies its users, or NIL (#527). RUN-TURN
@@ -152,6 +185,31 @@ turn (#531).")
 ;; Inheritable for the reason *PRINCIPAL* is: a thread that continues this turn acts under the
 ;; same policy (#158).
 (aion/dynamic:register-inheritable '*on-hold*)
+
+(defstruct (turn-cancel (:constructor make-turn-cancel ()))
+  "A handle that cancels a turn (#984). Make one, pass it to RUN-TURN as :CANCEL, and call
+CANCEL-TURN on it from another thread. One handle cancels for good: a turn started with a handle
+already cancelled ends before its first model call."
+  (request (http:make-request-cancel) :read-only t))
+
+(defun cancel-turn (cancel)
+  "Cancel the turn running with CANCEL, a TURN-CANCEL, from any thread. A model call in progress
+on a provider that streams (PRAXEON/LLM:SUPPORTS-STREAMING-P) has its connection closed, so the
+provider stops generating. A tool call in progress is not interrupted; the turn ends before the
+next model call. Returns T."
+  (http:cancel-request (turn-cancel-request cancel)))
+
+(defun turn-cancelled-p (cancel)
+  "True once CANCEL-TURN has been called on CANCEL."
+  (http:request-cancelled-p (turn-cancel-request cancel)))
+
+(defvar *turn-cancel* nil
+  "The TURN-CANCEL of the running turn, or NIL. RUN-TURN binds it from :CANCEL; a delegated
+sub-turn keeps it, so cancelling the turn cancels the sub-agent's model calls too.")
+
+;; Inherited by threads that carry on the turn, such as a parallel sub-agent, for the reason
+;; *PRINCIPAL* is: they are part of the turn being cancelled.
+(aion/dynamic:register-inheritable '*turn-cancel*)
 (aion/dynamic:register-inheritable '*hold-allowed*)
 
 (defun register-means (agent name description fn &key schema capability source confirm
@@ -1153,12 +1211,38 @@ to the model at all (#90)."
   (unless (agent-provider agent)
     (error 'cnd:deliberation-failure :detail "no provider configured"))
   (multiple-value-bind (messages estimate breakdown) (request-messages agent)
-    (values (llm:complete (agent-provider agent)
-                          messages
-                          :system (agent-system-parts agent)
-                          :tools (agent-tool-specs agent :permit permit)
-                          :max-tokens (%output-limit agent max-tokens))
-            estimate breakdown)))
+    ;; A cancelled call reports the prompt estimate too, so a ledger can charge it when the
+    ;; provider had reported no input count (#984).
+    (handler-bind ((cnd:completion-cancelled
+                     (lambda (c) (setf (cnd:completion-cancelled-estimated-input c) estimate))))
+      (values (llm:complete (agent-provider agent)
+                            messages
+                            :system (agent-system-parts agent)
+                            :tools (agent-tool-specs agent :permit permit)
+                            :max-tokens (%output-limit agent max-tokens))
+              estimate breakdown))))
+
+(defun %deliberate-step (agent permit limit step)
+  "DELIBERATE for STEP of a turn, with the turn's cancel handle given to the provider and, while
+an observer is bound, each piece of the model's text emitted as a :TEXT-DELTA event (#984)."
+  (let ((llm:*cancel* (and *turn-cancel* (turn-cancel-request *turn-cancel*)))
+        (llm:*on-text* (and evt:*observer*
+                            (lambda (piece) (evt:emit :text-delta :text piece :step step)))))
+    (deliberate agent :permit permit :max-tokens limit)))
+
+(defun %end-cancelled (step &optional stopped)
+  "End a cancelled turn at STEP. STOPPED is the COMPLETION-CANCELLED of a model call the cancel
+stopped, or NIL when the turn was cancelled between calls. Returns RUN-TURN's values."
+  (when stopped
+    (evt:emit :usage :input (cnd:completion-cancelled-input-tokens stopped)
+                     :output (cnd:completion-cancelled-output-tokens stopped)
+                     :cache-read (cnd:completion-cancelled-cache-read-tokens stopped)
+                     :cache-write (cnd:completion-cancelled-cache-write-tokens stopped)
+                     :estimated-input (cnd:completion-cancelled-estimated-input stopped)
+                     :estimated-output (cnd:completion-cancelled-estimated-output stopped)
+                     :cancelled t))
+  (evt:emit :turn-ended :reason :cancelled :step step)
+  (values nil :cancelled))
 
 (defun act (agent means-name argument &key permit)
   "Apply a registered means by name to ARGUMENT, establishing recovery restarts.
@@ -1269,7 +1353,7 @@ and ends the turn when nothing handles it, as before."
   (setf (agent-history agent) (append (agent-history agent) messages)))
 
 (defun run-turn (agent user-input &key (max-steps 8) permit max-tokens principal
-                                       (on-hold nil on-hold-p) held claim)
+                                       (on-hold nil on-hold-p) held claim cancel)
   "Run one full turn: record USER-INPUT, then deliberate and act until the model
 replies with no further tool call. Returns the model's final text. MAX-STEPS
 bounds the deliberate/act cycle so a misbehaving loop stays finite.
@@ -1329,8 +1413,20 @@ HELD is the HELD-TURN of an earlier turn whose held calls were never decided. Wh
 ends with calls that have no results, RUN-TURN needs it, or an earlier ABANDON-HELD-TURN, and
 signals HELD-TURN-REQUIRED without it. With it, the held calls get \"not run: the user did not
 confirm\" before the new message. CLAIM is the app's function that records a decision once; see
-CONTINUE-TURN."
+CONTINUE-TURN.
+
+CANCEL is a TURN-CANCEL that another thread may call CANCEL-TURN on (#984). The turn checks it
+before each model call. A model call in progress on a provider that streams is stopped by
+closing its connection. A tool call in progress finishes, and the turn ends before the next model
+call. A cancelled turn emits a :USAGE event for a model call it stopped, with :CANCELLED T, the
+counts the provider had reported (usually no output count) and :ESTIMATED-OUTPUT, then a
+:TURN-ENDED event with :REASON :CANCELLED, and returns NIL and :CANCELLED. The text of a stopped
+model call is not added to the history. NIL keeps the handle of an enclosing turn.
+
+While an observer is bound (PRAXEON/EVENT:WITH-OBSERVER), a provider that streams sends its text
+as it is written, and the turn emits a :TEXT-DELTA event for each piece."
   (let* ((*principal* (or principal *principal*))
+         (*turn-cancel* (or cancel *turn-cancel*))
          (*on-hold* (cond (on-hold-p on-hold)
                           ((eq *on-hold* :hold) nil)
                           (t *on-hold*)))
@@ -1370,9 +1466,12 @@ values. CONTINUE-TURN enters here too, after it has written a held step's result
                    (error 'cnd:deliberation-failure
                           :detail (format nil "no final answer within ~A steps"
                                           max-steps)))
+      (when (and *turn-cancel* (turn-cancelled-p *turn-cancel*))
+        (return (%end-cancelled step)))
       (evt:emit :deliberating :step step)
       (multiple-value-bind (completion estimate breakdown)
-          (deliberate agent :permit permit :max-tokens limit)
+          (handler-case (%deliberate-step agent permit limit step)
+            (cnd:completion-cancelled (c) (return (%end-cancelled step c))))
         ;; Economic calculation: report what this step cost so the scarce resource
         ;; (the token budget) is visible. :ESTIMATED-INPUT is what the history budget was
         ;; enforced against and :INPUT is what the provider actually charged -- two numbers

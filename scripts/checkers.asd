@@ -55,7 +55,9 @@ that hides which scripts it is about.")
                              (:file "windows-installer-swap") (:file "bundle-sources")
                              (:file "tree-natives") (:file "release-settings")
                              (:file "release-file-readers") (:file "with-mode")
-                             (:file "dyld-libraries")
+                             (:file "dyld-libraries") (:file "source-registry")
                              ;; #956: a native file the bundle needs and cannot find
-                             (:file "missing-natives"))))
+                             (:file "missing-natives")
+                             ;; #977: the BUILT-FROM stamp of a vendored library's build
+                             (:file "built-from"))))
   :perform (test-op (o c) (symbol-call :checkers/tests '#:run-tests)))
