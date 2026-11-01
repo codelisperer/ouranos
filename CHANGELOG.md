@@ -14,6 +14,22 @@ its tag.
 
 ### An app may have to act
 
+- **mnemosyne/conn: a Postgres connect gives up after 10 seconds, and an optional statement
+  timeout** (#959). `connect` and `make-pool` take `:connect-timeout`, in seconds, defaulting to
+  `*postgres-connect-timeout-seconds*` (10), and `:statement-timeout`, in milliseconds,
+  defaulting to `*postgres-statement-timeout-ms*` (NIL).
+  - A connect that is not finished in time, TCP connect through authentication, signals
+    `db-connect-timeout` (a `db-error`, with `db-connect-timeout-host`, `-port` and
+    `-seconds`). Before, a server that did not answer held the caller for about 127 s on Linux,
+    or forever if it accepted the TCP connection and sent nothing, and held a pool slot for that
+    long. A pooled connect that times out frees its slot at once. **This is a new default:** an
+    app whose Postgres connects take longer than 10 s passes a larger `:connect-timeout`, or
+    NIL for no limit.
+  - `:statement-timeout` sets `statement_timeout` on each new connection, and a pool sets it
+    again after its reset, which runs `RESET ALL`. A statement the server cancels for it
+    signals `db-statement-timeout` (a `db-error`), from `exec`, `query` and `map-query`.
+  - `mnemosyne/docs/user-guide.md` describes both, and the server-side fallback
+    `ALTER ROLE ... SET statement_timeout`.
 - **`mnemosyne/migrate:migrate` logs each applied migration at DEBUG and one INFO line per
   call** (#1046). The per-migration line `"migrate: applied"` (with `id`, `description` and `ms`)
   is now DEBUG, as is `"migrate: applying"`. A call that had migrations to apply ends with one
@@ -1114,6 +1130,69 @@ its tag.
   - The bell announces the unread count through a status region, once per change.
 
   See `hyperion/docs/notifications.md`.
+- **aion/retry: a retry policy as data, and `with-retry`, which retries through restarts**
+  (#79). `make-retry-policy` takes `:max-attempts`, `:base-delay`, `:multiplier`, `:max-delay`,
+  `:jitter` (`:full`, `:equal` or `:none`), `:deadline` and `:retryable`, and `retry-delay`
+  computes the schedule as a pure function. `with-retry` and `call-with-retry` run each attempt
+  inside a `retry` restart, signal `retry-scheduled` before each wait (a handler can take
+  `give-up` or `retry-now`), and let the original condition through unchanged when the policy
+  allows no more attempts. A server's Retry-After is a floor on the wait, and one longer than
+  `:max-delay` stops the retrying. Which conditions are retried by default is the `transience`
+  protocol: `transient-p` covers failures after which the request was not acted on, and
+  `transient-or-unknown-p` adds those after which it may have been, for idempotent calls.
+  `with-retry` signals `retry-would-block` on an aion/uv loop thread, which binds the new
+  `aion/dynamic:*blocking-forbidden*`.
+  - The wait happens after the failed attempt has unwound, so its `unwind-protect` cleanups
+    have run and its locks are free while the runner waits.
+  - `:retryable` takes a function, the name of one, or a list of condition types. A symbol
+    that names no function is refused when the policy is made.
+  - When a `:retryable` function, or a `transience` or `retry-after` method, signals while the
+    runner asks about a failure, the error is logged and the failure is not retried. The caller
+    sees the original condition.
+  - A `with-retry` inside another multiplies the attempts.
+
+  Nothing in the tree retries yet; praxeon and hermes adopt it, opt-in, in a later change.
+- **aion/http-client: `http-error` carries `http-error-retry-after` and `http-error-phase`**
+  (#79). `ensure-2xx` reads the response's Retry-After header, in seconds or as an HTTP date,
+  into `http-error-retry-after`. A transport failure has `http-error-phase` `:connect` when no
+  connection was made, so the request was not sent, and `:response` for a socket or stream
+  failure after it was made. A TLS failure, and anything else that is not a socket or stream
+  failure, has no phase, so it is never retried. On the pinned path (`:connect-address`,
+  `fetch-public`) the phase comes from where the call failed, not from the condition's type,
+  and a connection that ends before the response does (a `malformed-response` saying "the
+  connection ended") is `:response`.
+  - **Pooled connections.** Through dexador on Linux and macOS, a failure to connect is
+    `:connect` only for a request that could not have used dexador's connection pool. Otherwise
+    dexador may have sent the request on a pooled connection that then dropped, before its
+    reconnect failed. So a request whose method is not idempotent, such as POST or PATCH, is
+    now sent with `:use-connection-pool nil` and `:keep-alive nil`. A pooled request's failure
+    to connect, such as a GET's, is `:response`.
+  - **WinHTTP's 12152.** On Windows, a reply WinHTTP refuses as not HTTP (12152) is now
+    signalled as `malformed-response`, as this client's own reader signals one on the pinned
+    path, still with phase `:response`. It was a plain `http-error`. On Windows, where dexador uses WinHTTP, the phase comes
+  from WinHTTP's error code: 12029 and 12007 are `:connect`; 12002, 12030 and 12152 are
+  `:response`. aion/http-client now depends on `aion/retry` and defines the `transience` and
+  `retry-after` methods for `http-error`: 408, 425, 429, 503, 529 and `:connect` are
+  `:transient`; 500, 502, 504 and `:response` are `:unknown`.
+- **hyperion/page-meta: `:visibility :unlisted` writes the full preview card plus `robots
+  noindex`** (#947). `page-meta`, `meta-tags` and `meta-tags-string` accept `:unlisted` beside
+  `:public`, `:noindex` and `:private`. It is for a page anyone with the link may see and
+  share but that should not appear in search results. An app that added its own robots tag
+  next to `:visibility :public` for this can pass `:unlisted` and drop that tag. `:noindex` and
+  `:private` are unchanged: they still write only the site's name and fallback image. Robots
+  noindex is a request crawlers may ignore, so a page whose content must stay private still
+  uses `:private`.
+- **hermes: `make-email` takes `:headers`, so an email can carry `List-Unsubscribe` and
+  `List-Unsubscribe-Post`** (#106). `:headers` is an alist of `(name . value)` strings, read
+  back with `email-headers`. SendGrid receives them as its `headers` object, and the dev
+  transport prints them. `make-email` signals `invalid-message` for a name that is not a valid
+  header name or is given twice, a reserved header (`To`, `From`, `Subject`, `Reply-To`, `Cc`,
+  `Bcc`, `Content-Type` and the others `hermes:reserved-email-headers` returns), a header
+  longer than 998 characters, or a value with anything but printable ASCII and tabs, so a
+  carriage return or line feed cannot add a header of its own. Non-ASCII header text is not
+  encoded and is refused. An email without `:headers` sends the same SendGrid request as
+  before. A new email backend's `deliver` sends `email-headers` or signals `invalid-message`
+  when there are any; it never drops them.
 - **`mnemosyne/test-template`: a test suite can migrate one SQLite database per run and give
   each test a copy** (#1047). `make-sqlite-template` applies an app's migrations to an in-memory
   database once (`:setup` configures its connection first); `copy-sqlite-template` and
@@ -2866,6 +2945,30 @@ its tag.
 
 ### Fixed
 
+- **aion/http-client: a failure on a pinned connection no longer reconnects through DNS or sends
+  the request again** (#985). A request with `:connect-address`, which `fetch-public` always
+  makes, handed its connection to dexador on Linux and macOS. After any failure on it, such as a
+  read timeout or a reset, dexador opened a second connection by resolving the URL's host name,
+  bypassing the address `fetch-public` had checked, and sent the request again, a POST included.
+  The pinned path now writes the request and reads the response itself on every platform, as it
+  already did on Windows (#536), so it uses exactly one connection. Visible differences on Linux
+  and macOS: the request asks for `Accept-Encoding: identity` instead of gzip; a pinned
+  `send-request` does not follow redirects itself (`fetch-public` follows them, as before);
+  responses are read under http1.lisp's limits and refused with `malformed-response` outside
+  HTTP/1.1's grammar; an alist `:content` whose values are pathnames (dexador's multipart) is not
+  supported there. As through dexador, the default `User-Agent` and `Accept: */*` are sent,
+  string or octet content without a Content-Type is `text/plain`, and a request without content
+  other than GET or HEAD sends `Content-Length: 0`. Those four are now also what the Windows
+  pinned path sends.
+
+- **aion/http-client: on Windows, a pinned request's `:read-timeout` and `fetch-public`'s
+  `:deadline` end a read from a server that never answers** (#985). Neither did before: the
+  socket's receive timeout had no effect on Windows, and the deadline shut the socket down,
+  which did not wake the read there. Measured, a `fetch-public` with `:deadline 2` to such a
+  server was still waiting after 20 seconds, so a user-supplied URL could hold a Windows caller
+  for as long as the server kept the connection open. The read timeout now ends the read with
+  an `http-error` whose phase is `:response` and whose detail says "I/O timeout", and the
+  deadline closes the socket on Windows, so the fetch ends with `fetch-deadline-exceeded`.
 - **praxeon/actor: `move-conversation` no longer lowers the new agent's conversation taint.** It
   copied the old agent's `agent-conversation-taint` over the new agent's, so a new agent made with
   `:conversation-taint :untrusted` and given a conversation recorded as `:clean` ended up `:clean`.

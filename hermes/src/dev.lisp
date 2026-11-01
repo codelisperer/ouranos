@@ -42,6 +42,9 @@ DEV-LAST-FACEBOOK the last FACEBOOK-POST (#822)."))
   (%dev-render (dev-stream p) "EMAIL"
                (list "To:" (email-to m) "From:" (email-from m)
                      "Reply-To:" (email-reply-to m) "Subject:" (email-subject m)
+                     "Header:" (format nil "~{~A~^~%               ~}"
+                                       (loop for (name . value) in (email-headers m)
+                                             collect (format nil "~A: ~A" name value)))
                      "Body:" (email-text m)
                      ;; Names, types and sizes only; the content itself is not printed.
                      "Attachment:" (format nil "~{~A~^~%               ~}"
