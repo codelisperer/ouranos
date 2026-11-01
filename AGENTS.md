@@ -192,7 +192,8 @@ ends, rather than running until something interrupts it.
 1. `scripts/board.sh` — read the whole board before touching anything.
 2. **Rule on `Blocked` first.** A lane blocked on a decision is the only thing that cannot
    proceed without the hub. Everything else can wait a pass.
-3. **Merge what is green.** `In Review` + evidence in the issue → verify cold, merge, close.
+3. **Merge what is green.** `scripts/pr-runs.sh` first, so a head with no run is found before
+   it is read as green. `In Review` + evidence in the issue → verify cold, merge, close.
 4. **File what arrived as a message.** A finding, defect or proposal a lane *sent* is filed
    before the pass ends, or it dies with that session. The hub is the last place to catch it.
 5. **Set the next `Todo`** and name who takes it.
@@ -213,7 +214,10 @@ issue — a message is read once by one session, an issue outlives it.
 - Every lane works in its own worktree on `work/<track>`. Two agents on one machine still
   need two trees.
 - The ASDF drop-in names one tree. Set `CL_SOURCE_REGISTRY=<worktree>//:` (`//;` on
-  Windows — a colon is read as part of the drive letter).
+  Windows — a colon is read as part of the drive letter). To bootstrap in a worktree, also
+  set `OURANOS_BOOTSTRAP_LOCAL=1`: bootstrap then leaves the drop-in naming the main checkout
+  and builds against the worktree. Without it, bootstrap stops with exit code 3, because the
+  drop-in names another tree (#955).
 - Gitignored build output (`vendor/libuv/`, `dist/`) does not travel; run
   `scripts/build-libuv.lisp` if needed. A suite failing that your diff cannot reach is an
   environment result, not a code one.
@@ -458,6 +462,20 @@ not about an expression inside it; an `ok` line is about failures, not about cov
   Windows and 10x for macOS; standard runners are free for public repositories. A leg that fails
   for a reason your change cannot reach is still red, so read its failing-suite list (the rule
   above) before deciding whether the pull request is green.
+- **A push to a pull request that conflicts with `main` gets no CI run, so confirm a run exists
+  for every head you push.** A `pull_request` run checks out `refs/pull/N/merge`, and GitHub
+  cannot create that ref while the branch conflicts, so the push queues nothing and reports
+  nothing. Checks belong to a commit, so the new head has none, and the checks still shown in the
+  pull request's conversation belong to an earlier head. On 2026-10-28 seven pull requests' fix
+  pushes got no run this way (#1025). After pushing, run
+  `gh run list --branch <branch> --json headSha,databaseId` and look for the head you pushed.
+  If no run has it and the pull request conflicts with `main`, run
+  `gh workflow run verify.yml --ref <branch>`, which runs the branch head without a merge ref.
+  A conflict in `CHANGELOG.md` alone does not need a merge from `main`, because the hub resolves
+  those when it builds a train; a conflict in code does.
+  `scripts/pr-runs.sh` does this check for every open pull request at once: it prints each head
+  with the verify run for that commit, prints NO RUN where there is none, and exits 1 if any
+  head has no run.
 - **A marker that identifies a tree must be older than the change that reads it.** When a script
   locates its own root by looking for landmark files, a landmark introduced by that same change
   makes every older checkout read as "not a checkout at all", and the refusal then blames the

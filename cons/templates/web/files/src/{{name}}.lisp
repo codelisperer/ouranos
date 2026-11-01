@@ -45,13 +45,16 @@ which is why the .env load is at the top of it rather than in MAIN alone."
   ;; first consumer happens to sit -- is a .env that was not loaded for whatever ran
   ;; before it, and that failure blames the library rather than this ordering.
   (env:load-project-env :{{name}})
-  ;; On :uv, without workers every handler runs on the event-loop thread, so one slow request
-  ;; holds up all the others; two workers run handlers off that thread. Other servers
-  ;; (HYPERION_SERVER=hunchentoot, for one) keep their own default.
-  (let ((server (srv:default-server)))
-    (setf *handler* (srv:start #'app :host host :port port :server server
-                                     :workers (when (eq server :uv) 2))))
-  (format t "~&{{name}} serving at http://~A:~D/~%" host port)
+  (when *handler*
+    (error "{{name}}: already running on port ~D. Call STOP first."
+           (srv:handler-port *handler*)))
+  ;; DEFAULT-SERVER chooses :uv when libuv loads, and otherwise the next server this app loads,
+  ;; and says why. HYPERION_SERVER, when set, decides. On :uv, START runs handlers on two
+  ;; worker threads, so one slow request does not hold up the others.
+  (multiple-value-bind (server reason detail) (srv:default-server)
+    (log:info "{{name}}: server chosen" :server server :reason reason :detail detail)
+    (setf *handler* (srv:start #'app :host host :port port :server server)))
+  (format t "~&{{name}} serving at http://~A:~D/~%" host (srv:handler-port *handler*))
   (finish-output)
   *handler*)
 

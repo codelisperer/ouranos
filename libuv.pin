@@ -44,7 +44,8 @@ url     https://dist.libuv.org/dist/v1.53.0/libuv-v1.53.0.tar.gz
 # To adopt a new libuv:
 #   1. curl -sLO https://dist.libuv.org/dist/vX.Y.Z/libuv-vX.Y.Z.tar.gz
 #   2. sha256sum libuv-vX.Y.Z.tar.gz
-#   3. update the three lines above, delete vendor/libuv/, rebuild, run the
+#   3. update the three lines above, rebuild (build-libuv.lisp rebuilds a library whose
+#      vendor/libuv/BUILT-FROM does not name this pin, #977), run the
 #      aion/uv suite on all three OSes before committing.
 
 # --- staying current -------------------------------------------------------

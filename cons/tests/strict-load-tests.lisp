@@ -85,6 +85,31 @@ NAME/tests holding it, named by NAME's test-op. Returns DIR."
       (is (search "WARNING" (string-upcase printed))
           "the warning must be printed, not only counted: ~S" printed))))
 
+(test a-strict-load-whose-root-holds-none-of-its-systems-is-refused
+  "#960: with a root that is not the project's directory, no system counts as the project's own,
+every warning is muffled, and a strict load judged nothing and passed a full WARNING. Under
+:FORCE-OWN, which `cons --strict' sets, that is now refused, naming the root. Controls: the same
+load without :FORCE-OWN still passes, as a plain load of an outside library must; and the right
+root fails the WARNING, as before."
+  (%with-strict-project (dir name "wrongroot" *strict-warning-source*)
+    (tempdir:with-temporary-directory (elsewhere "elsewhere")
+      (multiple-value-bind (err printed) (%strict-load name elsewhere :force-own t)
+        (declare (ignore printed))
+        (is (typep err 'error) "a strict load under the wrong root must not pass")
+        (is (search "found no system of the project" (princ-to-string err)) "~A" err)
+        ;; By the directory's own name: the message names the root resolved with TRUENAME, and on
+        ;; a Windows runner the temporary directory's path can come back in its short 8.3 form
+        ;; (RUNNER~1) on one side and its long form on the other (run 40619640922).
+        (is (search (car (last (pathname-directory elsewhere))) (princ-to-string err))
+            "the root is named: ~A" err))
+      (is (null (%strict-load name elsewhere))
+          "control: without :FORCE-OWN the load of a system outside the root passes")))
+  (%with-strict-project (dir name "rightroot" *strict-warning-source*)
+    (let ((err (%strict-load name dir :force-own t)))
+      (is (typep err 'error))
+      (is (not (search "found no system of the project" (princ-to-string err)))
+          "control: under the right root it fails on the WARNING itself: ~A" err))))
+
 (test a-style-warning-does-not-fail-the-load
   (%with-strict-project (dir name "style" *strict-style-source*)
     (multiple-value-bind (err printed) (%strict-load name dir)
@@ -335,3 +360,129 @@ a `test' target testing it; NAME's one file holds SOURCE."
     (dolist (fresh '(nil t))
       (multiple-value-bind (code out) (%cons-target-in-child dir "build" :fresh fresh)
         (is (eql 0 code) "cons ~:[~;--fresh ~]build of a clean project must exit 0, got ~A:~%~A" fresh code out)))))
+
+;;; --- #960: --strict and the targets it cannot judge, and fasls written outside cons --------
+
+(test the-targets-strict-cannot-judge-are-the-ones-that-load-nothing
+  "#960: a target whose work is :eval, :call or :sh with no :load or :test is one --strict
+cannot judge. A target with :load or :test is judged, and a :steps target is judged by the
+targets it runs."
+  (let* ((spec (cons/spec:install-spec
+                "unjudged"
+                '(:system "unjudged"
+                  :targets
+                  ((build :load "unjudged")
+                   (test :test "unjudged/tests")
+                   (dev :load "unjudged/web" :call ("unjudged/web:dev"))
+                   (build-eval :eval "(asdf:load-system \"unjudged\")")
+                   (build-call :call ("asdf:load-system" "unjudged"))
+                   (dump :sh ("sbcl" "--script" "dump.lisp"))
+                   (repl :interactive t)
+                   (load-and-sh :load "unjudged" :sh ("sbcl" "--version"))
+                   (test-and-sh :test "unjudged/tests" :sh ("sbcl" "--version"))
+                   (twice :steps (build-eval build build-eval))
+                   (all :steps (build build-eval dump))))))
+         (tgt (lambda (name) (find name (cons/spec:spec-targets spec) :key #'cons/spec:target-name))))
+    (flet ((unjudged (name) (cons/run::%unjudged-targets spec (funcall tgt name))))
+      (dolist (judged '(:build :test :dev :repl))
+        (is (null (unjudged judged)) "~S loads what it builds, or does no work" judged))
+      (is (equal '((:build-eval :eval)) (unjudged :build-eval)))
+      (is (equal '((:build-call :call)) (unjudged :build-call)))
+      (is (equal '((:dump :sh)) (unjudged :dump)))
+      (is (equal '((:build-eval :eval) (:dump :sh)) (unjudged :all))
+          "a :steps target names each step it runs that --strict cannot judge")
+      ;; #968's review: cons runs :sh in place of :load and :test, so they never run.
+      (is (equal '((:load-and-sh :sh)) (unjudged :load-and-sh)))
+      (is (equal '((:test-and-sh :sh)) (unjudged :test-and-sh)))
+      (is (equal '((:build-eval :eval)) (unjudged :twice)) "a step run twice is named once"))))
+
+(test a-steps-cycle-is-refused-naming-the-cycle
+  "#968's review: :steps that lead back to a target already being run are refused, naming the
+cycle, instead of recursing until the stack runs out. Control: a step reached twice by two
+paths, which is not a cycle, is accepted."
+  (let* ((spec (cons/spec:install-spec
+                "cycle"
+                '(:system "cycle"
+                  :targets
+                  ((a :steps (b))
+                   (b :steps (c))
+                   (c :steps (a))
+                   (leaf :load "cycle")
+                   (diamond :steps (left right))
+                   (left :steps (leaf))
+                   (right :steps (leaf))))))
+         (tgt (lambda (name) (find name (cons/spec:spec-targets spec) :key #'cons/spec:target-name))))
+    (let ((e (handler-case (progn (cons/run::%steps-in-order spec (funcall tgt :a)) nil)
+               (error (e) e))))
+      (is-true e)
+      (is (search "a -> b -> c -> a" (princ-to-string e)) "~A" e))
+    (is (= 4 (length (remove-duplicates (cons/run::%steps-in-order spec (funcall tgt :diamond))
+                                        :key #'cons/spec:target-name)))
+        "control: diamond, left, right and leaf")))
+
+(defmacro %with-cons-targets ((dir name tag source targets-format) &body body)
+  "BODY with DIR a fresh project whose system NAME's one file holds SOURCE and whose cons.lisp
+has the targets TARGETS-FORMAT gives, a format string applied to NAME."
+  `(tempdir:with-temporary-directory (,dir "strict-cli")
+     (let ((,name (string-downcase (%strict-name ,tag))))
+       (%strict-project ,dir ,name ,source)
+       (with-open-file (out (merge-pathnames "cons.lisp" ,dir) :direction :output)
+         (format out "(cons:project ~S :system ~S :targets (~A))~%"
+                 ,name ,name (format nil ,targets-format ,name ,name ,name)))
+       ,@body)))
+
+(test cons-strict-refuses-a-target-that-loads-its-code-in-an-eval
+  "#960: an :eval target that loads a system holding a full WARNING. Under --strict it is
+refused, exit 1, naming the target and the clause, before it runs. Control: run without
+--strict, the same target runs, loads the system with its warnings muffled, as a build step
+through Quicklisp's quiet mode does, and exits 0 -- the check --strict could not have made."
+  (%with-cons-targets (dir name "evaltarget" *strict-warning-source*
+                       "(build-eval :eval \"(handler-bind ((warning (function muffle-warning))) (asdf:load-system \\\"~A\\\"))\") (build :load ~S)")
+    (multiple-value-bind (code out) (%cons-target-in-child dir "build-eval" :strict t)
+      (is (eql 1 code) "cons --strict build-eval must exit 1, got ~A:~%~A" code out)
+      (is (search "target build-eval does its work with :eval" out) "~A" out))
+    (multiple-value-bind (code out) (%cons-target-in-child dir "build-eval")
+      (is (eql 0 code) "control: cons build-eval without --strict runs and exits 0, got ~A:~%~A" code out))))
+
+(defun %plain-load-in-child (dir name)
+  "Load system NAME, found in DIR, in a child SBCL with plain ASDF, its warnings muffled, as a
+build step outside cons would: the child compiles the system and writes its fasls."
+  (multiple-value-bind (out err code)
+      (uiop:run-program
+       (list (uiop:native-namestring sb-ext:*runtime-pathname*)
+             "--noinform" "--no-userinit" "--no-sysinit" "--non-interactive"
+             "--eval" "(require :asdf)"
+             "--eval" (format nil "(push ~S asdf:*central-registry*)" (namestring (truename dir)))
+             "--eval" (format nil "(handler-bind ((warning (function muffle-warning))) (asdf:load-system ~S))" name))
+       :output :string :error-output :output :ignore-error-status t)
+    (declare (ignore err))
+    (values code out)))
+
+(test cons-strict-recompiles-fasls-written-outside-cons
+  "#960: a step outside cons -- plain ASDF in another process -- compiles a system holding a
+full WARNING and writes its fasl. cons --strict build must still fail, because --strict
+recompiles the project's own systems instead of loading that fasl. Control: plain cons build
+loads the fasl without compiling it and exits 0, which is the silent pass --strict exists to
+prevent."
+  (%with-cons-targets (dir name "outside" *strict-warning-source* "(build :load ~S)")
+    (multiple-value-bind (code out) (%plain-load-in-child dir name)
+      (is (eql 0 code) "the plain load outside cons must succeed and write the fasl, got ~A:~%~A" code out))
+    (multiple-value-bind (code out) (%cons-target-in-child dir "build")
+      (is (eql 0 code) "control: plain cons build loads the warm fasl and exits 0, got ~A:~%~A" code out))
+    (multiple-value-bind (code out) (%cons-target-in-child dir "build" :strict t)
+      (is (eql 1 code) "cons --strict build must recompile and exit 1, got ~A:~%~A" code out)
+      (is (search "not a number" out) "the warning must be printed:~%~A" out))))
+
+(test cons-strict-refuses-a-target-whose-shell-command-replaces-its-load
+  "#968's review: a target with :load and :sh. cons runs :sh in place of :load, so the system
+holding a full WARNING is never loaded. Under --strict that is refused, exit 1, naming the
+target. Control: without --strict the shell command runs, exit 0, and the warning, never loaded,
+is not printed."
+  (%with-cons-targets (dir name "loadsh" *strict-warning-source*
+                       "(build-sh :load ~S :sh (\"sbcl\" \"--version\"))")
+    (multiple-value-bind (code out) (%cons-target-in-child dir "build-sh" :strict t)
+      (is (eql 1 code) "cons --strict build-sh must exit 1, got ~A:~%~A" code out)
+      (is (search "target build-sh runs a shell command (:sh)" out) "~A" out))
+    (multiple-value-bind (code out) (%cons-target-in-child dir "build-sh")
+      (is (eql 0 code) "control: without --strict the shell command runs and exits 0, got ~A:~%~A" code out)
+      (is (null (search "not a number" out)) "control: the :load never ran:~%~A" out))))
