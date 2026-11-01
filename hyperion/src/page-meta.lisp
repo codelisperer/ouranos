@@ -12,7 +12,7 @@
 ;;;;     the request's Host header, which a client chooses.
 ;;;;   - A page whose visibility is :PRIVATE (it needs sign-in) or :NOINDEX gets
 ;;;;     robots noindex plus the site's name and fallback image, and nothing about the
-;;;;     page itself.
+;;;;     page itself. An :UNLISTED page gets the full card plus robots noindex (#947).
 
 (in-package #:hyperion/page-meta)
 
@@ -297,12 +297,18 @@ arguments.
   PUBLISHED-TIME, MODIFIED-TIME, AUTHOR, SECTION
                        for an :ARTICLE only. A time is a universal time or an ISO 8601
                        string; AUTHOR is a string or a list of them.
-  VISIBILITY           required: :PUBLIC, :NOINDEX (public but kept out of search
-                       engines), or :PRIVATE (needs sign-in). Either of the last two
-                       emits robots noindex, the SITE's name as og:site_name and
-                       og:title, the fallback image, and nothing from the page's own
-                       declaration, SITE-NAME included. There is no default, so a layout
-                       that forgets to say a page is private gets an error, not a card.
+  VISIBILITY           required: :PUBLIC, :UNLISTED, :NOINDEX or :PRIVATE.
+                       :PUBLIC emits the full card. :UNLISTED emits the same full card
+                       plus robots noindex, for a page anyone with the link may see and
+                       share but that should not be listed in search results.
+                       :NOINDEX (public but kept out of search engines) and :PRIVATE
+                       (needs sign-in) emit robots noindex, the SITE's name as
+                       og:site_name and og:title, the fallback image, and nothing from
+                       the page's own declaration, SITE-NAME included. Robots noindex is
+                       a request that crawlers may ignore, and they still fetch the card
+                       of an :UNLISTED page, so content that must not be seen uses
+                       :PRIVATE. There is no default, so a layout that forgets to say a
+                       page is private gets an error, not a card.
 
 URLs are made absolute from SITE's origin. Signals PAGE-META-ERROR when SITE is NIL or a
 value cannot produce a correct tag."
@@ -310,10 +316,10 @@ value cannot produce a correct tag."
     (%fail "No site to build page-meta URLs from. Set hyperion/page-meta:*site* with MAKE-SITE, or pass :SITE."))
   (unless (member type '(:website :article))
     (%fail "A page's type must be :WEBSITE or :ARTICLE; got ~S." type))
-  (unless (member visibility '(:public :noindex :private))
-    (%fail "A page's :VISIBILITY must be given, as :PUBLIC, :NOINDEX or :PRIVATE; got ~S." visibility))
+  (unless (member visibility '(:public :unlisted :noindex :private))
+    (%fail "A page's :VISIBILITY must be given, as :PUBLIC, :UNLISTED, :NOINDEX or :PRIVATE; got ~S." visibility))
   (let ((twitter (site-twitter site)))
-    (if (eq visibility :public)
+    (if (member visibility '(:public :unlisted))
         (multiple-value-bind (image-url width height alt)
             (%choose-image image image-width image-height image-alt site)
           (let* ((site-name (or site-name (site-name site)))
@@ -351,7 +357,9 @@ value cannot produce a correct tag."
                     (when description (list (list :name "twitter:description" description)))
                     (when image-url (list (list :name "twitter:image" image-url)))
                     (when (and image-url alt) (list (list :name "twitter:image:alt" alt))))))
-            entries))
+            (if (eq visibility :unlisted)
+                (cons (list :name "robots" "noindex") entries)
+                entries)))
         ;; :NOINDEX or :PRIVATE: nothing from the page's own declaration, not even its
         ;; SITE-NAME, which a page can set to something that names its content.
         (multiple-value-bind (image-url width height alt)
