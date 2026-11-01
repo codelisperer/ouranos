@@ -1138,6 +1138,79 @@ its tag.
 
 ### Added
 
+- **`mnemosyne/query:sql` renders Microsoft Access (Jet/ACE) SQL with `:dialect :jet`**
+  (#1061). `:limit` renders as `SELECT TOP n`, with `n` written into the SQL, so it must be a
+  positive integer; Jet's `TOP` also returns rows tied with the last one on the `ORDER BY`
+  columns. `:offset` signals the new condition `mnemosyne/query:unsupported-query` when the
+  query is compiled, because Jet has no `OFFSET`. Names render in brackets (`[c].[email]`,
+  `(:quoted "First Name")` as `[First Name]`). The new forms `(:date y m d)` and
+  `(:timestamp y m d h mi s)` render as `#2026-09-14#` and `#2026-09-14 08:05:03#` on Jet and
+  are bound as ISO text on the other dialects. Values bind as `?`, and the param list is in
+  placeholder order, which is the order ADO binds them in. An aggregate in the SELECT list
+  without an alias gets one (`COUNT(*) AS [count]`, `SUM(o.total) AS [sum_total]`), avoiding
+  the names of the other columns. More than one join renders in nested parentheses, as Jet
+  requires, and `:full` and `:cross` joins signal `unsupported-query`. A leading
+  `(:distinct …)` item gives `SELECT DISTINCT TOP n`. `unsupported-query` also refuses what
+  Access rejects when it runs: `:escape` on `:like`, `:lower`, `:upper`, `:length` and
+  `:coalesce` (use `(:call :lcase …)` and the other Jet functions), `(:count (:distinct …))`,
+  `:returning`, `:on-conflict` and an INSERT of more than one row. The dialect
+  renders queries only: mnemosyne has no backend that runs them, `ddl:ddl` signals
+  `unsupported-ddl` for `:jet`, and `schema:schema-ddl` refuses it. `mnemosyne/field:Dialect`
+  has a new constructor, `D-Jet`, and `mnemosyne/field-shell:+dialects+` lists it, so Coalton
+  code that matches on `Dialect` without a wildcard arm needs a `D-Jet` arm. See
+  `mnemosyne/docs/user-guide.md`, "Dialects".
+- **`aion/sexp:read-data` can skip `;` line comments, with `:comments :skip`** (#1062), for a
+  data file a person edits by hand, such as a configuration file. A comment runs from the `;` to
+  the end of the line, and is skipped before the datum, between elements and after it; for a
+  string, a tail of only whitespace and comments is accepted. A `;` inside a string is part of
+  the string either way. A skipped comment counts toward `max-input`, so a file of nothing but
+  comments is still bounded. `#| |#` and `#;` comments are `#` forms and stay refused. The
+  default, `:comments :refuse`, refuses a comment exactly as before. Any other value signals an
+  error.
+- **hyperion/desktop: a desktop app's page can show the native open, save-as and folder dialogs,
+  on Windows, and the page receives the path the user chooses** (#986). `run-app` takes
+  `:dialogs`, default T, and on Windows passes `--dialogs` to hyperion-view, which then defines
+  `window.hyperionDialog(request)` in the app's page. It resolves to `{path}`, `{paths}` for
+  `:open-many`, `{cancelled: true}`, or `{error}`. `hyperion/desktop:dialog-onclick` renders a
+  button's onclick that shows the dialog and posts the choice to one of the app's routes with htmx,
+  as the field `path`, or `paths` (a JSON array) for `:open-many`.
+  `hyperion/desktop:dialog-request-json` renders the request on its own, and both signal
+  `hyperion/desktop:dialog-request-refused` for a request hyperion-view would refuse; its
+  `dialog-request-refused-reason` is the keyword for hyperion-view's reason (`:kind`, `:title`,
+  `:folder`, `:name`, `:filters`, `:filter-label`, `:filter-patterns` or `:pattern`). A save
+  dialog with filters starts on the first filter and adds its first pattern's extension to a name
+  typed without one. `hyperion/desktop:dialogs-available-p` says whether the
+  page has the function now; when it does not, show a field for a pasted path instead.
+  - **The page's script receives the path, which says something about the user's machine.** The
+    function exists only in the top-level frame and only while it shows the origin of the URL
+    `run-app` started with: iframes, and pages from any other origin, do not get it. A call
+    without the token hyperion-view makes at each launch is refused by hyperion-view itself, and a
+    call made outside a user action (a click or a key) is refused where the webview can tell: on
+    Windows (WebView2) and on macOS 13.3 and later. The answer is delivered only while the window
+    still shows the app's origin, so a page the window has gone to since the call does not receive
+    the path. One dialog is shown at a time; a second call gets `{error: "busy"}`. A `folder` must be a
+    local drive path (`C:\Users`, `c:/data`), and any other folder is refused, because other forms
+    (`\\host\share`, `file://host/share`) reach a network share, and opening one makes Windows
+    send the user's credentials to that host. An app that shows
+    third-party content in its window should pass `:dialogs nil`.
+  - **Only Windows shows a dialog in this change.** On macOS and Linux `run-app` does not pass
+    `--dialogs`, so a hyperion-view built before this change still starts there; the page has no
+    `window.hyperionDialog`, and `dialogs-available-p` is NIL. Their dialogs follow in separate
+    changes. A view built with this change answers `{error: "unavailable"}` there if it is started
+    with `--dialogs` directly.
+  - hyperion-view gains `--dialogs`, `--exit-after SECONDS` (closes the window after SECONDS, for
+    tests), and two modes that make no window: `--dialog-request TOKEN PARAMS` prints how a call is
+    checked, and `--dialog-origin URL` prints the origin the function is offered to. With
+    `--dialogs`, hyperion-view exits 2 if it cannot make the launch's token or the URL has no
+    origin. For tests, `HYPERION_VIEW_FAKE_DIALOG=1`, honoured only when `GITHUB_ACTIONS` is set
+    too, answers every call with `{path: "fake-path"}` after three seconds, shows no dialog, skips
+    the user-action check, and says so on stderr. On Windows, a
+    hyperion-view built before this change refuses `--dialogs` as an unknown option and opens no
+    window, so rebuild it with `hyperion/hyperion-view/build.ps1` (it now links `uuid.lib` and
+    `bcrypt.lib`).
+  - `aion/test-http`'s `start-server` and `with-server` take `:concurrent`, which serves each
+    connection on a thread of its own, so a connection that sends nothing, as a browser opens,
+    does not hold up the next request. The default is unchanged.
 - **aion/retry: a retry policy as data, and `with-retry`, which retries through restarts**
   (#79). `make-retry-policy` takes `:max-attempts`, `:base-delay`, `:multiplier`, `:max-delay`,
   `:jitter` (`:full`, `:equal` or `:none`), `:deadline` and `:retryable`, and `retry-delay`
@@ -1280,6 +1353,20 @@ its tag.
   with nonces; the region's script handles the click. The fixed texts are the i18n keys
   `:notice/failed`, `:notice/unreachable`, `:notice/timeout` and `:notice/dismiss`. See `hyperion/docs/notice.md`. A notice is not stored; the notification list
   is #792.
+- **aion/windows/com: `variant-to-lisp` reads a one-dimensional SAFEARRAY, so a long-binary
+  value arrives as an octet vector** (#964). `VT_ARRAY|VT_UI1` (8209), the type of an ADO or DAO
+  long-binary column, of `GetChunk` and of an Automation `byte[]`, signalled "no Lisp mapping for
+  VARIANT type 8209"; it is now an `(unsigned-byte 8)` vector. Arrays of the integer and float
+  types, of `VT_BOOL` (as `T` and `NIL`), of `VT_BSTR` and of `VT_VARIANT` become simple vectors,
+  and a NULL array is an empty vector; a NULL BSTR element is NIL, as a single NULL BSTR is. A single `VT_I1` or `VT_UINT` value, which signalled before, is now read
+  as an integer too. A multi-dimensional array, an array of any other element type and a
+  `VT_ARRAY|VT_BYREF` value signal `com-error` with the reason. The elements are copied out under
+  `SafeArrayAccessData`, and the array is unlocked however the copy ends; when the copy signalled
+  and the unlock fails too, the copy's error is signalled and the unlock failure is a
+  `safearray-unlock-failed` warning, which carries the HRESULT. The VARIANT's owner frees the
+  array, as before. New in
+  `aion/windows/com/ffi`: `+vt-array+`, `safearraybound` and the oleaut32 SAFEARRAY functions
+  (`safe-array-get-dim`, `safe-array-access-data` and the rest).
 - **`mnemosyne/test-template`: a test suite can migrate one SQLite database per run and give
   each test a copy** (#1047). `make-sqlite-template` applies an app's migrations to an in-memory
   database once (`:setup` configures its connection first); `copy-sqlite-template` and
