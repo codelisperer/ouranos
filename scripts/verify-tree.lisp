@@ -135,6 +135,11 @@
 (load (merge-pathnames "caught-errors.lisp"
                        (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
 
+;;; A compiled system whose /tests system nothing runs (#992). Split out so that
+;;; checkers/tests can hand it a fixture tree; CHECK-UNRUN-SUITES below calls it.
+(load (merge-pathnames "unrun-suites.lisp"
+                       (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
+
 ;;; The NOT COVERED section (#182). Split out for the same reason as the two above, so a test
 ;;; can hand the printer known inputs; REPORT-NOT-COVERED below passes it this run's state.
 (load (merge-pathnames "not-covered.lisp"
@@ -1125,6 +1130,20 @@ let this run claim `view' while the five assertions skipped."
         (:built
          (format t "  ok      built in ~,1F s~%" (seconds-since start))))))
   *view-state*)
+(defun check-unrun-suites ()
+  "Fail for each system this run compiles whose <system>/tests suite this run does not run,
+either directly or as a dependency of a suite it runs (#992). Before #992 such a suite was
+noticed only when someone saw that a new suite's first commit left the total unchanged."
+  (format t "~%========== SUITES THE RUN LIST MUST NAME (#992) ==========~%")
+  (let ((unrun (ouranos-unrun-suites:unrun-suites (all-systems) (all-test-systems))))
+    (if (null unrun)
+        (format t "  ok      every compiled system's /tests suite is run~%")
+        (dolist (pair unrun)
+          (format t "  FAIL    ~a has ~a, which the gate does not run~%" (car pair) (cdr pair))
+          (fail "~a is compiled and ~a exists, but the gate does not run it: ~a"
+                (car pair) (cdr pair)
+                "add it to +TEST-SYSTEMS+, or to the axis list beside its system")))))
+
 (defun seconds-since (start)
   (/ (float (- (get-internal-real-time) start)) internal-time-units-per-second))
 
@@ -1135,6 +1154,10 @@ let this run claim `view' while the five assertions skipped."
   ;; (pre-publication issue 410). Best effort: a host that cannot build declines the axis and says so, rather than
   ;; failing a gate over a C++ toolchain.
   (build-view-launcher)
+
+  ;; Before LOADING, because it reads only .asd files and a missing suite is cheaper to
+  ;; report than to discover from an unchanged total.
+  (check-unrun-suites)
 
   (format t "~%========== LOADING (each in its own image) ==========~%")
   (dolist (s (all-systems))
