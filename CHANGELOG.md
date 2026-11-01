@@ -1092,6 +1092,14 @@ its tag.
 
 ### Added
 
+- **`aion/sexp:read-data` can skip `;` line comments, with `:comments :skip`** (#1062), for a
+  data file a person edits by hand, such as a configuration file. A comment runs from the `;` to
+  the end of the line, and is skipped before the datum, between elements and after it; for a
+  string, a tail of only whitespace and comments is accepted. A `;` inside a string is part of
+  the string either way. A skipped comment counts toward `max-input`, so a file of nothing but
+  comments is still bounded. `#| |#` and `#;` comments are `#` forms and stay refused. The
+  default, `:comments :refuse`, refuses a comment exactly as before. Any other value signals an
+  error.
 - **aion/retry: a retry policy as data, and `with-retry`, which retries through restarts**
   (#79). `make-retry-policy` takes `:max-attempts`, `:base-delay`, `:multiplier`, `:max-delay`,
   `:jitter` (`:full`, `:equal` or `:none`), `:deadline` and `:retryable`, and `retry-delay`

@@ -70,7 +70,7 @@ exponent is bounded separately, by the range of a double float.")
 ;;; --- reading --------------------------------------------------------------------------------
 
 (defstruct (%reader (:conc-name %r-))
-  stream (position 0) (elements 0) symbols intern-keywords
+  stream (position 0) (elements 0) symbols intern-keywords (comments :refuse)
   max-depth max-elements max-string-length max-number-digits max-input)
 
 (defun %peek (r)
@@ -89,7 +89,13 @@ exponent is bounded separately, by the range of a double float.")
     (%unsafe :too-many-elements (%r-position r) "more than ~D elements" (%r-max-elements r))))
 
 (defun %skip-whitespace (r)
-  (loop for c = (%peek r) while (and c (%whitespace-p c)) do (%next r)))
+  "Skip whitespace and, when the reader's COMMENTS is :SKIP, ; line comments: from the ; to the
+end of the line. A comment is read through %NEXT, so it counts toward MAX-INPUT (#1062)."
+  (loop for c = (%peek r)
+        while (and c (or (%whitespace-p c) (and (char= c #\;) (eq (%r-comments r) :skip))))
+        do (if (char= c #\;)
+               (loop for d = (%next r) until (or (null d) (char= d #\Newline)))
+               (%next r))))
 
 (defun %refuse-character (r c)
   "Signal UNSAFE-DATA for C, a character that cannot start a datum here."
@@ -318,7 +324,7 @@ is read."
             (t (%count-element r)
                (finish (%read-atom r)))))))))
 
-(defun read-data (source &key symbols intern-keywords
+(defun read-data (source &key symbols intern-keywords (comments :refuse)
                               (max-depth *max-depth*) (max-elements *max-elements*)
                               (max-string-length *max-string-length*)
                               (max-number-digits *max-number-digits*) (max-input *max-input*))
@@ -335,15 +341,24 @@ FLOATS: the exponent marker decides the type whatever *READ-DEFAULT-FLOAT-FORMAT
 S, and no marker, give a single float; D and L a double float.
 
 Refused, each with its reason: every # form (#S, #., #+, #-, #P, #A, #n=, #(, #\\ and the rest),
-quote, backquote and comma, |escaped| symbols, package prefixes, comments, a symbol that is not
-allowed, and input past a limit. The limits are the keyword arguments, defaulting to the
-variables of the same names.
+quote, backquote and comma, |escaped| symbols, package prefixes, comments unless COMMENTS is
+:SKIP, a symbol that is not allowed, and input past a limit. The limits are the keyword
+arguments, defaulting to the variables of the same names.
 
-For a string, text after the datum other than whitespace is refused; for a stream, the stream
-is left just after the datum."
+COMMENTS is :REFUSE, the default, or :SKIP (#1062). :SKIP skips ; line comments, from the ; to
+the end of the line, before the datum, between elements and after it, for a data file a person
+edits by hand, such as a configuration file. A ; inside a string is part of the string either
+way. A skipped comment counts toward MAX-INPUT. #| |# and #; comments are # forms, refused
+either way.
+
+For a string, text after the datum is refused unless it is whitespace, or whitespace and
+comments under :SKIP; for a stream, the stream is left just after the datum."
+  (unless (member comments '(:refuse :skip))
+    (error "aion/sexp: :COMMENTS must be :REFUSE or :SKIP, not ~S." comments))
   (let* ((stream (if (stringp source) (make-string-input-stream source) source))
          (r (progn (%check-symbols-argument symbols)
                    (make-%reader :stream stream :symbols symbols :intern-keywords intern-keywords
+                                 :comments comments
                           :max-depth max-depth :max-elements max-elements
                           :max-string-length max-string-length
                           :max-number-digits max-number-digits :max-input max-input)))

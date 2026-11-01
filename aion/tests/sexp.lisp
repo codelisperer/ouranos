@@ -255,3 +255,62 @@ single float, reads as zero, as READ-DATA's docstring says."
   (is (eq :unknown-symbol (reason (sexp:read-data (string (code-char #x663))))))
   (is (eql 0.1 (sexp:read-data "1e-0000001")))
   (is (eql 0.0 (sexp:read-data "1e-50"))))
+
+;;; --- comments, refused by default and skipped on request (#1062) ----------------------------
+
+(test a-comment-is-refused-by-default
+  "Unchanged by #1062. A comment after a whole datum in a string is refused as text after the
+datum, reason :SYNTAX, as it was before."
+  (dolist (case '(("; a comment
+1" :comment) ("(1 ; one
+ 2)" :comment) ("(1 2) ; after" :syntax)))
+    (destructuring-bind (input expected) case
+      (is (eq expected (reason (sexp:read-data input))) "~S" input)
+      (is (eq expected (reason (sexp:read-data input :comments :refuse))) "~S" input))))
+
+(test skip-skips-line-comments-before-between-and-after-the-datum
+  (dolist (case '(("; a config file
+;; with a header
+(:port 8080)" (:port 8080))
+                  ("(:port 8080 ; the default
+ :host \"localhost\") ; the end
+; and a last line with no newline" (:port 8080 :host "localhost"))
+                  ("(1;one
+2;two
+. 3)" (1 2 . 3))
+                  ("42; the answer" 42)))
+    (destructuring-bind (input expected) case
+      (is (equal expected (sexp:read-data input :comments :skip)) "~S" input))))
+
+(test a-semicolon-in-a-string-is-part-of-the-string-in-both-modes
+  (is (equal '("a;b" "; c") (sexp:read-data "(\"a;b\" \"; c\")")))
+  (is (equal '("a;b" "; c") (sexp:read-data "(\"a;b\" \"; c\") ; real" :comments :skip))))
+
+(test a-skipped-comment-counts-toward-max-input
+  "A file of nothing but comments is still bounded."
+  (let ((comments (with-output-to-string (s)
+                    (dotimes (i 100) (format s ";; line ~D~%" i)))))
+    (is (eq :input-too-long (reason (sexp:read-data comments :comments :skip :max-input 500))))
+    (is (eq :end-of-input (reason (sexp:read-data comments :comments :skip))))
+    (is (eq :input-too-long
+            (reason (sexp:read-data (format nil "; ~A~%1" (make-string 20 :initial-element #\x))
+                                    :comments :skip :max-input 20))))
+    (is (eql 1 (sexp:read-data (format nil "; ~A~%1" (make-string 20 :initial-element #\x))
+                               :comments :skip :max-input 24)))))
+
+(test block-and-datum-comments-stay-refused-in-both-modes
+  (dolist (input '("#| block |# 1" "(1 #| block |# 2)" "#;(ignored) 1" "(1 #;2 3)"))
+    (dolist (mode '(:refuse :skip))
+      (is (eq :dispatch-macro (reason (sexp:read-data input :comments mode))) "~S ~S" input mode))))
+
+(test skip-leaves-a-stream-just-after-the-datum
+  (with-input-from-string (in "; first
+(1) ; between
+; more
+(2) ; after")
+    (is (equal '(1) (sexp:read-data in :comments :skip)))
+    (is (equal '(2) (sexp:read-data in :comments :skip)))))
+
+(test the-comments-argument-must-be-refuse-or-skip
+  (signals error (sexp:read-data "1" :comments t))
+  (signals error (sexp:read-data "1" :comments :allow)))
