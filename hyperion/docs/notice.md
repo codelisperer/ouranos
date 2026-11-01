@@ -23,8 +23,12 @@ anything. A success says what was done. Leave out error codes, a bare "Error!", 
 marks. Where the notice appears and how it is styled already show its severity.
 
 Each notice is a `div` with `data-hyperion-notice` set to its severity. It has the classes
-`hyperion-notice` and `hyperion-notice-<severity>`, a `p` holding the message, and a button that
-removes it. The app styles these classes; hyperion ships no stylesheet for them.
+`hyperion-notice` and `hyperion-notice-<severity>`, a `p` holding the message, and a Dismiss
+button. The button has no handler of its own: the region's script removes the notice when its
+button is clicked, with one click listener on the document. An inline `onclick` would be refused
+under a Content-Security-Policy that allows scripts by nonce, because a nonce covers `<script>`
+elements and not event-handler attributes. The app styles these classes; hyperion ships no
+stylesheet for them.
 
 ## The region
 
@@ -41,7 +45,7 @@ containers are written with the page and stay empty until a notice arrives. The 
 region inside another live region twice.
 
 `:notices` takes a list of `(severity message)` pairs to show when the page loads. The fixed texts
-are `:notice/failed`, `:notice/unreachable` and `:notice/dismiss`. They come from `:locale` and
+are `:notice/failed`, `:notice/unreachable`, `:notice/timeout` and `:notice/dismiss`. They come from `:locale` and
 `:source` like the list component's text, in English when a key is missing.
 
 ## htmx error responses
@@ -58,8 +62,10 @@ one of two things:
 - otherwise a notice with `:notice/failed` is added. This covers an empty body, or a server's whole
   HTML error page.
 
-The script also listens for `htmx:sendError`, which htmx fires when no response arrived, and adds
-`:notice/unreachable`.
+The script also listens for `htmx:sendError`, which htmx fires when the request failed without a
+response, and adds `:notice/unreachable`. A request that runs past `htmx.config.timeout`, or the
+`timeout` in `hx-request`, fires `htmx:timeout` instead in htmx 2.0.11, and the script adds
+`:notice/timeout`.
 
 So to explain an error to the user, return the notice as the body of the error response:
 
@@ -84,12 +90,15 @@ own `responseHandling`, or its own `htmx:beforeSwap` listener that runs first an
 
 ### Turning it off
 
-- `(notice-region :htmx-errors nil)` writes the region without the script.
+- `(notice-region :htmx-errors nil)` leaves htmx errors to the app. The script is still written,
+  because Dismiss needs it, and the region is marked `data-htmx-errors="off"`.
+- `(notice-region :script nil)` writes no script, for an app that serves `(notices-script)` itself.
+  Without the script, no Dismiss button works.
 - An element with `data-hyperion-notices="off"`, or inside one, is left to the app: its error
   responses are not shown in the region.
 - For a Content-Security-Policy with nonces, pass `:nonce`. For one that allows scripts only from
   the app's origin or by hash, serve `(notices-script)` from a route or hash it, and pass
-  `:htmx-errors nil`.
+  `:script nil`.
 
 ## There is no page shell
 
@@ -102,14 +111,18 @@ unchanged.
 - `hyperion/tests`, suite `notice`: the markup, the containers' roles and `aria-live`, where each
   severity goes, the script and its opt-out, the nonce, and translation.
 - `hyperion/assets/tests`, `the-notice-region-shows-htmx-error-responses-in-a-real-browser`: a page
-  with the vendored htmx 2.0.11 and the region, run in a headless Chrome or Edge. It checks the six
-  cases above:
+  with the vendored htmx 2.0.11 and the region, run in a headless Chrome or Edge, served with
+  `Content-Security-Policy: script-src 'nonce-...'` and the region written with `:nonce`. It checks
+  these cases:
   - a 422 notice;
   - a 500 error page;
   - a refused connection;
   - the opt-out;
   - an app's own swap;
-  - a 200 with `notice-oob`.
+  - a 200 with `notice-oob`;
+  - a request that times out (the page makes that request's XHR report a timeout, because headless
+    Chrome's virtual time does not run while a request is in flight);
+  - a Dismiss click.
 
   It skips where no browser is found. The GitHub runners for all three operating systems have
   Chrome.

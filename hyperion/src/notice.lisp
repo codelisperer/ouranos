@@ -19,7 +19,16 @@
 ;;;; the response's status is 400 or more and htmx is not going to swap it, the script adds the
 ;;;; response's notices (elements with data-hyperion-notice, as NOTICE writes them) to the region,
 ;;;; or, when it has none, a notice with a fixed message. It also listens for htmx:sendError, which
-;;;; htmx fires when no response arrived, and shows a second fixed message.
+;;;; htmx fires when the request failed without a response, and shows a second fixed message, and
+;;;; for htmx:timeout, which htmx 2.0.11 fires instead of htmx:sendError when htmx.config.timeout
+;;;; or hx-request's timeout ran out, and shows a third.
+;;;;
+;;;; DISMISS. Each notice's Dismiss button has no handler of its own. The same script handles a
+;;;; click on any .hyperion-notice-dismiss with one listener on the document, which removes the
+;;;; notice holding the button. An inline onclick attribute would be refused under a
+;;;; Content-Security-Policy that allows scripts by nonce, because a nonce applies to <script>
+;;;; elements and not to event-handler attributes (the hub's review of #1004). So the script is
+;;;; written even with :HTMX-ERRORS NIL, which turns off only the handling of htmx errors.
 ;;;;
 ;;;; WHY AN EVENT LISTENER AND NOT htmx.config.responseHandling. responseHandling can send an error
 ;;;; response to a target, but it swaps whatever the body is: it cannot put a fixed message in place
@@ -32,9 +41,11 @@
 ;;;; the version hyperion/assets vendors, passes to htmx:beforeSwap: xhr, elt, shouldSwap and
 ;;;; serverResponse.
 ;;;;
-;;;; TURNING IT OFF. NOTICE-REGION :HTMX-ERRORS NIL writes the region without the script. An
-;;;; element with data-hyperion-notices="off", or inside one, is left to the app: its error
-;;;; responses are not shown here.
+;;;; TURNING IT OFF. NOTICE-REGION :HTMX-ERRORS NIL marks the region data-htmx-errors="off", and the
+;;;; script then shows no htmx errors and only handles Dismiss. An element with
+;;;; data-hyperion-notices="off", or inside one, is left to the app: its error responses are not
+;;;; shown here. NOTICE-REGION :SCRIPT NIL writes no script, for an app that serves NOTICES-SCRIPT
+;;;; itself.
 
 (in-package #:hyperion/notice)
 
@@ -49,6 +60,7 @@ happened, or can still happen, but the user should know something first. :SUCCES
 (defparameter +english+
   '(:notice/failed "That did not work. Please try again."
     :notice/unreachable "The server could not be reached. Check the connection and try again."
+    :notice/timeout "The server took too long to answer. Please try again."
     :notice/dismiss "Dismiss")
   "The English text for every key this package looks up; used when there is no source, or when
 the source has the key in neither the requested nor its default locale.")
@@ -67,19 +79,22 @@ the source has the key in neither the requested nor its default locale.")
   (if (eq severity :error) +alert-id+ +status-id+))
 
 (defparameter +notices-script+
-  "(function(){if(window.hyperionNotices)return;window.hyperionNotices=true;function region(){return document.getElementById('hyperion-notices');}function off(elt){return !!(elt&&elt.closest&&elt.closest('[data-hyperion-notices=\"off\"]'));}function place(nodes){for(var i=0;i<nodes.length;i++){var n=nodes[i];var id=n.getAttribute('data-hyperion-notice')==='error'?'hyperion-notices-alert':'hyperion-notices-status';var box=document.getElementById(id);if(box)box.appendChild(n);}}function fixed(r,key){var n=document.createElement('div');n.className='hyperion-notice hyperion-notice-error';n.setAttribute('data-hyperion-notice','error');var p=document.createElement('p');p.textContent=r.getAttribute(key)||'';n.appendChild(p);var b=document.createElement('button');b.type='button';b.className='hyperion-notice-dismiss';b.textContent=r.getAttribute('data-dismiss')||'';b.setAttribute('onclick',\"this.closest('[data-hyperion-notice]').remove()\");n.appendChild(b);return [n];}document.addEventListener('htmx:beforeSwap',function(e){var d=e.detail,x=d.xhr,r=region();if(!r||!x||x.status<400||d.shouldSwap||off(d.elt))return;var t=document.createElement('template');t.innerHTML=typeof d.serverResponse==='string'?d.serverResponse:'';var found=Array.prototype.slice.call(t.content.querySelectorAll('[data-hyperion-notice]'));place(found.length?found:fixed(r,'data-failed'));});document.addEventListener('htmx:sendError',function(e){var r=region();if(!r||off(e.detail.elt))return;place(fixed(r,'data-unreachable'));});})();"
-  "The script NOTICE-REGION writes with :HTMX-ERRORS T; see this file's header. The fixed
-messages and the dismiss label come from the region's data-failed, data-unreachable and
-data-dismiss attributes, so the script itself holds no text to translate.")
+  "(function(){if(window.hyperionNotices)return;window.hyperionNotices=true;function region(){return document.getElementById('hyperion-notices');}function htmxOff(r){return r.getAttribute('data-htmx-errors')==='off';}function off(elt){return !!(elt&&elt.closest&&elt.closest('[data-hyperion-notices=\"off\"]'));}function place(nodes){for(var i=0;i<nodes.length;i++){var n=nodes[i];var id=n.getAttribute('data-hyperion-notice')==='error'?'hyperion-notices-alert':'hyperion-notices-status';var box=document.getElementById(id);if(box)box.appendChild(n);}}function fixed(r,key){var n=document.createElement('div');n.className='hyperion-notice hyperion-notice-error';n.setAttribute('data-hyperion-notice','error');var p=document.createElement('p');p.textContent=r.getAttribute(key)||'';n.appendChild(p);var b=document.createElement('button');b.type='button';b.className='hyperion-notice-dismiss';b.textContent=r.getAttribute('data-dismiss')||'';n.appendChild(b);return [n];}document.addEventListener('click',function(e){var t=e.target;var b=t&&t.closest?t.closest('.hyperion-notice-dismiss'):null;var n=b&&b.closest('[data-hyperion-notice]');if(n)n.remove();});document.addEventListener('htmx:beforeSwap',function(e){var d=e.detail,x=d.xhr,r=region();if(!r||htmxOff(r)||!x||x.status<400||d.shouldSwap||off(d.elt))return;var t=document.createElement('template');t.innerHTML=typeof d.serverResponse==='string'?d.serverResponse:'';var found=Array.prototype.slice.call(t.content.querySelectorAll('[data-hyperion-notice]'));place(found.length?found:fixed(r,'data-failed'));});function noResponse(key){return function(e){var r=region();if(!r||htmxOff(r)||off(e.detail.elt))return;place(fixed(r,key));};}document.addEventListener('htmx:sendError',noResponse('data-unreachable'));document.addEventListener('htmx:timeout',noResponse('data-timeout'));})();"
+  "The script NOTICE-REGION writes; see this file's header. It makes every notice's Dismiss button
+work, and shows htmx error responses unless the region has data-htmx-errors=\"off\". The fixed
+messages and the dismiss label come from the region's data-failed, data-unreachable, data-timeout
+and data-dismiss attributes, so the script itself holds no text to translate.")
 
 (defun notices-script ()
-  "The script NOTICE-REGION writes with :HTMX-ERRORS T, as a string. For an app whose
-Content-Security-Policy allows scripts only from its own origin or by hash: serve this from a
-route, or hash it, and call NOTICE-REGION with :HTMX-ERRORS NIL."
+  "The script NOTICE-REGION writes, as a string. For an app whose Content-Security-Policy allows
+scripts only from its own origin or by hash: serve this from a route, or hash it, and call
+NOTICE-REGION with :SCRIPT NIL. Without it no notice's Dismiss button works."
   +notices-script+)
 
 (defun notice (severity message &key (locale "en") (source i18n:*translation-source*))
-  "Write one notice into SPINNERET:*HTML*: MESSAGE, with a button that removes it. SEVERITY is
+  "Write one notice into SPINNERET:*HTML*: MESSAGE, with a Dismiss button, which NOTICE-REGION's
+script makes remove the notice (the button has no inline handler, which a Content-Security-Policy
+with nonces would refuse). SEVERITY is
 :ERROR, :WARNING or :SUCCESS (see +SEVERITIES+). The notice carries data-hyperion-notice, set to
 the severity, and the classes hyperion-notice and hyperion-notice-SEVERITY; the app styles them.
 
@@ -99,7 +114,6 @@ add it with NOTICE-OOB. On a page rendered whole, pass it to NOTICE-REGION as :N
             :data-hyperion-notice name
         (:p message)
         (:button :type "button" :class "hyperion-notice-dismiss"
-                 :onclick "this.closest('[data-hyperion-notice]').remove()"
           (%text locale :notice/dismiss source))))))
 
 (defun notice-oob (severity message &rest options &key locale source)
@@ -112,7 +126,7 @@ the notice, into the region's container for SEVERITY with beforeend; the wrapper
     (:div :hx-swap-oob (format nil "beforeend:#~A" (%container-id severity))
       (apply #'notice severity message options))))
 
-(defun notice-region (&key notices (htmx-errors t) nonce (locale "en")
+(defun notice-region (&key notices (htmx-errors t) (script t) nonce (locale "en")
                            (source i18n:*translation-source*))
   "Write the place notices appear into SPINNERET:*HTML*, once per page, where they should show.
 It is a div#hyperion-notices holding two containers: div#hyperion-notices-alert, role=\"alert\"
@@ -121,15 +135,20 @@ and aria-live=\"polite\", for :WARNING and :SUCCESS ones.
 
 NOTICES is a list of (SEVERITY MESSAGE) to show when the page loads, each written with NOTICE.
 
-With HTMX-ERRORS true, the default, it also writes +NOTICES-SCRIPT+, which shows an htmx error
-response here instead of letting htmx 2 drop it; see this file's header. The fixed messages are
-:notice/failed and :notice/unreachable from LOCALE and SOURCE, in English when a key is missing.
-NONCE, when given, is written on the script for a Content-Security-Policy that uses nonces."
+With SCRIPT true, the default, it also writes +NOTICES-SCRIPT+, which makes every notice's Dismiss
+button work and, with HTMX-ERRORS true, the default, shows an htmx error response here instead of
+letting htmx 2 drop it; see this file's header. HTMX-ERRORS NIL leaves htmx errors to the app and
+keeps Dismiss working. SCRIPT NIL writes no script, for an app that serves NOTICES-SCRIPT itself.
+The fixed messages are :notice/failed, :notice/unreachable and :notice/timeout from LOCALE and
+SOURCE, in English when a key is missing. NONCE, when given, is written on the script for a
+Content-Security-Policy that uses nonces."
   (spin:with-html
     (:div :id +region-id+ :class "hyperion-notices"
           :data-failed (%text locale :notice/failed source)
           :data-unreachable (%text locale :notice/unreachable source)
+          :data-timeout (%text locale :notice/timeout source)
           :data-dismiss (%text locale :notice/dismiss source)
+          :data-htmx-errors (unless htmx-errors "off")
       (:div :id +alert-id+ :role "alert" :aria-live "assertive"
         (loop for (severity message) in notices
               when (eq (%check-severity severity) :error)
@@ -138,5 +157,5 @@ NONCE, when given, is written on the script for a Content-Security-Policy that u
         (loop for (severity message) in notices
               unless (eq severity :error)
                 do (notice severity message :locale locale :source source))))
-    (when htmx-errors
+    (when script
       (:script :nonce nonce (:raw +notices-script+)))))

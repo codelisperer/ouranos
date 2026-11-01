@@ -22,6 +22,8 @@
       (is (search "The draft was saved." html) "~A: ~A" severity html)
       (is (search "hyperion-notice-dismiss" html) "~A: ~A" severity html)
       (is (search ">Dismiss<" html) "~A: ~A" severity html)
+      (is (null (search "onclick" html))
+          "no inline handler, which a Content-Security-Policy with nonces refuses: ~A" html)
       (is (null (search "role=" html))
           "the role is on the region's container, not the notice, so it is not announced twice: ~A" html)))
   (signals error (%notice-html #'hyperion/notice:notice :info "x"))
@@ -53,8 +55,14 @@
     (is (search (hyperion/notice:notices-script) html) "the script is written whole: ~A" html)
     (is (search "data-failed=\"That did not work. Please try again.\"" html) "~A" html)
     (is (search "data-unreachable=" html) "~A" html)
-    (is (search "data-dismiss=Dismiss" html) "~A" html))
+    (is (search "data-timeout=\"The server took too long to answer. Please try again.\"" html) "~A" html)
+    (is (search "data-dismiss=Dismiss" html) "~A" html)
+    (is (null (search "data-htmx-errors=" html)) "the region's htmx handling is on: ~A" html))
+  ;; :HTMX-ERRORS NIL keeps the script, which Dismiss needs, and turns its htmx handling off.
   (let ((html (%notice-html #'hyperion/notice:notice-region :htmx-errors nil)))
+    (is (search (hyperion/notice:notices-script) html) "the script is still written: ~A" html)
+    (is (search "data-htmx-errors=off" html) "~A" html))
+  (let ((html (%notice-html #'hyperion/notice:notice-region :script nil)))
     (is (null (search "<script" html)) "~A" html)
     (is (search "id=hyperion-notices-alert" html) "the region is still written: ~A" html))
   (is (search "<script nonce=abc123>" (%notice-html #'hyperion/notice:notice-region :nonce "abc123"))))
@@ -69,8 +77,21 @@
     (is (search "d.shouldSwap" js) "only when htmx is not going to swap it")
     (is (search "[data-hyperion-notices=\"off\"]" js) "not under data-hyperion-notices=off")
     (is (search "addEventListener('htmx:sendError'" js) "and when no response arrived")
+    (is (search "addEventListener('htmx:timeout'" js)
+        "and when the request timed out, which htmx 2.0.11 reports as htmx:timeout, not htmx:sendError")
+    (is (search "'data-timeout'" js) "with its own message")
+    (is (search "htmxOff(r)" js) "none of it when the region has data-htmx-errors=off")
     (is (search "textContent" js) "the fixed messages are written as text")
     (is (null (search "innerHTML=r." js)) "and never as HTML")))
+
+(test the-script-handles-dismiss-with-one-listener-and-no-inline-handler
+  "The hub's review of #1004: an inline onclick is refused under a Content-Security-Policy with
+nonces, so Dismiss is one click listener on the document. Whether a click removes the notice under
+such a policy is checked in hyperion/assets/tests (notice-smoke-tests.lisp)."
+  (let ((js (hyperion/notice:notices-script)))
+    (is (search "addEventListener('click'" js))
+    (is (search "closest('.hyperion-notice-dismiss')" js))
+    (is (null (search "onclick" js)) "~A" js)))
 
 (test notice-oob-adds-the-notice-to-its-severitys-container
   (is (search "hx-swap-oob=beforeend:#hyperion-notices-alert"
