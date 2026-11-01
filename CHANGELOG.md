@@ -50,6 +50,16 @@ its tag.
   missing scope names are a third value. An app that shows "reconnect" for `:reconnect` shows it
   for `:missing-permission` too, and can name the permission. The statuses are the exported type
   `facebook-page-status`, documented value by value.
+- **A page that writes `hyperion/notice:notice-region` shows htmx error responses that it used
+  to drop** (#980). htmx 2 does not swap a 4xx or 5xx response, so an error answer to an htmx
+  request showed the user nothing. The region's script now adds the response's notices to the
+  region, or a fixed message when it has none (`:notice/failed`), `:notice/unreachable` when the
+  request failed without a response (`htmx:sendError`), and `:notice/timeout` when it timed out
+  (`htmx:timeout`). A page without the region is unchanged. Before adding the region, check what
+  the app's error responses say, because users will now read them. An element whose error responses
+  the app handles itself takes `data-hyperion-notices="off"`; `(notice-region :htmx-errors nil)`
+  turns the htmx handling off, and the script then only makes Dismiss work. The script does not act on a response the app already swaps, through
+  `htmx.config.responseHandling` or its own `htmx:beforeSwap` listener.
 - **`mnemosyne/migrate:migrate` logs each applied migration at DEBUG and one INFO line per
   call** (#1046). The per-migration line `"migrate: applied"` (with `id`, `description` and `ms`)
   is now DEBUG, as is `"migrate: applying"`. A call that had migrations to apply ends with one
@@ -1257,6 +1267,19 @@ its tag.
     an app that shows a trace and means to. Logs stay without it either way.
 
   A sub-agent delegated to from a private agent's turn runs under the same rules.
+- **hyperion/notice: in-page notices for an error, a warning or a success** (#980). In core
+  `hyperion`:
+  - `notice` writes one notice;
+  - `notice-oob` writes one for an htmx response to add out of band;
+  - `notice-region` writes the place they appear, with errors in `role="alert"
+    aria-live="assertive"` and the rest in `role="status" aria-live="polite"`;
+  - `notices-script` returns the region's script, for a Content-Security-Policy that needs it
+    served or hashed; pass `:script nil` to `notice-region` then.
+
+  A notice's Dismiss button has no inline handler, so it works under a Content-Security-Policy
+  with nonces; the region's script handles the click. The fixed texts are the i18n keys
+  `:notice/failed`, `:notice/unreachable`, `:notice/timeout` and `:notice/dismiss`. See `hyperion/docs/notice.md`. A notice is not stored; the notification list
+  is #792.
 - **`mnemosyne/test-template`: a test suite can migrate one SQLite database per run and give
   each test a copy** (#1047). `make-sqlite-template` applies an app's migrations to an in-memory
   database once (`:setup` configures its connection first); `copy-sqlite-template` and

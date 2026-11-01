@@ -108,6 +108,7 @@
                              (:file "i18n")     ; locale dictionaries + negotiation
                              (:file "page-meta") ; Open Graph + Twitter-card tags (#821); after i18n
                              (:file "consent")  ; cookie/tracking consent (GDPR/ePrivacy)
+                             (:file "notice")   ; in-page notices; htmx error responses shown (#980)
                              (:file "appearance") ; theme, contrast and look, and the --hy-* tokens (#981)
                              (:file "static")   ; static asset serving
                              (:file "markdown") ; Markdown -> HTML (safe by default)
@@ -426,6 +427,8 @@
   :serial t
   :components ((:file "tests/assets-tests")
                (:file "tests/htmx-smoke-tests")
+               ;; after htmx-smoke-tests, whose browser helpers it uses (#980)
+               (:file "tests/notice-smoke-tests")
                (:file "tests/kit-browser-tests"))   ; uses the smoke page's browser helpers
   :perform (test-op (o c) (uiop:symbol-call :hyperion/assets/tests :run-tests)))
 
@@ -757,6 +760,7 @@
                              (:file "same-origin-tests")
                              (:file "desktop-window-tests")
                              (:file "browser-tests")   ; the :browser shell opens no shell (#851)
+                             (:file "notice-tests")    ; after i18n-tests, whose %HT it uses (#980)
                              (:file "ratelimit-tests")
                              (:file "proxy-tests")   ; after ratelimit-tests, whose helpers it uses (#381)
                              (:file "entropy-tests")
