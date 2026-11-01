@@ -1138,6 +1138,19 @@ its tag.
 
 ### Added
 
+- **aion/folder-watch: watch a folder and be told when each file has finished being written,
+  without the litter sync clients leave** (#996, step 1). `watch-folder` takes a loop, a folder
+  and a function, which it calls on the loop thread with a `folder-event`: `:settled` once a
+  file's size and modification time have not changed for `:settle` seconds (default 1.5), and
+  `:removed` once a reported file has been gone that long. A rename is the old name removed and
+  the new one settled, and a save through a temporary file is one `:settled`. `:ignore` takes
+  string patterns with `*` and `?`, matched against each component of the path, and functions;
+  the default is `+sync-litter+` (Dropbox conflicted copies and `.dropbox.cache`, OneDrive and
+  Office `~$` and `.tmp` files, Google Drive's staging folders, editor swap and lock files, and
+  `.DS_Store`, `desktop.ini` and `Thumbs.db`). `:report-existing` reports the files already
+  there. `stop-folder-watch` stops it. On Linux, subfolders are not watched yet (a scan still
+  descends into them), and there is no polling fallback or placeholder detection yet; those
+  are #996's later steps. An app that debounced `aion/uv:watch` itself can use this instead.
 - **aion/retry: a retry policy as data, and `with-retry`, which retries through restarts**
   (#79). `make-retry-policy` takes `:max-attempts`, `:base-delay`, `:multiplier`, `:max-delay`,
   `:jitter` (`:full`, `:equal` or `:none`), `:deadline` and `:retryable`, and `retry-delay`

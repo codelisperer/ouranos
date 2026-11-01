@@ -319,7 +319,9 @@ decision someone made, not an accident -- which is the difference that matters."
     ;; Its Clack handler (#373, ADR-0020), here for the same reason: it starts server-uv.
     :hyperion/clack-handler-uv
     ;; The scheduler's libuv driver (#689).
-    :aion/schedule/uv)
+    :aion/schedule/uv
+    ;; Watching a folder for settled files, over aion/uv's watch and timers (#996).
+    :aion/folder-watch)
   "The libuv-backed systems. Absent from +SYSTEMS+ because they need
 scripts/build-libuv.lisp to have run first, so on a machine without it their absence is
 not evidence of anything.")
@@ -327,7 +329,8 @@ not evidence of anything.")
 (defparameter +uv-test-systems+
   '(:aion/uv/tests :aion/uv/net/tests :aion/uv/process/tests
     :hyperion/server-uv/tests :hyperion/clack-handler-uv/tests
-    :aion/schedule/uv/tests)
+    :aion/schedule/uv/tests
+    :aion/folder-watch/tests)
   "Their suites -- real checks over a real libuv, verified by nothing automatic until CI.")
 
 (defparameter +tls-systems+ '(:aion/tls)
