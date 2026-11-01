@@ -352,7 +352,13 @@ the 3xx it stopped at; the default follows to the end."
       (is (= 3 (%requests s))))
     (let ((all (http:send-request (http:make-request :url (%local s "/") :read-timeout 5) '())))
       (is (= 200 (http:response-status all)))
-      (is (string= "the end" (http:response-body all))))))
+      (is (string= "the end" (http:response-body all))))
+    ;; #1063: a pinned request follows none, whatever FOLLOW-REDIRECTS says, as MAKE-REQUEST's
+    ;; docstring says; its 3xx is the response.
+    (let ((pinned (http:send-request (http:make-request :url (%local s "/") :connect-address "127.0.0.1"
+                                                        :read-timeout 5)
+                                     '())))
+      (is (= 302 (http:response-status pinned)) "a pinned request with the default of 5"))))
 
 (test a-body-over-the-cap-is-refused-with-or-without-content-length
   "A declared Content-Length over the cap is refused before the body is read. Without one, the
@@ -1476,6 +1482,37 @@ never answers, and COUNT-VAR to a function returning how many connections it acc
          (ignore-errors (bt:destroy-thread ,thread))
          (dolist (c ,held) (ignore-errors (usocket:socket-close c)))
          (usocket:socket-close ,listener)))))
+
+(test a-read-that-returns-after-the-timer-fired-is-not-a-timeout
+  "#1063: on Windows a pinned request's read timeout is a timer that closes the socket
+(%IDLE-WATCHED-STREAM). A read that returned its data was reported as SB-SYS:IO-TIMEOUT when the
+timer fired before the read's own clean-up unscheduled it. The window is forced here with a read
+that keeps going past the timeout and then returns without touching the socket: it must return
+its value. The control is a read that fails once the timer has closed the socket, as a real
+blocked read does, which must still signal the timeout."
+  #-os-windows (skip "the watched stream is Windows-only; elsewhere the socket's receive timeout ends a read")
+  #+os-windows
+  (flet ((watched ()
+           ;; An inner stream with nothing to LISTEN to, so the read is watched; no socket, so
+           ;; the timer's close does nothing here.
+           (make-instance 'aion/http-client::%idle-watched-stream
+                          :inner (make-string-input-stream "") :socket nil :seconds 0.2)))
+    (let ((s (watched)))
+      (is (eql 42 (aion/http-client::%call-watched s (lambda () (sleep 0.6) 42)))
+          "a read that returned after the timer fired returns its value")
+      (is-true (aion/http-client::%timed-out s) "the timer did fire, so the window was reached"))
+    ;; Control: a read the timer's close ended is still a timeout.
+    (let ((s (watched)))
+      (signals sb-sys:io-timeout
+        (aion/http-client::%call-watched
+         s (lambda ()
+             (loop until (aion/http-client::%timed-out s) do (sleep 0.02))
+             (error "the socket was closed")))))
+    (let ((s (watched)))
+      (is (eql 7 (aion/http-client::%call-watched s (lambda () 7))))
+      (sleep 0.4)
+      (is (null (aion/http-client::%timed-out s))
+          "a read that finished first leaves the timer nothing to do"))))
 
 (test a-pinned-request-that-times-out-uses-one-connection
   "#985: the URL names localhost, which resolves, and the request is pinned to 127.0.0.1. The

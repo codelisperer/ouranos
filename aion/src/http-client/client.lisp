@@ -179,13 +179,18 @@ For fetching a URL a user supplied (#295; FETCH-PUBLIC builds on all four):
 
 FOLLOW-REDIRECTS  the most redirects to follow. NIL follows none, and a 3xx is the response.
                   The default, 5, is dexador's own, so a caller that sets nothing is unchanged.
+                  A request with CONNECT-ADDRESS follows none whatever this says: its 3xx is
+                  the response, because a redirect's host would need an address of its own
+                  (FETCH-PUBLIC checks each hop's address and follows redirects itself).
 MAX-BODY-BYTES    when set, the body is read as a stream and reading stops at this many bytes;
                   a longer body signals RESPONSE-TOO-LARGE. NIL reads the whole body.
 CONNECT-ADDRESS   an IP address, as a string or an octet vector, to connect to instead of
                   resolving the URL's host. The Host header, TLS SNI and certificate
-                  verification still use the URL's host name. On Windows, where dexador's
-                  WinHTTP takes no caller's connection, the request goes over aion/tls and
-                  Windows decides about the certificate (#536); see %REQUEST-PINNED.
+                  verification still use the URL's host name. On every OS the request is then
+                  written and its response read by this client's own HTTP/1.1 (http1.lisp,
+                  #985), not by dexador; for https it goes over aion/tls on Windows, where
+                  Windows decides about the certificate (#536), and over cl+ssl elsewhere. See
+                  %REQUEST-PINNED.
 CA-PATH           trust roots for certificate verification (a PEM file or a directory; on
                   Windows a PEM file only). NIL uses the system's."
   (method :get :type keyword)
