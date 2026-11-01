@@ -1248,18 +1248,30 @@ send('trapready',location.origin);
                          (eq (position #\= query)))
                     (cons (subseq query 0 eq) (%percent-decode (subseq query (1+ eq)))))))
 
-(defmacro %with-dialog-server ((server port) &body body)
-  "Run BODY with SERVER serving %DIALOG-PAGE on 127.0.0.1, and PORT its port."
-  `(let ((,port nil))
-     (aion/test-http:with-server
-         (,server (lambda (request stream)
-                    (let ((page (%dialog-page ,port (aion/test-http:request-path request))))
-                      (if page
-                          (aion/test-http:write-response
-                           stream 200 '(("Content-Type" . "text/html; charset=utf-8")) page)
-                          (aion/test-http:write-response stream 404 '() "")))))
-       (setf ,port (aion/test-http:server-port ,server))
-       ,@body)))
+(defmacro %with-dialog-server ((server port &optional (requests (gensym "REQUESTS"))) &body body)
+  "Run BODY with SERVER serving %DIALOG-PAGE on 127.0.0.1, and PORT its port. REQUESTS is bound to
+a cons whose car lists every request the server answered, newest first, as \"SECONDS PATH\", with
+SECONDS counted from the server's start. A failure message prints it, so a missing report shows
+whether its page was ever requested. The handler runs on the server's thread, so the list is kept
+in this cons and not in a special variable bound on the test's thread."
+  (let ((start (gensym "START")))
+    `(let ((,port nil)
+           (,requests (list nil))
+           (,start (get-internal-real-time)))
+       (aion/test-http:with-server
+           (,server (lambda (request stream)
+                      (sb-ext:atomic-push
+                       (format nil "~,1Fs ~A"
+                               (/ (- (get-internal-real-time) ,start) internal-time-units-per-second)
+                               (aion/test-http:request-path request))
+                       (car ,requests))
+                      (let ((page (%dialog-page ,port (aion/test-http:request-path request))))
+                        (if page
+                            (aion/test-http:write-response
+                             stream 200 '(("Content-Type" . "text/html; charset=utf-8")) page)
+                            (aion/test-http:write-response stream 404 '() "")))))
+         (setf ,port (aion/test-http:server-port ,server))
+         ,@body))))
 
 (defun %run-dialog-view (url)
   "Start the view on URL with --dialogs, closing itself after 40 seconds, as a real window: hidden
@@ -1278,7 +1290,7 @@ top-level page only, and refuses a call made outside a user action."
   (with-launcher
     (if (not (%real-window-allowed-p))
         (skip "Runs only on GitHub Actions (GITHUB_ACTIONS is not set here): it creates a window")
-        (%with-dialog-server (server port)
+        (%with-dialog-server (server port requests)
           (let* ((url (aion/test-http:server-url server "/"))
                  (app (subseq url 0 (1- (length url))))
                  (other (format nil "http://localhost:~D" port))
@@ -1297,7 +1309,8 @@ top-level page only, and refuses a call made outside a user action."
               (is (equal "1" (report "navigating"))
                   "the page started its navigation to the other origin: ~S" reports)
               (is (equal (format nil "undefined,undefined,~A" other) (report "away"))
-                  "a top-level page from another origin has neither: ~S" reports)))))))
+                  "a top-level page from another origin has neither: ~S~%requests: ~S"
+                  reports (reverse (car requests)))))))))
 
 (test a-dialog-call-is-answered-once-at-a-time-and-only-to-the-apps-origin-on-a-real-window
   "On a GitHub Actions Windows runner, with HYPERION_VIEW_FAKE_DIALOG=1: a call without the token
