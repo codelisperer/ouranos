@@ -1111,6 +1111,11 @@ its tag.
       the new `evt:*withhold-from-logs*`, which a private agent's turn binds whether or not the
       agent retains content, and `mcp:add-resource` binds from the agent it is given, so a call
       outside a turn is covered. `actor:agent-private` is now exported.
+    - `actor:continue-turn` and `actor:abandon-held-turn` run with the same privacy as
+      `actor:run-turn`, so the rest of a held turn is covered too.
+    - `actor:move-conversation` leaves the new agent private when either agent was, so an app
+      whose factory leaves out `:private` does not make a private conversation public. The new
+      agent's `:retain-content` is its own.
   - **Events.** `evt:*withhold-content*` is true, and `evt:emit` replaces every content field
     with `:withheld`. The content fields are `evt:+content-keys+`: `:arguments`, `:content`,
     `:text`, `:message`, `:schema` and `:url`. This covers what the studio's status printer and

@@ -149,8 +149,10 @@ NIL means not recorded, so either recorded value is kept over it."
 the state needed to read it as it was read before: the retrieved context, the offloaded and
 cleared tool results with the store they are in, the untrusted-content records, the turn guard,
 and the thread memory. TO's conversation taint becomes the higher of the two agents' values
-(%HIGHER-TAINT), so a value the app gave TO is not lowered. TO keeps its own configuration:
-provider, system prompt, means, budgets and taint scope. An app does this when what an agent may
+(%HIGHER-TAINT), so a value the app gave TO is not lowered. TO is private when either agent is,
+so a conversation that was private stays private on an agent the app built without :PRIVATE
+(#983, the hub's review of #1027). TO keeps the rest of its own configuration: provider, system
+prompt, means, budgets, taint scope and RETAIN-CONTENT. An app does this when what an agent may
 do changes and its conversation should go on, such as praxeon/web when a session's grant
 changes (#67). The two agents share the moved tables afterwards, so FROM is not used again."
   (setf (agent-history to) (agent-history from)
@@ -162,6 +164,7 @@ changes (#67). The two agents share the moved tables afterwards, so FROM is not 
         (agent-untrusted-calls to) (agent-untrusted-calls from)
         (agent-conversation-taint to) (%higher-taint (agent-conversation-taint from)
                                                      (agent-conversation-taint to))
+        (agent-private to) (or (agent-private from) (agent-private to))
         (agent-thread-memory to) (agent-thread-memory from))
   ;; The result index names results in FROM's store, so the store goes with it.
   (when (agent-result-store from)

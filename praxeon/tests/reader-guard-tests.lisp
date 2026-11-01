@@ -89,6 +89,64 @@ still withholds the host. The control is an agent that is not private, whose log
     (is (null (search "mark983host" retaining)) "a private agent's host: ~A" retaining)
     (is (search "mark983host" open) "control: not private, the host is logged: ~A" open)))
 
+;;; --- a held turn that is continued or abandoned keeps the agent's privacy (#983) ---------
+
+(defun %held-read (decide &rest agent-keys)
+  "A turn of an agent made with AGENT-KEYS whose model calls spend, which is held, then reads
+https://mark983host.example/page, then answers. The turn is held, and DECIDE is called with
+the agent, the held turn and a CLAIM function. Returns (values LOG CLAIMED-PRIVATE): what was
+logged while DECIDE ran, and the value of EVT:*WITHHOLD-FROM-LOGS* when CLAIM was called."
+  (let* ((reader (make-instance '%stub-reader))
+         (ag (apply #'actor:make-agent
+                    :name "held"
+                    :provider (make-instance 'scripted
+                                             :script (list (%calls (list "spend" (%args "q" "x")))
+                                                           (%calls (list "read-web-page"
+                                                                         (%args "url" "https://mark983host.example/page")))
+                                                           (llm:make-completion :text "Done." :stop-reason :end)))
+                    agent-keys))
+         (out (make-string-output-stream))
+         (claimed :not-called))
+    (wp:register ag reader)
+    (actor:register-means ag "spend" "spends credits" (lambda (a) (declare (ignore a)) "spent") :confirm t)
+    (multiple-value-bind (text how held)
+        (actor:run-turn ag "Spend, then read https://mark983host.example/page" :principal "u1" :on-hold :hold)
+      (declare (ignore text))
+      (is (eq :held how))
+      (unwind-protect
+           (progn (aion/log:setup :env :prod :level :trace :stream out)
+                  (funcall decide ag held (lambda (id decision)
+                                            (declare (ignore id decision))
+                                            (setf claimed evt:*withhold-from-logs*)
+                                            t)))
+        (aion/log:setup :env :dev :level :warn :stream *standard-output*)))
+    (values (get-output-stream-string out) claimed)))
+
+(defun %continue (ag held claim) (actor:continue-turn ag held :approve :principal "u1" :claim claim))
+(defun %abandon (ag held claim) (actor:abandon-held-turn ag held :principal "u1" :claim claim))
+
+(test a-continued-held-turn-of-a-private-agent-does-not-log-the-host-it-reads
+  "#983, from the hub's review of #1027: CONTINUE-TURN runs the rest of the turn with the agent's
+privacy, as RUN-TURN does, also when the agent retains content in events. The control is the
+same turn for an agent that is not private, whose log names the host."
+  (multiple-value-bind (log claimed) (%held-read #'%continue :private t :retain-content t)
+    (is (search "read-web-page" log) "the page was read in the continued turn: ~A" log)
+    (is (null (search "mark983host" log)) "a private agent's host: ~A" log)
+    (is (eq t claimed) "the claim ran with logs withheld"))
+  (multiple-value-bind (log claimed) (%held-read #'%continue)
+    (is (search "mark983host" log) "control: not private, the host is logged: ~A" log)
+    (is (null claimed) "control: the claim ran without")))
+
+(test an-abandoned-held-turn-of-a-private-agent-runs-with-its-privacy
+  "#983, from the hub's review of #1027: ABANDON-HELD-TURN runs nothing, so nothing of the turn
+reaches a log through it; it binds the agent's privacy so that whatever it calls does, including
+the app's CLAIM function, which this reads it through. The control is an agent that is not
+private."
+  (multiple-value-bind (log claimed) (%held-read #'%abandon :private t :retain-content t)
+    (is (null (search "mark983host" log)) "~A" log)
+    (is (eq t claimed) "the claim ran with logs withheld"))
+  (is (null (nth-value 1 (%held-read #'%abandon))) "control: not private, it ran without"))
+
 ;;; --- a page that tells the model to open another URL ----------------------------------
 
 (test a-page-cannot-send-the-model-to-another-site

@@ -9629,12 +9629,14 @@ that is not private, whose log holds it."
 
 (defparameter +moved-agent-slots+
   '("CONTEXT" "RESULT-STORE" "CONVERSATION" "RESULT-INDEX" "CLEARED" "GUARD" "UNTRUSTED-INPUTS"
-    "UNTRUSTED-CALLS" "CONVERSATION-TAINT" "THREAD-MEMORY" "HISTORY"))
+    "UNTRUSTED-CALLS" "CONVERSATION-TAINT" "THREAD-MEMORY" "HISTORY"
+    ;; Moved one way only: TO is private when either agent is (#983).
+    "PRIVATE"))
 
 (defparameter +kept-agent-slots+
   '("NAME" "PROVIDER" "SYSTEM-PROMPT" "CACHE-SYSTEM" "MEANS" "HISTORY-BUDGET" "MAX-TOKENS"
     "OFFLOAD-THRESHOLD" "CLEAR-BUDGET" "CLEAR-TARGET" "KEEP-RECENT" "NEVER-CLEAR" "TAINT-SCOPE"
-    "PRIVATE" "RETAIN-CONTENT"))
+    "RETAIN-CONTENT"))
 
 (test every-agent-slot-is-either-moved-or-kept-by-move-conversation
   "A slot added to the agent fails this test until it is listed here as conversation state, which
@@ -9666,6 +9668,23 @@ MOVE-CONVERSATION must then copy, or as configuration."
         (is (eq (funcall reader from) (funcall reader to)) "~A was not moved" name)))
     (is (string= "to" (actor:agent-name to)))
     (is (string= "new" (actor:agent-system-prompt to)) "the new agent's configuration was replaced")))
+
+(test move-conversation-keeps-a-private-conversation-private
+  "#983, from the hub's review of #1027: an app that rebuilds the agent with a factory that
+leaves out :PRIVATE does not make the conversation public. The new agent is private when either
+agent was; RETAIN-CONTENT stays the new agent's own."
+  (flet ((moved (&key from to)
+           (actor:move-conversation (apply #'actor:make-agent :name "from" from)
+                                    (apply #'actor:make-agent :name "to" to))))
+    (is-true (actor:agent-private (moved :from '(:private t) :to '()))
+             "a private conversation moved onto an agent built without :private stays private")
+    (is-true (actor:agent-private (moved :from '() :to '(:private t)))
+             "a new agent built private stays private")
+    (is (null (actor:agent-private (moved :from '() :to '())))
+        "control: neither private, the new agent is not")
+    (is (null (praxeon/actor::agent-retain-content
+               (moved :from '(:private t :retain-content t) :to '())))
+        "retain-content is the new agent's own")))
 
 (test move-conversation-gives-the-new-agent-the-higher-taint
   "The new agent's conversation taint is the higher of the two, so moving a conversation does not
