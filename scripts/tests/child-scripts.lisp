@@ -90,3 +90,17 @@ failure, not a pass: the check could not judge it."
          (list (search "(defparameter +checkers+" text))
          (entry (search "(\"check-child-scripts.lisp\"" text)))
     (is-true (and list entry (< list entry)) "+CHECKERS+ does not name check-child-scripts.lisp")))
+
+(test a-checkout-inside-a-directory-named-tests-checks-only-its-own-tests-directories
+  "Review of #1088: the tests/ directory is matched in the path below the root, not the whole
+path. With the fixture tree placed inside a directory named tests/, the scripts/ checker files
+are not child scripts, and exactly one script is checked."
+  (let* ((outer (merge-pathnames "tests/" (%fresh-tree)))
+         (tree (%install-root-markers (merge-pathnames "co/" outer))))
+    (%write (merge-pathnames "fx/fx.asd" tree) (%lines "(defsystem \"fx\")"))
+    (%write (merge-pathnames "fx/tests/child.lisp" tree) (apply #'%lines +child-script-lines+))
+    (multiple-value-bind (code output)
+        (%run-child (%install-checker tree "check-child-scripts.lisp"))
+      (is (= 0 code) "exit was ~D~%~A" code output)
+      (is (search "ok -- 1 child script," output) "exactly one child script is checked:~%~A"
+          output))))

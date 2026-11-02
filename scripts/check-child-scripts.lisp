@@ -93,7 +93,11 @@ files are loaded, which defines their systems and loads nothing else."
   "Every .lisp under a tests/ directory that no system in this tree compiles, sorted."
   (let ((compiled (%compiled-files)))
     (sort (remove-if (lambda (file)
-                       (or (not (member "tests" (pathname-directory file) :test #'equal))
+                       ;; Relative to the root: a checkout under a directory named tests/
+                       ;; would otherwise make every uncompiled file qualify (#1088 review).
+                       (or (not (member "tests" (pathname-directory
+                                                 (uiop:enough-pathname file *root*))
+                                        :test #'equal))
                            (gethash (namestring (truename file)) compiled)))
                      (%files *root* "lisp"))
           #'string< :key #'namestring)))
