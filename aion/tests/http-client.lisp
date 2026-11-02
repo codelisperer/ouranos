@@ -2231,21 +2231,20 @@ use; that path has its own tests."
   (signals program-error
     (funcall (fdefinition 'http:proxy-arguments)
              "http://public.example/x" :approved-local "public.example"))
-  ;; MAKE-REQUEST ACCEPTS IT AND IGNORES IT, which is measured here rather than assumed: it is a
-  ;; DEFSTRUCT &KEY constructor, and SBCL rejects an unknown keyword at compile time for a literal
-  ;; call while a runtime FUNCALL with the same arguments returns normally. So the property worth
-  ;; asserting is not that the call fails -- it does not -- but that the keyword has NO EFFECT.
-  ;; An earlier version of this test asserted a PROGRAM-ERROR here and failed, which is how the
-  ;; difference came to light.
-  (let ((smuggled (funcall (fdefinition 'http:make-request)
-                           :method :get :url "http://public.example/x"
-                           :headers '(("Authorization" . "Bearer x"))
-                           :approved-local "public.example")))
-    (let ((args (http::%dex-args smuggled)))
-      (is-false (member :proxy args)
-                "a keyword a caller invents is ignored, not honoured: ~S" args)
-      (is (eql 5 (getf args :max-redirects))
-          "and changes nothing about redirects either: ~S" args)))
+  ;; MAKE-REQUEST REJECTS IT TOO. SBCL signals SB-EXT:UNKNOWN-KEYWORD-ARGUMENT, which is a
+  ;; subtype of PROGRAM-ERROR: (subtypep (quote sb-ext:unknown-keyword-argument)
+  ;; (quote program-error)) answers T, measured rather than assumed, and the behaviour is the
+  ;; same compiled or interpreted.
+  ;;
+  ;; A COMMENT HERE ONCE CLAIMED THE OPPOSITE -- that the constructor accepted the keyword and
+  ;; ignored it -- on the strength of a script that printed "RETURNED NORMALLY". That script had
+  ;; loaded a STALE FASL, built before the keyword was removed, so what it measured was the old
+  ;; constructor accepting its own keyword. The false claim reached a commit message and a
+  ;; CHANGELOG line before this suite disagreed with it. A measurement taken outside the suite is
+  ;; worth only as much as the build it ran against.
+  (signals program-error
+    (funcall (fdefinition 'http:make-request)
+             :method :get :url "http://public.example/x" :approved-local "public.example"))
   ;; And nothing an exported call can do produces the exemption for a public host.
   (is (null (http:proxy-arguments "http://public.example/x"))
       "a public host is not exempted")

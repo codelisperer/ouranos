@@ -837,3 +837,55 @@ lines about the API version."
   (is (string= "whsec" (aion/secret:reveal
                         (money:config-webhook-secret
                          (money:make-config "sk_live" "whsec" "https://api.example"))))))
+
+(test stripe-refuses-an-api-base-it-cannot-send-the-secret-key-to
+  "#1106. Stripe's API-BASE was unchecked: it accepted any value, so a mistyped or hostile base
+sent the secret key in an Authorization header to whatever it named. It runs the same check as
+Twilio's API base and SendGrid's endpoint now -- AION/HTTP-CLIENT:CREDENTIAL-URL-REFUSAL, by way
+of hermes' %CHECK-CREDENTIAL-URL, which is what decides to signal CONFIGURATION-ERROR.
+
+EACH CASE ASSERTS WHICH REFUSAL FIRED. A test satisfied by any refusal cannot tell the rule from
+a typo: `evil.example://127.0.0.1' has to be refused for its SCHEME, because a check that looked
+for `http' would read the host as 127.0.0.1 and let it through, and that was one of the three
+holes two copies of this rule grew between them.
+
+A PAYMENTS BACKEND REFUSING AT CONSTRUCTION is the doctrine MAKE-STRIPE-PAYMENTS already follows
+for a missing credential: one that appears to build and fails at the till is worse than one that
+refuses to build."
+  (flet ((refusal (base)
+           (handler-case (progn (pay:make-stripe-payments :api-key "sk_test" :webhook-secret "wh"
+                                                          :api-base base)
+                                nil)
+             (pay:configuration-error (e) (pay:configuration-error-missing e)))))
+    (dolist (case (list (cons "http://evil.example/x" "in the clear")
+                        (cons "evil.example://127.0.0.1" "The scheme is")
+                        (cons "https://u:pw@api.stripe.com" "user name or password")
+                        (cons "https://[::1]/x" "bracketed IPv6 address")))
+      (let ((text (refusal (car case))))
+        (is-true text "stripe refuses ~S" (car case))
+        (is-true (and text (search (cdr case) text))
+                 "and for the right reason, not another: ~A" text)
+        (is-true (and text (search "Stripe API-BASE" text))
+                 "naming the setting: ~A" text)))
+    ;; No refusal repeats a password: the value may carry one, and these reports reach logs.
+    (let ((text (refusal "https://u:hunter2@api.stripe.com")))
+      (is-false (and text (search "hunter2" text))
+                "and does not repeat the password: ~A" text)
+      (is-true (and text (search "api.stripe.com" text))
+               "control: while still naming the host the request would reach: ~A" text))
+    ;; The controls: the default and a local plaintext mock are both still accepted, and the
+    ;; local one records the host approved as local so its sends are not handed to a proxy.
+    (is-false (refusal "https://api.stripe.com") "control: the default is accepted")
+    (is-false (refusal "http://127.0.0.1:12111") "control: a local plaintext mock is accepted")
+    (let ((p (pay:make-stripe-payments :api-key "sk_test" :webhook-secret "wh"
+                                       :api-base "http://127.0.0.1:12111")))
+      (is (equal "127.0.0.1" (hermes/payments::stripe-api-base-approved-local p))
+          "and records the host it approved: ~S"
+          (hermes/payments::stripe-api-base-approved-local p)))
+    ;; REINITIALIZE-INSTANCE is checked too, and a refusal leaves the previous base in place.
+    (let ((p (pay:make-stripe-payments :api-key "sk_test" :webhook-secret "wh")))
+      (signals pay:configuration-error
+        (reinitialize-instance p :api-base "http://evil.example/x"))
+      (is (equal "https://api.stripe.com" (hermes/payments::stripe-api-base p))
+          "a refused reinitialize leaves the base alone: ~S"
+          (hermes/payments::stripe-api-base p)))))

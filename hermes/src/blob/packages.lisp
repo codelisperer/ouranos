@@ -53,7 +53,11 @@
   ;; may only skip a proxy on a verdict the framework reached, never on one a caller asserts
   ;; (#1091) -- so it is imported here by name, which puts this reach into aion's internals in
   ;; this file rather than in a double colon at the call site (the final review of #1134).
-  (:import-from #:aion/http-client #:call-with-approved-local-host)
+  (:import-from #:aion/http-client #:call-with-approved-local-host
+                ;; The URL rule itself, shared with hermes core's providers (#1106). It returns a
+                ;; reason rather than signalling, which is what lets this system use it without
+                ;; depending on hermes core for a condition.
+                #:credential-url-refusal)
   (:documentation
    "The neutral blob-store protocol and its backends. Bytes live in object storage; rows
     hold metadata and a storage key, never the bytes. STORE is a class, and PUT-BLOB /

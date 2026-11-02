@@ -2317,7 +2317,7 @@ BLOB-BACKEND-ERROR."
         (signals b:blob-configuration-error (store :endpoint endpoint)))
       ;; Allowed: a local double, by name or by address, with or without a port.
       (dolist (endpoint '("localhost:9000" "LOCALHOST" "127.0.0.1:9000" "10.1.2.3:9000"
-                          "192.168.1.10" "172.17.0.2:9000" "[::1]:9000" "169.254.1.2"))
+                          "192.168.1.10" "172.17.0.2:9000" "169.254.1.2"))
         (is (not (b::s3-secure-p (store :endpoint endpoint)))
             "~A is local, so plaintext is allowed" endpoint))
       ;; A name that does not resolve is not known to be local.
@@ -2359,14 +2359,14 @@ QURI, which is what dexador parses with, so the check and the request agree."
     ;; reads differently. A bare host:port has no scheme, and QURI reads "localhost:9000" as the
     ;; SCHEME "localhost" with no host, so the endpoint gets a scheme before it is parsed. A bare
     ;; IPv6 address cannot be read as an authority at all and is matched as a literal.
-    (dolist (endpoint '("localhost:9000" "127.0.0.1:9000" "[::1]:9000" "10.1.2.3:9000"
+    (dolist (endpoint '("localhost:9000" "127.0.0.1:9000" "10.1.2.3:9000"
                         "minio:9000"))
       (is-true (b::s3-endpoint (store :endpoint endpoint))
                "control: ~A is still a usable endpoint" endpoint))
     ;; And the plaintext rule still reaches its own verdict on those, which is what would break
     ;; if the host came back NIL or bracketed from the new parser.
     (with-environment-variable ("MNEMOSYNE_S3_SECURE" "false")
-      (dolist (endpoint '("localhost:9000" "127.0.0.1:9000" "[::1]:9000"))
+      (dolist (endpoint '("localhost:9000" "127.0.0.1:9000"))
         (is (not (b::s3-secure-p (store :endpoint endpoint)))
             "control: ~A is still read as local, so plaintext is still allowed" endpoint))
       ;; A bare IPv6 address is NOT allowed, because it is not a working endpoint: the request
@@ -2388,12 +2388,12 @@ which addresses the endpoint the check is about."
     (with-environment-variable ("MNEMOSYNE_S3_SECURE" "false")
       ;; Refused even though every one of these endpoints is local: it is the bucket label in
       ;; front that is unaccounted for, not the endpoint.
-      (dolist (endpoint '("127.0.0.1:9000" "10.1.2.3:9000" "localhost:9000" "[::1]:9000"))
+      (dolist (endpoint '("127.0.0.1:9000" "10.1.2.3:9000" "localhost:9000"))
         (signals b:blob-configuration-error (store :endpoint endpoint))
         (signals b:blob-configuration-error (store :endpoint endpoint :path-style nil)))
       ;; The control: with path-style the same endpoints are allowed, and the URL that gets
       ;; built addresses the endpoint rather than a name derived from the bucket.
-      (dolist (endpoint '("127.0.0.1:9000" "10.1.2.3:9000" "localhost:9000" "[::1]:9000"))
+      (dolist (endpoint '("127.0.0.1:9000" "10.1.2.3:9000" "localhost:9000"))
         (let ((s (store :endpoint endpoint :path-style t)))
           (is (not (b::s3-secure-p s)) "~A with path-style is allowed to speak plaintext" endpoint)
           (is-false (search "bkt." (b::%s3-url s "bkt" "k"))
@@ -2537,16 +2537,20 @@ the ENDPOINT and not the URL the request is built from -- and those are differen
     ;; docstring and CHANGELOG sentence of mine said it did.
     (dolist (endpoint '("http://127.0.0.1:9000" "https://s3.amazonaws.com"))
       (signals b:blob-configuration-error (store :endpoint endpoint)))
-    ;; The rest of a URL has no place in an endpoint either.
+    ;; The rest of a URL has no place in an endpoint either. A BRACKETED IPv6 ADDRESS is refused
+    ;; with them now, by the shared rule rather than by this shape check: a URL built from it
+    ;; cannot be connected to, measured as USOCKET:NS-HOST-NOT-FOUND-ERROR against a listener
+    ;; genuinely accepting on [::1], so it was never a usable endpoint (#1106). It was a control
+    ;; in the list below, asserting the URL it builds, which was true of the string and false
+    ;; about whether a request could be sent.
     (dolist (endpoint '("localhost:9000/bucket" "localhost:9000?x=1" "localhost:9000#f"
-                        "local host:9000" "" "  "))
+                        "local host:9000" "" "  " "[::1]:9000"))
       (signals b:blob-configuration-error (store :endpoint endpoint)))
     ;; The controls: every shape that is a bare host with an optional port still works, and the
     ;; URL built from it still names that host. This is what would break if the refusal above
     ;; were written too widely.
     (dolist (case '(("localhost:9000" . "http://localhost:9000/bkt/k")
                     ("127.0.0.1:9000" . "http://127.0.0.1:9000/bkt/k")
-                    ("[::1]:9000" . "http://[::1]:9000/bkt/k")
                     ("minio:9000" . "http://minio:9000/bkt/k")
                     ("s3.amazonaws.com" . "http://s3.amazonaws.com/bkt/k")))
       (let ((s (store :endpoint (car case) :secure nil :path-style t)))
@@ -2675,3 +2679,40 @@ across a REINITIALIZE-INSTANCE that moves the endpoint somewhere it does not app
                          "a reinitialized endpoint drops the old approval: ~S"
                          (hermes/blob::s3-endpoint-approved-local earned)))))
       (setf (fdefinition 'http:resolve-host) original-resolve))))
+
+(test an-ipv6-endpoint-is-refused-in-either-spelling
+  "#1106, and a capability this store never had. The shape check refused a BARE IPv6 address and
+told the operator to write it with brackets instead; the bracketed form was then accepted, and
+three tests asserted it was a usable endpoint. None of them sent a request. Measured against a
+listener genuinely accepting on [::1]:
+
+  dex:request \"http://[::1]:37753/\"  ->  USOCKET:NS-HOST-NOT-FOUND-ERROR
+
+quri hands usocket the host with its brackets still attached, and no such name exists, so the
+connection is never attempted. The advice produced a store that could not send, which is why
+hermes core has refused a bracketed host for a credential URL since #1077 -- and sharing that
+rule (#1106) is what brought the two call sites into agreement.
+
+BOTH SPELLINGS ARE REFUSED NOW, by different checks: the bare form by %CHECK-ENDPOINT-SHAPE,
+which is about what this setting may look like, and the bracketed form by the shared rule in
+%CHECK-ENDPOINT-URL. The test asserts which reason fired for each, not merely that something
+did."
+  (flet ((refusal (endpoint)
+           (handler-case (progn (b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE"
+                                                 :secret-key "x" :endpoint endpoint)
+                                nil)
+             (b:blob-configuration-error (e) (princ-to-string e)))))
+    (let ((bracketed (refusal "[::1]:9000"))
+          (bare (refusal "::1")))
+      (is-true bracketed "a bracketed IPv6 endpoint is refused")
+      (is-true (and bracketed (search "bracketed IPv6 address" bracketed))
+               "and the reason is the one about brackets: ~A" bracketed)
+      (is-true bare "a bare IPv6 endpoint is refused")
+      (is-true (and bare (search "without brackets" bare))
+               "and names the unbracketed form: ~A" bare)
+      ;; The advice must not send the reader to the other spelling, which is what it used to do.
+      (is-false (and bare (search "write it as [::1]" bare))
+                "the refusal no longer recommends the spelling that cannot connect: ~A" bare)
+      ;; The control: a name and an IPv4 address are still usable endpoints.
+      (dolist (endpoint '("minio.invalid:9000" "127.0.0.1:9000"))
+        (is-false (refusal endpoint) "control: ~A is still accepted" endpoint)))))

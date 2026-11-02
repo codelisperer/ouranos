@@ -46,66 +46,32 @@ default of ten seconds in force. There is no way from here to ask for an unlimit
 
 (defmethod shared-initialize :around ((p sendgrid) slot-names &rest initargs
                                      &key &allow-other-keys)
-  "Check the endpoint BEFORE the slot is assigned, on every initialization (#1129).
+  "Check the endpoint on EVERY initialization, and leave the provider untouched if the check
+refuses (#1092, #1129, #1104).
 
-:AROUND AND NOT :AFTER. An :AFTER method runs once the slots have been assigned, so a refused
-REINITIALIZE-INSTANCE signalled the error and left the refused URL in the slot. Measured at
-7ca13e23:
+SHARED-INITIALIZE AND NOT INITIALIZE-INSTANCE, because REINITIALIZE-INSTANCE does not call
+the latter: before the review of #1104,
 
-  (let ((p (make-sendgrid :api-key \"SG.x\")))
-    (handler-case (reinitialize-instance p :endpoint \"http://evil.example/x\") (error () nil))
-    (sendgrid-endpoint p))   =>  \"http://evil.example/x\"
+  (reinitialize-instance <provider> :endpoint `http://evil.example/x')
 
-A caller that handled the refusal and carried on then sent the API key to the refused URL, and
-nothing checked it again. Checking here, before CALL-NEXT-METHOD assigns anything, means a
-refusal leaves the provider exactly as it was: both the URL and the recorded verdict are put
-back (found by Copilot's review of #1126, filed as #1129).
+was accepted and the next send carried the credential there in plaintext.
 
-WHICH VALUE IS CHECKED is the value that will be in effect: the initarg when one was supplied,
-otherwise the slot's current value when it has one -- a REINITIALIZE-INSTANCE that does not touch
-the endpoint still re-checks it, which is what #1104 established -- and otherwise the default,
-which is not readable from the slot yet because MAKE-INSTANCE has assigned nothing at this point.
+AN :AROUND METHOD, and the ordering inside it is %CALL-WITH-URL-CHECK's rather than this
+method's: what is checked is the slot the object ends up with, the verdict is cleared first,
+CALL-NEXT-METHOD runs inside the restoring handler, and a failure puts both the URL and the
+recorded verdict back. That paragraph used to be written out here and in the other provider,
+and each of the four rules in it was a separate review finding; read it where it lives.
 
-THE VERDICT IS STORED AFTER CALL-NEXT-METHOD, not before, because the slot filling would
-overwrite it from the initform. It is stored on every initialization, including one that moves
-the endpoint from a local name back to an https host, so it cannot go stale and claim an approval
-that belongs to a URL the provider no longer has (#1091)."
-  (declare (ignore slot-names))
-  ;; THE SLOT'S OWN VALUE IS WHAT IS CHECKED, after CALL-NEXT-METHOD has assigned it. Checking
-  ;; the value that WOULD be in effect -- the initarg, else the current slot, else the default
-  ;; constant -- missed a subclass that gives the slot an :INITFORM of its own, because neither
-  ;; an initarg nor a bound slot exists on a fresh instance and the constant is not what the slot
-  ;; will hold (the re-review of #1134).
-  ;;
-  ;; A REFUSAL STILL LEAVES THE PREVIOUS URL IN PLACE, which is what #1129 is about, so the
-  ;; previous value is put back before the error leaves this method. HANDLER-BIND rather than
-  ;; HANDLER-CASE: the handler runs and then declines, so the refusal still propagates to the
-  ;; caller with the same condition it had.
-  (let ((previous (and (slot-boundp p 'endpoint) (sendgrid-endpoint p)))
-        (previous-verdict (and (slot-boundp p 'endpoint-approved-local) (slot-value p 'endpoint-approved-local))))
-    (setf (slot-value p 'endpoint-approved-local) nil)
-    ;; CALL-NEXT-METHOD IS INSIDE THE HANDLER TOO, not only the check. A subclass :AFTER method on
-    ;; SHARED-INITIALIZE runs inside CALL-NEXT-METHOD, after the URL slot has been assigned, so if
-    ;; it signals -- for a bad initarg of its own, say -- the slot kept the new, unchecked URL and
-    ;; #1129's property was lost for exactly the callers who handle the error and carry on. With
-    ;; the whole body inside, any failure between here and the end puts the URL back (the final
-    ;; review of #1134).
-    (handler-bind ((error (lambda (c)
-                            (declare (ignore c))
-                            ;; BOTH SLOTS GO BACK, so a refusal really does leave the provider
-                            ;; as it was. Restoring the URL and clearing the verdict would leave a
-                            ;; provider that still points at an approved local host and has
-                            ;; forgotten that it was approved, which is safe -- it would be
-                            ;; proxied -- but it is not "unchanged" (the re-review of #1134). The
-                            ;; verdict belongs to the URL being restored, so the two travel
-                            ;; together.
-                            (if previous
-                                (setf (slot-value p 'endpoint) previous)
-                                (slot-makunbound p 'endpoint))
-                            (setf (slot-value p 'endpoint-approved-local) previous-verdict))))
-      (let ((instance (call-next-method)))
-        (setf (slot-value p 'endpoint-approved-local) (%check-endpoint (sendgrid-endpoint p)))
-        instance))))
+The verdict recorded in ENDPOINT-APPROVED-LOCAL is the host approved as local, used to keep a
+plaintext send to it away from a proxy (#1091)."
+  (declare (ignore slot-names initargs))
+  ;; THE ORDERING IS %CALL-WITH-URL-CHECK's, shared with every other provider that checks a
+  ;; configured URL (#1106). It was written out here, and in the other provider, and three
+  ;; reviews in a row found a defect in one copy or the other: the value checked rather than
+  ;; the slot, a verdict left standing beside a URL it was not about, and CALL-NEXT-METHOD
+  ;; outside the restoring handler. #1106 would have made five copies of it.
+  (%call-with-url-check p 'endpoint 'endpoint-approved-local #'%check-endpoint
+                        (lambda () (call-next-method))))
 
 (defun %check-endpoint (endpoint)
   "Signal CONFIGURATION-ERROR unless ENDPOINT is a URL a SendGrid request may carry the API key

@@ -111,53 +111,32 @@ against a future change to %TWILIO-ENDPOINT rather than against any base."
 
 (defmethod shared-initialize :around ((p twilio) slot-names &rest initargs
                                      &key &allow-other-keys)
-  "Check the API base BEFORE the slot is assigned, on every initialization (#1129).
+  "Check the API base on EVERY initialization, and leave the provider untouched if the check
+refuses (#1092, #1129, #1104).
 
-:AROUND AND NOT :AFTER, for the reason SENDGRID's method of the same name sets out at length: an
-:AFTER method runs once the slots are assigned, so a refused REINITIALIZE-INSTANCE left the
-refused URL in the slot and a caller that handled the refusal and carried on sent the account SID
-and auth token there. Measured at 7ca13e23, where (reinitialize-instance p :api-base
-\"http://evil.example/x\") was refused and TWILIO-API-BASE then read \"http://evil.example/x\".
+SHARED-INITIALIZE AND NOT INITIALIZE-INSTANCE, because REINITIALIZE-INSTANCE does not call
+the latter: before the review of #1104,
 
-#1104 moved this check from INITIALIZE-INSTANCE to SHARED-INITIALIZE so that
-REINITIALIZE-INSTANCE could not skip it. That closed one door; this closes the one next to it,
-where the check runs but the assignment has already happened."
-  (declare (ignore slot-names))
-  ;; THE SLOT'S OWN VALUE IS WHAT IS CHECKED, after CALL-NEXT-METHOD has assigned it. Checking
-  ;; the value that WOULD be in effect -- the initarg, else the current slot, else the default
-  ;; constant -- missed a subclass that gives the slot an :INITFORM of its own, because neither
-  ;; an initarg nor a bound slot exists on a fresh instance and the constant is not what the slot
-  ;; will hold (the re-review of #1134).
-  ;;
-  ;; A REFUSAL STILL LEAVES THE PREVIOUS URL IN PLACE, which is what #1129 is about, so the
-  ;; previous value is put back before the error leaves this method. HANDLER-BIND rather than
-  ;; HANDLER-CASE: the handler runs and then declines, so the refusal still propagates to the
-  ;; caller with the same condition it had.
-  (let ((previous (and (slot-boundp p 'api-base) (twilio-api-base p)))
-        (previous-verdict (and (slot-boundp p 'api-base-approved-local) (slot-value p 'api-base-approved-local))))
-    (setf (slot-value p 'api-base-approved-local) nil)
-    ;; CALL-NEXT-METHOD IS INSIDE THE HANDLER TOO, not only the check. A subclass :AFTER method on
-    ;; SHARED-INITIALIZE runs inside CALL-NEXT-METHOD, after the URL slot has been assigned, so if
-    ;; it signals -- for a bad initarg of its own, say -- the slot kept the new, unchecked URL and
-    ;; #1129's property was lost for exactly the callers who handle the error and carry on. With
-    ;; the whole body inside, any failure between here and the end puts the URL back (the final
-    ;; review of #1134).
-    (handler-bind ((error (lambda (c)
-                            (declare (ignore c))
-                            ;; BOTH SLOTS GO BACK, so a refusal really does leave the provider
-                            ;; as it was. Restoring the URL and clearing the verdict would leave a
-                            ;; provider that still points at an approved local host and has
-                            ;; forgotten that it was approved, which is safe -- it would be
-                            ;; proxied -- but it is not "unchanged" (the re-review of #1134). The
-                            ;; verdict belongs to the URL being restored, so the two travel
-                            ;; together.
-                            (if previous
-                                (setf (slot-value p 'api-base) previous)
-                                (slot-makunbound p 'api-base))
-                            (setf (slot-value p 'api-base-approved-local) previous-verdict))))
-      (let ((instance (call-next-method)))
-        (setf (slot-value p 'api-base-approved-local) (%check-api-base (twilio-api-base p)))
-        instance))))
+  (reinitialize-instance <provider> :api-base `http://evil.example/x')
+
+was accepted and the next send carried the credential there in plaintext.
+
+AN :AROUND METHOD, and the ordering inside it is %CALL-WITH-URL-CHECK's rather than this
+method's: what is checked is the slot the object ends up with, the verdict is cleared first,
+CALL-NEXT-METHOD runs inside the restoring handler, and a failure puts both the URL and the
+recorded verdict back. That paragraph used to be written out here and in the other provider,
+and each of the four rules in it was a separate review finding; read it where it lives.
+
+The verdict recorded in API-BASE-APPROVED-LOCAL is the host approved as local, used to keep a
+plaintext send to it away from a proxy (#1091)."
+  (declare (ignore slot-names initargs))
+  ;; THE ORDERING IS %CALL-WITH-URL-CHECK's, shared with every other provider that checks a
+  ;; configured URL (#1106). It was written out here, and in the other provider, and three
+  ;; reviews in a row found a defect in one copy or the other: the value checked rather than
+  ;; the slot, a verdict left standing beside a URL it was not about, and CALL-NEXT-METHOD
+  ;; outside the restoring handler. #1106 would have made five copies of it.
+  (%call-with-url-check p 'api-base 'api-base-approved-local #'%check-api-base
+                        (lambda () (call-next-method))))
 
 (defun %twilio-endpoint (base sid)
   (format nil "~A/Accounts/~A/Messages.json" base sid))

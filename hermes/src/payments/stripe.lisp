@@ -43,17 +43,51 @@ for an absent time, and 0 would otherwise become 1970 rather than nothing."
 
 ;;; --- the provider ---------------------------------------------------------
 
+(defparameter +stripe-api-base-default+ "https://api.stripe.com"
+  "The Stripe API host.
+
+WRITTEN ONCE. It was written twice -- the slot's :INITFORM and MAKE-STRIPE-PAYMENTS' &KEY default
+-- which is a version pin kept in two places and the exact shape that broke Twilio's check twice
+(#1092, #1104).")
+
 (defclass stripe-payments (payment-provider)
   ((api-key :initarg :api-key :reader stripe-api-key)
    (webhook-secret :initarg :webhook-secret :reader stripe-webhook-secret)
-   (api-base :initarg :api-base :initform "https://api.stripe.com" :reader stripe-api-base)
+   (api-base :initarg :api-base :initform +stripe-api-base-default+ :reader stripe-api-base)
+   (api-base-approved-local
+    :initform nil :reader stripe-api-base-approved-local
+    :documentation
+    "THE HOST of API-BASE when the check that runs on every initialization resolved it and
+approved it as local, and NIL otherwise, so a plaintext send to it is not handed to a proxy
+(#1091). No initarg: the value is a verdict this code reached.")
    ;; The one impure pivot, injectable so the whole backend is testable without a network
    ;; or a key. Production leaves it NIL and the shared client performs the call.
    (perform :initarg :perform :initform nil :reader stripe-perform))
   (:documentation "Stripe, as one implementation of the neutral payments protocol."))
 
+(defun %check-stripe-api-base (base)
+  "Signal CONFIGURATION-ERROR unless BASE is a URL a Stripe request may carry the secret key to
+(#1106). Returns the host approved as local, or NIL."
+  (nth-value 1 (%check-credential-url base
+                                      :setting "Stripe API-BASE"
+                                      :example +stripe-api-base-default+
+                                      :credential "the secret key"
+                                      :appends-path t)))
+
+(defmethod shared-initialize :around ((p stripe-payments) slot-names &rest initargs
+                                      &key &allow-other-keys)
+  "Check the API base on EVERY initialization, and leave the provider untouched if the check
+refuses (#1106). The ordering is %CALL-WITH-URL-CHECK's; read it there.
+
+A PAYMENTS BACKEND REFUSES AT CONSTRUCTION, which is what MAKE-STRIPE-PAYMENTS already does for a
+missing credential: one that appears to build and fails at the till is worse than one that refuses
+to build. A base that would send the secret key in the clear belongs in the same category."
+  (declare (ignore slot-names initargs))
+  (%call-with-url-check p 'api-base 'api-base-approved-local #'%check-stripe-api-base
+                        (lambda () (call-next-method))))
+
 (defun make-stripe-payments (&key api-key webhook-secret
-                                  (api-base "https://api.stripe.com") perform)
+                                  (api-base +stripe-api-base-default+) perform)
   "A Stripe backend. Credentials come from the environment when not supplied.
 
 Signals CONFIGURATION-ERROR when a credential is missing, at CONSTRUCTION rather than on the
@@ -87,9 +121,14 @@ below turns that into a PAYMENT-ERROR."
          (req (http:make-request :method method :url url :headers headers :content form
                                  :connect-timeout 10 :read-timeout 30)))
     (handler-case
-        (let ((resp (apply #'http:send-request req (list (http:ensure-2xx "stripe"))
-                           (when (stripe-perform p)
-                             (list :perform (stripe-perform p))))))
+        ;; The approved host is bound around the send, so a plaintext request to a host the
+        ;; configuration check approved as local is not handed to a proxy (#1091).
+        (let ((resp (call-with-approved-local-host
+                     (stripe-api-base-approved-local p)
+                     (lambda ()
+                       (apply #'http:send-request req (list (http:ensure-2xx "stripe"))
+                              (when (stripe-perform p)
+                                (list :perform (stripe-perform p))))))))
           (jzon:parse (http:response-body resp)))
       (http:http-error (e)
         (error 'payment-error

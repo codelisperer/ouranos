@@ -561,3 +561,125 @@ refused. Either way it must not survive."
     (reinitialize-instance p :endpoint "https://accepted.example/v1" :x :fine)
     (is (equal "https://accepted.example/v1" (hermes::sendgrid-endpoint p))
         "control: a good initarg lets the endpoint move: ~S" (hermes::sendgrid-endpoint p))))
+
+;;;; #1106: every backend that sends a credential to a configured URL runs the same check.
+
+(defun %provider-refusal (make key value)
+  "The refusal text from building a provider with KEY bound to VALUE, or NIL when it was accepted."
+  (handler-case (progn (funcall make key value) nil)
+    (h:configuration-error (e) (h:configuration-error-missing e))))
+
+(defparameter *url-checked-providers*
+  (list (list "Twilio" (lambda (key value) (hermes::make-twilio :account-sid "ACx" :auth-token "t"
+                                                                :from "+15005550006" key value))
+              :api-base "Twilio API-BASE")
+        (list "SendGrid" (lambda (key value) (hermes::make-sendgrid :api-key "SG.x" key value))
+              :endpoint "SendGrid ENDPOINT")
+        (list "Telegram" (lambda (key value) (hermes::make-telegram :token "t" key value))
+              :api-base "Telegram API-BASE")
+        (list "Facebook" (lambda (key value) (hermes::make-facebook :app-id "a" :app-secret "s"
+                                                                    key value))
+              :graph-base "Facebook GRAPH-BASE"))
+  "The hermes-core providers that send a credential to a configured URL, and the initarg that
+carries it. Stripe is the fifth and is tested in hermes/payments/tests, because it is in another
+system; hermes/blob's S3 endpoint is the sixth and is tested in blob.lisp, because it is a bare
+authority rather than a URL and signals its own condition.")
+
+(test every-provider-refuses-a-url-it-cannot-send-a-credential-to
+  "#1106. Twilio's API base and SendGrid's endpoint were checked; Telegram's api-base, Facebook's
+graph-base and Stripe's api-base were not, and hermes/blob kept its own copy of part of the rule.
+Four more call sites each deciding for themselves is the bet that produced the first three holes
+-- a bracketed IPv6 address in the userinfo, a scheme inside the endpoint, and a bucket label in
+front of the host -- each of which was a case another copy's fix had already closed.
+
+EACH CASE ASSERTS WHICH REFUSAL FIRED, not merely that something did. A test that accepts any
+refusal cannot tell the rule from a typo in the value: `evil.example://127.0.0.1' must be refused
+for its SCHEME, because a check that looked for `http' would read the host as 127.0.0.1 and let
+it through, and a test satisfied by any refusal would pass while that hole was open."
+  (dolist (provider *url-checked-providers*)
+    (destructuring-bind (name make key setting) provider
+      (dolist (case (list (cons "http://evil.example/x" "in the clear")
+                          (cons "evil.example://127.0.0.1" "The scheme is")
+                          (cons "https://u:pw@api.example.com" "user name or password")
+                          (cons "https://[::1]/x" "bracketed IPv6 address")
+                          ;; QURI PARSES THIS WITHOUT COMPLAINT, so the refusal is the one about
+                          ;; the scheme rather than a parse failure. Worth asserting as the reason
+                          ;; it actually is: a value that is not a URL at all still reaches the
+                          ;; scheme branch, which is the branch that stops
+                          ;; `evil.example://127.0.0.1' too.
+                          (cons "not a url at all" "The scheme is")
+                          (cons (format nil "https://api.example.com/x~Cy" #\Newline)
+                                "without control characters")))
+        (let ((refusal (%provider-refusal make key (car case))))
+          (is-true refusal "~A refuses ~S" name (car case))
+          (is-true (and refusal (search (cdr case) refusal))
+                   "~A refuses ~S for the right reason, not another: ~A" name (car case) refusal)
+          (is-true (and refusal (search setting refusal))
+                   "~A names the setting in its refusal: ~A" name refusal)))
+      ;; The control: each provider still accepts a URL it may send to, so the refusals above are
+      ;; about the values and not about the provider having become unbuildable.
+      (is-false (%provider-refusal make key "https://api.example.com/v1")
+                "control: ~A accepts an https URL" name)
+      (is-false (%provider-refusal make key "http://127.0.0.1:4010/v1")
+                "control: ~A accepts a local plaintext URL" name))))
+
+(test no-provider-refusal-repeats-the-configured-value
+  "#1106, and the reason the shared rule's refusals are worded as they are: the value may carry a
+password -- that is one of the things refused -- and these reports reach logs and terminals. One
+copy of this rule printed the value in every branch, and its parse-failure branch appended quri's
+error text, which quotes the URI again, so a password appeared twice (the review of #1084). Every
+backend now inherits the wording that does not.
+
+THE HOST AND THE SCHEME ARE ECHOED ON PURPOSE, so this test is about the branches where the value
+is a secret rather than about every branch. `The host \"evil.example\" would receive ...' and
+`The scheme is \"evil.example\"' are the whole use of those refusals: they tell the operator where
+the bytes would have gone, which is the fact that makes the refusal actionable. A first version of
+this test planted the password in the host and in the scheme and asserted it was not echoed, which
+would have been a demand to make those refusals useless.
+
+What must not be echoed is the USERINFO, which is where a password lives, and the whole value in
+the two branches that cannot read it: a value quri will not parse, and a value with a control
+character in it."
+  (dolist (provider *url-checked-providers*)
+    (destructuring-bind (name make key setting) provider
+      (declare (ignore setting))
+      (dolist (value (list "https://user:hunter2@api.example.com"
+                           "http://user:hunter2@127.0.0.1:4010"
+                           (format nil "https://api.example.com/x~Chunter2" #\Newline)
+                           (format nil "https://api.example.com/x~Chunter2" (code-char 127))))
+        (let ((refusal (%provider-refusal make key value)))
+          (is-true refusal "~A refuses ~S" name value)
+          (is-false (and refusal (search "hunter2" refusal))
+                    "~A does not repeat the secret in its refusal: ~A" name refusal)))
+      ;; The control: the refusal for a userinfo value DOES name the host, which is the fact it
+      ;; exists to report, so the assertion above is about the password and not about the refusal
+      ;; having been emptied out.
+      (let ((refusal (%provider-refusal make key "https://user:hunter2@api.example.com")))
+        (is-true (and refusal (search "api.example.com" refusal))
+                 "control: ~A still reports the host the request would reach: ~A"
+                 name refusal)))))
+
+(test every-provider-rechecks-its-url-on-reinitialize
+  "#1106 and #1104. REINITIALIZE-INSTANCE does not call INITIALIZE-INSTANCE, so a check on the
+latter is one a caller can walk around:
+
+  (reinitialize-instance <provider> <key> `http://evil.example/x')
+
+was accepted for SendGrid and Twilio until the review of #1104, and the next send carried the
+credential there in plaintext. Every provider's check is on SHARED-INITIALIZE, so there is no
+second door, and a refusal leaves the previous URL in place (#1129)."
+  (dolist (provider *url-checked-providers*)
+    (destructuring-bind (name make key setting) provider
+      (declare (ignore setting))
+      (let* ((p (funcall make key "https://api.example.com/v1"))
+             (reader (lambda () (slot-value p (if (eq key :api-base) 'hermes::api-base
+                                                  (if (eq key :graph-base) 'hermes::graph-base
+                                                      'hermes::endpoint))))))
+        (signals h:configuration-error
+          (reinitialize-instance p key "http://evil.example/x"))
+        (is (equal "https://api.example.com/v1" (funcall reader))
+            "~A keeps its URL when a reinitialize is refused: ~S" name (funcall reader))
+        ;; The control: an acceptable URL does replace it.
+        (reinitialize-instance p key "https://other.example/v2")
+        (is (equal "https://other.example/v2" (funcall reader))
+            "control: ~A accepts a good URL on reinitialize: ~S" name (funcall reader))))))

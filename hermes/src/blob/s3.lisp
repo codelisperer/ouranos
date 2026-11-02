@@ -101,7 +101,7 @@ moved to hermes, and the deployed names were kept rather than renamed. They are 
       ;; failed safe, but a value this code is about to reject should not be sent to a resolver
       ;; first (the review of #1090).
       (%check-endpoint-shape endpoint)
-      (%check-endpoint-userinfo endpoint)
+      (%check-endpoint-url endpoint)
       (let ((secure (%secure-setting secure secure-p endpoint path-style)))
         (make-instance 's3-store
                        :endpoint endpoint
@@ -168,6 +168,17 @@ the request is built from without that qualification, which was false for virtua
       (let ((bad (find-if (lambda (piece) (search piece endpoint)) +endpoint-forbidden+)))
         (when bad
           (refuse (format nil "The value contains ~S, which belongs to the rest of a URL rather than to a host." bad))))
+      ;; AN IPv6 LITERAL CANNOT BE AN ENDPOINT AT ALL, in either spelling. This branch catches the
+      ;; unbracketed form and %CHECK-ENDPOINT-URL catches the bracketed one, and the advice this
+      ;; message used to give -- write it as [::1]:9000 -- produced a store that could not send a
+      ;; request. Measured against a listener genuinely accepting on [::1]:
+      ;;
+      ;;   dex:request "http://[::1]:37753/"  ->  USOCKET:NS-HOST-NOT-FOUND-ERROR
+      ;;
+      ;; quri hands usocket the host with its brackets still attached and no such name exists, so
+      ;; the connection is never attempted. That is also why hermes core refuses a bracketed host
+      ;; for a credential URL, and it is the same rule here now (#1106).
+      ;;
       ;; A BARE IPv6 ADDRESS IS REFUSED, WHATEVER THE MODE. An endpoint of "::1" passed every
       ;; check when MNEMOSYNE_S3_SECURE was unset, because the plaintext rule never ran, and
       ;; produced the request URL "https://::1/bkt/k" -- which QURI reads as the host ":" with
@@ -177,7 +188,7 @@ the request is built from without that qualification, which was false for virtua
       (when (and (not (char= #\[ (char endpoint 0)))
                  (let ((first (position #\: endpoint)))
                    (and first (position #\: endpoint :start (1+ first)))))
-        (refuse "The value looks like an IPv6 address without brackets. A request URL built from it has no usable host: write it as [::1]:9000, with the brackets and a port."))))) 
+        (refuse "The value looks like an IPv6 address written without brackets. A request URL built from it has no usable host. Writing it WITH brackets does not work either -- see %CHECK-ENDPOINT-URL -- so use a name that resolves to the address, or an IPv4 address.")))))
 
 (defun %endpoint-url (endpoint)
   "ENDPOINT as the URL a request would be built from: the scheme, \"://\", then the endpoint.
@@ -200,38 +211,46 @@ endpoint may carry userinfo before an \"@\", and when the userinfo was a bracket
 stripping the brackets consumed the \"@\" with it: for \"[::1]@example.com\" it returned \"::1\",
 which %LOCAL-ENDPOINT-P allowed as loopback while dexador connected to example.com."
   (http:url-host (%endpoint-url endpoint)))
-(defun %endpoint-userinfo (endpoint)
-  "The user name and password ENDPOINT carries before an \"@\", or NIL. An S3 endpoint has no use
-for either: their only effects here are to hide the real host from anyone reading the setting,
-and to defeat the check below (#1089), so %CHECK-PLAINTEXT-ENDPOINT refuses any endpoint that
-has them whatever the host turns out to be."
-  (let ((uri (ignore-errors (quri:uri (%endpoint-url endpoint)))))
-    (and uri (quri:uri-userinfo uri))))
+(defun %check-endpoint-url (endpoint)
+  "Signal BLOB-CONFIGURATION-ERROR unless ENDPOINT, read as the URL a request is built from, is
+one this store may send its signed requests to (#1106). Returns the parsed URI.
 
-(defun %check-endpoint-userinfo (endpoint)
-  "Signal BLOB-CONFIGURATION-ERROR when ENDPOINT carries a user name or password before an \"@\"
-(#1089).
+THE RULE IS AION/HTTP-CLIENT:CREDENTIAL-URL-REFUSAL, shared with every hermes provider that sends
+a credential to a configured URL. It replaces the copy that lived here: a userinfo check written
+out in this file, beside hermes core's own. The two copies of this rule acquired three different
+holes between them, each a case the other's fix had already closed (#1089, and the reviews of
+#1084 and #1090), which is why the rule now has one home. The condition stays this file's,
+because hermes/blob does not depend on hermes core and must not start to -- that is what
+CREDENTIAL-URL-REFUSAL returning a reason rather than signalling is for.
 
-Refused whatever the scheme and whatever the host, and not only for a plaintext store, because
-the real damage is that the request goes somewhere other than where the setting appears to say.
-dexador connects to the host AFTER the \"@\", so an endpoint of that shape sends this store's
-SigV4-signed requests, and any session token, to that host -- over TLS if the store is secure,
-which hides the redirection rather than preventing it. An S3 endpoint has no legitimate use for
-userinfo, so there is nothing to weigh against refusing it.
+WHAT IT CONTRIBUTES HERE: the parse, userinfo before an at-sign, a scheme inside the endpoint, a
+control character, a bracketed IPv6 host, and a missing host. Of those, userinfo is the one worth
+naming -- dexador connects to the host AFTER the at-sign, so an endpoint of that shape sends this
+store's signed requests, and any session token, to that host, over TLS if the store is secure,
+which hides the redirection rather than preventing it.
 
-Checked when the store is made, as the credentials are, so a deployment with a wrong endpoint
-dies at boot naming the variable instead of on the first upload.
+THE SCHEME PASSED IS HTTPS, DELIBERATELY, so that the shared rule's plaintext branch does not
+fire here. Whether this store may use plaintext is decided by %SECURE-SETTING, and that decision
+has an exception the shared rule knows nothing about: :SECURE NIL passed in code is allowed
+without a locality check at all, because it is a deliberate choice written by whoever owns the
+code and it is the workaround #124 was filed with. Letting the shared rule judge plaintext here
+would refuse that case and take the workaround away. %SECURE-SETTING keeps the locality refusal,
+with the message that names the environment variable.
 
-%CHECK-ENDPOINT-SHAPE now refuses an \"@\" outright, so in practice it reports this first and
-this function is the second of two guards rather than the only one. It is kept because it names
-the specific mistake -- credentials in the endpoint instead of in
-MNEMOSYNE_S3_ACCESS_KEY -- and because it reads the host QURI found, which is the fact that
-makes the refusal worth explaining to whoever set the variable."
-  (let ((userinfo (and endpoint (%endpoint-userinfo endpoint))))
-    (when userinfo
-      (error 'blob-configuration-error
-             :missing (format nil "MNEMOSYNE_S3_ENDPOINT without a user name or password in it. The value carries userinfo before an \"@\", so the request would be sent to the host ~S rather than to what the setting appears to name, with this store's signed requests and any session token"
-                              (%endpoint-host endpoint))))))
+%CHECK-ENDPOINT-SHAPE still runs first, and still belongs here: it is about the BARE AUTHORITY
+form -- no scheme, no path, no at-sign, brackets on an IPv6 address -- which is a rule about what
+this setting is allowed to look like rather than about URLs in general, and the shared rule cannot
+express it."
+  (let ((url (and endpoint (concatenate 'string "https://" (string-trim " " endpoint)))))
+    (multiple-value-bind (reason uri)
+        (credential-url-refusal url
+                                :setting "MNEMOSYNE_S3_ENDPOINT"
+                                :example "s3.amazonaws.com"
+                                :credential "this store's signed requests and any session token"
+                                :appends-path t)
+      (when reason
+        (error 'blob-configuration-error :missing reason))
+      uri)))
 
 (defun %local-endpoint-p (endpoint)
   "Whether ENDPOINT names something only this machine or this network can reach, so sending it
