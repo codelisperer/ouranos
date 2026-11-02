@@ -14,6 +14,13 @@ its tag.
 
 ### An app may have to act
 
+- **hermes: a 429 from SendGrid or Twilio is now `delivery-rate-limited`, not a plain
+  `delivery-failure`** (#79 step two). An app that caught `delivery-failure` still catches it,
+  since `delivery-rate-limited` is a subtype, but one that *distinguished* a rate limit by
+  reading `delivery-failure-status` can now match on the class, and read
+  `delivery-rate-limited-retry-after` for the wait the response asked for. Telegram and Facebook
+  already signalled it; every backend does now.
+
 - **A plaintext request to a local host is no longer sent through a proxy** (#1091, #1082).
   dexador sets its proxy from `HTTPS_PROXY` or `HTTP_PROXY` when it loads and honours no
   `NO_PROXY`, and nothing here passed `:proxy`, so a caller that had checked its destination was
@@ -40,7 +47,6 @@ its tag.
   environment variables works only before the image loads dexador, because it reads them once
   into `dexador:*default-proxy*` when it loads (`defvar`, so unsetting them later changes
   nothing); setting that variable to `nil` is the runtime equivalent.
-
 - **hermes/blob: an S3 endpoint that carries a user name or password is now refused when the
   store is made** (#1089). `MNEMOSYNE_S3_ENDPOINT` values such as `user:pw@host` or
   `[::1]@host` signal `blob-configuration-error`. An app that put userinfo in that variable has
@@ -1202,6 +1208,26 @@ its tag.
   `claude-sonnet-5-5` allows 128,000 output tokens, so `*default-max-tokens*` (8,192) is
   unchanged. The documentation's examples now name
   `claude-opus-5-5` where they named `claude-opus-4-8`.
+- **`aion/tests` runs its four sub-suites through ASDF, and a red aion run stops at the first
+  failing one** (#992). `aion/tests` has no components now. It names `aion/csv/tests`,
+  `aion/csv/types/tests`, `aion/clock/tests` and `aion/log/tests` in
+  `:in-order-to ((test-op (test-op …)))`, and each of those signals an error from its
+  `:perform` when a check fails, so `asdf:test-system` on any of them reports a failure through
+  the exit code. A green run counts the same checks as before (623 on macOS arm64). **When a
+  sub-suite fails, ASDF does not run the sub-suites after it**, so their reports are missing
+  from that run; before, all four ran and the verdict came at the end. The function
+  `aion/tests:run-tests` and the file `aion/tests/all.lisp` are gone: code that called
+  `aion/tests:run-tests` calls `(asdf:test-system :aion/tests)` instead, as `aion/cons.lisp`'s
+  `test` target now does.
+- **cons: the strict load fails a call to a function that does not exist in the project's own
+  code** (#1083). `cons build`, `cons test` and `cons --strict` load a project's own systems
+  through `load-system-strictly`, which failed on a full compile `WARNING` and let every
+  `STYLE-WARNING` through. SBCL reports a call to an undefined function as a `STYLE-WARNING`
+  (`undefined function: PKG::NAME`), so such a call built and tested clean and failed only when
+  it ran. It now fails the load, and the error names the function. **A project that loaded
+  before can now fail:** define the function, or correct the name or package of the call. Other
+  `STYLE-WARNING`s still do not fail, and an undefined function inside a library outside the
+  project directory is still muffled. `cons/docs/user-guide.md` says the same.
 
 ### Added
 
@@ -1347,6 +1373,104 @@ its tag.
   - `aion/test-http`'s `start-server` and `with-server` take `:concurrent`, which serves each
     connection on a thread of its own, so a connection that sends nothing, as a browser opens,
     does not hold up the next request. The default is unchanged.
+- **hyperion/notifications: in-app notifications, with per-kind delivery to the list, to email
+  through the app's own function, or both** (#792). These are new opt-in systems:
+  - `hyperion/notifications` has:
+    - `notify`, `define-notification-kind` and `*notification-email*`;
+    - the store protocol `notification-put`, `notification-list`, `unread-count`, `mark-read`,
+      `mark-all-read`, `prune-notifications`, `delivery-ref` and `delivery-set`;
+    - `make-memory-notification-store`;
+    - the components `notification-bell`, `notification-panel` and `delivery-form`;
+    - `notification-router`;
+    - `prune-notifications-job` for aion/schedule.
+  - `hyperion/notifications-db` has `make-db-notification-store`, and the DDL for the app's
+    migrations: `notifications-ddl`, `notifications-index-ddl`, `notifications-unread-key-ddl`
+    and `delivery-ddl`. The store refuses to start without its tables
+    (`missing-notification-tables`). A table name is 1 to 47 ASCII letters, digits and
+    underscores. The database store needs Postgres 9.5 or later, or SQLite 3.35 or later, for
+    `INSERT ... ON CONFLICT ... RETURNING`. With an older SQLite, the first `notification-put`
+    signals `mnemosyne/conn:db-error` for a syntax error at `RETURNING`. A
+    desktop bundle carries the SQLite pinned in `sqlite.pin`; elsewhere the system's copy is
+    used, and `mnemosyne/sqlite-library:loaded-library` names it.
+
+  How it behaves:
+  - A notification with the group key of an unread item collapses into it and raises its `count`.
+    In the database store this is one statement, so it is safe when two calls race, including
+    inside the app's own transaction.
+  - A store refuses a notification whose id it already holds, unless it collapses:
+    `invalid-notification` from the memory store, the database's error from the database store.
+  - A link must be a path on the app's own site.
+  - The router takes the recipient from the app's `:recipient-fn`, never from the request.
+  - The bell announces the unread count through a status region, once per change.
+
+  See `hyperion/docs/notifications.md`.
+- **`aion/http-client:status-transience` is exported**: given an HTTP status and a transport
+  phase, either of which may be `nil`, it returns `:transient`, `:unknown` or `nil`. It is the
+  one place that mapping is written, so a library turning HTTP failures into its own conditions
+  reaches the same verdict by calling it instead of repeating the `cond` over
+  `+transient-statuses+` and `+unknown-statuses+`. `aion/http-client:transience` on an
+  `http-error` and `hermes`'s method on a `delivery-failure` both call it.
+- **hermes: `aion/retry:transience` and `aion/retry:retry-after` answer for hermes's own
+  failures, so an app can ask what is worth sending again** (#79 step two). `hermes` depends on
+  `aion/retry` for this and **still never sleeps or retries by itself**: a rate limit or a transient failure is
+  classified, and the app schedules the next attempt, for example with
+  `aion/schedule:schedule-once`. `aion/retry:with-retry` is deliberately not used inside hermes,
+  because it sleeps, and a send is not safe to repeat blindly.
+  - `delivery-rate-limited` is `:transient`, and its `retry-after` is what to schedule by. The
+    Graph codes 4, 17, 32, 613 and 80001 reach it with the wait from
+    `X-Business-Use-Case-Usage`, and Telegram's with its own `retry_after`.
+  - `delivery-failure` is classified from its status, using aion/http-client's own
+    `+transient-statuses+` and `+unknown-statuses+` rather than a second copy of those lists; and
+    where there is no status, from the new `delivery-failure-phase`, carried from
+    `http-error-phase`: `:connect` means the message was never sent (`:transient`), `:response`
+    that the provider may already have sent it (`:unknown`). A failure hermes raised itself is
+    neither, so the default policy will not send a message twice.
+  - `aion/http-client` exports `+transient-statuses+` and `+unknown-statuses+` for this.
+
+- **New bindings exported for the credential backends** (#1035), used by
+  `hades/credentials`: `aion/windows/ffi:cred-enumerate-w` (`CredEnumerateW`, which lists a
+  user's credentials matching a filter); `aion/darwin/ffi:+err-sec-interaction-not-allowed+`
+  (`errSecInteractionNotAllowed`, -25308, which a locked Keychain returns instead of prompting
+  when the query sets `kSecUseAuthenticationUIFail`); and
+  `aion/darwin:cf-array-get-count` and `aion/darwin:cf-array-get-value-at-index`, for walking the
+  `CFArray` an attributes-only Keychain query returns.
+- **hades/credentials: `credential-exists-p` and `credential-names` answer without returning any
+  secret, and on macOS and Linux without decrypting one** (#1035). `credential-exists-p service
+  account` says whether a credential is stored, and `credential-names service` lists the accounts
+  under one service. **On Windows the values are decrypted and then erased**, because Windows has
+  no call that lists or reads a credential without its value: `CredEnumerateW` with the filter
+  `SERVICE/*` returns a whole `CREDENTIALW` for every matching target, plaintext
+  `CredentialBlob` included, and `CredReadW` does the same. hades writes zeros over every blob
+  before freeing what Windows returned, so nothing is left in freed memory and no value is
+  returned, but on Windows an app should treat these two functions as it treats
+  `fetch-credential` in that respect. An earlier wording of this entry said "without decrypting
+  or copying a value", which was false on Windows. An app showing "a key is saved", or offering to remove one, no longer
+  fetches the secret to decide a label, and no longer has to keep its own list of what it saved,
+  which could drift from the store.
+  - macOS asks the Keychain for attributes only (`kSecReturnAttributes`, never
+    `kSecReturnData`), and Linux searches the Secret Service and reads item attributes, which it
+    stores unencrypted, without `SECRET_SEARCH_LOAD_SECRETS` and without `SECRET_SEARCH_UNLOCK`.
+    Neither decrypts a value.
+  - **On Windows the value is decrypted and then erased**, because Windows offers no other way:
+    `CredEnumerateW` and `CredReadW` both return the whole `CREDENTIALW`, including the plaintext
+    `CredentialBlob`. hades writes zeros over every blob before freeing what Windows returned, so
+    a listing leaves nothing in freed memory, but the value does pass through the process. An app
+    on Windows should treat `credential-names` as it treats `fetch-credential` in that respect.
+  - A service name containing `*` is refused for both functions, on every platform, because on
+    Windows it would widen `CredEnumerateW`'s filter and make Windows enumerate, and so decrypt,
+    other applications' credentials.
+  - On Windows a target is matched exactly against the service and the stored account, not by
+    prefix, so `credential-names "S"` does not report an item of the service `"S/x"`. macOS and
+    Linux already matched exactly; this makes the three agree.
+  - **Neither prompts.** On macOS the query sets `kSecUseAuthenticationUIFail`, so a Keychain that
+    could only answer by asking signals `credential-store-unavailable` instead of showing a
+    dialog; **that path is not covered by a test**, since nothing here locks a keychain. On Linux
+    a locked keyring answers without prompting, which is exercised, so `credential-exists-p` can
+    be true for an item `fetch-credential` would refuse to read until the keyring is unlocked.
+  - Nothing is logged by either, so no account name can reach a log.
+  - `aion/libsecret` gains `search-attribute-values` and the bindings it needs
+    (`secret_service_search_sync`, `secret_item_get_attributes`, `g_hash_table_lookup`,
+    `g_list_free_full`).
 - **aion/retry: a retry policy as data, and `with-retry`, which retries through restarts**
   (#79). `make-retry-policy` takes `:max-attempts`, `:base-delay`, `:multiplier`, `:max-delay`,
   `:jitter` (`:full`, `:equal` or `:none`), `:deadline` and `:retryable`, and `retry-delay`
@@ -3255,6 +3379,14 @@ its tag.
 
 ### Fixed
 
+- **aion/http-client: on Windows, a pinned request's read that returned is no longer reported as
+  a timeout** (#1063). A request with `:connect-address`, which `fetch-public` makes, keeps its
+  read timeout on Windows with a timer that closes the socket. When the timer fired just as a
+  read returned, the read's data was dropped and `sb-sys:io-timeout` signalled. Now a read that
+  returns is returned, and the timeout is signalled only for a read the timer ended. The
+  `make-request` docstring now says that a request with `:connect-address` follows no redirect
+  whatever `:follow-redirects` says, and that its own HTTP/1.1 is used on every OS, not only on
+  Windows.
 - **aion/http-client: a failure on a pinned connection no longer reconnects through DNS or sends
   the request again** (#985). A request with `:connect-address`, which `fetch-public` always
   makes, handed its connection to dexador on Linux and macOS. After any failure on it, such as a

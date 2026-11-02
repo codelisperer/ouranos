@@ -56,22 +56,33 @@ failure that is not of the socket or stream, such as a TLS failure (%TRANSPORT-P
 (defparameter +transient-statuses+ '(408 425 429 503 529)
   "Statuses after which the request was not acted on and may succeed later: request timeout, too
 early, too many requests, service unavailable, and 529, which Anthropic's API sends when it is
-overloaded.")
+overloaded. Exported so a caller that maps these statuses into its own conditions, as hermes
+does, classifies them the same way rather than keeping a second copy of the list (#79).")
 
 (defparameter +unknown-statuses+ '(500 502 504)
   "Statuses that may be temporary, but after which the server may have acted on the request.")
 
+(defun status-transience (status phase)
+  "The AION/RETRY:TRANSIENCE verdict for a failure with HTTP STATUS and transport PHASE, where
+either may be NIL: :TRANSIENT for a status in +TRANSIENT-STATUSES+ or, with no status, the
+:CONNECT phase; :UNKNOWN for a status in +UNKNOWN-STATUSES+ or the :RESPONSE phase; NIL
+otherwise, a 4xx such as 400, 401 or 404 included.
+
+Exported, and not only the two lists, so that a caller mapping these failures into its own
+conditions reaches the same verdict by calling this rather than by repeating the COND. hermes
+does that for DELIVERY-FAILURE: sharing the lists alone left the two COND forms as separate
+copies that could be changed apart while both still passed their own tests (the review of
+#1067)."
+  (cond ((member status +transient-statuses+) :transient)
+        ((member status +unknown-statuses+) :unknown)
+        (status nil)
+        ((eq phase :connect) :transient)
+        ((eq phase :response) :unknown)
+        (t nil)))
+
 (defmethod aion/retry:transience ((c http-error))
-  "For HTTP-ERROR: :TRANSIENT for a status in +TRANSIENT-STATUSES+ or a failure in the :CONNECT
-phase; :UNKNOWN for a status in +UNKNOWN-STATUSES+ or a failure in the :RESPONSE phase; NIL
-otherwise, a 4xx such as 400, 401 or 404 included."
-  (let ((status (http-error-status c)))
-    (cond ((member status +transient-statuses+) :transient)
-          ((member status +unknown-statuses+) :unknown)
-          (status nil)
-          ((eq (http-error-phase c) :connect) :transient)
-          ((eq (http-error-phase c) :response) :unknown)
-          (t nil))))
+  "For HTTP-ERROR: STATUS-TRANSIENCE of its status and phase."
+  (status-transience (http-error-status c) (http-error-phase c)))
 
 (defmethod aion/retry:retry-after ((c http-error))
   (http-error-retry-after c))
@@ -179,13 +190,18 @@ For fetching a URL a user supplied (#295; FETCH-PUBLIC builds on all four):
 
 FOLLOW-REDIRECTS  the most redirects to follow. NIL follows none, and a 3xx is the response.
                   The default, 5, is dexador's own, so a caller that sets nothing is unchanged.
+                  A request with CONNECT-ADDRESS follows none whatever this says: its 3xx is
+                  the response, because a redirect's host would need an address of its own
+                  (FETCH-PUBLIC checks each hop's address and follows redirects itself).
 MAX-BODY-BYTES    when set, the body is read as a stream and reading stops at this many bytes;
                   a longer body signals RESPONSE-TOO-LARGE. NIL reads the whole body.
 CONNECT-ADDRESS   an IP address, as a string or an octet vector, to connect to instead of
                   resolving the URL's host. The Host header, TLS SNI and certificate
-                  verification still use the URL's host name. On Windows, where dexador's
-                  WinHTTP takes no caller's connection, the request goes over aion/tls and
-                  Windows decides about the certificate (#536); see %REQUEST-PINNED.
+                  verification still use the URL's host name. On every OS the request is then
+                  written and its response read by this client's own HTTP/1.1 (http1.lisp,
+                  #985), not by dexador; for https it goes over aion/tls on Windows, where
+                  Windows decides about the certificate (#536), and over cl+ssl elsewhere. See
+                  %REQUEST-PINNED.
 CA-PATH           trust roots for certificate verification (a PEM file or a directory; on
                   Windows a PEM file only). NIL uses the system's."
   (method :get :type keyword)

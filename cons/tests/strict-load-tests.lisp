@@ -116,6 +116,40 @@ root fails the WARNING, as before."
       (declare (ignore printed))
       (is (null err) "a STYLE-WARNING must not fail the load: ~A" err))))
 
+(defun %undefined-call-source (tag defined-p)
+  "A function calling STRICT-FIXTURE-<TAG>-CALLEE, which the same file defines when DEFINED-P.
+The callee is named after TAG so that a control which defines it cannot define it for a later
+test that must find it undefined."
+  (format nil "(defun strict-fixture-~A () (strict-fixture-~A-callee 1))~@[~%~A~]"
+          tag tag (and defined-p (format nil "(defun strict-fixture-~A-callee (x) x)" tag))))
+
+(test a-call-to-an-undefined-function-fails-the-load
+  "#1083: SBCL reports a call to a function that does not exist as a STYLE-WARNING, which the
+strict load let through, so the call failed only when it ran (#1066). It now fails the load and
+names the function. The control is the same call with the function defined."
+  (let ((tag (format nil "u~36R" (random (expt 36 8)))))
+    (%with-strict-project (dir name "undefined" (%undefined-call-source tag nil))
+      (multiple-value-bind (err printed) (%strict-load name dir)
+        (declare (ignore printed))
+        (is (typep err 'error) "a call to an undefined function must fail the strict load")
+        (is (search (string-upcase (format nil "strict-fixture-~A-callee" tag))
+                    (princ-to-string err))
+            "the error names the function: ~A" err)))
+    (%with-strict-project (dir name "defined" (%undefined-call-source tag t))
+      (is (null (%strict-load name dir)) "control: the same call to a defined function passes"))))
+
+(test a-call-to-an-undefined-function-in-a-dependency-does-not-fail-it
+  "The rule for a library's warnings holds for this one too: LIB, outside the app's ROOT, calls
+an undefined function, and the app that depends on it loads."
+  (tempdir:with-temporary-directory (libdir "strictlib")
+    (let* ((lib (%strict-name "undeflib"))
+           (tag (format nil "l~36R" (random (expt 36 8))))
+           (asdf:*central-registry* (cons libdir asdf:*central-registry*)))
+      (%strict-project libdir lib (%undefined-call-source tag nil))
+      (%with-strict-project (dir name "undefapp" *strict-clean-source* :depends-on (list lib))
+        (is (null (%strict-load name dir))
+            "an undefined function in a dependency outside ROOT must not fail the app")))))
+
 (test a-warning-in-a-dependency-outside-the-project-does-not-fail-it
   ;; A library's warning is not the app's to fix. LIB sits in its own directory, outside the
   ;; app's ROOT, so it is loaded the quiet way, and the app's clean code loads.

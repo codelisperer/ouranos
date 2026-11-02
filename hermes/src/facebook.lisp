@@ -304,7 +304,10 @@ unwound first (see this file's header)."
                  (http-error (c)
                    (error 'delivery-failure
                           :provider :facebook :status (http-error-status c)
-                          :detail (funcall redact (or (http-error-detail c) (http-error-body c)))))
+                          :detail (funcall redact (or (http-error-detail c) (http-error-body c)))
+                          ;; Kept so AION/RETRY:TRANSIENCE can tell a post that was never
+                          ;; sent from one that may have been (#79).
+                          :phase (http-error-phase c)))
                  ;; As in telegram.lisp: anything else is reported, redacted, after this
                  ;; HANDLER-CASE has unwound the frames that hold the request, whether it was
                  ;; raised while the request was built or while it was sent.

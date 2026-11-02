@@ -22,6 +22,9 @@
                 #:make-response #:response-status #:response-headers #:response-body
                 #:make-interceptor #:add-header #:ensure-2xx #:send-request #:header-value
                 #:http-error #:http-error-status #:http-error-body #:http-error-detail
+                ;; #79: the phase says whether a message was sent before the failure, and
+                ;; retry-after is the wait a 429's response asked for.
+                #:http-error-phase #:http-error-retry-after
                 ;; To decide whether a plaintext API base names something only this machine or
                 ;; this network can reach (#1077).
                 #:address-category #:parse-address #:resolve-host
@@ -84,7 +87,7 @@
    #:invalid-message #:invalid-message-problem
    #:as-delivery
    #:delivery-failure #:delivery-failure-provider #:delivery-failure-status
-   #:delivery-failure-detail #:unsupported-message
+   #:delivery-failure-detail #:delivery-failure-phase #:unsupported-message
    #:delivery-rate-limited #:delivery-rate-limited-retry-after
    #:telegram-chat-unreachable #:telegram-not-permitted
    #:telegram-chat-migrated #:telegram-chat-migrated-migrate-to-chat-id

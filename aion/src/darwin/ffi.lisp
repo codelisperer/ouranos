@@ -22,6 +22,10 @@
 (defconstant +err-sec-success+ 0 "errSecSuccess.")
 (defconstant +err-sec-item-not-found+ -25300 "errSecItemNotFound.")
 (defconstant +err-sec-duplicate-item+ -25299 "errSecDuplicateItem.")
+(defconstant +err-sec-interaction-not-allowed+ -25308
+  "errSecInteractionNotAllowed: the Keychain could only answer by asking the person something,
+and the query said not to (kSecUseAuthenticationUIFail). A locked Keychain answers this to an
+attributes-only read rather than showing an unlock dialog (#1035).")
 
 ;;; --- CoreFoundation: ownership ------------------------------------------------------------
 
@@ -61,6 +65,11 @@
 (cffi:defcfun ("SecItemAdd" sec-item-add) :int32 (attributes :pointer) (result :pointer))
 (cffi:defcfun ("SecItemUpdate" sec-item-update) :int32 (query :pointer) (attributes-to-update :pointer))
 (cffi:defcfun ("SecItemCopyMatching" sec-item-copy-matching) :int32 (query :pointer) (result :pointer))
+
+;;; CFArray, for a query that returns every match rather than one (kSecMatchLimitAll, #1035).
+(cffi:defcfun ("CFArrayGetCount" cf-array-get-count) :long (array :pointer))
+(cffi:defcfun ("CFArrayGetValueAtIndex" cf-array-get-value-at-index) :pointer
+  (array :pointer) (index :long))
 (cffi:defcfun ("SecItemDelete" sec-item-delete) :int32 (query :pointer))
 (cffi:defcfun ("SecCopyErrorMessageString" sec-copy-error-message-string) :pointer
   (status :int32) (reserved :pointer))

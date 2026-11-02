@@ -164,6 +164,9 @@ anything is signalled (see this file's header)."
                               (%telegram-refusal (http-error-status c) (http-error-body c) redact)
                               (make-condition 'delivery-failure
                                               :provider :telegram
+                                              ;; Kept so AION/RETRY:TRANSIENCE can tell a send
+                                              ;; that never left from one that may have (#79).
+                                              :phase (http-error-phase c)
                                               :detail (funcall redact
                                                                (or (http-error-detail c)
                                                                    (http-error-body c)))))))
