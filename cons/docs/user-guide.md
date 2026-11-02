@@ -192,27 +192,36 @@ different install.
 `bin/cons` is a **dumped image**. It carries its own runtime, and the contribs `bootstrap.lisp`
 bakes in (`sb-cltl2`, `sb-bsd-sockets`, `sb-posix`, `sb-rotate-byte`, `sb-md5`,
 `sb-introspect`, `sb-concurrency`). Any other contrib, `sb-sprof` for example, it loads from
-the SBCL installation when something first requires it. What an upgrade does to it therefore
-depends on whether the SBCL that built it is still installed.
+a contrib directory when something first requires it.
 
-**The old install is still there** (Homebrew before it removes the old Cellar, or an SBCL
-installed next to the old one). `bin/cons` keeps working, and `cons` warns:
+**Which contrib directory, if any, depends on `SBCL_HOME`.** In a dumped image SBCL takes its
+home from `SBCL_HOME`, or from `lib/sbcl/` beside the executable when that exists, and
+otherwise has none: it does not fall back to the directory SBCL was installed in. The Windows
+installer sets `SBCL_HOME` for every process. On macOS and Linux it is usually not exported:
+Homebrew's `sbcl` command sets it for its own process only. So:
+
+- **With no `SBCL_HOME`**, the usual case on macOS and Linux, `bin/cons` can load only the
+  contribs it baked in, whatever SBCL is installed, and it cannot check anything on disk.
+- **With `SBCL_HOME` set**, the usual case on Windows, `bin/cons` loads other contribs from
+  `$SBCL_HOME/contrib/`, and checks at startup which SBCL compiled them. It reads the version
+  from the header of `sb-posix.fasl` there, without loading it.
+
+When an upgrade changes the `sbcl` on `PATH`, `cons` warns, and says what it could check:
 
 ```
 cons: this cons was built by SBCL 2.6.5, but SBCL 2.6.7 is now on PATH.
-cons: It still runs, because the contribs on disk are still its own version, but `--fresh`
-cons: targets run under the PATH sbcl, so one build can span two compilers. Once that
-cons: install is removed or replaced, a target needing a contrib cons did not bake in will fail.
+cons: cons has no SBCL home (SBCL_HOME is not set, and there is no lib/sbcl beside the executable), so it cannot check the contribs on disk and can load only the ones it baked in.
+cons: `--fresh` targets run under the PATH sbcl, so one build can span two compilers.
 cons: Rebuild: sbcl --dynamic-space-size 4096 --script bootstrap.lisp
 ```
 
-This is a **warning, not a refusal**: the image works, and `--fresh` targets are the ones it
-affects, since they run in a subprocess `sbcl` taken from `PATH`.
+With `SBCL_HOME` pointing at the old install, the second sentence instead says the contribs
+there are still SBCL 2.6.5's. This is a **warning, not a refusal**: the image works, and
+`--fresh` targets, which run in a subprocess `sbcl` taken from `PATH`, are the ones it affects.
 
-**The old install was replaced in place** (the Windows installer over the same directory, or a
-Linux package upgraded in place). The contrib directory `bin/cons` loads from now holds the new
-version's fasls, and SBCL refuses a fasl compiled by another version. `cons` reads the version
-from a contrib fasl's header at startup, and refuses to run a target (#701):
+**When `SBCL_HOME` points at an install that was replaced in place** (the Windows installer
+over the same directory), the contrib directory holds the new version's fasls, and SBCL refuses
+a fasl compiled by another version. `cons` refuses to run a target (#701):
 
 ```
 cons: this cons runs SBCL 2.6.8, but the contribs in C:\Program Files\SBCL\contrib\ were compiled by SBCL 2.6.9.
@@ -221,19 +230,20 @@ cons: Rebuild: sbcl --dynamic-space-size 4096 --script bootstrap.lisp
 cons: not running build until the problem above is fixed.
 ```
 
-The built-in commands (`cons version`, `cons help`, `cons setup`, ...) still run.
+The built-in commands (`cons version`, `cons help`, `cons setup`, ...) still run, and so does a
+`--fresh` target, which uses the `sbcl` on `PATH` and its own contribs.
 
-**The old install was removed.** There is no contrib directory left to read a version from, so
-nothing is refused at startup: a shipped `bin/cons` on a machine without SBCL is in the same
-state, and most targets never need a contrib it did not bake in. When a target does need one,
-`cons` says where it looked before the error itself:
+**When a contrib fails to load during a target** for any other reason, `cons` says where it
+loads contribs from before the error itself. With no SBCL home:
 
 ```
 cons: a contrib could not be loaded: System "sb-sprof" not found
-cons: This cons runs SBCL 2.6.5 and loads any contrib it did not bake in from /opt/homebrew/Cellar/sbcl/2.6.5/lib/sbcl/contrib/.
-cons: If SBCL was upgraded, replaced or removed since bin/cons was built, rebuild: sbcl --dynamic-space-size 4096 --script bootstrap.lisp
+cons: This cons has no SBCL home: SBCL_HOME is not set, and there is no lib/sbcl beside the executable. It can load only the contribs bootstrap.lisp baked in.
+cons: Export SBCL_HOME as the lib/sbcl directory of the SBCL that built cons, or add the contrib to the list bootstrap.lisp bakes in and rebuild.
 cons build: System "sb-sprof" not found
 ```
+
+A rebuild alone does not help in that case, since the rebuilt image has no SBCL home either.
 
 `cons version` reports both, so you can check without re-reading the scrollback:
 

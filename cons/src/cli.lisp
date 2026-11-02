@@ -240,7 +240,8 @@ fasl still fails the target (#303); use it in CI. With no
   ;; (pre-publication issue 161). The built-in commands still run on a fatal finding: `cons
   ;; version` and `cons help` must answer on a broken toolchain, since that is when you need
   ;; them most. A build-spec target does not (#701): it would fail later, at a REQUIRE, with
-  ;; an error that does not name the cause.
+  ;; an error that does not name the cause. A `--fresh' target is exempt, since it runs in a
+  ;; subprocess under the sbcl on PATH, whose contribs are its own.
   (let ((toolchain-findings (toolchain:check)))
     (project:ensure-source-registry)
     (let ((argv (uiop:command-line-arguments)))
@@ -257,7 +258,7 @@ fasl still fails the target (#303); use it in CI. With no
                          (format *error-output* "cons: error reading cons.lisp: ~A~%" e)
                          (uiop:quit 1)))))
                (cond ((null build-spec) (clingon:run (cons-command) argv))
-                     ((and first (toolchain:fatal-p toolchain-findings))
+                     ((and first (not fresh) (toolchain:fatal-p toolchain-findings))
                       (format *error-output* "cons: not running ~A until ~A~%"
                               first "the problem above is fixed.")
                       (uiop:quit 1))

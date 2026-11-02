@@ -64,13 +64,26 @@ or NIL. SBCL writes it as a text line, `  using SBCL version 2.6.9', before the 
         (and end (plusp (length version)) version)))))
 
 (defun %contrib-directory ()
-  "The contrib directory REQUIRE loads from in this image, or NIL."
+  "The contrib directory REQUIRE loads from in this image, or NIL.
+
+NIL IS THE USUAL ANSWER IN bin/cons ON macOS AND LINUX. In a dumped executable,
+SB-INT:SBCL-HOMEDIR-PATHNAME is SBCL_HOME, or <executable>/../lib/sbcl/ when that holds a
+contrib/ directory, and otherwise NIL: it does not fall back to the path SBCL was installed
+at (measured with a dumped probe on SBCL 2.6.9, review of #1097). Homebrew's `sbcl' wrapper
+sets SBCL_HOME for its own process only. So unless SBCL_HOME is exported, bin/cons has no
+contrib directory and can load only the contribs bootstrap.lisp baked in. The Windows
+installer sets SBCL_HOME for every process, which is how #701 met a replaced install."
   (let ((home (ignore-errors (sb-int:sbcl-homedir-pathname))))
     (and home (merge-pathnames "contrib/" (uiop:ensure-directory-pathname home)))))
 
-(defun %contrib-version (&optional (contrib *probe-contrib*))
-  "The SBCL version that compiled CONTRIB's fasl in the contrib directory, or NIL when there is
-no such file or its header cannot be read.
+(defparameter +fasl-header-bytes+ 16384
+  "How much of a fasl CONTRIB-VERSION-IN reads. The header holds the source path, so a long
+build path makes it long; 16 KiB covers any path a filesystem allows on the platforms cons
+runs on, and a header longer than that reads as no version, which the warning reports.")
+
+(defun contrib-version-in (directory &optional (contrib *probe-contrib*))
+  "The SBCL version that compiled CONTRIB's fasl in DIRECTORY, a contrib directory, or NIL
+when there is no such file or its header cannot be read.
 
 This is the question #701 needed. When an SBCL install is replaced in place, as the Windows
 installer does and as Linux packages can, bin/cons's runtime stays the old version and the
@@ -78,16 +91,15 @@ contrib directory it loads from holds the new version's fasls. SBCL refuses a fa
 another version, so the first REQUIRE of a contrib bin/cons did not bake in fails, as an
 INVALID-FASL-VERSION or `Don't know how to REQUIRE'. Reading the header answers that without
 loading anything."
-  (let ((dir (%contrib-directory)))
-    (when dir
-      (let ((fasl (probe-file (merge-pathnames
-                               (format nil "~(~A~).fasl" contrib) dir))))
-        (when fasl
-          (ignore-errors
-           (with-open-file (in fasl :element-type '(unsigned-byte 8))
-             (let* ((bytes (make-array 1024 :element-type '(unsigned-byte 8)))
-                    (n (read-sequence bytes in)))
-               (fasl-header-version (map 'string #'code-char (subseq bytes 0 n)))))))))))
+  (when directory
+    (let ((fasl (probe-file (merge-pathnames (format nil "~(~A~).fasl" contrib)
+                                             (uiop:ensure-directory-pathname directory)))))
+      (when fasl
+        (ignore-errors
+         (with-open-file (in fasl :element-type '(unsigned-byte 8))
+           (let* ((bytes (make-array +fasl-header-bytes+ :element-type '(unsigned-byte 8)))
+                  (n (read-sequence bytes in)))
+             (fasl-header-version (map 'string #'code-char (subseq bytes 0 n))))))))))
 
 (defun %dumped-image-p ()
   "True when running as a saved executable (bin/cons) rather than a stock sbcl.
@@ -126,7 +138,7 @@ answer can matter, and it costs a subprocess, which is not worth paying on every
           :home-exists (and home (probe-file (uiop:ensure-directory-pathname home)) t)
           :contrib-available (%contrib-available-p)
           :contrib-directory (let ((d (%contrib-directory))) (and d (uiop:native-namestring d)))
-          :contrib-version (%contrib-version)
+          :contrib-version (contrib-version-in (%contrib-directory))
           :path-version (and dumped (sbcl-on-path-version))
           :dumped-image-p dumped)))
 
@@ -143,6 +155,19 @@ answer can matter, and it costs a subprocess, which is not worth paying on every
         (home-exists (format nil "SBCL_HOME is ~A, which exists but has no usable contribs."
                              home))
         (t (format nil "SBCL_HOME is ~A, which does not exist." home))))
+
+(defun %contribs-clause (runtime-version contrib-directory contrib-version)
+  "What the stale-image warning can say about the contribs on disk. Only a version that was
+read and matches is reported as matching; otherwise the sentence says what could not be
+checked and why (review of #1097)."
+  (cond ((and contrib-version (string= contrib-version runtime-version))
+         (format nil "It still runs, because the contribs in ~A are still SBCL ~A's. Once that install is removed or replaced, a target needing a contrib cons did not bake in will fail."
+                 contrib-directory contrib-version))
+        (contrib-directory
+         (format nil "cons could not read which SBCL compiled the contribs in ~A, so it cannot tell whether a contrib it did not bake in will still load."
+                 contrib-directory))
+        (t
+         "cons has no SBCL home (SBCL_HOME is not set, and there is no lib/sbcl beside the executable), so it cannot check the contribs on disk and can load only the ones it baked in.")))
 
 (defun diagnose (facts)
   "FACTS (as from FACTS) -> a list of findings, worst first.
@@ -192,7 +217,8 @@ list means the toolchain is coherent."
                     :lines
                     (list (format nil "this cons was built by SBCL ~A, but SBCL ~A is now on PATH."
                                   runtime-version path-version)
-                          "It still runs, because the contribs on disk are still its own version, but `--fresh` targets run under the PATH sbcl, so one build can span two compilers. Once that install is removed or replaced, a target needing a contrib cons did not bake in will fail."
+                          (%contribs-clause runtime-version contrib-directory contrib-version)
+                          "`--fresh` targets run under the PATH sbcl, so one build can span two compilers."
                           "Rebuild: sbcl --dynamic-space-size 4096 --script bootstrap.lisp"))
               findings))
       ;; Worst first, so a caller showing only the head shows the one that matters.
@@ -216,7 +242,11 @@ cons target loads through Quicklisp when it is present.")
   "True when CONDITION reports that a system named like an SBCL contrib (sb-...) was not
 found. A `:depends-on' naming a contrib whose file is absent fails this way, not through
 REQUIRE (measured with a dumped cons whose contrib directory lacks sb-sprof: `System
-\"sb-sprof\" not found'). The types are reached by name, since this package uses only UIOP."
+\"sb-sprof\" not found'). The types are reached by name, since this package uses only UIOP.
+
+The test is the name alone, so a project's own system named sb-... that is not found is
+explained as a contrib too. The extra lines then say where contribs load from, and the
+original error still follows them."
   (loop for (package type accessor) in +not-found-conditions+
         for type-symbol = (and (find-package package) (find-symbol type package))
         for accessor-symbol = (and (find-package package) (find-symbol accessor package))
@@ -244,12 +274,16 @@ lines name the runtime version and where the contribs came from."
                           (diagnose facts))))
     (cons (format nil "a contrib could not be loaded: ~A"
                   (substitute #\Space #\Newline condition-text))
-          (if finding
-              (getf finding :lines)
-              (list (format nil "This cons runs SBCL ~A and loads any contrib it did not bake in from ~A."
-                            (getf facts :runtime-version)
-                            (or (getf facts :contrib-directory) "the SBCL installation, which it cannot find"))
-                    "If SBCL was upgraded, replaced or removed since bin/cons was built, rebuild: sbcl --dynamic-space-size 4096 --script bootstrap.lisp")))))
+          (cond (finding (getf finding :lines))
+                ((getf facts :contrib-directory)
+                 (list (format nil "This cons runs SBCL ~A and loads any contrib it did not bake in from ~A."
+                               (getf facts :runtime-version) (getf facts :contrib-directory))
+                       "If SBCL was upgraded, replaced or removed since bin/cons was built, rebuild: sbcl --dynamic-space-size 4096 --script bootstrap.lisp"))
+                ;; No home at all: a rebuild alone gives the same image, which fails the same
+                ;; way (measured in the review of #1097).
+                (t
+                 (list "This cons has no SBCL home: SBCL_HOME is not set, and there is no lib/sbcl beside the executable. It can load only the contribs bootstrap.lisp baked in."
+                       "Export SBCL_HOME as the lib/sbcl directory of the SBCL that built cons, or add the contrib to the list bootstrap.lisp bakes in and rebuild."))))))
 
 (defun explain-contrib-failure (condition &key (stream *error-output*))
   "When CONDITION is a contrib failing to load, print why, once, and return T. Called from a

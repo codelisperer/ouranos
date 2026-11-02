@@ -135,13 +135,27 @@ need a contrib it did not bake in. No version read is not evidence of a mismatch
              (%facts :dumped-image-p t :runtime-version "2.6.8" :path-version nil
                      :contrib-version nil)))))
 
-(test the-warning-no-longer-says-the-image-carries-its-own-contribs
+(test the-warning-says-the-contribs-match-only-when-it-read-a-matching-version
   "#701: the old warning said a dumped image carries its own contribs, which is true only of
-the ones bootstrap.lisp baked in."
-  (let ((text (%text (cons/toolchain:diagnose
-                      (%facts :dumped-image-p t :runtime-version "2.6.8" :path-version "2.6.9")))))
-    (is (not (search "carries its own" text)))
-    (is (search "contribs on disk" text))))
+the ones bootstrap.lisp baked in. The review of #1097: it may say the contribs on disk are
+still its own only when it read their version and it matches. In bin/cons on macOS and Linux
+it usually has no contrib directory at all, because SBCL_HOME is not exported."
+  (flet ((warning-text (&rest overrides)
+           (%text (cons/toolchain:diagnose
+                   (apply #'%facts (append overrides
+                                           (list :dumped-image-p t :runtime-version "2.6.8"
+                                                 :path-version "2.6.9")))))))
+    (let ((matching (warning-text :contrib-directory "/sbcl/contrib/" :contrib-version "2.6.8"))
+          (no-home (warning-text :contrib-directory nil :contrib-version nil))
+          (unread (warning-text :contrib-directory "/sbcl/contrib/" :contrib-version nil)))
+      (is (search "still SBCL 2.6.8's" matching))
+      (is (search "no SBCL home" no-home) "~A" no-home)
+      (is (search "SBCL_HOME" no-home))
+      (is (search "could not read" unread) "~A" unread)
+      (dolist (text (list matching no-home unread))
+        (is (not (search "carries its own" text))))
+      (is (not (search "still SBCL" no-home)) "a version it did not read is not claimed")
+      (is (not (search "still SBCL" unread)) "a version it did not read is not claimed"))))
 
 (test fasl-header-version-reads-the-version-line
   (let ((header (format nil "#!/x/sbcl --script~%# FASL~%  compiled from \"X\"~%~A~%~C~C"
@@ -189,9 +203,31 @@ same fasl's header before the change, which gives this image's version."
          (multiple-value-bind (fasl other) (%fasl-from-another-version dir)
            (is (equal other (cons/toolchain:fasl-header-version
                              (uiop:read-file-string fasl :external-format :latin-1))))
+           (is (equal other (cons/toolchain:contrib-version-in dir "c"))
+               "the gatherer reads the other version from the file (review of #1097)")
            (let ((condition (handler-case (progn (load fasl) nil) (error (e) e))))
              (is (typep condition 'error) "loading another version's fasl must fail")
              (is (cons/toolchain:contrib-load-failure-p condition))))
+      (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore))))
+
+(test the-gatherer-reads-this-sbcl-s-own-fasl-as-its-own-version
+  "The control for the altered fasl: one compiled here and left alone reads as this image's
+version. No file, and no directory, read as no version."
+  (let ((dir (uiop:ensure-directory-pathname
+              (merge-pathnames (format nil "cons-701-own-~36R/" (random (expt 2 40)
+                                                                         (make-random-state t)))
+                               (uiop:temporary-directory)))))
+    (unwind-protect
+         (let ((source (merge-pathnames "c.lisp" dir)))
+           (ensure-directories-exist source)
+           (with-open-file (out source :direction :output :if-exists :supersede)
+             (write-line "(defun c701-own () 1)" out))
+           (let ((*error-output* (make-broadcast-stream))
+                 (*standard-output* (make-broadcast-stream)))
+             (compile-file source :output-file (merge-pathnames "c.fasl" dir)))
+           (is (equal (lisp-implementation-version) (cons/toolchain:contrib-version-in dir "c")))
+           (is (null (cons/toolchain:contrib-version-in dir "no-such-contrib")))
+           (is (null (cons/toolchain:contrib-version-in nil))))
       (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore))))
 
 (test an-absent-contrib-is-recognised-and-other-errors-are-not
@@ -238,6 +274,23 @@ stale contribs when the facts show them, and otherwise where contribs are loaded
     (is (search "/sbcl/contrib/" healthy))
     (is (search "bootstrap.lisp" healthy))
     (is (not (search "compiled by SBCL" healthy)))))
+
+(test with-no-sbcl-home-a-contrib-failure-does-not-say-rebuild-alone
+  "Review of #1097: with no SBCL home, a rebuilt bin/cons fails the same way, so the lines say
+to export SBCL_HOME or to bake the contrib in. The control is the case with a contrib
+directory, which suggests the rebuild."
+  (let ((no-home (format nil "~{~A~^ ~}"
+                         (cons/toolchain:contrib-failure-lines
+                          (%facts :dumped-image-p t :contrib-directory nil :contrib-version nil)
+                          "Don't know how to REQUIRE SB-SPROF.")))
+        (with-home (format nil "~{~A~^ ~}"
+                           (cons/toolchain:contrib-failure-lines
+                            (%facts :dumped-image-p t :contrib-directory "/sbcl/contrib/")
+                            "Don't know how to REQUIRE SB-SPROF."))))
+    (is (search "Export SBCL_HOME" no-home) "~A" no-home)
+    (is (search "add the contrib to the list bootstrap.lisp bakes in" no-home))
+    (is (not (search "Export SBCL_HOME" with-home)))
+    (is (search "rebuild: sbcl" with-home))))
 
 ;;; --- ordering and shape ----------------------------------------------------
 
@@ -293,8 +346,13 @@ stale contribs when the facts show them, and otherwise where contribs are loaded
     (is (eq t (getf facts :contrib-available))
         "the suite itself could not have loaded without contribs")
     (is (member (getf facts :dumped-image-p) '(t nil)))
-    (is (equal (lisp-implementation-version) (getf facts :contrib-version))
-        "this image's own contribs, read from their header (#701)")))
+    ;; Only when there is a contrib directory: bin/cons with SBCL_HOME unset has none, and
+    ;; reads no version (review of #1097).
+    (if (getf facts :contrib-directory)
+        (is (equal (lisp-implementation-version) (getf facts :contrib-version))
+            "this image's own contribs, read from their header (#701)")
+        (is (null (getf facts :contrib-version))
+            "no contrib directory, so no version was read"))))
 
 (test this-image-diagnoses-clean
   ;; The control on the whole feature: whatever machine this is, running the real gatherer

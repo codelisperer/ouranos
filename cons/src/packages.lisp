@@ -62,10 +62,11 @@
     with its own answer, so the variable agrees precisely when it does not matter. Also
     names what an SBCL upgrade does to a dumped bin/cons: stale but working while the old
     install's contribs are on disk, and unable to load a contrib it did not bake in once
-    they are replaced (#701), which it reads from a contrib fasl's header. DIAGNOSE is pure over gathered FACTS,
-    so the fatal branch is testable on a machine where it is false. uiop-only.")
+    they are replaced (#701), which it reads from a contrib fasl's header. DIAGNOSE is pure
+    over gathered FACTS, so the fatal branch is testable on a machine where it is false.
+    uiop-only.")
   (:export #:check #:diagnose #:facts #:report #:fatal-p #:sbcl-on-path-version
-           #:*probe-contrib* #:fasl-header-version #:contrib-load-failure-p
+           #:*probe-contrib* #:fasl-header-version #:contrib-version-in #:contrib-load-failure-p
            #:contrib-failure-lines #:explain-contrib-failure))
 
 (cl:defpackage #:cons/setup
