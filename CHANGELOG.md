@@ -3377,6 +3377,14 @@ its tag.
 
 ### Fixed
 
+- **aion/folder-watch: `watch-folder` given a pathname watches the folder it names when the last
+  folder's name has brackets** (#1112). A pathname with no trailing separator, such as one
+  `uiop:parse-native-namestring` gives for `/tmp/Photos [2026]`, went through
+  `uiop:ensure-directory-pathname`, which escapes `[ ] * ?` in the last name, and on Linux and
+  macOS a backslash too. On Windows the folder watched was `Photos ^[2026]`, so `watch-folder`
+  signalled `aion/uv:file-not-found`, or watched that folder if it existed. A pathname is now
+  given its native name with `aion/uv:native-path`, as a string already was.
+
 - **aion/uv: a path string reaches libuv as written, so a file with a backslash in its name works
   on Linux and macOS** (#1093). Every function that takes a path ran it through `cl:namestring`,
   and on Linux and macOS that drops a backslash, so `a\b.txt` was used as `ab.txt`. The affected
