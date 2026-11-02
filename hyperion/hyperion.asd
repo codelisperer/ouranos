@@ -315,7 +315,7 @@
   :perform (test-op (o c) (uiop:symbol-call :hyperion/calendar/tests :run-tests)))
 
 (defsystem "hyperion/kit"
-  :description "Generic collection-page components: page header, breadcrumbs, empty state, segmented control, toggle group, dialogs, the destructive confirm, the undo notice, the list toolbar, the properties panel (#981), and the dock panel (#67)."
+  :description "Generic collection-page components: page header, breadcrumbs, empty state, segmented control, toggle group, dialogs, the destructive confirm, the undo notice, the list toolbar, the properties panel, the appearance picker (#981), and the dock panel (#67)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
@@ -332,7 +332,8 @@
                              (:file "dialog")
                              (:file "toolbar")
                              (:file "panel")
-                             (:file "dock"))))
+                             (:file "dock")
+                             (:file "appearance"))))
   :in-order-to ((test-op (test-op "hyperion/kit/tests"))))
 
 (defsystem "hyperion/kit/tests"
@@ -340,7 +341,9 @@
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   ;; plump parses the markup, so a test reads elements and attributes, not strings.
-  :depends-on ("hyperion/kit" "hyperion/list" "spinneret" "plump" "fiveam")
+  ;; com.inuoe.jzon reads the HX-Trigger header back as JSON.
+  :depends-on ("hyperion" "hyperion/kit" "hyperion/list" "spinneret" "plump" "fiveam"
+               "com.inuoe.jzon")
   :components ((:file "tests/kit-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/kit/tests :run-tests)))
 

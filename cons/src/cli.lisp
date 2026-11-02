@@ -239,9 +239,12 @@ fasl still fails the target (#303); use it in CI. With no
   ;; Early and once, before anything can meet a bare "Don't know how to REQUIRE SB-POSIX"
   ;; (pre-publication issue 161). The built-in commands still run on a fatal finding: `cons
   ;; version` and `cons help` must answer on a broken toolchain, since that is when you need
-  ;; them most. A build-spec target does not (#701): it would fail later, at a REQUIRE, with
-  ;; an error that does not name the cause. A `--fresh' target is exempt, since it runs in a
-  ;; subprocess under the sbcl on PATH, whose contribs are its own.
+  ;; them most. A build-spec target does not (#701) when any of its work would run in this
+  ;; image: it would fail later, at a REQUIRE, with an error that does not name the cause.
+  ;; Work that runs in a subprocess, under the sbcl on PATH whose contribs are its own, is not
+  ;; refused. RUN:TOOLCHAIN-REFUSAL decides which work runs where with the runner's own
+  ;; predicate, so the two agree; deciding from --fresh alone refused an :isolate target and
+  ;; let a :steps target's steps run here (#1110).
   (let ((toolchain-findings (toolchain:check)))
     (project:ensure-source-registry)
     (let ((argv (uiop:command-line-arguments)))
@@ -257,9 +260,13 @@ fasl still fails the target (#303); use it in CI. With no
                        (error (e)
                          (format *error-output* "cons: error reading cons.lisp: ~A~%" e)
                          (uiop:quit 1)))))
-               (cond ((null build-spec) (clingon:run (cons-command) argv))
-                     ((and first (not fresh) (toolchain:fatal-p toolchain-findings))
-                      (format *error-output* "cons: not running ~A until ~A~%"
-                              first "the problem above is fixed.")
-                      (uiop:quit 1))
-                     (t (run:cli-run build-spec rest :fresh fresh :strict strict))))))))))))
+               (let ((in-image (and build-spec first
+                                    (run:toolchain-refusal build-spec first toolchain-findings
+                                                           :fresh fresh))))
+                 (cond ((null build-spec) (clingon:run (cons-command) argv))
+                       (in-image
+                        (format *error-output*
+                                "cons: not running ~A until the problem above is fixed, since ~{~A~^, ~} would run in cons's own image.~%"
+                                first in-image)
+                        (uiop:quit 1))
+                       (t (run:cli-run build-spec rest :fresh fresh :strict strict)))))))))))))

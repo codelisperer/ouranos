@@ -1251,16 +1251,21 @@ its tag.
   the version from the header of `sb-posix.fasl` there at startup. On a mismatch it prints both
   versions, the directory and the rebuild command
   (`sbcl --dynamic-space-size 4096 --script bootstrap.lisp`), then exits 1 before running the
-  target. The built-in commands (`cons version`, `cons help`, `cons setup`, …) and `--fresh`
-  targets still run. Any fatal toolchain finding now stops a target this way, including the
-  existing "contribs cannot be loaded" one. When a contrib fails to load during a target for any
+  target. The built-in commands (`cons version`, `cons help`, `cons setup`, …) still run, and so
+  does a target whose work runs in a subprocess `sbcl`, under the `sbcl` on `PATH`, whose
+  contribs are its own: a Lisp target run with `--fresh` or marked `:isolate t`, and an `:sh`
+  target. A `:steps` target is refused, with or without `--fresh`, when any of its steps does
+  Lisp work, because cons performs the steps in its own image; the refusal names those steps
+  (#1110). Any fatal toolchain finding now stops a target this way, including the existing
+  "contribs cannot be loaded" one. When a contrib fails to load during a target for any
   other reason, `cons` prints where it loads contribs from before the error, or, with no
   `SBCL_HOME`, that it can load only the contribs `bootstrap.lisp` baked in. The stale-image
   warning no longer says that a dumped image carries its own contribs, and says whether it
   could check the contribs on disk. To act: rebuild `bin/cons` after every SBCL upgrade, and on
   macOS or Linux export `SBCL_HOME` if a project needs a contrib `bootstrap.lisp` does not
   bake in. New exports from `cons/toolchain`: `fasl-header-version`, `contrib-version-in`,
-  `contrib-load-failure-p`, `contrib-failure-lines` and `explain-contrib-failure`.
+  `contrib-load-failure-p`, `contrib-failure-lines` and `explain-contrib-failure`; from
+  `cons/run`, `toolchain-refusal`, which decides whether a target is refused.
 
 ### Added
 
@@ -1287,6 +1292,37 @@ its tag.
   connection follows the resolver. Other non-canonical spellings (`127.1`, `0x7f.0.0.1`,
   `2130706433`) are **kept**, because they go to the system resolver, which is the same resolver
   the connection uses, so there is no second parser to disagree with.
+- **hyperion/kit: an appearance picker for theme, contrast and look** (#981). The new
+  package `hyperion/kit/appearance` has five parts:
+  - `appearance-picker` writes a POST form with three labelled groups of buttons:
+    - theme: System, Light, Dark;
+    - contrast: System, Normal, High;
+    - look: Flat, Gradient.
+
+    Each button is a submit button with `aria-pressed`, so the form works without script. Its
+    text comes from a `:labels` plist, with `*default-picker-labels*` for any key left out.
+    With htmx, the buttons sit in a `<fieldset>` that is disabled while a request is in
+    flight, so a press made then visibly does nothing. Without that, htmx dropped such a press
+    with no sign. `apply-appearance-js` gives focus back to the pressed button when
+    the request ends, since disabling it moves focus to the page body.
+  - `appearance-from-form` reads the posted body. It checks every value against
+    `hyperion/appearance`'s values, and refuses the whole form, returning `nil`, for anything
+    else or for a setting posted twice.
+  - `merge-appearance` puts the change over the visitor's current settings.
+  - `appearance-response-headers` gives the store's `Set-Cookie` and an `HX-Trigger` event,
+    `hy-appearance`.
+  - `apply-appearance-js` is a script for the page that applies that event without a reload. It
+    sets or removes `data-theme`, `data-contrast` and `data-look` on `<html>`, and moves
+    `aria-pressed` in every picker on the page.
+
+  `hyperion/appearance` now exports `*themes*`, `*contrasts*` and `*looks*`, the values each
+  setting allows. The package's comment shows a handler that answers 400 for a refused form,
+  204 with the headers for htmx, and a 303 back to the page otherwise.
+- **praxeon/chat-ui: `composer` takes `:action`, the route its form posts to** (#1117). It
+  defaults to `/api/message`, the route `praxeon/web` serves, so a page that passes nothing
+  posts where it did before. A host app that renders the chat parts in its own page, with its
+  routes under a prefix, scoped to one conversation, or with its own `/api/message`, passes its
+  route instead of mounting its handler at `/api/message`. `:action` must be a string.
 
 - **hermes: how long a send waits is now hermes's own setting, `*send-connect-timeout*` and
   `*send-read-timeout*`, both 10 seconds** (#1077). Each provider also takes `:connect-timeout`
