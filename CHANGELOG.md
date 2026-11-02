@@ -3441,6 +3441,15 @@ its tag.
 
 ### Fixed
 
+- **`scripts/verify-bundle-macos.sh` now fails a carried dylib that has no install name, as
+  check 1b was meant to** (#1131). It read `otool -D`'s second line with
+  `head -n 2 | tail -n 1`, which returns otool's header line, the file's own path, when there is
+  no second line, and that path is inside the bundle, so the check reported ok. Check 1b is now
+  the script `scripts/check-install-names.sh <dir>`, which `verify-bundle-macos.sh` runs: it
+  prints a line per dylib and exits 1 on a dylib it cannot read or that has no install name. It
+  also accepts the directory with a trailing slash, which before made an install name inside the
+  bundle read as a path outside it.
+
 - **aion/uv: a path string reaches libuv as written, so a file with a backslash in its name works
   on Linux and macOS** (#1093). Every function that takes a path ran it through `cl:namestring`,
   and on Linux and macOS that drops a backslash, so `a\b.txt` was used as `ab.txt`. The affected
