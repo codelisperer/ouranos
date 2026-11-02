@@ -2239,9 +2239,10 @@ use; that path has its own tests."
   ;; A COMMENT HERE ONCE CLAIMED THE OPPOSITE -- that the constructor accepted the keyword and
   ;; ignored it -- on the strength of a script that printed "RETURNED NORMALLY". That script had
   ;; loaded a STALE FASL, built before the keyword was removed, so what it measured was the old
-  ;; constructor accepting its own keyword. The false claim reached a commit message and a
-  ;; CHANGELOG line before this suite disagreed with it. A measurement taken outside the suite is
-  ;; worth only as much as the build it ran against.
+  ;; constructor accepting its own keyword. THE SUITE AGREED WITH THE SCRIPT for the same reason,
+  ;; in a worktree whose fasls were equally stale, and the first thing to disagree was a CI leg,
+  ;; which always builds cold. A measurement taken outside a cold build is worth only as much as
+  ;; the build it ran against -- and so is one taken inside a warm one.
   (signals program-error
     (funcall (fdefinition 'http:make-request)
              :method :get :url "http://public.example/x" :approved-local "public.example"))
