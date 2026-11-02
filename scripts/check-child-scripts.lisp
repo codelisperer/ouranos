@@ -41,7 +41,11 @@
 (defpackage #:check-child-scripts (:use #:cl))
 (in-package #:check-child-scripts)
 
-(defvar *root* (tree-root:resolve-or-die *load-truename* "check-child-scripts"))
+;;; TRUENAME, because the files below are found by walking the directory and ASDF gives their
+;;; truenames. On a Windows runner TEMP is the 8.3 alias `C:\Users\RUNNER~1\...' and TRUENAME
+;;; gives the long name (pre-publication issue 510); with the alias here, no system's directory
+;;; was under the root, so every file in a fixture's tests/ was reported as a child script.
+(defvar *root* (truename (tree-root:resolve-or-die *load-truename* "check-child-scripts")))
 
 ;;; This tree only. With the machine's registry inherited, ASDF resolves a system to another
 ;;; checkout that defines the same name, and that checkout's files are the ones it reports as
