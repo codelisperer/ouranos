@@ -63,6 +63,14 @@ NULL, so a schema has at most 31 attributes.")
 no service file can start one.")
 (defconstant +g-dbus-error-name-has-no-owner+ 3 "G_DBUS_ERROR_NAME_HAS_NO_OWNER.")
 
+;;; SecretSearchFlags, from libsecret's secret-service.h. SECRET_SEARCH_ALL returns every
+;;; matching item rather than the first. The two deliberately NOT used here are
+;;; SECRET_SEARCH_UNLOCK (1 << 2), which asks the service to unlock a locked collection, and
+;;; SECRET_SEARCH_LOAD_SECRETS (1 << 3), which fetches each item's value: a search that asks for
+;;; neither reads attributes only and cannot prompt (#1035).
+(defconstant +secret-search-none+ 0 "SECRET_SEARCH_NONE.")
+(defconstant +secret-search-all+ 2 "SECRET_SEARCH_ALL (1 << 1).")
+
 ;;; --- SecretSchema --------------------------------------------------------------------------
 ;;;
 ;;; The layout from libsecret's secret-schema.h. The reserved fields are private, but they are
@@ -96,6 +104,32 @@ no service file can start one.")
 
 (define-call secret-password-clearv-sync "secret_password_clearv_sync" :int
   (schema :pointer) (attributes :pointer) (cancellable :pointer) (error :pointer))
+
+;;; --- libsecret: searching without reading a value (#1035) ----------------------------------
+;;;
+;;; secret_service_search_sync returns a GList of SecretItem*, each owned by the caller. With
+;;; SECRET_SEARCH_ALL alone the items carry their attributes, which the Secret Service stores
+;;; unencrypted, and no secret is loaded and no collection is unlocked. secret_item_get_attributes
+;;; returns a GHashTable the caller owns.
+
+(define-call secret-service-search-sync "secret_service_search_sync" :pointer
+  (service :pointer) (schema :pointer) (attributes :pointer) (flags :int)
+  (cancellable :pointer) (error :pointer))
+
+(define-call secret-item-get-attributes "secret_item_get_attributes" :pointer
+  (item :pointer))
+
+(define-call g-hash-table-lookup "g_hash_table_lookup" :pointer
+  (table :pointer) (key :string))
+
+(define-call g-list-free-full "g_list_free_full" :void
+  (list :pointer) (free-func :pointer))
+
+(cffi:defcstruct g-list
+  "GList, from glib: the data pointer and the two links. Only DATA and NEXT are read."
+  (data :pointer)
+  (next :pointer)
+  (prev :pointer))
 
 ;;; --- libsecret: SecretValue ----------------------------------------------------------------
 ;;;
