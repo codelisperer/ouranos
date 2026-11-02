@@ -450,24 +450,73 @@ it again. #1104 had already moved the check from INITIALIZE-INSTANCE to SHARED-I
 REINITIALIZE-INSTANCE could not skip it; this is the door next to that one, where the check runs
 but the assignment has already happened.
 
-The check is in an :AROUND method now, before CALL-NEXT-METHOD assigns anything."
+The check is in an :AROUND method now. It reads the slot after CALL-NEXT-METHOD -- so that a
+subclass with an :INITFORM of its own is checked too -- and puts the previous URL AND the previous
+verdict back before the refusal propagates.
+
+ONE CASE STARTS FROM AN APPROVED LOCAL ENDPOINT, which is the only way to tell restoring from
+clearing. Every case used to start at the https default, where the verdict is NIL already, so an
+implementation that dropped the verdict on refusal passed: there was nothing to drop (the
+re-review of #1134)."
   (dolist (case (list (list (hermes::make-sendgrid :api-key "SG.x")
                             :endpoint #'hermes::sendgrid-endpoint
-                            #'hermes::sendgrid-endpoint-approved-local)
+                            #'hermes::sendgrid-endpoint-approved-local nil)
                       (list (hermes::make-twilio :account-sid "ACx" :auth-token "t"
                                                  :from "+15005550006")
                             :api-base #'hermes::twilio-api-base
-                            #'hermes::twilio-api-base-approved-local)))
-    (destructuring-bind (provider key reader verdict) case
+                            #'hermes::twilio-api-base-approved-local nil)
+                      ;; The same two, but configured at a local plaintext host that the check
+                      ;; approved, so both the URL and the verdict have something to lose.
+                      (list (hermes::make-sendgrid
+                             :api-key "SG.x" :endpoint "http://127.0.0.1:4010/v3/mail/send")
+                            :endpoint #'hermes::sendgrid-endpoint
+                            #'hermes::sendgrid-endpoint-approved-local "127.0.0.1")
+                      (list (hermes::make-twilio :account-sid "ACx" :auth-token "t"
+                                                 :from "+15005550006"
+                                                 :api-base "http://127.0.0.1:4010/2010-04-01")
+                            :api-base #'hermes::twilio-api-base
+                            #'hermes::twilio-api-base-approved-local "127.0.0.1")))
+    (destructuring-bind (provider key reader verdict expected-verdict) case
       (let ((before (funcall reader provider)))
+        (is (equal expected-verdict (funcall verdict provider))
+            "the provider starts with the verdict this case needs: ~S"
+            (funcall verdict provider))
         (signals h:configuration-error
           (reinitialize-instance provider key "http://evil.example/x"))
         (is (equal before (funcall reader provider))
             "~S keeps its URL after a refusal: ~S" (type-of provider) (funcall reader provider))
-        (is-false (funcall verdict provider)
-                  "and claims no local approval: ~S" (funcall verdict provider))
+        (is (equal expected-verdict (funcall verdict provider))
+            "and keeps the verdict that belongs to it: ~S" (funcall verdict provider))
         ;; The control: a URL the check accepts DOES move, so the assertion above is about the
         ;; refusal and not about REINITIALIZE-INSTANCE being unable to change the slot.
         (reinitialize-instance provider key "https://accepted.example/v1")
         (is (equal "https://accepted.example/v1" (funcall reader provider))
             "control: an accepted URL replaces it: ~S" (funcall reader provider))))))
+
+(defclass %sendgrid-with-its-own-default (hermes::sendgrid)
+  ((hermes::endpoint :initform "http://public.invalid/v3/mail/send"))
+  (:documentation
+   "A subclass that gives the endpoint slot an :INITFORM of its own, which is the case the check
+used to miss (the re-review of #1134). Its default is a PLAINTEXT PUBLIC host, so a check that
+looks at the slot refuses it and a check that looks at the superclass's default constant does
+not."))
+
+(test a-subclass-default-url-is-checked-too
+  "The re-review of #1134. The :AROUND check used to work out the value that WOULD be in effect:
+the initarg if one was supplied, else the slot if it was bound, else the superclass's default
+constant. On a fresh instance of a SUBCLASS that gives the slot its own :INITFORM, none of those
+is the value the slot ends up with -- there is no initarg, the slot is not yet bound, and the
+constant is the superclass's -- so the subclass's URL was never checked and a plaintext public
+endpoint was accepted.
+
+The check reads the slot after CALL-NEXT-METHOD now, so the value it judges is the value the
+object has."
+  (signals h:configuration-error (make-instance '%sendgrid-with-its-own-default :api-key "SG.x"))
+  ;; The control, so this is about the subclass's initform and not about the class being
+  ;; unbuildable for some other reason: the same subclass with an acceptable endpoint passed as
+  ;; an initarg builds.
+  (let ((ok (make-instance '%sendgrid-with-its-own-default
+                           :api-key "SG.x" :endpoint "https://api.sendgrid.com/v3/mail/send")))
+    (is (equal "https://api.sendgrid.com/v3/mail/send" (hermes::sendgrid-endpoint ok))
+        "control: an acceptable endpoint passed as an initarg is kept: ~S"
+        (hermes::sendgrid-endpoint ok))))

@@ -123,20 +123,35 @@ and auth token there. Measured at 7ca13e23, where (reinitialize-instance p :api-
 REINITIALIZE-INSTANCE could not skip it. That closed one door; this closes the one next to it,
 where the check runs but the assignment has already happened."
   (declare (ignore slot-names))
-  ;; CLEARED BEFORE ANYTHING IS ASSIGNED. If the check refuses, nothing below runs and the
-  ;; provider keeps the URL and the verdict it already had; but if CALL-NEXT-METHOD itself fails
-  ;; part-way, after the URL slot has been assigned, the old verdict must not be left standing
-  ;; beside a URL it was not about. NIL is the safe value: it means the request is proxied
-  ;; normally (the review of #1134).
-  (setf (slot-value p 'api-base-approved-local) nil)
-  (let* ((missing '#:missing)
-         (supplied (getf initargs :api-base missing))
-         (value (cond ((not (eq supplied missing)) supplied)
-                      ((slot-boundp p 'api-base) (twilio-api-base p))
-                      (t +twilio-api-base-default+)))
-         (approved-local (%check-api-base value)))
-    (prog1 (call-next-method)
-      (setf (slot-value p 'api-base-approved-local) approved-local))))
+  ;; THE SLOT'S OWN VALUE IS WHAT IS CHECKED, after CALL-NEXT-METHOD has assigned it. Checking
+  ;; the value that WOULD be in effect -- the initarg, else the current slot, else the default
+  ;; constant -- missed a subclass that gives the slot an :INITFORM of its own, because neither
+  ;; an initarg nor a bound slot exists on a fresh instance and the constant is not what the slot
+  ;; will hold (the re-review of #1134).
+  ;;
+  ;; A REFUSAL STILL LEAVES THE PREVIOUS URL IN PLACE, which is what #1129 is about, so the
+  ;; previous value is put back before the error leaves this method. HANDLER-BIND rather than
+  ;; HANDLER-CASE: the handler runs and then declines, so the refusal still propagates to the
+  ;; caller with the same condition it had.
+  (let ((previous (and (slot-boundp p 'api-base) (twilio-api-base p)))
+        (previous-verdict (and (slot-boundp p 'api-base-approved-local) (slot-value p 'api-base-approved-local))))
+    (setf (slot-value p 'api-base-approved-local) nil)
+    (let ((instance (call-next-method)))
+      (handler-bind ((error (lambda (c)
+                              (declare (ignore c))
+                              ;; BOTH SLOTS GO BACK, so a refusal really does leave the provider
+                              ;; as it was. Restoring the URL and clearing the verdict would
+                              ;; leave a provider that still points at an approved local host and
+                              ;; has forgotten that it was approved, which is safe -- it would be
+                              ;; proxied -- but it is not "unchanged", and the comment above said
+                              ;; it was (the re-review of #1134). The verdict belongs to the URL
+                              ;; being restored, so the two travel together.
+                              (if previous
+                                  (setf (slot-value p 'api-base) previous)
+                                  (slot-makunbound p 'api-base))
+                              (setf (slot-value p 'api-base-approved-local) previous-verdict))))
+        (setf (slot-value p 'api-base-approved-local) (%check-api-base (twilio-api-base p))))
+      instance)))
 
 (defun %twilio-endpoint (base sid)
   (format nil "~A/Accounts/~A/Messages.json" base sid))
@@ -161,15 +176,19 @@ where the check runs but the assignment has already happened."
                                            (cons "From" from)
                                            (cons "Body" (sms-text m)))
                             :connect-timeout (twilio-connect-timeout p)
-                            :read-timeout (twilio-read-timeout p)
-                            ;; A plaintext send to a host the check approved as local is not
-                            ;; handed to a proxy (#1091).
-                            :approved-local (twilio-api-base-approved-local p)))
+                            :read-timeout (twilio-read-timeout p)))
+         ;; A PLAINTEXT SEND TO A HOST THE CHECK APPROVED AS LOCAL IS NOT HANDED TO A PROXY
+         ;; (#1091). The verdict is bound around the send rather than passed with the request,
+         ;; because a keyword on MAKE-REQUEST was a keyword any caller could pass, for any host
+         ;; (the re-review of #1134).
          (resp (as-delivery :twilio
-                 (send-request
-                  req
-                  (list (add-header "Authorization" (%basic-auth sid token))
-                        (ensure-2xx :twilio)))))
+                 (call-with-approved-local-host
+                  (twilio-api-base-approved-local p)
+                  (lambda ()
+                    (send-request
+                     req
+                     (list (add-header "Authorization" (%basic-auth sid token))
+                           (ensure-2xx :twilio)))))))
          (json (jzon:parse (response-body resp))))
     (make-delivery-result
      :provider :twilio

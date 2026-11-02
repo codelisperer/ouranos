@@ -280,14 +280,44 @@ may travel in the clear is the last rule that should exist twice (#1082)."
                  (let ((addresses (ignore-errors (resolve-host host))))
                    (and addresses (every #'%local-address-p addresses) t)))))))
 
-(defun proxy-arguments (url &key approved-local)
+(defvar *approved-local-host* nil
+  "The host a configuration step resolved and approved as LOCAL, bound around a send by the code
+that holds that verdict (#1091).
+
+NOT EXPORTED, AND NOT AN ARGUMENT TO ANYTHING EXPORTED, which is the point of it. It was a
+:APPROVED-LOCAL keyword on MAKE-REQUEST and on PROXY-ARGUMENTS, both exported, so any caller
+could assert an approval for any host:
+
+  (make-request :url \"http://public.example/x\" :approved-local \"public.example\"
+                :headers <an Authorization header>)
+
+got :PROXY NIL and :MAX-REDIRECTS 0 for a public host -- the same door that was closed by taking
+the initarg off hermes/blob's slot, left open one layer down (the re-review of #1134). The
+exported surface can no longer express an approval at all; what a caller builds its own request
+with is the rule for an address or \"localhost\" and nothing else.
+
+Bound with CALL-WITH-APPROVED-LOCAL-HOST, by hermes's providers and hermes/blob's S3 backend.
+Reaching this symbol from outside takes a double-colon, which is the line this codebase draws
+around anything a caller is not meant to use.
+
+A DYNAMIC BINDING IS SAFE HERE BECAUSE OF THE HOST COMPARISON. The binding covers everything the
+send does, including an interceptor that issues a request of its own, but PROXY-ARGUMENTS grants
+nothing unless the URL's host equals this value, so the approval cannot spread to another host.")
+
+(defun call-with-approved-local-host (host thunk)
+  "Call THUNK with HOST bound as the approved local host (#1091). Not exported: see
+*APPROVED-LOCAL-HOST*."
+  (let ((*approved-local-host* host))
+    (funcall thunk)))
+
+(defun proxy-arguments (url)
   "The dexador keyword arguments that say how URL is to be proxied: (:PROXY NIL) for a plaintext
 request to a host this machine reaches by itself, and no arguments otherwise (#1091).
 
-APPROVED-LOCAL IS THE HOST a configuration step resolved and approved as local -- the string,
-not a boolean -- and it grants the exemption only when it equals URL's host. A boolean said only
-that somebody had approved something, which is not a statement about the request being sent: a
-provider
+*APPROVED-LOCAL-HOST* IS THE HOST a configuration step resolved and approved as local -- the
+string, not a boolean -- and it grants the exemption only when it equals URL's host. A boolean
+said only that somebody had approved something, which is not a statement about the request being
+sent: a provider
 whose URL had moved on, or a verdict recorded for one host and read while another was in the
 slot, would have exempted a request to a host nothing had approved. Pass it from a recorded
 verdict, not from a resolution made now; see below for why that distinction is the whole point.
@@ -342,7 +372,8 @@ because this function would not decide by name. Measured on Linux before the fix
   (let* ((uri (ignore-errors (quri:uri url)))
          (scheme (and uri (quri:uri-scheme uri)))
          (host (and uri (url-host url))))
-    (let ((approved (and (stringp approved-local) host (string-equal approved-local host)
+    (let ((approved (and (stringp *approved-local-host*) host
+                         (string-equal *approved-local-host* host)
                          (and scheme (string-equal scheme "http")))))
       (cond (approved (list :proxy nil :max-redirects 0))
             ((and scheme (string-equal scheme "http") host

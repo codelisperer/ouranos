@@ -177,8 +177,7 @@ on. A body cut short by the deadline is never returned as a response."))
                                                      (headers '()) content
                                                      connect-timeout read-timeout
                                                      (follow-redirects 5) max-body-bytes
-                                                     connect-address ca-path
-                                                     approved-local)))
+                                                     connect-address ca-path)))
   "An outbound HTTP request being built. HEADERS is an alist of (name . value); CONTENT is a
 JSON/string body or an alist (dexador form-encodes an alist).
 
@@ -205,11 +204,9 @@ CONNECT-ADDRESS   an IP address, as a string or an octet vector, to connect to i
                   %REQUEST-PINNED.
 CA-PATH           trust roots for certificate verification (a PEM file or a directory; on
                   Windows a PEM file only). NIL uses the system's.
-APPROVED-LOCAL    the HOST a configuration step resolved and approved as local, so a plaintext
-                  request to it is not sent through a proxy and does not follow redirects
-                  (#1091). It must equal URL's host to have any effect. hermes's providers pass
-                  it from the verdict their configuration check recorded. NIL leaves a
-                  configured proxy in place. See PROXY-ARGUMENTS for both rules."
+There is no argument for the local-host proxy exemption, deliberately: see
+*APPROVED-LOCAL-HOST*, which is not exported, because a keyword here let any caller assert an
+approval for any host (#1091, and the re-review of #1134)."
   (method :get :type keyword)
   (url "" :type string)
   (headers (quote ()) :type list)
@@ -219,12 +216,7 @@ APPROVED-LOCAL    the HOST a configuration step resolved and approved as local, 
   (follow-redirects 5)
   (max-body-bytes nil)
   (connect-address nil)
-  (ca-path nil)
-  ;; The HOST a configuration step resolved and approved as local, so a plaintext request to it
-  ;; is not sent through a proxy and does not follow redirects (#1091). See PROXY-ARGUMENTS: this
-  ;; is a recorded verdict, not a resolution made on the send path, it has to match the URL's
-  ;; host, and NIL means "no verdict was recorded", which leaves a configured proxy in place.
-  (approved-local nil))
+  (ca-path nil))
 
 (defparameter +no-bytes+
   (make-array 0 :element-type '(unsigned-byte 8))
@@ -500,8 +492,7 @@ every request, so no connection is reused."
 
 (defun %dex-args (req)
   "The dexador keyword arguments REQ implies, apart from the URL and the stream."
-  (let ((local (proxy-arguments (request-url req)
-                                :approved-local (request-approved-local req))))
+  (let ((local (proxy-arguments (request-url req))))
    (append (list :method (request-method req)
                 :headers (%dex-headers req)
                 :content (request-content req)

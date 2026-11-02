@@ -58,8 +58,8 @@ REINITIALIZE-INSTANCE signalled the error and left the refused URL in the slot. 
 
 A caller that handled the refusal and carried on then sent the API key to the refused URL, and
 nothing checked it again. Checking here, before CALL-NEXT-METHOD assigns anything, means a
-refusal leaves the provider exactly as it was (found by Copilot's review of #1126, filed as
-#1129).
+refusal leaves the provider exactly as it was: both the URL and the recorded verdict are put
+back (found by Copilot's review of #1126, filed as #1129).
 
 WHICH VALUE IS CHECKED is the value that will be in effect: the initarg when one was supplied,
 otherwise the slot's current value when it has one -- a REINITIALIZE-INSTANCE that does not touch
@@ -71,20 +71,35 @@ overwrite it from the initform. It is stored on every initialization, including 
 the endpoint from a local name back to an https host, so it cannot go stale and claim an approval
 that belongs to a URL the provider no longer has (#1091)."
   (declare (ignore slot-names))
-  ;; CLEARED BEFORE ANYTHING IS ASSIGNED. If the check refuses, nothing below runs and the
-  ;; provider keeps the URL and the verdict it already had; but if CALL-NEXT-METHOD itself fails
-  ;; part-way, after the URL slot has been assigned, the old verdict must not be left standing
-  ;; beside a URL it was not about. NIL is the safe value: it means the request is proxied
-  ;; normally (the review of #1134).
-  (setf (slot-value p 'endpoint-approved-local) nil)
-  (let* ((missing '#:missing)
-         (supplied (getf initargs :endpoint missing))
-         (value (cond ((not (eq supplied missing)) supplied)
-                      ((slot-boundp p 'endpoint) (sendgrid-endpoint p))
-                      (t +sendgrid-endpoint-default+)))
-         (approved-local (%check-endpoint value)))
-    (prog1 (call-next-method)
-      (setf (slot-value p 'endpoint-approved-local) approved-local))))
+  ;; THE SLOT'S OWN VALUE IS WHAT IS CHECKED, after CALL-NEXT-METHOD has assigned it. Checking
+  ;; the value that WOULD be in effect -- the initarg, else the current slot, else the default
+  ;; constant -- missed a subclass that gives the slot an :INITFORM of its own, because neither
+  ;; an initarg nor a bound slot exists on a fresh instance and the constant is not what the slot
+  ;; will hold (the re-review of #1134).
+  ;;
+  ;; A REFUSAL STILL LEAVES THE PREVIOUS URL IN PLACE, which is what #1129 is about, so the
+  ;; previous value is put back before the error leaves this method. HANDLER-BIND rather than
+  ;; HANDLER-CASE: the handler runs and then declines, so the refusal still propagates to the
+  ;; caller with the same condition it had.
+  (let ((previous (and (slot-boundp p 'endpoint) (sendgrid-endpoint p)))
+        (previous-verdict (and (slot-boundp p 'endpoint-approved-local) (slot-value p 'endpoint-approved-local))))
+    (setf (slot-value p 'endpoint-approved-local) nil)
+    (let ((instance (call-next-method)))
+      (handler-bind ((error (lambda (c)
+                              (declare (ignore c))
+                              ;; BOTH SLOTS GO BACK, so a refusal really does leave the provider
+                              ;; as it was. Restoring the URL and clearing the verdict would
+                              ;; leave a provider that still points at an approved local host and
+                              ;; has forgotten that it was approved, which is safe -- it would be
+                              ;; proxied -- but it is not "unchanged", and the comment above said
+                              ;; it was (the re-review of #1134). The verdict belongs to the URL
+                              ;; being restored, so the two travel together.
+                              (if previous
+                                  (setf (slot-value p 'endpoint) previous)
+                                  (slot-makunbound p 'endpoint))
+                              (setf (slot-value p 'endpoint-approved-local) previous-verdict))))
+        (setf (slot-value p 'endpoint-approved-local) (%check-endpoint (sendgrid-endpoint p))))
+      instance)))
 
 (defun %check-endpoint (endpoint)
   "Signal CONFIGURATION-ERROR unless ENDPOINT is a URL a SendGrid request may carry the API key
@@ -174,16 +189,19 @@ disposition given; an inline attachment also carries its content_id."
                             :url (sendgrid-endpoint p)
                             :content (jzon:stringify (%sendgrid-body m))
                             :connect-timeout (sendgrid-connect-timeout p)
-                            :read-timeout (sendgrid-read-timeout p)
-                            ;; A plaintext send to a host the check approved as local is not
-                            ;; handed to a proxy (#1091).
-                            :approved-local (sendgrid-endpoint-approved-local p)))
+                            :read-timeout (sendgrid-read-timeout p)))
+         ;; A PLAINTEXT SEND TO A HOST THE CHECK APPROVED AS LOCAL IS NOT HANDED TO A PROXY
+         ;; (#1091), bound around the send rather than passed with the request: see
+         ;; *APPROVED-LOCAL-HOST* for why no exported argument carries it.
          (resp (as-delivery :sendgrid
-                 (send-request
-                  req
-                  (list (add-header "Authorization" (format nil "Bearer ~A" key))
-                        (add-header "Content-Type" "application/json")
-                        (ensure-2xx :sendgrid))))))
+                 (call-with-approved-local-host
+                  (sendgrid-endpoint-approved-local p)
+                  (lambda ()
+                    (send-request
+                     req
+                     (list (add-header "Authorization" (format nil "Bearer ~A" key))
+                           (add-header "Content-Type" "application/json")
+                           (ensure-2xx :sendgrid))))))))
     (make-delivery-result
      :provider :sendgrid
      :id (header-value (response-headers resp) "x-message-id")

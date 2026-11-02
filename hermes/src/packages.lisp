@@ -17,6 +17,12 @@
                 ;; The HTTP client moved to aion (pre-publication issue 202). Imported rather than nicknamed so
                 ;; the backends' call sites are unchanged by the move -- the point of the
                 ;; exercise was to stop reimplementing it, not to churn its consumers.
+                ;; CALL-WITH-APPROVED-LOCAL-HOST is NOT exported from aion/http-client, and is
+                ;; imported here by name so that this reach into its internals is written down
+                ;; in one place. It is unexported on purpose: a keyword on MAKE-REQUEST let any
+                ;; caller assert that a host had been approved as local and so send a plaintext
+                ;; request to it with no proxy (#1091, the re-review of #1134).
+                #:call-with-approved-local-host
                 #:make-request #:request-url #:request-method #:request-headers
                 #:request-content
                 #:make-response #:response-status #:response-headers #:response-body

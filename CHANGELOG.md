@@ -49,7 +49,9 @@ its tag.
   **A host that is a DNS name is covered by the change below, for a store or provider whose
   configuration check approved that host**; this entry described the case as still open, which was
   true when it was written. It is not covered for a caller that builds its own request, which
-  still gets the rule in this entry: an address or `localhost`, and no name.
+  still gets the rule in this entry: an address or `localhost`, and no name. **There is no
+  exported way to say that a host was approved**, so that sentence is a property of the API rather
+  than only a convention: see the entry below.
   The send-time decision resolves no name on purpose: a lookup there is a blocking resolution
   that `connect-timeout` does not cover, and a name that answers private now can answer public at
   connect time, which would skip a configured egress proxy on the strength of a resolution that
@@ -70,20 +72,32 @@ its tag.
   `:approved-local`; `hermes/blob`'s `s3-store` records `s3-endpoint-approved-local`, and
   hermes's Twilio and SendGrid providers record `twilio-api-base-approved-local` and
   `sendgrid-endpoint-approved-local`.
-  **`:approved-local` is the approved HOST, not a boolean**, and it exempts a request only when
-  it equals that request's host. As a boolean it said only that something had been approved,
-  which is not a statement about the request being sent: a verdict recorded for one host and read
-  while another was in the slot would have exempted a request to a host nothing had approved.
+  **The approval is the approved HOST, not a boolean**, and it exempts a request only when it
+  equals that request's host. As a boolean it said only that something had been approved, which is
+  not a statement about the request being sent: a verdict recorded for one host and read while
+  another was in the slot would have exempted a request to a host nothing had approved.
+  **No exported function takes it.** It was `:approved-local`, a keyword on `make-request` and on
+  `proxy-arguments`, both exported, so any caller could assert an approval for any host and have a
+  plaintext request to a public host sent with no proxy and an `Authorization` header — the same
+  door that removing the `s3-store` initarg closed, one layer down. The approval is now an
+  unexported variable bound around the send by the three senders that hold a verdict, and the
+  exported surface cannot express one: `proxy-arguments` no longer takes the keyword, and
+  `make-request` ignores it.
   **None of the three slots has an initarg, and each is recomputed on every initialization.** The
   value is a verdict the framework reached. `s3-store` is exported, so while it had an initarg
   `(make-instance 'hermes/blob:s3-store :endpoint "public.example:80" :secure nil :path-style t
   :endpoint-approved-local "public.example" ...)` sent signed requests to a public host in
   plaintext with no proxy — the leak the slot exists to prevent. Recomputing also means a
   `reinitialize-instance` that moves the endpoint cannot leave the old verdict behind.
-  **A refused `reinitialize-instance` now leaves a provider exactly as it was** (#1129). The
-  endpoint and API base checks moved from `shared-initialize :after` to `:around`, so the URL is
-  checked before the slot is assigned; previously the error was signalled with the refused URL
+  **A refused `reinitialize-instance` now leaves a provider exactly as it was** (#1129) — both
+  the URL and the recorded verdict are put back. The endpoint and API base checks moved from
+  `shared-initialize :after` to `:around`; previously the error was signalled with the refused URL
   already stored, and a caller that handled it and carried on sent the credential there.
+  **A subclass that gives the slot its own `:initform` is checked too.** The check reads the
+  slot's own value, so the URL it judges is the one the object ends up with; working out the value
+  that *would* be in effect missed a subclass default, because on a fresh instance there is no
+  initarg, the slot is not yet bound, and the superclass's constant is not what the slot will
+  hold.
   **The verdict is about the endpoint, not about how plaintext was chosen.** It is recomputed
   from the endpoint the store actually has, so a `:secure nil` passed in code is exempted too
   when its endpoint is local, even though that path does not check locality in order to refuse
