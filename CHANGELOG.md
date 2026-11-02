@@ -1249,6 +1249,34 @@ its tag.
   The local-host rule is `aion/http-client:address-category` as used by `hermes/blob` for S3
   endpoints (#970); that it is written in both places is #1082, and the review of #1084 plus
   #1089 found that both copies had holes, which is why that move is a fix rather than a tidy-up.
+- **aion/folder-watch: watch a folder and be told when each file has finished being written,
+  without the litter sync clients leave** (#996, step 1). `watch-folder` takes a loop, a folder
+  and a function, and returns a `folder-watcher`. It calls the function on the loop thread with a
+  `folder-event`, read with `folder-event-kind`, `folder-event-path`, `folder-event-name`,
+  `folder-event-size`, `folder-event-modified` and `folder-event-placeholder`:
+  - `:settled` once a file's size and modification time have not changed for `:settle` seconds
+    (default 1.5), and `:removed` once a file reported `:settled` has been gone that long. A file
+    created and deleted before it settled is not reported.
+  - A rename is the old name removed and the new one settled, and a save through a temporary
+    file is one `:settled`. A folder moved in reports each file in it, and a folder deleted
+    reports each of its files removed. A file that cannot be read for a while (a sharing
+    violation, EACCES) waits and is reported once it can be.
+  - A writer that pauses for longer than `:settle` is reported at the pause and again at the end.
+  - On Windows and macOS two names that differ only in case are one file.
+  - `:ignore` takes string patterns with `*` and `?`, matched against each component of the path,
+    and functions of the relative path. The default is `+sync-litter+`: Dropbox conflicted
+    copies, selective sync conflicts, `.dropbox`, `.dropbox.attr` and `.dropbox.cache`; OneDrive
+    and Office `~$*` and `*.tmp`; Google Drive's `.tmp.drivedownload` and `.tmp.driveupload`;
+    partial browser downloads (`*.crdownload`, `*.download`, `*.partial`), which Proton Drive
+    does not sync; editor swap and lock files; and `.DS_Store`, `._*`, `Icon` followed by a
+    carriage return, `desktop.ini` and `Thumbs.db`. `ignored-p` and `glob-match-p` apply the same
+    matching.
+  - `:report-existing` reports the files already there. `stop-folder-watch` stops it, also from
+    inside the function.
+
+  On Linux, subfolders are not watched yet (a scan still descends into them), and there is no
+  polling fallback or placeholder detection yet; those are #996's later steps. An app that
+  debounced `aion/uv:watch` itself can use this instead.
 
 - **`mnemosyne/query:sql` renders Microsoft Access (Jet/ACE) SQL with `:dialect :jet`**
   (#1061). `:limit` renders as `SELECT TOP n`, with `n` written into the SQL, so it must be a

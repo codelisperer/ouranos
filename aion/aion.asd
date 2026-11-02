@@ -685,6 +685,23 @@
   :components ((:file "tests/schedule-uv"))
   :perform (test-op (o c) (uiop:symbol-call :aion/schedule/uv/tests :run-tests)))
 
+(defsystem "aion/folder-watch"
+  :description "Watching a folder for files that have settled, with an ignore filter for what sync clients and editors leave behind (#996). Requires a built libuv (scripts/build-libuv.lisp)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; A layer over aion/uv's WATCH and timers, kept out of aion/uv so its sync-client defaults
+  ;; and policy stay out of the binding (#996).
+  :depends-on ("aion/uv")
+  :components ((:file "src/folder-watch"))
+  :in-order-to ((test-op (test-op "aion/folder-watch/tests"))))
+
+(defsystem "aion/folder-watch/tests"
+  :description "Tests for aion/folder-watch, on real temporary folders. Requires a built libuv (scripts/build-libuv.lisp)."
+  :depends-on ("aion/folder-watch" "aion/uv" "aion/fs" "fiveam")
+  :components ((:file "tests/folder-watch"))
+  :perform (test-op (o c) (uiop:symbol-call :aion/folder-watch/tests :run-tests)))
+
 (defsystem "aion/interceptor"
   :description "A typed, protocol-agnostic interceptor pipeline over a context (Coalton)."
   :author "Bob <eternal.recursion@proton.me>"
