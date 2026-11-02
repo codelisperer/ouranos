@@ -3393,6 +3393,12 @@ its tag.
 
 ### Fixed
 
+- **aion/uv: on Windows, `make-directory` makes a path relative to a drive, such as `C:work`, in
+  that drive's current folder** (#1111). Since #1095 it put a backslash after the drive and made
+  `C:\work`, in the drive's root folder, with or without `:parents`. Before #1095 such a path
+  reached libuv unchanged. Nothing in this repository passes one; for an app that does, the
+  folder is made in the drive's current folder again, as before #1095.
+
 - **aion/fs: `make-temporary-directory` takes an `:in` folder given as a string as a native name**
   (#1103). It passed `:in` through `uiop:ensure-directory-pathname`, which parses a string as a
   Lisp namestring, so a folder named, for example, `a[1]` named another path or none, and on Linux

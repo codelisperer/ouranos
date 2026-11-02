@@ -161,7 +161,10 @@ take the root's separator off (#1093)."
 (defun %parent-chain (path)
   "The folders MAKE-DIRECTORY with :PARENTS creates for the native path PATH, outermost first,
 ending with PATH itself without its trailing separators. The root is not in it. On Windows the
-parts are joined with a backslash, which an extended-length path requires."
+parts are joined with a backslash, which an extended-length path requires, except right after a
+drive with no separator: C:work names work in drive C's current folder, and C:\\work names it in
+C:'s root folder, so a separator there would name another folder (Copilot's review of #1109,
+#1111)."
   (let* ((root (min (%root-length path) (length path)))
          (rest (string-right-trim (if (uiop:os-windows-p) "/\\" "/") (subseq path root)))
          (joint (if (uiop:os-windows-p) "\\" "/"))
@@ -169,7 +172,10 @@ parts are joined with a backslash, which an extended-length path requires."
          (chain '()))
     (dolist (component (split-path rest) (nreverse chain))
       (unless (string= component "")
-        (setf so-far (if (or (string= so-far "") (path:separator-p (char so-far (1- (length so-far)))))
+        (setf so-far (if (or (string= so-far "")
+                             (path:separator-p (char so-far (1- (length so-far))))
+                             ;; The root is a drive with no separator after it.
+                             (and (= (length so-far) root) (char= #\: (char so-far (1- root)))))
                          (concatenate 'string so-far component)
                          (concatenate 'string so-far joint component)))
         (push so-far chain)))))
