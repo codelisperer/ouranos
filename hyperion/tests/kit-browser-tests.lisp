@@ -668,3 +668,119 @@ below cannot see the restore: ~S" (saw "rapid-focus-during"))
                        "focus did not return to the pressed button after the request")))
             (ignore-errors (hyperion/server:stop handler))
             (is (ports:await-released port) "the port was still accepting after teardown"))))))
+
+;;; --- two pickers and a slow response (#1138) ----------------------------------------------
+;;;
+;;; Two pickers on one page each disabled only their own buttons, so both could send before
+;;; either answer came, each request carrying the old cookie, and the later answer undid the
+;;; other choice. And when the answer came, focus went back to the pressed button even if the
+;;; visitor had moved on. The page here has two pickers and a text field, and its handler waits
+;;; before it answers. While picker one's request is outstanding, the page checks that picker
+;;; two is disabled, presses it anyway, and moves focus to the field.
+
+(defparameter *two-pickers-scenario* "
+var r = [];
+function log(k, v) { r.push(k + '=' + v); document.getElementById('results').textContent = r.join(' '); }
+function root(name) { var v = document.documentElement.getAttribute('data-' + name); return v === null ? 'none' : v; }
+function button(picker, name, value) {
+  return document.querySelector('#' + picker + ' [name=' + name + '][value=' + value + ']'); }
+function pressed(picker, name) {
+  var b = document.querySelectorAll('#' + picker + ' [data-hy-setting=' + name + '][aria-pressed=true]');
+  return b.length === 1 ? b[0].value : b.length; }
+document.addEventListener('DOMContentLoaded', function () { setTimeout(function () {
+  try {
+    // From htmx:beforeSend, as in the test above: headless Chrome's timers stand still while
+    // a request is outstanding.
+    var first = true;
+    document.addEventListener('htmx:beforeSend', function () {
+      if (!first) { return; }
+      first = false;
+      log('other-disabled', button('picker-two', 'contrast', 'high').matches(':disabled'));
+      button('picker-two', 'contrast', 'high').click();
+      document.getElementById('elsewhere').focus();
+      log('moved', document.activeElement.id); });
+    button('picker-one', 'theme', 'dark').focus();
+    button('picker-one', 'theme', 'dark').click();
+    setTimeout(function () {
+      log('settings', root('theme') + ',' + root('contrast'));
+      log('cookie', document.cookie);
+      log('other-pressed', pressed('picker-two', 'theme') + ',' + pressed('picker-two', 'contrast'));
+      log('focus', document.activeElement.id || document.activeElement.tagName);
+      log('done', 'yes'); }, 2000);
+  } catch (e) { log('error', e.message.replace(/ /g, '_')); }
+}, 100); });
+"
+  "The steps the two-picker page runs, logged as key=value and read back by %KIT-RESULTS.")
+
+(defun %two-pickers-page (appearance)
+  (spinneret:with-html-string
+    (:doctype)
+    (:html :attrs (hyperion/appearance:html-attributes appearance)
+      (:head (:meta :charset "utf-8")
+             (:script :src (assets:url :htmx))
+             (:script (:raw (hyperion/kit/appearance:apply-appearance-js))))
+      (:body
+        (hyperion/kit/appearance:appearance-picker appearance "/two" :id "picker-one")
+        (:input :id "elsewhere" :name "elsewhere")
+        (hyperion/kit/appearance:appearance-picker appearance "/two" :id "picker-two")
+        (:pre :id "results")
+        (:script (:raw *two-pickers-scenario*))))))
+
+(defun %two-pickers-app ()
+  "The two-picker page, and a handler that waits half a second before it answers, as the
+appearance page's handler does otherwise."
+  (router:to-app
+   (router:router
+    (assets:mount)
+    (router:route :get "/two"
+                  (lambda (env)
+                    (%html (%two-pickers-page
+                            (hyperion/appearance:read-appearance *appearance-store* env)))))
+    (router:route :post "/two"
+                  (lambda (env)
+                    (sleep 0.5)
+                    (let ((change (hyperion/kit/appearance:appearance-from-form
+                                   (http:body-string env))))
+                      (if (null change)
+                          (list 400 '(:content-type "text/plain") '("bad appearance"))
+                          (list 204 (hyperion/kit/appearance:appearance-response-headers
+                                     *appearance-store*
+                                     (hyperion/kit/appearance:merge-appearance
+                                      (hyperion/appearance:read-appearance *appearance-store* env)
+                                      change))
+                                '()))))))))
+
+(test two-pickers-and-a-slow-response-in-a-real-browser
+  "#1138: while picker one's request is outstanding, picker two's buttons are disabled too, so a
+press on picker two does nothing, and the stored choice and both pickers show picker one's
+choice only. Focus, moved to a text field during the request, stays there when the slow answer
+arrives."
+  (let ((browser (%smoke-browser)))
+    (if (null browser)
+        (skip "No Chrome or Edge found; set HYPERION_SMOKE_BROWSER to run the two-picker page")
+        (let* ((app (%two-pickers-app))
+               (port nil)
+               (handler (ports:call-with-port
+                         (lambda (p)
+                           (prog1 (hyperion/server:start app :port p :host "127.0.0.1" :log nil)
+                             (setf port p))))))
+          (unwind-protect
+               (let* ((dom (%run-browser browser (format nil "http://127.0.0.1:~D/two" port)))
+                      (results (%kit-results dom)))
+                 (flet ((saw (key) (cdr (assoc key results :test #'string=))))
+                   (is (equal "yes" (saw "done")) "the page ran every step: ~S" results)
+                   (is (null (saw "error")) "a step threw: ~S" (saw "error"))
+                   (is (equal "true" (saw "other-disabled"))
+                       "picker two was not disabled while picker one's request was outstanding")
+                   (is (equal "dark,none" (saw "settings"))
+                       "the press on picker two had an effect: ~S" (saw "settings"))
+                   (is (equal "appearance=dark.system.system" (saw "cookie"))
+                       "the stored choice is not picker one's: ~S" (saw "cookie"))
+                   (is (equal "dark,system" (saw "other-pressed"))
+                       "picker two does not show the stored choice: ~S" (saw "other-pressed"))
+                   (is (equal "elsewhere" (saw "moved"))
+                       "focus did not move to the field, so the check below cannot see it kept")
+                   (is (equal "elsewhere" (saw "focus"))
+                       "the slow answer took focus from the field: ~S" (saw "focus"))))
+            (ignore-errors (hyperion/server:stop handler))
+            (is (ports:await-released port) "the port was still accepting after teardown"))))))
