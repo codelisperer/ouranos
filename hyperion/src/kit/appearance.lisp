@@ -109,7 +109,8 @@ the default look. ID is the form's id.
 
 Each button is a submit button named after its setting, so without script the browser posts
 the one pressed, such as theme=dark. With htmx the form posts with hx-post and swaps
-nothing, and its buttons, in a <fieldset>, are disabled until the answer arrives. Include
+nothing, and while its request is in flight every picker's buttons on the page are disabled,
+not only this picker's, until the answer arrives (#1138). Include
 APPLY-APPEARANCE-JS on the page, and answer with APPEARANCE-RESPONSE-HEADERS. LABELS is a
 plist of the visible text, keyed as *DEFAULT-PICKER-LABELS*; a key it leaves out takes the
 default.

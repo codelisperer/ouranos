@@ -706,7 +706,15 @@ document.addEventListener('DOMContentLoaded', function () { setTimeout(function 
       log('cookie', document.cookie);
       log('other-pressed', pressed('picker-two', 'theme') + ',' + pressed('picker-two', 'contrast'));
       log('focus', document.activeElement.id || document.activeElement.tagName);
-      log('done', 'yes'); }, 2000);
+      // Focus on a button of picker two while picker one is pressed without taking focus, as
+      // a click does in Safari. Disabling every picker moves focus to the body, and it has to
+      // come back to picker two's button.
+      button('picker-two', 'theme', 'light').focus();
+      button('picker-one', 'look', 'gradient').click();
+      setTimeout(function () {
+        log('look', root('look'));
+        log('focus-other', document.activeElement === button('picker-two', 'theme', 'light'));
+        log('done', 'yes'); }, 2000); }, 2000);
   } catch (e) { log('error', e.message.replace(/ /g, '_')); }
 }, 100); });
 "
@@ -754,7 +762,9 @@ appearance page's handler does otherwise."
   "#1138: while picker one's request is outstanding, picker two's buttons are disabled too, so a
 press on picker two does nothing, and the stored choice and both pickers show picker one's
 choice only. Focus, moved to a text field during the request, stays there when the slow answer
-arrives."
+arrives. Then picker one is pressed while focus is on a button of picker two, as a click that
+does not take focus leaves it: focus returns to that button when the answer arrives, because
+the focused element is kept when it is in any picker, not only the one that sent."
   (let ((browser (%smoke-browser)))
     (if (null browser)
         (skip "No Chrome or Edge found; set HYPERION_SMOKE_BROWSER to run the two-picker page")
@@ -781,6 +791,10 @@ arrives."
                    (is (equal "elsewhere" (saw "moved"))
                        "focus did not move to the field, so the check below cannot see it kept")
                    (is (equal "elsewhere" (saw "focus"))
-                       "the slow answer took focus from the field: ~S" (saw "focus"))))
+                       "the slow answer took focus from the field: ~S" (saw "focus"))
+                   (is (equal "gradient" (saw "look"))
+                       "the second press, on picker one, had no effect: ~S" (saw "look"))
+                   (is (equal "true" (saw "focus-other"))
+                       "focus did not return to picker two's button after picker one's request")))
             (ignore-errors (hyperion/server:stop handler))
             (is (ports:await-released port) "the port was still accepting after teardown"))))))
