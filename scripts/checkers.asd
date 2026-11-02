@@ -62,6 +62,8 @@ that hides which scripts it is about.")
                              (:file "built-from")
                              ;; #992: a compiled system whose /tests system the gate never runs
                              (:file "unrun-suites")
+                             ;; #1086: an undefined call in a test's child script
+                             (:file "child-scripts")
                              ;; #1099: a contrib a dumped image carries must load, or the dump stops
                              (:file "bake-contribs"))))
   :perform (test-op (o c) (symbol-call :checkers/tests '#:run-tests)))
