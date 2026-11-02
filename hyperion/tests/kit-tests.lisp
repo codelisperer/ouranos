@@ -786,7 +786,7 @@ the-dock-panel-in-a-real-browser."
 (test the-appearance-picker-is-a-post-form-of-three-named-groups
   "Without script the form posts the one button pressed, so every button is a submit button
 named after its setting, and the form has method post and an action. With htmx it posts the
-same and swaps nothing."
+same, swaps nothing, and disables the fieldset holding the buttons until the answer arrives."
   (let* ((dom (%picker (app:make-appearance) :id "ap"))
          (form (%one dom "form")))
     (is (equal "post" (%attr form "method")))
@@ -801,7 +801,11 @@ same and swaps nothing."
                   ("contrast" "high" "High"))
                  (("look" "flat" "Flat") ("look" "gradient" "Gradient")))
                (mapcar (lambda (g) (mapcar (lambda (b) (subseq b 0 3)) (rest g))) (%groups dom))))
-    (is (every (lambda (b) (equal "submit" (%attr b "type"))) (%all dom "button")))))
+    (is (every (lambda (b) (equal "submit" (%attr b "type"))) (%all dom "button")))
+    (is (= 8 (length (%all (%one form "fieldset") "button")))
+        "every button is in the one fieldset")
+    (is (equal "find fieldset" (%attr form "hx-disabled-elt"))
+        "the fieldset, and so every button, is disabled while a request is in flight")))
 
 (test the-appearance-picker-presses-the-current-setting-in-each-group
   "System for a theme or contrast that follows the system, and Flat for the default look."

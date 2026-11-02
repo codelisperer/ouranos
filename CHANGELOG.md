@@ -1213,6 +1213,9 @@ its tag.
 
     Each button is a submit button with `aria-pressed`, so the form works without script. Its
     text comes from a `:labels` plist, with `*default-picker-labels*` for any key left out.
+    With htmx, the buttons sit in a `<fieldset>` that is disabled while a request is in
+    flight, so a press made then visibly does nothing. Without that, htmx dropped such a press
+    with no sign.
   - `appearance-from-form` reads the posted body. It checks every value against
     `hyperion/appearance`'s values, and refuses the whole form, returning `nil`, for anything
     else or for a setting posted twice.

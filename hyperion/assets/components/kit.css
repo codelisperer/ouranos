@@ -85,6 +85,18 @@
 
 /* Segmented control and toggle group: a row of buttons. The pressed state is drawn from
    aria-pressed, so the markup and the look cannot disagree. */
+/* The appearance picker's fieldset only groups its buttons, so that disabling it disables
+   them all while a request is in flight; it draws nothing. */
+.hy-appearance-fields {
+  border: 0;
+  margin: 0;
+  padding: 0;
+  min-width: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--hy-space-3, 0.75rem);
+}
+
 .hy-segmented,
 .hy-toggle-group {
   display: inline-flex;

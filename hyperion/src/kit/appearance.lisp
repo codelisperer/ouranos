@@ -100,7 +100,7 @@ the default look. ID is the form's id.
 
 Each button is a submit button named after its setting, so without script the browser posts
 the one pressed, such as theme=dark. With htmx the form posts with hx-post and swaps
-nothing: include APPLY-APPEARANCE-JS on the page, and answer with
+nothing, and its buttons, in a <fieldset>, are disabled until the answer arrives: include APPLY-APPEARANCE-JS on the page, and answer with
 APPEARANCE-RESPONSE-HEADERS. LABELS is a plist of the visible text, keyed as
 *DEFAULT-PICKER-LABELS*; a key it leaves out takes the default.
 
@@ -112,19 +112,28 @@ form's action, and javascript: there would run as script."
     (:form :id id :class "hy-appearance-picker" :method "post" :action action-href
            :aria-label (%label labels :picker)
            :hx-post action-href :hx-swap "none"
-      (dolist (setting +settings+)
-        (destructuring-bind (key name nil-value var accessor) setting
-          (declare (ignore nil-value var))
-          (let ((pressed (%value-string setting (funcall accessor appearance))))
-            (spin:with-html
-              (:div :class "hy-segmented hy-appearance-group" :role "group"
-                    :aria-label (%label labels key)
-                (dolist (value (%allowed setting))
-                  (spin:with-html
-                    (:button :type "submit" :class "button" :name name :value value
-                             :data-hy-setting name
-                             :aria-pressed (if (string= value pressed) "true" "false")
-                      (%label labels (intern (string-upcase value) :keyword)))))))))))))
+           ;; The fieldset, and so every button in it, is disabled while a request is in
+           ;; flight, so a press made then visibly does nothing. Without this, htmx keeps only
+           ;; the last press made during a request and drops the others without a sign.
+           ;; Queueing every request does not help: htmx reads the pressed button when it
+           ;; sends, not when it queues, so each queued request carries the last button. The
+           ;; fieldset is the target because `find button' disables only the first button
+           ;; (#1115's review).
+           :hx-disabled-elt "find fieldset"
+      (:fieldset :class "hy-appearance-fields"
+        (dolist (setting +settings+)
+          (destructuring-bind (key name nil-value var accessor) setting
+            (declare (ignore nil-value var))
+            (let ((pressed (%value-string setting (funcall accessor appearance))))
+              (spin:with-html
+                (:div :class "hy-segmented hy-appearance-group" :role "group"
+                      :aria-label (%label labels key)
+                  (dolist (value (%allowed setting))
+                    (spin:with-html
+                      (:button :type "submit" :class "button" :name name :value value
+                               :data-hy-setting name
+                               :aria-pressed (if (string= value pressed) "true" "false")
+                        (%label labels (intern (string-upcase value) :keyword))))))))))))))
 
 ;;; --- reading the form ---------------------------------------------------------------
 

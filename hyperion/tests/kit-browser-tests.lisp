@@ -528,7 +528,24 @@ var steps = [
       .then(function () {
         return fetch('/appearance', {method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'},
                                      body: 'contrast=normal', redirect: 'manual'}); })
-      .then(function (res) { log('plain-post', res.type); log('final-cookie', document.cookie); log('done', 'yes'); })
+      .then(function (res) { log('plain-post', res.type); log('final-cookie', document.cookie);
+        // Two more presses while the first is in flight, made from htmx:beforeSend, which
+        // fires after htmx has sent nothing yet and has disabled the buttons. Timers cannot be
+        // used: headless Chrome's virtual time stands still while a request is outstanding, so
+        // a timer set during one fires only after the answer.
+        var first = true;
+        document.addEventListener('htmx:beforeSend', function () {
+          if (!first) { return; }
+          first = false;
+          log('rapid-disabled', button('contrast', 'high').matches(':disabled'));
+          button('contrast', 'high').click(); button('look', 'flat').click(); });
+        button('theme', 'dark').click(); })
+      .then(function () {
+        setTimeout(function () {
+          log('rapid', root('theme') + ',' + root('contrast') + ',' + root('look'));
+          log('rapid-pressed', pressed('theme') + ',' + pressed('contrast') + ',' + pressed('look'));
+          log('rapid-cookie', document.cookie);
+          log('rapid-enabled', !button('contrast', 'high').matches(':disabled')); log('done', 'yes'); }, 1500); })
       .catch(function (e) { log('error-fetch', String(e).replace(/ /g, '_')); }); }
 ];
 var i = 0;
@@ -560,36 +577,40 @@ document.addEventListener('DOMContentLoaded', function () { setTimeout(next, 100
   "The appearance page, and the handler the picker posts to, written as the outline in
 hyperion/kit/appearance describes: 400 for a refused form, 204 with the trigger for htmx, and a
 303 back to the page without it."
-  (router:to-app
-   (router:router
-    (assets:mount)
-    (router:route :get "/appearance"
-                  (lambda (env)
-                    (%html (%appearance-page
-                            (hyperion/appearance:read-appearance *appearance-store* env)))))
-    (router:route :post "/appearance"
-                  (lambda (env)
-                    (let ((change (hyperion/kit/appearance:appearance-from-form
-                                   (http:body-string env))))
-                      (if (null change)
-                          (list 400 '(:content-type "text/plain") '("bad appearance"))
-                          (let ((new (hyperion/kit/appearance:merge-appearance
-                                      (hyperion/appearance:read-appearance *appearance-store* env)
-                                      change)))
-                            (if (http:htmx-request-p env)
-                                (list 204 (hyperion/kit/appearance:appearance-response-headers
-                                           *appearance-store* new)
-                                      '())
-                                (list 303 (list* :location "/appearance"
-                                                 (hyperion/appearance:persist-appearance
-                                                  *appearance-store* new))
-                                      '()))))))))))
+  (progn
+    (router:to-app
+     (router:router
+      (assets:mount)
+      (router:route :get "/appearance"
+                    (lambda (env)
+                      (%html (%appearance-page
+                              (hyperion/appearance:read-appearance *appearance-store* env)))))
+      (router:route :post "/appearance"
+                    (lambda (env)
+                      (let ((change (hyperion/kit/appearance:appearance-from-form
+                                     (http:body-string env))))
+                        (if (null change)
+                            (list 400 '(:content-type "text/plain") '("bad appearance"))
+                            (let ((new (hyperion/kit/appearance:merge-appearance
+                                        (hyperion/appearance:read-appearance *appearance-store*
+                                                                             env)
+                                        change)))
+                              (if (http:htmx-request-p env)
+                                  (list 204 (hyperion/kit/appearance:appearance-response-headers
+                                             *appearance-store* new)
+                                        '())
+                                  (list 303 (list* :location "/appearance"
+                                                   (hyperion/appearance:persist-appearance
+                                                    *appearance-store* new))
+                                        '())))))))))))
 
 (test the-appearance-picker-in-a-real-browser
   "Pressing Dark posts the form with htmx, and the response's event sets data-theme on <html>,
 moves aria-pressed to Dark and stores the choice in the cookie, leaving contrast alone; System
 removes data-theme, so the CSS follows the system again; Gradient sets data-look. A forged value
-is refused with 400, not echoed and not triggered; a post without htmx is redirected."
+is refused with 400, not echoed and not triggered; a post without htmx is redirected. While a
+press is in flight the buttons are disabled, so presses made then have no effect and the page
+still shows what was stored (#1115's review)."
   (let ((browser (%smoke-browser)))
     (if (null browser)
         (skip "No Chrome or Edge found; set HYPERION_SMOKE_BROWSER to run the appearance page")
@@ -624,6 +645,15 @@ is refused with 400, not echoed and not triggered; a post without htmx is redire
                    (is (equal "opaqueredirect" (saw "plain-post"))
                        "a post without htmx was not redirected: ~S" (saw "plain-post"))
                    (is (equal "appearance=system.normal.gradient" (saw "final-cookie"))
-                       "the redirect did not store the choice: ~S" (saw "final-cookie"))))
+                       "the redirect did not store the choice: ~S" (saw "final-cookie"))
+                   (is (equal "true" (saw "rapid-disabled"))
+                       "the buttons were not disabled while the first press was in flight")
+                   (is (equal "dark,normal,gradient" (saw "rapid"))
+                       "a press made during a request had an effect: ~S" (saw "rapid"))
+                   (is (equal "dark,normal,gradient" (saw "rapid-pressed"))
+                       "the pressed buttons do not show the settings: ~S" (saw "rapid-pressed"))
+                   (is (equal "appearance=dark.normal.gradient" (saw "rapid-cookie"))
+                       "the page and the stored choice disagree: ~S" (saw "rapid-cookie"))
+                   (is (equal "true" (saw "rapid-enabled")) "the buttons stayed disabled")))
             (ignore-errors (hyperion/server:stop handler))
             (is (ports:await-released port) "the port was still accepting after teardown"))))))
