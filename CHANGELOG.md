@@ -14,6 +14,13 @@ its tag.
 
 ### An app may have to act
 
+- **hermes: a 429 from SendGrid or Twilio is now `delivery-rate-limited`, not a plain
+  `delivery-failure`** (#79 step two). An app that caught `delivery-failure` still catches it,
+  since `delivery-rate-limited` is a subtype, but one that *distinguished* a rate limit by
+  reading `delivery-failure-status` can now match on the class, and read
+  `delivery-rate-limited-retry-after` for the wait the response asked for. Telegram and Facebook
+  already signalled it; every backend does now.
+
 - **mnemosyne/conn: a Postgres connect gives up after 10 seconds, and an optional statement
   timeout** (#959). `connect` and `make-pool` take `:connect-timeout`, in seconds, defaulting to
   `*postgres-connect-timeout-seconds*` (10), and `:statement-timeout`, in milliseconds,
@@ -1135,6 +1142,17 @@ its tag.
   `claude-sonnet-5-5` allows 128,000 output tokens, so `*default-max-tokens*` (8,192) is
   unchanged. The documentation's examples now name
   `claude-opus-5-5` where they named `claude-opus-4-8`.
+- **`aion/tests` runs its four sub-suites through ASDF, and a red aion run stops at the first
+  failing one** (#992). `aion/tests` has no components now. It names `aion/csv/tests`,
+  `aion/csv/types/tests`, `aion/clock/tests` and `aion/log/tests` in
+  `:in-order-to ((test-op (test-op …)))`, and each of those signals an error from its
+  `:perform` when a check fails, so `asdf:test-system` on any of them reports a failure through
+  the exit code. A green run counts the same checks as before (623 on macOS arm64). **When a
+  sub-suite fails, ASDF does not run the sub-suites after it**, so their reports are missing
+  from that run; before, all four ran and the verdict came at the end. The function
+  `aion/tests:run-tests` and the file `aion/tests/all.lisp` are gone: code that called
+  `aion/tests:run-tests` calls `(asdf:test-system :aion/tests)` instead, as `aion/cons.lisp`'s
+  `test` target now does.
 
 ### Added
 
@@ -1157,7 +1175,8 @@ its tag.
     copies, selective sync conflicts, `.dropbox`, `.dropbox.attr` and `.dropbox.cache`; OneDrive
     and Office `~$*` and `*.tmp`; Google Drive's `.tmp.drivedownload` and `.tmp.driveupload`;
     partial browser downloads (`*.crdownload`, `*.download`, `*.partial`), which Proton Drive
-    does not sync; editor swap and lock files; and `.DS_Store`, `._*`, `Icon`, `desktop.ini`
+    does not sync; editor swap and lock files; and `.DS_Store`, `._*`, `Icon
+`, `desktop.ini`
     and `Thumbs.db`. `ignored-p` and `glob-match-p` apply the same matching.
   - `:report-existing` reports the files already there. `stop-folder-watch` stops it, also from
     inside the function.
@@ -1165,6 +1184,134 @@ its tag.
   On Linux, subfolders are not watched yet (a scan still descends into them), and there is no
   polling fallback or placeholder detection yet; those are #996's later steps. An app that
   debounced `aion/uv:watch` itself can use this instead.
+
+- **`mnemosyne/query:sql` renders Microsoft Access (Jet/ACE) SQL with `:dialect :jet`**
+  (#1061). `:limit` renders as `SELECT TOP n`, with `n` written into the SQL, so it must be a
+  positive integer; Jet's `TOP` also returns rows tied with the last one on the `ORDER BY`
+  columns. `:offset` signals the new condition `mnemosyne/query:unsupported-query` when the
+  query is compiled, because Jet has no `OFFSET`. Names render in brackets (`[c].[email]`,
+  `(:quoted "First Name")` as `[First Name]`). The new forms `(:date y m d)` and
+  `(:timestamp y m d h mi s)` render as `#2026-09-14#` and `#2026-09-14 08:05:03#` on Jet and
+  are bound as ISO text on the other dialects. Values bind as `?`, and the param list is in
+  placeholder order, which is the order ADO binds them in. An aggregate in the SELECT list
+  without an alias gets one (`COUNT(*) AS [count]`, `SUM(o.total) AS [sum_total]`), avoiding
+  the names of the other columns. More than one join renders in nested parentheses, as Jet
+  requires, and `:full` and `:cross` joins signal `unsupported-query`. A leading
+  `(:distinct …)` item gives `SELECT DISTINCT TOP n`. `unsupported-query` also refuses what
+  Access rejects when it runs: `:escape` on `:like`, `:lower`, `:upper`, `:length` and
+  `:coalesce` (use `(:call :lcase …)` and the other Jet functions), `(:count (:distinct …))`,
+  `:returning`, `:on-conflict` and an INSERT of more than one row. The dialect
+  renders queries only: mnemosyne has no backend that runs them, `ddl:ddl` signals
+  `unsupported-ddl` for `:jet`, and `schema:schema-ddl` refuses it. `mnemosyne/field:Dialect`
+  has a new constructor, `D-Jet`, and `mnemosyne/field-shell:+dialects+` lists it, so Coalton
+  code that matches on `Dialect` without a wildcard arm needs a `D-Jet` arm. See
+  `mnemosyne/docs/user-guide.md`, "Dialects".
+- **`aion/sexp:read-data` can skip `;` line comments, with `:comments :skip`** (#1062), for a
+  data file a person edits by hand, such as a configuration file. A comment runs from the `;` to
+  the end of the line, and is skipped before the datum, between elements and after it; for a
+  string, a tail of only whitespace and comments is accepted. A `;` inside a string is part of
+  the string either way. A skipped comment counts toward `max-input`, so a file of nothing but
+  comments is still bounded. `#| |#` and `#;` comments are `#` forms and stay refused. The
+  default, `:comments :refuse`, refuses a comment exactly as before. Any other value signals an
+  error.
+- **hyperion/desktop: a desktop app's page can show the native open, save-as and folder dialogs,
+  on Windows, and the page receives the path the user chooses** (#986). `run-app` takes
+  `:dialogs`, default T, and on Windows passes `--dialogs` to hyperion-view, which then defines
+  `window.hyperionDialog(request)` in the app's page. It resolves to `{path}`, `{paths}` for
+  `:open-many`, `{cancelled: true}`, or `{error}`. `hyperion/desktop:dialog-onclick` renders a
+  button's onclick that shows the dialog and posts the choice to one of the app's routes with htmx,
+  as the field `path`, or `paths` (a JSON array) for `:open-many`.
+  `hyperion/desktop:dialog-request-json` renders the request on its own, and both signal
+  `hyperion/desktop:dialog-request-refused` for a request hyperion-view would refuse; its
+  `dialog-request-refused-reason` is the keyword for hyperion-view's reason (`:kind`, `:title`,
+  `:folder`, `:name`, `:filters`, `:filter-label`, `:filter-patterns` or `:pattern`). A save
+  dialog with filters starts on the first filter and adds its first pattern's extension to a name
+  typed without one. `hyperion/desktop:dialogs-available-p` says whether the
+  page has the function now; when it does not, show a field for a pasted path instead.
+  - **The page's script receives the path, which says something about the user's machine.** The
+    function exists only in the top-level frame and only while it shows the origin of the URL
+    `run-app` started with: iframes, and pages from any other origin, do not get it. A call
+    without the token hyperion-view makes at each launch is refused by hyperion-view itself, and a
+    call made outside a user action (a click or a key) is refused where the webview can tell: on
+    Windows (WebView2) and on macOS 13.3 and later. The answer is delivered only while the window
+    still shows the app's origin, so a page the window has gone to since the call does not receive
+    the path. One dialog is shown at a time; a second call gets `{error: "busy"}`. A `folder` must be a
+    local drive path (`C:\Users`, `c:/data`), and any other folder is refused, because other forms
+    (`\\host\share`, `file://host/share`) reach a network share, and opening one makes Windows
+    send the user's credentials to that host. An app that shows
+    third-party content in its window should pass `:dialogs nil`.
+  - **Only Windows shows a dialog in this change.** On macOS and Linux `run-app` does not pass
+    `--dialogs`, so a hyperion-view built before this change still starts there; the page has no
+    `window.hyperionDialog`, and `dialogs-available-p` is NIL. Their dialogs follow in separate
+    changes. A view built with this change answers `{error: "unavailable"}` there if it is started
+    with `--dialogs` directly.
+  - hyperion-view gains `--dialogs`, `--exit-after SECONDS` (closes the window after SECONDS, for
+    tests), and two modes that make no window: `--dialog-request TOKEN PARAMS` prints how a call is
+    checked, and `--dialog-origin URL` prints the origin the function is offered to. With
+    `--dialogs`, hyperion-view exits 2 if it cannot make the launch's token or the URL has no
+    origin. For tests, `HYPERION_VIEW_FAKE_DIALOG=1`, honoured only when `GITHUB_ACTIONS` is set
+    too, answers every call with `{path: "fake-path"}` after three seconds, shows no dialog, skips
+    the user-action check, and says so on stderr. On Windows, a
+    hyperion-view built before this change refuses `--dialogs` as an unknown option and opens no
+    window, so rebuild it with `hyperion/hyperion-view/build.ps1` (it now links `uuid.lib` and
+    `bcrypt.lib`).
+  - `aion/test-http`'s `start-server` and `with-server` take `:concurrent`, which serves each
+    connection on a thread of its own, so a connection that sends nothing, as a browser opens,
+    does not hold up the next request. The default is unchanged.
+- **hyperion/notifications: in-app notifications, with per-kind delivery to the list, to email
+  through the app's own function, or both** (#792). These are new opt-in systems:
+  - `hyperion/notifications` has:
+    - `notify`, `define-notification-kind` and `*notification-email*`;
+    - the store protocol `notification-put`, `notification-list`, `unread-count`, `mark-read`,
+      `mark-all-read`, `prune-notifications`, `delivery-ref` and `delivery-set`;
+    - `make-memory-notification-store`;
+    - the components `notification-bell`, `notification-panel` and `delivery-form`;
+    - `notification-router`;
+    - `prune-notifications-job` for aion/schedule.
+  - `hyperion/notifications-db` has `make-db-notification-store`, and the DDL for the app's
+    migrations: `notifications-ddl`, `notifications-index-ddl`, `notifications-unread-key-ddl`
+    and `delivery-ddl`. The store refuses to start without its tables
+    (`missing-notification-tables`). A table name is 1 to 47 ASCII letters, digits and
+    underscores. The database store needs Postgres 9.5 or later, or SQLite 3.35 or later, for
+    `INSERT ... ON CONFLICT ... RETURNING`. With an older SQLite, the first `notification-put`
+    signals `mnemosyne/conn:db-error` for a syntax error at `RETURNING`. A
+    desktop bundle carries the SQLite pinned in `sqlite.pin`; elsewhere the system's copy is
+    used, and `mnemosyne/sqlite-library:loaded-library` names it.
+
+  How it behaves:
+  - A notification with the group key of an unread item collapses into it and raises its `count`.
+    In the database store this is one statement, so it is safe when two calls race, including
+    inside the app's own transaction.
+  - A store refuses a notification whose id it already holds, unless it collapses:
+    `invalid-notification` from the memory store, the database's error from the database store.
+  - A link must be a path on the app's own site.
+  - The router takes the recipient from the app's `:recipient-fn`, never from the request.
+  - The bell announces the unread count through a status region, once per change.
+
+  See `hyperion/docs/notifications.md`.
+- **`aion/http-client:status-transience` is exported**: given an HTTP status and a transport
+  phase, either of which may be `nil`, it returns `:transient`, `:unknown` or `nil`. It is the
+  one place that mapping is written, so a library turning HTTP failures into its own conditions
+  reaches the same verdict by calling it instead of repeating the `cond` over
+  `+transient-statuses+` and `+unknown-statuses+`. `aion/http-client:transience` on an
+  `http-error` and `hermes`'s method on a `delivery-failure` both call it.
+- **hermes: `aion/retry:transience` and `aion/retry:retry-after` answer for hermes's own
+  failures, so an app can ask what is worth sending again** (#79 step two). `hermes` depends on
+  `aion/retry` for this and **still never sleeps or retries by itself**: a rate limit or a transient failure is
+  classified, and the app schedules the next attempt, for example with
+  `aion/schedule:schedule-once`. `aion/retry:with-retry` is deliberately not used inside hermes,
+  because it sleeps, and a send is not safe to repeat blindly.
+  - `delivery-rate-limited` is `:transient`, and its `retry-after` is what to schedule by. The
+    Graph codes 4, 17, 32, 613 and 80001 reach it with the wait from
+    `X-Business-Use-Case-Usage`, and Telegram's with its own `retry_after`.
+  - `delivery-failure` is classified from its status, using aion/http-client's own
+    `+transient-statuses+` and `+unknown-statuses+` rather than a second copy of those lists; and
+    where there is no status, from the new `delivery-failure-phase`, carried from
+    `http-error-phase`: `:connect` means the message was never sent (`:transient`), `:response`
+    that the provider may already have sent it (`:unknown`). A failure hermes raised itself is
+    neither, so the default policy will not send a message twice.
+  - `aion/http-client` exports `+transient-statuses+` and `+unknown-statuses+` for this.
+
 - **aion/retry: a retry policy as data, and `with-retry`, which retries through restarts**
   (#79). `make-retry-policy` takes `:max-attempts`, `:base-delay`, `:multiplier`, `:max-delay`,
   `:jitter` (`:full`, `:equal` or `:none`), `:deadline` and `:retryable`, and `retry-delay`
@@ -1307,6 +1454,20 @@ its tag.
   with nonces; the region's script handles the click. The fixed texts are the i18n keys
   `:notice/failed`, `:notice/unreachable`, `:notice/timeout` and `:notice/dismiss`. See `hyperion/docs/notice.md`. A notice is not stored; the notification list
   is #792.
+- **aion/windows/com: `variant-to-lisp` reads a one-dimensional SAFEARRAY, so a long-binary
+  value arrives as an octet vector** (#964). `VT_ARRAY|VT_UI1` (8209), the type of an ADO or DAO
+  long-binary column, of `GetChunk` and of an Automation `byte[]`, signalled "no Lisp mapping for
+  VARIANT type 8209"; it is now an `(unsigned-byte 8)` vector. Arrays of the integer and float
+  types, of `VT_BOOL` (as `T` and `NIL`), of `VT_BSTR` and of `VT_VARIANT` become simple vectors,
+  and a NULL array is an empty vector; a NULL BSTR element is NIL, as a single NULL BSTR is. A single `VT_I1` or `VT_UINT` value, which signalled before, is now read
+  as an integer too. A multi-dimensional array, an array of any other element type and a
+  `VT_ARRAY|VT_BYREF` value signal `com-error` with the reason. The elements are copied out under
+  `SafeArrayAccessData`, and the array is unlocked however the copy ends; when the copy signalled
+  and the unlock fails too, the copy's error is signalled and the unlock failure is a
+  `safearray-unlock-failed` warning, which carries the HRESULT. The VARIANT's owner frees the
+  array, as before. New in
+  `aion/windows/com/ffi`: `+vt-array+`, `safearraybound` and the oleaut32 SAFEARRAY functions
+  (`safe-array-get-dim`, `safe-array-access-data` and the rest).
 - **`mnemosyne/test-template`: a test suite can migrate one SQLite database per run and give
   each test a copy** (#1047). `make-sqlite-template` applies an app's migrations to an in-memory
   database once (`:setup` configures its connection first); `copy-sqlite-template` and
@@ -3059,6 +3220,32 @@ its tag.
 
 ### Fixed
 
+- **aion/uv: a path string reaches libuv as written, so a file with a backslash in its name works
+  on Linux and macOS** (#1093). Every function that takes a path ran it through `cl:namestring`,
+  and on Linux and macOS that drops a backslash, so `a\b.txt` was used as `ab.txt`. The affected
+  functions are:
+  - `file-info`, `read-file`, `write-file`, `make-directory`, `delete-file*`, `delete-directory`,
+    `rename-path`, `real-path` and `list-directory`;
+  - `read-file-async`, `file-info-async` and `write-file-async`, and `watch`;
+  - `aion/uv/net`'s `listen-pipe` and `connect-pipe`, and `aion/uv/process`'s `spawn` `:cwd`.
+
+  A string is now passed through unchanged. A pathname is converted with
+  `uiop:native-namestring`, so on Windows it reaches libuv with backslashes, as does
+  `uv-error-path` in a condition about it. Before, both had forward slashes. A string with
+  backslashes on Windows also keeps them now. `make-directory` with `:parents` splits on either
+  separator on Windows, and on `/` only elsewhere. On Windows `watch` drops a trailing backslash
+  from the folder's path, except for a drive's root, because libuv then reports each filename
+  with a backslash in front of it. The new exported function `native-path` returns the string a
+  path is given to libuv as.
+
+- **aion/http-client: on Windows, a pinned request's read that returned is no longer reported as
+  a timeout** (#1063). A request with `:connect-address`, which `fetch-public` makes, keeps its
+  read timeout on Windows with a timer that closes the socket. When the timer fired just as a
+  read returned, the read's data was dropped and `sb-sys:io-timeout` signalled. Now a read that
+  returns is returned, and the timeout is signalled only for a read the timer ended. The
+  `make-request` docstring now says that a request with `:connect-address` follows no redirect
+  whatever `:follow-redirects` says, and that its own HTTP/1.1 is used on every OS, not only on
+  Windows.
 - **aion/http-client: a failure on a pinned connection no longer reconnects through DNS or sends
   the request again** (#985). A request with `:connect-address`, which `fetch-public` always
   makes, handed its connection to dexador on Linux and macOS. After any failure on it, such as a

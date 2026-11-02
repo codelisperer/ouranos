@@ -86,7 +86,11 @@
   :components ((:module "tests"
                 :serial t
                 :components ((:file "csv-types"))))
-  :perform (test-op (o c) (uiop:symbol-call :aion/csv/types/tests :run-tests)))
+  ;; Signals when a check fails, so that the exit code says so; aion/tests runs this
+  ;; through :in-order-to and relies on it (#992).
+  :perform (test-op (o c)
+             (unless (uiop:symbol-call :aion/csv/types/tests :run-tests)
+               (error "aion/csv/types/tests: a check failed; the FiveAM report above says which"))))
 
 ;;; aion/sexp --- a safe reader and writer for s-expression data from outside the program
 ;;; (#972). Dependency-free on purpose, like aion/csv: plain CL, its own parser, no CL:READ.
@@ -112,7 +116,11 @@
   :components ((:module "tests"
                 :serial t
                 :components ((:file "csv"))))
-  :perform (test-op (o c) (uiop:symbol-call :aion/csv/tests :run-tests)))
+  ;; Signals when a check fails, so that the exit code says so; aion/tests runs this
+  ;; through :in-order-to and relies on it (#992).
+  :perform (test-op (o c)
+             (unless (uiop:symbol-call :aion/csv/tests :run-tests)
+               (error "aion/csv/tests: a check failed; the FiveAM report above says which"))))
 
 ;;; aion/uv --- libuv for Common Lisp. A separate, OPT-IN system: core aion stays pure
 ;;; and toolchain-free, while consumers that want an event loop, async/sync filesystem
@@ -874,7 +882,11 @@
   :components ((:module "tests"
                 :serial t
                 :components ((:file "clock"))))
-  :perform (test-op (o c) (uiop:symbol-call :aion/clock/tests :run-tests)))
+  ;; Signals when a check fails, so that the exit code says so; aion/tests runs this
+  ;; through :in-order-to and relies on it (#992).
+  :perform (test-op (o c)
+             (unless (uiop:symbol-call :aion/clock/tests :run-tests)
+               (error "aion/clock/tests: a check failed; the FiveAM report above says which"))))
 
 ;;; aion/log --- a backend-neutral logging facade over log4cl. A separate opt-in system so
 ;;; core aion stays dependency-light (coalton + alexandria); consumers that want logging
@@ -953,7 +965,11 @@
   :components ((:module "tests"
                 :serial t
                 :components ((:file "log"))))
-  :perform (test-op (o c) (uiop:symbol-call :aion/log/tests :run-tests)))
+  ;; Signals when a check fails, so that the exit code says so; aion/tests runs this
+  ;; through :in-order-to and relies on it (#992).
+  :perform (test-op (o c)
+             (unless (uiop:symbol-call :aion/log/tests :run-tests)
+               (error "aion/log/tests: a check failed; the FiveAM report above says which"))))
 
 (defsystem "aion/boundary/tests"
   :description "Tests for aion/boundary (#110)."
@@ -974,16 +990,16 @@
   :perform (test-op (o c) (uiop:symbol-call :aion/dynamic/tests :run-tests)))
 
 (defsystem "aion/tests"
-  :description "Umbrella test suite for Aion: runs every aion sub-suite."
-  :depends-on ("aion" "aion/csv/tests" "aion/csv/types/tests" "aion/clock/tests"
-               "aion/log/tests" "fiveam")
-  :serial t
-  :components ((:module "tests"
-                :serial t
-                :components ((:file "all"))))
-  ;; RUN-TESTS prints four FiveAM reports and returns NIL if any failed. That value used to be
-  ;; dropped, so a failing sub-suite still exited 0 (#605). Signalling makes the exit code say
-  ;; so, independently of the gate reading every report's Fail line.
-  :perform (test-op (o c)
-             (unless (uiop:symbol-call :aion/tests :run-tests)
-               (error "aion/tests: a sub-suite failed; the FiveAM reports above say which"))))
+  :description "Umbrella test suite for Aion: runs every aion sub-suite through ASDF."
+  :depends-on ("aion")
+  ;; No components: core aion has no tests of its own yet, so this system only runs the
+  ;; sub-suites of aion/csv, aion/csv/types, aion/clock and aion/log, through ASDF's test-op
+  ;; (#992). Before #992 a file here called each one's RUN-TESTS, which the gate's check that
+  ;; every compiled system's /tests suite is run could not see as running them.
+  ;;
+  ;; Each sub-suite's :perform signals when a check fails, so the exit code reports a failure
+  ;; (#605). As a consequence, a red aion run STOPS AT THE FIRST FAILING SUB-SUITE: ASDF does
+  ;; not run the sub-suites after it, so their reports are missing from that run. The gate
+  ;; still fails it, and a green run counts the same checks as before.
+  :in-order-to ((test-op (test-op "aion/csv/tests" "aion/csv/types/tests" "aion/clock/tests"
+                                  "aion/log/tests"))))

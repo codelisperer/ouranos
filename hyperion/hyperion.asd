@@ -380,6 +380,45 @@
   :components ((:file "tests/list-db-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/list-db/tests :run-tests)))
 
+(defsystem "hyperion/notifications"
+  :description "In-app notifications: a store protocol and a memory store, NOTIFY with per-kind delivery to the list or the app's email function, the bell and list components, their router, and a prune job (#792)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; hyperion for hyperion/http, i18n, router and csrf. aion/clock for the ids, aion/log for a
+  ;; failed email. No database (hyperion/notifications-db) and no hermes: email is the app's
+  ;; function, because nothing in the line depends on a satellite.
+  :depends-on ("hyperion" "spinneret" "bordeaux-threads" "aion/clock" "aion/log")
+  :components ((:file "src/notifications"))
+  :in-order-to ((test-op (test-op "hyperion/notifications/tests"))))
+
+(defsystem "hyperion/notifications/tests"
+  :description "Tests for hyperion/notifications: the store protocol on the memory store, collapsing by group key, delivery per kind, the link check, the components' markup and the routes."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion/notifications" "hyperion" "spinneret" "flexi-streams" "fiveam"
+               "aion/schedule")   ; the prune job is run the way the docs define it
+  :components ((:file "tests/notifications-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/notifications/tests :run-tests)))
+
+(defsystem "hyperion/notifications-db"
+  :description "A mnemosyne store for hyperion/notifications, with the DDL for the app's migrations and a check that its tables exist (#792)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; mnemosyne is to hyperion's left in the DAG; bordeaux-threads for the one-connection lock.
+  :depends-on ("hyperion/notifications" "mnemosyne" "bordeaux-threads" "aion/log")
+  :components ((:file "src/notifications-db"))
+  :in-order-to ((test-op (test-op "hyperion/notifications-db/tests"))))
+
+(defsystem "hyperion/notifications-db/tests"
+  :description "Tests for hyperion/notifications-db against SQLite in memory, and Postgres when MNEMOSYNE_TEST_PG_URL is set."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion/notifications-db" "hyperion/notifications" "mnemosyne" "fiveam")
+  :components ((:file "tests/notifications-db-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/notifications-db/tests :run-tests)))
+
 (defsystem "hyperion/sidecar"
   :description "Dev sidecars: helper processes, such as a webhook forwarder, started and stopped with a dev server (#700)."
   :author "Bob <eternal.recursion@proton.me>"
@@ -447,7 +486,8 @@
   ;; DEPENDS ON hyperion/desktop, not on nothing: the suite resolves the launcher through
   ;; desktop:default-launcher rather than rebuilding that logic, so if resolution moves
   ;; the suite moves with it instead of quietly testing a path nobody uses.
-  :depends-on ("aion/fs" "aion/platform" "hyperion/desktop" "fiveam")   ; view-tests.lisp compares with aion/platform (#416)
+  :depends-on ("aion/fs" "aion/platform" "hyperion/desktop" "fiveam"   ; view-tests.lisp compares with aion/platform (#416)
+               "aion/test-http")   ; the pages a real window with --dialogs loads, on CI (#986)
   :serial t
   :components ((:file "tests/view-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/view/tests :run-tests)))
@@ -460,7 +500,9 @@
                ;; ShellExecuteW for the :browser shell, so no URL passes through cmd (#851)
                (:feature :win32 "aion/windows"))
   :serial t
-  :components ((:file "src/desktop")))
+  :components ((:file "src/desktop")
+               ;; #986: the native dialogs' request, checked and rendered for a page
+               (:file "src/desktop-dialogs")))
 
 ;;; The desktop self-updater (ADR-0010, pre-publication issue 76). An aux system: only a desktop app pulls it,
 ;;; and hyperion core stays free of crypto and of an HTTP client.
@@ -761,6 +803,7 @@
                              (:file "desktop-window-tests")
                              (:file "browser-tests")   ; the :browser shell opens no shell (#851)
                              (:file "notice-tests")    ; after i18n-tests, whose %HT it uses (#980)
+                             (:file "desktop-dialogs-tests")   ; the dialog call a page renders (#986)
                              (:file "ratelimit-tests")
                              (:file "proxy-tests")   ; after ratelimit-tests, whose helpers it uses (#381)
                              (:file "entropy-tests")

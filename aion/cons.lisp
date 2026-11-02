@@ -13,7 +13,7 @@
           :load "aion")
    (test  :doc "run the fiveam test suite"
           :load "aion/tests"
-          :eval "(uiop:quit (if (aion/tests:run-tests) 0 1))")
+          :eval "(uiop:quit (handler-case (progn (asdf:test-system :aion/tests) 0) (error () 1)))")
    (uv-test :doc "run the aion/uv suite (needs scripts/build-libuv.lisp first)"
             :load "aion/uv/tests"
             :eval "(uiop:quit (if (aion/uv/tests:run-tests) 0 1))")

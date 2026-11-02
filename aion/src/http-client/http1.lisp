@@ -19,8 +19,10 @@
 ;;;;     digits, since a response a proxy could frame two ways is how requests are smuggled;
 ;;;;   - a chunk size: hexadecimal, at most +MAX-CHUNK-SIZE-DIGITS+ digits, nothing but an
 ;;;;     extension after it; the trailer is limited like the head.
-;;;; The body's total is limited by the caller, through %READ-CAPPED and MAX-BODY-BYTES, and a
-;;;; read waits at most the socket's receive timeout, which the caller sets.
+;;;; The body's total is limited by the caller, through %READ-CAPPED and MAX-BODY-BYTES. How long a
+;;;; read may wait is set by the caller too, by a different mechanism on each OS: elsewhere, the
+;;;; socket's receive timeout; on Windows, where that timeout does not end a read, the
+;;;; %IDLE-WATCHED-STREAM in fetch.lisp, whose timer closes the socket (#985).
 ;;;;
 ;;;; The request asks for what this reader can read: Connection: close, so the body may end at
 ;;;; the close, and Accept-Encoding: identity, so nothing is compressed.

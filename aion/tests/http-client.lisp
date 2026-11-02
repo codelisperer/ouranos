@@ -328,6 +328,45 @@ IPv4 list."
   (is (equalp #(10 0 0 5) (http:parse-address "10.0.0.5")))
   (is (string= "0:0:0:0:0:0:0:1" (http:address-string (http:parse-address "::1")))))
 
+;;; --- aion/test-http :concurrent (#999) ---------------------------------------------------
+
+(defun %answered-past-an-idle-connection-p (concurrent)
+  "Whether a server started with CONCURRENT answers a request while another connection to it is
+open and has sent nothing: true when the answer's first byte arrives within two seconds."
+  (aion/test-http:with-server (s (lambda (request stream)
+                                   (declare (ignore request))
+                                   (aion/test-http:write-response stream 200 '() "answered"))
+                                 :concurrent concurrent)
+    (let ((idle (usocket:socket-connect "127.0.0.1" (aion/test-http:server-port s)
+                                        :element-type '(unsigned-byte 8)))
+          (asking nil))
+      (unwind-protect
+           (progn
+             (sleep 0.3)                ; the server takes the idle connection first
+             (setf asking (usocket:socket-connect "127.0.0.1" (aion/test-http:server-port s)
+                                                  :element-type '(unsigned-byte 8)))
+             (let ((out (usocket:socket-stream asking)))
+               (write-sequence (sb-ext:string-to-octets
+                                (format nil "GET / HTTP/1.1~C~CHost: x~C~C~C~C"
+                                        #\Return #\Newline #\Return #\Newline #\Return #\Newline)
+                                :external-format :latin-1)
+                               out)
+               (finish-output out))
+             (and (usocket:wait-for-input asking :timeout 2 :ready-only t) t))
+        ;; Closing the idle connection lets a server that serves one at a time go on, so its
+        ;; thread can be stopped.
+        (ignore-errors (usocket:socket-close idle))
+        (when asking (ignore-errors (usocket:socket-close asking)))))))
+
+(test a-concurrent-test-server-answers-while-another-connection-is-idle
+  "#999, from the hub's review: aion/test-http's :CONCURRENT serves each connection on its own
+thread, so a connection that sends nothing does not hold up the next request. The control is the
+default server, which serves one connection at a time and does not answer meanwhile. A browser
+opens such connections, and the window test that needs this runs only on CI."
+  (is-true (%answered-past-an-idle-connection-p t) "with :concurrent, the request is answered")
+  (is-false (%answered-past-an-idle-connection-p nil)
+            "control: one connection at a time, the request waits behind the idle one"))
+
 ;;; --- redirect control and the body cap (every platform) ------------------------------
 
 (defun %redirecting (path head stream)
@@ -352,7 +391,13 @@ the 3xx it stopped at; the default follows to the end."
       (is (= 3 (%requests s))))
     (let ((all (http:send-request (http:make-request :url (%local s "/") :read-timeout 5) '())))
       (is (= 200 (http:response-status all)))
-      (is (string= "the end" (http:response-body all))))))
+      (is (string= "the end" (http:response-body all))))
+    ;; #1063: a pinned request follows none, whatever FOLLOW-REDIRECTS says, as MAKE-REQUEST's
+    ;; docstring says; its 3xx is the response.
+    (let ((pinned (http:send-request (http:make-request :url (%local s "/") :connect-address "127.0.0.1"
+                                                        :read-timeout 5)
+                                     '())))
+      (is (= 302 (http:response-status pinned)) "a pinned request with the default of 5"))))
 
 (test a-body-over-the-cap-is-refused-with-or-without-content-length
   "A declared Content-Length over the cap is refused before the body is read. Without one, the
@@ -1476,6 +1521,73 @@ never answers, and COUNT-VAR to a function returning how many connections it acc
          (ignore-errors (bt:destroy-thread ,thread))
          (dolist (c ,held) (ignore-errors (usocket:socket-close c)))
          (usocket:socket-close ,listener)))))
+
+(test a-read-that-returns-after-the-timer-fired-is-not-a-timeout
+  "#1063: on Windows a pinned request's read timeout is a timer that closes the socket
+(%IDLE-WATCHED-STREAM). A read that returned its data was reported as SB-SYS:IO-TIMEOUT when the
+timer fired before the read's own clean-up unscheduled it. The window is forced here with a read
+that keeps going past the timeout and then returns without touching the socket: it must return
+its value. The control is a read that fails once the timer has closed the socket, as a real
+blocked read does, which must still signal the timeout."
+  #-os-windows (skip "the watched stream is Windows-only; elsewhere the socket's receive timeout ends a read")
+  #+os-windows
+  (flet ((watched ()
+           ;; An inner stream with nothing to LISTEN to, so the read is watched; no socket, so
+           ;; the timer's close does nothing here.
+           (make-instance 'aion/http-client::%idle-watched-stream
+                          :inner (make-string-input-stream "") :socket nil :seconds 0.2)))
+    (let ((s (watched)))
+      (is (eql 42 (aion/http-client::%call-watched s (lambda () (sleep 0.6) 42)))
+          "a read that returned after the timer fired returns its value")
+      (is-true (aion/http-client::%timed-out s) "the timer did fire, so the window was reached"))
+    ;; Control: a read the timer's close ended is still a timeout.
+    (let ((s (watched)))
+      (signals sb-sys:io-timeout
+        (aion/http-client::%call-watched
+         s (lambda ()
+             (loop until (aion/http-client::%timed-out s) do (sleep 0.02))
+             (error "the socket was closed")))))
+    (let ((s (watched)))
+      (is (eql 7 (aion/http-client::%call-watched s (lambda () 7))))
+      (sleep 0.4)
+      (is (null (aion/http-client::%timed-out s))
+          "a read that finished first leaves the timer nothing to do"))))
+
+(test a-timer-that-fires-after-the-read-finished-does-nothing
+  "#1063, from the review of #1070: the other half of the window. The timer can fire after the
+read has recorded that it finished and before the read unschedules it. Its callback,
+%WATCH-FIRE, is called here with the read's state already :DONE, which is that moment: it must
+neither mark the stream timed out nor close the socket. The control calls it with the state
+still :READING, when it must do both. The socket is a real listening socket, which signals once
+it is closed."
+  #-os-windows (skip "the watched stream is Windows-only; elsewhere the socket's receive timeout ends a read")
+  #+os-windows
+  (flet ((watched (socket)
+           (make-instance 'aion/http-client::%idle-watched-stream
+                          :inner (make-string-input-stream "") :socket socket :seconds 60))
+         (open-p (socket)
+           (handler-case (progn (usocket:get-local-port socket) t)
+             (error () nil))))
+    (let* ((socket (usocket:socket-listen "127.0.0.1" 0))
+           (s (watched socket))
+           (state (list :done)))
+      (unwind-protect
+           (progn
+             (aion/http-client::%watch-fire s state)
+             (is (eq :done (car state)))
+             (is (null (aion/http-client::%timed-out s)) "a finished read is not marked timed out")
+             (is-true (open-p socket) "and its socket is not closed"))
+        (ignore-errors (usocket:socket-close socket))))
+    (let* ((socket (usocket:socket-listen "127.0.0.1" 0))
+           (s (watched socket))
+           (state (list :reading)))
+      (unwind-protect
+           (progn
+             (aion/http-client::%watch-fire s state)
+             (is (eq :fired (car state)))
+             (is-true (aion/http-client::%timed-out s) "control: a read still waiting is timed out")
+             (is (null (open-p socket)) "control: and its socket is closed"))
+        (ignore-errors (usocket:socket-close socket))))))
 
 (test a-pinned-request-that-times-out-uses-one-connection
   "#985: the URL names localhost, which resolves, and the request is pinned to 127.0.0.1. The

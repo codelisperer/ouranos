@@ -55,6 +55,19 @@
                      filename
                      watcher))))))
 
+(defun %watch-path (path)
+  "PATH as WATCH gives it to libuv. On Windows a trailing backslash is dropped, unless PATH is a
+drive's root, three characters long, because libuv then reports each FILENAME with a backslash in
+front of it. A trailing / does not do that. A directory pathname's native name ends in a
+backslash on Windows, so without this, watching one reported a.txt with a backslash before it
+(#1093)."
+  (let ((native (native-path path)))
+    (if (and (uiop:os-windows-p)
+             (> (length native) 3)
+             (char= #\\ (char native (1- (length native)))))
+        (subseq native 0 (1- (length native)))
+        native)))
+
 (defun watch (loop path function &key recursive)
   "Watch PATH on LOOP, calling FUNCTION with (EVENTS FILENAME WATCHER) on each change.
 
@@ -64,7 +77,7 @@ platform reports one, otherwise NIL. FUNCTION runs ON THE LOOP THREAD.
 RECURSIVE is honoured on macOS and Windows; on Linux libuv watches only the named
 directory, so a recursive watch there needs one watcher per subdirectory."
   (ensure-available)
-  (let* ((path (namestring path))
+  (let* ((path (%watch-path path))
          (pointer (cffi:foreign-alloc :char
                                       :count (ffi:uv-handle-size ffi:+uv-fs-event+))))
     (handler-bind ((error (lambda (e) (declare (ignore e)) (cffi:foreign-free pointer))))
