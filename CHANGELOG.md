@@ -1204,6 +1204,29 @@ its tag.
 
 ### Added
 
+- **hyperion/kit: an appearance picker for theme, contrast and look** (#981). The new
+  package `hyperion/kit/appearance` has five parts:
+  - `appearance-picker` writes a POST form with three labelled groups of buttons:
+    - theme: System, Light, Dark;
+    - contrast: System, Normal, High;
+    - look: Flat, Gradient.
+
+    Each button is a submit button with `aria-pressed`, so the form works without script. Its
+    text comes from a `:labels` plist, with `*default-picker-labels*` for any key left out.
+  - `appearance-from-form` reads the posted body. It checks every value against
+    `hyperion/appearance`'s values, and refuses the whole form, returning `nil`, for anything
+    else or for a setting posted twice.
+  - `merge-appearance` puts the change over the visitor's current settings.
+  - `appearance-response-headers` gives the store's `Set-Cookie` and an `HX-Trigger` event,
+    `hy-appearance`.
+  - `apply-appearance-js` is a script for the page that applies that event without a reload. It
+    sets or removes `data-theme`, `data-contrast` and `data-look` on `<html>`, and moves
+    `aria-pressed` in every picker on the page.
+
+  `hyperion/appearance` now exports `*themes*`, `*contrasts*` and `*looks*`, the values each
+  setting allows. The package's comment shows a handler that answers 400 for a refused form,
+  204 with the headers for htmx, and a 303 back to the page otherwise.
+
 - **hermes: how long a send waits is now hermes's own setting, `*send-connect-timeout*` and
   `*send-read-timeout*`, both 10 seconds** (#1077). Each provider also takes `:connect-timeout`
   and `:read-timeout`, read back with `sendgrid-connect-timeout`, `sendgrid-read-timeout`,

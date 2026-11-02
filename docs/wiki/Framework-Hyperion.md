@@ -214,6 +214,14 @@ combination, sampling along each gradient, and a button's text on hover and when
 as at rest. An app runs it in its own tests, so a gradient that drops text below WCAG AA fails
 the build, not a visitor.
 
+**Changing the choice.** `hyperion/kit/appearance` has the picker a visitor uses. It is a POST
+form with a group of buttons for each setting, and works without script: the browser posts the
+pressed button, such as `theme=dark`, and the handler redirects back to the page.
+`appearance-from-form` reads the body and refuses, as a whole, any value that is not one of the
+allowed values. With htmx the handler answers 204 with `appearance-response-headers`, whose
+`HX-Trigger` event `apply-appearance-js` applies to `<html>` and to every picker on the page
+without a reload. The picker's text comes from a plist, so an app can translate it.
+
 ### Collection-page components (`hyperion/kit`)
 
 `hyperion/kit` (#981) holds the generic parts of a page that lists things. Domain components,
@@ -231,7 +239,8 @@ The components so far:
   Space;
 - `dialog`, `dialog-opener`, `confirm-dialog`, `notice-region` and `undo-notice`, described
   below;
-- `list-toolbar`, and `selectable-row` with `properties-panel`, described below.
+- `list-toolbar`, and `selectable-row` with `properties-panel`, described below;
+- `appearance-picker` (`hyperion/kit/appearance`), described below.
 
 The tests parse the HTML the components write and check roles, names and pressed state. They
 do not search the HTML as a string.

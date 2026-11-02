@@ -497,3 +497,133 @@ only; and the page's window.htmx is still the object it loaded."
                        "each panel's contents should be asked for once: ~S" loads)))
             (ignore-errors (hyperion/server:stop handler))
             (is (ports:await-released port) "the port was still accepting after teardown"))))))
+
+;;; --- the appearance picker --------------------------------------------------------------
+
+(defparameter *appearance-scenario* "
+var r = [];
+function log(k, v) { r.push(k + '=' + v); document.getElementById('results').textContent = r.join(' '); }
+function root(name) { var v = document.documentElement.getAttribute('data-' + name); return v === null ? 'none' : v; }
+function pressed(name) {
+  var b = document.querySelectorAll('[data-hy-setting=' + name + '][aria-pressed=true]');
+  return b.length === 1 ? b[0].value : b.length; }
+function button(name, value) { return document.querySelector('[name=' + name + '][value=' + value + ']'); }
+var steps = [
+  function () { log('start-theme', root('theme')); log('start-contrast', root('contrast'));
+    log('start-pressed', pressed('theme') + ',' + pressed('contrast') + ',' + pressed('look'));
+    button('theme', 'dark').click(); },
+  function () { log('dark-theme', root('theme')); log('dark-pressed', pressed('theme'));
+    log('dark-contrast', root('contrast')); log('dark-cookie', document.cookie);
+    button('theme', 'system').click(); },
+  function () { log('system-theme', root('theme')); log('system-pressed', pressed('theme'));
+    button('look', 'gradient').click(); },
+  function () { log('gradient-look', root('look')); log('gradient-pressed', pressed('look'));
+    log('gradient-contrast', root('contrast'));
+    // The two posts run in sequence and the last logs done, so the dump waits for both.
+    fetch('/appearance', {method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded', 'HX-Request': 'true'},
+                          body: 'theme=purple'})
+      .then(function (res) { return res.text().then(function (t) {
+        log('forged-status', res.status); log('forged-echo', t.indexOf('purple') >= 0);
+        log('forged-trigger', res.headers.get('HX-Trigger') === null); }); })
+      .then(function () {
+        return fetch('/appearance', {method: 'POST', headers: {'Content-Type': 'application/x-www-form-urlencoded'},
+                                     body: 'contrast=normal', redirect: 'manual'}); })
+      .then(function (res) { log('plain-post', res.type); log('final-cookie', document.cookie); log('done', 'yes'); })
+      .catch(function (e) { log('error-fetch', String(e).replace(/ /g, '_')); }); }
+];
+var i = 0;
+function next() {
+  if (i < steps.length) {
+    try { steps[i++](); } catch (e) { log('error-' + i, e.message.replace(/ /g, '_')); }
+    setTimeout(next, 300);
+  }
+}
+document.addEventListener('DOMContentLoaded', function () { setTimeout(next, 100); });
+"
+  "The steps the appearance page runs, logged as key=value and read back by %KIT-RESULTS.")
+
+(defparameter *appearance-store* (hyperion/appearance:make-cookie-appearance-store))
+
+(defun %appearance-page (appearance)
+  (spinneret:with-html-string
+    (:doctype)
+    (:html :attrs (hyperion/appearance:html-attributes appearance)
+      (:head (:meta :charset "utf-8")
+             (:script :src (assets:url :htmx))
+             (:script (:raw (hyperion/kit/appearance:apply-appearance-js))))
+      (:body
+        (hyperion/kit/appearance:appearance-picker appearance "/appearance" :id "picker")
+        (:pre :id "results")
+        (:script (:raw *appearance-scenario*))))))
+
+(defun %appearance-app ()
+  "The appearance page, and the handler the picker posts to, written as the outline in
+hyperion/kit/appearance describes: 400 for a refused form, 204 with the trigger for htmx, and a
+303 back to the page without it."
+  (router:to-app
+   (router:router
+    (assets:mount)
+    (router:route :get "/appearance"
+                  (lambda (env)
+                    (%html (%appearance-page
+                            (hyperion/appearance:read-appearance *appearance-store* env)))))
+    (router:route :post "/appearance"
+                  (lambda (env)
+                    (let ((change (hyperion/kit/appearance:appearance-from-form
+                                   (http:body-string env))))
+                      (if (null change)
+                          (list 400 '(:content-type "text/plain") '("bad appearance"))
+                          (let ((new (hyperion/kit/appearance:merge-appearance
+                                      (hyperion/appearance:read-appearance *appearance-store* env)
+                                      change)))
+                            (if (http:htmx-request-p env)
+                                (list 204 (hyperion/kit/appearance:appearance-response-headers
+                                           *appearance-store* new)
+                                      '())
+                                (list 303 (list* :location "/appearance"
+                                                 (hyperion/appearance:persist-appearance
+                                                  *appearance-store* new))
+                                      '()))))))))))
+
+(test the-appearance-picker-in-a-real-browser
+  "Pressing Dark posts the form with htmx, and the response's event sets data-theme on <html>,
+moves aria-pressed to Dark and stores the choice in the cookie, leaving contrast alone; System
+removes data-theme, so the CSS follows the system again; Gradient sets data-look. A forged value
+is refused with 400, not echoed and not triggered; a post without htmx is redirected."
+  (let ((browser (%smoke-browser)))
+    (if (null browser)
+        (skip "No Chrome or Edge found; set HYPERION_SMOKE_BROWSER to run the appearance page")
+        (let* ((app (%appearance-app))
+               (port nil)
+               (handler (ports:call-with-port
+                         (lambda (p)
+                           (prog1 (hyperion/server:start app :port p :host "127.0.0.1" :log nil)
+                             (setf port p))))))
+          (unwind-protect
+               (let* ((dom (%run-browser browser (format nil "http://127.0.0.1:~D/appearance" port)))
+                      (results (%kit-results dom)))
+                 (flet ((saw (key) (cdr (assoc key results :test #'string=))))
+                   (is (equal "yes" (saw "done")) "the page ran every step: ~S" results)
+                   (is (null (remove-if-not (lambda (p) (search "error" (car p))) results))
+                       "a step threw: ~S" results)
+                   (is (equal "none" (saw "start-theme")) "a fresh visitor follows the system")
+                   (is (equal "system,system,flat" (saw "start-pressed")))
+                   (is (equal "dark" (saw "dark-theme")) "the event did not set data-theme")
+                   (is (equal "dark" (saw "dark-pressed")) "aria-pressed did not move to Dark")
+                   (is (equal "none" (saw "dark-contrast")) "contrast changed with the theme")
+                   (is (equal "appearance=dark.system.system" (saw "dark-cookie"))
+                       "the choice was not stored: ~S" (saw "dark-cookie"))
+                   (is (equal "none" (saw "system-theme")) "System did not remove data-theme")
+                   (is (equal "system" (saw "system-pressed")))
+                   (is (equal "gradient" (saw "gradient-look")))
+                   (is (equal "gradient" (saw "gradient-pressed")))
+                   (is (equal "none" (saw "gradient-contrast")))
+                   (is (equal "400" (saw "forged-status")) "a forged value was not refused")
+                   (is (equal "false" (saw "forged-echo")) "the forged value was echoed")
+                   (is (equal "true" (saw "forged-trigger")) "a refused form sent the event")
+                   (is (equal "opaqueredirect" (saw "plain-post"))
+                       "a post without htmx was not redirected: ~S" (saw "plain-post"))
+                   (is (equal "appearance=system.normal.gradient" (saw "final-cookie"))
+                       "the redirect did not store the choice: ~S" (saw "final-cookie"))))
+            (ignore-errors (hyperion/server:stop handler))
+            (is (ports:await-released port) "the port was still accepting after teardown"))))))
