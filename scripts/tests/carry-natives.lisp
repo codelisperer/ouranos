@@ -768,9 +768,9 @@ name. Returns true when every compile succeeded."
 
 (test a-dylib-with-no-install-name-fails-the-install-name-check
   "#1131: noid.dylib and the universal noidfat.dylib have no install name. The check exits 1 with
-a FAIL line naming each, and does not report either as ok. The control is the same directory without noid.dylib, which exits 0: the
-library inside the bundle and the relative one are ok, and the absolute path outside the
-bundle is a WARN, which does not fail."
+a FAIL line naming each, and does not report either as ok. The control is the same directory
+without the two, which exits 0: the library inside the bundle and the relative one are ok, and
+the absolute path outside the bundle is a WARN, which does not fail."
   (let ((why (%relink-skip-reason)))
     (if why
         (skip why)
