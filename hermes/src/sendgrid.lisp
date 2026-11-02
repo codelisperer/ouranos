@@ -22,7 +22,9 @@
                  :reader sendgrid-read-timeout))
   (:documentation "The SendGrid v3 mail/send API as an email-provider. API-KEY defaults to
 $SENDGRID_API_KEY. CONNECT-TIMEOUT and READ-TIMEOUT are seconds and default from
-*SEND-CONNECT-TIMEOUT* and *SEND-READ-TIMEOUT*; NIL for either waits forever (#1077)."))
+*SEND-CONNECT-TIMEOUT* and *SEND-READ-TIMEOUT* (#1077). NIL FOR EITHER DOES NOT WAIT FOREVER:
+AION/HTTP-CLIENT passes a timeout to dexador only when one is set, so NIL leaves dexador's own
+default of ten seconds in force. There is no way from here to ask for an unlimited wait."))
 
 (defun make-sendgrid (&rest initargs &key api-key endpoint connect-timeout read-timeout)
   "A SendGrid provider. API-KEY/ENDPOINT default from the environment, and the two timeouts from

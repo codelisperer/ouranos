@@ -46,12 +46,25 @@ sends a byte. The listener is closed on the way out, including on a non-local ex
   (h:make-sms :to "+15005550007" :text "t"))
 
 (defun %time-a-send (thunk)
-  "Seconds THUNK took to fail. Signals a test failure if it does not fail, because every caller
-here is sending to a server that never answers."
-  (let ((start (get-internal-real-time)))
-    (handler-case (progn (funcall thunk) nil)
-      (h:delivery-failure () nil))
-    (%elapsed-seconds start)))
+  "Seconds THUNK took to fail, asserting that it did fail.
+
+The assertion is the point, and the first version of this helper did not make it: both branches
+of its HANDLER-CASE returned NIL, so a send that RETURNED NORMALLY was timed and reported like
+one that failed, and every elapsed-time assertion downstream would have passed. The docstring
+claimed the check that the code did not perform. Found in review of #1077.
+
+Every caller sends to a socket that accepts the connection and never answers, so a normal return
+means the backend reported success for a message no provider ever acknowledged, which is a worse
+defect than any timing error this file is looking for."
+  (let ((start (get-internal-real-time))
+        (failed nil))
+    (handler-case (funcall thunk)
+      (h:delivery-failure () (setf failed t)))
+    (let ((elapsed (%elapsed-seconds start)))
+      (is-true failed
+               "a send to a server that never answers must fail; it returned normally after ~,2Fs"
+               elapsed)
+      elapsed)))
 
 (defparameter +dexador-default-timeout+ 10
   "The read timeout dexador applies when none is passed (`*default-read-timeout*' in its

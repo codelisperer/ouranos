@@ -30,7 +30,9 @@
   (:documentation "The Twilio Messages API as an sms-provider. ACCOUNT-SID, AUTH-TOKEN and the
 default FROM number come from $TWILIO_ACCOUNT_SID / $TWILIO_AUTH_TOKEN / $TWILIO_FROM.
 CONNECT-TIMEOUT and READ-TIMEOUT are seconds and default from *SEND-CONNECT-TIMEOUT* and
-*SEND-READ-TIMEOUT*; NIL for either waits forever (#1077).
+*SEND-READ-TIMEOUT* (#1077). NIL FOR EITHER DOES NOT WAIT FOREVER: AION/HTTP-CLIENT passes a
+timeout to dexador only when one is set, so NIL leaves dexador's own default of ten seconds in
+force. There is no way from here to ask for an unlimited wait.
 
 API-BASE is where the Messages API lives, and exists so a test or a local mock can be pointed
 at. UNLIKE THE OTHER SLOTS IT HAS NO ENVIRONMENT DEFAULT, deliberately: every request carries
