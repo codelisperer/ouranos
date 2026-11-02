@@ -3204,8 +3204,10 @@ its tag.
   `uiop:native-namestring`, so on Windows it reaches libuv with backslashes, as does
   `uv-error-path` in a condition about it. Before, both had forward slashes. A string with
   backslashes on Windows also keeps them now. `make-directory` with `:parents` splits on either
-  separator on Windows, and on `/` only elsewhere. The new exported function `native-path`
-  returns the string a path is given to libuv as.
+  separator on Windows, and on `/` only elsewhere. On Windows `watch` drops a trailing backslash
+  from the folder's path, except for a drive's root, because libuv then reports each filename
+  with a backslash in front of it. The new exported function `native-path` returns the string a
+  path is given to libuv as.
 
 - **aion/http-client: on Windows, a pinned request's read that returned is no longer reported as
   a timeout** (#1063). A request with `:connect-address`, which `fetch-public` makes, keeps its

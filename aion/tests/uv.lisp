@@ -377,6 +377,34 @@ for MAKE-DIRECTORY with :PARENTS, which splits on both."
       (uv:delete-file* p)
       (is-false (probe-file p)))))
 
+(test watching-a-folder-named-with-a-trailing-separator-reports-plain-names
+  "A directory pathname's native name ends in a separator, a backslash on Windows, and libuv on
+Windows then reported each name with a backslash in front of it (#1093). The folder is watched by
+its directory pathname and by that pathname's native name, and each event names just the file."
+  (with-scratch
+    (let ((directory (uiop:ensure-directory-pathname (uiop:parse-native-namestring *scratch*))))
+      (dolist (spelling (list directory (uiop:native-namestring directory)))
+        (let ((l (uv:make-loop))
+              (names '())
+              (lock (sb-thread:make-mutex))
+              (fired (sb-thread:make-semaphore)))
+          (unwind-protect
+               (progn
+                 (uv:watch l spelling
+                           (lambda (kinds name watcher)
+                             (declare (ignore kinds watcher))
+                             (sb-thread:with-mutex (lock) (push name names))
+                             (sb-thread:signal-semaphore fired)))
+                 (uv:start-loop-thread l)
+                 (sleep 0.2)
+                 (uv:write-file (scratch "named.txt") "trigger")
+                 (is-true (sb-thread:wait-on-semaphore fired :timeout 10))
+                 (sleep 0.3)
+                 (let ((seen (sb-thread:with-mutex (lock)
+                               (remove-duplicates names :test #'equal))))
+                   (is (equal '("named.txt") seen) "watching ~S reported ~S" spelling seen)))
+            (uv:close-loop l)))))))
+
 ;;; --- timers ----------------------------------------------------------------------
 
 (test timer-fires-once
