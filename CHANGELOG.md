@@ -1092,10 +1092,24 @@ its tag.
 
 ### Added
 
-- **hades/credentials: `credential-exists-p` and `credential-names` answer without reading any
-  secret** (#1035). `credential-exists-p service account` says whether a credential is stored,
-  and `credential-names service` lists the accounts under one service, both without decrypting
-  or copying a value. An app showing "a key is saved", or offering to remove one, no longer
+- **New bindings exported for the credential backends** (#1035), used by
+  `hades/credentials`: `aion/windows/ffi:cred-enumerate-w` (`CredEnumerateW`, which lists a
+  user's credentials matching a filter); `aion/darwin/ffi:+err-sec-interaction-not-allowed+`
+  (`errSecInteractionNotAllowed`, -25308, which a locked Keychain returns instead of prompting
+  when the query sets `kSecUseAuthenticationUIFail`); and
+  `aion/darwin:cf-array-get-count` and `aion/darwin:cf-array-get-value-at-index`, for walking the
+  `CFArray` an attributes-only Keychain query returns.
+- **hades/credentials: `credential-exists-p` and `credential-names` answer without returning any
+  secret, and on macOS and Linux without decrypting one** (#1035). `credential-exists-p service
+  account` says whether a credential is stored, and `credential-names service` lists the accounts
+  under one service. **On Windows the values are decrypted and then erased**, because Windows has
+  no call that lists or reads a credential without its value: `CredEnumerateW` with the filter
+  `SERVICE/*` returns a whole `CREDENTIALW` for every matching target, plaintext
+  `CredentialBlob` included, and `CredReadW` does the same. hades writes zeros over every blob
+  before freeing what Windows returned, so nothing is left in freed memory and no value is
+  returned, but on Windows an app should treat these two functions as it treats
+  `fetch-credential` in that respect. An earlier wording of this entry said "without decrypting
+  or copying a value", which was false on Windows. An app showing "a key is saved", or offering to remove one, no longer
   fetches the secret to decide a label, and no longer has to keep its own list of what it saved,
   which could drift from the store.
   - macOS asks the Keychain for attributes only (`kSecReturnAttributes`, never

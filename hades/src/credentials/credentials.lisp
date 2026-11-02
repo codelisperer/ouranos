@@ -674,7 +674,9 @@ ordinary character in an attribute and would simply match nothing."
                              :code "a service name used for listing may not contain `*'")))
 
 (defun credential-exists-p (service account)
-  "Whether a credential is stored for SERVICE and ACCOUNT, WITHOUT READING ITS VALUE (#1035).
+  "Whether a credential is stored for SERVICE and ACCOUNT, without returning its value, and on
+macOS and Linux without decrypting one (#1035). ON WINDOWS THE VALUE IS DECRYPTED AND ERASED --
+see below, and do not read this first line as saying otherwise.
 
 An app that shows \"a key is saved\", or offers to remove one, asks this instead of fetching the
 secret to decide a label. The Keychain is asked for attributes only, and the Secret Service is
@@ -707,13 +709,23 @@ does a SERVICE holding `*' (%CHECK-LISTING-SERVICE)."
   (%exists-p service account))
 
 (defun credential-names (service)
-  "The accounts stored under SERVICE, as a list of strings, WITHOUT READING ANY VALUE (#1035).
+  "The accounts stored under SERVICE, as a list of strings, without returning any value, and on
+macOS and Linux without decrypting one (#1035). ON WINDOWS EVERY MATCHING VALUE IS DECRYPTED AND
+ERASED -- see CREDENTIAL-EXISTS-P's docstring and %ACCOUNTS.
 The order is the store's. An app keeping its own list of which keys it has saved, which can
 drift from the store, asks this instead.
 
-Reads what CREDENTIAL-EXISTS-P reads and prompts as little, and like it reveals only which
-accounts exist and never a value; see its docstring. Only SERVICE's own items are listed, so
-this never reads the names of credentials another program stored.
+Reads what CREDENTIAL-EXISTS-P reads and prompts as little, and like it returns only which
+accounts exist and never a value; see its docstring.
+
+ONLY SERVICE'S OWN ITEMS ARE RETURNED, WHICH IS NOT THE SAME AS ONLY SERVICE'S OWN ITEMS BEING
+READ. On Windows the filter handed to CredEnumerateW is SERVICE/*, and Windows decrypts every
+credential of this user whose target begins with that prefix before hades compares any target,
+including items another program stored under such a target. Those values are erased with the
+rest (%ZERO-BLOB), and none is returned, but they do pass through this process. macOS and Linux
+match the service attribute exactly in the store, so they read only SERVICE's items. Narrowing
+the Windows read to one CredReadW for the exact target is #1079, and the collision between two
+(service, account) pairs that join to the same Windows target is #1080 (the review of #1066).
 
 Nothing here is logged. hades/credentials depends on no logging facade, and an account name is
 the kind of thing a log must not carry, so the names are returned to the caller and written

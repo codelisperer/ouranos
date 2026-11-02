@@ -755,26 +755,52 @@ there is no backend, the fetch says the store is unavailable instead."
 
 ;;; --- the review of #1066: the flags, the exact target, and the wildcard ------------------
 
-(defun %assertion-operators-used ()
-  "Every token in this file that starts a form and begins with \"is\", as a list of strings.
+(defun %test-source-lines ()
+  "This test file's own lines."
+  (uiop:read-file-lines
+   (merge-pathnames "tests/credentials-tests.lisp"
+                    (asdf:system-source-directory "hades/credentials"))))
+
+(defun %assertion-operators-used (&optional (lines (%test-source-lines)))
+  "Every token in LINES that follows an open paren and names a fiveam assertion: \"is\" itself, or
+\"is\" followed by a character that is not a letter or digit, which covers is-true, is-false and
+is*. LINES defaults to this file's own lines; the control below passes its own.
 
 Textual on purpose: READing this file on Linux would fail on the Windows and macOS forms, whose
-packages are not loaded here. Only tokens whose open paren is the first thing on the line are
-collected, so prose inside a docstring is not mistaken for a call."
-  (let ((lines (uiop:read-file-lines
-                (merge-pathnames "tests/credentials-tests.lisp"
-                                 (asdf:system-source-directory "hades/credentials"))))
-        (found '()))
+packages are not loaded here. The token rule is what lets it look anywhere on a line rather than
+only at the start, so a form nested inside another is still seen: a word like ISLAND is excluded
+by its third character being a letter, not by where it sits (the review of #1066).
+
+A token may hold only letters, digits and -*!?. Without that, this function matched the string
+literal \"(is\" in its own body and collected the token IS-with-a-quote, which no package can
+define, so the sweep failed on itself the first time it was allowed to look anywhere on a line."
+  (let ((found '()))
     (dolist (line lines)
-      (let* ((text (string-left-trim '(#\Space #\Tab) line)))
-        (when (and (> (length text) 3) (char= (char text 0) #\()
-                   (string= "is" text :start2 1 :end2 3))
-          (let* ((end (or (position-if (lambda (c)
-                                         (member c '(#\Space #\Tab #\( #\)) :test #'char=))
-                                       text :start 1)
-                          (length text))))
-            (pushnew (subseq text 1 end) found :test #'string=)))))
+      (let ((i 0))
+        (loop
+          (let ((p (search "(is" line :start2 i)))
+            (unless p (return))
+            (let* ((start (1+ p))
+                   (end (or (position-if (lambda (c)
+                                           (member c '(#\Space #\Tab #\( #\)) :test #'char=))
+                                         line :start start)
+                            (length line)))
+                   (token (subseq line start end)))
+              (when (and (every (lambda (c)
+                                  (or (alphanumericp c)
+                                      (member c '(#\- #\* #\! #\?) :test #'char=)))
+                                token)
+                         (or (string= token "is")
+                             (and (> (length token) 2) (not (alphanumericp (char token 2))))))
+                (pushnew token found :test #'string=)))
+            (setf i (1+ p))))))
     found))
+
+(defun %assertion-defined-p (token)
+  "Whether TOKEN names something callable in this package. The sweep and its control both call
+this, so neither checks a copy of the other's predicate (the review of #1066)."
+  (let ((symbol (find-symbol (string-upcase token) :hades/credentials/tests)))
+    (and symbol (or (macro-function symbol) (fboundp symbol)) t)))
 
 (test every-assertion-operator-this-file-uses-is-defined
   "A fiveam assertion operator that does not exist compiles without complaint and only fails
@@ -784,18 +810,28 @@ mnemosyne/tests/backends.lisp and not here, the suite skipped the live block on 
 found it. Neither check-compile nor a cold rebuild reports an undefined function, so this check
 is textual and runs everywhere."
   (let ((tokens (%assertion-operators-used)))
-    ;; The control, so this cannot pass by finding nothing.
+    ;; The sweep cannot pass by finding nothing.
     (is-true (member "is" tokens :test #'string=) "the sweep finds the plain IS: ~S" tokens)
     (is-true (member "is-true" tokens :test #'string=) "and IS-TRUE: ~S" tokens)
     (dolist (token tokens)
-      (let ((symbol (find-symbol (string-upcase token) :hades/credentials/tests)))
-        (is-true (and symbol (or (macro-function symbol) (fboundp symbol)))
-                 "~A is defined here; an assertion operator that is not fails only when the test runs"
-                 token)))
-    ;; The other direction: a name that is not defined is judged missing.
-    (let ((symbol (find-symbol "IS-ABSOLUTELY-NOT-DEFINED" :hades/credentials/tests)))
-      (is-false (and symbol (or (macro-function symbol) (fboundp symbol)))
-                "control: an operator that does not exist is judged missing"))))
+      (is-true (%assertion-defined-p token)
+               "~A is defined here; an assertion operator that is not fails only when the test runs"
+               token))
+    ;; The control, through the same collector and the same predicate, on lines made at run time.
+    ;; They are built with FORMAT so that this file does not itself contain "(is-bogus", which the
+    ;; collector would then find in its own source and demand be defined.
+    (let* ((bogus (format nil "(~A-bogus x)" "is"))
+           (nested (format nil "(let ((x 1)) (~A-bogus x))" "is"))
+           (word (format nil "(~Aland 1)" "is"))
+           (collected (%assertion-operators-used (list bogus nested word))))
+      (is-true (member "is-bogus" collected :test #'string=)
+               "control: the collector finds an assertion that starts a line: ~S" collected)
+      (is-false (member "island" collected :test #'string=)
+                "control: and ISLAND is not taken for an assertion: ~S" collected)
+      (is-false (%assertion-defined-p "is-bogus")
+                "control: an operator that does not exist is judged missing")
+      (is-true (%assertion-defined-p "is-true")
+               "control: and one that does exist is judged present"))))
 
 #+linux
 (test the-secret-service-search-passes-only-the-all-flag
@@ -827,11 +863,23 @@ the flags it was given."
   "#1066's review: on Windows the service goes into CredEnumerateW's filter, where `*' is a
 wildcard, so a service of \"*\" would enumerate -- and so decrypt -- every credential of every
 application. Refused on every platform, so the three agree."
+  ;; SIGNALS CREDENTIAL-ERROR IS NOT ENOUGH, and that is what this test did until the review of
+  ;; #1066. CREDENTIAL-STORE-UNAVAILABLE is a subclass of CREDENTIAL-ERROR, so on a machine with
+  ;; no credential store -- this lane's machine, and any CI leg without one -- the test passed on
+  ;; the store's absence even if the wildcard refusal were deleted. The refusal has to be told
+  ;; apart from the store simply not being there.
   (dolist (service '("*" "a*" "soloflow/*" "*/x"))
-    (signals cred:credential-error (cred:credential-names service))
-    (signals cred:credential-error (cred:credential-exists-p service "user")))
-  ;; The control: an ordinary service name is not refused by this check. Without a store it
-  ;; still signals, but CREDENTIAL-STORE-UNAVAILABLE rather than the refusal above.
+    (dolist (call (list (cons "credential-names" (lambda () (cred:credential-names service)))
+                        (cons "credential-exists-p"
+                              (lambda () (cred:credential-exists-p service "user")))))
+      (let ((c (handler-case (progn (funcall (cdr call)) nil)
+                 (cred:credential-error (e) e))))
+        (is-true (and c (not (typep c 'cred:credential-store-unavailable)))
+                 "~A refuses ~S for its name, rather than failing for want of a store: ~S"
+                 (car call) service c))))
+  ;; The control in the other direction: an ordinary name is not refused for its name. Without a
+  ;; store that is CREDENTIAL-STORE-UNAVAILABLE, which is the one condition the assertions above
+  ;; require NOT to be the answer, so the two cannot both be satisfied by the same mistake.
   (let ((c (handler-case (progn (cred:credential-names (%service)) nil)
              (cred:credential-error (e) e))))
     (is (or (null c) (typep c 'cred:credential-store-unavailable))
