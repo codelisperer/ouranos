@@ -163,8 +163,8 @@ take the root's separator off (#1093)."
 ending with PATH itself without its trailing separators. The root is not in it. On Windows the
 parts are joined with a backslash, which an extended-length path requires."
   (let* ((root (min (%root-length path) (length path)))
-         (rest (string-right-trim (if (uiop:os-windows-p) "/\\" "/") (subseq path root)))
-         (joint (if (uiop:os-windows-p) "\\" "/"))
+         (rest (string-right-trim (path:separators) (subseq path root)))
+         (joint (path:native-separator))
          (so-far (subseq path 0 root))
          (chain '()))
     (dolist (component (split-path rest) (nreverse chain))

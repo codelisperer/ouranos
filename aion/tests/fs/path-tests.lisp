@@ -12,11 +12,84 @@
 (in-suite all)
 
 (test native-name-passes-a-string-through-and-converts-a-pathname
+  "The pathnames are parsed from names that CL:NAMESTRING writes differently from the native name,
+and the test checks that it does, so a NATIVE-NAME that returned CL:NAMESTRING would fail: a name
+with brackets, which SBCL escapes, and on Linux and macOS a name with a backslash (the hub's
+review of #1123)."
   (let ((odd (format nil "dir~Ca*b?[1].txt" #\\)))
     (is (eq odd (aion/path:native-name odd)) "a string is returned as it is, not reparsed"))
-  (let ((p (uiop:parse-native-namestring
-            (concatenate 'string (uiop:native-namestring (uiop:temporary-directory)) "x.txt"))))
-    (is (string= (uiop:native-namestring p) (aion/path:native-name p)))))
+  (dolist (name (list "a[1].txt" #-win32 (format nil "a~Cb.txt" #\\)))
+    (let* ((native (concatenate 'string (uiop:native-namestring (uiop:temporary-directory)) name))
+           (p (uiop:parse-native-namestring native)))
+      (is (string/= native (namestring p))
+          "CL:NAMESTRING writes ~S differently, so this case can tell the two apart" native)
+      (is (string= native (aion/path:native-name p)) "~S comes back as ~S" native
+          (aion/path:native-name p)))))
+
+(test native-name-and-directory-pathname-keep-a-name-with-dots
+  "A name with several dots, one that starts with a dot and one that ends with a dot, each given as a
+pathname parsed from the native name, and as a folder name."
+  (dolist (name '("a.tar.gz" ".hidden" "a.b."))
+    (let ((p (uiop:parse-native-namestring name)))
+      (is (string= name (aion/path:native-name p)) "~S comes back as ~S" name (aion/path:native-name p))
+      (is (string= (concatenate 'string name (%sep))
+                   (aion/path:native-name (aion/path:directory-pathname p)))
+          "~S as a folder is ~S" name (aion/path:native-name (aion/path:directory-pathname p))))))
+
+(test an-empty-name-is-the-current-folder-not-the-root
+  "DIRECTORY-PATHNAME trimmed the separators off a name and added one, so \"\" and #P\"\" became the
+root, / (the hub's review of #1123). An empty name is the current folder: a pathname with no
+parts, which merges with *DEFAULT-PATHNAME-DEFAULTS*."
+  (is (string= "" (aion/path:native-name "")))
+  (is (string= "" (aion/path:native-name #p"")))
+  (let ((base (uiop:temporary-directory)))
+    (dolist (input (list "" #p""))
+      (let ((dir (aion/path:directory-pathname input)))
+        (is (equal '(nil nil nil nil)
+                   (list (pathname-device dir) (pathname-directory dir)
+                         (pathname-name dir) (pathname-type dir)))
+            "~S gives a pathname with no parts: ~S" input dir)
+        (is (equal base (merge-pathnames dir base)) "~S merged with ~S gives ~S" input base
+            (merge-pathnames dir base))))))
+
+(test a-temporary-directory-in-an-empty-folder-name-is-made-in-the-current-folder
+  "(make-temporary-directory \"x\" :in \"\") made its folder in the current folder before #1123 and
+must still. With an empty name made into the root, it was made in /, or failed there."
+  (let ((base (%fresh)))
+    (unwind-protect
+         (let ((made (let ((*default-pathname-defaults* base))
+                       (fs:make-temporary-directory "path-test" :in ""))))
+           (is (eq :relative (first (pathname-directory made))) "~S is relative" made)
+           (is-true (uiop:directory-exists-p (merge-pathnames made base))
+                    "~S is made in ~S" made base))
+      (%cleanup base))))
+
+#+win32
+(test a-drive-with-nothing-after-it-is-that-drives-current-folder
+  "On Windows C: names drive C's current folder, and C:\\ its root. DIRECTORY-PATHNAME added a
+separator to C: and so gave the root (the hub's review of #1123). C:a, a folder in drive C's
+current folder, is kept relative to it."
+  (let ((dir (aion/path:directory-pathname "C:")))
+    (is (string= "C:" (aion/path:native-name dir)) "C: gives ~S" (aion/path:native-name dir))
+    (is (null (pathname-directory dir)) "C: has no folder parts: ~S" dir))
+  (is (string= "C:\\" (aion/path:native-name (aion/path:directory-pathname "C:\\"))))
+  (dolist (input (list "C:a" "C:a\\" (uiop:parse-native-namestring "C:a")))
+    (is (string= "C:a\\" (aion/path:native-name (aion/path:directory-pathname input)))
+        "~S gives ~S" input (aion/path:native-name (aion/path:directory-pathname input))))
+  (let ((p (uiop:parse-native-namestring "C:a[1]\\b.txt")))
+    (is (string= "C:a[1]\\b.txt" (aion/path:native-name p)))))
+
+#+win32
+(test a-unc-path-keeps-its-server-and-share
+  "A path on a network share, \\\\server\\share\\..., given as a string and as a pathname. Nothing is
+read from the share, so no server is needed."
+  (let ((file "\\\\server\\share\\d\\a[1].txt")
+        (folder "\\\\server\\share\\d"))
+    (is (string= file (aion/path:native-name (uiop:parse-native-namestring file))))
+    (dolist (input (list folder (concatenate 'string folder "\\")
+                         (uiop:parse-native-namestring folder)))
+      (is (string= "\\\\server\\share\\d\\" (aion/path:native-name (aion/path:directory-pathname input)))
+          "~S gives ~S" input (aion/path:native-name (aion/path:directory-pathname input))))))
 
 (test native-name-refuses-what-names-no-single-file
   (signals type-error (aion/path:native-name nil))
