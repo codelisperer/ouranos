@@ -330,6 +330,9 @@ directory it was looked for in, named nothing."
     (unwind-protect
          (progn
            (uiop:copy-file (uiop:parse-native-namestring (%sbcl)) (uiop:parse-native-namestring exe))
+           ;; FIND-EXECUTABLE returns the truename, and a CI runner's temporary directory is
+           ;; spelled with a short name (RUNNER~1), so compare against the truename.
+           (setf exe (uiop:native-namestring (truename (uiop:parse-native-namestring exe))))
            (is (string-equal exe (w:find-executable (concatenate 'string dir "\\" "tool[2]")))
                "by its full name")
            (is (string-equal exe (w:find-executable "tool[2]" :path dir)) "on PATH"))
