@@ -59,5 +59,7 @@ that hides which scripts it is about.")
                              ;; #956: a native file the bundle needs and cannot find
                              (:file "missing-natives")
                              ;; #977: the BUILT-FROM stamp of a vendored library's build
-                             (:file "built-from"))))
+                             (:file "built-from")
+                             ;; #1086: an undefined call in a test's child script
+                             (:file "child-scripts"))))
   :perform (test-op (o c) (symbol-call :checkers/tests '#:run-tests)))
