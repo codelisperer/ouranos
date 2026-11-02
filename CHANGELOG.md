@@ -1192,6 +1192,15 @@ its tag.
   `aion/tests:run-tests` and the file `aion/tests/all.lisp` are gone: code that called
   `aion/tests:run-tests` calls `(asdf:test-system :aion/tests)` instead, as `aion/cons.lisp`'s
   `test` target now does.
+- **cons: the strict load fails a call to a function that does not exist in the project's own
+  code** (#1083). `cons build`, `cons test` and `cons --strict` load a project's own systems
+  through `load-system-strictly`, which failed on a full compile `WARNING` and let every
+  `STYLE-WARNING` through. SBCL reports a call to an undefined function as a `STYLE-WARNING`
+  (`undefined function: PKG::NAME`), so such a call built and tested clean and failed only when
+  it ran. It now fails the load, and the error names the function. **A project that loaded
+  before can now fail:** define the function, or correct the name or package of the call. Other
+  `STYLE-WARNING`s still do not fail, and an undefined function inside a library outside the
+  project directory is still muffled. `cons/docs/user-guide.md` says the same.
 
 ### Added
 
