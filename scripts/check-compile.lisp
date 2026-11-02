@@ -16,8 +16,9 @@
 ;;;; output is judged by the gate's own functions, loaded from the same files:
 ;;;; WARNINGS-IN with +KNOWN-WARNINGS+ (compile-warnings.lisp), ERRORS-IN (caught-errors.lisp)
 ;;;; and REDEFINITIONS-IN (redefinitions.lisp). The child's load runs inside
-;;;; CALL-REPORTING-REDEFINITIONS, so a DEFUN in one file that replaces a function defined in
-;;;; another is reported (#577); the files counted are this tree's and the checked system's own.
+;;;; CALL-REPORTING-REDEFINITIONS, so a DEFUN, DEFMACRO, DEFGENERIC or DEFMETHOD in one file that
+;;;; replaces one from another file is reported (#577, #1121); the files counted are this tree's
+;;;; and the checked system's own.
 ;;;; A system passes only if the child exits 0 and all three find nothing.
 ;;;;
 ;;;; COLD FOR THIS TREE, EVERY RUN. The fasls of this tree's files, and of the checked system's
@@ -205,7 +206,8 @@ end the run before the system's FAIL line and the systems after it (review of #1
       (push (format nil "~D caught ERROR~:P:" (length errors)) lines)
       (dolist (e errors) (dolist (l e) (push (format nil "  | ~A" l) lines))))
     (when redefined
-      (push (format nil "~D function~:P defined a second time in another file (#577):" (length redefined))
+      (push (format nil "~D definition~:P replaced by one in another file (#577, #1121):"
+                    (length redefined))
             lines)
       (dolist (r redefined) (push (format nil "  | ~A" r) lines)))
     (values (and (zerop code) (null warned) (null errors) (null redefined)) (nreverse lines) seconds)))

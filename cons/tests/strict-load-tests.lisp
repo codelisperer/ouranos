@@ -395,6 +395,69 @@ a `test' target testing it; NAME's one file holds SOURCE."
       (multiple-value-bind (code out) (%cons-target-in-child dir "build" :fresh fresh)
         (is (eql 0 code) "cons ~:[~;--fresh ~]build of a clean project must exit 0, got ~A:~%~A" fresh code out)))))
 
+;;; --- #1121: a definition replaced from another file of the project ------------------------
+;;;
+;;; These run `cons --strict build' in a child image, as the tests above do: inside
+;;; ASDF:TEST-SYSTEM, the recompile --strict asks for is a nested ASDF operation with :FORCE,
+;;; which ASDF refuses.
+
+(defmacro %with-two-file-cons-project ((dir name a-source b-source) &body body)
+  "BODY with DIR a fresh project whose `build' target loads system NAME. NAME's file a.lisp
+defines a fresh package and holds A-SOURCE; b.lisp, compiled after it, holds B-SOURCE in that
+package. Both sources are FORMAT control strings, given NAME as their one argument."
+  (let ((package (gensym "PACKAGE")))
+    `(tempdir:with-temporary-directory (,dir "strict-redef")
+       (let* ((,name (string-downcase (%strict-name "redef")))
+              (,package (string-upcase ,name)))
+         (%strict-project ,dir ,name
+                          (format nil "(defpackage ~S (:use #:cl))~%(in-package ~S)~%~?"
+                                  ,package ,package ,a-source (list ,name))
+                          :later-source (format nil "(in-package ~S)~%~?"
+                                                ,package ,b-source (list ,name)))
+         (with-open-file (out (merge-pathnames "cons.lisp" ,dir) :direction :output)
+           (format out "(cons:project ~S :system ~S :targets ((build :load ~S)))~%"
+                   ,name ,name ,name))
+         ,@body))))
+
+(test a-definition-replaced-from-another-file-fails-cons-strict-build
+  "A consuming app's helper in one file was replaced by one with the same name in another file
+of the package, and its strict build passed, because SBCL reports that only as a STYLE-WARNING.
+`cons --strict build' now fails for each of DEFUN, DEFMACRO, DEFGENERIC and a DEFMETHOD on the
+same specializers, naming the kind, the definition and both files. Without --strict the same
+build still passes, as it did."
+  (loop for (kind a-source b-source)
+          in '(("defun" "(defun helper (a b) (list a b))" "(defun helper (a) (list a))")
+               ("defmacro" "(defmacro helper (x) x)" "(defmacro helper (x) (list 'quote x))")
+               ("defgeneric" "(defgeneric helper (x))" "(defgeneric helper (x))")
+               ("defmethod" "(defmethod helper ((x integer)) x)"
+                "(defmethod helper ((x integer)) (1+ x))"))
+        do (%with-two-file-cons-project (dir name a-source b-source)
+             (multiple-value-bind (code out) (%cons-target-in-child dir "build" :strict t)
+               (is (eql 1 code) "~A: cons --strict build must exit 1, got ~A:~%~A" kind code out)
+               (is (search (format nil "~A ~A::HELPER" kind (string-upcase name)) out)
+                   "~A: the output names the kind and the definition:~%~A" kind out)
+               ;; In the error's own sentence: the child's compile output names both files
+               ;; whether or not the error does.
+               (is-true (let ((p (search "b.lisp replaces the one in " out)))
+                          (and p (search "a.lisp" out :start2 p)))
+                        "~A: the error names both files:~%~A" kind out))))
+  (%with-two-file-cons-project (dir name "(defun helper () 1)" "(defun helper () 2)")
+    (multiple-value-bind (code out) (%cons-target-in-child dir "build")
+      (is (eql 0 code) "control: cons build without --strict must pass, got ~A:~%~A" code out))))
+
+(test one-file-loaded-twice-passes-cons-strict-build
+  "The control for the test above. b.lisp loads a.lisp's source again, so its function is
+redefined from the same file, and a.lisp's macro is defined twice by SBCL itself, once while
+the file compiles and once when it loads. Neither is a definition from another file."
+  (%with-two-file-cons-project
+      (dir name "(defun helper () 1)~%(defmacro helper-macro (x) x)"
+           ;; By the system's directory: when b.lisp's fasl loads, *LOAD-TRUENAME* is the fasl
+           ;; in the cache, not the source.
+           "(load (merge-pathnames \"a.lisp\" (asdf:system-source-directory ~S)))")
+    (multiple-value-bind (code out) (%cons-target-in-child dir "build" :strict t)
+      (is (eql 0 code) "a file loaded twice must pass cons --strict build, got ~A:~%~A"
+          code out))))
+
 ;;; --- #960: --strict and the targets it cannot judge, and fasls written outside cons --------
 
 (test the-targets-strict-cannot-judge-are-the-ones-that-load-nothing

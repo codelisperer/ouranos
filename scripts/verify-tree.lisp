@@ -1024,7 +1024,7 @@ fallback for a child that died without printing a condition at all."
 failing or warning system with a redefinition reports both, and a suite's checks still count."
   (when redefined
     (format t "  REDEF   ~a~%~{          ~a~%~}" system redefined)
-    (fail "~a defines ~D function~:P a second time in another file: ~{~a~^; ~}"
+    (fail "~a replaces ~D definition~:P with one from another file: ~{~a~^; ~}"
           system (length redefined) redefined)))
 
 (defun report-caught-errors (label output)

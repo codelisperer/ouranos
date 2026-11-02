@@ -145,6 +145,70 @@ both upcased for the standard readtable."
                   (handler-bind ((warning (function muffle-warning)))
                     (with-compilation-unit (:override t)
                       (asdf :load-system name))))
+                (under-root-p (path)
+                  ;; Case-insensitive on Windows, as OWN-P below.
+                  (let ((p (namestring path)))
+                    (and (>= (length p) (length root))
+                         (if (uiop:os-windows-p)
+                             (string-equal root p :end2 (length root))
+                             (string= root p :end2 (length root))))))
+                (source-file (thing)
+                  ;; The truename of the file THING, a function or a method, was compiled
+                  ;; from, or NIL. sb-introspect is baked into bin/cons and required below.
+                  (let ((path (ignore-errors
+                               (uiop:symbol-call
+                                :sb-introspect :definition-source-pathname
+                                (uiop:symbol-call :sb-introspect :find-definition-source
+                                                  thing)))))
+                    (and path (ignore-errors (probe-file path)))))
+                (cross-file-redefinition (w)
+                  ;; #1121: under --strict, a DEFUN, DEFMACRO, DEFGENERIC or DEFMETHOD that
+                  ;; replaces a definition from another file of the project is counted. SBCL
+                  ;; signals each as a STYLE-WARNING, a REDEFINITION-WARNING, and the load
+                  ;; went ahead with whichever file loaded last. Returns a line naming the
+                  ;; kind, the name and both files, or NIL. Same-file redefinitions, such as a
+                  ;; macro defined while its file compiles and again when it loads, and
+                  ;; definitions outside ROOT, are not counted. SBCL's names are looked up by
+                  ;; string so the printed form holds no SBCL symbol.
+                  (flet ((sb (name package) (uiop:find-symbol* name package nil)))
+                    (let ((kind (loop for (class . text)
+                                        in '((:redefinition-with-defun . "defun")
+                                             (:redefinition-with-defmacro . "defmacro")
+                                             (:redefinition-with-defgeneric . "defgeneric")
+                                             (:redefinition-with-defmethod . "defmethod"))
+                                      for type = (sb class :sb-kernel)
+                                      when (and type (typep w type)) return text)))
+                      (when (and kind (uiop:find-package* :sb-introspect nil))
+                        (let* ((name (slot-value w (sb :name :sb-kernel)))
+                               (new-function (sb :new-function :sb-kernel))
+                               (new-location (sb :new-location :sb-kernel))
+                               (new (if (and (slot-exists-p w new-function)
+                                             (slot-boundp w new-function))
+                                        (source-file (slot-value w new-function))
+                                        (let ((l (and (slot-boundp w new-location)
+                                                      (slot-value w new-location))))
+                                          (and l (ignore-errors
+                                                  (probe-file
+                                                   (uiop:symbol-call
+                                                    :sb-c :definition-source-location-namestring
+                                                    l)))))))
+                               (old (cond ((string= kind "defmethod")
+                                           (source-file
+                                            (slot-value w (sb :old-method :sb-kernel))))
+                                          ((string= kind "defmacro")
+                                           (and (symbolp name) (macro-function name)
+                                                (source-file (macro-function name))))
+                                          (t (and (fboundp name)
+                                                  (source-file (fdefinition name)))))))
+                          (when (and new old (under-root-p new) (under-root-p old)
+                                     (not (funcall (if (uiop:os-windows-p)
+                                                       (function string-equal)
+                                                       (function string=))
+                                                   (namestring new) (namestring old))))
+                            (let ((*package* (find-package :keyword)))
+                              (format nil "~A ~S in ~A replaces the one in ~A"
+                                      kind name (uiop:native-namestring new)
+                                      (uiop:native-namestring old)))))))))
                 (own-load (name)
                   ;; ASDF fails the load itself on a WARNING that COMPILE-FILE reports. The
                   ;; handler is for the ones it does not fail on: those deferred to the end of
@@ -160,7 +224,11 @@ both upcased for the standard readtable."
                   ;; matching the printed text keeps this form free of SBCL's own symbols.
                   (let ((caught '())
                         (recursive (uiop:find-symbol* :recursive-operate :asdf/operate nil)))
+                    (when force-own (ignore-errors (require :sb-introspect)))
                     (handler-bind ((warning (lambda (w)
+                                              (let ((redefined (and force-own
+                                                                    (cross-file-redefinition w))))
+                                                (when redefined (push redefined caught)))
                                               (unless (or (typep w 'uiop:compile-warned-warning)
                                                           (and (typep w 'style-warning)
                                                                (not (uiop:string-prefix-p
