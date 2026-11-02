@@ -14,6 +14,19 @@ its tag.
 
 ### An app may have to act
 
+- **hermes: `make-sendgrid` now checks its `:endpoint`, and refuses one a request should not carry
+  the API key to** (#1092). It was not checked at all before, so
+  `(make-sendgrid :endpoint "http://evil.example/v3/mail/send")` sent the key — a `Bearer`
+  credential in an `Authorization` header — in plaintext to whatever host was named. Refused now:
+  a value `quri` cannot parse, a scheme that is not `http` or `https`, any userinfo, no host, a
+  bracketed IPv6 host (which cannot be connected to), and plaintext `http` to a host this machine
+  or network cannot reach by itself. No refusal repeats the value, because it may hold a password.
+  **An app that set `:endpoint` to a plaintext remote host will now fail when the provider is
+  made** rather than on the first send. `:endpoint` is also readable now, as
+  `sendgrid-endpoint`.
+  **A query or fragment is allowed here**, unlike in a Twilio `api-base`: `deliver` sends this
+  value as the request URL exactly as it stands, so nothing can land inside one.
+
 - **hermes: a 429 from SendGrid or Twilio is now `delivery-rate-limited`, not a plain
   `delivery-failure`** (#79 step two). An app that caught `delivery-failure` still catches it,
   since `delivery-rate-limited` is a subtype, but one that *distinguished* a rate limit by
@@ -1250,6 +1263,7 @@ its tag.
   `contrib-load-failure-p`, `contrib-failure-lines` and `explain-contrib-failure`.
 
 ### Added
+
 
 - **`aion/http-client:local-host-p` and `aion/http-client:url-host` are exported** (#1082).
   `local-host-p` takes a host name or an IP address in text and says whether only this machine or
