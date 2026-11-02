@@ -138,7 +138,7 @@ safe to call from any thread even while another thread runs a loop.")
    #:future #:await #:future-finished-p #:future-value #:future-error
    ;; synchronous fs
    #:read-file #:write-file #:file-info #:list-directory
-   #:make-directory #:delete-file* #:delete-directory #:rename-path #:real-path
+   #:make-directory #:delete-file* #:delete-directory #:rename-path #:real-path #:native-path
    ;; file-info accessors
    #:file-info-size #:file-info-kind #:file-info-mode #:file-info-mtime
    #:file-info-atime #:file-info-ctime #:file-info-inode #:file-info-nlink

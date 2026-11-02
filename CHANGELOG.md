@@ -3329,6 +3329,33 @@ its tag.
 
 ### Fixed
 
+- **aion/uv: a path string reaches libuv as written, so a file with a backslash in its name works
+  on Linux and macOS** (#1093). Every function that takes a path ran it through `cl:namestring`,
+  and on Linux and macOS that drops a backslash, so `a\b.txt` was used as `ab.txt`. The affected
+  functions are:
+  - `file-info`, `read-file`, `write-file`, `make-directory`, `delete-file*`, `delete-directory`,
+    `rename-path`, `real-path` and `list-directory`;
+  - `read-file-async`, `file-info-async` and `write-file-async`, and `watch`;
+  - `aion/uv/net`'s `listen-pipe` and `connect-pipe`, and `aion/uv/process`'s `spawn` `:cwd`.
+
+  A string is now passed through unchanged. A pathname is converted with
+  `uiop:native-namestring`, after a logical pathname is translated, so on Windows it reaches
+  libuv with backslashes, as does `uv-error-path` in a condition about it. Before, both had
+  forward slashes. A string with backslashes on Windows also keeps them now. A wild pathname is
+  refused with an error before libuv is called, and anything that is neither a string nor a
+  pathname, `nil` included, signals `type-error`; before, `(make-directory nil)` made a folder
+  named `NIL`. The new exported function `native-path` returns the string a path is given to
+  libuv as.
+  - `make-directory` with `:parents` creates nothing at or above the root. On Windows a root can
+    be a drive, a server's share, or an extended-length prefix (`\\?\C:\`); before, the
+    first two characters of a share or extended-length path were taken as a folder, and the
+    call failed.
+  - On Windows `watch` drops a trailing backslash from the folder's path, because libuv then
+    reports each filename with a backslash in front of it. A root keeps its separator.
+  - When `watch` cannot start, for example on a folder that does not exist, the handle is now
+    closed rather than freed while the loop still held it. Before, `close-loop` afterwards could
+    abort the process.
+
 - **aion/http-client: on Windows, a pinned request's read that returned is no longer reported as
   a timeout** (#1063). A request with `:connect-address`, which `fetch-public` makes, keeps its
   read timeout on Windows with a timer that closes the socket. When the timer fired just as a
