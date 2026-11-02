@@ -353,6 +353,18 @@ not about an expression inside it; an `ok` line is about failures, not about cov
   unregistered suite, an unrun suite and a passing suite are identical at the exit code.
 - A cold-cache test must assert it was cold (fasl count, compile count). Clear the fasl
   cache after a control run — a stale fasl reproduces a false failure across runs.
+- **Clearing means deleting the cached fasl, not touching the source.** ASDF compares write
+  rebuilds only when the source is newer than its fasl, and a touch that lands in the same second
+  as the control run's build is not newer — so restoring a file and touching it leaves the
+  control's code loaded.
+  **A correct file on disk is not evidence that the image loaded it**, and the two failures look
+  nothing alike: the suite either reports the control's failures against code that no longer
+  exists, or reports a pass because the control happened to pass. Delete the fasl
+  (`~/.cache/common-lisp/**/<file>.fasl`) or load with `:force t`, then read the count back. One
+  session hit this five times in a day, and one of those produced a false claim about an API that
+  reached a commit message, a CHANGELOG line and a report to the hub before a compiled suite
+  contradicted it. The rule above has said *clear* since it was written; this says what clear
+  has to mean.
 - The test harness must be able to see the failure before the failure can be asserted;
   the fixture must not be easier than reality (read the real artefact the generator writes).
 - A fixture that cleans up after itself is **relying** on cleanup; one with a genuinely
