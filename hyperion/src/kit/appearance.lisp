@@ -83,10 +83,19 @@ without repeating the NIL value (look's default, flat, is also one of its keywor
   (if value (string-downcase (symbol-name value)) (third setting)))
 
 (defun %label (labels key)
+  "LABELS' text for KEY, or the default text. Signals unless it is a string."
   (let ((text (or (getf labels key) (getf *default-picker-labels* key))))
     (unless (stringp text)
       (error "The picker's label ~S must be a string, not ~S." key text))
     text))
+
+(defun %check-labels (labels)
+  "Signal unless every label the picker writes is a string, before the picker writes anything."
+  (dolist (setting +settings+)
+    (%label labels (first setting))
+    (dolist (value (%allowed setting))
+      (%label labels (intern (string-upcase value) :keyword))))
+  (%label labels :picker))
 
 ;;; --- the picker ---------------------------------------------------------------------
 
@@ -100,14 +109,18 @@ the default look. ID is the form's id.
 
 Each button is a submit button named after its setting, so without script the browser posts
 the one pressed, such as theme=dark. With htmx the form posts with hx-post and swaps
-nothing, and its buttons, in a <fieldset>, are disabled until the answer arrives: include APPLY-APPEARANCE-JS on the page, and answer with
-APPEARANCE-RESPONSE-HEADERS. LABELS is a plist of the visible text, keyed as
-*DEFAULT-PICKER-LABELS*; a key it leaves out takes the default.
+nothing, and its buttons, in a <fieldset>, are disabled until the answer arrives. Include
+APPLY-APPEARANCE-JS on the page, and answer with APPEARANCE-RESPONSE-HEADERS. LABELS is a
+plist of the visible text, keyed as *DEFAULT-PICKER-LABELS*; a key it leaves out takes the
+default.
 
 Signals when ACTION-HREF has a scheme other than http or https (PAGE:SAFE-HREF-P): it is the
-form's action, and javascript: there would run as script."
+form's action, and javascript: there would run as script. Signals when a label is not a
+string. Both are checked before anything is written, so a refused picker leaves no part of a
+form in *HTML*."
   (unless (page:safe-href-p action-href)
     (error "The picker's ACTION-HREF must be http, https or relative, not ~S." action-href))
+  (%check-labels labels)
   (spin:with-html
     (:form :id id :class "hy-appearance-picker" :method "post" :action action-href
            :aria-label (%label labels :picker)
@@ -201,13 +214,44 @@ APPLY-APPEARANCE-JS applies it to the page. Answer with status 204, since nothin
   "Compiled JS that applies the hy-appearance event to the page: for each setting it sets the
 attribute on <html> (data-theme, data-contrast, data-look), or removes it when the setting is
 null, so the CSS follows the system again; and it sets aria-pressed on every picker button of
-that setting. Installed once on the document however many times the page includes it.
+that setting. It also gives focus back to the picker button that had it once the picker's
+request ends, since disabling the buttons during the request moves focus to the body.
+Installed once on the document however many times the page includes it.
 Include it once with (:script (:raw (apply-appearance-js)))."
   (out:js-string
    `(funcall
      (lambda ()
        (unless (@ window hy-kit-appearance)
          (setf (@ window hy-kit-appearance) t)
+         ;; Disabling the fieldset while a request is in flight takes focus from the pressed
+         ;; button, and the browser moves it to the body. The focused element inside a picker
+         ;; is kept when its request starts and focused again when the request ends, so a
+         ;; keyboard or screen-reader user keeps their place.
+         (chain document
+                (add-event-listener
+                 "htmx:beforeRequest"
+                 (lambda (e)
+                   (let ((form (@ e target))
+                         (focused (@ document active-element)))
+                     (when (and (@ form matches)
+                                (chain form (matches ".hy-appearance-picker"))
+                                focused
+                                (chain form (contains focused)))
+                       (setf (@ form hy-focused) focused))))))
+         (chain document
+                (add-event-listener
+                 "htmx:afterRequest"
+                 (lambda (e)
+                   (let* ((form (@ e target))
+                          (focused (@ form hy-focused)))
+                     (when focused
+                       (setf (@ form hy-focused) nil)
+                       ;; htmx enables the fieldset again only after this event, so the focus
+                       ;; waits for that.
+                       (set-timeout (lambda ()
+                                      (when (@ focused is-connected)
+                                        (chain focused (focus))))
+                                    0))))))
          (chain document
                 (add-event-listener
                  ,*appearance-event*

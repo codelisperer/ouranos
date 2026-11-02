@@ -15,6 +15,7 @@
                     (#:picker #:hyperion/kit/appearance)
                     (#:app #:hyperion/appearance)
                     (#:http #:hyperion/http)
+                    (#:csrf #:hyperion/csrf)
                     (#:list #:hyperion/list)
                     (#:spin #:spinneret))
   (:export #:run-tests))
@@ -834,8 +835,28 @@ same, swaps nothing, and disables the fieldset holding the buttons until the ans
   (signals error (picker:appearance-picker (app:make-appearance) "javascript:alert(1)"))
   (signals error (picker:appearance-picker (app:make-appearance) nil))
   (signals error (picker:appearance-picker (app:make-appearance) "/a" :labels '(:theme 3)))
+  ;; A label is checked before anything is written, so a refused picker leaves no part of a
+  ;; form behind, including for a label the picker writes last.
+  (dolist (labels '((:theme 3) (:gradient 3) (:picker 3)))
+    (let ((html (with-output-to-string (spin:*html*)
+                  (ignore-errors
+                   (picker:appearance-picker (app:make-appearance) "/a" :labels labels)))))
+      (is (string= "" html) "a refused picker wrote ~S for the labels ~S" html labels)))
   (finishes (spin:with-html-string
               (picker:appearance-picker (app:make-appearance) "https://example.com/a"))))
+
+(test the-appearance-picker-carries-the-csrf-token-outside-the-fieldset
+  "The request's CSRF token reaches the picker's form as the hidden field, outside the
+fieldset, so disabling the fieldset during a request does not stop it being posted."
+  (let* ((dom (let ((csrf:*token-thunk* (lambda () "tok-981")))
+                (%picker (app:make-appearance))))
+         (form (%one dom "form"))
+         (fields (remove-if-not (lambda (i) (equal csrf:*field-name* (%attr i "name")))
+                                (%all form "input"))))
+    (is (= 1 (length fields)) "the form has one token field: ~S" (length fields))
+    (is (equal "tok-981" (%attr (first fields) "value")))
+    (is (equal "hidden" (%attr (first fields) "type")))
+    (is (null (%all (%one form "fieldset") "input")) "the token field is inside the fieldset")))
 
 (defun %form (&rest pairs)
   "A urlencoded body of PAIRS, alternating names and values, as a browser posts it."
@@ -879,7 +900,8 @@ not a plist with the value left out, so nothing from it reaches the page."
   (let ((old (app:make-appearance :theme :dark :contrast :high :look :gradient)))
     (flet ((settings (a)
              (list (app:appearance-theme a) (app:appearance-contrast a) (app:appearance-look a))))
-      (is (equal '(:light :high :gradient) (settings (picker:merge-appearance old '(:theme :light)))))
+      (is (equal '(:light :high :gradient)
+                 (settings (picker:merge-appearance old '(:theme :light)))))
       (is (equal '(nil :high :gradient) (settings (picker:merge-appearance old '(:theme nil))))
           "NIL in the change means follow the system, not keep the old value")
       (is (equal '(:dark :high nil) (settings (picker:merge-appearance old '(:look nil)))))

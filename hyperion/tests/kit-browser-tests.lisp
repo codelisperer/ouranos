@@ -538,14 +538,19 @@ var steps = [
           if (!first) { return; }
           first = false;
           log('rapid-disabled', button('contrast', 'high').matches(':disabled'));
+          log('rapid-focus-during', document.activeElement === button('theme', 'dark'));
           button('contrast', 'high').click(); button('look', 'flat').click(); });
+        // Focused first, as a keyboard press would leave it, so the test can see where focus
+        // goes when the buttons are disabled and enabled again.
+        button('theme', 'dark').focus();
         button('theme', 'dark').click(); })
       .then(function () {
         setTimeout(function () {
           log('rapid', root('theme') + ',' + root('contrast') + ',' + root('look'));
           log('rapid-pressed', pressed('theme') + ',' + pressed('contrast') + ',' + pressed('look'));
           log('rapid-cookie', document.cookie);
-          log('rapid-enabled', !button('contrast', 'high').matches(':disabled')); log('done', 'yes'); }, 1500); })
+          log('rapid-enabled', !button('contrast', 'high').matches(':disabled'));
+          log('rapid-focus', document.activeElement === button('theme', 'dark')); log('done', 'yes'); }, 1500); })
       .catch(function (e) { log('error-fetch', String(e).replace(/ /g, '_')); }); }
 ];
 var i = 0;
@@ -610,7 +615,8 @@ moves aria-pressed to Dark and stores the choice in the cookie, leaving contrast
 removes data-theme, so the CSS follows the system again; Gradient sets data-look. A forged value
 is refused with 400, not echoed and not triggered; a post without htmx is redirected. While a
 press is in flight the buttons are disabled, so presses made then have no effect and the page
-still shows what was stored (#1115's review)."
+still shows what was stored, and focus returns to the pressed button afterwards (#1115's
+review)."
   (let ((browser (%smoke-browser)))
     (if (null browser)
         (skip "No Chrome or Edge found; set HYPERION_SMOKE_BROWSER to run the appearance page")
@@ -654,6 +660,11 @@ still shows what was stored (#1115's review)."
                        "the pressed buttons do not show the settings: ~S" (saw "rapid-pressed"))
                    (is (equal "appearance=dark.normal.gradient" (saw "rapid-cookie"))
                        "the page and the stored choice disagree: ~S" (saw "rapid-cookie"))
-                   (is (equal "true" (saw "rapid-enabled")) "the buttons stayed disabled")))
+                   (is (equal "true" (saw "rapid-enabled")) "the buttons stayed disabled")
+                   (is (equal "false" (saw "rapid-focus-during"))
+                       "disabling the buttons left focus on the pressed one, so the focus check
+below cannot see the restore: ~S" (saw "rapid-focus-during"))
+                   (is (equal "true" (saw "rapid-focus"))
+                       "focus did not return to the pressed button after the request")))
             (ignore-errors (hyperion/server:stop handler))
             (is (ports:await-released port) "the port was still accepting after teardown"))))))

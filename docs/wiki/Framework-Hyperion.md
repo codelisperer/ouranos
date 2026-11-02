@@ -240,7 +240,7 @@ The components so far:
 - `dialog`, `dialog-opener`, `confirm-dialog`, `notice-region` and `undo-notice`, described
   below;
 - `list-toolbar`, and `selectable-row` with `properties-panel`, described below;
-- `appearance-picker` (`hyperion/kit/appearance`), described below.
+- `appearance-picker` (`hyperion/kit/appearance`), described above.
 
 The tests parse the HTML the components write and check roles, names and pressed state. They
 do not search the HTML as a string.
