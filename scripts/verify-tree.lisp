@@ -916,6 +916,12 @@ storage engine and have nothing to say here."
               (t (push (format nil "~a reported an unparseable coverage value ~s" want value)
                        problems)))))))))
 
+;;; --- the packages this tree defines (#1076) ------------------------------------------
+
+(defparameter *tree-packages* (ouranos-compile-warnings:tree-packages *root*)
+  "Every package a .lisp file in this tree defines. WARNINGS-IN fails a call to an undefined
+function in one of them, and leaves one in a dependency's package to that dependency.")
+
 ;;; --- counting -------------------------------------------------------------
 
 (defun count-checks (output)
@@ -993,7 +999,8 @@ fallback for a child that died without printing a condition at all."
 
 ;;; --- caught ERROR fails the gate (#263) -----------------------------------------------
 ;;;
-;;; WARNINGS-IN (scripts/compile-warnings.lisp) matches `caught WARNING' only. A FiveAM test body is compiled when its
+;;; WARNINGS-IN (scripts/compile-warnings.lisp) matches `caught WARNING', and a STYLE-WARNING
+;;; only for an undefined function in this tree's packages. A FiveAM test body is compiled when its
 ;;; fasl loads, so a body SBCL cannot compile prints `caught ERROR' where neither compile-file
 ;;; nor ASDF sees it, and this scan is its only compile check. scripts/caught-errors.lisp
 ;;; explains the mechanism and records the measurement taken before this became a failure:
@@ -1191,7 +1198,7 @@ suite at all, because a check that found nothing to check looks the same as one 
         (run-checked (ouranos-redefinitions:wrap-form (format nil "(asdf:load-system :~(~a~))" s)
                                                       (format nil "(list ~S)" (namestring *root*)))
                      s)
-      (let ((warned (ouranos-compile-warnings:warnings-in out))
+      (let ((warned (ouranos-compile-warnings:warnings-in out *tree-packages*))
             (redefined (ouranos-redefinitions:redefinitions-in out)))
         (cond
           ((not (zerop code))
@@ -1241,10 +1248,12 @@ suite at all, because a check that found nothing to check looks the same as one 
                         (fail "~a ran ZERO checks" s))))
             ;; Every report must say Fail: 0, not just one of them (#605).
             ((and (ouranos-fiveam-report:every-report-passed-p text)
-                  (ouranos-compile-warnings:warnings-in text))
+                  (ouranos-compile-warnings:warnings-in text *tree-packages*))
              (incf grand n)
-             (format t "  WARN    ~a~34t~a checks~%~{          ~a~%~}" s n (ouranos-compile-warnings:warnings-in text))
-             (fail "~a compiled with ~D warning~:P" s (length (ouranos-compile-warnings:warnings-in text))))
+             (format t "  WARN    ~a~34t~a checks~%~{          ~a~%~}" s n
+                     (ouranos-compile-warnings:warnings-in text *tree-packages*))
+             (fail "~a compiled with ~D warning~:P" s
+                   (length (ouranos-compile-warnings:warnings-in text *tree-packages*))))
             ((ouranos-fiveam-report:every-report-passed-p text)
              (incf grand n)
              (let ((skipped (count-skips text)))

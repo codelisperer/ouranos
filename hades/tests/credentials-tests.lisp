@@ -22,6 +22,12 @@
   (:use #:cl #:fiveam)
   (:local-nicknames (#:cred #:hades/credentials) (#:sec #:aion/secret))
   #+linux (:local-nicknames (#:libsecret #:aion/libsecret) (#:ffi #:aion/libsecret/ffi))
+  ;; The stub test replaces THIS platform's value-reading entry point, so it needs that
+  ;; platform's FFI package under the same nickname hades/credentials uses (#1035). Only the
+  ;; Linux line existed, so the #+darwin and #+win32 branches of that test named a package
+  ;; that does not exist there, and the file failed to READ on both.
+  #+win32 (:local-nicknames (#:ffi #:aion/windows/ffi))
+  #+darwin (:local-nicknames (#:ffi #:aion/darwin/ffi) (#:darwin #:aion/darwin))
   (:export #:run-tests))
 
 (in-package #:hades/credentials/tests)
@@ -135,6 +141,62 @@ Linux this is why the backend uses libsecret's _binary_ calls rather than the te
              (is (null (cred:delete-credential service "user")) "deleting what is gone returns NIL")
              (signals cred:credential-not-found (cred:fetch-credential service "user")))
         (%cleanup service "user"))))
+
+  (test exists-and-names-follow-what-is-stored-without-reading-a-value
+    "#1035: CREDENTIAL-EXISTS-P and CREDENTIAL-NAMES against the real store. Only this run's own
+service is listed, so no credential of whoever runs this is read."
+    (let* ((service (%item (%service) "user"))
+           (value (%marker))
+           (second (%marker)))
+      (unwind-protect
+           (progn
+             (is (null (cred:credential-exists-p service "user"))
+                 "nothing is stored under this run's service yet")
+             (is (null (cred:credential-names service)) "and it lists nothing")
+             (cred:store-credential service "user" (sec:make-secret value))
+             (is (eq t (cred:credential-exists-p service "user")) "stored, so it exists")
+             (is (null (cred:credential-exists-p service "someone-else"))
+                 "and another account under the same service does not")
+             (is (equal '("user") (cred:credential-names service)) "which is the one name listed")
+             (cred:store-credential (%item service "second") "second" (sec:make-secret second))
+             (is (eq t (cred:credential-exists-p service "user")) "the first is still there")
+             ;; THE VALUE IS NOT IN THE ANSWER. Both markers are unique to this run, so finding
+             ;; either in what these two returned could only be a leak.
+             (let ((answer (format nil "~S ~S" (cred:credential-names service)
+                                   (cred:credential-exists-p service "user"))))
+               (is (null (search value answer)) "the value is not in what they returned")
+               (is (null (search second answer))))
+             (is (eq t (cred:delete-credential service "user")))
+             (is (null (cred:credential-exists-p service "user")) "deleted, so it does not exist")
+             (is (null (member "user" (cred:credential-names service) :test #'string=))
+                 "and it is no longer listed"))
+        (%cleanup service "user")
+        (%cleanup (%item service "second") "second"))))
+
+  (test names-under-one-service-do-not-include-another-services-items
+    "#1066's review: a target is SERVICE/ACCOUNT and either part may hold a slash, as this
+file's own \"soloflow/anthropic-api-key\" example shows. On Windows the filter SERVICE/* matched
+those too, so CREDENTIAL-NAMES \"S\" reported \"x/y\", an account of the service \"S/x\". macOS and
+Linux match exactly; this asserts all three agree."
+    (let* ((outer (%item (%service) "user"))
+           (inner (%item (concatenate 'string outer "/x") "y")))
+      (unwind-protect
+           (progn
+             (cred:store-credential outer "user" (sec:make-secret (%marker)))
+             (cred:store-credential inner "y" (sec:make-secret (%marker)))
+             (let ((names (cred:credential-names outer)))
+               (is-true (member "user" names :test #'string=)
+                        "its own account is listed, in ~S" names)
+               (is-false (member "x/y" names :test #'string=)
+                         "the nested service's item is not listed, in ~S" names)
+               (is-false (member "y" names :test #'string=)
+                         "nor under any other spelling, in ~S" names))
+             (is-false (cred:credential-exists-p outer "x/y")
+                       "nor does EXISTS-P claim the nested item for this service")
+             (is-true (cred:credential-exists-p inner "y")
+                      "control: the nested item does exist under its own service"))
+        (%cleanup outer "user")
+        (%cleanup inner "y"))))
 
   (test names-with-non-ascii-characters-round-trip
     (let* ((account (concatenate 'string "b" (string (code-char #xF6)) "b"))
@@ -312,6 +374,161 @@ fetches by name only the items this run created."
 ;;; they run without OURANOS_TEST_REAL_CREDENTIAL_STORE.
 
 (in-suite all)
+
+;;; --- the value is never read, whichever backend is compiled (#1035) ----------------------
+
+(defparameter +value-reading-entry-points+
+  '(("win32" . "(ffi:cred-read-w")
+    ("darwin" . "(ffi:sec-item-copy-matching")
+    ("linux" . "(ffi:secret-password-lookupv-binary-sync"))
+  "The one call in each backend that returns a credential's VALUE, written AS CALLED. The call
+syntax, not the bare name: these names appear in the backends' own docstrings, which say what
+each function does and does not read, and a bare-name search finds those sentences instead of
+any call. That is how this sweep first went green while checking one backend, and then failed on
+a docstring once it checked all three.
+
+CREDENTIAL-EXISTS-P and CREDENTIAL-NAMES must reach none of them. On macOS
+SEC-ITEM-COPY-MATCHING is also the call the attributes-only query uses, so it is the query that
+is checked there, not the call; see THE-VALUE-IS-NEVER-FETCHED-TO-ANSWER-EXISTS-OR-NAMES.")
+
+(defun %credentials-source ()
+  "hades/src/credentials/credentials.lisp as a list of lines. Every backend is in this file
+whichever one is compiled, so a sweep of it checks all three on any operating system."
+  (uiop:read-file-lines
+   (merge-pathnames "src/credentials/credentials.lisp"
+                    (asdf:system-source-directory "hades/credentials"))))
+
+(defun %definition-lines (lines name)
+  "The lines of EVERY definition of NAME in LINES, appended: each from its (defun NAME line to
+the line before the next definition at the same indentation.
+
+EVERY definition, not the first. The three backends each define %ACCOUNTS, %EXISTS-P and %NAMES
+inside their own #+ block, so a search that stopped at the first match read the Windows backend
+and reported on all three. It passed, and it was checking one (found by reading this file after
+it had already gone green)."
+  (let ((found '())
+        (from 0))
+    (loop
+      (let ((start (position-if (lambda (l) (search (format nil "(defun ~A " name) l))
+                                lines :start from)))
+        (unless start (return (nreverse found)))
+        (let* ((line (nth start lines))
+               (indent (- (length line) (length (string-left-trim " " line))))
+               (rest (nthcdr (1+ start) lines))
+               (end (position-if (lambda (l)
+                                   (and (search "(defun " l)
+                                        (= indent (- (length l) (length (string-left-trim " " l))))))
+                                 rest))
+               (stop (if end (+ 1 start end) (length lines))))
+          (setf found (append (reverse (subseq lines start stop)) found)
+                from stop))))))
+
+(test the-value-is-never-fetched-to-answer-exists-or-names
+  "#1035: neither CREDENTIAL-EXISTS-P nor CREDENTIAL-NAMES may decrypt or copy a secret. Read
+from the source, so all three backends are checked wherever this runs: the two that are not
+compiled here are still in the file, and a change to the Windows backend fails this on Linux."
+  (let ((lines (%credentials-source)))
+    (is (plusp (length lines)) "the backend source was read")
+    ;; THE COUNTS, so a rename cannot empty this sweep (the review of #1066). %DEFINITION-LINES
+    ;; returning nothing used to mean "nothing to check" and the sweep passed: renaming %ACCOUNTS
+    ;; would have made every assertion below vanish. %ACCOUNTS is defined once per backend;
+    ;; %EXISTS-P and %NAMES also have the no-backend definition; the two public functions once.
+    (dolist (entry '(("%accounts" 3) ("%exists-p" 4) ("%names" 4)
+                     ("credential-exists-p" 1) ("credential-names" 1)))
+      (destructuring-bind (name expected) entry
+        (is (= expected (count-if (lambda (l) (search (format nil "(defun ~A " name) l)) lines))
+            "~A is defined ~D time~:P, as this sweep assumes" name expected)))
+    (dolist (name '("%exists-p" "%names" "%accounts" "credential-exists-p" "credential-names"))
+      (let ((body (%definition-lines lines name)))
+        (is-true body "~A has a definition to sweep" name)
+        (when body
+          (loop for (os . entry) in +value-reading-entry-points+
+                ;; SEC-ITEM-COPY-MATCHING is both the Keychain's value read and the call its
+                ;; attributes-only query uses, so naming it proves nothing on macOS. What proves
+                ;; it there is the absence of kSecReturnData, checked below; every other entry
+                ;; point must be absent outright.
+                unless (string= os "darwin")
+                  do (is (notany (lambda (l) (search entry l)) body)
+                         "~A does not call ~A, the ~A backend's value read" name entry os)))))
+    ;; The macOS query must not ask for the data: kSecReturnData is the only key that returns a
+    ;; value, and the attributes-only query shares its entry point with %FETCH.
+    (let ((body (append (%definition-lines lines "%accounts")
+                        (%definition-lines lines "%exists-p")
+                        (%definition-lines lines "%names"))))
+      ;; Quoted, because it is a string literal in the query and bare prose in the docstrings.
+      (is (notany (lambda (l) (search "\"kSecReturnData\"" l)) body)
+          "the attributes-only Keychain query never asks for kSecReturnData")
+      (is (some (lambda (l) (search "\"kSecUseAuthenticationUIFail\"" l)) body)
+          "and it asks the Keychain to fail rather than prompt")
+      ;; The control for the exemption above: %FETCH, which does want the value, names both the
+      ;; entry point and kSecReturnData, so the checks would see a query that asked for data.
+      (let ((fetch (%definition-lines lines "%fetch")))
+        (is (some (lambda (l) (search "\"kSecReturnData\"" l)) fetch)
+            "control: %FETCH asks for kSecReturnData, so this check can tell the two apart")
+        (is (some (lambda (l) (search "(ffi:sec-item-copy-matching" l)) fetch)
+            "control: and the matcher finds a real call, so the entry-point checks are not vacuous")))
+    ;; The Linux search's flags are asserted for real in
+    ;; THE-SECRET-SERVICE-SEARCH-PASSES-ONLY-THE-ALL-FLAG below. The check that used to sit here
+    ;; looked for "+secret-search-unlock+", a constant that does not exist in the tree, so it
+    ;; could never fail and adding LOAD_SECRETS to the flags would have passed it (the review of
+    ;; #1066).
+    ))
+
+(test asking-whether-a-credential-exists-never-calls-the-value-read
+  "#1035, on the backend compiled here, and without needing a store: the value-reading entry
+point is replaced by one that records the call and signals. CREDENTIAL-EXISTS-P and
+CREDENTIAL-NAMES are then called, and the assertion is on the recorder, not on what they
+return: a machine with no store answers CREDENTIAL-STORE-UNAVAILABLE, and that is fine. What
+must not happen is the read being reached at all."
+  #-(or win32 darwin linux)
+  (skip "no backend on this operating system, so there is no value read to replace")
+  #+(or win32 darwin linux)
+  (let* ((called 0)
+         (symbol #+win32 'ffi:cred-read-w
+                 #+darwin 'ffi:sec-item-copy-matching
+                 #+linux 'ffi:secret-password-lookupv-binary-sync)
+         (original (fdefinition symbol))
+         ;; ON MACOS THE ENTRY POINT IS SHARED. SecItemCopyMatching is both the Keychain's value
+         ;; read and the call the attributes-only query uses, so counting calls to it would count
+         ;; the legitimate one and this test would fail for the wrong reason. There the stub reads
+         ;; the QUERY: it records only a query that asks for kSecReturnData, which is the only key
+         ;; that returns a value, and passes anything else through to the real call. On Windows
+         ;; and Linux the entry point returns a value and nothing else, so the call itself counts.
+         (stub #+darwin (lambda (query out)
+                          (if (cffi:null-pointer-p
+                               (ffi:cf-dictionary-get-value query (darwin:cf-constant "kSecReturnData")))
+                              (funcall original query out)
+                              (progn (incf called)
+                                     (error "the value read was called to answer a question about existence"))))
+               #-darwin (lambda (&rest args)
+                          (declare (ignore args))
+                          (incf called)
+                          (error "the value read was called to answer a question about existence"))))
+    (unwind-protect
+         (progn
+           (setf (fdefinition symbol) stub)
+           (dolist (call (list (lambda () (cred:credential-exists-p (%service) "user"))
+                               (lambda () (cred:credential-names (%service)))))
+             ;; Any outcome is allowed; the recorder is what is asserted.
+             (handler-case (funcall call) (error () nil)))
+           (is (zerop called)
+               "neither call reached the value read (~D call~:P)" called))
+      (setf (fdefinition symbol) original))
+    ;; THE CONTROL: the stub must be capable of noticing, or the assertion above is vacuous.
+    ;; FETCH-CREDENTIAL does want the value, so it reaches the read -- but only once there is a
+    ;; store to reach it through. Without one, every backend refuses before the read, so the
+    ;; control cannot run and says so rather than passing emptily. CI has a store on all three
+    ;; operating systems, so it runs there.
+    (if (not (cred:credential-store-available-p))
+        (skip "no store on this machine, so the control for the stub could not run; the assertion above still held, the read was not reached")
+        (let ((reached 0))
+          (unwind-protect
+               (progn
+                 (setf (fdefinition symbol)
+                       (lambda (&rest args) (declare (ignore args)) (incf reached) (error "read")))
+                 (handler-case (cred:fetch-credential (%service) "user") (error () nil)))
+            (setf (fdefinition symbol) original))
+          (is (plusp reached) "control: FETCH-CREDENTIAL does reach the value read")))))
 
 #-(or win32 darwin linux)
 (test with-no-backend-every-call-signals-and-nothing-is-stored
@@ -535,3 +752,135 @@ there is no backend, the fetch says the store is unavailable instead."
               (signals cred:credential-store-unavailable (cred:fetch-credential service account)))
     #-(or win32 darwin linux) (signals cred:credential-store-unavailable
                                 (cred:fetch-credential service account))))
+
+;;; --- the review of #1066: the flags, the exact target, and the wildcard ------------------
+
+(defun %test-source-lines ()
+  "This test file's own lines."
+  (uiop:read-file-lines
+   (merge-pathnames "tests/credentials-tests.lisp"
+                    (asdf:system-source-directory "hades/credentials"))))
+
+(defun %assertion-operators-used (&optional (lines (%test-source-lines)))
+  "Every token in LINES that follows an open paren and names a fiveam assertion: \"is\" itself, or
+\"is\" followed by a character that is not a letter or digit, which covers is-true, is-false and
+is*. LINES defaults to this file's own lines; the control below passes its own.
+
+Textual on purpose: READing this file on Linux would fail on the Windows and macOS forms, whose
+packages are not loaded here. The token rule is what lets it look anywhere on a line rather than
+only at the start, so a form nested inside another is still seen: a word like ISLAND is excluded
+by its third character being a letter, not by where it sits (the review of #1066).
+
+A token may hold only letters, digits and -*!?. Without that, this function matched the string
+literal \"(is\" in its own body and collected the token IS-with-a-quote, which no package can
+define, so the sweep failed on itself the first time it was allowed to look anywhere on a line."
+  (let ((found '()))
+    (dolist (line lines)
+      (let ((i 0))
+        (loop
+          (let ((p (search "(is" line :start2 i)))
+            (unless p (return))
+            (let* ((start (1+ p))
+                   (end (or (position-if (lambda (c)
+                                           (member c '(#\Space #\Tab #\( #\)) :test #'char=))
+                                         line :start start)
+                            (length line)))
+                   (token (subseq line start end)))
+              (when (and (every (lambda (c)
+                                  (or (alphanumericp c)
+                                      (member c '(#\- #\* #\! #\?) :test #'char=)))
+                                token)
+                         (or (string= token "is")
+                             (and (> (length token) 2) (not (alphanumericp (char token 2))))))
+                (pushnew token found :test #'string=)))
+            (setf i (1+ p))))))
+    found))
+
+(defun %assertion-defined-p (token)
+  "Whether TOKEN names something callable in this package. The sweep and its control both call
+this, so neither checks a copy of the other's predicate (the review of #1066)."
+  (let ((symbol (find-symbol (string-upcase token) :hades/credentials/tests)))
+    (and symbol (or (macro-function symbol) (fboundp symbol)) t)))
+
+(test every-assertion-operator-this-file-uses-is-defined
+  "A fiveam assertion operator that does not exist compiles without complaint and only fails
+when the test RUNS, so a test guarded by a store this machine has not got never reaches it. That
+is what happened to #1066: the live test below used IS*, which is defined in
+mnemosyne/tests/backends.lisp and not here, the suite skipped the live block on WSL, and CI
+found it. Neither check-compile nor a cold rebuild reports an undefined function, so this check
+is textual and runs everywhere."
+  (let ((tokens (%assertion-operators-used)))
+    ;; The sweep cannot pass by finding nothing.
+    (is-true (member "is" tokens :test #'string=) "the sweep finds the plain IS: ~S" tokens)
+    (is-true (member "is-true" tokens :test #'string=) "and IS-TRUE: ~S" tokens)
+    (dolist (token tokens)
+      (is-true (%assertion-defined-p token)
+               "~A is defined here; an assertion operator that is not fails only when the test runs"
+               token))
+    ;; The control, through the same collector and the same predicate, on lines made at run time.
+    ;; They are built with FORMAT so that this file does not itself contain "(is-bogus", which the
+    ;; collector would then find in its own source and demand be defined.
+    (let* ((bogus (format nil "(~A-bogus x)" "is"))
+           (nested (format nil "(let ((x 1)) (~A-bogus x))" "is"))
+           (word (format nil "(~Aland 1)" "is"))
+           (collected (%assertion-operators-used (list bogus nested word))))
+      (is-true (member "is-bogus" collected :test #'string=)
+               "control: the collector finds an assertion that starts a line: ~S" collected)
+      (is-false (member "island" collected :test #'string=)
+                "control: and ISLAND is not taken for an assertion: ~S" collected)
+      (is-false (%assertion-defined-p "is-bogus")
+                "control: an operator that does not exist is judged missing")
+      (is-true (%assertion-defined-p "is-true")
+               "control: and one that does exist is judged present"))))
+
+#+linux
+(test the-secret-service-search-passes-only-the-all-flag
+  "The flags are asserted, not assumed. The sweep used to look for a constant name that does not
+exist in the tree, so adding SECRET_SEARCH_LOAD_SECRETS -- which fetches every matching item's
+secret -- would have passed every test (the review of #1066). This stubs the search and reads
+the flags it was given."
+  (let ((seen :never-called)
+        (original (fdefinition 'ffi:secret-service-search-sync)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'ffi:secret-service-search-sync)
+                 (lambda (service schema attributes flags cancellable error)
+                   (declare (ignore service schema attributes cancellable error))
+                   (setf seen flags)
+                   (cffi:null-pointer)))
+           ;; Any outcome is allowed: without a store this signals before or after the search.
+           (handler-case (cred:credential-names (%service)) (error () nil)))
+      (setf (fdefinition 'ffi:secret-service-search-sync) original))
+    (if (eq seen :never-called)
+        (skip "no Secret Service on this machine, so the search was never reached")
+        (progn
+          (is (eql ffi:+secret-search-all+ seen)
+              "exactly SECRET_SEARCH_ALL: not UNLOCK, which would prompt, and not LOAD_SECRETS, which would fetch every value")
+          (is (zerop (logand seen 4)) "SECRET_SEARCH_UNLOCK (4) is not set")
+          (is (zerop (logand seen 8)) "SECRET_SEARCH_LOAD_SECRETS (8) is not set")))))
+
+(test a-service-name-with-a-star-is-refused-for-listing
+  "#1066's review: on Windows the service goes into CredEnumerateW's filter, where `*' is a
+wildcard, so a service of \"*\" would enumerate -- and so decrypt -- every credential of every
+application. Refused on every platform, so the three agree."
+  ;; SIGNALS CREDENTIAL-ERROR IS NOT ENOUGH, and that is what this test did until the review of
+  ;; #1066. CREDENTIAL-STORE-UNAVAILABLE is a subclass of CREDENTIAL-ERROR, so on a machine with
+  ;; no credential store -- this lane's machine, and any CI leg without one -- the test passed on
+  ;; the store's absence even if the wildcard refusal were deleted. The refusal has to be told
+  ;; apart from the store simply not being there.
+  (dolist (service '("*" "a*" "soloflow/*" "*/x"))
+    (dolist (call (list (cons "credential-names" (lambda () (cred:credential-names service)))
+                        (cons "credential-exists-p"
+                              (lambda () (cred:credential-exists-p service "user")))))
+      (let ((c (handler-case (progn (funcall (cdr call)) nil)
+                 (cred:credential-error (e) e))))
+        (is-true (and c (not (typep c 'cred:credential-store-unavailable)))
+                 "~A refuses ~S for its name, rather than failing for want of a store: ~S"
+                 (car call) service c))))
+  ;; The control in the other direction: an ordinary name is not refused for its name. Without a
+  ;; store that is CREDENTIAL-STORE-UNAVAILABLE, which is the one condition the assertions above
+  ;; require NOT to be the answer, so the two cannot both be satisfied by the same mistake.
+  (let ((c (handler-case (progn (cred:credential-names (%service)) nil)
+             (cred:credential-error (e) e))))
+    (is (or (null c) (typep c 'cred:credential-store-unavailable))
+        "an ordinary service name is not refused for its name: ~S" c)))

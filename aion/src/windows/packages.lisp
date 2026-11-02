@@ -67,7 +67,7 @@
    #:credential-w #:flags #:target-name #:comment #:last-written
    #:credential-blob-size #:credential-blob #:persist #:attribute-count #:attributes
    #:target-alias #:user-name
-   #:cred-write-w #:cred-read-w #:cred-delete-w #:cred-free
+   #:cred-write-w #:cred-read-w #:cred-enumerate-w #:cred-delete-w #:cred-free
    #:+cred-type-generic+ #:+cred-persist-local-machine+ #:+cred-max-credential-blob-size+
    #:+error-not-found+
    ;; job objects (#599)

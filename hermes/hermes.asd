@@ -115,6 +115,9 @@
                "aion/log"   ; the framework logging facade -- already hermes core's
                "coalton"    ; the key/visibility core is typed
                "dexador"    ; the S3 backend's only transport
+               ;; The endpoint is parsed with the same parser dexador uses, so the check for a
+               ;; plaintext endpoint reads the host the request will go to (#1089).
+               "quri"
                ;; address-category and resolve-host: a plaintext store is refused unless its
                ;; endpoint is local (#970). Already hermes core's, so no new external dep.
                "aion/http-client"
