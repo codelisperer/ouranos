@@ -46,6 +46,9 @@
            ;; fetching a URL a user supplied (#295)
            #:fetch-public #:*fetch-public-max-body-bytes*
            #:address-category #:parse-address #:address-string #:resolve-host
+           ;; The one rule for whether a host may be sent requests in the clear, and the
+           ;; host-from-a-URL reading it takes, shared by hermes core and hermes/blob (#1082).
+           #:local-host-p #:url-host
            #:response-too-large #:response-too-large-limit
            #:pinned-connect-unsupported
            ;; a pinned connection's certificate, refused by the OS (#536)

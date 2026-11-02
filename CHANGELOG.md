@@ -14,6 +14,18 @@ its tag.
 
 ### An app may have to act
 
+- **A plaintext request to a host this tree judges local is no longer sent through a proxy**
+  (#1091, #1082). dexador sets its proxy from `HTTPS_PROXY` or `HTTP_PROXY` when it loads and
+  honours no `NO_PROXY`, and `aion/http-client` never passed `:proxy`, so a caller that had
+  checked its destination was local — hermes for a Twilio `api-base`, `hermes/blob` for an S3
+  endpoint — could still have its credentials carried off the machine in the clear, because the
+  bytes went to the proxy rather than to the host that was checked. An `http` request to
+  `localhost`, a loopback, private or link-local address, or a name resolving only to those, is
+  now sent with `:proxy nil`. **An app that deliberately proxied plaintext requests to a local
+  host will see them stop going through the proxy.** https is unaffected, because a proxied https
+  request is a `CONNECT` tunnel and the credentials are inside TLS, and plaintext to a host that
+  is not local is unaffected too.
+
 - **hermes/blob: an S3 endpoint that carries a user name or password is now refused when the
   store is made** (#1089). `MNEMOSYNE_S3_ENDPOINT` values such as `user:pw@host` or
   `[::1]@host` signal `blob-configuration-error`. An app that put userinfo in that variable has
@@ -1177,6 +1189,23 @@ its tag.
   `claude-opus-5-5` where they named `claude-opus-4-8`.
 
 ### Added
+
+- **`aion/http-client:local-host-p` and `aion/http-client:url-host` are exported** (#1082).
+  `local-host-p` takes a host name or an IP address in text and says whether only this machine or
+  this network can reach it, which is the one question a caller must answer before sending
+  credentials in the clear. `url-host` reads a URL's host with `quri`, the parser dexador parses
+  a request URL with, and strips the brackets from an IPv6 host so the result can go straight to
+  `parse-address`.
+  **Both were written twice before this**, in hermes core for a Twilio `api-base` and in
+  `hermes/blob` for an S3 endpoint, and the two copies acquired different holes: a bracketed IPv6
+  address in the userinfo got past one, a scheme inside the endpoint got past the other, and a
+  bucket label in front of the host got past both (#1089, and the review of #1084). Both callers
+  now use these.
+  **`local-host-p` does not treat a 6to4 address as local**, although `address-category` reports
+  one by the IPv4 address it carries, so `2002:7f00:1::` is `:loopback` there. That is the right
+  conservative answer for a guard deciding whether a destination may be reached at all, and the
+  wrong one here, because 6to4 traffic reaches its destination through a public relay.
+  `address-category` is unchanged.
 
 - **hermes: how long a send waits is now hermes's own setting, `*send-connect-timeout*` and
   `*send-read-timeout*`, both 10 seconds** (#1077). Each provider also takes `:connect-timeout`

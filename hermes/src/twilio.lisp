@@ -60,30 +60,6 @@ timeouts from *SEND-CONNECT-TIMEOUT* and *SEND-READ-TIMEOUT* (#1077)."
   (format nil "Basic ~A"
           (b64:string-to-base64-string (format nil "~A:~A" user pass))))
 
-(defun %local-host-p (host)
-  "Whether HOST names something only this machine or this network can reach, so sending it
-requests in plaintext does not put them on the public internet.
-
-\"localhost\" counts. An IP address is classified by AION/HTTP-CLIENT:ADDRESS-CATEGORY and counts
-when it is loopback, private or link-local. Any other name is resolved, and counts only when it
-resolves and every address it resolves to is one of those. A name that does not resolve does not
-count: a host that cannot be reached is not a host known to be local.
-
-This is the same rule as HERMES/BLOB's %LOCAL-ENDPOINT-P, written again rather than shared,
-because hermes/blob is an aux system that deliberately does not depend on hermes core and the
-two cannot see each other. Both call the same AION/HTTP-CLIENT primitives. Moving the rule into
-aion/http-client, where those primitives live and which both systems already depend on, is
-#1082 -- two copies of a rule about sending credentials in the clear is exactly the kind of pair
-that gets changed apart, and the review of #1084 found that both copies had the same hole."
-  (flet ((local-p (address)
-           (member (address-category address) '(:loopback :private :link-local))))
-    (or (string-equal host "localhost")
-        (let ((literal (parse-address host)))
-          (if literal
-              (and (local-p literal) t)
-              (let ((addresses (ignore-errors (resolve-host host))))
-                (and addresses (every #'local-p addresses) t)))))))
-
 (defun %leading-zero-octet-p (host)
   "Whether HOST looks like dotted-quad IPv4 with a leading zero in any octet, such as
 \"010.0.0.1\" (#1077, the review of #1084).
@@ -132,6 +108,8 @@ equivalent rule in HERMES/BLOB then turned out to have two further holes of the 
   - userinfo is refused outright, whatever the scheme and host;
   - a query or a fragment is refused, because the request's path is appended to this value and
     would land inside them;
+  - the locality rule itself is AION/HTTP-CLIENT:LOCAL-HOST-P, not a copy written here. It used
+    to be a copy, and so did hermes/blob's, and the two acquired different holes (#1082);
   - a bracketed IPv6 host is refused, because such a base cannot send: usocket:socket-connect
     answers NS-HOST-NOT-FOUND-ERROR for \"[::1]\" while \"::1\" resolves. An earlier test of mine
     asserted that such a base was accepted, which was a claim about a configuration that could
@@ -166,7 +144,7 @@ equivalent rule in HERMES/BLOB then turned out to have two further holes of the 
         (refuse (format nil "The host ~S is a bracketed IPv6 address, which cannot be connected to: it is looked up as a name and no such name exists. Write the address without brackets, or use a name." host)))
       (when (%leading-zero-octet-p host)
         (refuse (format nil "The host ~S has a leading zero in an octet. Some stacks read that as octal, so the address checked here need not be the address connected to; write it without leading zeros." host)))
-      (when (and (string-equal scheme "http") (not (%local-host-p host)))
+      (when (and (string-equal scheme "http") (not (local-host-p host)))
         (refuse (format nil "The host ~S would receive the account SID and auth token in the clear, because every request carries them in an Authorization header. Use https, or a host only this machine or this network can reach." host)))
       (let ((built (handler-case (quri:uri (%twilio-endpoint base "ACprobe"))
                      (error () nil))))

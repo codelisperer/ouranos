@@ -471,6 +471,17 @@ policy resends. Not used on Windows, where dexador's WinHTTP backend opens a new
 every request, so no connection is reused."
   (%idempotent-method-p (request-method req)))
 
+(defun %plaintext-to-local-p (url)
+  "Whether URL is an http URL whose host this machine or network can reach by itself (#1091).
+NIL for https, for a host that is not local, and for a URL with no host or one that will not
+parse -- in each of those cases nothing is exempted and the proxy, if any, still applies."
+  (let ((uri (ignore-errors (quri:uri url))))
+    (and uri
+         (let ((scheme (quri:uri-scheme uri)))
+           (and scheme (string-equal scheme "http")))
+         (let ((host (url-host url)))
+           (and host (local-host-p host) t)))))
+
 (defun %dex-args (req)
   "The dexador keyword arguments REQ implies, apart from the URL and the stream."
   (append (list :method (request-method req)
@@ -483,6 +494,23 @@ every request, so no connection is reused."
                 ;; are still there.
                 :force-binary t
                 :max-redirects (or (request-follow-redirects req) 0))
+          ;; A PLAINTEXT REQUEST TO A LOCAL HOST IS NOT SENT THROUGH A PROXY (#1091).
+          ;;
+          ;; dexador sets *DEFAULT-PROXY* from HTTPS_PROXY or HTTP_PROXY when it loads, on every
+          ;; platform but Windows, and it honours no NO_PROXY. This function never passed :PROXY,
+          ;; so that default stood for every request this tree makes. The effect was that a
+          ;; caller which had checked its destination was local -- hermes for a Twilio API base,
+          ;; hermes/blob for an S3 endpoint -- could still have its credentials carried off the
+          ;; machine in the clear, because the bytes went to the proxy rather than to the host
+          ;; that was checked. The check was not wrong about the host; it was answering a
+          ;; question that stops being the whole question once a proxy is in the path.
+          ;;
+          ;; Only http to a local host is exempted. An https request through a proxy is a CONNECT
+          ;; tunnel, so the credentials are inside TLS and the proxy sees only the host name,
+          ;; which is not the leak this closes. And a plaintext request to a host that is NOT
+          ;; local is left alone: whoever configured that is already sending in the clear, and a
+          ;; proxy is not what makes it worse.
+          (when (%plaintext-to-local-p (request-url req)) (list :proxy nil))
           (when (request-max-body-bytes req) (list :want-stream t))
           (when (request-ca-path req) (list :ca-path (request-ca-path req)))
           ;; Passed only when set, so an unset timeout means dexador's default rather than an

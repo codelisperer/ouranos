@@ -162,6 +162,69 @@ address (IPv4-mapped, NAT64, 6to4) is classified by the IPv4 address it carries,
                         when (%in-prefix-p a prefix bits) return category)
                   :public))))))
 
+(defun %6to4-p (address)
+  "Whether ADDRESS is a 6to4 address, 2002::/16. Such an address carries an IPv4 address, and
+ADDRESS-CATEGORY classifies it by that inner address, so 2002:7f00:1:: reports :LOOPBACK. That
+is the conservative answer for a guard deciding whether a destination may be reached at all,
+which is what ADDRESS-CATEGORY is for. It is the WRONG answer for a decision about whether a
+destination is local, because 6to4 traffic reaches its destination through a public relay, so
+LOCAL-HOST-P excludes these (#1082, the review of #1084)."
+  (let ((a (parse-address address)))
+    (and a (= 16 (length a)) (%in-prefix-p a #(32 2 0 0 0 0 0 0 0 0 0 0 0 0 0 0) 16) t)))
+
+(defun url-host (url)
+  "URL's host, without brackets and without a port: \"http://[::1]:9000/x\" gives \"::1\". NIL when
+URL has no host or cannot be parsed.
+
+QURI is used because it is the parser dexador parses a request URL with, so a caller asking this
+asks the same question of the same parser rather than of one of its own. It returns an IPv6 host
+with its brackets, as the URL carries them, and every caller wants the address itself, because
+that is what PARSE-ADDRESS and ADDRESS-CATEGORY read.
+
+Both hermes core and hermes/blob had written this, and both had holes: see #1089 and the review
+of #1084. It is here because it belongs next to the primitives it feeds, and because one copy
+can be fixed once."
+  (let* ((uri (ignore-errors (quri:uri url)))
+         (host (and uri (quri:uri-host uri))))
+    (if (and host (> (length host) 1)
+             (char= #\[ (char host 0))
+             (char= #\] (char host (1- (length host)))))
+        (subseq host 1 (1- (length host)))
+        host)))
+
+(defun local-host-p (host)
+  "Whether HOST names something only this machine or this network can reach, so sending it
+requests in plaintext does not put them on the public internet. HOST is a name or an IP address
+in text, without brackets or a port -- see URL-HOST.
+
+\"localhost\" counts, without a lookup. An IP address counts when ADDRESS-CATEGORY says
+:LOOPBACK, :PRIVATE or :LINK-LOCAL, except for a 6to4 address (%6TO4-P), which reaches its
+destination through a public relay whatever IPv4 address it carries. Any other name is resolved,
+and counts only when it resolves and EVERY address it resolves to is one of those, so a Docker
+Compose service name works while a name pointing at the internet does not. A name that does not
+resolve does not count: a host that cannot be reached is not a host known to be local.
+
+THE NAME IS RESOLVED HERE AND NOW, once. A caller that asks this when it is configured, as
+hermes and hermes/blob do, has an answer about that moment and not a standing guarantee.
+
+WHY THIS IS IN AION RATHER THAN IN EACH CALLER. hermes core wrote it for a Twilio API base and
+hermes/blob for an S3 endpoint, and the two copies acquired different holes -- a bracketed IPv6
+userinfo got past one, a scheme in the endpoint got past the other, and a bucket label in front
+of the host got past both (#1089, the review of #1084). A rule that decides whether credentials
+may travel in the clear is the last rule that should exist twice (#1082)."
+  (and host
+       (or (string-equal host "localhost")
+           (let ((literal (parse-address host)))
+             (flet ((local-p (address)
+                      (and (not (%6to4-p address))
+                           (member (address-category address)
+                                   '(:loopback :private :link-local))
+                           t)))
+               (if literal
+                   (local-p literal)
+                   (let ((addresses (ignore-errors (resolve-host host))))
+                     (and addresses (every #'local-p addresses) t))))))))
+
 (defun resolve-host (host)
   "The addresses HOST resolves to, as octet vectors; NIL when it does not resolve. A host that is
 an IP address in text resolves to itself."

@@ -1846,3 +1846,79 @@ sends nothing."
         (close body))
       (loop repeat 30 until (car closed-at) do (sleep 0.1))
       (is-true (car closed-at) "the server saw the connection close"))))
+
+;;; --- one rule for whether a host may be sent requests in the clear (#1082) ---------------
+
+(test local-host-p-answers-for-names-literals-and-the-forms-that-look-local
+  "#1082: hermes core and hermes/blob each wrote this rule, for a Twilio API base and an S3
+endpoint, and the two copies acquired different holes -- see #1089 and the review of #1084. It
+lives here now, next to the primitives it uses, so there is one implementation to get right."
+  ;; Local: the name, and every literal whose category says so.
+  (dolist (host '("localhost" "LOCALHOST" "127.0.0.1" "127.1.2.3" "::1" "10.0.0.5"
+                  "172.17.0.2" "192.168.1.9" "169.254.1.2" "fc00::1" "fe80::1"))
+    (is-true (http:local-host-p host) "~A is local" host))
+  ;; Not local: public literals, and a name that does not resolve.
+  (dolist (host '("8.8.8.8" "93.184.216.34" "2606:2800:220:1:248:1893:25c8:1946"
+                  "nothing-here.invalid" "a.b.c.invalid"))
+    (is-false (http:local-host-p host) "~A is not local" host))
+  ;; 6TO4 IS NOT LOCAL, whatever address it carries. ADDRESS-CATEGORY answers about it by the
+  ;; IPv4 address inside, which is the right conservative answer for a guard deciding whether a
+  ;; destination may be reached at all, and the wrong answer for this question: 6to4 reaches its
+  ;; destination through a public relay (the review of #1084).
+  (dolist (host '("2002:7f00:1::" "2002:a00:5::" "2002:c0a8:109::"))
+    (is-true (member (http:address-category host) '(:loopback :private))
+             "control: ~A still reports a non-public category, which the SSRF guard needs" host)
+    (is-false (http:local-host-p host) "but ~A is not local, because 6to4 goes over a relay" host))
+  ;; An IPv4-mapped loopback address IS local: there is no relay, it is the same stack.
+  (is-true (http:local-host-p "::ffff:127.0.0.1"))
+  (is-false (http:local-host-p nil) "no host is not a local host")
+  (is-false (http:local-host-p "") "and neither is an empty one"))
+
+(test url-host-reads-the-host-quri-would-connect-to
+  "#1082: both callers had written this, and both got it wrong in their own way. QURI is used
+because it is the parser dexador parses a request URL with, and the brackets come off because
+every caller feeds the result to PARSE-ADDRESS or ADDRESS-CATEGORY."
+  (dolist (case '(("http://localhost:9000/x" . "localhost")
+                  ("http://127.0.0.1:9000" . "127.0.0.1")
+                  ("http://[::1]:9000/x" . "::1")
+                  ("https://[2606:2800::1]/x" . "2606:2800::1")
+                  ("http://minio:9000" . "minio")
+                  ;; The bypass that started #1089: a bracketed IPv6 in the userinfo. A parser
+                  ;; that stripped brackets returned "::1" here and the request went elsewhere.
+                  ("http://[::1]@evil.invalid/x" . "evil.invalid")
+                  ("http://[::1]:80@evil.invalid/x" . "evil.invalid")
+                  ("http://user:pw@evil.invalid" . "evil.invalid")))
+    (is (equal (cdr case) (http:url-host (car case)))
+        "~A has the host ~A" (car case) (cdr case)))
+  (is-false (http:url-host "not a url at all") "a value with no host reads as none")
+  ;; A bare authority has no scheme, and QURI reads the host as a scheme: callers prepend one.
+  (is-false (equal "localhost" (http:url-host "localhost:9000"))
+            "control: a bare host:port is NOT a URL, which is why callers add a scheme first"))
+
+(test a-plaintext-request-to-a-local-host-is-not-sent-through-a-proxy
+  "#1091: dexador sets *DEFAULT-PROXY* from HTTPS_PROXY or HTTP_PROXY when it loads and honours
+no NO_PROXY, and %DEX-ARGS never passed :PROXY. So a caller that had checked its destination was
+local -- hermes for a Twilio API base, hermes/blob for an S3 endpoint -- could still have its
+credentials carried off the machine in the clear, because the bytes went to the proxy instead of
+to the host that was checked.
+
+The assertion is on what dexador is given, not on what a request returns: a fixture whose proxy
+is unreachable would pass for the wrong reason."
+  (flet ((proxy-arg (url)
+           (let ((args (http::%dex-args (http:make-request :method :get :url url))))
+             (if (member :proxy args) (list :passed (getf args :proxy)) :not-passed))))
+    ;; Exempted: plaintext to a local host, by name or by address.
+    (dolist (url '("http://127.0.0.1:9000/x" "http://localhost/x" "http://[::1]:9000/x"
+                   "http://10.0.0.5/x"))
+      (is (equal '(:passed nil) (proxy-arg url))
+          "~A is sent with :proxy nil, so no proxy can see it" url))
+    ;; Not exempted: https anywhere, because a proxied https request is a CONNECT tunnel and the
+    ;; credentials are inside TLS; and plaintext to a host that is not local, where whoever
+    ;; configured it is already sending in the clear.
+    (dolist (url '("https://127.0.0.1/x" "https://api.example.invalid/x" "http://8.8.8.8/x"
+                   "http://api.example.invalid/x"))
+      (is (eq :not-passed (proxy-arg url))
+          "~A keeps whatever proxy is configured" url))
+    ;; 6to4 is not local, so it is not exempted either.
+    (is (eq :not-passed (proxy-arg "http://2002:7f00:1::/x"))
+        "a 6to4 address is not local, so its request is not exempted")))
