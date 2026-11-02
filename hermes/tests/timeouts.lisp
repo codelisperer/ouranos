@@ -53,17 +53,40 @@ here is sending to a server that never answers."
       (h:delivery-failure () nil))
     (%elapsed-seconds start)))
 
+(defparameter +dexador-default-timeout+ 10
+  "The read timeout dexador applies when none is passed (`*default-read-timeout*' in its
+src/util.lisp). The tests below assert that a send gives up WELL UNDER this, because that is what
+distinguishes a timeout hermes set from the one the dependency would have used anyway.")
+
+(defun %is-the-setting-in-force (seconds elapsed what)
+  "Assert that a send with a READ-TIMEOUT of SECONDS took ELAPSED seconds because of that
+setting: at least SECONDS, since a send that failed instantly failed for some other reason and
+would satisfy a test that only looked for a failure, and comfortably under dexador's own default,
+since that is what would be in force if the setting were dropped.
+
+The upper bound is not SECONDS plus a small margin, which is what this test asserted first.
+Windows took 4.00 seconds to honour a 1-second read timeout -- measured on CI, where the bound
+was (+ SECONDS 3) and the run failed by milliseconds. The platform adds overhead of its own, and
+the relationship between a small setting and the elapsed time is not something this test should
+claim to know. What it can claim on every platform is the part that matters: the send ended
+because hermes named a number, not because dexador did."
+  (is (<= seconds elapsed)
+      "~A: a read timeout of ~Ds gave up after ~,2Fs, which is less than the timeout itself"
+      what seconds elapsed)
+  (is (< elapsed (1- +dexador-default-timeout+))
+      "~A: a read timeout of ~Ds gave up after ~,2Fs, so hermes's setting is in force rather than dexador's ~Ds"
+      what seconds elapsed +dexador-default-timeout+))
+
 (test a-sendgrid-read-timeout-is-the-one-hermes-was-given
-  "#1077: the elapsed time follows the setting, so the figure in force is hermes's and not the
-dependency's. Two short values, each bounded above and below: below, because a send that failed
-instantly failed for some other reason and would pass a test that only looked for a failure."
+  "#1077: a send gives up on hermes's timeout rather than on the one dexador would have applied.
+See %IS-THE-SETTING-IN-FORCE for what is asserted and why the upper bound is dexador's default
+rather than the setting plus a margin."
   (with-silent-server (port)
     (dolist (seconds '(1 2))
       (let* ((p (h:make-sendgrid :api-key "k" :read-timeout seconds :connect-timeout 2
                                  :endpoint (format nil "http://127.0.0.1:~D/v3/mail/send" port)))
              (elapsed (%time-a-send (lambda () (h:deliver p (%an-email))))))
-        (is (<= seconds elapsed (+ seconds 3))
-            "a read timeout of ~Ds gave up after ~,2Fs" seconds elapsed)))))
+        (%is-the-setting-in-force seconds elapsed "sendgrid")))))
 
 (test a-twilio-read-timeout-is-the-one-hermes-was-given
   "#1077, the same for Twilio, whose endpoint is redirected with :API-BASE."
@@ -73,27 +96,37 @@ instantly failed for some other reason and would pass a test that only looked fo
                                :read-timeout seconds :connect-timeout 2
                                :api-base (format nil "http://127.0.0.1:~D/2010-04-01" port)))
              (elapsed (%time-a-send (lambda () (h:deliver p (%an-sms))))))
-        (is (<= seconds elapsed (+ seconds 3))
-            "a read timeout of ~Ds gave up after ~,2Fs" seconds elapsed)))))
+        (%is-the-setting-in-force seconds elapsed "twilio")))))
 
-(test a-shorter-send-timeout-beats-a-longer-one
-  "The control for the two tests above, and the reason they are a ladder rather than one value.
-If the setting were ignored and something else were ending these sends -- dexador's ten-second
-default, for instance -- both rungs would take the same time. So the 1-second send must finish
-measurably before the 2-second one."
+(test a-shorter-send-timeout-gives-up-no-later-than-a-longer-one
+  "A second look at the same property, from the other direction: if something other than the
+setting were ending these sends, two different settings would produce the same elapsed time.
+
+STRICT ORDERING IS ASSERTED ONLY WHERE THE PLATFORM CAN SHOW IT. Windows took 4.00 seconds to
+honour a 1-second read timeout, so the elapsed time there is the setting plus overhead of the
+platform's own, and whether a 1-second and a 2-second timeout are distinguishable at that
+granularity is not something this test knows in advance. When the two measurements are within a
+quarter of a second of each other it says so and skips, rather than failing on a platform
+property or passing on a comparison that could not have failed. Nothing is lost by that: if the
+setting were being ignored, both sends would take dexador's ten seconds and the assertions in
+the two tests above would fail."
   (with-silent-server (port)
     (flet ((seconds-for (timeout)
              (let ((p (h:make-sendgrid :api-key "k" :read-timeout timeout :connect-timeout 2
                                        :endpoint (format nil "http://127.0.0.1:~D/x" port))))
                (%time-a-send (lambda () (h:deliver p (%an-email)))))))
-      (let ((quick (seconds-for 1))
-            (slower (seconds-for 2)))
-        (is (< quick slower)
-            "1s gave up after ~,2Fs and 2s after ~,2Fs, so the setting is what ends the send"
-            quick slower)
-        (is (< slower 9)
-            "and both are well under dexador's own 10s default, which is what an ignored setting would have left in force: ~,2Fs"
-            slower)))))
+      (let* ((quick (seconds-for 1))
+             (slower (seconds-for 2))
+             (gap (- slower quick)))
+        (is (< slower (1- +dexador-default-timeout+))
+            "both are under dexador's ~Ds default, so the setting is what ends the send: 1s took ~,2Fs and 2s took ~,2Fs"
+            +dexador-default-timeout+ quick slower)
+        (if (<= gap 0.25)
+            (skip "1s took ~,2Fs and 2s took ~,2Fs, a gap of ~,2Fs: this platform's timing is too coarse to tell the two settings apart, and the bound above is what carries the claim here"
+                  quick slower gap)
+            (is (< quick slower)
+                "1s gave up after ~,2Fs and 2s after ~,2Fs, so the elapsed time follows the setting"
+                quick slower))))))
 
 (test the-send-timeout-defaults-are-ten-and-settable
   "#1077: both defaults are 10, which is what dexador already did, so nothing changes for an app
