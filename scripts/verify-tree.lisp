@@ -135,6 +135,11 @@
 (load (merge-pathnames "caught-errors.lisp"
                        (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
 
+;;; A compiled system whose /tests system nothing runs (#992). Split out so that
+;;; checkers/tests can hand it a fixture tree; CHECK-UNRUN-SUITES below calls it.
+(load (merge-pathnames "unrun-suites.lisp"
+                       (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
+
 ;;; The NOT COVERED section (#182). Split out for the same reason as the two above, so a test
 ;;; can hand the printer known inputs; REPORT-NOT-COVERED below passes it this run's state.
 (load (merge-pathnames "not-covered.lisp"
@@ -579,6 +584,12 @@ inventing a suite name that does not exist would fail the gate for the wrong rea
   (uiop:pathname-parent-directory-pathname
    (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*)))
   "The repo root -- the parent of scripts/.")
+
+;;; This image resolves systems too, in CHECK-UNRUN-SUITES and PLATFORM-REQUIRED-TEST-SYSTEMS,
+;;; so it searches THIS tree first, as CHILD-ENVIRONMENT makes every child do. Otherwise a
+;;; registry naming another checkout answers for this one, and a suite added only in this
+;;; tree is not found (review of #1072).
+(asdf:initialize-source-registry `(:source-registry (:tree ,*root*) :inherit-configuration))
 
 (defparameter *quicklisp*
   (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))
@@ -1125,6 +1136,28 @@ let this run claim `view' while the five assertions skipped."
         (:built
          (format t "  ok      built in ~,1F s~%" (seconds-since start))))))
   *view-state*)
+(defun check-unrun-suites ()
+  "Fail for each system this run compiles whose <system>/tests suite this run does not run:
+a suite counts as run when it is in the run list, or reached from it through :in-order-to
+test-op wiring (#992). Before #992 such a suite was noticed only when someone saw that a new
+suite's first commit left the total unchanged. Also fail when no compiled system has a /tests
+suite at all, because a check that found nothing to check looks the same as one that passed."
+  (format t "~%========== SUITES THE RUN LIST MUST NAME (#992) ==========~%")
+  (multiple-value-bind (unrun checked)
+      (ouranos-unrun-suites:unrun-suites (all-systems) (all-test-systems))
+    (cond
+      ((zerop checked)
+       (format t "  FAIL    no compiled system has a /tests suite, so nothing was checked~%")
+       (fail "check-unrun-suites found no /tests suite of any compiled system to check"))
+      ((null unrun)
+       (format t "  ok      every compiled system's /tests suite is run (~D checked)~%" checked))
+      (t
+       (dolist (pair unrun)
+          (format t "  FAIL    ~a has ~a, which the gate does not run~%" (car pair) (cdr pair))
+          (fail "~a is compiled and ~a exists, but the gate does not run it: ~a"
+                (car pair) (cdr pair)
+                "add it to +TEST-SYSTEMS+, or to the axis list beside its system"))))))
+
 (defun seconds-since (start)
   (/ (float (- (get-internal-real-time) start)) internal-time-units-per-second))
 
@@ -1135,6 +1168,10 @@ let this run claim `view' while the five assertions skipped."
   ;; (pre-publication issue 410). Best effort: a host that cannot build declines the axis and says so, rather than
   ;; failing a gate over a C++ toolchain.
   (build-view-launcher)
+
+  ;; Before LOADING, because it reads only .asd files and a missing suite is cheaper to
+  ;; report than to discover from an unchanged total.
+  (check-unrun-suites)
 
   (format t "~%========== LOADING (each in its own image) ==========~%")
   (dolist (s (all-systems))
