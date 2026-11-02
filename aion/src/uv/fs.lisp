@@ -122,12 +122,21 @@ hangs off the request, and it is libuv's to free -- never ours."
        :ctime (timespec-seconds
                (cffi:foreign-slot-pointer statbuf '(:struct ffi::uv-stat-t) 'ffi::st-ctim))))))
 
+(defun native-path (path)
+  "PATH as the string libuv is given. A string is passed through unchanged: it is already the
+operating system's name for the file. A pathname is converted with UIOP:NATIVE-NAMESTRING.
+CL:NAMESTRING is used for neither: on Linux and macOS it reads a backslash in a string as an escape
+and drops it, so a file whose name has one could not be used (#1093)."
+  (if (stringp path)
+      path
+      (uiop:native-namestring path)))
+
 ;;; ----------------------------------------------------------- synchronous API
 
 (defun file-info (path &key (follow-symlinks t))
   "Return a FILE-INFO for PATH. Signals FILE-NOT-FOUND if it does not exist."
   (ensure-available)
-  (let ((path (namestring path)))
+  (let ((path (native-path path)))
     (with-fs-req (req)
       (check (if follow-symlinks
                  (ffi:uv-fs-stat (default-loop-pointer) req path (%null))
@@ -177,7 +186,7 @@ single read is permitted to return fewer bytes than asked for."
 AS is :OCTETS (default) or :STRING. Synchronous: libuv does the work on this thread and
 no event loop is involved."
   (ensure-available)
-  (let* ((path (namestring path))
+  (let* ((path (native-path path))
          (fd (%open-file path ffi:o-rdonly 0 :read-file)))
     (unwind-protect
          (let* ((size (with-fs-req (req)
@@ -203,7 +212,7 @@ no event loop is involved."
 IF-EXISTS is :SUPERSEDE (default, truncate), :APPEND, :OVERWRITE (write in place without
 truncating) or :ERROR (refuse if the path exists)."
   (ensure-available)
-  (let* ((path (namestring path))
+  (let* ((path (native-path path))
          (octets (if (stringp contents)
                      (encode-string contents external-format)
                      (coerce contents '(vector (unsigned-byte 8)))))
@@ -234,7 +243,8 @@ truncating) or :ERROR (refuse if the path exists)."
   "Create directory PATH. With PARENTS, create missing intermediate directories and do
 not complain if it already exists."
   (ensure-available)
-  (let ((path (string-right-trim "/\\" (namestring path))))
+  ;; A backslash is a separator only on Windows; elsewhere it can end a name (#1093).
+  (let ((path (string-right-trim (if (uiop:os-windows-p) "/\\" "/") (native-path path))))
     (flet ((mkdir (p)
              (with-fs-req (req)
                (let ((code (ffi:uv-fs-mkdir (default-loop-pointer) req p mode (%null))))
@@ -253,12 +263,15 @@ not complain if it already exists."
           (progn (mkdir path) path)))))
 
 (defun split-path (path)
-  "Split PATH on / into components, keeping a leading empty component for an absolute
-path so that rejoining reproduces the root."
+  "Split PATH on / into components, and on Windows on a backslash too, keeping a leading empty
+component for an absolute path so that rejoining reproduces the root. A string reaches libuv as
+the caller wrote it, so on Windows it may use either separator (#1093)."
   (let ((parts '())
-        (start 0))
+        (start 0)
+        (windows (uiop:os-windows-p)))
     (loop for i from 0 below (length path)
-          when (char= (char path i) #\/)
+          when (or (char= (char path i) #\/)
+                   (and windows (char= (char path i) #\\)))
             do (push (subseq path start i) parts)
                (setf start (1+ i)))
     (push (subseq path start) parts)
@@ -267,7 +280,7 @@ path so that rejoining reproduces the root."
 (defun delete-file* (path)
   "Delete the file at PATH. Named with a trailing * to avoid clashing with CL:DELETE-FILE."
   (ensure-available)
-  (let ((path (namestring path)))
+  (let ((path (native-path path)))
     (with-fs-req (req)
       (check (ffi:uv-fs-unlink (default-loop-pointer) req path (%null))
              :operation :delete-file :path path))
@@ -276,7 +289,7 @@ path so that rejoining reproduces the root."
 (defun delete-directory (path)
   "Remove the (empty) directory at PATH."
   (ensure-available)
-  (let ((path (namestring path)))
+  (let ((path (native-path path)))
     (with-fs-req (req)
       (check (ffi:uv-fs-rmdir (default-loop-pointer) req path (%null))
              :operation :delete-directory :path path))
@@ -285,7 +298,7 @@ path so that rejoining reproduces the root."
 (defun rename-path (from to)
   "Rename FROM to TO."
   (ensure-available)
-  (let ((from (namestring from)) (to (namestring to)))
+  (let ((from (native-path from)) (to (native-path to)))
     (with-fs-req (req)
       (check (ffi:uv-fs-rename (default-loop-pointer) req from to (%null))
              :operation :rename-path :path from))
@@ -294,7 +307,7 @@ path so that rejoining reproduces the root."
 (defun real-path (path)
   "Resolve PATH to a canonical absolute path."
   (ensure-available)
-  (let ((path (namestring path)))
+  (let ((path (native-path path)))
     (with-fs-req (req)
       (check (ffi:uv-fs-realpath (default-loop-pointer) req path (%null))
              :operation :real-path :path path)
@@ -304,7 +317,7 @@ path so that rejoining reproduces the root."
   "List PATH. Returns a list of (NAME . KIND), where KIND is :FILE, :DIRECTORY,
 :SYMLINK, ... -- libuv reports the kind during the scan, so no extra stat is needed."
   (ensure-available)
-  (let ((path (namestring path)))
+  (let ((path (native-path path)))
     (with-fs-req (req)
       (let ((count (check (ffi:uv-fs-scandir (default-loop-pointer) req path 0 (%null))
                           :operation :list-directory :path path))
@@ -468,7 +481,7 @@ BODY, then clean and free the request exactly once."
 The answer arrives either by AWAIT, or through ON-SUCCESS / ON-ERROR, which are invoked
 ON THE LOOP THREAD -- so they should hand work off rather than block."
   (ensure-available)
-  (let* ((path (namestring path))
+  (let* ((path (native-path path))
          (op (%make-fs-op :future (%make-future) :operation :read-file-async
                           :path path :loop loop :step :open
                           :on-success on-success :on-error on-error)))
@@ -489,7 +502,7 @@ ON THE LOOP THREAD -- so they should hand work off rather than block."
 (defun file-info-async (loop path &key on-success on-error)
   "Stat PATH on LOOP. Returns a FUTURE that yields a FILE-INFO."
   (ensure-available)
-  (let* ((path (namestring path))
+  (let* ((path (native-path path))
          (op (%make-fs-op :future (%make-future) :operation :file-info-async
                           :path path :loop loop :step :stat
                           :on-success on-success :on-error on-error)))
@@ -549,7 +562,7 @@ ON THE LOOP THREAD -- so they should hand work off rather than block."
 Note the ordering guarantee this does NOT make: two concurrent writes to one path are
 two independent chains and may interleave. Serialise them yourself if that matters."
   (ensure-available)
-  (let* ((path (namestring path))
+  (let* ((path (native-path path))
          (octets (if (stringp contents)
                      (encode-string contents external-format)
                      (coerce contents '(vector (unsigned-byte 8)))))

@@ -195,7 +195,7 @@ which is the convention that surprises people who have passed argv straight thro
                    (setf (cffi:mem-aref options :unsigned-char i) 0))
                  (cffi:with-foreign-string (file (string program))
                    (let ((cwd-pointer (if cwd
-                                          (cffi:foreign-string-alloc (namestring cwd))
+                                          (cffi:foreign-string-alloc (uv:native-path cwd))
                                           (cffi:null-pointer))))
                      (unwind-protect
                           (progn

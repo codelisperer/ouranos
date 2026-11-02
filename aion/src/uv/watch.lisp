@@ -64,7 +64,7 @@ platform reports one, otherwise NIL. FUNCTION runs ON THE LOOP THREAD.
 RECURSIVE is honoured on macOS and Windows; on Linux libuv watches only the named
 directory, so a recursive watch there needs one watcher per subdirectory."
   (ensure-available)
-  (let* ((path (namestring path))
+  (let* ((path (native-path path))
          (pointer (cffi:foreign-alloc :char
                                       :count (ffi:uv-handle-size ffi:+uv-fs-event+))))
     (handler-bind ((error (lambda (e) (declare (ignore e)) (cffi:foreign-free pointer))))

@@ -290,6 +290,93 @@ with the real expectations back, ENSURE-AVAILABLE returns T and libuv counts as 
     (is (string= "content" (uv:read-file (scratch "to.txt") :as :string)))
     (signals uv:file-not-found (uv:read-file (scratch "from.txt")))))
 
+;;; --- names that a Lisp namestring would change (#1093) ----------------------------
+;;;
+;;; Every entry point used to pass PATH through CL:NAMESTRING. For a string that parses it as a
+;;; Lisp namestring, and on Linux and macOS a backslash there is an escape, so a file named
+;;; a\b.txt was looked up as ab.txt. These tests make names that a namestring would change, and
+;;; check each one through CL as well, so a reader other than aion/uv agrees on the name.
+
+(defun %bs (&rest parts)
+  "PARTS joined with a backslash: written this way so the test source has no escapes to misread."
+  (format nil (concatenate 'string "~{~A~^" (string #\\) "~}") parts))
+
+(defun %cl-sees-p (native)
+  "Whether CL, given NATIVE as an operating-system name, finds a file there."
+  (probe-file (uiop:parse-native-namestring native)))
+
+(test native-path-passes-a-string-through-and-converts-a-pathname
+  (let ((with-backslash (%bs "dir" "a.txt")))
+    (is (eq with-backslash (uv:native-path with-backslash))
+        "a string is returned as it is, not reparsed"))
+  (is (string= "a*b?[1].txt" (uv:native-path "a*b?[1].txt")))
+  (let ((p (uiop:parse-native-namestring
+            (concatenate 'string (uiop:native-namestring (uiop:temporary-directory)) "x.txt"))))
+    (is (string= (uiop:native-namestring p) (uv:native-path p)))))
+
+(defun %round-trip (from to)
+  "Create FROM in the scratch folder, then stat, list, rename to TO, read and delete it, through
+aion/uv, checking with CL at each step that the file has the name given."
+  (let ((a (scratch from)) (b (scratch to)))
+    (unwind-protect
+         (progn
+           (is (= 4 (uv:write-file a "kept")) "write ~S" from)
+           (is-true (%cl-sees-p a) "CL finds ~S" from)
+           (is (= 4 (uv:file-info-size (uv:file-info a))) "stat ~S" from)
+           (is (member from (mapcar #'car (uv:list-directory *scratch*)) :test #'string=)
+               "listed as ~S: ~S" from (uv:list-directory *scratch*))
+           (uv:rename-path a b)
+           (is-false (%cl-sees-p a) "~S is gone after the rename" from)
+           (is-true (%cl-sees-p b) "CL finds ~S" to)
+           (is (string= "kept" (uv:read-file b :as :string)) "read ~S" to)
+           (uv:with-loop (l)
+             (let ((future (uv:read-file-async l b)))
+               (uv:run l :mode :default)
+               (is (string= "kept" (sb-ext:octets-to-string (uv:await future :timeout 10)))
+                   "read ~S asynchronously" to)))
+           (uv:delete-file* b)
+           (is-false (%cl-sees-p b) "~S deleted" to))
+      (ignore-errors (uv:delete-file* a))
+      (ignore-errors (uv:delete-file* b)))))
+
+#-win32
+(test a-backslash-in-a-name-round-trips
+  "On Linux and macOS a backslash is an ordinary character in a name. Before #1093 every one of
+these calls used the name without it."
+  (with-scratch (%round-trip (%bs "draft" "one.txt") (%bs "final" "two.txt"))))
+
+#-win32
+(test star-and-question-mark-in-a-name-round-trip
+  "Windows does not allow * or ? in a name."
+  (with-scratch (%round-trip "a*b?.txt" "c?d*.txt")))
+
+(test brackets-in-a-name-round-trip
+  (with-scratch (%round-trip "a[1].txt" "b[2].txt")))
+
+#+win32
+(test a-backslash-is-a-separator-on-windows
+  "On Windows a string reaches libuv as written, so a backslash is a separator there, including
+for MAKE-DIRECTORY with :PARENTS, which splits on both."
+  (with-scratch
+    (let ((deep (scratch (%bs "p" "q" "r"))))
+      (uv:make-directory deep :parents t)
+      (is (eq :directory (uv:file-info-kind (uv:file-info deep))))
+      (uv:write-file (concatenate 'string deep (string #\\) "f.txt") "kept")
+      (is (string= "kept" (uv:read-file (scratch "p/q/r/f.txt") :as :string)))
+      (uv:delete-file* (scratch "p/q/r/f.txt"))
+      (uv:delete-directory deep)
+      (uv:delete-directory (scratch "p/q"))
+      (uv:delete-directory (scratch "p")))))
+
+(test a-pathname-is-converted-to-its-native-name
+  (with-scratch
+    (let ((p (uiop:parse-native-namestring (scratch "as-pathname.txt"))))
+      (uv:write-file p "kept")
+      (is (string= "kept" (uv:read-file (scratch "as-pathname.txt") :as :string)))
+      (is (= 4 (uv:file-info-size (uv:file-info p))))
+      (uv:delete-file* p)
+      (is-false (probe-file p)))))
+
 ;;; --- timers ----------------------------------------------------------------------
 
 (test timer-fires-once
