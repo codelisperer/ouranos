@@ -139,7 +139,11 @@ the two tests above would fail."
             "the 1s send is under dexador's ~Ds default: ~,2Fs" +dexador-default-timeout+ quick)
         (is (< slower (1- +dexador-default-timeout+))
             "and the 2s send is too: ~,2Fs" slower)
-        (if (<= gap 0.25)
+        ;; THE ABSOLUTE GAP. With a signed one, a REVERSED pair -- the very thing this assertion
+        ;; exists to catch -- had a negative gap, satisfied (<= gap 0.25) and skipped, so the
+        ;; check could not fail in the direction that mattered. Measured: quick=2.0 slower=1.0
+        ;; gives gap -1.0 and skipped (the review of #1094).
+        (if (<= (abs gap) 0.25)
             (skip "1s took ~,2Fs and 2s took ~,2Fs, a gap of ~,2Fs: this platform's timing is too coarse to tell the two settings apart, and the bound above is what carries the claim here"
                   quick slower gap)
             (is (< quick slower)

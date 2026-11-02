@@ -2001,6 +2001,64 @@ lives here now, next to the primitives it uses, so there is one implementation t
     (is-true (and resolved (http:local-host-p "localhost"))
              "control: localhost is still local")))
 
+(test local-host-p-requires-every-resolved-address-to-be-local
+  "The review of #1094, and the sharpest finding in it: nothing exercised a name with more than
+one resolved address, so changing EVERY to SOME in LOCAL-HOST-P passed the whole suite.
+Measured before writing this -- 493 checks, Fail 0, with SOME in place.
+
+That is the property that matters. A name resolving to one private address AND one public one
+must NOT be local: the connection may go to either, so approving it would allow plaintext to a
+public host on the strength of a loopback entry beside it.
+
+RESOLUTION IS STUBBED rather than arranged in DNS, because the cases that matter -- mixed,
+public-only, a resolution error -- cannot be conjured from a real resolver on a build machine,
+and a test that waits for the network to produce them is a test that silently stops running."
+  (let ((original (fdefinition 'http:resolve-host)))
+    (unwind-protect
+         (flet ((answering (addresses)
+                  ;; ADDRESSES is a list, or :ERROR to make resolution signal.
+                  (setf (fdefinition 'http:resolve-host)
+                        (lambda (host)
+                          (declare (ignore host))
+                          (if (eq addresses :error)
+                              (error "aion/http-client/tests: the resolver failed")
+                              addresses)))))
+           (dolist (case '((:all-local ((127 0 0 1)) t)
+                           (:all-local-several ((127 0 0 1) (10 0 0 5) (192 168 1 9)) t)
+                           (:public-only ((8 8 8 8)) nil)
+                           (:public-several ((8 8 8 8) (93 184 216 34)) nil)
+                           ;; THE CASE THAT KILLS "SOME": one local, one public. EVERY says no,
+                           ;; SOME says yes, and the connection may use either address.
+                           (:mixed-local-first ((127 0 0 1) (8 8 8 8)) nil)
+                           (:mixed-public-first ((8 8 8 8) (127 0 0 1)) nil)
+                           (:mixed-private-and-public ((10 0 0 5) (93 184 216 34)) nil)
+                           (:empty () nil)))
+             (destructuring-bind (name octet-lists expected) case
+               (answering (mapcar (lambda (o) (coerce o 'vector)) octet-lists))
+               (is (eq expected (and (http:local-host-p "a-name.invalid") t))
+                   "~A: a name resolving to ~S is ~:[not ~;~]local"
+                   name octet-lists expected)))
+           ;; 6to4 among the answers: not local, however local the address it carries looks.
+           (answering (list (http:parse-address "2002:7f00:1::")))
+           (is-false (http:local-host-p "a-name.invalid")
+                     "a name resolving only to 6to4 is not local")
+           (answering (list (http:parse-address "127.0.0.1") (http:parse-address "2002:7f00:1::")))
+           (is-false (http:local-host-p "a-name.invalid")
+                     "nor is one resolving to a loopback address and a 6to4 address")
+           ;; NAT64 likewise.
+           (answering (list (http:parse-address "64:ff9b::7f00:1")))
+           (is-false (http:local-host-p "a-name.invalid")
+                     "nor one resolving only to NAT64")
+           ;; A resolution error is not a local answer. LOCAL-HOST-P swallows it, so the point is
+           ;; that it swallows it to NIL and not to T.
+           (answering :error)
+           (is-false (http:local-host-p "a-name.invalid")
+                     "a name whose resolution signals is not local"))
+      (setf (fdefinition 'http:resolve-host) original)))
+  ;; The control: with resolution restored, a name that really does resolve locally is local
+  ;; again, so the cases above were about the fixture and not about the stub being left in place.
+  (is-true (http:local-host-p "localhost") "control: resolution is restored"))
+
 (test url-host-reads-the-host-quri-would-connect-to
   "#1082: both callers had written this, and both got it wrong in their own way. QURI is used
 because it is the parser dexador parses a request URL with, and the brackets come off because
