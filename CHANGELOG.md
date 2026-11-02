@@ -1201,6 +1201,26 @@ its tag.
   before can now fail:** define the function, or correct the name or package of the call. Other
   `STYLE-WARNING`s still do not fail, and an undefined function inside a library outside the
   project directory is still muffled. `cons/docs/user-guide.md` says the same.
+- **`cons` refuses to run a build-spec target when the SBCL contribs on disk were compiled by
+  a different SBCL version from the one that built `bin/cons`** (#701). After an SBCL install
+  is replaced in place, `bin/cons` used to print its stale-image warning and continue, and a
+  target then failed at its first `require` of a contrib it had not baked in, with
+  `Don't know how to REQUIRE`, `System "sb-…" not found` or a fasl-version error. When
+  `bin/cons` has a contrib directory, which in a dumped image means `SBCL_HOME` is set (the
+  Windows installer sets it; on macOS and Linux it is usually not exported), `cons` now reads
+  the version from the header of `sb-posix.fasl` there at startup. On a mismatch it prints both
+  versions, the directory and the rebuild command
+  (`sbcl --dynamic-space-size 4096 --script bootstrap.lisp`), then exits 1 before running the
+  target. The built-in commands (`cons version`, `cons help`, `cons setup`, …) and `--fresh`
+  targets still run. Any fatal toolchain finding now stops a target this way, including the
+  existing "contribs cannot be loaded" one. When a contrib fails to load during a target for any
+  other reason, `cons` prints where it loads contribs from before the error, or, with no
+  `SBCL_HOME`, that it can load only the contribs `bootstrap.lisp` baked in. The stale-image
+  warning no longer says that a dumped image carries its own contribs, and says whether it
+  could check the contribs on disk. To act: rebuild `bin/cons` after every SBCL upgrade, and on
+  macOS or Linux export `SBCL_HOME` if a project needs a contrib `bootstrap.lisp` does not
+  bake in. New exports from `cons/toolchain`: `fasl-header-version`, `contrib-version-in`,
+  `contrib-load-failure-p`, `contrib-failure-lines` and `explain-contrib-failure`.
 
 ### Added
 
