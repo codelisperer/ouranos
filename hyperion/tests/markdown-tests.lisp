@@ -306,3 +306,87 @@ escaping a double quote, so the safe mode keeps it only when it is a name."
                 (md:render (format nil "```x\" onclick=\"a~%code~%```~%"))))
     (is (search "<pre class=\"c++\"><code>code</code></pre>"
                 (md:render (format nil "```c++~%code~%```~%"))))))
+
+;;; --- a render mode for untrusted text (#1119) ---------------------------------------------
+;;;
+;;; An image is fetched as soon as it is rendered, with no click, so a reply holding an image
+;;; URL makes the reader's machine send that request and whatever the URL carries with it. In a
+;;; desktop webview with no Content-Security-Policy nothing stops it, and following a link
+;;; replaces the app's own page. :IMAGES NIL and :LINKS :TEXT are for text the app did not write.
+
+(defun %untrusted (markdown)
+  (hyperion/markdown:render markdown :images nil :links :text))
+
+(test untrusted-render-emits-no-image-element-and-no-href
+  "#1119: in the untrusted mode no form of image or link reaches the output as markup. Each case
+asserts the ABSENCE of the markup and the PRESENCE of the text that replaces it, because a mode
+that produced nothing at all would satisfy the first half on its own."
+  (dolist (case '(("![alt text](https://elsewhere.example/?d=secret)" . "alt text")
+                  ("![a](/local.png)" . "a")
+                  ("![a](//host.example/i.png)" . "a")
+                  ("[click me](https://elsewhere.example/p)" . "click me")
+                  ("[mail](mailto:a@b.example)" . "mail")
+                  ("[rel](/page)" . "rel")
+                  ("text with ![an image](https://elsewhere.example/i.png) inside" . "an image")
+                  ("text with [a link](https://elsewhere.example/p) inside" . "a link")))
+    (let ((out (%untrusted (car case))))
+      (is-false (search "<img" out) "~S emits no img element: ~A" (car case) out)
+      (is-false (search "href" out) "~S emits no href: ~A" (car case) out)
+      (is-false (search "elsewhere.example" out)
+                "~S does not carry the URL into the output at all: ~A" (car case) out)
+      (is-true (search (cdr case) out)
+               "~S keeps its text ~S: ~A" (car case) (cdr case) out)))
+  ;; A reference link, whose URL lives in a definition elsewhere in the document.
+  (let ((out (%untrusted (format nil "[r][1]~%~%  [1]: https://elsewhere.example/p"))))
+    (is-false (search "href" out) "a reference link emits no href: ~A" out)
+    (is-false (search "elsewhere.example" out) "and does not carry its URL: ~A" out)
+    (is-true (search "r" out) "but keeps its text: ~A" out))
+  ;; An autolink. In the safe mode 3bmd does not make one at all -- the angle brackets are
+  ;; escaped -- so this asserts the absence rather than claiming the option did the work.
+  (let ((out (%untrusted "<https://elsewhere.example/p>")))
+    (is-false (search "href" out) "an autolink emits no href: ~A" out)))
+
+(test the-default-render-is-unchanged-by-the-untrusted-mode
+  "THE CONTROL for #1119, and the reason the options are opt-in: everything that renders trusted
+content must be untouched. Each case is the same input as the untrusted test above, asserting
+that the default still produces the markup."
+  (dolist (case '(("![alt text](https://elsewhere.example/i.png)" "<img" "alt text")
+                  ("![a](/local.png)" "<img" "/local.png")
+                  ("[click me](https://elsewhere.example/p)" "href" "click me")
+                  ("[mail](mailto:a@b.example)" "href" "mailto:a@b.example")
+                  ("[rel](/page)" "href" "/page")))
+    (destructuring-bind (markdown markup text) case
+      (let ((out (hyperion/markdown:render markdown)))
+        (is-true (search markup out) "~S still renders ~A: ~A" markdown markup out)
+        (is-true (search text out) "and keeps ~S: ~A" text out))))
+  ;; A reference link still renders as a link by default.
+  (let ((out (hyperion/markdown:render (format nil "[r][1]~%~%  [1]: https://elsewhere.example/p"))))
+    (is-true (search "href" out) "a reference link still renders by default: ~A" out))
+  ;; And the refusals #66 added are untouched by the new arguments, in both modes.
+  (dolist (markdown '("[x](javascript:alert(1))" "![x](javascript:alert(1))"))
+    (dolist (out (list (hyperion/markdown:render markdown) (%untrusted markdown)))
+      (is-false (search "javascript" out) "~S is still refused: ~A" markdown out))))
+
+(test the-untrusted-render-arguments-refuse-a-value-they-cannot-honour
+  "#1119: the default is the permissive one, so a typo in a security argument must not read as
+`render everything'. And :ALLOW-HTML T cannot be combined with either mode: raw HTML is not
+parsed into the tree these options filter, so an IMG or HREF written directly in the source
+survives them -- measured, before the combination was refused."
+  (dolist (bad '(:maybe :no "nil" 0))
+    (signals error (hyperion/markdown:render "x" :images bad)))
+  (dolist (bad '(:texts :plain "text" nil-is-fine))
+    (signals error (hyperion/markdown:render "x" :links bad)))
+  ;; T and :TEXT, and T and NIL, are the values that work.
+  (is-true (stringp (hyperion/markdown:render "x" :images t :links t)))
+  (is-true (stringp (hyperion/markdown:render "x" :images nil :links :text)))
+  (is-true (stringp (hyperion/markdown:render "x" :images nil :links t)))
+  (is-true (stringp (hyperion/markdown:render "x" :images t :links :text)))
+  ;; The combination that cannot be honoured.
+  (signals error (hyperion/markdown:render "x" :allow-html t :images nil))
+  (signals error (hyperion/markdown:render "x" :allow-html t :links :text))
+  (signals error (hyperion/markdown:render "x" :allow-html t :images nil :links :text))
+  ;; The control: :ALLOW-HTML T on its own still works, and still passes raw HTML through, which
+  ;; is why the combination above is refused rather than quietly ignored.
+  (let ((out (hyperion/markdown:render "<img src=\"https://elsewhere.example/i.png\">"
+                                       :allow-html t)))
+    (is-true (search "<img" out) "control: raw HTML still passes with :allow-html t alone: ~A" out)))
