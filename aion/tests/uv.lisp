@@ -483,27 +483,31 @@ drive and a server's share."
 separator, so C:name was made as C:\\name, in the drive's root folder instead of in the drive's
 current folder. The current folder of the current drive is this process's working folder, so the
 test makes the folder there, with and without :PARENTS, and checks the root has none of that name."
-  (let* ((cwd (uiop:native-namestring (uiop:getcwd)))
-         (drive (subseq cwd 0 2))
-         (name (format nil "aion-uv-drive-~D" (random 1000000000 (make-random-state t))))
-         (in-cwd (uiop:parse-native-namestring (concatenate 'string cwd name "\\")))
-         (in-root (uiop:parse-native-namestring (concatenate 'string drive "\\" name "\\"))))
-    (unwind-protect
-         (progn
-           (dolist (parents '(nil t))
-             (uv:make-directory (concatenate 'string drive name) :parents parents)
-             (is-true (uiop:directory-exists-p in-cwd) "~A~A is made in ~A (:parents ~A)"
-                      drive name cwd parents)
-             (is-false (uiop:directory-exists-p in-root) "and not in ~A's root" drive)
-             (uv:delete-directory (uiop:native-namestring in-cwd)))
-           (uv:make-directory (concatenate 'string drive name "/x") :parents t)
-           (is-true (uiop:directory-exists-p (merge-pathnames "x/" in-cwd))
-                    "~A~A/x is made in ~A" drive name cwd)
-           (is-false (uiop:directory-exists-p in-root) "and not in ~A's root" drive))
-      (ignore-errors (uv:delete-directory (uiop:native-namestring (merge-pathnames "x/" in-cwd))))
-      (ignore-errors (uv:delete-directory (uiop:native-namestring in-cwd)))
-      (ignore-errors (uv:delete-directory (uiop:native-namestring (merge-pathnames "x/" in-root))))
-      (ignore-errors (uv:delete-directory (uiop:native-namestring in-root))))))
+  (let ((cwd (uiop:native-namestring (uiop:getcwd))))
+    ;; A working folder on a network share, such as \\server\share\, has no drive letter, so
+    ;; there is no drive-relative path to make. UIOP:GETCWD ends the name with a separator.
+    (if (not (and (> (length cwd) 2) (char= #\: (char cwd 1))))
+        (skip "The working folder ~A is not on a drive letter." cwd)
+        (let* ((drive (subseq cwd 0 2))
+               (name (format nil "aion-uv-drive-~D" (random 1000000000 (make-random-state t))))
+               (in-cwd (uiop:parse-native-namestring (concatenate 'string cwd name "\\")))
+               (in-root (uiop:parse-native-namestring (concatenate 'string drive "\\" name "\\"))))
+          (unwind-protect
+               (progn
+                 (dolist (parents '(nil t))
+                   (uv:make-directory (concatenate 'string drive name) :parents parents)
+                   (is-true (uiop:directory-exists-p in-cwd) "~A~A is made in ~A (:parents ~A)"
+                            drive name cwd parents)
+                   (is-false (uiop:directory-exists-p in-root) "and not in ~A's root" drive)
+                   (uv:delete-directory (uiop:native-namestring in-cwd)))
+                 (uv:make-directory (concatenate 'string drive name "/x") :parents t)
+                 (is-true (uiop:directory-exists-p (merge-pathnames "x/" in-cwd))
+                          "~A~A/x is made in ~A" drive name cwd)
+                 (is-false (uiop:directory-exists-p in-root) "and not in ~A's root" drive))
+            (ignore-errors (uv:delete-directory (uiop:native-namestring (merge-pathnames "x/" in-cwd))))
+            (ignore-errors (uv:delete-directory (uiop:native-namestring in-cwd)))
+            (ignore-errors (uv:delete-directory (uiop:native-namestring (merge-pathnames "x/" in-root))))
+            (ignore-errors (uv:delete-directory (uiop:native-namestring in-root))))))))
 
 #+win32
 (test make-directory-with-parents-takes-an-extended-length-path
