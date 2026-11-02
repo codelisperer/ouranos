@@ -1215,11 +1215,17 @@ its tag.
   the app's own page with the linked one.
   Both apply to every form the markdown can take — an explicit link or image, a reference link,
   an autolink — and to relative and `mailto` URLs as well as `http` and `https`.
-  **`:allow-html t` cannot be combined with either, and signals.** Raw HTML is not parsed into
-  the tree these options filter, so an `img` or `href` written directly in the source would
-  survive them; an option that cannot deliver its guarantee is worse than no option. `:images`
-  accepts `t` or `nil` and `:links` accepts `t` or `:text`; any other value signals rather than
-  falling back to the permissive default.
+  - **`render` now signals an error in two new cases**, both of them a request it cannot honour:
+    `:allow-html t` passed together with `:images nil` or `:links :text`, and any value for
+    `:images` other than `t` or `nil`, or for `:links` other than `t` or `:text`. Nothing that
+    passes neither new argument can reach either signal, so no existing call changes.
+  - `:allow-html t` with either mode is refused because raw HTML is not parsed into the tree
+    these options filter: an `img` or `href` written directly in the source survives them, so
+    `:images nil` would report no image while the output carried one. The two arguments also
+    describe opposite situations — `:allow-html t` is for content the app wrote, these modes for
+    content it did not.
+  - An unrecognised value is refused because the default is the permissive one, so a typo in a
+    security argument must not read as "render everything".
 
 - **hermes: how long a send waits is now hermes's own setting, `*send-connect-timeout*` and
   `*send-read-timeout*`, both 10 seconds** (#1077). Each provider also takes `:connect-timeout`
