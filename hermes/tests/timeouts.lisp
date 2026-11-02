@@ -683,3 +683,60 @@ second door, and a refusal leaves the previous URL in place (#1129)."
         (reinitialize-instance p key "https://other.example/v2")
         (is (equal "https://other.example/v2" (funcall reader))
             "control: ~A accepts a good URL on reinitialize: ~S" name (funcall reader))))))
+
+(test telegram-and-facebook-bind-their-approval-around-the-send
+  "The review of #1140, and a gap of exactly the shape AGENTS.md warns about: the slot was
+recorded, the binder was called at the send site, and NOTHING TESTED THE CALL. Removing
+CALL-WITH-APPROVED-LOCAL-HOST from telegram.lisp or facebook.lisp passed every suite, because the
+recorded verdict was asserted in one test and the proxy argument in another, and no test joined
+them for these providers. Twilio and SendGrid have had that test since #1091; these did not, and
+Stripe's equivalent is in hermes/payments/tests because it is in another system.
+
+THE ASSERTION IS ON WHAT DEXADOR RECEIVES, which is the only place the two halves meet. It cannot
+be done through the *TELEGRAM-PERFORM* and *FACEBOOK-PERFORM* pivots: those replace the whole
+performing function, so %DEX-ARGS and PROXY-ARGUMENTS never run and the argument under test is
+never computed. This stubs DEX:REQUEST instead and leaves the pivots alone.
+
+Both directions for each: a plaintext base at a host the check approved as local is sent with
+:PROXY NIL, and the same provider at its https default is not."
+  (let ((seen '())
+        (original-request (fdefinition 'dex:request))
+        (original-resolve (fdefinition 'aion/http-client:resolve-host)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'aion/http-client:resolve-host)
+                 (lambda (host)
+                   (if (string= host "provider.invalid")
+                       (funcall original-resolve "127.0.0.1")
+                       (funcall original-resolve host))))
+           (setf (fdefinition 'dex:request)
+                 (lambda (url &rest args)
+                   (push (list url (if (member :proxy args) :no-proxy :proxied)) seen)
+                   (error "stopped before sending")))
+           ;; Telegram: the token is in the path, so this is the one where a proxy would log it.
+           (dolist (base '("http://provider.invalid:8081" "https://api.telegram.org"))
+             (ignore-errors
+              (h:deliver (hermes::make-telegram :token "t" :api-base base)
+                         ;; A VALID CHAT ID. "@c" is refused by Telegram's own message check --
+                         ;; it wants "@" and 5 to 32 characters -- so the send never reached
+                         ;; dexador and the first version of this test measured two facebook
+                         ;; calls while claiming four.
+                         (h:make-telegram-message :chat "@news_channel" :text "x"))))
+           ;; Facebook: a POST, which carries the access token in the form body.
+           (dolist (base '("http://provider.invalid:8081" "https://graph.facebook.com"))
+             (ignore-errors
+              (h:deliver (hermes::make-facebook :app-id "111" :app-secret "s"
+                                                :page-tokens (list (cons "1234567890" "tok"))
+                                                :graph-base base)
+                         (h:make-facebook-post :page "1234567890" :message "hi")))))
+      (setf (fdefinition 'dex:request) original-request)
+      (setf (fdefinition 'aion/http-client:resolve-host) original-resolve))
+    (let ((calls (reverse seen)))
+      (is (= 4 (length calls)) "all four sends reached dexador: ~S" calls)
+      (dolist (pair '((0 . "telegram") (2 . "facebook")))
+        (let ((local (nth (car pair) calls))
+              (remote (nth (1+ (car pair)) calls)))
+          (is (eq :no-proxy (second local))
+              "~A's plaintext send to the approved host is not proxied: ~S" (cdr pair) local)
+          (is (eq :proxied (second remote))
+              "~A's https send keeps whatever proxy is configured: ~S" (cdr pair) remote))))))

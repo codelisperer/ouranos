@@ -116,11 +116,20 @@ DIALOG-BASE IS NOT CHECKED, and the difference is the point: no credential is se
 where a person's browser is sent to approve the app, so a rule about carrying a credential in the
 clear has nothing to say about it, and refusing a plaintext dialog base would turn away a working
 local setup for no reason."
-  (nth-value 1 (%check-credential-url base
-                                      :setting "Facebook GRAPH-BASE"
-                                      :example +facebook-graph-base-default+
-                                      :credential "a page access token and the appsecret proof"
-                                      :appends-path t)))
+  (nth-value 1 (%check-credential-url
+                base
+                :setting "Facebook GRAPH-BASE"
+                :example +facebook-graph-base-default+
+                :credential "a page access token, the appsecret proof and the app secret"
+                ;; ALL THREE PLACES, because this backend uses all three and the default wording
+                ;; would have named only the first. A GET sends the token in an Authorization
+                ;; header; a POST puts access_token in the FORM BODY; and the connect step sends
+                ;; client_secret in the QUERY STRING. The query is the worst of the three, for the
+                ;; reason Telegram's path is: it is written into any access log along the way. A
+                ;; refusal that described only the header would have sent the reader looking in
+                ;; the wrong place for their own exposure (the review of #1140).
+                :carried-in "a GET carries the token in an Authorization header, a POST carries it in the form body, and the connect step carries the app secret in the query string, which any proxy or server along the way may log"
+                :appends-path t)))
 
 (defmethod shared-initialize :around ((p facebook) slot-names &rest initargs
                                       &key &allow-other-keys)

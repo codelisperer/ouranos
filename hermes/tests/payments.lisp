@@ -889,3 +889,46 @@ refuses to build."
       (is (equal "https://api.stripe.com" (hermes/payments::stripe-api-base p))
           "a refused reinitialize leaves the base alone: ~S"
           (hermes/payments::stripe-api-base p)))))
+
+
+(test stripe-binds-its-approval-around-the-send
+  "The review of #1140. Stripe's send site called CALL-WITH-APPROVED-LOCAL-HOST and nothing tested
+the call: removing it passed every suite, because the recorded verdict was asserted in one test
+and the proxy argument in another, and no test joined them. Telegram's and Facebook's equivalent
+is in hermes/tests; this one is here because hermes/payments is a separate system.
+
+THE ASSERTION IS ON WHAT DEXADOR RECEIVES. It cannot go through the :PERFORM slot, which replaces
+the whole performing function, so %DEX-ARGS and PROXY-ARGUMENTS would never run and the argument
+under test would never be computed. This stubs DEX:REQUEST and leaves :PERFORM nil.
+
+Both directions: a plaintext base at a host the check approved as local is sent with :PROXY NIL,
+and the https default is not."
+  (let ((seen '())
+        (original-request (fdefinition 'dex:request))
+        (original-resolve (fdefinition 'aion/http-client:resolve-host)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'aion/http-client:resolve-host)
+                 (lambda (host)
+                   (if (string= host "provider.invalid")
+                       (funcall original-resolve "127.0.0.1")
+                       (funcall original-resolve host))))
+           (setf (fdefinition 'dex:request)
+                 (lambda (url &rest args)
+                   (push (list url (if (member :proxy args) :no-proxy :proxied)) seen)
+                   (error "stopped before sending")))
+           (dolist (base '("http://provider.invalid:12111" "https://api.stripe.com"))
+             (ignore-errors
+              (pay:create-checkout
+               (pay:make-stripe-payments :api-key "sk_test" :webhook-secret "wh" :api-base base)
+               :customer-ref "cus_1" :mode :payment
+               :line-items (list (list :price "price_1" :quantity 1))
+               :success-url "https://ok.example" :cancel-url "https://no.example"))))
+      (setf (fdefinition 'dex:request) original-request)
+      (setf (fdefinition 'aion/http-client:resolve-host) original-resolve))
+    (let ((calls (reverse seen)))
+      (is (= 2 (length calls)) "both sends reached dexador: ~S" calls)
+      (is (eq :no-proxy (second (first calls)))
+          "the plaintext send to the approved host is not proxied: ~S" (first calls))
+      (is (eq :proxied (second (second calls)))
+          "and the https send keeps whatever proxy is configured: ~S" (second calls)))))

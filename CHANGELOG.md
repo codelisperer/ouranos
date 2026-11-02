@@ -46,6 +46,14 @@ its tag.
   IPv4 address. This is the same rule hermes has applied to a credential URL since #1077, and
   sharing the rule is what brought the two into agreement.
 
+- **`hermes/blob` also refuses an S3 endpoint with a control character in it, or with no host**
+  (#1106), both of which it accepted before. `MNEMOSYNE_S3_ENDPOINT` of `":9000"` has no host, and
+  one containing a byte below 32 or 127 — a stray newline or `\x01` from a mangled environment
+  file — is refused without echoing the value, because it may contain a password. Neither was a
+  working endpoint: the first builds a URL with no host to connect to, and the second cannot
+  appear in a URL at all. They come from the shared rule, which hermes has applied to a credential
+  URL since #1104.
+
 - **hermes: `make-sendgrid` now checks its `:endpoint`, and refuses one a request should not carry
   the API key to** (#1092). It was not checked at all before, so
   `(make-sendgrid :endpoint "http://evil.example/v3/mail/send")` sent the key — a `Bearer`
@@ -100,10 +108,12 @@ its tag.
   decision declined to answer because the host was a name.
   **The verdict the configuration check already reached is now carried to the send instead of
   being recomputed there**, so no name is resolved on the send path.
-  `aion/http-client:proxy-arguments` takes `:approved-local` and `make-request` takes
-  `:approved-local`; `hermes/blob`'s `s3-store` records `s3-endpoint-approved-local`, and
-  hermes's Twilio and SendGrid providers record `twilio-api-base-approved-local` and
-  `sendgrid-endpoint-approved-local`.
+  **Six senders record it**, each in a slot with no initarg, recomputed on every initialization:
+  `hermes/blob`'s `s3-store` records `s3-endpoint-approved-local`, and hermes's providers record
+  `twilio-api-base-approved-local`, `sendgrid-endpoint-approved-local`,
+  `telegram-api-base-approved-local`, `facebook-graph-base-approved-local` and
+  `stripe-api-base-approved-local`. The last three arrived with #1106, which brought those
+  backends under the same URL check.
   **The approval is the approved HOST, not a boolean**, and it exempts a request only when it
   equals that request's host. As a boolean it said only that something had been approved, which is
   not a statement about the request being sent: a verdict recorded for one host and read while
@@ -112,10 +122,10 @@ its tag.
   `proxy-arguments`, both exported, so any caller could assert an approval for any host and have a
   plaintext request to a public host sent with no proxy and an `Authorization` header — the same
   door that removing the `s3-store` initarg closed, one layer down. The approval is now an
-  unexported variable bound around the send by the three senders that hold a verdict, and the
+  unexported variable bound around the send by the six senders that hold a verdict, and the
   exported surface cannot express one: neither `proxy-arguments` nor `make-request` accepts the
   keyword, and passing it to either signals.
-  **None of the three slots has an initarg, and each is recomputed on every initialization.** The
+  **None of the six slots has an initarg, and each is recomputed on every initialization.** The
   value is a verdict the framework reached. `s3-store` is exported, so while it had an initarg
   `(make-instance 'hermes/blob:s3-store :endpoint "public.example:80" :secure nil :path-style t
   :endpoint-approved-local "public.example" ...)` sent signed requests to a public host in
@@ -174,8 +184,10 @@ its tag.
   still refused.
 - **hermes/blob: an S3 endpoint must now be a bare host with an optional port** (#1089).
   `MNEMOSYNE_S3_ENDPOINT` is refused when it contains `://`, `/`, `?`, `#`, `@` or whitespace, or
-  is empty. Values such as `localhost:9000`, `127.0.0.1:9000`, `[::1]:9000`, `minio:9000` and
-  `s3.amazonaws.com` are unaffected.
+  is empty. Values such as `localhost:9000`, `127.0.0.1:9000`, `minio:9000` and
+  `s3.amazonaws.com` are unaffected. (`[::1]:9000` was listed here as unaffected, and **#1106
+  refuses it**: a URL built from a bracketed IPv6 address cannot be connected to, so it was never
+  a working endpoint. See that entry.)
   **Two shapes that used to be accepted no longer are, and neither ever worked.** An endpoint
   carrying its own scheme, such as `http://127.0.0.1:9000`, produced the request URL
   `http://http://127.0.0.1:9000/...`, whose host is `http`; it is now refused instead of
@@ -183,7 +195,10 @@ its tag.
   loopback while the request went to `evil.com`, because the check read the endpoint and not the
   URL built from it. A **bare IPv6 address** without brackets, such as `::1`, is also not a
   working endpoint and is now reported as such: the request URL `http://::1/...` has the host `:`
-  and the port 1. Write it with brackets, as `[::1]:9000`.
+  and the port 1. **The advice this entry used to give — write it with brackets, as
+  `[::1]:9000` — was wrong, and #1106 refuses that spelling too**: quri hands usocket the host
+  with its brackets attached and no such name exists, so the connection is never attempted. Use a
+  name that resolves to the address, or an IPv4 address.
 
 - **mnemosyne/conn: a Postgres connect gives up after 10 seconds, and an optional statement
   timeout** (#959). `connect` and `make-pool` take `:connect-timeout`, in seconds, defaulting to
