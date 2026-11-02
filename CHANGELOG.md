@@ -3130,6 +3130,14 @@ its tag.
 
 ### Fixed
 
+- **aion/http-client: on Windows, a pinned request's read that returned is no longer reported as
+  a timeout** (#1063). A request with `:connect-address`, which `fetch-public` makes, keeps its
+  read timeout on Windows with a timer that closes the socket. When the timer fired just as a
+  read returned, the read's data was dropped and `sb-sys:io-timeout` signalled. Now a read that
+  returns is returned, and the timeout is signalled only for a read the timer ended. The
+  `make-request` docstring now says that a request with `:connect-address` follows no redirect
+  whatever `:follow-redirects` says, and that its own HTTP/1.1 is used on every OS, not only on
+  Windows.
 - **aion/http-client: a failure on a pinned connection no longer reconnects through DNS or sends
   the request again** (#985). A request with `:connect-address`, which `fetch-public` always
   makes, handed its connection to dexador on Linux and macOS. After any failure on it, such as a
