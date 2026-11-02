@@ -258,8 +258,10 @@ original error still follows them."
 (defun contrib-load-failure-p (condition)
   "True when CONDITION is SBCL failing to load a contrib: a fasl compiled by another SBCL
 version; `Don't know how to REQUIRE', which REQUIRE gives for an absent contrib file; or
-ASDF not finding a system named like a contrib."
-  (or (typep condition 'sb-fasl::invalid-fasl-version)
+ASDF not finding a system named like a contrib. INVALID-FASL-VERSION is internal to SB-FASL,
+so it is looked up by name, and a later SBCL without it only loses that case."
+  (or (let ((type (find-symbol "INVALID-FASL-VERSION" "SB-FASL")))
+        (and type (typep condition type)))
       (and (typep condition 'sb-int:extension-failure)
            (search "Don't know how to REQUIRE" (princ-to-string condition))
            t)
