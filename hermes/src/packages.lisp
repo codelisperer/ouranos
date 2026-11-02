@@ -76,6 +76,9 @@
    ;; How long a send waits, and the per-provider readers for it (#1077).
    #:*send-connect-timeout* #:*send-read-timeout*
    #:sendgrid-connect-timeout #:sendgrid-read-timeout
+   ;; Readable since #1092, when the endpoint gained a check: an app that sets it should be able
+   ;; to read back what was accepted.
+   #:sendgrid-endpoint
    #:twilio-connect-timeout #:twilio-read-timeout #:twilio-api-base
    #:telegram-api-base #:facebook #:make-facebook #:facebook-app-id #:facebook-graph-base
    #:facebook-dialog-base #:dev-transport #:make-dev-transport

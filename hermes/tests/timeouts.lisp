@@ -232,3 +232,97 @@ api.twilio.com, which did resolve, contradicting this file's own header."
             "control: https to a remote host that http was refused for")
   (is-false (%api-base-refusal "http://127.0.0.1:1/x")
             "control: http to a local host, the same scheme refused remotely"))
+
+;;; --- SendGrid's endpoint, checked by the same rule as Twilio's API base (#1092) -----------
+;;;
+;;; These live beside the Twilio ones because they are the same check. The file is named for the
+;;; timeouts of #1077, which is where that check arrived; the name has drifted.
+
+(defun %sendgrid-refusal (endpoint)
+  "The report of the CONFIGURATION-ERROR refusing ENDPOINT, or NIL if it was accepted."
+  (handler-case (progn (h:make-sendgrid :api-key "SG.key" :endpoint endpoint) nil)
+    (h:configuration-error (e) (princ-to-string e))))
+
+(test a-sendgrid-endpoint-is-refused-for-the-reason-it-deserves
+  "#1092: every SendGrid request carries the API key as a Bearer credential in an Authorization
+header, and until this the endpoint was not checked at all, so
+(MAKE-SENDGRID :ENDPOINT \"http://evil.example/v3/mail/send\") sent the key in plaintext to
+whatever host was named.
+
+Each case asserts WHICH check refused it, not merely that something did: a list of endpoints that
+all signal the same condition would pass if one check were doing all the work."
+  (dolist (case '(("http://evil.example/v3/mail/send" . "in the clear")
+                  ("http://8.8.8.8/v3/mail/send" . "in the clear")
+                  ("http://010.0.0.1/v3/mail/send" . "in the clear")
+                  ("https://SG:pw@api.example.invalid/x" . "user name or password")
+                  ("http://[::1]@host.invalid/x" . "user name or password")
+                  ("https://[::1]@127.0.0.1/x" . "user name or password")
+                  ("evil.invalid://127.0.0.1" . "The scheme is")
+                  ("api.sendgrid.invalid/v3/mail/send" . "The scheme is")
+                  ("//host.invalid/x" . "The scheme is")
+                  ("http://[::1]:4010/x" . "bracketed IPv6")))
+    (let ((report (%sendgrid-refusal (car case))))
+      (is-true report "~S is refused" (car case))
+      (is-true (and report (search (cdr case) report))
+               "~S is refused for ~S: ~A" (car case) (cdr case) report)))
+  ;; No refusal may repeat the value, which may hold a password.
+  (dolist (endpoint (list "https://SG:tOpS3cret@api.example.invalid/x"
+                          "https://SG:tOpS3cret with spaces@api.example.invalid/x"
+                          "http://SG:tOpS3cret@127.0.0.1:4010/x"
+                          "https://SG:tOpS3cret\"@api.example.invalid/x"))
+    (let ((report (%sendgrid-refusal endpoint)))
+      (is-true report "~S is refused" endpoint)
+      (is-false (and report (search "tOpS3cret" report))
+                "and its report does not contain the password: ~A" report)))
+  ;; The controls: every legitimate endpoint is accepted and read back unchanged.
+  (dolist (endpoint '("https://api.sendgrid.com/v3/mail/send"
+                      "https://api.eu.sendgrid.com/v3/mail/send"
+                      "http://localhost:4010/v3/mail/send"
+                      "http://127.0.0.1:4010/v3/mail/send"
+                      "http://10.0.0.5/v3/mail/send"))
+    (let ((p (h:make-sendgrid :api-key "SG.key" :endpoint endpoint)))
+      (is (string= endpoint (h:sendgrid-endpoint p)) "~A is accepted unchanged" endpoint)))
+  ;; A QUERY IS ACCEPTED HERE, unlike in a Twilio API base. DELIVER sends this value as the
+  ;; request URL exactly as it stands, so nothing can land inside a query; refusing one would
+  ;; turn away a legitimate local mock. That difference is :APPENDS-PATH.
+  (is-false (%sendgrid-refusal "http://127.0.0.1:4010/v3/mail/send?trace=1")
+            "a query is harmless when nothing is appended to the endpoint")
+  (is-true (search "query or a fragment"
+                   (or (%api-base-refusal "https://api.twilio.invalid/x?q=1") ""))
+           "control: the same shape IS refused for Twilio, where a path is appended")
+  ;; And the default is unchanged by any of this.
+  (is (string= "https://api.sendgrid.com/v3/mail/send"
+               (h:sendgrid-endpoint (h:make-sendgrid :api-key "SG.key")))
+      "the default endpoint still makes a provider"))
+
+(test the-credential-url-check-is-one-check-for-both-backends
+  "#1092's reason for existing. The locality half of this rule was written twice -- hermes core
+for a Twilio API base, hermes/blob for an S3 endpoint -- and the two copies acquired three
+different holes between them, each a case the other's fix had already closed (#1089, and the
+reviews of #1084 and #1090). SendGrid had no check at all. A third hand-written copy would have
+been the same bet, so both backends call %CHECK-CREDENTIAL-URL.
+
+This asserts the sharing rather than trusting it: for each shape, both providers refuse, and for
+the same stated reason."
+  (dolist (case '(("http://evil.invalid/x" . "in the clear")
+                  ("https://u:pw@evil.invalid/x" . "user name or password")
+                  ("evil.invalid://127.0.0.1" . "The scheme is")
+                  ("http://[::1]:4010/x" . "bracketed IPv6")
+                  ("//evil.invalid/x" . "The scheme is")))
+    (let ((sendgrid (%sendgrid-refusal (car case)))
+          (twilio (%api-base-refusal (car case))))
+      (is-true (and sendgrid twilio) "~S is refused by both" (car case))
+      (is-true (and sendgrid (search (cdr case) sendgrid))
+               "sendgrid refuses ~S for ~S" (car case) (cdr case))
+      (is-true (and twilio (search (cdr case) twilio))
+               "and twilio refuses it for the same reason" )))
+  ;; The naming differs, deliberately: each report names its own setting and credential, so an
+  ;; operator is told which variable to fix and what would have travelled.
+  (is-true (search "SendGrid ENDPOINT" (or (%sendgrid-refusal "http://evil.invalid/x") ""))
+           "the SendGrid report names its own setting")
+  (is-true (search "Twilio API-BASE" (or (%api-base-refusal "http://evil.invalid/x") ""))
+           "and the Twilio report names its own")
+  (is-true (search "the API key" (or (%sendgrid-refusal "http://evil.invalid/x") ""))
+           "and each says what would have travelled")
+  (is-true (search "account SID and auth token" (or (%api-base-refusal "http://evil.invalid/x") ""))
+           "which is not the same credential"))
