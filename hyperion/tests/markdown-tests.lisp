@@ -391,11 +391,10 @@ survives them -- measured, before the combination was refused."
     (is (eq :links (hyperion/markdown:render-option-error-argument c)))
     (is (eq :texts (hyperion/markdown:render-option-error-value c)))
     (is-true (search ":LINKS" (princ-to-string c)) "and prints readably: ~A" c))
-  ;; T and :TEXT, and T and NIL, are the values that work.
+  ;; The four accepted combinations are exercised with real markup in
+  ;; EACH-OPTION-ACTS-ON-ITS-OWN-KIND-OF-MARKUP below, not here: rendering "x" showed only that a
+  ;; string came back, which is what let the reference-link bypass survive (the review of #1120).
   (is-true (stringp (hyperion/markdown:render "x" :images t :links t)))
-  (is-true (stringp (hyperion/markdown:render "x" :images nil :links :text)))
-  (is-true (stringp (hyperion/markdown:render "x" :images nil :links t)))
-  (is-true (stringp (hyperion/markdown:render "x" :images t :links :text)))
   ;; The combination that cannot be honoured.
   (signals hyperion/markdown:render-option-error
     (hyperion/markdown:render "x" :allow-html t :images nil))
@@ -408,3 +407,59 @@ survives them -- measured, before the combination was refused."
   (let ((out (hyperion/markdown:render "<img src=\"https://elsewhere.example/i.png\">"
                                        :allow-html t)))
     (is-true (search "<img" out) "control: raw HTML still passes with :allow-html t alone: ~A" out)))
+
+(test each-option-acts-on-its-own-kind-of-markup
+  "The review of #1120, and the bypass it found. The mixed combinations were only ever rendered
+with the input \"x\", so nothing checked what each option does on its own -- and the untrusted
+tests always set BOTH, so :LINKS :TEXT masked an image surviving :IMAGES NIL.
+
+THE BYPASS: an accepted reference link was returned whole, so its label was never walked. With
+:IMAGES NIL and the default :LINKS T, `[![alt](https://tracker.example/i.png)][r]' kept the
+image and would still have fetched it. Measured before the fix:
+
+  :images nil, :links t -> <p><a href=\"...\"><img src=\"https://tracker.example/i.png\" ...></a></p>
+
+Each row below is one input under all four accepted combinations, asserting what each option is
+responsible for rather than that something came back."
+  (let ((image "![alt](https://img.example/i.png)")
+        (link "[words](https://link.example/p)")
+        (ref-with-image (format nil "[![alt](https://img.example/i.png)][r]~%~%  [r]: https://link.example/p")))
+    (flet ((out (markdown images links)
+             (hyperion/markdown:render markdown :images images :links links)))
+      ;; An image: governed by :IMAGES alone, whatever :LINKS says.
+      (dolist (links '(t :text))
+        (is-true (search "<img" (out image t links))
+                 ":images t keeps the image with :links ~S" links)
+        (is-false (search "<img" (out image nil links))
+                  ":images nil drops it with :links ~S" links)
+        (is-true (search "alt" (out image nil links))
+                 "and leaves the alt text with :links ~S" links))
+      ;; A link: governed by :LINKS alone, whatever :IMAGES says.
+      (dolist (images '(t nil))
+        (is-true (search "href" (out link images t))
+                 ":links t keeps the href with :images ~S" images)
+        (is-false (search "href" (out link images :text))
+                  ":links :text drops it with :images ~S" images)
+        (is-true (search "words" (out link images :text))
+                 "and leaves the text with :images ~S" images))
+      ;; AN IMAGE INSIDE AN ACCEPTED REFERENCE LINK'S LABEL -- the bypass. The link is allowed
+      ;; here, so this is the case where only :IMAGES can stop the fetch.
+      (is-true (search "<img" (out ref-with-image t t))
+               "control: the default keeps both the link and the image")
+      (is-true (search "href" (out ref-with-image nil t))
+               ":links t keeps the reference link")
+      (is-false (search "<img" (out ref-with-image nil t))
+                "but :images nil drops the image inside its label: ~A" (out ref-with-image nil t))
+      (is-false (search "img.example" (out ref-with-image nil t))
+                "and the image URL does not reach the output: ~A" (out ref-with-image nil t))
+      (is-true (search "alt" (out ref-with-image nil t))
+               "while the alt text stays")
+      ;; THE LOOKUP KEY SURVIVES THE SANITISING. The label is rewritten, so the original is kept
+      ;; as the definition; without that the key would change and the href would not resolve.
+      (is-true (search "link.example/p" (out ref-with-image nil t))
+               "the reference still resolves to its definition: ~A" (out ref-with-image nil t))
+      ;; And with links off too, nothing of either remains.
+      (dolist (o (list (out ref-with-image nil :text) (out ref-with-image t :text)))
+        (is-false (search "href" o) "no href with :links :text: ~A" o))
+      (is-false (search "<img" (out ref-with-image nil :text))
+                "and no image with both off"))))

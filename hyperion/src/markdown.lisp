@@ -216,7 +216,20 @@ write."
               (key (3bmd::print-label-to-string (or (getf rest :definition) label)))
               (source (gethash key references)))
          (if (and source (not (eq *links* :text)) (%safe-url source))
-             (list node)
+             ;; AN ACCEPTED REFERENCE LINK STILL HAS ITS LABEL WALKED. Returning the node whole
+             ;; left the label untouched, so anything inside it escaped every rule applied here:
+             ;; with :IMAGES NIL and the default :LINKS T,
+             ;; `[![alt](https://tracker.example/i.png)][r]' kept the image and would still have
+             ;; fetched it. Measured before the fix (the review of #1120).
+             ;;
+             ;; The ORIGINAL label is kept as :DEFINITION so the lookup key is unchanged.
+             ;; 3bmd computes that key from (or :definition :label), so sanitising the label
+             ;; without this would change the key and the definition would no longer resolve.
+             (list (list* :reference-link
+                          :label (%sanitize label references)
+                          :definition (or (getf rest :definition) label)
+                          (loop for (k v) on rest by #'cddr
+                                unless (member k '(:label :definition)) nconc (list k v))))
              ;; Refused, or undefined: the label as text. An undefined one would have
              ;; printed as text anyway, with a warning.
              (%sanitize label references))))
