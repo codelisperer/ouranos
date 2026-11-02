@@ -99,8 +99,10 @@ cons --strict test         # recompile the project's own systems first; use this
 ```
 
 A full compile `WARNING` in the project's own code fails `cons build` and `cons test`, and
-is printed; a `STYLE-WARNING` is printed and does not fail. The project's own systems are
-the ones whose `.asd` is under the directory holding `cons.lisp`. Libraries, and the
+is printed; a `STYLE-WARNING` is printed and does not fail. The one exception is a call to a
+function that does not exist: SBCL reports it as a `STYLE-WARNING`, and it fails the build
+too (#1083). The project's own systems are the ones whose `.asd` is under the directory
+holding `cons.lisp`. Libraries, and the
 framework when you are building an app, are loaded with their warnings muffled, because a
 warning inside a library is not yours to fix (#303).
 
