@@ -187,22 +187,53 @@ Ordinary ways to get here: an SBCL upgrade that removed the tree a wrapper still
 a runtime copied out of its install tree, or a checkout whose environment was set up for a
 different install.
 
-### The quieter version: a stale `bin/cons`
+### After an SBCL upgrade: a stale `bin/cons`
 
-`bin/cons` is a **dumped image** — it carries its own runtime and its own contribs — so an
-SBCL upgrade leaves it working rather than broken, which is precisely why it goes unnoticed:
+`bin/cons` is a **dumped image**. It carries its own runtime, and the contribs `bootstrap.lisp`
+bakes in (`sb-cltl2`, `sb-bsd-sockets`, `sb-posix`, `sb-rotate-byte`, `sb-md5`,
+`sb-introspect`, `sb-concurrency`). Any other contrib, `sb-sprof` for example, it loads from
+the SBCL installation when something first requires it. What an upgrade does to it therefore
+depends on whether the SBCL that built it is still installed.
+
+**The old install is still there** (Homebrew before it removes the old Cellar, or an SBCL
+installed next to the old one). `bin/cons` keeps working, and `cons` warns:
 
 ```
 cons: this cons was built by SBCL 2.6.5, but SBCL 2.6.7 is now on PATH.
-cons: It still runs -- a dumped image carries its own runtime and contribs -- but `--fresh`
-cons: targets run under the PATH sbcl, so one build can span two compilers.
+cons: It still runs, because the contribs on disk are still its own version, but `--fresh`
+cons: targets run under the PATH sbcl, so one build can span two compilers. Once that
+cons: install is removed or replaced, a target needing a contrib cons did not bake in will fail.
 cons: Rebuild: sbcl --dynamic-space-size 4096 --script bootstrap.lisp
 ```
 
-This is a **warning, not a refusal**: the image genuinely works, and refusing would block you
-over a mismatch that often bites nothing — including the rebuild, which `cons` itself is not
-the tool for. It matters for `--fresh` targets, which run in a subprocess `sbcl` taken from
-`PATH` rather than in cons's warm image.
+This is a **warning, not a refusal**: the image works, and `--fresh` targets are the ones it
+affects, since they run in a subprocess `sbcl` taken from `PATH`.
+
+**The old install was replaced in place** (the Windows installer over the same directory, or a
+Linux package upgraded in place). The contrib directory `bin/cons` loads from now holds the new
+version's fasls, and SBCL refuses a fasl compiled by another version. `cons` reads the version
+from a contrib fasl's header at startup, and refuses to run a target (#701):
+
+```
+cons: this cons runs SBCL 2.6.8, but the contribs in C:\Program Files\SBCL\contrib\ were compiled by SBCL 2.6.9.
+cons: The SBCL install it was built from has been replaced. SBCL 2.6.8 cannot load another version's fasls, so the first REQUIRE of a contrib it did not bake in (sb-sprof, sb-simple-streams, ...) fails.
+cons: Rebuild: sbcl --dynamic-space-size 4096 --script bootstrap.lisp
+cons: not running build until the problem above is fixed.
+```
+
+The built-in commands (`cons version`, `cons help`, `cons setup`, ...) still run.
+
+**The old install was removed.** There is no contrib directory left to read a version from, so
+nothing is refused at startup: a shipped `bin/cons` on a machine without SBCL is in the same
+state, and most targets never need a contrib it did not bake in. When a target does need one,
+`cons` says where it looked before the error itself:
+
+```
+cons: a contrib could not be loaded: System "sb-sprof" not found
+cons: This cons runs SBCL 2.6.5 and loads any contrib it did not bake in from /opt/homebrew/Cellar/sbcl/2.6.5/lib/sbcl/contrib/.
+cons: If SBCL was upgraded, replaced or removed since bin/cons was built, rebuild: sbcl --dynamic-space-size 4096 --script bootstrap.lisp
+cons build: System "sb-sprof" not found
+```
 
 `cons version` reports both, so you can check without re-reading the scrollback:
 

@@ -237,23 +237,28 @@ forces the target to run in a subprocess sbcl instead of cons's warm image. A le
 fasl still fails the target (#303); use it in CI. With no
 `cons.lisp` and no built-in, clingon prints usage."
   ;; Early and once, before anything can meet a bare "Don't know how to REQUIRE SB-POSIX"
-  ;; (pre-publication issue 161). Reported, not fatal: `cons version` and `cons help` must still answer on a
-  ;; broken toolchain, since that is when you need them most.
-  (toolchain:check)
-  (project:ensure-source-registry)
-  (let ((argv (uiop:command-line-arguments)))
-    (multiple-value-bind (fresh rest) (%pop-flag "--fresh" argv)
-     (multiple-value-bind (strict rest) (%pop-flag "--strict" rest)
-      (let ((first (first rest)))
-        (cond
-          ((and first (member first *builtin-commands* :test #'string-equal))
-           (clingon:run (cons-command) rest))
-          (t
-           (let ((build-spec
-                   (handler-case (spec:load-spec)
-                     (error (e)
-                       (format *error-output* "cons: error reading cons.lisp: ~A~%" e)
-                       (uiop:quit 1)))))
-             (if build-spec
-                 (run:cli-run build-spec rest :fresh fresh :strict strict)
-                 (clingon:run (cons-command) argv))))))))))
+  ;; (pre-publication issue 161). The built-in commands still run on a fatal finding: `cons
+  ;; version` and `cons help` must answer on a broken toolchain, since that is when you need
+  ;; them most. A build-spec target does not (#701): it would fail later, at a REQUIRE, with
+  ;; an error that does not name the cause.
+  (let ((toolchain-findings (toolchain:check)))
+    (project:ensure-source-registry)
+    (let ((argv (uiop:command-line-arguments)))
+      (multiple-value-bind (fresh rest) (%pop-flag "--fresh" argv)
+       (multiple-value-bind (strict rest) (%pop-flag "--strict" rest)
+        (let ((first (first rest)))
+          (cond
+            ((and first (member first *builtin-commands* :test #'string-equal))
+             (clingon:run (cons-command) rest))
+            (t
+             (let ((build-spec
+                     (handler-case (spec:load-spec)
+                       (error (e)
+                         (format *error-output* "cons: error reading cons.lisp: ~A~%" e)
+                         (uiop:quit 1)))))
+               (cond ((null build-spec) (clingon:run (cons-command) argv))
+                     ((and first (toolchain:fatal-p toolchain-findings))
+                      (format *error-output* "cons: not running ~A until ~A~%"
+                              first "the problem above is fixed.")
+                      (uiop:quit 1))
+                     (t (run:cli-run build-spec rest :fresh fresh :strict strict))))))))))))

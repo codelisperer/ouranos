@@ -75,8 +75,9 @@ one thing it is making wrong."
 ;;; --- the quiet case: a dumped image left behind by an upgrade -------------
 
 (test a-stale-dumped-image-warns-but-is-not-fatal
-  ;; It still works -- a dumped image carries its own runtime and contribs -- so refusing to
-  ;; run would block work over a mismatch that often bites nothing. But `--fresh` targets run
+  ;; It still works while the old install's contribs are on disk (no :contrib-version here
+  ;; says otherwise), so refusing to run would block work over a mismatch that often bites
+  ;; nothing. But `--fresh` targets run
   ;; under the PATH sbcl, so one build can span two compilers, and that is worth saying.
   (let ((findings (cons/toolchain:diagnose
                    (%facts :dumped-image-p t :runtime-version "2.6.5" :path-version "2.6.7"))))
@@ -98,6 +99,145 @@ one thing it is making wrong."
   ;; not evidence of a mismatch, and must not be reported as one.
   (is (null (cons/toolchain:diagnose
              (%facts :dumped-image-p t :path-version nil :runtime-version "2.6.5")))))
+
+;;; --- contribs on disk from another SBCL (#701) ----------------------------
+
+(test contribs-compiled-by-another-sbcl-are-fatal-and-say-why
+  "#701: SBCL 2.6.9 was installed over 2.6.8, and bin/cons, built by 2.6.8, warned and carried
+on, then failed at the first REQUIRE of a contrib it had not baked in. With the contribs on
+disk read as 2.6.9, the finding is fatal, names both versions and the directory, and gives the
+rebuild. The stale-image warning is not repeated alongside it."
+  (let ((findings (cons/toolchain:diagnose
+                   (%facts :dumped-image-p t :runtime-version "2.6.8" :path-version "2.6.9"
+                           :contrib-version "2.6.9"
+                           :contrib-directory "C:\\Program Files\\SBCL\\contrib\\"))))
+    (is (equal '(:stale-contribs) (%codes findings)))
+    (is (cons/toolchain:fatal-p findings))
+    (let ((text (%text findings)))
+      (is (search "2.6.8" text) "the version cons runs")
+      (is (search "2.6.9" text) "the version the contribs came from")
+      (is (search "C:\\Program Files\\SBCL\\contrib\\" text) "where they are")
+      (is (search "bootstrap.lisp" text) "and the rebuild"))))
+
+(test contribs-of-the-image-s-own-version-keep-the-warning
+  "The control for the test above: the same upgrade with the old install still on disk, so the
+contribs are 2.6.8. bin/cons still works, so it is the warning, not a refusal."
+  (let ((findings (cons/toolchain:diagnose
+                   (%facts :dumped-image-p t :runtime-version "2.6.8" :path-version "2.6.9"
+                           :contrib-version "2.6.8"))))
+    (is (equal '(:stale-image) (%codes findings)))
+    (is (not (cons/toolchain:fatal-p findings)))))
+
+(test no-contrib-file-is-not-a-finding
+  "A shipped bin/cons on a machine with no SBCL has no contrib directory, and most targets never
+need a contrib it did not bake in. No version read is not evidence of a mismatch."
+  (is (null (cons/toolchain:diagnose
+             (%facts :dumped-image-p t :runtime-version "2.6.8" :path-version nil
+                     :contrib-version nil)))))
+
+(test the-warning-no-longer-says-the-image-carries-its-own-contribs
+  "#701: the old warning said a dumped image carries its own contribs, which is true only of
+the ones bootstrap.lisp baked in."
+  (let ((text (%text (cons/toolchain:diagnose
+                      (%facts :dumped-image-p t :runtime-version "2.6.8" :path-version "2.6.9")))))
+    (is (not (search "carries its own" text)))
+    (is (search "contribs on disk" text))))
+
+(test fasl-header-version-reads-the-version-line
+  (let ((header (format nil "#!/x/sbcl --script~%# FASL~%  compiled from \"X\"~%~A~%~C~C"
+                        "  using SBCL version 2.6.9" (code-char 255) (code-char 5))))
+    (is (equal "2.6.9" (cons/toolchain:fasl-header-version header))))
+  (is (null (cons/toolchain:fasl-header-version "not a fasl at all")))
+  (is (null (cons/toolchain:fasl-header-version "  using SBCL version 2.6.9"))
+      "a header cut off before the end of the line is not read as a version"))
+
+(defun %fasl-from-another-version (dir)
+  "A real fasl compiled here, whose version is changed to one this image is not, and that
+version. Returns (values PATHNAME OTHER-VERSION)."
+  (let* ((source (merge-pathnames "c.lisp" dir))
+         (fasl (merge-pathnames "c.fasl" dir))
+         (own (lisp-implementation-version))
+         (other (concatenate 'string (subseq own 0 (1- (length own)))
+                             (if (char= (char own (1- (length own))) #\0) "1" "0"))))
+    (ensure-directories-exist source)
+    (with-open-file (out source :direction :output :if-exists :supersede)
+      (write-line "(defun c701 () 1)" out))
+    (let ((*error-output* (make-broadcast-stream)) (*standard-output* (make-broadcast-stream)))
+      (compile-file source :output-file fasl))
+    ;; Same length, so every offset in the file stays where it was.
+    (let* ((bytes (with-open-file (in fasl :element-type '(unsigned-byte 8))
+                    (let ((v (make-array (file-length in) :element-type '(unsigned-byte 8))))
+                      (subseq v 0 (read-sequence v in)))))
+           (from (map '(vector (unsigned-byte 8)) #'char-code own))
+           (to (map '(vector (unsigned-byte 8)) #'char-code other)))
+      (loop for at = (search from bytes) while at
+            do (replace bytes to :start1 at))
+      (with-open-file (out fasl :direction :output :if-exists :supersede
+                                :element-type '(unsigned-byte 8))
+        (write-sequence bytes out)))
+    (values fasl other)))
+
+(test a-fasl-from-another-version-is-read-and-recognised
+  "Against a real fasl rather than a description of one: its header gives the other version,
+and loading it signals the condition CONTRIB-LOAD-FAILURE-P recognises. The control is the
+same fasl's header before the change, which gives this image's version."
+  (let ((dir (uiop:ensure-directory-pathname
+              (merge-pathnames (format nil "cons-701-~36R/" (random (expt 2 40)
+                                                                     (make-random-state t)))
+                               (uiop:temporary-directory)))))
+    (unwind-protect
+         (multiple-value-bind (fasl other) (%fasl-from-another-version dir)
+           (is (equal other (cons/toolchain:fasl-header-version
+                             (uiop:read-file-string fasl :external-format :latin-1))))
+           (let ((condition (handler-case (progn (load fasl) nil) (error (e) e))))
+             (is (typep condition 'error) "loading another version's fasl must fail")
+             (is (cons/toolchain:contrib-load-failure-p condition))))
+      (uiop:delete-directory-tree dir :validate t :if-does-not-exist :ignore))))
+
+(test an-absent-contrib-is-recognised-and-other-errors-are-not
+  (is (cons/toolchain:contrib-load-failure-p
+       (handler-case (progn (require :cons-701-no-such-contrib) nil) (error (e) e))))
+  (is (cons/toolchain:contrib-load-failure-p
+       (handler-case (progn (asdf:find-system "sb-cons-701-no-such" t) nil) (error (e) e)))
+      "ASDF not finding a system named like a contrib, as a :depends-on on one gives")
+  (is (not (cons/toolchain:contrib-load-failure-p
+            (handler-case (progn (asdf:find-system "cons-701-no-such" t) nil) (error (e) e))))
+      "control: a missing system that is not named like a contrib")
+  (is (not (cons/toolchain:contrib-load-failure-p (make-condition 'simple-error
+                                                                  :format-control "other")))))
+
+(test quicklisp-not-finding-a-contrib-is-recognised
+  "A cons target loads through Quicklisp when it is present, and Quicklisp reports a missing
+system as its own SYSTEM-NOT-FOUND. This is the condition the dumped cons met when sb-sprof's
+file was absent."
+  (if (not (find-package "QUICKLISP-CLIENT"))
+      (skip "Quicklisp is not loaded in this image")
+      (flet ((failure (name)
+               (handler-case (progn (uiop:symbol-call "QUICKLISP-CLIENT" "QUICKLOAD" name
+                                                      :silent t)
+                                    nil)
+                 (error (e) e))))
+        (is (cons/toolchain:contrib-load-failure-p (failure "sb-cons-701-no-such")))
+        (is (not (cons/toolchain:contrib-load-failure-p (failure "cons-701-no-such")))
+            "control: a missing system that is not named like a contrib"))))
+
+(test a-contrib-failure-during-a-target-names-the-cause
+  "Item 2 of #701: when a contrib fails to load during a target, the lines printed name the
+stale contribs when the facts show them, and otherwise where contribs are loaded from."
+  (let ((stale (format nil "~{~A~^ ~}"
+                       (cons/toolchain:contrib-failure-lines
+                        (%facts :dumped-image-p t :runtime-version "2.6.8"
+                                :contrib-version "2.6.9" :contrib-directory "/sbcl/contrib/")
+                        "Don't know how to REQUIRE SB-SPROF.")))
+        (healthy (format nil "~{~A~^ ~}"
+                         (cons/toolchain:contrib-failure-lines
+                          (%facts :contrib-directory "/sbcl/contrib/")
+                          "Don't know how to REQUIRE SB-SPROF."))))
+    (is (search "Don't know how to REQUIRE SB-SPROF." stale))
+    (is (search "compiled by SBCL 2.6.9" stale))
+    (is (search "/sbcl/contrib/" healthy))
+    (is (search "bootstrap.lisp" healthy))
+    (is (not (search "compiled by SBCL" healthy)))))
 
 ;;; --- ordering and shape ----------------------------------------------------
 
@@ -152,7 +292,9 @@ one thing it is making wrong."
     (is (stringp (getf facts :runtime-version)))
     (is (eq t (getf facts :contrib-available))
         "the suite itself could not have loaded without contribs")
-    (is (member (getf facts :dumped-image-p) '(t nil)))))
+    (is (member (getf facts :dumped-image-p) '(t nil)))
+    (is (equal (lisp-implementation-version) (getf facts :contrib-version))
+        "this image's own contribs, read from their header (#701)")))
 
 (test this-image-diagnoses-clean
   ;; The control on the whole feature: whatever machine this is, running the real gatherer

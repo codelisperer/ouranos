@@ -1153,6 +1153,22 @@ its tag.
   `aion/tests:run-tests` and the file `aion/tests/all.lisp` are gone: code that called
   `aion/tests:run-tests` calls `(asdf:test-system :aion/tests)` instead, as `aion/cons.lisp`'s
   `test` target now does.
+- **`cons` refuses to run a build-spec target when the SBCL contribs on disk were compiled by
+  a different SBCL version from the one that built `bin/cons`** (#701). After an SBCL install
+  is replaced in place, `bin/cons` used to print its stale-image warning and continue, and a
+  target then failed at its first `require` of a contrib it had not baked in, with
+  `Don't know how to REQUIRE`, `System "sb-…" not found` or a fasl-version error. `cons` now
+  reads the version from the header of `sb-posix.fasl` in the contrib directory at startup. On
+  a mismatch it prints both versions, the directory and the rebuild command
+  (`sbcl --dynamic-space-size 4096 --script bootstrap.lisp`), then exits 1 before running the
+  target. The built-in commands (`cons version`, `cons help`, `cons setup`, …) still run. Any
+  fatal toolchain finding now stops a target this way, including the existing "contribs cannot
+  be loaded" one. When a contrib fails to load during a target for any other reason, `cons`
+  prints where it loads contribs from before the error. The stale-image warning no longer says
+  that a dumped image carries its own contribs: it carries only the ones `bootstrap.lisp` bakes
+  in. To act: rebuild `bin/cons` after every SBCL upgrade. New exports from `cons/toolchain`:
+  `fasl-header-version`, `contrib-load-failure-p`, `contrib-failure-lines` and
+  `explain-contrib-failure`.
 
 ### Added
 
