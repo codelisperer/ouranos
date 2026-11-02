@@ -170,13 +170,16 @@ What is refused, and why each is here rather than only the obvious one:
 The host is resolved at the moment this runs, once. A provider made while a name resolved
 locally is not re-checked if that name later resolves elsewhere.
 
-RETURNS TWO VALUES: the parsed URI, and whether the host was approved as LOCAL. The second is
-what #1091 needed, and it costs no second lookup, because it is already known here: a plaintext
-URL that this function returns at all is one whose host LOCAL-HOST-P approved -- that is the last
-branch below, and the alternative is a refusal. A caller records it and passes it to
+RETURNS TWO VALUES: the parsed URI, and THE HOST that was approved as local, or NIL. The second
+is what #1091 needed, and it costs no second lookup, because it is already known here: a
+plaintext URL that this function returns at all is one whose host LOCAL-HOST-P approved -- that is
+the last branch below, and the alternative is a refusal. A caller records it and passes it to
 AION/HTTP-CLIENT as APPROVED-LOCAL, so the plaintext request it then sends is not handed to a
-proxy. It is false for an https URL, whose host is never resolved here, which matches
-PROXY-ARGUMENTS: the proxy decision is only made for plaintext."
+proxy and does not follow redirects. It is NIL for an https URL, whose host is never resolved
+here, which matches PROXY-ARGUMENTS: the proxy decision is only made for plaintext.
+
+THE HOST RATHER THAN T, so that the recorded verdict cannot be read against a URL it was not
+about: PROXY-ARGUMENTS grants nothing unless the host it is given matches (the review of #1134)."
   ;; CONTROL CHARACTERS ARE REFUSED FIRST, before the value is parsed. A newline in a URL is the
   ;; shape of a header injection -- "http://127.0.0.1/x\nHost: evil.example" -- and although the
   ;; credential would still have gone only to the local host, a value that cannot appear in a URL
@@ -214,7 +217,7 @@ PROXY-ARGUMENTS: the proxy decision is only made for plaintext."
       ;; THE SECOND VALUE IS READ OFF THE BRANCH ABOVE rather than resolved again. Reaching here
       ;; with an http scheme means LOCAL-HOST-P said yes, since the only other way out of that
       ;; branch is a refusal (#1091).
-      (setf approved-local (and scheme (string-equal scheme "http") t)))
+      (setf approved-local (and scheme (string-equal scheme "http") host)))
     (values uri approved-local)))
 
 (defparameter *send-connect-timeout* 10

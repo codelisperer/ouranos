@@ -2143,3 +2143,66 @@ is unreachable would pass for the wrong reason."
     ;; 6to4 is not local, so it is not exempted either.
     (is (eq :not-passed (proxy-arg "http://2002:7f00:1::/x"))
         "a 6to4 address is not local, so its request is not exempted")))
+
+(test an-approval-exempts-only-its-own-host-and-follows-no-redirect
+  "The review of #1134, which found two ways the recorded approval reached a request it was not
+about.
+
+THE APPROVAL IS A HOST, NOT A BOOLEAN. As a boolean it said only that something had been
+approved, which is not a statement about the request being sent: a provider whose URL had moved
+on, or a verdict recorded for one host and read while another sat in the slot, exempted a request
+to a host nothing had approved. It now has to equal the URL's host.
+
+AN EXEMPTED REQUEST FOLLOWS NO REDIRECT. dexador follows a redirect to a DIFFERENT host by
+recursing with the same arguments and the same headers -- it prepends a new Host and keeps the
+rest, in the cross-host branch of its redirect handling in src/backend/usocket.lisp -- so a 307
+from the approved host to http://public.example/ would be fetched with :PROXY NIL AND with the
+Authorization header built for the approved host. That is the credential leaving the machine, not
+merely a proxy being skipped. The exemption is about a destination this machine reaches by
+itself, and a redirect leaves that destination, so :MAX-REDIRECTS 0 travels with it.
+
+THE LITERAL PATH KEEPS FOLLOWING REDIRECTS. It has the same hazard in principle -- a 307 from
+127.0.0.1 can name a public host just as easily -- but the cause is dexador carrying headers
+across a cross-host redirect rather than anything about this rule, the literal rule is what every
+caller of this client gets, and following a redirect to a local server is behaviour this client
+documents and tests. Turning it off here broke REDIRECTS-CAN-BE-REFUSED-CAPPED-OR-FOLLOWED, which
+follows redirects against a test server at 127.0.0.1. APPROVED-LOCAL, by contrast, is passed only
+by a configuration step about to send a credential, and none of those callers follows redirects."
+  ;; The host has to match.
+  (is (null (http:proxy-arguments "http://other.invalid/x" :approved-local "approved.invalid"))
+      "an approval for one host does not exempt a request to another")
+  (is (equal '(:proxy nil :max-redirects 0)
+             (http:proxy-arguments "http://approved.invalid/x" :approved-local "approved.invalid"))
+      "and does exempt its own host, with redirects off")
+  (is (null (http:proxy-arguments "https://approved.invalid/x" :approved-local "approved.invalid"))
+      "https is never exempted, approval or not")
+  ;; A boolean is not a host, so the old shape grants nothing rather than everything.
+  (is (null (http:proxy-arguments "http://approved.invalid/x" :approved-local t))
+      "T is not a host and grants no exemption")
+  ;; And what a request actually hands dexador.
+  (flet ((args (url &key approved-local)
+           (http::%dex-args (http:make-request :method :get :url url
+                                               :follow-redirects 5
+                                               :approved-local approved-local))))
+    (let ((exempt (args "http://approved.invalid/x" :approved-local "approved.invalid"))
+          (literal (args "http://127.0.0.1:9000/x"))
+          (ordinary (args "http://public.invalid/x"))
+          (mismatched (args "http://other.invalid/x" :approved-local "approved.invalid")))
+      (is (eql 0 (getf exempt :max-redirects))
+          "an exempted request is given :max-redirects 0: ~S" exempt)
+      (is (= 1 (count :max-redirects exempt))
+          ":max-redirects is passed once, so the value cannot depend on argument order: ~S"
+          exempt)
+      (is (eql 5 (getf literal :max-redirects))
+          "while one exempted by an IP literal still follows redirects: ~S" literal)
+      (is (equal '(:proxy nil) (http:proxy-arguments "http://127.0.0.1:9000/x"))
+          "the literal rule exempts the proxy and says nothing about redirects")
+      ;; The controls: a request that is not exempt keeps the redirect budget it asked for.
+      (is (eql 5 (getf ordinary :max-redirects))
+          "control: an ordinary request still follows redirects: ~S" ordinary)
+      (is-false (member :proxy ordinary)
+                "control: and is not given :proxy at all: ~S" ordinary)
+      (is (eql 5 (getf mismatched :max-redirects))
+          "control: a mismatched approval changes neither argument: ~S" mismatched)
+      (is-false (member :proxy mismatched)
+                "control: and leaves the proxy alone: ~S" mismatched))))

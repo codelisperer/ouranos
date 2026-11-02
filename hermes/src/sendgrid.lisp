@@ -26,7 +26,9 @@ once because the docstring explaining that quoted the marker it was describing (
    (endpoint-approved-local
     :initform nil :reader sendgrid-endpoint-approved-local
     :documentation
-    "Whether ENDPOINT's host was resolved and approved as LOCAL by the check that runs when this
+    "THE HOST of ENDPOINT, when the check that runs when this provider is initialized resolved it and
+approved it as local, and NIL otherwise. A host rather than T, so that PROXY-ARGUMENTS can refuse
+to apply it to a request for any other host (the review of #1134). It says that
 provider is initialized, so a plaintext send is not handed to a proxy (#1091). NO INITARG, for
 the reason TWILIO-API-BASE-APPROVED-LOCAL gives: a caller that could pass it could assert that a
 public host had been approved.")
@@ -42,19 +44,47 @@ $SENDGRID_API_KEY. CONNECT-TIMEOUT and READ-TIMEOUT are seconds and default from
 AION/HTTP-CLIENT passes a timeout to dexador only when one is set, so NIL leaves dexador's own
 default of ten seconds in force. There is no way from here to ask for an unlimited wait."))
 
-(defmethod shared-initialize :after ((p sendgrid) slot-names &rest initargs &key &allow-other-keys)
-  "Check the configured URL on EVERY initialization, not only the first.
+(defmethod shared-initialize :around ((p sendgrid) slot-names &rest initargs
+                                     &key &allow-other-keys)
+  "Check the endpoint BEFORE the slot is assigned, on every initialization (#1129).
 
-SHARED-INITIALIZE AND NOT INITIALIZE-INSTANCE. The check used to hang off
-INITIALIZE-INSTANCE :AFTER, which REINITIALIZE-INSTANCE does not call, so
+:AROUND AND NOT :AFTER. An :AFTER method runs once the slots have been assigned, so a refused
+REINITIALIZE-INSTANCE signalled the error and left the refused URL in the slot. Measured at
+7ca13e23:
 
-  (reinitialize-instance (make-instance 'hermes::sendgrid ...) :endpoint \"http://evil.example/x\")
+  (let ((p (make-sendgrid :api-key \"SG.x\")))
+    (handler-case (reinitialize-instance p :endpoint \"http://evil.example/x\") (error () nil))
+    (sendgrid-endpoint p))   =>  \"http://evil.example/x\"
 
-was accepted and the next send carried the credential there in plaintext. SHARED-INITIALIZE runs
-for both, so there is no second door (the review of #1104)."
-  (declare (ignore slot-names initargs))
-  (setf (slot-value p 'endpoint-approved-local)
-        (%check-endpoint (sendgrid-endpoint p))))
+A caller that handled the refusal and carried on then sent the API key to the refused URL, and
+nothing checked it again. Checking here, before CALL-NEXT-METHOD assigns anything, means a
+refusal leaves the provider exactly as it was (found by Copilot's review of #1126, filed as
+#1129).
+
+WHICH VALUE IS CHECKED is the value that will be in effect: the initarg when one was supplied,
+otherwise the slot's current value when it has one -- a REINITIALIZE-INSTANCE that does not touch
+the endpoint still re-checks it, which is what #1104 established -- and otherwise the default,
+which is not readable from the slot yet because MAKE-INSTANCE has assigned nothing at this point.
+
+THE VERDICT IS STORED AFTER CALL-NEXT-METHOD, not before, because the slot filling would
+overwrite it from the initform. It is stored on every initialization, including one that moves
+the endpoint from a local name back to an https host, so it cannot go stale and claim an approval
+that belongs to a URL the provider no longer has (#1091)."
+  (declare (ignore slot-names))
+  ;; CLEARED BEFORE ANYTHING IS ASSIGNED. If the check refuses, nothing below runs and the
+  ;; provider keeps the URL and the verdict it already had; but if CALL-NEXT-METHOD itself fails
+  ;; part-way, after the URL slot has been assigned, the old verdict must not be left standing
+  ;; beside a URL it was not about. NIL is the safe value: it means the request is proxied
+  ;; normally (the review of #1134).
+  (setf (slot-value p 'endpoint-approved-local) nil)
+  (let* ((missing '#:missing)
+         (supplied (getf initargs :endpoint missing))
+         (value (cond ((not (eq supplied missing)) supplied)
+                      ((slot-boundp p 'endpoint) (sendgrid-endpoint p))
+                      (t +sendgrid-endpoint-default+)))
+         (approved-local (%check-endpoint value)))
+    (prog1 (call-next-method)
+      (setf (slot-value p 'endpoint-approved-local) approved-local))))
 
 (defun %check-endpoint (endpoint)
   "Signal CONFIGURATION-ERROR unless ENDPOINT is a URL a SendGrid request may carry the API key

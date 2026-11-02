@@ -33,7 +33,7 @@
            #:request-method #:request-url #:request-headers #:request-content
            #:request-connect-timeout #:request-read-timeout
            #:request-follow-redirects #:request-max-body-bytes
-           #:request-connect-address #:request-ca-path #:request-approved-local
+           #:request-connect-address #:request-ca-path
            #:response #:make-response #:response-p
            #:response-status #:response-headers #:response-body #:response-bytes
            #:responsep

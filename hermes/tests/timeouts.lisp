@@ -406,14 +406,16 @@ value reaches the send at all."
            (let ((twilio (hermes::make-twilio :account-sid "ACtest" :auth-token "t"
                                               :from "+15005550006"
                                               :api-base "http://provider.invalid:4010/2010-04-01")))
-             (is-true (hermes::twilio-api-base-approved-local twilio)
-                      "twilio recorded that its api-base was approved as local")
+             (is (equal "provider.invalid" (hermes::twilio-api-base-approved-local twilio))
+                 "twilio recorded the HOST it approved: ~S"
+                 (hermes::twilio-api-base-approved-local twilio))
              (ignore-errors (h:deliver twilio (%an-sms))))
            (let ((sendgrid (hermes::make-sendgrid
                             :api-key "SG.test"
                             :endpoint "http://provider.invalid:4010/v3/mail/send")))
-             (is-true (hermes::sendgrid-endpoint-approved-local sendgrid)
-                      "sendgrid recorded that its endpoint was approved as local")
+             (is (equal "provider.invalid" (hermes::sendgrid-endpoint-approved-local sendgrid))
+                 "sendgrid recorded the HOST it approved: ~S"
+                 (hermes::sendgrid-endpoint-approved-local sendgrid))
              (ignore-errors (h:deliver sendgrid (%an-email))))
            ;; The controls: the real https endpoints, whose hosts are never resolved by the
            ;; check and must keep whatever proxy is configured.
@@ -433,3 +435,39 @@ value reaches the send at all."
           "twilio's https send keeps whatever proxy is configured: ~S" (third calls))
       (is (eq :none (second (fourth calls)))
           "and so does sendgrid's: ~S" (fourth calls)))))
+
+(test a-refused-url-leaves-the-provider-as-it-was
+  "#1129, found by Copilot's review of #1126. The check hung off SHARED-INITIALIZE :AFTER, which
+runs once the slots have been assigned, so a refused REINITIALIZE-INSTANCE signalled the error
+and LEFT THE REFUSED URL IN THE SLOT. Measured at 7ca13e23:
+
+  (let ((p (make-sendgrid :api-key \"SG.x\")))
+    (handler-case (reinitialize-instance p :endpoint \"http://evil.example/x\") (error () nil))
+    (sendgrid-endpoint p))   =>  \"http://evil.example/x\"
+
+A caller that handled the refusal and carried on then sent the API key there, and nothing checked
+it again. #1104 had already moved the check from INITIALIZE-INSTANCE to SHARED-INITIALIZE so that
+REINITIALIZE-INSTANCE could not skip it; this is the door next to that one, where the check runs
+but the assignment has already happened.
+
+The check is in an :AROUND method now, before CALL-NEXT-METHOD assigns anything."
+  (dolist (case (list (list (hermes::make-sendgrid :api-key "SG.x")
+                            :endpoint #'hermes::sendgrid-endpoint
+                            #'hermes::sendgrid-endpoint-approved-local)
+                      (list (hermes::make-twilio :account-sid "ACx" :auth-token "t"
+                                                 :from "+15005550006")
+                            :api-base #'hermes::twilio-api-base
+                            #'hermes::twilio-api-base-approved-local)))
+    (destructuring-bind (provider key reader verdict) case
+      (let ((before (funcall reader provider)))
+        (signals h:configuration-error
+          (reinitialize-instance provider key "http://evil.example/x"))
+        (is (equal before (funcall reader provider))
+            "~S keeps its URL after a refusal: ~S" (type-of provider) (funcall reader provider))
+        (is-false (funcall verdict provider)
+                  "and claims no local approval: ~S" (funcall verdict provider))
+        ;; The control: a URL the check accepts DOES move, so the assertion above is about the
+        ;; refusal and not about REINITIALIZE-INSTANCE being unable to change the slot.
+        (reinitialize-instance provider key "https://accepted.example/v1")
+        (is (equal "https://accepted.example/v1" (funcall reader provider))
+            "control: an accepted URL replaces it: ~S" (funcall reader provider))))))

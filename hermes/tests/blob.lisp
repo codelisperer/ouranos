@@ -2581,10 +2581,14 @@ The store now records the verdict its configuration check already reached, and %
 it. The assertion is on WHAT DEXADOR IS GIVEN, not on what a request returns: a fixture whose
 proxy is unreachable would pass for the wrong reason.
 
-THE THIRD CASE IS THE ONE THAT IS EASY TO GET WRONG. A code-supplied :SECURE NIL is not checked
-for locality at all -- %SECURE-SETTING returns at its first branch -- so there is no verdict to
-carry, and the proxy stays. Inferring the verdict from `the store is plaintext' would have been
-the obvious implementation and would have claimed an approval that never happened."
+THE VERDICT IS ABOUT THE ENDPOINT, NOT ABOUT HOW PLAINTEXT WAS CHOSEN. It is recomputed in
+SHARED-INITIALIZE from the endpoint the store actually has, so a code-supplied :SECURE NIL at a
+local name is exempted as well, even though %SECURE-SETTING does not check locality on that path.
+That is a change from the first version of this fix, which recorded the verdict inside
+%SECURE-SETTING and so recorded nothing for a code-supplied :SECURE NIL; moving the computation
+out of that function to close a worse hole -- the slot's initarg -- made the two paths agree
+(the review of #1134). What is still not exempted is a plaintext store whose endpoint is not
+local, which is the third case below."
   (let ((seen '())
         (original-request (fdefinition 'dex:request))
         (original-resolve (fdefinition 'http:resolve-host)))
@@ -2604,15 +2608,18 @@ the obvious implementation and would have claimed an approval that never happene
            (with-environment-variable ("MNEMOSYNE_S3_SECURE" "false")
              (let ((store (b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x"
                                            :endpoint "minio.invalid:9000" :path-style t)))
-               (is-true (hermes/blob::s3-endpoint-approved-local store)
-                        "the store recorded that its endpoint was approved as local")
+               (is (equal "minio.invalid" (hermes/blob::s3-endpoint-approved-local store))
+                   "the store recorded the HOST it approved, not just that it approved one")
                (ignore-errors (b:get-blob store "bkt" "k"))))
-           ;; A code-supplied :SECURE NIL: nothing resolved the endpoint, so nothing approved it.
+           ;; A code-supplied :SECURE NIL at a PUBLIC name. %SECURE-SETTING allows it -- that is
+           ;; the #124 workaround, a deliberate choice written by whoever owns the code -- but
+           ;; the endpoint is not local, so there is no approval and the proxy stays.
            (let ((store (b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x"
-                                         :endpoint "minio.invalid:9000" :path-style t
+                                         :endpoint "public.invalid:9000" :path-style t
                                          :secure nil)))
              (is-false (hermes/blob::s3-endpoint-approved-local store)
-                       "an unchecked :secure nil records no approval")
+                       "a plaintext store at a public endpoint records no approval: ~S"
+                       (hermes/blob::s3-endpoint-approved-local store))
              (ignore-errors (b:get-blob store "bkt" "k")))
            ;; And an ordinary secure store at the same name.
            (let ((store (b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x"
@@ -2625,7 +2632,46 @@ the obvious implementation and would have claimed an approval that never happene
       (is (equal '(:proxy nil) (second (first calls)))
           "the plaintext request to the approved NAME is sent with :proxy nil: ~S" (first calls))
       (is (eq :none (second (second calls)))
-          "a code-supplied :secure nil, which was never checked, keeps the proxy: ~S"
-          (second calls))
+          "a plaintext store at a public endpoint keeps the proxy: ~S" (second calls))
       (is (eq :none (second (third calls)))
           "and so does an https request to the same name: ~S" (third calls)))))
+
+(test a-store-cannot-be-handed-an-approval-it-did-not-earn
+  "The review of #1134. ENDPOINT-APPROVED-LOCAL had an initarg and S3-STORE is exported, so a
+caller could hand the slot a host of their choosing and have signed requests sent to a PUBLIC
+host in plaintext with :PROXY NIL -- the leak the slot exists to prevent. There is no initarg
+now, and the verdict is computed in SHARED-INITIALIZE on every initialization.
+
+Two doors, so two cases: asserting the approval through MAKE-INSTANCE, and keeping an earned one
+across a REINITIALIZE-INSTANCE that moves the endpoint somewhere it does not apply."
+  (let ((original-resolve (fdefinition 'http:resolve-host)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'http:resolve-host)
+                 (lambda (host)
+                   (if (string= host "minio.invalid")
+                       (funcall original-resolve "127.0.0.1")
+                       (funcall original-resolve host))))
+           ;; The slot cannot be set from outside at all: with no initarg, MAKE-INSTANCE's value
+           ;; is ignored, and the recomputation answers from the endpoint instead.
+           (let ((store (make-instance 'b:s3-store :endpoint "public.invalid:80" :secure nil
+                                       :path-style t :access-key "AKIAIOSFODNN7EXAMPLE"
+                                       :secret-key "x"
+                                       :endpoint-approved-local "public.invalid")))
+             (is-false (hermes/blob::s3-endpoint-approved-local store)
+                       "a caller-supplied approval for a public endpoint does not stick: ~S"
+                       (hermes/blob::s3-endpoint-approved-local store))
+             ;; The control, so the assertion above is not passing because the fixture cannot
+             ;; produce an approval at all.
+             (let ((earned (make-instance 'b:s3-store :endpoint "minio.invalid:9000" :secure nil
+                                          :path-style t :access-key "AKIAIOSFODNN7EXAMPLE"
+                                          :secret-key "x")))
+               (is (equal "minio.invalid" (hermes/blob::s3-endpoint-approved-local earned))
+                   "control: a local endpoint earns the approval with no initarg at all: ~S"
+                   (hermes/blob::s3-endpoint-approved-local earned))
+               ;; And moving the endpoint does not keep it.
+               (reinitialize-instance earned :endpoint "public.invalid:80")
+               (is-false (hermes/blob::s3-endpoint-approved-local earned)
+                         "a reinitialized endpoint drops the old approval: ~S"
+                         (hermes/blob::s3-endpoint-approved-local earned)))))
+      (setf (fdefinition 'http:resolve-host) original-resolve))))
