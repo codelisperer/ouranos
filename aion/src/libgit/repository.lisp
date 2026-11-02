@@ -90,10 +90,17 @@ REPOSITORY-CLOSED if it has been closed."
 /.git/ itself, and on Windows it cannot resolve the doubled separator a trailing one leaves
 (\"failed to resolve path 'C:/.../dir//.git/'\", #470's first Windows run). POSIX realpath
 accepts it, which is why macOS and Linux never showed this. A drive root such as C:\\ keeps
-its separator."
-  (let ((name (uiop:native-namestring (uiop:ensure-directory-pathname directory))))
+its separator. A string is a native name already and is used as it is: parsing it as a Lisp
+namestring dropped a backslash on Linux and macOS and read [ ] * ? as wildcard syntax (#1096). A
+pathname is given its native name directly, not through UIOP:ENSURE-DIRECTORY-PATHNAME, whose
+FILE-NAMESTRING escapes those same characters in the last name."
+  (let ((name (if (stringp directory)
+                  directory
+                  (uiop:native-namestring (translate-logical-pathname directory)))))
     (loop while (and (> (length name) 1)
-                     (member (char name (1- (length name))) '(#\/ #\\))
+                     ;; A backslash is a separator only on Windows; elsewhere a name can end in
+                     ;; one, and trimming it named the sibling without it (Copilot on #1101).
+                     (member (char name (1- (length name))) #+win32 '(#\/ #\\) #-win32 '(#\/))
                      (not (and (= (length name) 3) (char= (char name 1) #\:))))
           do (setf name (subseq name 0 (1- (length name)))))
     name))
@@ -109,7 +116,8 @@ does not exist, and return it open. On a directory that is already a repository,
 reinitialises it, which changes nothing that is already there."
   (ensure-loaded)
   (let ((path (%directory-namestring directory)))
-    (ensure-directories-exist (uiop:ensure-directory-pathname directory))
+    (ensure-directories-exist
+     (uiop:parse-native-namestring (concatenate 'string path #+win32 "\\" #-win32 "/")))
     (cffi:with-foreign-object (out :pointer)
       (%check "git_repository_init" (%repository-init out path 0))
       (%wrap out))))
@@ -156,7 +164,12 @@ run by another process would be overwritten by the copy from before it."
              (progn
                (%check "git_index_read" (%index-read index 0))
                (dolist (path paths)
-                 (if (probe-file (merge-pathnames path (repository-workdir repository)))
+                 ;; By native name: MERGE-PATHNAMES parses PATH and the working directory as
+                 ;; Lisp namestrings, so a[1].txt signalled a wild-pathname error and a working
+                 ;; directory with a backslash lost it (the hub's review of #1101). libgit2's
+                 ;; working directory always ends in /.
+                 (if (probe-file (uiop:parse-native-namestring
+                                  (concatenate 'string (repository-workdir repository) path)))
                      (%check "git_index_add_bypath" (%index-add-bypath index path))
                      (%check "git_index_remove_bypath" (%index-remove-bypath index path))))
                (%check "git_index_write" (%index-write index)))

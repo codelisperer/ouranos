@@ -81,7 +81,7 @@ quoted by QUOTE-WINDOWS-ARGUMENT and separated by one space."
 
 (defun %candidates (name)
   "NAME as given when it has an extension, otherwise NAME with .exe and then .com."
-  (if (pathname-type (pathname name))
+  (if (pathname-type (uiop:parse-native-namestring name))
       (list name)
       (list (concatenate 'string name ".exe") (concatenate 'string name ".com"))))
 
@@ -89,9 +89,11 @@ quoted by QUOTE-WINDOWS-ARGUMENT and separated by one space."
   "The native namestring of the .exe or .com file NAME names, or NIL. A NAME with a directory in
 it is looked for there. A bare NAME is looked for in each directory of PATH in turn. A NAME
 without an extension is tried with .exe and then .com. Batch files are not looked for, and a NAME
-that ends in .bat or .cmd is returned as it is found, for SPAWN-IN-JOB to refuse."
+that ends in .bat or .cmd is returned as it is found, for SPAWN-IN-JOB to refuse. NAME and
+each directory of PATH are native names, not Lisp namestrings, so [ ] in them are ordinary
+characters."
   (flet ((existing (candidate)
-           (let ((found (probe-file candidate)))
+           (let ((found (probe-file (uiop:parse-native-namestring candidate))))
              (and found
                   (pathname-name found)
                   (or (%executable-type-p (pathname-type found))
@@ -239,6 +241,14 @@ string followed by a NUL, and one more NUL at the end. Freed with CFFI:FOREIGN-S
    (format nil "~{~A~C~}" (loop for e in environment collect e collect (code-char 0)))
    :encoding :utf-16le))
 
+(defun %native-name (path)
+  "PATH as Windows takes it. A string is a native name already and is returned as it is; parsing it
+as a Lisp namestring reads [ ] * ? as wildcard syntax, so a folder named a[1] named nothing
+(#1096). A pathname is given its native name, after any logical-pathname translation."
+  (if (stringp path)
+      path
+      (uiop:native-namestring (translate-logical-pathname path))))
+
 (defun spawn-in-job (program arguments &key environment directory
                                             (input nil) (output nil) (error nil)
                                             (element-type :default)
@@ -252,6 +262,8 @@ or the condition JOB-FUNCTION signalled when IF-NO-JOB is :CONTINUE.
 PROGRAM is found by FIND-EXECUTABLE. PROCESS-NOT-STARTED is signalled when it is not found or is
 a batch file. ENVIRONMENT is a list of \"NAME=VALUE\" strings that replaces this image's
 environment, or NIL to inherit it. DIRECTORY is the working directory, or NIL for this image's.
+A string given as DIRECTORY or as ERROR is taken as a native name and not parsed as a Lisp
+namestring.
 
 INPUT and OUTPUT are :STREAM, for a pipe whose other end becomes JOB-PROCESS-INPUT or
 JOB-PROCESS-OUTPUT, or NIL, for the NUL device. ERROR is :STREAM, NIL, or a pathname or string
@@ -268,7 +280,7 @@ When IF-NO-JOB is :CONTINUE, the process runs outside any job."
          (parent-ends (list :input nil :output nil :error nil))
          (process nil) (job nil) (job-error nil) (thread nil)
          (done nil))
-    (when (%batch-type-p (pathname-type (pathname path)))
+    (when (%batch-type-p (pathname-type (uiop:parse-native-namestring path)))
       (cl:error 'process-not-started :program program :reason :batch-file))
     (flet ((pipe (slot child-reads)
              (multiple-value-bind (r w) (sb-unix:unix-pipe)
@@ -280,7 +292,7 @@ When IF-NO-JOB is :CONTINUE, the process runs outside any job."
                  child)))
            (nul (access) (let ((h (%open-inheritable "NUL" access))) (push h child-ends) h))
            (file (spec)
-             (let ((h (%open-inheritable (uiop:native-namestring (pathname spec))
+             (let ((h (%open-inheritable (%native-name spec)
                                          ffi:+file-append-data+)))
                (push h child-ends)
                h)))
@@ -346,7 +358,7 @@ HANDLE of its main thread."
           (command (cffi:foreign-string-alloc command-line :encoding :utf-16le))
           (app (lisp-to-wide-string path))
           (env (and environment (%environment-block environment)))
-          (cwd (and directory (lisp-to-wide-string (uiop:native-namestring directory)))))
+          (cwd (and directory (lisp-to-wide-string (%native-name directory)))))
       (unwind-protect
            (progn
              (check-win32 (ffi:initialize-proc-thread-attribute-list attributes 1 0 size)
