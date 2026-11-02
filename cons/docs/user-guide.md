@@ -140,6 +140,13 @@ function and is not counted either. `defparameter`, `defvar`, `defstruct` and `d
 checked, because SBCL signals nothing when they are repeated in another file. Without
 `--strict`, `cons build` and `cons test` do not count these.
 
+Only a definition that the same build made is counted as replaced. An image that has built
+the project before, such as `bin/cons` or a REPL, still holds the earlier build's definitions,
+so after you move a function from one file to another, the next build in that image is not
+failed for replacing the old copy. The check also applies when an app has set
+`uiop:*uninteresting-conditions*` to `uiop:*usual-uninteresting-conditions*`, which lists these
+warnings: the strict load leaves them out of that list while it runs.
+
 **Still ahead:** dependency management — `cons add`, Quicklisp/ocicl backends, a native
 resolver + lockfiles (see
 [`docs/wiki/Framework-Cons.md`](../../docs/wiki/Framework-Cons.md), the dependency-source

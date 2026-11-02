@@ -21,7 +21,10 @@ its tag.
   of definition, its name and both files. An app whose strict CI build passed before can fail
   now; rename one of the two definitions, or delete the one that is not meant to be used. A
   file loaded twice, a library outside the project, and a method on other specializers are not
-  counted. Without `--strict` nothing changes. The tree's own gate (`verify-tree.lisp`,
+  counted, and neither is a definition left in the image by an earlier build, as in a REPL
+  after a function moved files. Setting `uiop:*uninteresting-conditions*` to
+  `uiop:*usual-uninteresting-conditions*` does not hide it. Without `--strict` nothing changes.
+  The tree's own gate (`verify-tree.lisp`,
   `check-compile.lisp`, through `scripts/redefinitions.lisp`) already failed a cross-file
   `defun` (#577) and now fails the other three kinds as well.
 

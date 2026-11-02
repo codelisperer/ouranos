@@ -115,12 +115,8 @@ under one of the directories ROOTS: (values KIND NAME NEW-FILE OLD-FILE), KIND a
                    (%under-roots-p old roots) (%under-roots-p new roots))
           (values kind name new old))))))
 
-(defun call-reporting-redefinitions (thunk &optional roots)
-  "Call THUNK. Each time a DEFUN, DEFMACRO, DEFGENERIC or DEFMETHOD replaces a definition from a
-different source file, both files under one of the directories ROOTS, print one line to standard
-output: +MARKER+, the kind of definition, its name with its package, then the new and the old
-source file. The line is printed as it happens, so it is in the output even if THUNK then fails.
-The redefinition itself goes ahead, as it would without this."
+(defun %call-reporting-redefinitions (thunk roots)
+  "CALL-REPORTING-REDEFINITIONS, once UIOP's lists are bound."
   (handler-bind ((sb-kernel:redefinition-warning
                    (lambda (c)
                      (multiple-value-bind (kind name new old) (cross-file-redefinition c roots)
@@ -130,6 +126,27 @@ The redefinition itself goes ahead, as it would without this."
                                    name (uiop:native-namestring new) (uiop:native-namestring old)))
                          (finish-output *standard-output*))))))
     (funcall thunk)))
+
+(defun call-reporting-redefinitions (thunk &optional roots)
+  "Call THUNK. Each time a DEFUN, DEFMACRO, DEFGENERIC or DEFMETHOD replaces a definition from a
+different source file, both files under one of the directories ROOTS, print one line to standard
+output: +MARKER+, the kind of definition, its name with its package, then the new and the old
+source file. The line is printed as it happens, so it is in the output even if THUNK then fails.
+The redefinition itself goes ahead, as it would without this.
+
+UIOP's lists of conditions ASDF muffles are bound without the redefinition warnings while THUNK
+runs. UIOP:*USUAL-UNINTERESTING-CONDITIONS* holds them, and when UIOP:*UNINTERESTING-CONDITIONS*
+is set to it, ASDF's own handlers muffle each redefinition before this handler sees it (#1121)."
+  (progv '(uiop:*uninteresting-conditions* uiop:*uninteresting-compiler-conditions*
+           uiop:*uninteresting-loader-conditions*)
+      (mapcar (lambda (list)
+                (remove-if (lambda (c)
+                             (and c (symbolp c)
+                                  (ignore-errors (subtypep c 'sb-kernel:redefinition-warning))))
+                           list))
+              (list uiop:*uninteresting-conditions* uiop:*uninteresting-compiler-conditions*
+                    uiop:*uninteresting-loader-conditions*))
+    (%call-reporting-redefinitions thunk roots)))
 
 (defparameter *this-file* (or *load-truename* *load-pathname*)
   "Where this file was loaded from, for WRAP-FORM, which is called after loading has finished.")

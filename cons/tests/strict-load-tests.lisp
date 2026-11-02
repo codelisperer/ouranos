@@ -458,6 +458,99 @@ the file compiles and once when it loads. Neither is a definition from another f
       (is (eql 0 code) "a file loaded twice must pass cons --strict build, got ~A:~%~A"
           code out))))
 
+;;; The review of #1128 found two ways the check could be wrong in a real image. These run
+;;; their forms in one child image, so that one image builds more than once, or has a setting
+;;; an app made, as a REPL or bin/cons would.
+
+(defun %forms-in-child (dir forms)
+  "Run FORMS, strings, in order in a child SBCL that has loaded cons from this tree, with DIR
+and this tree in its source registry. Returns (values EXIT-CODE OUTPUT)."
+  (flet ((tree-entry (d) (format nil "~A//" (string-right-trim "/" (namestring (truename d))))))
+    (let* ((tree (uiop:pathname-parent-directory-pathname (asdf:system-source-directory :cons)))
+           (sep (if (uiop:os-windows-p) ";" ":"))
+           (registry (format nil "~A~A~A~A" (tree-entry dir) sep (tree-entry tree) sep)))
+      (multiple-value-bind (out err code)
+          (uiop:run-program
+           (append (list (uiop:native-namestring sb-ext:*runtime-pathname*)
+                         "--noinform" "--no-userinit" "--no-sysinit" "--non-interactive"
+                         "--eval" "(require :asdf)"
+                         "--eval" (format nil "(load ~S)"
+                                          (uiop:native-namestring
+                                           (merge-pathnames "quicklisp/setup.lisp"
+                                                            (user-homedir-pathname))))
+                         "--eval" "(let ((*standard-output* (make-broadcast-stream))) (asdf:load-system :cons))")
+                   (loop for f in forms append (list "--eval" f)))
+           :output :string :error-output :output :ignore-error-status t :directory dir
+           :environment (cons (format nil "CL_SOURCE_REGISTRY=~A" registry)
+                              (remove-if (lambda (e) (uiop:string-prefix-p "CL_SOURCE_REGISTRY=" e))
+                                         (sb-ext:posix-environ))))
+        (declare (ignore err))
+        (values code out)))))
+
+(defun %strict-build-form (label name dir)
+  "A form, as a string, that loads NAME from DIR strictly, as `cons --strict build' does, and
+prints LABEL followed by `ok' or by `failed:' and the error."
+  (format nil "(handler-case (progn (cons/run:load-system-strictly ~S ~S :force-own t) (format t \"~~&~A ok~~%\")) (error (e) (format t \"~~&~A failed: ~~A~~%\" e)))"
+          name (uiop:native-namestring dir) label label))
+
+(defun %write-form (dir file text)
+  "A form, as a string, that replaces FILE in DIR with TEXT."
+  (format nil "(with-open-file (out ~S :direction :output :if-exists :supersede) (write-string ~S out))"
+          (uiop:native-namestring (merge-pathnames file dir)) text))
+
+(test a-function-moved-to-another-file-passes-a-second-strict-build-in-one-image
+  "Review of #1128: an image that has built the project once holds its definitions with the
+files they came from. When HELPER then moves from a.lisp to b.lisp, the next strict build in
+that image replaced the earlier build's HELPER from a.lisp and failed, although no file of the
+project defines it twice. That is the state of bin/cons for cons's own code, or of a REPL. It
+now passes. The control, a third build in the same image with HELPER in both files, fails."
+  (%with-two-file-cons-project (dir name "(defun helper () 1)" "(defun other () 2)")
+    (let* ((package (string-upcase name))
+           (head (format nil "(defpackage ~S (:use #:cl))~%(in-package ~S)~%" package package))
+           (b-head (format nil "(in-package ~S)~%" package)))
+      (multiple-value-bind (code out)
+          (%forms-in-child
+           dir
+           (list (%strict-build-form "FIRST" name dir)
+                 (%write-form dir "a.lisp" head)
+                 (%write-form dir "b.lisp" (format nil "~A(defun other () 2)~%(defun helper () 1)~%"
+                                                   b-head))
+                 (%strict-build-form "MOVED" name dir)
+                 (%write-form dir "a.lisp" (format nil "~A(defun helper () 1)~%" head))
+                 (%strict-build-form "BOTH" name dir)))
+        (is (eql 0 code) "the child exited ~A:~%~A" code out)
+        (is (search "FIRST ok" out) "the first build:~%~A" out)
+        (is (search "MOVED ok" out) "the build after the move:~%~A" out)
+        (is (search "BOTH failed:" out) "control: both files define HELPER:~%~A" out)
+        (is (search (format nil "defun ~A::HELPER in " package) out)
+            "control: the error names the definition:~%~A" out)))))
+
+(test the-usual-uninteresting-conditions-do-not-hide-a-redefinition
+  "Review of #1128: UIOP:*USUAL-UNINTERESTING-CONDITIONS* lists the redefinition warnings, and
+an app that sets UIOP:*UNINTERESTING-CONDITIONS* to it made ASDF muffle every one before the
+strict loader or the gate's check saw it. Both now bind the list without them. The child sets
+the muffle, then runs a strict build and the gate's CALL-REPORTING-REDEFINITIONS on fresh
+copies of a project whose two files both define HELPER."
+  (%with-two-file-cons-project (dir name "(defun helper () 1)" "(defun helper () 2)")
+    (let ((script (uiop:native-namestring
+                   (merge-pathnames "scripts/redefinitions.lisp"
+                                    (uiop:pathname-parent-directory-pathname
+                                     (asdf:system-source-directory :cons))))))
+      (multiple-value-bind (code out)
+          (%forms-in-child
+           dir
+           (list "(setf uiop:*uninteresting-conditions* uiop:*usual-uninteresting-conditions*)"
+                 (%strict-build-form "STRICT" name dir)
+                 (format nil "(load ~S)" script)
+                 ;; The gate's check, with a fresh compile so that the definitions are made
+                 ;; again under it, and with DIR as the root its files must be under.
+                 (format nil "(ouranos-redefinitions:call-reporting-redefinitions (lambda () (asdf:load-system ~S :force t)) (list ~S))"
+                         name (uiop:native-namestring dir))))
+        (is (eql 0 code) "the child exited ~A:~%~A" code out)
+        (is (search "STRICT failed:" out) "the strict build passed under the muffle:~%~A" out)
+        (is (search "OURANOS-REDEFINED defun " out)
+            "the gate's check reported nothing under the muffle:~%~A" out)))))
+
 ;;; --- #960: --strict and the targets it cannot judge, and fasls written outside cons --------
 
 (test the-targets-strict-cannot-judge-are-the-ones-that-load-nothing
