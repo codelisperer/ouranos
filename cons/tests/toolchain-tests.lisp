@@ -359,3 +359,43 @@ directory, which suggests the rebuild."
   ;; through the real diagnosis must be silent -- otherwise every cons command is about to
   ;; start printing at the user.
   (is (null (cons/toolchain:diagnose (cons/toolchain:facts)))))
+
+;;; --- which targets a fatal finding refuses (#1110) ------------------------
+
+(test a-fatal-finding-refuses-only-work-that-runs-in-cons-s-own-image
+  "#1110: the refusal follows where the runner sends the work, not the --fresh flag alone. A Lisp
+target with :isolate, or any Lisp target with --fresh, runs in a subprocess and is not refused,
+and neither is an :sh target. A plain Lisp target is refused, and so is a :steps target, with or
+without --fresh, because cons performs its steps in its own image; the refusal names each step
+that would. A REPL target is refused too, since --fresh does not send it to a subprocess. With
+no fatal finding nothing is refused, and an unknown target is left for RUN to report."
+  (let ((spec (cons/spec:install-spec
+               "refusal"
+               '(:system "refusal"
+                 :targets
+                 ((plain :load "refusal")
+                  (iso :load "refusal" :isolate t)
+                  (shell :sh ("true"))
+                  (repl :interactive t)
+                  (all :steps (shell plain iso))))))
+        (fatal (cons/toolchain:diagnose
+                (%facts :dumped-image-p t :runtime-version "2.6.8" :path-version "2.6.9"
+                        :contrib-version "2.6.9" :contrib-directory "/opt/sbcl/contrib/")))
+        (healthy (cons/toolchain:diagnose (%facts))))
+    (is (cons/toolchain:fatal-p fatal) "the fixture's finding must be fatal, or this tests nothing")
+    (flet ((refused (name &optional fresh)
+             (cons/run:toolchain-refusal spec name fatal :fresh fresh)))
+      (is (equal '("plain") (refused "plain")))
+      (is (null (refused "plain" t)) "--fresh sends a Lisp target to a subprocess")
+      (is (null (refused "iso")) ":isolate sends it to a subprocess without --fresh")
+      (is (null (refused "iso" t)))
+      (is (null (refused "shell")) "an :sh target runs a program")
+      (is (null (refused "shell" t)))
+      (is (equal '("repl") (refused "repl" t)) "--fresh does not send a REPL-only target away")
+      (is (equal '("plain" "iso") (refused "all"))
+          "the steps run in this image, :isolate or not: ~S" (refused "all"))
+      (is (equal '("plain" "iso") (refused "all" t))
+          "--fresh does not reach a :steps target's steps: ~S" (refused "all" t))
+      (is (null (refused "missing")) "an unknown target is RUN's to report"))
+    (is (null (cons/run:toolchain-refusal spec "plain" healthy))
+        "nothing is refused without a fatal finding")))

@@ -413,6 +413,22 @@ return -- it enters the REPL, which exits the process itself."
        (or (spec:target-load tgt) (spec:target-call tgt)
            (spec:target-test tgt) (spec:target-eval tgt))))
 
+(defun %in-subprocess-p (tgt fresh)
+  "True when RUN sends TGT's work to a subprocess sbcl: with FRESH or TGT's :isolate, for a target
+that does Lisp work. RUN and %IN-IMAGE-TARGETS both decide with this, so the toolchain guard in
+cons/cli refuses exactly what would run in cons's own image (#1110)."
+  (and (or fresh (spec:target-isolate tgt)) (%lisp-target-p tgt)))
+
+(defun %in-image-work-p (tgt)
+  "True when %PERFORM, given TGT, does Lisp work in the current image: TGT has no :SH and no
+:STEPS, which %PERFORM runs in place of everything else, and it loads, tests, calls, evaluates or
+enters a REPL."
+  (and (not (spec:target-sh tgt))
+       (not (spec:target-steps tgt))
+       (or (spec:target-load tgt) (spec:target-call tgt) (spec:target-test tgt)
+           (spec:target-eval tgt) (spec:target-interactive tgt))
+       t))
+
 (defun %steps-in-order (spec tgt &optional path)
   "TGT and every target its :STEPS run, depth first, each named once, as a list of targets.
 PATH is the chain of target names that led here. Signals an error naming the cycle when a step
@@ -459,6 +475,35 @@ judge (%UNJUDGED-TARGETS), naming each such target once and why."
                                (format nil "target ~(~A~) does its work with ~{:~(~A~)~^ and ~} and loads nothing with :load or :test"
                                        name clauses)))))))
 
+(defun %in-image-targets (spec name fresh)
+  "The names of the targets whose Lisp work running target NAME (a string) of SPEC, with FRESH,
+would do in cons's own image, in the order they run, each once. NIL when none would: an :sh
+target runs a program, and a Lisp target with FRESH or :isolate runs in a subprocess sbcl.
+
+The steps of a :steps target are performed in this image whatever FRESH and their own :isolate
+say, as %PERFORM runs them, so each step that does Lisp work is named. Signals, as RUN does, for
+an unknown target or a :steps cycle.
+
+TOOLCHAIN-REFUSAL refuses a target when this is not NIL (#1110)."
+  (let ((tgt (%require-target spec name)))
+    (unless (%in-subprocess-p tgt fresh)
+      (loop for target in (remove-duplicates (%steps-in-order spec tgt)
+                                             :key #'spec:target-name :from-end t)
+            when (%in-image-work-p target)
+              collect (string-downcase (string (spec:target-name target)))))))
+
+(defun toolchain-refusal (spec name findings &key fresh)
+  "When target NAME (a string) of SPEC must not run, given FINDINGS from CONS/TOOLCHAIN:CHECK:
+the names of the targets that would do Lisp work in cons's own image, as %IN-IMAGE-TARGETS
+gives them. NIL, so the target runs, when FINDINGS has nothing fatal or when nothing would run
+in this image. A fatal finding, such as contribs compiled by another SBCL (#701), is about this
+image only; a subprocess runs under the sbcl on PATH, whose contribs are its own.
+
+Also NIL for an unknown target or a :steps cycle, which RUN then reports without running
+anything. cons/cli calls this before RUN."
+  (and (cons/toolchain:fatal-p findings)
+       (ignore-errors (%in-image-targets spec name fresh))))
+
 (defun %load-env (spec)
   "Load the spec's :env files (relative to the spec dir) into the environment."
   (dolist (f (spec:spec-env spec))
@@ -487,7 +532,7 @@ fasl is seen; see LOAD-SYSTEM-STRICTLY."
         (cons/upstream:report)
         (%load-env spec)
         (uiop:quit
-         (if (and (or fresh (spec:target-isolate tgt)) (%lisp-target-p tgt))
+         (if (%in-subprocess-p tgt fresh)
              (%run-subprocess spec tgt pmap)
              ;; #701: a contrib that fails to load says why, before the error itself is
              ;; reported. Said once, since ASDF can signal the same failure more than once.

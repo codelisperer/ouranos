@@ -229,11 +229,14 @@ a fasl compiled by another version. `cons` refuses to run a target (#701):
 cons: this cons runs SBCL 2.6.8, but the contribs in C:\Program Files\SBCL\contrib\ were compiled by SBCL 2.6.9.
 cons: The SBCL install it was built from has been replaced. SBCL 2.6.8 cannot load another version's fasls, so the first REQUIRE of a contrib it did not bake in (sb-sprof, sb-simple-streams, ...) fails.
 cons: Rebuild: sbcl --dynamic-space-size 4096 --script bootstrap.lisp
-cons: not running build until the problem above is fixed.
+cons: not running build until the problem above is fixed, since build would run in cons's own image.
 ```
 
-The built-in commands (`cons version`, `cons help`, `cons setup`, ...) still run, and so does a
-`--fresh` target, which uses the `sbcl` on `PATH` and its own contribs.
+The built-in commands (`cons version`, `cons help`, `cons setup`, ...) still run. So does a target
+whose work runs in a subprocess, which uses the `sbcl` on `PATH` and its own contribs: a Lisp
+target run with `--fresh` or marked `:isolate t`, and an `:sh` target. A `:steps` target is
+refused when any of its steps does Lisp work, with or without `--fresh`, because `cons` performs
+the steps in its own image; the message names those steps.
 
 **When a contrib fails to load during a target** for any other reason, `cons` says where it
 loads contribs from before the error itself. With no SBCL home:

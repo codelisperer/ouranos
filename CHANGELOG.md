@@ -1211,16 +1211,21 @@ its tag.
   the version from the header of `sb-posix.fasl` there at startup. On a mismatch it prints both
   versions, the directory and the rebuild command
   (`sbcl --dynamic-space-size 4096 --script bootstrap.lisp`), then exits 1 before running the
-  target. The built-in commands (`cons version`, `cons help`, `cons setup`, …) and `--fresh`
-  targets still run. Any fatal toolchain finding now stops a target this way, including the
-  existing "contribs cannot be loaded" one. When a contrib fails to load during a target for any
+  target. The built-in commands (`cons version`, `cons help`, `cons setup`, …) still run, and so
+  does a target whose work runs in a subprocess `sbcl`, under the `sbcl` on `PATH`, whose
+  contribs are its own: a Lisp target run with `--fresh` or marked `:isolate t`, and an `:sh`
+  target. A `:steps` target is refused, with or without `--fresh`, when any of its steps does
+  Lisp work, because cons performs the steps in its own image; the refusal names those steps
+  (#1110). Any fatal toolchain finding now stops a target this way, including the existing
+  "contribs cannot be loaded" one. When a contrib fails to load during a target for any
   other reason, `cons` prints where it loads contribs from before the error, or, with no
   `SBCL_HOME`, that it can load only the contribs `bootstrap.lisp` baked in. The stale-image
   warning no longer says that a dumped image carries its own contribs, and says whether it
   could check the contribs on disk. To act: rebuild `bin/cons` after every SBCL upgrade, and on
   macOS or Linux export `SBCL_HOME` if a project needs a contrib `bootstrap.lisp` does not
   bake in. New exports from `cons/toolchain`: `fasl-header-version`, `contrib-version-in`,
-  `contrib-load-failure-p`, `contrib-failure-lines` and `explain-contrib-failure`.
+  `contrib-load-failure-p`, `contrib-failure-lines` and `explain-contrib-failure`; from
+  `cons/run`, `toolchain-refusal`, which decides whether a target is refused.
 
 ### Added
 
