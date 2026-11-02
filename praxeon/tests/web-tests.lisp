@@ -353,6 +353,23 @@ used to add nothing for it, so the page showed no count at all."
         "the ordinary link beside it must still render, or the test proves nothing: ~S" html)))
 
 ;;; --------------------------------------------------------------------------
+;;; The composer posts to the route its host names (#1117)
+;;; --------------------------------------------------------------------------
+
+(test the-composer-posts-to-the-action-it-is-given
+  "With no ACTION the composer posts to /api/message, the route praxeon/web serves; with one it
+posts there, escaped, and nowhere else."
+  (let ((default (praxeon/chat-ui:composer))
+        (custom (praxeon/chat-ui:composer :action "/docs/7/chat/message?a=1&b=2")))
+    (is (search "hx-post=\"/api/message\"" default) "the default route changed: ~S" default)
+    (is (search "hx-post=\"/docs/7/chat/message?a=1&amp;b=2\"" custom)
+        "the composer did not post to the given action: ~S" custom)
+    (is (null (search "/api/message" custom)) "the default route is still in the form: ~S" custom)
+    (is (search "disabled" (praxeon/chat-ui:composer :disabled t :action "/x"))
+        "DISABLED still applies with an action"))
+  (signals type-error (praxeon/chat-ui:composer :action nil)))
+
+;;; --------------------------------------------------------------------------
 ;;; A web turn logs with the request's context (#160)
 ;;; --------------------------------------------------------------------------
 ;;;
