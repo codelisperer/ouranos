@@ -45,6 +45,15 @@
 ;;;;
 ;;;; This is scripting, not framework: `cons desktop build` absorbs it (ADR-0007).
 
+;;; The contribs the app image carries; a contrib that does not load stops the build (#1099).
+;;; Before (require :asdf), because ASDF is a contrib too and is on the list; see
+;;; bake-contribs.lisp. Each re-exec'd child below runs this again, which takes a second.
+(load (merge-pathnames "bake-contribs.lisp"
+                       (make-pathname :name nil :type nil :version nil
+                                      :defaults (or *load-truename* *load-pathname*))))
+(funcall (read-from-string "ouranos-bake:bake-contribs-or-die")
+         "build-desktop-app" "the app image")
+
 (require :asdf)
 (load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
 (load (merge-pathnames "fs.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; aion/fs:delete-tree (#347)
@@ -598,10 +607,6 @@ a later step does: a resource update rewrites the file and drops an Authenticode
       (%finish-windows-bundle (%bundle-directory))
       (sb-ext:exit :code 0))))
 
-(dolist (contrib '(:sb-cltl2 :sb-bsd-sockets :sb-posix :sb-rotate-byte
-                   :sb-md5 :sb-introspect :sb-concurrency))
-  (ignore-errors (require contrib)))
-
 (load (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))
 
 (format t "~&build-desktop-app: loading ~A (first Coalton compile takes minutes)~%" *system*)
@@ -680,6 +685,10 @@ nothing."
                (uiop:copy-file source dst)
                (uiop:run-program (list "chmod" "+x" (namestring dst)) :ignore-error-status t)
                (format t "~&  carry     ~A  <- ~A~%" (file-namestring dst) (human-path:human-path source))
+               (handler-case (ouranos-carry:stamp-install-name dst) ; #957
+                 (ouranos-carry:carry-refused (e)
+                   (format *error-output* "~&build-desktop-app: ~A~%" e)
+                   (sb-ext:exit :code 3)))
                ;; Homebrew keeps the license at the formula prefix: <prefix>/lib/x.dylib
                ;; -> <prefix>/LICENSE*. We ship the code, so we ship the license.
                (let* ((prefix (uiop:pathname-parent-directory-pathname
@@ -720,6 +729,13 @@ nothing."
     (sb-ext:exit :code 3)))
 (ouranos-tree-natives:carry-native-libraries :already-carried *tree-carried*)
 (carry-runtime-linked-libraries)
+;; Each step above relinks only its own files. A library one step carried can need one another
+;; step carried, such as a --carry libarchive that links the runtime's libzstd, so the
+;; bundle's dylibs are relinked against each other once all three have run (#958's review).
+(handler-case (ouranos-carry:relink-bundle *bundle*)
+  (ouranos-carry:carry-refused (e)
+    (format *error-output* "~&build-desktop-app: ~A~%" e)
+    (sb-ext:exit :code 3)))
 (format t "~&~A~%" (ouranos-missing-natives:missing-summary (reverse *missing-natives*)))
 
 ;;; VERSION is what a fresh install reports before the app has ever run, and what the

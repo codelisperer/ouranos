@@ -288,6 +288,8 @@ directory, which suggests the rebuild."
                             (%facts :dumped-image-p t :contrib-directory "/sbcl/contrib/")
                             "Don't know how to REQUIRE SB-SPROF."))))
     (is (search "Export SBCL_HOME" no-home) "~A" no-home)
+    (is (search "SBCL_HOME is not set or has no contrib/ directory" no-home)
+        "an SBCL_HOME without contrib/ is ignored by SBCL, so the lines say so: ~A" no-home)
     (is (search "add the contrib to the list bootstrap.lisp bakes in" no-home))
     (is (not (search "Export SBCL_HOME" with-home)))
     (is (search "rebuild: sbcl" with-home))))

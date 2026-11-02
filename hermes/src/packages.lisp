@@ -27,7 +27,10 @@
                 #:http-error-phase #:http-error-retry-after
                 ;; To decide whether a plaintext API base names something only this machine or
                 ;; this network can reach (#1077).
-                #:address-category #:parse-address #:resolve-host)
+                #:address-category #:parse-address #:resolve-host
+                ;; The one rule for whether a host may be sent requests in the clear, and the
+                ;; host-from-a-URL reading it takes. Both used to be written here (#1082).
+                #:local-host-p #:url-host)
 (:documentation
    "Neutral email + SMS delivery -- hermes, the messenger. A PROVIDER delivers a neutral
     EMAIL or SMS via the DELIVER generic (CLOS multiple dispatch on provider + message), so
@@ -73,6 +76,9 @@
    ;; How long a send waits, and the per-provider readers for it (#1077).
    #:*send-connect-timeout* #:*send-read-timeout*
    #:sendgrid-connect-timeout #:sendgrid-read-timeout
+   ;; Readable since #1092, when the endpoint gained a check: an app that sets it should be able
+   ;; to read back what was accepted.
+   #:sendgrid-endpoint
    #:twilio-connect-timeout #:twilio-read-timeout #:twilio-api-base
    #:telegram-api-base #:facebook #:make-facebook #:facebook-app-id #:facebook-graph-base
    #:facebook-dialog-base #:dev-transport #:make-dev-transport

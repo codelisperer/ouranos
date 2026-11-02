@@ -45,6 +45,9 @@
                     ;; ADDRESS-CATEGORY and RESOLVE-HOST, to decide whether an endpoint a
                     ;; plaintext store is aimed at is one only this machine or network can
                     ;; reach (#970).
+                    ;; LOCAL-HOST-P and URL-HOST too since #1082: the rule for whether an
+                    ;; endpoint may be sent requests in the clear, and the host-from-a-URL
+                    ;; reading it takes, used to be written here and in hermes core both.
                     (#:http #:aion/http-client))
   (:documentation
    "The neutral blob-store protocol and its backends. Bytes live in object storage; rows
