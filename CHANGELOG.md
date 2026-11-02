@@ -1225,12 +1225,15 @@ its tag.
 ### Added
 
 - **aion/path: one function for the name the operating system takes for a path** (#1103). The new
-  system `aion/path` exports `native-name`, `directory-pathname`, `separator-p` and `separators`.
+  system `aion/path` exports `native-name`, `directory-pathname`, `separator-p`, `separators` and
+  `native-separator`, the separator written between parts: a backslash on Windows, `/` elsewhere.
   `native-name` returns a string unchanged and gives a pathname its `uiop:native-namestring`,
   after a logical pathname is translated; it refuses a wild pathname with an error, and anything
   else, `nil` included, with `type-error`. `directory-pathname` makes a directory pathname from a
   native string or a pathname without parsing the name as a Lisp namestring, which
-  `uiop:ensure-directory-pathname` does. aion/fs, aion/uv, aion/libgit and aion/windows each had
+  `uiop:ensure-directory-pathname` does. As with that function, an empty name, `""` or `#P""`,
+  gives the current folder, and on Windows a drive with nothing after it, such as `C:`, gives that
+  drive's current folder, not its root. aion/fs, aion/uv, aion/libgit and aion/windows each had
   their own copy of this rule and call `aion/path` now; `aion/uv:native-path` remains, and returns
   what `aion/path:native-name` does. `aion/path` needs only UIOP, so `scripts/fs.lisp` loads it
   before aion/fs.

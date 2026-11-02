@@ -166,8 +166,8 @@ drive with no separator: C:work names work in drive C's current folder, and C:\\
 C:'s root folder, so a separator there would name another folder (Copilot's review of #1109,
 #1111)."
   (let* ((root (min (%root-length path) (length path)))
-         (rest (string-right-trim (if (uiop:os-windows-p) "/\\" "/") (subseq path root)))
-         (joint (if (uiop:os-windows-p) "\\" "/"))
+         (rest (string-right-trim (path:separators) (subseq path root)))
+         (joint (path:native-separator))
          (so-far (subseq path 0 root))
          (chain '()))
     (dolist (component (split-path rest) (nreverse chain))
