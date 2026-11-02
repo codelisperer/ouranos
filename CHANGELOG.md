@@ -4166,6 +4166,24 @@ its tag.
   paragraph. Raw HTML inside a quote is still shown as text,
   and a `>` in code is still escaped once. Every klio page changes the same way.
 
+- **`bootstrap.lisp` and `scripts/build-desktop-app.lisp` stop when an SBCL contrib the image
+  must carry does not load** (#1099). Both loaded `sb-cltl2`, `sb-bsd-sockets`, `sb-posix`,
+  `sb-rotate-byte`, `sb-md5`, `sb-introspect` and `sb-concurrency` inside `ignore-errors`, so a
+  contrib that failed to load was left out of `bin/cons` or the app image without a message,
+  and the image failed much later at the first `require` of it, for example with
+  `Don't know how to REQUIRE sb-posix.` Now each one must load and appear on `*modules*`, or
+  the script exits 1 before dumping, naming each contrib, its error, the directory SBCL looked
+  in and `SBCL_HOME`. The list and the check are in the new `scripts/bake-contribs.lisp`. The
+  check runs before `(require :asdf)`, and `asdf` is on the list, because ASDF is a contrib
+  too: with the contrib directory wrong, the scripts used to stop at
+  `Don't know how to REQUIRE ASDF` before any check ran. When `SBCL_HOME` is set, the advice
+  says to unset or correct it. The messages and `cons/docs/user-guide.md` now say that SBCL
+  ignores an `SBCL_HOME` that has no `contrib/` directory, and the user guide lists the other
+  places SBCL looks, in order, under "Which contrib directory": the executable's directory, its
+  `../lib/sbcl/`, the current directory, and the target of a symbolic link to the executable.
+  The current directory matters: `bin/cons` run from a directory that holds `contrib/` takes
+  that directory as its SBCL home.
+
 ## v0.1.7 — 2026-09-30
 
 ### An app may have to act
