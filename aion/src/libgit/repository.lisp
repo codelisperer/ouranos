@@ -98,7 +98,9 @@ FILE-NAMESTRING escapes those same characters in the last name."
                   directory
                   (uiop:native-namestring (translate-logical-pathname directory)))))
     (loop while (and (> (length name) 1)
-                     (member (char name (1- (length name))) '(#\/ #\\))
+                     ;; A backslash is a separator only on Windows; elsewhere a name can end in
+                     ;; one, and trimming it named the sibling without it (Copilot on #1101).
+                     (member (char name (1- (length name))) #+win32 '(#\/ #\\) #-win32 '(#\/))
                      (not (and (= (length name) 3) (char= (char name 1) #\:))))
           do (setf name (subseq name 0 (1- (length name)))))
     name))

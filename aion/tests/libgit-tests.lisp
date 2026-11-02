@@ -838,10 +838,11 @@ smaller)."
 (test a-directory-given-as-a-native-string-is-the-one-used
   "#1096: a directory string was parsed as a Lisp namestring, which reads [ ] as wildcard syntax
 and, on Linux and macOS, drops a backslash."
-  (dolist (suffix (list "[1]" #-win32 (format nil "~Cx" #\\)))
+  (dolist (suffix (list "[1]" #-win32 (format nil "~Cx" #\\) #-win32 (format nil "y~C" #\\)))
     (let* ((sep #+win32 "\\" #-win32 "/")
            (dir (concatenate 'string (string-right-trim "/\\" (uiop:native-namestring (fresh-directory)))
                              suffix)))
+      (is (string= dir (git::%directory-namestring dir)) "~S reaches libgit2 as written" dir)
       (unwind-protect
            (progn
              (git:with-repository (repo (git:init-repository dir))
