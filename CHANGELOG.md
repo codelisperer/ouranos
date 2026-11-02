@@ -14,6 +14,20 @@ its tag.
 
 ### An app may have to act
 
+- **hermes/blob: an S3 endpoint that carries a user name or password is now refused when the
+  store is made** (#1089). `MNEMOSYNE_S3_ENDPOINT` values such as `user:pw@host` or
+  `[::1]@host` signal `blob-configuration-error`. An app that put userinfo in that variable has
+  to move it: S3 credentials belong in `MNEMOSYNE_S3_ACCESS_KEY` and
+  `MNEMOSYNE_S3_SECRET_KEY`.
+  **Why it is refused rather than ignored.** dexador connects to the host *after* the `@`, so
+  such an endpoint sent this store's SigV4-signed requests, and any session token, to that host
+  while the setting appeared to name another. With `MNEMOSYNE_S3_SECURE=false` it also defeated
+  the check added in #970: the endpoint's host was read by a parser of hermes's own, which
+  returned the bracketed IPv6 userinfo as the host and allowed plaintext to a public host. The
+  endpoint is now read with `quri`, the parser dexador itself uses, so the check and the request
+  agree about where the bytes are going. Endpoints without userinfo are unaffected, including a
+  bare `host:port`, a bracketed IPv6 address with a port, and a bare IPv6 address.
+
 - **mnemosyne/conn: a Postgres connect gives up after 10 seconds, and an optional statement
   timeout** (#959). `connect` and `make-pool` take `:connect-timeout`, in seconds, defaulting to
   `*postgres-connect-timeout-seconds*` (10), and `:statement-timeout`, in milliseconds,

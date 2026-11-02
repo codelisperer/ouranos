@@ -2320,6 +2320,45 @@ BLOB-BACKEND-ERROR."
       (is (b::s3-secure-p (store :endpoint "localhost:9000")))
       (is (b::s3-secure-p (store :endpoint "s3.amazonaws.com"))))))
 
+(test an-endpoint-with-userinfo-is-refused-and-its-real-host-is-read
+  "#1089: the check for a plaintext endpoint read the endpoint with a parser of its own, taking
+the authority up to the first slash and stripping any brackets. An endpoint may carry userinfo
+before an \"@\", and when that userinfo was a bracketed IPv6 address the brackets took the \"@\"
+with them, so the function returned the userinfo as the host. %LOCAL-ENDPOINT-P then read ::1 and
+allowed plaintext, while dexador connected to the host after the @. The endpoint is now read with
+QURI, which is what dexador parses with, so the check and the request agree."
+  ;; The host is the one the request goes to, not the one hidden in the userinfo.
+  (dolist (case '(("[::1]@example.com" . "example.com")
+                  ("[::1]:80@example.com" . "example.com")
+                  ("user:pw@example.com" . "example.com")))
+    (is (string= (cdr case) (b::%endpoint-host (car case)))
+        "~A is an endpoint for ~A" (car case) (cdr case)))
+  ;; And such an endpoint is refused outright when the store is made, whatever the scheme and
+  ;; whatever the host, because the damage is that the request goes elsewhere.
+  (flet ((store (&rest args)
+           (apply #'b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x" args)))
+    (dolist (endpoint '("[::1]@example.com" "[::1]:80@example.com" "user:pw@example.com"
+                        "[::1]@example.com:9000"))
+      (signals b:blob-configuration-error (store :endpoint endpoint)))
+    ;; Refused with MNEMOSYNE_S3_SECURE unset too, so this is not the plaintext rule firing.
+    (with-environment-variable ("MNEMOSYNE_S3_SECURE" nil)
+      (signals b:blob-configuration-error (store :endpoint "[::1]@example.com")))
+    ;; The controls: every legitimate shape still makes a store, including the ones QURI alone
+    ;; reads differently. A bare host:port has no scheme, and QURI reads "localhost:9000" as the
+    ;; SCHEME "localhost" with no host, so the endpoint gets a scheme before it is parsed. A bare
+    ;; IPv6 address cannot be read as an authority at all and is matched as a literal.
+    (dolist (endpoint '("localhost:9000" "127.0.0.1:9000" "[::1]:9000" "::1" "10.1.2.3:9000"
+                        "minio:9000"))
+      (is-true (b::s3-endpoint (store :endpoint endpoint))
+               "control: ~A is still a usable endpoint" endpoint))
+    ;; And the plaintext rule still reaches its own verdict on those, which is what would break
+    ;; if the host came back NIL or bracketed from the new parser.
+    (with-environment-variable ("MNEMOSYNE_S3_SECURE" "false")
+      (dolist (endpoint '("localhost:9000" "127.0.0.1:9000" "[::1]:9000" "::1"))
+        (is (not (b::s3-secure-p (store :endpoint endpoint)))
+            "control: ~A is still read as local, so plaintext is still allowed" endpoint))
+      (signals b:blob-configuration-error (store :endpoint "[2606:2800:220:1:248:1893:25c8:1946]:9000")))))
+
 (test an-endpoint-host-is-read-without-its-port
   (dolist (case '(("s3.amazonaws.com" . "s3.amazonaws.com")
                   ("localhost:9000" . "localhost")
