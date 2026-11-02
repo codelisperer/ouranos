@@ -1175,9 +1175,9 @@ its tag.
     copies, selective sync conflicts, `.dropbox`, `.dropbox.attr` and `.dropbox.cache`; OneDrive
     and Office `~$*` and `*.tmp`; Google Drive's `.tmp.drivedownload` and `.tmp.driveupload`;
     partial browser downloads (`*.crdownload`, `*.download`, `*.partial`), which Proton Drive
-    does not sync; editor swap and lock files; and `.DS_Store`, `._*`, `Icon
-`, `desktop.ini`
-    and `Thumbs.db`. `ignored-p` and `glob-match-p` apply the same matching.
+    does not sync; editor swap and lock files; and `.DS_Store`, `._*`, `Icon` followed by a
+    carriage return, `desktop.ini` and `Thumbs.db`. `ignored-p` and `glob-match-p` apply the same
+    matching.
   - `:report-existing` reports the files already there. `stop-folder-watch` stops it, also from
     inside the function.
 

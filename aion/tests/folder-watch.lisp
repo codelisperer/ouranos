@@ -38,11 +38,12 @@
   (uiop:native-namestring (merge-pathnames name dir)))
 
 (defun call-with-watched-folder (function &key setup (settle +settle+) (ignore :defaults)
-                                               report-existing also (recursive t))
+                                               report-existing also (recursive t) path)
   "Make a fresh folder, call SETUP with it, watch it, and call FUNCTION with the folder and a
 function that returns the events reported so far, oldest first, as (KIND NAME SIZE). ALSO, when
 given, is called on the loop thread with each event and the FOLDER-WATCHER after the event is
-recorded; the watcher is passed because *WATCHER* is bound on the test's thread only."
+recorded; the watcher is passed because *WATCHER* is bound on the test's thread only. PATH, when
+given, is called with the folder and returns what to watch instead of the folder."
   (let ((dir (aion/fs:make-temporary-directory "folder-watch-test"))
         (loop (uv:make-loop))
         (events '())
@@ -53,7 +54,7 @@ recorded; the watcher is passed because *WATCHER* is bound on the test's thread 
            (when setup (funcall setup dir))
            (let ((*loop* loop)
                  (*watcher*
-                   (fw:watch-folder loop dir
+                   (fw:watch-folder loop (if path (funcall path dir) dir)
                                     (lambda (e)
                                       (sb-thread:with-mutex (lock)
                                         (push (list (fw:folder-event-kind e)
@@ -380,6 +381,119 @@ a-folder-moved-in-reports-each-file-in-it, and a file at the top level here, whi
              (is (equal '((:settled "top.txt" 3)) seen) "only the top-level file: ~S" seen)))
       (ignore-errors (aion/fs:delete-tree source)))))
 
+;;; --- the hub's second review of #1074 -------------------------------------------------------
+
+(defun %subfolder (dir name)
+  "The native name of the folder NAME inside DIR, ending in a separator."
+  (concatenate 'string (uiop:native-namestring dir) name (string (fw::%separator))))
+
+(test a-folder-whose-name-has-brackets-is-watched-by-that-name
+  "A string path was parsed as a Lisp namestring, which took the brackets for a wildcard and
+signalled. The string is now used as written."
+  (with-watched-folder (dir events :report-existing t
+                                   :setup (lambda (d)
+                                            (let ((sub (%subfolder d "Photos [2026]")))
+                                              (uv:make-directory sub :parents t)
+                                              (uv:write-file (concatenate 'string sub "a.txt") "a")))
+                                   :path (lambda (d) (%subfolder d "Photos [2026]")))
+    (let ((seen (%wait events (lambda (e) (%settled e "a.txt")))))
+      (is (equal '((:settled "a.txt" 1)) seen) "~S" seen))))
+
+#-win32
+(test a-folder-whose-name-has-a-backslash-is-watched-by-that-name
+  "On Linux and macOS a string path with a backslash in a folder's name lost the backslash, so
+w\z/ was watched as wz/. Both folders exist here, and only w\z's file may be reported."
+  (with-watched-folder (dir events
+                        :report-existing t
+                        :setup (lambda (d)
+                                 (let ((odd (%subfolder d (format nil "w~Cz" #\\))))
+                                   (uv:make-directory odd :parents t)
+                                   (uv:write-file (concatenate 'string odd "inside.txt") "in"))
+                                 (%write d "wz/other.txt" "other"))
+                        :path (lambda (d) (%subfolder d (format nil "w~Cz" #\\))))
+    (let ((seen (%wait events (lambda (e) (%settled e "inside.txt")))))
+      (sleep (* 2 +settle+))
+      (setf seen (funcall events))
+      (is (equal '((:settled "inside.txt" 2)) seen) "~S" seen))))
+
+(test watching-a-folder-that-does-not-exist-signals-and-leaves-nothing-open
+  "The hub's review of #1074: the timer made before the watch was left on the loop when the watch
+failed, and with the handle freed too early in aion/uv, closing the loop aborted the process."
+  (let ((dir (aion/fs:make-temporary-directory "folder-watch-test"))
+        (loop (uv:make-loop)))
+    (unwind-protect
+         (progn
+           (signals uv:file-not-found
+             (fw:watch-folder loop (%subfolder dir "not-here")
+                              (lambda (e) (declare (ignore e)))))
+           ;; Open, not only active: the timer is made before the watch and not started, so a
+           ;; leaked one is inactive but still open on the loop.
+           (is (null (remove-if-not (lambda (h) (and (member (uv:handle-info-kind h)
+                                                            '(:fs-event :timer))
+                                                    (not (uv:handle-info-closing h))))
+                                    (uv:loop-handles loop)))
+               "no watch or timer left open: ~S" (uv:loop-handles loop))
+           (let ((left-unfreed nil))
+             (handler-bind ((uv:loop-left-unfreed
+                              (lambda (w) (setf left-unfreed w) (muffle-warning w))))
+               (uv:close-loop loop))
+             (is (null left-unfreed) "the loop was left unfreed: ~A" left-unfreed)))
+      (ignore-errors (uv:close-loop loop))
+      (ignore-errors (aion/fs:delete-tree dir)))))
+
+(test an-entry-that-can-never-be-statted-does-not-keep-the-timer-running
+  "The hub's review of #1074: a link that loops (ELOOP) stayed :UNKNOWN and pending for good, so
+the timer woke every SETTLE/4 seconds forever. It is now taken as missing. The stat of loop.txt is
+made to fail with ELOOP."
+  (let ((original fw::*%file-info*))
+    (unwind-protect
+         (progn
+           (setf fw::*%file-info*
+                 (lambda (path)
+                   (if (search "loop.txt" path)
+                       (error 'uv:uv-error :code -40 :name "ELOOP" :message "too many links"
+                                           :operation :file-info :path path)
+                       (funcall original path))))
+           (with-watched-folder (dir events :report-existing t
+                                            :setup (lambda (d) (%write d "loop.txt" "x")
+                                                     (%write d "plain.txt" "plain")))
+             (let ((watcher *watcher*))
+               (%wait events (lambda (e) (%settled e "plain.txt")))
+               (sleep (* 2 +settle+))
+               (is (equal '((:settled "plain.txt" 5)) (funcall events)) "~S" (funcall events))
+               (is (zerop (hash-table-count (fw::folder-watcher-pending watcher)))
+                   "nothing left pending")
+               (is-false (fw::folder-watcher-timer-running watcher) "the timer stopped"))))
+      (setf fw::*%file-info* original))))
+
+(test a-link-or-an-entry-of-unknown-kind-is-statted-by-a-scan
+  "The hub's review of #1074: a scan acted only on files and folders, so a link, or an entry on a
+filesystem that does not give the kind, was skipped by a scan but reported from a raw event. The
+listing here gives link.txt as a link and odd.txt and odd/ as unknown."
+  (let ((original fw::*%list-directory*))
+    (unwind-protect
+         (progn
+           (setf fw::*%list-directory*
+                 (lambda (path)
+                   (mapcar (lambda (entry)
+                             (cond ((string= (car entry) "link.txt") (cons (car entry) :symlink))
+                                   ((member (car entry) '("odd.txt" "odd") :test #'string=)
+                                    (cons (car entry) :unknown))
+                                   (t entry)))
+                           (funcall original path))))
+           (with-watched-folder (dir events :report-existing t
+                                            :setup (lambda (d) (%write d "link.txt" "l")
+                                                     (%write d "odd.txt" "oo")
+                                                     (%write d "odd/inner.txt" "iii")))
+             (let ((seen (%wait events (lambda (e) (= 3 (length e))))))
+               (sleep (* 2 +settle+))
+               (setf seen (funcall events))
+               (is (equal '((:settled "link.txt" 1) (:settled "odd.txt" 2)
+                            (:settled "odd/inner.txt" 3))
+                          (sort (copy-list seen) #'< :key #'third))
+                   "~S" seen))))
+      (setf fw::*%list-directory* original))))
+
 ;;; --- a file that cannot be read, and stopping --------------------------------------------
 
 (test a-file-that-cannot-be-read-stays-pending-and-does-not-stop-the-others
@@ -388,17 +502,21 @@ violation while a writer holds the file on Windows, escaped and stopped every la
 other file settled. The stat is made to fail for locked.txt for 1.5 s: free.txt settles in the
 meantime, and locked.txt settles once it can be read."
   (let ((original fw::*%file-info*)
-        (until (+ (get-internal-real-time) (* 1.5 internal-time-units-per-second))))
+        ;; Locked until this is set, 1.5 s after the watch is running (the hub's review of #1074:
+        ;; set before the setup, the window could be over before the test looked).
+        (until nil))
     (unwind-protect
          (progn
            (setf fw::*%file-info*
                  (lambda (path)
-                   (if (and (search "locked.txt" path) (< (get-internal-real-time) until))
+                   (if (and (search "locked.txt" path)
+                            (or (null until) (< (get-internal-real-time) until)))
                        (error 'uv:permission-denied :code -13 :name "EACCES"
                                                     :message "held by another program"
                                                     :operation :file-info :path path)
                        (funcall original path))))
            (with-watched-folder (dir events)
+             (setf until (+ (get-internal-real-time) (* 1.5 internal-time-units-per-second)))
              (%write dir "locked.txt" "held")
              (%write dir "free.txt" "free")
              (let ((seen (%wait events (lambda (e) (%settled e "free.txt")) :timeout 5)))

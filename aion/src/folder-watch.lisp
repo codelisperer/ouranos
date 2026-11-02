@@ -194,7 +194,12 @@ rather than stopping the watcher (the hub's review of #1074)."
             :directory))
     (uv:file-not-found () :missing)
     (uv:not-a-directory () :missing)
-    (uv:uv-error () :unknown)))
+    ;; A link that loops, or a name too long, will not become readable by waiting, and as
+    ;; :UNKNOWN it would keep the timer waking for good (the hub's review of #1074).
+    (uv:uv-error (e)
+      (if (member (uv:uv-error-name e) '("ELOOP" "ENAMETOOLONG") :test #'equal)
+          :missing
+          :unknown))))
 
 (defun %now () (get-internal-real-time))
 
@@ -260,7 +265,17 @@ into subfolders that are not ignored when the watch is recursive."
           (case (cdr entry)
             (:file (funcall function name))
             (:directory (when (folder-watcher-recursive fw)
-                          (%scan fw function (concatenate 'string name "/"))))))))))
+                          (%scan fw function (concatenate 'string name "/"))))
+            ;; A link, or an entry whose kind the filesystem did not give, is statted, as a raw
+            ;; event's name is (the hub's review of #1074). A link to a folder is not followed,
+            ;; because links can form a loop; a folder of unknown kind is.
+            ((:symlink :unknown)
+             (let ((state (%state fw name)))
+               (cond ((eq state :directory)
+                      (when (and (eq (cdr entry) :unknown) (folder-watcher-recursive fw))
+                        (%scan fw function (concatenate 'string name "/"))))
+                     ((eq state :missing))
+                     (t (funcall function name)))))))))))
 
 (defun %consider (fw name state)
   "Put NAME in the pending table with STATE, unless nothing has changed: it is pending already with
@@ -372,9 +387,14 @@ table, without restarting the quiet period of one already there unchanged."
             (%touch fw name))))))
 
 (defun %root (path)
-  "PATH as a native directory string ending in a separator."
-  (let ((native (uiop:native-namestring (uiop:ensure-directory-pathname path))))
-    (if (find (char native (1- (length native))) "/\\")
+  "PATH as a native directory string ending in a separator. A string is used as written, through
+AION/UV:NATIVE-PATH. Parsing it as a Lisp namestring, as UIOP:ENSURE-DIRECTORY-PATHNAME does,
+dropped a backslash on Linux and macOS and took brackets for a wildcard (the hub's review of
+#1074)."
+  (let ((native (uv:native-path (if (stringp path) path (uiop:ensure-directory-pathname path)))))
+    (if (and (plusp (length native))
+             (let ((last (char native (1- (length native)))))
+               (or (char= last #\/) (and (uiop:os-windows-p) (char= last #\\)))))
         native
         (concatenate 'string native (string (%separator))))))
 
@@ -388,9 +408,10 @@ SETTLE is the number of seconds a file's size and modification time must stay th
 it is reported. IGNORE is :DEFAULTS (+SYNC-LITTER+) or a list of patterns, strings or functions
 of the relative name, which may include :DEFAULTS. RECURSIVE watches subfolders too, where the
 operating system can (macOS and Windows; see this file's header for Linux). A folder in it that
-cannot be listed is tried again on each tick, and its files are reported once it can be. With REPORT-EXISTING,
-every file already in the folder is reported once it is quiet for SETTLE seconds; otherwise
-those files are only remembered, and reported when they change.
+cannot be listed is tried again on each tick, and its files are reported once it can be. With
+REPORT-EXISTING, every file already in the folder is reported once it is quiet for SETTLE
+seconds; otherwise those files are only remembered, and reported when they change. A folder
+that does not exist signals AION/UV:FILE-NOT-FOUND, and nothing is left on the loop.
 
 The watch is started before the folder is first scanned, so a file created during the scan is
 not missed. As with AION/UV:WATCH, call this before the loop thread runs or on the loop thread."
@@ -401,17 +422,18 @@ not missed. As with AION/UV:WATCH, call this before the loop thread runs or on t
     (setf (folder-watcher-timer fw) (uv:make-timer loop (lambda (timer)
                                                           (declare (ignore timer))
                                                           (%tick fw))))
-    (setf (folder-watcher-watcher fw)
-          (uv:watch loop (folder-watcher-root fw)
-                    (lambda (events filename watcher)
-                      (declare (ignore watcher))
-                      (%on-raw-event fw events filename))
-                    ;; libuv honours :RECURSIVE on macOS and Windows only (aion/uv/watch.lisp).
-                    :recursive (and recursive (or (uiop:os-macosx-p) (uiop:os-windows-p)))))
-    ;; An error in the first scan, such as from an ignore function the caller gave, reaches the
-    ;; caller, who then has no watcher to stop: the watch and timer made above are closed first,
-    ;; so a failed WATCH-FOLDER leaves nothing on the loop (the hub's re-review of #1074).
+    ;; An error from the watch, such as a folder that does not exist, or from the first scan, such
+    ;; as from an ignore function the caller gave, reaches the caller, who then has no watcher to
+    ;; stop: what was made here is closed first, so a failed WATCH-FOLDER leaves nothing on the
+    ;; loop (the hub's reviews of #1074).
     (handler-bind ((error (lambda (e) (declare (ignore e)) (stop-folder-watch fw))))
+      (setf (folder-watcher-watcher fw)
+            (uv:watch loop (folder-watcher-root fw)
+                      (lambda (events filename watcher)
+                        (declare (ignore watcher))
+                        (%on-raw-event fw events filename))
+                      ;; libuv honours :RECURSIVE on macOS and Windows only (aion/uv/watch.lisp).
+                      :recursive (and recursive (or (uiop:os-macosx-p) (uiop:os-windows-p)))))
       (%scan fw (lambda (name)
                   (let ((state (%state fw name)))
                     (cond (report-existing (%pend fw name state))
