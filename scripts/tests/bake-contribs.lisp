@@ -43,7 +43,7 @@ contrib on *MODULES*."
                              (format t \"~(~A~)=~A~%\" c
                                      (and (member (string c) *modules* :test #'string-equal) t))))")
     (is (= 0 code) "exit was ~D~%~A" code output)
-    (dolist (c '("sb-cltl2" "sb-bsd-sockets" "sb-posix" "sb-rotate-byte" "sb-md5"
+    (dolist (c '("asdf" "sb-cltl2" "sb-bsd-sockets" "sb-posix" "sb-rotate-byte" "sb-md5"
                  "sb-introspect" "sb-concurrency"))
       (is (search (format nil "~A=T" c) output) "~A is not on *MODULES*:~%~A" c output))
     (is (not (search "cannot dump" output)) "~A" output)))
@@ -57,7 +57,8 @@ Now it exits 1 and names the contrib, the SBCL version and SBCL_HOME."
     (is (search "t: cannot dump img: 1 SBCL contrib it must carry did not load" output) "~A" output)
     (is (search "sb-cons-1099-no-such:" output) "the contrib is not named:~%~A" output)
     (is (not (search "sb-posix:" output)) "a contrib that loaded was named:~%~A" output)
-    (is (search "SBCL_HOME is" output) "~A" output)))
+    (is (search "SBCL_HOME is" output) "~A" output)
+    (is (search "repair or reinstall sbcl" (string-downcase output)) "no advice:~%~A" output)))
 
 (test a-real-contrib-under-an-empty-sbcl-home-stops-the-dump
   "A contrib SBCL cannot find because SBCL_HOME points at the wrong directory. sb-sprof is not
@@ -74,16 +75,34 @@ install and loaded sb-sprof; macOS failed only because Homebrew's runtime has no
     (multiple-value-bind (code output) (%bake-child form :sbcl-home empty)
       (is (= 1 code) "exit was ~D~%~A" code output)
       (is (search "sb-sprof:" output) "~A" output)
-      (is (search (uiop:native-namestring empty) output) "SBCL_HOME is not shown:~%~A" output))
+      (is (search (uiop:native-namestring empty) output) "SBCL_HOME is not shown:~%~A" output)
+      (is (search "SBCL uses SBCL_HOME as its home" output) "~A" output)
+      (is (search "unset SBCL_HOME or correct it" output) "~A" output))
     (multiple-value-bind (code output) (%bake-child form)
       (is (= 0 code) "with this SBCL's own home, exit was ~D~%~A" code output))))
 
+(test an-sbcl-home-without-contrib-is-named-as-unused
+  "Review of #1100: with SBCL_HOME set to a directory with no contrib/, SBCL does not use it,
+and the advice says so and still says to unset or correct it. The contrib does not exist, so
+the dump stops wherever SBCL found its home."
+  (multiple-value-bind (code output)
+      (%bake-child "(ouranos-bake:bake-contribs-or-die \"t\" \"img\" '(:sb-cons-1099-no-such))"
+                   :sbcl-home (%fresh-tree))
+    (is (= 1 code) "exit was ~D~%~A" code output)
+    (is (search "SBCL_HOME has no contrib/ directory, so SBCL did not use it" output) "~A" output)
+    (is (not (search "SBCL uses SBCL_HOME as its home" output)) "~A" output)))
+
 (test bootstrap-and-the-desktop-build-use-the-checked-bake
   "Both images that carry contribs bake them through bake-contribs.lisp, and neither still
-ignores a contrib that fails."
+ignores a contrib that fails. The bake comes before (require :asdf): ASDF is a contrib, and
+with the contrib directory wrong that REQUIRE would stop the script before the check could
+say why (review of #1100)."
   (dolist (file (list (merge-pathnames "bootstrap.lisp" td-root)
                       (merge-pathnames "build-desktop-app.lisp" *scripts*)))
     (let ((text (uiop:read-file-string file)))
       (is (search "bake-contribs.lisp" text) "~A does not load it" file)
       (is (search "ouranos-bake:bake-contribs-or-die" text) "~A does not call it" file)
-      (is (not (search "(ignore-errors (require contrib))" text)) "~A still ignores it" file))))
+      (is (not (search "(ignore-errors (require contrib))" text)) "~A still ignores it" file)
+      (let ((bake (search "ouranos-bake:bake-contribs-or-die" text))
+            (asdf (search (format nil "~%(require :asdf)") text)))
+        (is-true (and bake asdf (< bake asdf)) "~A requires ASDF before the bake" file)))))

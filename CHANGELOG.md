@@ -3986,9 +3986,15 @@ its tag.
   `Don't know how to REQUIRE sb-posix.` Now each one must load and appear on `*modules*`, or
   the script exits 1 before dumping, naming each contrib, its error, the directory SBCL looked
   in and `SBCL_HOME`. The list and the check are in the new `scripts/bake-contribs.lisp`. The
-  messages and `cons/docs/user-guide.md` now say that SBCL ignores an `SBCL_HOME` that has no
-  `contrib/` directory, and that the other place it looks is
-  `<executable's directory>/../lib/sbcl/`.
+  check runs before `(require :asdf)`, and `asdf` is on the list, because ASDF is a contrib
+  too: with the contrib directory wrong, the scripts used to stop at
+  `Don't know how to REQUIRE ASDF` before any check ran. When `SBCL_HOME` is set, the advice
+  says to unset or correct it. The messages and `cons/docs/user-guide.md` now say that SBCL
+  ignores an `SBCL_HOME` that has no `contrib/` directory, and the user guide lists the other
+  places SBCL looks, in order, under "Which contrib directory": the executable's directory, its
+  `../lib/sbcl/`, the current directory, and the target of a symbolic link to the executable.
+  The current directory matters: `bin/cons` run from a directory that holds `contrib/` takes
+  that directory as its SBCL home.
 
 ## v0.1.7 — 2026-09-30
 

@@ -197,11 +197,21 @@ bakes in (`sb-cltl2`, `sb-bsd-sockets`, `sb-posix`, `sb-rotate-byte`, `sb-md5`,
 a contrib directory when something first requires it.
 
 **Which contrib directory, if any, depends on `SBCL_HOME`.** SBCL takes as its home the first
-of these that has a `contrib/` directory: `SBCL_HOME`; the executable's own directory;
-`<executable's directory>/../lib/sbcl/`; the current directory. With none, it has no home. So
-an `SBCL_HOME` without `contrib/` is ignored, not reported. For `bin/cons` none of the others
-is the directory SBCL was installed in, so in practice its home is `SBCL_HOME` or nothing. The Windows
-installer sets `SBCL_HOME` for every process. On macOS and Linux it is usually not exported:
+of these that has a `contrib/` directory, in this order (`sb-impl::%sbcl-homedir-pathname`,
+SBCL 2.6.9):
+
+1. `SBCL_HOME`;
+2. the executable's own directory;
+3. `<executable's directory>/../lib/sbcl/`;
+4. the current directory;
+5. when the executable was started through a symbolic link, the directory of the file the link
+   points to, and then that directory's `../lib/sbcl/`.
+
+With none, it has no home. So an `SBCL_HOME` without `contrib/` is ignored, not reported. For
+`bin/cons`, places 2, 3 and 5 are in the tree, not where SBCL was installed, so its home is
+normally `SBCL_HOME` or nothing. The exception is place 4: run from a directory that holds a
+`contrib/` directory, `bin/cons` takes that directory as its home. The Windows installer sets
+`SBCL_HOME` for every process. On macOS and Linux it is usually not exported:
 Homebrew's `sbcl` command sets it for its own process only. So:
 
 - **With no `SBCL_HOME`**, the usual case on macOS and Linux, `bin/cons` can load only the

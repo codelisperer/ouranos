@@ -45,6 +45,15 @@
 ;;;;
 ;;;; This is scripting, not framework: `cons desktop build` absorbs it (ADR-0007).
 
+;;; The contribs the app image carries; a contrib that does not load stops the build (#1099).
+;;; Before (require :asdf), because ASDF is a contrib too and is on the list; see
+;;; bake-contribs.lisp. Each re-exec'd child below runs this again, which takes a second.
+(load (merge-pathnames "bake-contribs.lisp"
+                       (make-pathname :name nil :type nil :version nil
+                                      :defaults (or *load-truename* *load-pathname*))))
+(funcall (read-from-string "ouranos-bake:bake-contribs-or-die")
+         "build-desktop-app" "the app image")
+
 (require :asdf)
 (load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
 (load (merge-pathnames "fs.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; aion/fs:delete-tree (#347)
@@ -597,12 +606,6 @@ a later step does: a resource update rewrites the file and drops an Authenticode
       (unless (eql code 0) (sb-ext:exit :code code))
       (%finish-windows-bundle (%bundle-directory))
       (sb-ext:exit :code 0))))
-
-;;; The contribs the app image carries; a contrib that does not load stops the build (#1099).
-(load (merge-pathnames "bake-contribs.lisp"
-                       (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
-(funcall (read-from-string "ouranos-bake:bake-contribs-or-die")
-         "build-desktop-app" "the app image")
 
 (load (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))
 

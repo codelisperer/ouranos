@@ -69,9 +69,11 @@ or NIL. SBCL writes it as a text line, `  using SBCL version 2.6.9', before the 
 NIL IS THE USUAL ANSWER IN bin/cons ON macOS AND LINUX. SB-INT:SBCL-HOMEDIR-PATHNAME takes
 the first of these that holds a contrib/ directory, and is NIL when none does
 (SB-IMPL::%SBCL-HOMEDIR-PATHNAME, SBCL 2.6.9): SBCL_HOME; the executable's own directory;
-<executable's directory>/../lib/sbcl/; the current directory. So an SBCL_HOME with no
-contrib/ is ignored, not an error. In a dumped executable none of these is the path SBCL was
-installed at (measured with a dumped probe, review of #1097). Homebrew's `sbcl' wrapper
+<executable's directory>/../lib/sbcl/; the current directory; and, for an executable started
+through a symbolic link, the directory of the file it points to and that directory's
+../lib/sbcl/. So an SBCL_HOME with no contrib/ is ignored, not an error. In a dumped
+executable none of the others is the path SBCL was installed at (measured with a dumped probe,
+review of #1097), though the current directory is used when it holds a contrib/ directory. Homebrew's `sbcl' wrapper
 sets SBCL_HOME for its own process only. So unless SBCL_HOME is exported, bin/cons has no
 contrib directory and can load only the contribs bootstrap.lisp baked in. The Windows
 installer sets SBCL_HOME for every process, which is how #701 met a replaced install."
