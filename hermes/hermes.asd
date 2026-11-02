@@ -17,6 +17,9 @@
                "com.inuoe.jzon"    ; JSON (SendGrid body, Twilio response)
                "cl-base64"         ; Twilio Basic auth + inbound-signature encoding
                "ironclad"          ; HMAC-SHA1 for X-Twilio-Signature verification
+               ;; Twilio's API-BASE is read with the parser dexador parses the request URL with,
+               ;; so the check and the request agree on the host (#1077).
+               "quri"
                "aion/log"          ; framework logging facade (send attempts/failures)
                "aion/secret"       ; the Telegram bot token, held so it cannot be printed (#778)
                "aion/random")      ; the Facebook connect flow's state (#822)

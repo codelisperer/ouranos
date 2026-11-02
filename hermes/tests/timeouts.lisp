@@ -131,9 +131,14 @@ the two tests above would fail."
       (let* ((quick (seconds-for 1))
              (slower (seconds-for 2))
              (gap (- slower quick)))
+        ;; BOTH, asserted separately. An earlier version of this said "both" and checked only
+        ;; the slower one, which is a claim the assertion did not make: without the strict
+        ;; ordering below -- which is skipped where the platform cannot show it -- nothing then
+        ;; said the quicker send was under the default either.
+        (is (< quick (1- +dexador-default-timeout+))
+            "the 1s send is under dexador's ~Ds default: ~,2Fs" +dexador-default-timeout+ quick)
         (is (< slower (1- +dexador-default-timeout+))
-            "both are under dexador's ~Ds default, so the setting is what ends the send: 1s took ~,2Fs and 2s took ~,2Fs"
-            +dexador-default-timeout+ quick slower)
+            "and the 2s send is too: ~,2Fs" slower)
         (if (<= gap 0.25)
             (skip "1s took ~,2Fs and 2s took ~,2Fs, a gap of ~,2Fs: this platform's timing is too coarse to tell the two settings apart, and the bound above is what carries the claim here"
                   quick slower gap)
@@ -167,7 +172,19 @@ at the first send, so the failure arrives where the configuration is."
   (dolist (base '("http://api.twilio.com/2010-04-01"
                   "http://example.com"
                   "http://8.8.8.8/2010-04-01"
-                  "http://[2001:4860:4860::8888]/x"))
+                  "http://[2001:4860:4860::8888]/x"
+                  ;; The review of #1084 and the three holes the same rule had in hermes/blob
+                  ;; (#1089). Each of these was accepted by some earlier version of this check.
+                  "http://[::1]@evil.com/x"        ; quri reads the host as evil.com
+                  "http://[::1]:80@evil.com/x"
+                  "http://user:pw@evil.com"
+                  "https://[::1]@evil.com/x"       ; userinfo is refused over https too
+                  "https://[::1]@127.0.0.1/x"      ; and even when the host IS local
+                  "evil.com://127.0.0.1"           ; a scheme that is neither http nor https
+                  "api.twilio.com/2010-04-01"      ; no scheme at all
+                  "//evil.com/x"
+                  "https://api.twilio.com/x?q=1"   ; the request path would land in the query
+                  "https://api.twilio.com/x#f"))
     (let ((c (handler-case (progn (h:make-twilio :account-sid "a" :auth-token "t" :api-base base)
                                   nil)
                (h:configuration-error (e) e))))

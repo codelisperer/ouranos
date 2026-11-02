@@ -1153,15 +1153,24 @@ its tag.
   `*send-read-timeout*`; the default is not raised for everyone, because a hung provider would
   then hold `deliver` longer than it does today. A send cut off by the read timeout **may still
   have been delivered**, because the request reached the provider.
-- **hermes: `make-twilio` takes `:api-base`, and refuses a plaintext `http` base unless the host
-  is local** (#1077). It defaults to `https://api.twilio.com/2010-04-01` and exists so a test or
+- **hermes: `make-twilio` takes `:api-base`, and refuses a base that a request should not carry
+  Twilio credentials to** (#1077). It defaults to `https://api.twilio.com/2010-04-01` and exists so a test or
   a local mock can be pointed at. Unlike every other Twilio setting it has **no environment
   default**, and a base of `http://` to any host that is not `localhost`, a loopback, private or
   link-local address, or a name resolving only to those, signals `configuration-error` when the
   provider is made rather than at the first send. Every Twilio request carries the account SID
   and auth token in an `Authorization` header, so a mistyped base would send them in the clear.
-  The rule is `aion/http-client:address-category` as used by `hermes/blob` for S3 endpoints
-  (#970); that it is now written in both places is #1082.
+  The base is parsed with `quri`, the parser dexador itself uses, and so is the URL a request is
+  actually built from, whose scheme and host must be the ones the check approved. Refused: a
+  scheme that is not `http` or `https`, any userinfo (whatever the scheme and host, since
+  Twilio's API uses none and it hides the real host), a query or fragment (the request's path is
+  appended to this value and would land inside them), no host, and plaintext `http` to a host
+  this machine or network cannot reach by itself. **The host is resolved once, when the provider
+  is made**, so a provider built while a name resolved locally is not re-checked if that name
+  later resolves elsewhere.
+  The local-host rule is `aion/http-client:address-category` as used by `hermes/blob` for S3
+  endpoints (#970); that it is written in both places is #1082, and the review of #1084 plus
+  #1089 found that both copies had holes, which is why that move is a fix rather than a tidy-up.
 
 - **`mnemosyne/query:sql` renders Microsoft Access (Jet/ACE) SQL with `:dialect :jet`**
   (#1061). `:limit` renders as `SELECT TOP n`, with `n` written into the SQL, so it must be a
