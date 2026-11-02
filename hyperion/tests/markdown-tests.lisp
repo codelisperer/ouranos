@@ -463,3 +463,67 @@ responsible for rather than that something came back."
         (is-false (search "href" o) "no href with :links :text: ~A" o))
       (is-false (search "<img" (out ref-with-image nil :text))
                 "and no image with both off"))))
+
+(defun %attribute-value (name html)
+  "The value of the first NAME=\"...\" attribute in HTML, read to the next double quote, or NIL.
+
+READ EXACTLY AS A BROWSER'S TOKENIZER WOULD END IT -- at the first quote, not at the last one on
+the line. That is the whole point of #1132: the injected markup's own quote ended the attribute
+early, and a test that took the value as everything up to the final quote would see one long
+harmless-looking string and miss it."
+  (let ((start (search (concatenate 'string name "=\"") html)))
+    (when start
+      (let* ((from (+ start (length name) 2))
+             (end (position #\" html :start from)))
+        (and end (subseq html from end))))))
+
+(test an-image-inside-an-image-alt-cannot-add-attributes-to-it
+  "#1132, found by the hub's review of #1120, and ON MAIN WITH THE DEFAULT OPTIONS -- not only in
+the untrusted mode, which is what makes it the more serious half of this work.
+
+3bmd renders an image's alt label to HTML and writes the result into alt=\"...\" without escaping
+it, so a nested element put its own markup inside the attribute. Measured at 052737ea:
+
+  ![![x](onerror=alert(1))](outer.png)
+  -> <img src=\"outer.png\" alt=\"<img src=\"onerror=alert(1)\" alt=\"x\" />\" />
+
+The alt value ends at the inner src's first quote and the rest is read as attributes of the
+outer image: ONERROR, with the unquoted value ALERT(1). %SAFE-URL passes that source because it
+is a relative URL, and the outer source then fails to load, which runs the handler.
+
+THE ASSERTION IS ABOUT THE ATTRIBUTE, not about the string ONERROR. An alt text may legitimately
+contain the characters `onerror=alert(1)' as text -- `![![x onerror=alert(1)](i.png)](outer.png)'
+does, harmlessly, inside the quoted value -- so a test grepping the output for ONERROR would
+both miss the real case and fail on a safe one. What must hold is that the alt value ends where
+3bmd meant it to end: no quote and no < inside it, and exactly one IMG in the output."
+  (let ((cases (list "![![x](onerror=alert(1))](outer.png)"
+                     "![![x](i.png)](outer.png)"
+                     "![![x](i.png \"ttl\")](outer.png)"
+                     "![![x](i.png)![y](j.png)](outer.png)"
+                     "![![x onerror=alert(1)](i.png)](outer.png)"
+                     "![a *b* ![n](m.png)](outer.png)"
+                     "![![<script>alert(1)</script>](i.png)](outer.png)")))
+    (dolist (md cases)
+      ;; The default options first: this is reached without asking for anything.
+      (dolist (options '(() (:images t :links t) (:images t :links :text)
+                         (:images nil :links t) (:images nil :links :text)))
+        (let* ((html (apply #'hyperion/markdown:render md options))
+               (images-on (let ((v (getf options :images :unsupplied)))
+                            (or (eq v :unsupplied) v)))
+               (imgs (%count-of "<img" html))
+               (alt (%attribute-value "alt" html)))
+          (if images-on
+              (progn
+                (is (= 1 imgs) "exactly one IMG for ~S with ~S: ~A" md options html)
+                (is-true alt "and it has an alt value for ~S with ~S: ~A" md options html)
+                (is-false (and alt (find #\" alt))
+                          "whose value holds no quote for ~S with ~S: ~A" md options html)
+                (is-false (and alt (find #\< alt))
+                          "and no < for ~S with ~S: ~A" md options html))
+              (is (= 0 imgs) "no IMG at all with :images nil for ~S: ~A" md html))
+          ;; Whatever the options, nothing may close the outer tag early and leave a stray
+          ;; fragment behind as content. The injected markup ended with `/>\"', so the quote
+          ;; was left in the document text.
+          (is-false (search "/>\"" html)
+                    "no stray fragment after an early tag close for ~S with ~S: ~A"
+                    md options html))))))

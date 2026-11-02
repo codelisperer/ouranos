@@ -184,6 +184,55 @@ write."
                   (%sanitize-node e references)
                   (list (if (consp e) (%sanitize e references) e)))))
 
+(defun %plist-free-children (rest)
+  "The child nodes in REST, a 3bmd node's tail, with its plist entries left out.
+
+A NODE'S TAIL MIXES TWO THINGS. Some nodes carry children directly, as (:EMPH \"b\") does, and
+some carry a plist, as (:EXPLICIT-LINK :LABEL ... :SOURCE ...) does. Dropping keywords alone
+would keep the value that follows each one, so a :SOURCE's URL would be collected as though it
+were text -- which is the opposite of what %LABEL-TEXT is for. A keyword takes its value with
+it."
+  (loop with items = '()
+        with tail = rest
+        while tail
+        do (if (keywordp (car tail))
+               (setf tail (cddr tail))
+               (progn (push (car tail) items) (setf tail (cdr tail))))
+        finally (return (nreverse items))))
+
+(defun %label-text (elements)
+  "ELEMENTS as one plain string, with every nested element reduced to the text inside it (#1132).
+
+FOR AN ALT ATTRIBUTE, WHICH CANNOT HOLD MARKUP. 3bmd writes an image's alt label by rendering it
+to HTML and putting the result inside alt=\"...\" without escaping it, so a nested element wrote
+its own markup into the attribute. An image inside an image's alt text was enough to inject
+attributes onto the outer IMG. Measured on main at 052737ea with the DEFAULT options:
+
+  ![![x](onerror=alert(1))](outer.png)
+  -> <img src=\"outer.png\" alt=\"<img src=\"onerror=alert(1)\" alt=\"x\" />\" />
+
+The alt value ends at the inner src's first quote, and what follows is read as attributes of the
+outer image: ONERROR with the unquoted value ALERT(1). The source passes %SAFE-URL because it is
+a relative URL, and the outer image's own source then fails to load, which is what runs the
+handler.
+
+A plain string in a label is escaped by 3bmd, so reducing the label to one string is what closes
+this. NO URL IS EVER COLLECTED: a nested image or link contributes the text of its label and
+nothing else, so a URL cannot reach an attribute by this route even if a future node shape
+carries one somewhere new."
+  (with-output-to-string (out)
+    (labels ((walk (e)
+               (cond ((stringp e) (write-string e out))
+                     ((and (consp e) (keywordp (car e)))
+                      (case (car e)
+                        ;; (:IMAGE (:EXPLICIT-LINK :LABEL ...)): the wrapped link's label.
+                        (:image (walk (first (cdr e))))
+                        ((:explicit-link :reference-link :link)
+                         (mapc #'walk (getf (cdr e) :label)))
+                        (t (mapc #'walk (%plist-free-children (cdr e))))))
+                     ((consp e) (mapc #'walk e)))))
+      (mapc #'walk elements))))
+
 (defun %sanitize-node (node references)
   "A list of nodes to put in place of NODE. See %SANITIZE."
   (let ((tag (car node)) (rest (cdr node)))
@@ -206,7 +255,13 @@ write."
               ;; produced (#1119).
               (url (and *images* (%safe-url (getf link :source)))))
          (if url
-             (list (list :image (list* :explicit-link :label label :source url
+             ;; THE LABEL IS REDUCED TO ONE PLAIN STRING, because 3bmd renders it into the
+             ;; alt attribute without escaping the result (#1132). Only this branch needs it:
+             ;; when no image is emitted the label becomes ordinary content, where an element
+             ;; is markup rather than an attribute value.
+             (list (list :image (list* :explicit-link
+                                       :label (list (%label-text label))
+                                       :source url
                                        (loop for (k v) on link by #'cddr
                                              unless (member k '(:label :source))
                                                nconc (list k v)))))
