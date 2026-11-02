@@ -1897,12 +1897,23 @@ lives here now, next to the primitives it uses, so there is one implementation t
   ;; THE OTHER NON-CANONICAL SPELLINGS ARE KEPT, deliberately: they fail PARSE-ADDRESS, so they
   ;; go to RESOLVE-HOST -- the same resolver the connection uses -- and there is no second parser
   ;; to disagree with. If the resolver says loopback, the connection goes to loopback.
-  (dolist (host '("127.1" "0x7f.0.0.1" "2130706433"))
-    (let ((resolved (http:resolve-host host)))
-      (when resolved
-        (is-true (http:local-host-p host)
-                 "~A resolves to ~S, and that is the resolver the connection uses too"
-                 host resolved))))
+  ;;
+  ;; ASSERTED UNCONDITIONALLY, AGAINST WHAT THE RESOLVER SAYS. An earlier version of this ran the
+  ;; assertion only (WHEN RESOLVED), so a platform whose resolver declined these spellings turned
+  ;; the check into nothing rather than into a failure -- the same shape as the empty-host case
+  ;; above, which passed on three legs and failed on Windows for a reason unrelated to the
+  ;; property it names. The expectation is now derived from the resolver's own answer, so it holds
+  ;; whichever way a platform goes and still fails if LOCAL-HOST-P disagrees with it.
+  ;;
+  ;; %LOCAL-ADDRESS-P is the function LOCAL-HOST-P itself uses, not a copy of the rule written
+  ;; here: what is being asserted is that LOCAL-HOST-P is RESOLVE-HOST composed with that
+  ;; predicate, which is its contract. A control that re-derived locality would be checking a
+  ;; copy of the thing under test.
+  (dolist (host '("127.1" "0x7f.0.0.1" "2130706433" "localhost"))
+    (let* ((addresses (http:resolve-host host))
+           (expected (and addresses (every #'http::%local-address-p addresses) t)))
+      (is (eq expected (and (http:local-host-p host) t))
+          "~A: this resolver answers ~S, so LOCAL-HOST-P must be ~S" host addresses expected)))
   (is-false (http:local-host-p nil) "no host is not a local host")
   ;; AN EMPTY OR BLANK HOST IS REFUSED ON EVERY PLATFORM, which it was not before. On Linux
   ;; usocket:get-hosts-by-name "" signals NS-HOST-NOT-FOUND-ERROR, so the answer was NIL by
