@@ -124,6 +124,44 @@ bot has a webhook set."))
 ;;; A backend registers a no-arg constructor thunk under its name; adding a vendor is a new
 ;;; class + one REGISTER-IMPL, with the selection layer staying neutral.
 
+(defparameter *send-connect-timeout* 10
+  "Seconds a backend waits for a connection to a provider before giving up (#1077).
+
+TEN IS WHAT HAPPENED ALREADY, now stated here. #1077 was filed believing a send with no timeout
+waited for ever; it does not. AION/HTTP-CLIENT passes a timeout to dexador only when one is set,
+so an unset timeout has always meant dexador's own default, and that default is ten seconds
+(`*default-connect-timeout*` in dexador's src/util.lisp). Measured against a socket that accepts
+a connection and never answers: 10.0 seconds, with both timeouts NIL.
+
+THIS DOES NOT COVER NAME RESOLUTION. It bounds the connect itself, and a name that takes a long
+time to resolve, or hangs, is not bounded by it (#1077, the review of #1084).
+
+So this changes no behaviour. What it changes is that the figure is hermes's, written down and
+settable, instead of a number inside a dependency that an upgrade could move without anyone
+here noticing. Setting this, or passing :CONNECT-TIMEOUT to a provider's constructor, now wins
+over dexador's default. NIL still means \"say nothing to dexador\", which is dexador's ten, not
+for ever.")
+
+(defparameter *send-read-timeout* 10
+  "Seconds a backend waits for a provider's answer once the connection was made (#1077). Ten,
+for the reason in *SEND-CONNECT-TIMEOUT*: it is what dexador already did, so nothing changes for
+an app that sets nothing.
+
+THIS IS A LIMIT ON EACH SOCKET READ, NOT ON THE WHOLE RESPONSE. It is the socket's receive
+timeout, so it is reset every time a byte arrives: a provider that sends one byte every nine
+seconds holds DELIVER for as long as it cares to, and no setting here ends that. Bounding a whole
+response needs a deadline around the call, which is an app's to impose (#1077, the review of
+#1084).
+
+A send that is cut off here has reached the provider, and raising this is a judgement about
+responsiveness against failing a send that would have been answered. An app that wants to wait
+longer sets it; the default is not raised for everybody, because a hung provider would then hold
+DELIVER longer than it does today.
+
+A SEND WHOSE READ TIMES OUT MAY ALREADY HAVE BEEN DELIVERED. The request reached the provider,
+so the failure says only that no answer arrived. An app that retries one of these can deliver
+the same message twice, and it should check the provider rather than assume either way.")
+
 (defvar *impls* (make-hash-table :test #'equal)
   "Map of \"channel/name\" -> a thunk returning a fresh provider.")
 

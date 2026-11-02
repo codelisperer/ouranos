@@ -244,7 +244,9 @@
  :reviewed "2026-10-23")
 
 (:name "Twilio API version" :category :api
- :where ((:text "hermes/src/twilio.lisp" "https://api.twilio.com/" "/"))
+ ;; The version now ends the API-BASE default rather than sitting between two slashes in a
+ ;; longer URL, so the end marker is the string's closing quote (#1077).
+ :where ((:text "hermes/src/twilio.lisp" "https://api.twilio.com/" "\""))
  :upstream (:manual "https://www.twilio.com/docs/usage/api")
  :reviewed "2026-10-17")
 

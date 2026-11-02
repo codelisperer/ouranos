@@ -1204,6 +1204,52 @@ its tag.
 
 ### Added
 
+- **hermes: how long a send waits is now hermes's own setting, `*send-connect-timeout*` and
+  `*send-read-timeout*`, both 10 seconds** (#1077). Each provider also takes `:connect-timeout`
+  and `:read-timeout`, read back with `sendgrid-connect-timeout`, `sendgrid-read-timeout`,
+  `twilio-connect-timeout` and `twilio-read-timeout`, and defaulting from the two specials.
+  **Nothing changes for an app that sets nothing.** Ten seconds is what SendGrid and Twilio
+  already waited: `aion/http-client` passes a timeout to dexador only when one is set, so an
+  unset timeout meant dexador's `*default-connect-timeout*` and `*default-read-timeout*`, which
+  are both 10. #1077 was filed believing a send with no timeout waited for ever, and that was
+  wrong; measured against a socket that accepts a connection and never answers, a send with both
+  timeouts `nil` fails after 10.0 seconds. What changes is that the figure is written down here
+  and can be set, instead of living in a dependency where an upgrade could move it unnoticed. An
+  app that wants to wait longer than 10 seconds for a provider's answer sets
+  `*send-read-timeout*`; the default is not raised for everyone, because a hung provider would
+  then hold `deliver` longer than it does today. A send cut off by the read timeout **may still
+  have been delivered**, because the request reached the provider.
+  **What these two do not bound.** The read timeout is the socket's receive timeout, so it limits
+  each read and is reset whenever a byte arrives: a provider that sends one byte every nine
+  seconds holds `deliver` for as long as it likes, and no setting here ends that. The connect
+  timeout bounds the connect and not name resolution. Putting a limit on a whole send remains an
+  app's to impose.
+- **hermes: `make-twilio` takes `:api-base`, and refuses a base that a request should not carry
+  Twilio credentials to** (#1077). It defaults to `https://api.twilio.com/2010-04-01` and exists so a test or
+  a local mock can be pointed at. Unlike every other Twilio setting it has **no environment
+  default**, and a base of `http://` to any host that is not `localhost`, a loopback, private or
+  link-local address, or a name resolving only to those, signals `configuration-error` when the
+  provider is made rather than at the first send. Every Twilio request carries the account SID
+  and auth token in an `Authorization` header, so a mistyped base would send them in the clear.
+  The base is parsed with `quri`, the parser dexador itself uses, and so is the URL a request is
+  actually built from, whose scheme and host must be the ones the check approved. Refused: a
+  scheme that is not `http` or `https`, any userinfo (whatever the scheme and host, since
+  Twilio's API uses none and it hides the real host), a query or fragment (the request's path is
+  appended to this value and would land inside them), no host, a bracketed IPv6 host (such a base
+  cannot send: the brackets are looked up as a name), an IPv4 host with a leading zero in an
+  octet (some stacks read that as octal, so the address checked need not be the one connected
+  to), and plaintext `http` to a host this machine or network cannot reach by itself. No refusal
+  repeats the value, because it may hold a password.
+  **What this does not cover.** A plaintext request judged local still goes through `HTTPS_PROXY`
+  or `HTTP_PROXY` if one is set, because dexador applies its proxy default and nothing here
+  passes `:proxy`; that is #1091 and it affects `hermes/blob`'s plaintext store the same way.
+  `make-sendgrid`'s `:endpoint` has no check at all, which is #1092. **The host is resolved once, when the provider
+  is made**, so a provider built while a name resolved locally is not re-checked if that name
+  later resolves elsewhere.
+  The local-host rule is `aion/http-client:address-category` as used by `hermes/blob` for S3
+  endpoints (#970); that it is written in both places is #1082, and the review of #1084 plus
+  #1089 found that both copies had holes, which is why that move is a fix rather than a tidy-up.
+
 - **`mnemosyne/query:sql` renders Microsoft Access (Jet/ACE) SQL with `:dialect :jet`**
   (#1061). `:limit` renders as `SELECT TOP n`, with `n` written into the SQL, so it must be a
   positive integer; Jet's `TOP` also returns rows tied with the last one on the `ORDER BY`
