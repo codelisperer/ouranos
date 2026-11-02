@@ -44,6 +44,7 @@
            #:carry-declared-libraries
            #:carry-refused
            #:open-carried-libraries #:runtime-directory
+           #:stamp-install-name #:relink-bundle
            #:sqlite-file-name
            #:tree-sqlite-carry))
 
@@ -191,14 +192,91 @@ test turns it off, as the control for the relink.")
       (uiop:run-program args :output :string :error-output :string :ignore-error-status t)
     (values (concatenate 'string out err) code)))
 
+(defun %macho-p (file)
+  "Whether FILE starts with a Mach-O or universal (fat) header, read from its first four bytes,
+so the answer does not depend on otool being installed."
+  (with-open-file (in file :element-type '(unsigned-byte 8) :if-does-not-exist nil)
+    (and in
+         (let ((magic (make-array 4 :element-type '(unsigned-byte 8))))
+           (and (= 4 (read-sequence magic in))
+                (member (coerce magic 'list)
+                        '((#xfe #xed #xfa #xce) (#xce #xfa #xed #xfe)
+                          (#xfe #xed #xfa #xcf) (#xcf #xfa #xed #xfe)
+                          (#xca #xfe #xba #xbe) (#xbe #xba #xfe #xca))
+                        :test #'equal)
+                t)))))
+
+(defun %otool (flag file)
+  "The output of `otool FLAG FILE'. Signals CARRY-REFUSED when FILE is a Mach-O and otool exits
+non-zero. Without the Xcode Command Line Tools, /usr/bin/otool is a stub that does exactly that,
+and reading its silence as \"nothing to change\" would ship the file unchanged (#958's review).
+NIL for a file that is not a Mach-O and that otool cannot read."
+  (multiple-value-bind (out code) (%run-tool (list "otool" flag (uiop:native-namestring file)))
+    (cond ((eql code 0) out)
+          ((%macho-p file)
+           (error 'carry-refused
+                  :path file
+                  :reason (format nil "otool ~A exited ~A on it, so it cannot be checked or relinked. otool comes with the Xcode Command Line Tools (xcode-select --install): ~A"
+                                  flag code (string-trim '(#\Newline #\Space) out)))))))
+
+(defun %install-name (file)
+  "FILE's own install name, as otool -D prints it, or NIL for a file that has none. Signals
+CARRY-REFUSED when FILE is a Mach-O that otool cannot read (%OTOOL)."
+  (let ((out (%otool "-D" file)))
+    (and out
+         (second (uiop:split-string (string-trim '(#\Newline) out) :separator '(#\Newline))))))
+
+(defvar *stamp* t
+  "Whether STAMP-INSTALL-NAME changes anything. Only a test turns it off, as the control for
+the stamp.")
+
+(defun stamp-install-name (file &key (report *standard-output*))
+  "On macOS, when FILE, a dylib just copied into a bundle, has an absolute install name, set it
+to @executable_path/<file name> and re-sign FILE ad hoc (#957). Returns the new install name
+when it changed FILE, otherwise NIL.
+
+A dylib built outside a bundle keeps the path it was built at as its install name, such as the
+tree's vendor/libuv/lib/libuv.1.dylib or a Homebrew prefix. Nothing loads a carried copy by that
+name, but the shipped file would then carry a path from the build machine. @executable_path/ is
+where the copy is, beside the executable, and the form the runtime's own load commands use
+(ADR-0014). An install name that is already relative, such as ./libpdfium.dylib, names no
+machine and is left as it is. Changing the install name invalidates the signature, and arm64
+does not load an invalidly signed dylib, so FILE is re-signed with `codesign --force -s -'.
+
+When install_name_tool cannot set the new name, FILE is left as it was, with its signature
+intact, a warning naming the reason goes to REPORT, and this returns NIL. That happens when the
+header has no room for the longer name, for a dylib linked with a short absolute install name
+and without -headerpad_max_install_names. The stamp only removes a build-machine path that
+nothing loads the copy by, so the bundle still works without it (#958's review).
+
+Signals CARRY-REFUSED when FILE is a Mach-O that otool cannot read (%OTOOL), and when codesign
+cannot re-sign FILE after its install name changed."
+  (when (and *stamp* (uiop:os-macosx-p))
+    (let ((id (%install-name file))
+          (path (uiop:native-namestring file)))
+      (when (and id (plusp (length id)) (char= (char id 0) #\/))
+        (let ((new (concatenate 'string "@executable_path/" (file-namestring file))))
+          (multiple-value-bind (out code) (%run-tool (list "install_name_tool" "-id" new path))
+            (cond
+              ((eql code 0)
+               (multiple-value-bind (out code) (%run-tool (list "codesign" "--force" "-s" "-" path))
+                 (unless (eql code 0)
+                   (error 'carry-refused :path file
+                                         :reason (format nil "codesign could not re-sign it after its install name changed: ~A" out))))
+               (format report "~&            install name is now ~A~%" new)
+               new)
+              (t
+               (format report "~&            warning: install name left as ~A, because install_name_tool could not set it to ~A: ~A~%"
+                       id new (string-trim '(#\Newline #\Space) out))
+               nil))))))))
+
 (defun %macho-dependencies (file)
   "The install names FILE's load commands name, as otool -L lists them, without FILE's own
-install name (otool -D). NIL for a file that is not a Mach-O."
-  (multiple-value-bind (out code) (%run-tool (list "otool" "-L" (uiop:native-namestring file)))
-    (when (eql code 0)
-      (let ((own (second (uiop:split-string
-                          (string-trim '(#\Newline) (%run-tool (list "otool" "-D" (uiop:native-namestring file))))
-                          :separator '(#\Newline)))))
+install name (otool -D). NIL for a file that is not a Mach-O. Signals CARRY-REFUSED when FILE
+is a Mach-O that otool cannot read (%OTOOL)."
+  (let ((out (%otool "-L" file)))
+    (when out
+      (let ((own (%install-name file)))
         (loop for line in (rest (uiop:split-string out :separator '(#\Newline)))
               for trimmed = (string-trim '(#\Space #\Tab) line)
               for dep = (subseq trimmed 0 (or (position #\Space trimmed) (length trimmed)))
@@ -221,36 +299,65 @@ A load command is rewritten only when it names another carried file, by resolved
 file name. System libraries and names already relative (@...) are never touched. Rewriting
 invalidates the signature, and arm64 will not load an invalidly signed dylib, so each changed
 file is re-signed with `codesign --force -s -'."
-  (let ((truenames (mapcar #'first plan))
-        (names (mapcar #'second plan)))
-    (loop for (nil name) in plan
-          for dst = (merge-pathnames name bundle)
-          for changed = nil
-          do (dolist (dep (%macho-dependencies dst))
-               (unless (or (char= (char dep 0) #\@)
-                           (uiop:string-prefix-p "/usr/lib/" dep)
-                           (uiop:string-prefix-p "/System/" dep))
-                 (let* ((dep-true (ignore-errors (probe-file dep)))
-                        (target (or (and dep-true
-                                         (let ((i (position dep-true truenames :test #'equal)))
-                                           (and i (nth i names))))
-                                    (find (file-namestring dep) names :test #'%same-file-name-p))))
-                   (when (and target (not (%same-file-name-p target name)))
-                     (multiple-value-bind (out code)
-                         (%run-tool (list "install_name_tool" "-change" dep
-                                          (format nil "@loader_path/~A" target)
-                                          (uiop:native-namestring dst)))
-                       (unless (eql code 0)
-                         (error 'carry-refused :path dst
-                                               :reason (format nil "install_name_tool could not point it at the carried ~A: ~A" target out))))
-                     (format report "~&            ~A now names @loader_path/~A~%" dep target)
-                     (setf changed t)))))
-             (when changed
-               (multiple-value-bind (out code)
-                   (%run-tool (list "codesign" "--force" "-s" "-" (uiop:native-namestring dst)))
-                 (unless (eql code 0)
-                   (error 'carry-refused :path dst
-                                         :reason (format nil "codesign could not re-sign it after relinking: ~A" out))))))))
+  (%relink-files (mapcar #'second plan) (mapcar #'first plan) (mapcar #'second plan)
+                 bundle report))
+
+(defun %relink-files (files truenames names bundle report)
+  "Rewrite the load commands of each of FILES, file names in BUNDLE, that name one of NAMES,
+the carried files' names, to @loader_path/<name>, and re-sign each file that changed, as
+%RELINK-CARRIED describes. A load command matches a name by file name, or, when TRUENAMES is
+given in the same order as NAMES, by the path it resolves to on this machine."
+  (loop for name in files
+        for dst = (merge-pathnames name bundle)
+        for changed = nil
+        do (dolist (dep (%macho-dependencies dst))
+             (unless (or (char= (char dep 0) #\@)
+                         (uiop:string-prefix-p "/usr/lib/" dep)
+                         (uiop:string-prefix-p "/System/" dep))
+               (let* ((dep-true (and truenames (ignore-errors (probe-file dep))))
+                      (target (or (and dep-true
+                                       (let ((i (position dep-true truenames :test #'equal)))
+                                         (and i (nth i names))))
+                                  (find (file-namestring dep) names :test #'%same-file-name-p))))
+                 (when (and target (not (%same-file-name-p target name)))
+                   (multiple-value-bind (out code)
+                       (%run-tool (list "install_name_tool" "-change" dep
+                                        (format nil "@loader_path/~A" target)
+                                        (uiop:native-namestring dst)))
+                     (unless (eql code 0)
+                       (error 'carry-refused :path dst
+                                             :reason (format nil "install_name_tool could not point it at the carried ~A: ~A" target out))))
+                   (format report "~&            ~A now names @loader_path/~A~%" dep target)
+                   (setf changed t)))))
+           (when changed
+             (multiple-value-bind (out code)
+                 (%run-tool (list "codesign" "--force" "-s" "-" (uiop:native-namestring dst)))
+               (unless (eql code 0)
+                 (error 'carry-refused :path dst
+                                       :reason (format nil "codesign could not re-sign it after relinking: ~A" out)))))))
+
+(defun relink-bundle (bundle &key (report *standard-output*))
+  "On macOS, relink every dylib directly in BUNDLE against every other one there, after all the
+carry steps have run, as CARRY-DECLARED-LIBRARIES relinks the libraries of one --carry list.
+Returns the list of dylib file names it read. Does nothing when *RELINK* is NIL.
+
+Why: build-desktop-app.lisp carries in three steps, the app's --carry libraries, the tree's own
+libraries and the libraries the runtime links against, and each step relinks only its own
+files. A carried library from one step can need one from another: a --carry libarchive or
+libcurl links Homebrew's libzstd, which the runtime step carries. Before #957 the carried
+libzstd kept Homebrew's path as its install name, and dyld reused the copy already open by
+that name (#334). STAMP-INSTALL-NAME now gives it @executable_path/libzstd.1.dylib, so the
+names no longer match, and on a Mac without Homebrew dyld stops with `Library not loaded'
+unless the load command is rewritten to the copy beside it (#958's review).
+
+Signals CARRY-REFUSED as %RELINK-CARRIED does."
+  (when (and *relink* (uiop:os-macosx-p))
+    (let ((names (loop for f in (uiop:directory-files bundle)
+                       for name = (file-namestring f)
+                       when (and (string-equal "dylib" (pathname-type f)) (%macho-p f))
+                         collect name)))
+      (%relink-files names nil names bundle report)
+      names)))
 
 (defun carry-declared-libraries (carries bundle &key vendor tree-carries
                                                      (report *standard-output*))
@@ -311,6 +418,7 @@ OPEN-CARRIED-LIBRARIES opens at startup."
                (unless (uiop:os-windows-p)
                  (uiop:run-program (list "chmod" "+x" (uiop:native-namestring dst)) :ignore-error-status t))
                (format report "~&  carry     ~A  <- ~A~%" name (uiop:native-namestring truename))
+               (stamp-install-name dst :report report)
                (dolist (license licenses)
                  (%copy-license license (pathname-name name) bundle report))
                (cond

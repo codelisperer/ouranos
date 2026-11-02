@@ -685,6 +685,10 @@ nothing."
                (uiop:copy-file source dst)
                (uiop:run-program (list "chmod" "+x" (namestring dst)) :ignore-error-status t)
                (format t "~&  carry     ~A  <- ~A~%" (file-namestring dst) (human-path:human-path source))
+               (handler-case (ouranos-carry:stamp-install-name dst) ; #957
+                 (ouranos-carry:carry-refused (e)
+                   (format *error-output* "~&build-desktop-app: ~A~%" e)
+                   (sb-ext:exit :code 3)))
                ;; Homebrew keeps the license at the formula prefix: <prefix>/lib/x.dylib
                ;; -> <prefix>/LICENSE*. We ship the code, so we ship the license.
                (let* ((prefix (uiop:pathname-parent-directory-pathname
@@ -725,6 +729,13 @@ nothing."
     (sb-ext:exit :code 3)))
 (ouranos-tree-natives:carry-native-libraries :already-carried *tree-carried*)
 (carry-runtime-linked-libraries)
+;; Each step above relinks only its own files. A library one step carried can need one another
+;; step carried, such as a --carry libarchive that links the runtime's libzstd, so the
+;; bundle's dylibs are relinked against each other once all three have run (#958's review).
+(handler-case (ouranos-carry:relink-bundle *bundle*)
+  (ouranos-carry:carry-refused (e)
+    (format *error-output* "~&build-desktop-app: ~A~%" e)
+    (sb-ext:exit :code 3)))
 (format t "~&~A~%" (ouranos-missing-natives:missing-summary (reverse *missing-natives*)))
 
 ;;; VERSION is what a fresh install reports before the app has ever run, and what the
