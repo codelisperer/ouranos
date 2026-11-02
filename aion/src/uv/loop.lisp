@@ -145,8 +145,12 @@ handle, the submission queue, and the set of handles to close on teardown."))
 (defun ensure-available ()
   "Load libuv if it is not loaded yet, and verify it matches this binding.
 Called by every entry point, so a missing library fails at USE with instructions
-rather than at LOAD with a broken system."
-  (unless (ffi:libuv-loaded-p)
+rather than at LOAD with a broken system.
+
+The check runs until it has passed, not only while libuv is unloaded. LOAD-LIBUV marks libuv
+loaded before VERIFY-ABI runs, so a libuv that failed the check used to count as available on
+every later call (#940). Now every call signals LIBUV-ABI-MISMATCH until a check passes."
+  (unless (ffi:abi-verified-p)
     (ffi::ensure-loaded)
     (ffi:verify-abi))
   t)
@@ -240,7 +244,10 @@ MODE is :DEFAULT (until no active handles), :ONCE (block for one round of events
                       (:nowait ffi:+uv-run-nowait+))))
     (setf (loop-running-p loop) t)
     (unwind-protect
-         (ffi:uv-run (loop-pointer loop) mode-value)
+         ;; Every callback runs inside this call, so code that must not block a loop, such as
+         ;; aion/retry's wait, can tell it is on one (#79).
+         (let ((aion/dynamic:*blocking-forbidden* "an aion/uv loop"))
+           (ffi:uv-run (loop-pointer loop) mode-value))
       (setf (loop-running-p loop) nil))))
 
 (defun stop (loop)

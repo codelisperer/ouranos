@@ -63,7 +63,8 @@
 
 (test uv-is-preferred-when-libuv-loads
   (is (eq :uv (car (first srv::+backends+))) ":uv heads the table")
-  (is (equal '(:uv :preferred) (multiple-value-list (srv::%choose-server nil '(:uv :hunchentoot))))))
+  (is (equal '(:uv :preferred)
+             (multiple-value-list (srv::%choose-server nil '(:uv :hunchentoot))))))
 
 (test uv-is-skipped-with-a-reason-when-libuv-does-not-load
   "Control: the same AVAILABLE as the test above, with UV-PROBLEM set."
@@ -90,7 +91,8 @@
 
 (test the-libuv-probe-returns-the-error-message-or-nil
   (is (null (srv::%libuv-problem (lambda () t))))
-  (is (equal "libuv 1.40 is too old" (srv::%libuv-problem (lambda () (error "libuv 1.40 is too old"))))))
+  (is (equal "libuv 1.40 is too old"
+             (srv::%libuv-problem (lambda () (error "libuv 1.40 is too old"))))))
 
 (test uv-gets-two-workers-by-default-and-the-others-none
   (is (eql 2 (srv:default-workers :uv)))

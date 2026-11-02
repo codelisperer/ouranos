@@ -82,7 +82,7 @@ supplies the web-app *template*, `cons` supplies the machinery.
 
 | Command | Status |
 |---|---|
-| `cons init NAME --template web` | scaffold a new project — **works** |
+| `cons init NAME --template web` | scaffold a new project — **works**. `--db sqlite` or `--db postgres` adds one database pool shared by a session store and a user store (#711) |
 | `cons setup` | write the project's ASDF source-registry `(:tree)` drop-in (per-OS) — **not** prereq provisioning, which is `scripts/setup.sh` |
 | `cons version` | prints the version — **works** |
 | `cons build` / `test` / `serve` / `run` / `add` | the intended surface — **planned / in progress** |
@@ -176,6 +176,12 @@ resolution. **Adding a language is dropping a file** — no code change.
      (i18n:load-dictionary
       (asdf:system-relative-pathname :myapp "resources/i18n/") :default :en))
    ```
+   If the directory holds no `.json` file, because it is wrong, missing or empty, this
+   signals `i18n:empty-dictionary`, whose message gives the absolute directory it searched.
+   A relative path is resolved against `*default-pathname-defaults*`, which in a dumped
+   image is the directory the binary was started from, so resolve it from the system as
+   above. If the `:default` locale has no file, it warns `i18n:default-locale-not-loaded`
+   and returns the dictionary (#294).
 3. **Look up** by a flat `:section/key` with an explicit locale; `{named}`
    placeholders interpolate from keyword args:
    ```lisp
@@ -249,6 +255,20 @@ operation then borrows a connection, and when Postgres has ended that connection
 connection (#636). A store made over one connection can do the same only when it is given the
 backend that connection came from, `:backend`; without it, every later session lookup fails
 until the process restarts.
+
+**Do not give the session store and another store the same connection** (#711). Each store's
+lock covers only its own operations, so with `hyperion/auth-db` over that connection too, two
+handler threads can send statements on it at the same moment. This happens under Hunchentoot,
+which runs each connection on its own thread, as well as under `:workers`. Make one mnemosyne
+pool and give it to every store and to `wrap-connection`:
+
+```lisp
+(defvar *db*)
+(defvar *pool* (mnemosyne/conn:make-pool backend :size 8))
+(defvar *sessions* (session-db:make-db-store *pool* :dialect :postgres))
+(defvar *auth* (auth:make-db-auth *pool* :dialect :postgres))
+(hyperion/server:start (db-connection:wrap-connection (app) *pool* '*db*))
+```
 
 **Changes are written back by `wrap-session`.** A DB-backed store hands out a fresh copy of the
 session on every request, so `wrap-session` writes the session back through `store-save`
@@ -424,12 +444,30 @@ PBKDF2 passwords, a temp-password flag for forced-change-at-first-login, and a r
 (auth:authenticate *auth* "ada@example.com" "pw")     ; => USER or NIL
 ```
 
+**A test suite may lower the password cost; production must not** (#1045). Passwords are
+hashed with PBKDF2 at `auth:*pbkdf2-iterations*`, 100000 by default, and one hash or one verify
+takes about a quarter of a second at that count. A test that creates a user and signs in pays
+that twice. An app's test runner can set the count for the whole run:
+
+```lisp
+(setf auth:*pbkdf2-iterations* 1000)   ; in the test runner only
+```
+
+Use `setf` rather than `let` when tests start threads, because a `let` binding is not seen by
+other threads. Every hash stores the count it was made with, and `auth:verify-password` uses
+that stored count, so hashes made at either count verify under the other. Do not lower the count
+in a running app: it is what makes a stolen hash expensive to guess. Hyperion's own
+`hyperion/auth-db/tests` runs at 1000, which took it from about 29 s to 8 s on an Apple Silicon
+Mac.
+
 **An app serving with `:workers` gives the store its pool** (#371):
 `(auth:make-db-auth pool :dialect :postgres)`, usually the pool it also gives
 `hyperion/db-connection:wrap-connection`. Each operation then borrows a connection, which during
 a request is the request's own, so lookups on different request threads run at once. A store
 made over one connection is also safe to share between threads, because every operation takes
-the store's lock, but its operations then run one at a time. `:ensure t` creates the tables
+the store's lock, but its operations then run one at a time. That lock is the store's own, so
+never give one connection to this store and another store such as `hyperion/session-db`: give
+them both the pool (see the example under HTTP sessions, #711). `:ensure t` creates the tables
 under the store's `:table` and `:events-table` names (#378).
 
 ### Changing roles after the account exists
@@ -653,11 +691,20 @@ startup, then call `meta-tags` in the layout's head:
 - A page with no image uses the site's fallback image. An image URL presigned with an
   expiry is replaced by the fallback too, because a crawler keeps the card longer than the
   URL lasts; serve card images from a stable public URL.
-- `:visibility` is required, so a layout cannot forget to say that a page is private. A
-  public page passes `:visibility :public`. A page that needs sign-in passes
-  `:visibility :private`, and one kept out of search
-  engines passes `:noindex`. Either gets `robots noindex` and the site's name and fallback
-  image, and nothing from its own title, description, URL, image or `:site-name`.
+- `:visibility` is required, so a layout cannot forget to say that a page is private. It
+  takes one of four values:
+  - `:public`: the full card, and search engines may index the page.
+  - `:unlisted`: the same full card plus `robots noindex`. Use it for a page anyone with the
+    link may see and share, such as a post shared by link, that should not be listed in
+    search results.
+  - `:noindex`: `robots noindex`, and the card shows only the site's name and fallback
+    image.
+  - `:private`, for a page that needs sign-in: the same tags as `:noindex`.
+
+  `:noindex` and `:private` put nothing from the page's own title, description, URL, image
+  or `:site-name` in the head. `:unlisted` puts all of it there. `robots noindex` is a
+  request: a crawler may ignore it, and crawlers and link previewers still fetch an unlisted
+  page's card. A page whose content must stay private uses `:private` and requires sign-in.
 - `page-meta` returns the tags as a list of `(kind name value)` for a test or a layout that
   writes its own markup.
 

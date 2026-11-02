@@ -63,9 +63,11 @@ width. Requiring dashes and only dashes is the property; the exact width is not.
   "WHICH checks failed, not merely that some did: every line of every FiveAM `Failure Details:'
 block in OUTPUT, in order, entry rules included, interior blank lines preserved.
 
-EVERY BLOCK, NOT THE FIRST (#616). A test op that prints several reports, as aion/tests does,
-prints one block per failing report; reading only the first named one sub-suite's failures
-when two had failed.
+EVERY BLOCK, NOT THE FIRST (#616). A test op that runs several FiveAM suites in one image
+prints one report for each, and one block per failing report; reading only the first named one
+suite's failures when two had failed. aion/tests was the case: until #992 it ran all four of
+its sub-suites before signalling. It now stops at the first failing one, so this applies to any
+test op that runs several suites without signalling between them.
 
 READ TO THE STRUCTURE, NOT TO THE FIRST BLANK LINE. Each entry is wrapped in a rule, so a
 blank line inside one is part of a reason and a blank line outside one is the end of the
@@ -154,8 +156,8 @@ FAIL line, and return how many there were.
 
 Used by both of the gate's FAIL branches: a suite that exited 0 with failing checks, and one
 whose child exited non-zero. The second includes a suite that ran its checks and then
-signalled because some failed, as aion/tests does since #605; without this, its failures were
-reported only as the error that ended the child, not as the checks that failed."
+signalled because some failed, as each aion sub-suite does since #992; without this, its
+failures were reported only as the error that ended the child, not as the checks that failed."
   (let ((details (failure-details output)))
     (format stream "~{          ~a~%~}" details)
     (length details)))

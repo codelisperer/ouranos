@@ -20,13 +20,14 @@
   (:documentation "Raw macOS framework bindings: CoreFoundation and Security. Apple spellings kept.")
   (:export
    #:+cf-string-encoding-utf8+ #:+err-sec-success+ #:+err-sec-item-not-found+
-   #:+err-sec-duplicate-item+
+   #:+err-sec-duplicate-item+ #:+err-sec-interaction-not-allowed+
    #:cf-release #:cf-retain #:cf-get-retain-count
    #:cf-string-create-with-bytes #:cf-string-get-length #:cf-string-get-maximum-size-for-encoding
    #:cf-string-get-c-string
    #:cf-data-create #:cf-data-get-length #:cf-data-get-byte-ptr
    #:cf-dictionary-create #:cf-dictionary-get-count #:cf-dictionary-get-value
    #:sec-item-add #:sec-item-update #:sec-item-copy-matching #:sec-item-delete
+   #:cf-array-get-count #:cf-array-get-value-at-index
    #:sec-copy-error-message-string))
 
 (cl:defpackage #:aion/darwin

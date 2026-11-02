@@ -627,6 +627,22 @@ effect did or did not happen."
       (signals ceiling:grant-invalid
         (ceiling:verify-grant (ceiling:make-ed25519-verifier pub) forged sig)))))
 
+(test a-signed-payload-of-the-wrong-shape-is-refused
+  "The signature is good and the payload is not a grant. Each is GRANT-INVALID, which a web
+service answers 401, and none is another error, which it would answer 500."
+  (with-keys (priv pub)
+    (let ((v (ceiling:make-ed25519-verifier pub)))
+      (dolist (payload '("not json" "[1,2]" "\"a string\""
+                         "{\"principal\":5}" "{\"principal\":\"u1\",\"audience\":[1]}"
+                         "{\"principal\":\"u1\",\"capabilities\":\"search\"}"
+                         "{\"principal\":\"u1\",\"capabilities\":[1]}"
+                         "{\"principal\":\"u1\",\"capabilities\":7}"))
+        (is (eq :refused (handler-case (progn (ceiling:verify-grant v payload (%sign priv payload))
+                                              :accepted)
+                           (ceiling:grant-invalid () :refused)
+                           (error (e) (type-of e))))
+            "~S" payload)))))
+
 (test a-grant-signed-by-the-wrong-key-is-rejected
   ;; The property a shared secret would NOT have given us: this side can verify and cannot
   ;; mint, so compromising it yields no usable grants.
@@ -669,6 +685,45 @@ effect did or did not happen."
             (is (search "signature" (ceiling:grant-invalid-reason c))
                 "must fail on the signature, not the expiry: got ~S"
                 (ceiling:grant-invalid-reason c))))))))
+
+;;; --- a grant as one string (#67) ---------------------------------------------
+
+(test a-grant-token-round-trips-and-verifies
+  "ENCODE-GRANT-TOKEN signs with an `aion/signature' key; DECODE-GRANT-TOKEN gives back the
+payload and signature, and VERIFY-GRANT accepts them under the matching public key."
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (let* ((payload (%grant-json :principal "ü1"))
+           (token (ceiling:encode-grant-token payload priv)))
+      (is (= 1 (count #\. token)) "a token is two parts and one dot: ~S" token)
+      (is (notany (lambda (c) (find c "+/=")) token)
+          "a token is base64url without padding, so it fits a header unescaped: ~S" token)
+      (multiple-value-bind (text signature) (ceiling:decode-grant-token token)
+        (is (string= payload text) "the payload came back changed")
+        (is (string= "ü1" (ceiling:grant-principal
+                           (ceiling:verify-grant (ceiling:make-ed25519-verifier pub :audience "elise")
+                                                 text signature)))
+            "a non-ASCII principal survives the round trip")))))
+
+(test a-grant-token-with-a-changed-payload-does-not-verify
+  "The payload part is only base64url, so anyone can rewrite it. The signature is what stops it."
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (let* ((token (ceiling:encode-grant-token (%grant-json :token-cap 10) priv))
+           (forged-payload (subseq (ceiling:encode-grant-token (%grant-json :token-cap 999999) priv)
+                                   0 (position #\. (ceiling:encode-grant-token
+                                                     (%grant-json :token-cap 999999) priv))))
+           (forged (concatenate 'string forged-payload (subseq token (position #\. token)))))
+      (signals ceiling:grant-invalid
+        (multiple-value-bind (text signature) (ceiling:decode-grant-token forged)
+          (ceiling:verify-grant (ceiling:make-ed25519-verifier pub) text signature))))))
+
+(test a-malformed-grant-token-is-refused-with-a-reason
+  ;; The last four have letters or a digit from outside ASCII in the payload or the signature.
+  (dolist (bad (list "" "no-dot" "a.b.c" ".abc" "abc." "a+b.c/d" "abcde.QUJD" nil 42
+                     "QUJD.QUJé" "QUJD.ＱＵＪＤ" "ＱＵＪＤ.QUJD" "QUJD.QUJ٣"))
+    (is (eq :refused (handler-case (progn (ceiling:decode-grant-token bad) :accepted)
+                       (ceiling:grant-invalid (e)
+                         (if (search "base64url" (ceiling:grant-invalid-reason e)) :refused :no-reason))))
+        "~S was not refused with the reason" bad)))
 
 ;;; --- the ledger ------------------------------------------------------------
 
@@ -9404,3 +9459,246 @@ comes after the correction."
           (is (search "Has a dog called Rui." text) "~A" text)
           (is (null (search "Lives in Porto." text)) "the replaced value is gone: ~A" text)
           (is (= 0 (obs:observer-failures second))))))))
+
+;;; --- a private agent keeps content out of logs and events (#983) ---------------------------
+;;;
+;;; The test must be able to see a leak, so it runs the same agent twice: private, and as the
+;;; control, not private. Each run captures every log record at the most verbose level with
+;;; AION/LOG:*LOG-CONDITION-DETAILS* on, which makes EXCEPTION print a condition's report and the
+;;; backtrace's arguments, and records every event. Handlers inside the turn log each failure
+;;; with LOG:EXCEPTION, as an app's middleware does. The control finds every marker; the private
+;;; run finds none.
+;;;
+;;; EACH MARKER HAS A ROUTE IN THE CONTROL, or its absence from the private run would prove
+;;; nothing (the hub's review of #1027). The prompt reaches a log through the failing provider,
+;;; whose report quotes the messages it was sent, as providers' errors do. The refused repair
+;;; reply reaches one through a validator whose problem quotes it and a handler that logs each
+;;; rejection.
+
+(defparameter +983-markers+
+  '("MARK983PROMPT" "MARK983ARG" "MARK983RESULT" "MARK983REPLY"
+    "MARK983FAIL" "MARK983PROVIDER" "MARK983REPAIR")
+  "One string per kind of content: the user's prompt, a tool argument, a tool result, the reply,
+a failing means' report, a provider error's report, and a reply the structured-output repair
+refused.")
+
+(defclass %983-failing-provider (llm:provider) ()
+  (:documentation "A provider whose every request fails with a report that quotes content."))
+
+(defmethod llm:complete ((p %983-failing-provider) messages &key system tools max-tokens temperature tool-choice)
+  (declare (ignore system tools max-tokens temperature tool-choice))
+  (error "the provider refused the request about MARK983PROVIDER: ~S" messages))
+
+(defun %983-spec ()
+  "%SPEC with a validator whose problem quotes the headline it refuses, so a refused reply reaches
+the report of STRUCTURED-RESULT-REJECTED."
+  (let ((spec (%spec)))
+    (llm:make-tool-spec :name (llm:tool-spec-name spec) :description (llm:tool-spec-description spec)
+                        :schema (llm:tool-spec-schema spec)
+                        :validators (list (lambda (arguments)
+                                            (let ((h (gethash "headline" arguments)))
+                                              (when (and (stringp h) (search "REPAIR" h))
+                                                (format nil "headline ~S is not allowed" h))))))))
+
+(defun %983-printable (x)
+  "X with each hash table turned into an alist, so printing an event shows what an observer that
+prints it, such as the studio's STATUS-OBSERVER, would show of a tool call's arguments."
+  (typecase x
+    (hash-table (loop for k being the hash-keys of x using (hash-value v)
+                      collect (cons k (%983-printable v))))
+    (cons (cons (%983-printable (car x)) (%983-printable (cdr x))))
+    (t x)))
+
+(defun %983-run (&key private)
+  "Run the scenario with an agent made with PRIVATE. Returns everything a log sink or an event
+observer received, as one string."
+  (let* ((repairing (make-instance 'recording
+                                   :script (list (%call-completion "draft_copy" (%args "headline" "MARK983REPAIR" "characters" 13))
+                                                 (%call-completion "draft_copy" (%args "headline" "MARK983RESULT"
+                                                                                       "characters" 13)))))
+         (script (list (llm:make-completion
+                        :tool-calls (list (llm:make-tool-call :id "t1" :name "lookup"
+                                                              :arguments (%args "query" "MARK983ARG"))
+                                          (llm:make-tool-call :id "t2" :name "boom" :arguments (%args)))
+                        :stop-reason :tool-use)
+                       (llm:make-completion :text "the reply is MARK983REPLY" :stop-reason :end)))
+         (agent (actor:make-agent :name "writer" :private private
+                                  :provider (make-instance 'scripted :script script)))
+         (events '())
+         (out (make-string-output-stream)))
+    ;; A means whose result comes from a structured-output repair, and one that fails.
+    (actor:register-means agent "lookup" "looks something up"
+                          (lambda (in)
+                            (declare (ignore in))
+                            ;; An app that logs each rejected attempt, as the structured-output
+                            ;; documentation suggests for watching rejections.
+                            (handler-bind ((llm:structured-result-rejected
+                                             (lambda (c) (aion/log:exception c "structured reply rejected"))))
+                              (gethash "headline" (llm:generate-structured
+                                                   repairing '((:role :user :content "brief")) (%983-spec)
+                                                   :attempts 3)))))
+    (actor:register-means agent "boom" "always fails"
+                          (lambda (in) (declare (ignore in)) (error "the means failed on MARK983FAIL")))
+    (unwind-protect
+         (progn
+           (aion/log:setup :env :prod :level :trace :stream out)
+           (let ((aion/log:*log-condition-details* t))
+             (evt:with-observer ((lambda (e) (push e events)))
+               ;; A normal turn, with a tool call and a failing means.
+               (handler-bind ((cnd:means-failure
+                                (lambda (c)
+                                  (aion/log:exception c "means failed")
+                                  (cnd:substitute-result "recovered" c))))
+                 (actor:run-turn agent "my prompt is MARK983PROMPT"))
+               ;; A provider error, on the same agent.
+               (setf (actor:agent-provider agent) (make-instance '%983-failing-provider))
+               (handler-case
+                   (handler-bind ((error (lambda (c) (aion/log:exception c "turn failed"))))
+                     (actor:run-turn agent "again"))
+                 (error () nil)))))
+      (aion/log:setup :env :dev :level :warn :stream *standard-output*))
+    (format nil "~A~%~{~S~%~}" (get-output-stream-string out) (mapcar #'%983-printable (reverse events)))))
+
+(test a-private-agent-keeps-every-marker-out-of-logs-and-events
+  (let ((private (%983-run :private t))
+        (control (%983-run :private nil)))
+    (dolist (marker +983-markers+)
+      (is (search marker control) "control: ~A reaches a log or an event when the agent is not private" marker))
+    (dolist (marker +983-markers+)
+      (is (null (search marker private)) "~A reached a log record or an event of a private agent" marker))
+    (is (search ":WITHHELD" private) "the events still arrive, with their content withheld")
+    (is (search "SIMPLE-ERROR" private) "and the failures are still logged, by type")))
+
+(defun %983-retaining-run (&key private)
+  "A turn of an agent made with PRIVATE and :RETAIN-CONTENT T whose means fails with a report
+holding MARK983FAIL, logged with details on by a handler inside the turn, then replies
+MARK983REPLY. Returns (values EVENTS-TEXT LOG-TEXT)."
+  (let* ((events '())
+         (out (make-string-output-stream))
+         (agent (actor:make-agent :private private :retain-content t
+                                  :provider (make-instance
+                                             'scripted
+                                             :script (list (llm:make-completion
+                                                            :tool-calls (list (llm:make-tool-call
+                                                                               :id "t1" :name "boom"
+                                                                               :arguments (%args)))
+                                                            :stop-reason :tool-use)
+                                                           (llm:make-completion
+                                                            :text "MARK983REPLY" :stop-reason :end))))))
+    (actor:register-means agent "boom" "always fails"
+                          (lambda (in) (declare (ignore in)) (error "the means failed on MARK983FAIL")))
+    (unwind-protect
+         (progn (aion/log:setup :env :prod :level :trace :stream out)
+                (let ((aion/log:*log-condition-details* t))
+                  (evt:with-observer ((lambda (e) (push e events)))
+                    (handler-bind ((cnd:means-failure
+                                     (lambda (c)
+                                       (aion/log:exception c "means failed")
+                                       (cnd:substitute-result "recovered" c))))
+                      (actor:run-turn agent "MARK983PROMPT")))))
+      (aion/log:setup :env :dev :level :warn :stream *standard-output*))
+    (values (format nil "~S" events) (get-output-stream-string out))))
+
+(test a-private-agent-that-retains-content-gets-it-in-events-and-never-in-logs
+  "The failing means would put MARK983FAIL in the log, with details on; for a private agent it
+does not, even one that retains content in events. The control is the same turn with an agent
+that is not private, whose log holds it."
+  (multiple-value-bind (events log) (%983-retaining-run :private t)
+    (is (search "MARK983REPLY" events) "the app asked for content in events")
+    (is (null (search "MARK983" log)) "logs stay without it: ~A" log))
+  (multiple-value-bind (events log) (%983-retaining-run :private nil)
+    (declare (ignore events))
+    (is (search "MARK983FAIL" log) "control: without privacy the failure's report is logged")))
+
+(test unless-withheld-withholds-content-outside-the-content-keys
+  "A delegation's task text, a host and a resource name are withheld by UNLESS-WITHHELD, since
+:TASK is not a content key (the hub's review of #1027)."
+  (is (eq :withheld (let ((evt:*withhold-content* t)) (evt:unless-withheld "the task text"))))
+  (is (equal "the task text" (evt:unless-withheld "the task text")) "control: not withheld")
+  (is (null (member :task evt:+content-keys+)) ":task is not a content key"))
+
+(test withholding-replaces-only-the-content-fields-of-an-event
+  (let ((seen nil))
+    (let ((evt:*withhold-content* t))
+      (evt:with-observer ((lambda (e) (setf seen e)))
+        (evt:emit :tool-call :name "lookup" :id "t1" :arguments "secret")))
+    (is (equal '(:type :tool-call :name "lookup" :id "t1" :arguments :withheld) seen))))
+;;; --- moving a conversation to a rebuilt agent (#67, #1011's review) ---------------------
+
+(in-suite praxeon)
+
+(defparameter +moved-agent-slots+
+  '("CONTEXT" "RESULT-STORE" "CONVERSATION" "RESULT-INDEX" "CLEARED" "GUARD" "UNTRUSTED-INPUTS"
+    "UNTRUSTED-CALLS" "CONVERSATION-TAINT" "THREAD-MEMORY" "HISTORY"
+    ;; Moved one way only: TO is private when either agent is (#983).
+    "PRIVATE"))
+
+(defparameter +kept-agent-slots+
+  '("NAME" "PROVIDER" "SYSTEM-PROMPT" "CACHE-SYSTEM" "MEANS" "HISTORY-BUDGET" "MAX-TOKENS"
+    "OFFLOAD-THRESHOLD" "CLEAR-BUDGET" "CLEAR-TARGET" "KEEP-RECENT" "NEVER-CLEAR" "TAINT-SCOPE"
+    "RETAIN-CONTENT"))
+
+(test every-agent-slot-is-either-moved-or-kept-by-move-conversation
+  "A slot added to the agent fails this test until it is listed here as conversation state, which
+MOVE-CONVERSATION must then copy, or as configuration."
+  (let ((slots (mapcar (lambda (d) (symbol-name (sb-mop:slot-definition-name d)))
+                       (sb-mop:class-slots (find-class 'praxeon/actor::agent)))))
+    (is (null (set-difference slots (append +moved-agent-slots+ +kept-agent-slots+)
+                              :test #'string=))
+        "slots in neither list: ~S"
+        (set-difference slots (append +moved-agent-slots+ +kept-agent-slots+) :test #'string=))))
+
+(test move-conversation-carries-the-conversation-and-keeps-the-new-configuration
+  (let ((from (actor:make-agent :name "from" :system-prompt "old"))
+        (to (actor:make-agent :name "to" :system-prompt "new")))
+    (setf (actor:agent-history from) (list "m1" "m2")
+          (praxeon/actor::agent-context from) (ctx:make-context)
+          (praxeon/actor::agent-result-store from) (list :store)
+          (praxeon/actor::agent-conversation from) "conv-1"
+          (praxeon/actor::agent-guard from) (list :guard)
+          (praxeon/actor::agent-untrusted-inputs from) (list "task")
+          (praxeon/actor::agent-conversation-taint from) :untrusted
+          (praxeon/actor::agent-thread-memory from) (list :memory))
+    (setf (gethash "c1" (praxeon/actor::agent-untrusted-calls from)) t
+          (gethash "c2" (praxeon/actor::agent-result-index from)) :described
+          (gethash "c3" (praxeon/actor::agent-cleared from)) t)
+    (is (eq to (actor:move-conversation from to)))
+    (dolist (name +moved-agent-slots+)
+      (let ((reader (find-symbol (format nil "AGENT-~A" name) :praxeon/actor)))
+        (is (eq (funcall reader from) (funcall reader to)) "~A was not moved" name)))
+    (is (string= "to" (actor:agent-name to)))
+    (is (string= "new" (actor:agent-system-prompt to)) "the new agent's configuration was replaced")))
+
+(test move-conversation-keeps-a-private-conversation-private
+  "#983, from the hub's review of #1027: an app that rebuilds the agent with a factory that
+leaves out :PRIVATE does not make the conversation public. The new agent is private when either
+agent was; RETAIN-CONTENT stays the new agent's own."
+  (flet ((moved (&key from to)
+           (actor:move-conversation (apply #'actor:make-agent :name "from" from)
+                                    (apply #'actor:make-agent :name "to" to))))
+    (is-true (actor:agent-private (moved :from '(:private t) :to '()))
+             "a private conversation moved onto an agent built without :private stays private")
+    (is-true (actor:agent-private (moved :from '() :to '(:private t)))
+             "a new agent built private stays private")
+    (is (null (actor:agent-private (moved :from '() :to '())))
+        "control: neither private, the new agent is not")
+    (is (null (praxeon/actor::agent-retain-content
+               (moved :from '(:private t :retain-content t) :to '())))
+        "retain-content is the new agent's own")))
+
+(test move-conversation-gives-the-new-agent-the-higher-taint
+  "The new agent's conversation taint is the higher of the two, so moving a conversation does not
+lower a value the app recorded on the new agent. NIL, not recorded, is lower than any value."
+  (flet ((moved (from-taint to-taint)
+           (let ((from (actor:make-agent :name "from"))
+                 (to (actor:make-agent :name "to")))
+             (setf (praxeon/actor::agent-conversation-taint from) from-taint
+                   (praxeon/actor::agent-conversation-taint to) to-taint)
+             (praxeon/actor::agent-conversation-taint (actor:move-conversation from to)))))
+    (is (eq :untrusted (moved :clean :untrusted)) "a recorded :untrusted on the new agent stays")
+    (is (eq :untrusted (moved :untrusted :clean)))
+    (is (eq :delegated (moved :clean :delegated)))
+    (is (eq :untrusted (moved :untrusted :delegated)))
+    (is (eq :clean (moved :clean nil)) "a new agent that recorded nothing takes the old value")
+    (is (eq :delegated (moved nil :delegated)))
+    (is (null (moved nil nil)))))

@@ -25,7 +25,7 @@ libuv's own portable structs, not the platform's, which is what makes hand-writi
 them safe.")
   (:export
    ;; library management
-   #:load-libuv #:unload-libuv #:libuv-loaded-p #:libuv-not-found #:*libuv-path*
+   #:load-libuv #:unload-libuv #:libuv-loaded-p #:abi-verified-p #:libuv-not-found #:*libuv-path*
    ;; The sonames a shipped bundle must present. EXPORTED because the bundler has to
    ;; agree with them: it copies a library in under a name, and this is the list of
    ;; names anything looking for it will ask for (pre-publication issue 329). It was reachable only by

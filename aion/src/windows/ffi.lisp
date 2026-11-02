@@ -180,6 +180,21 @@
   (type dword)
   (flags dword))
 
+(cffi:defcfun ("CredEnumerateW" cred-enumerate-w) :int32
+  ;; Filter is "SERVICE/*" or NULL for everything; Count and Credentials are out parameters, and
+  ;; Windows allocates the array, which the caller frees with CredFree (#1035).
+  ;;
+  ;; EVERY MATCHING CREDENTIAL ARRIVES WITH ITS VALUE. For a generic credential the CREDENTIALW
+  ;; that Windows allocates includes CredentialBlob, the plaintext after DPAPI decryption, so a
+  ;; caller cannot ask for target names alone. hades reads TARGET-NAME and USER-NAME, writes
+  ;; zeros over each blob, and only then calls CredFree; an earlier version of this comment said
+  ;; the blob is never touched, which was wrong in both directions -- Windows had already
+  ;; decrypted it, and the caller must write to it to erase it (the review of #1066).
+  (filter :pointer)
+  (flags dword)
+  (count :pointer)                      ; DWORD*
+  (credentials :pointer))               ; PCREDENTIALW** -- Windows allocates
+
 (cffi:defcfun ("CredFree" cred-free) :void
   (buffer :pointer))
 

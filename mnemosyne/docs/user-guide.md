@@ -49,6 +49,35 @@ Build a typed backend, then open a connection. Backends are constructed from CL 
   closed instead. A checkout that finds every connection lent waits up to `:checkout-timeout`
   seconds and then signals `pool-exhausted`. A hyperion app that keeps its connection in a
   global uses `hyperion/db-connection:wrap-connection` to bind it per request.
+- **A Postgres connect gives up after 10 seconds, and a statement timeout is available**
+  (#959). `connect` and `make-pool` take `:connect-timeout`, in seconds, defaulting to
+  `*postgres-connect-timeout-seconds*` (10). It covers the whole connect, from the TCP connect
+  to the end of authentication, like libpq's `connect_timeout`. Past it, `connect` signals
+  `db-connect-timeout`, a `db-error` whose message names the host and port and nothing else
+  from the configuration. Without the limit, a server that does not answer held the caller
+  for the operating system's connect limit, about 127 s on Linux, or forever if it accepted
+  the TCP connection and then sent nothing, and in a pool it held a slot for that long. Pass
+  `:connect-timeout nil` for no limit. A pooled connect that times out gives its slot back
+  before the condition reaches the caller.
+
+  `:statement-timeout`, in milliseconds, defaulting to `*postgres-statement-timeout-ms*`
+  (NIL), sets `statement_timeout` on each new connection. A pool sets it again each time it
+  takes a connection back, because its reset runs `RESET ALL`. A statement that runs longer
+  is cancelled by the server and signals `db-statement-timeout`, a `db-error`, and the
+  connection stays usable. A statement cancelled for another reason, such as
+  `pg_cancel_backend`, is a plain `db-error`. Telling the two apart reads the server's
+  message, so a server whose `lc_messages` is not English reports a timeout as a plain
+  `db-error` too.
+
+  The server-side fallback, which also covers connections mnemosyne does not open, such as
+  a `psql` session or another service using the same role:
+
+  ```sql
+  ALTER ROLE app_user SET statement_timeout = '30s';
+  ```
+
+  A role setting applies to new sessions of that role, and it is the value `RESET ALL`
+  returns to, so a pool without `:statement-timeout` keeps it too.
 - **A file-backed SQLite path gets its parent directory created.** `"./data/app.db"` is an
   ordinary layout, but SQLite creates the *file* and never the *folder*, so a first run
   failed with a bare `unable to open database file` naming neither the path nor the cause.
@@ -206,6 +235,21 @@ target: `:sqlite` and `:postgres` both emit `?` (verified). `:xtdb` is the seam 
 SELECT); provisional, see [`xtdb-notes.md`](xtdb-notes.md). The builder **enforces** two
 XTDB DML differences: it signals on `:on-conflict` (XTDB `INSERT` already upserts on `_id`)
 and on `:returning` (XTDB DML has none — read the value back with a separate query).
+
+`:jet` is Microsoft Access SQL (Jet/ACE), for **queries only** (#1061): mnemosyne renders it and
+has no backend that runs it, and `ddl:ddl` and `schema:schema-ddl` refuse it. It differs from the
+others in these places:
+
+| Query | `:jet` renders | Why |
+|---|---|---|
+| `:limit 200` | `SELECT TOP 200 …`, the number written into the SQL | Jet has no `LIMIT` and takes no parameter in `TOP`. `TOP` also returns rows tied with the last one on the `ORDER BY` columns. A leading `(:distinct …)` item gives `SELECT DISTINCT TOP 200 …`. |
+| `:offset 20` | signals `unsupported-query` | Jet has no `OFFSET`. Page with a `:where` on the last key seen and `:limit`. |
+| `:c.email`, `(:quoted "First Name")` | `[c].[email]`, `[First Name]` | Bracket quoting. A name holding a period, `!`, a backquote, a bracket, a control character or a leading space is refused. |
+| `(:date 2026 9 14)`, `(:timestamp 2026 9 14 8 5 3)` | `#2026-09-14#`, `#2026-09-14 08:05:03#` | Jet reads this form the same way in every locale. Other dialects bind the ISO text. |
+| any value | `?`, params in placeholder order | ADO binds by position. |
+| `(:count :*)` without `:as` | `COUNT(*) AS [count]` | Jet otherwise names the column `Expr1000`. The alias avoids the names of the other columns, so a clash gives `[count_2]`. |
+| two or more `:join`s | `FROM ([a] INNER JOIN [b] ON …) INNER JOIN [c] ON …` | Jet rejects the flat form. It has no `FULL` or `CROSS` join, so those signal `unsupported-query`. |
+| `:escape` on `:like`; `:lower`, `:upper`, `:length`, `:coalesce`; `(:count (:distinct …))`; `:returning`; `:on-conflict`; an INSERT of several rows | signals `unsupported-query` | Access rejects each of these when it runs. It escapes a wildcard by putting it in brackets, `[%]`. Its functions are `LCase`, `UCase`, `Len` and `Nz`, written with `(:call :lcase …)`. It counts distinct values only through a `SELECT DISTINCT` subquery, and it inserts one row per statement. |
 
 **One vocabulary, three spellings** ([ADR-0003](adr/0003-one-dialect-vocabulary.md), pre-publication issue 432).
 A dialect is a *designator*: the keyword `:postgres`, the string `"postgres"` and a typed

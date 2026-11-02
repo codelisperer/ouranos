@@ -41,37 +41,244 @@ MAKE-S3-STORE."))
       (error 'blob-configuration-error :missing name)))
 
 (defun make-s3-store (&key endpoint region access-key secret-key session-token
-                           (secure t) path-style public-base-url upload-acl)
+                           (secure t secure-p) path-style public-base-url upload-acl)
   "An S3-STORE, defaulting every setting from the environment.
 
 ENDPOINT is MNEMOSYNE_S3_ENDPOINT (default \"s3.amazonaws.com\"), REGION is MNEMOSYNE_S3_REGION
 (default \"us-east-1\"), ACCESS-KEY and SECRET-KEY are MNEMOSYNE_S3_ACCESS_KEY and
 MNEMOSYNE_S3_SECRET_KEY, SESSION-TOKEN is MNEMOSYNE_S3_SESSION_TOKEN, PATH-STYLE is
 MNEMOSYNE_S3_PATH_STYLE=true and PUBLIC-BASE-URL is MNEMOSYNE_S3_PUBLIC_BASE_URL.
+SECURE, whether requests and signed URLs use https, is MNEMOSYNE_S3_SECURE, and true when that
+is unset; see %SECURE-SETTING (#124). A local S3 double such as MinIO on localhost:9000 is
+reached with MNEMOSYNE_S3_SECURE=false and MNEMOSYNE_S3_PATH_STYLE=true.
 UPLOAD-ACL is :NONE (the default) or :PRIVATE, or MNEMOSYNE_S3_UPLOAD_ACL: whether UPLOAD-URL
 signs `x-amz-acl: private'. Set :PRIVATE for a bucket that honours ACLs, such as DigitalOcean
 Spaces or an AWS bucket with ACLs enabled, and leave :NONE for an AWS bucket with ACLs disabled
 or Cloudflare R2; see %UPLOAD-ACL-SETTING (#796).
 
 Credentials are checked HERE rather than at first use, so a deploy missing a secret dies
-at boot with the variable's name instead of on the first upload a member attempts."
-  (let ((endpoint (or endpoint (uiop:getenv "MNEMOSYNE_S3_ENDPOINT") "s3.amazonaws.com"))
-        (region (or region (uiop:getenv "MNEMOSYNE_S3_REGION") "us-east-1"))
-        (access-key (or access-key (uiop:getenv "MNEMOSYNE_S3_ACCESS_KEY")))
-        (secret-key (or secret-key (uiop:getenv "MNEMOSYNE_S3_SECRET_KEY"))))
-    (make-instance 's3-store
-                   :endpoint (%require-setting endpoint "MNEMOSYNE_S3_ENDPOINT")
+at boot with the variable's name instead of on the first upload a member attempts.
+
+The MNEMOSYNE_ prefix on these variables is historical: the blob store began in mnemosyne and
+moved to hermes, and the deployed names were kept rather than renamed. They are hermes settings."
+  (let ((endpoint (or endpoint (%setting "MNEMOSYNE_S3_ENDPOINT") "s3.amazonaws.com"))
+        (region (or region (%setting "MNEMOSYNE_S3_REGION") "us-east-1"))
+        (access-key (or access-key (%setting "MNEMOSYNE_S3_ACCESS_KEY")))
+        (secret-key (or secret-key (%setting "MNEMOSYNE_S3_SECRET_KEY"))))
+    ;; The endpoint is required FIRST, so an empty one is reported as the missing setting it is,
+    ;; naming MNEMOSYNE_S3_ENDPOINT on its own. Only then is its shape judged: an empty value is
+    ;; a setting nobody filled in, and a malformed one is a setting filled in wrongly, and the
+    ;; two deserve different sentences (the review of #1090).
+    ;; TRIMMED ONCE, HERE, and the trimmed value is what is both checked and stored. The checks
+    ;; used to trim their own copy while the store kept the raw string, so " 127.0.0.1" passed
+    ;; the checks and then every request was built from a URL with a space in it (the review of
+    ;; #1090). One normalisation, before anything looks at the value.
+    (let* ((endpoint (string-trim '(#\Space #\Tab #\Newline #\Return)
+                                  (%require-setting endpoint "MNEMOSYNE_S3_ENDPOINT")))
+           (path-style (or path-style
+                           (let ((v (%setting "MNEMOSYNE_S3_PATH_STYLE")))
+                             (and v (string-equal v "true")))))
+           (secure (%secure-setting secure secure-p endpoint path-style)))
+      (%check-endpoint-shape endpoint)
+      (%check-endpoint-userinfo endpoint)
+      (make-instance 's3-store
+                   :endpoint endpoint
                    :region region
                    :access-key (%require-setting access-key "MNEMOSYNE_S3_ACCESS_KEY")
                    :secret-key (%require-setting secret-key "MNEMOSYNE_S3_SECRET_KEY")
-                   :session-token (or session-token (uiop:getenv "MNEMOSYNE_S3_SESSION_TOKEN"))
+                   :session-token (or session-token (%setting "MNEMOSYNE_S3_SESSION_TOKEN"))
                    :secure secure
-                   :path-style (or path-style
-                                   (let ((v (uiop:getenv "MNEMOSYNE_S3_PATH_STYLE")))
-                                     (and v (string-equal v "true"))))
+                   :path-style path-style
                    :public-base-url (or public-base-url
-                                        (uiop:getenv "MNEMOSYNE_S3_PUBLIC_BASE_URL"))
-                   :upload-acl (%upload-acl-setting upload-acl))))
+                                        (%setting "MNEMOSYNE_S3_PUBLIC_BASE_URL"))
+                   :upload-acl (%upload-acl-setting upload-acl)))))
+
+(defun %strip-brackets (text)
+  "TEXT without a surrounding pair of square brackets: \"[::1]\" gives \"::1\". Anything else is
+returned unchanged."
+  (if (and text (> (length text) 1)
+           (char= #\[ (char text 0))
+           (char= #\] (char text (1- (length text)))))
+      (subseq text 1 (1- (length text)))
+      text))
+
+(defparameter +endpoint-forbidden+ '("://" "/" "?" "#" "@")
+  "Substrings an S3 endpoint may not contain (#1089). An endpoint is an authority -- a host with
+an optional port -- and nothing else. Each of these either moves the host somewhere this check
+would not look, or makes the request URL mean something other than what the setting appears to
+say.")
+
+(defun %check-endpoint-shape (endpoint)
+  "Signal BLOB-CONFIGURATION-ERROR unless ENDPOINT is a bare host with an optional port (#1089).
+
+WHY THE SHAPE IS CHECKED AND NOT ONLY THE HOST. The request URL is built as the scheme, then
+\"://\", then the endpoint as it stands (%S3-URL through %S3-HOST), so whatever the endpoint
+contains lands in the middle of a URL. The first fix for #1089 read the endpoint with QURI, the
+parser dexador uses, but read the ENDPOINT rather than the URL the request is built from, and
+the adversarial review found that these are not the same string:
+
+  evil.com://127.0.0.1        the check read the scheme \"evil.com\" and the host 127.0.0.1 and
+                              allowed plaintext, while the request URL was
+                              http://evil.com://127.0.0.1/bkt/k and dexador connected to
+                              evil.com:80
+  bucket.evil.com://localhost the same thing through the virtual-host form
+  http://127.0.0.1:9000       the request URL became http://http://127.0.0.1:9000/..., whose
+                              host is \"http\" -- an endpoint carrying a scheme never worked,
+                              although an earlier docstring of mine said it did
+
+Using dexador's parser was not enough, because it was handed a different string. Two things hold
+now: an endpoint may not contain the pieces that make a URL mean something else, and the host is
+read from the shape a PATH-STYLE request is built from. Both matter -- the shape check is what
+keeps the host check's input honest -- so a later reader should not drop either as redundant.
+
+PATH-STYLE IS PART OF THAT CLAIM AND NOT AN ASIDE. In virtual-host style %S3-HOST builds
+\"BUCKET.ENDPOINT\", which is a different DNS name from the endpoint and resolves wherever its
+resolver says, so no check here can speak for it. That is why %SECURE-SETTING requires path-style
+for a plaintext store. An earlier version of this docstring said the host was read from the shape
+the request is built from without that qualification, which was false for virtual-host style."
+  (let ((endpoint (and endpoint (string-trim " " endpoint))))
+    (flet ((refuse (why)
+             (error 'blob-configuration-error
+                    :missing (format nil "MNEMOSYNE_S3_ENDPOINT to be a host with an optional port, such as s3.amazonaws.com or localhost:9000. ~A" why))))
+      (when (or (null endpoint) (zerop (length endpoint)))
+        (refuse "The value is empty."))
+      (when (some (lambda (c) (member c '(#\Space #\Tab #\Newline #\Return) :test #'char=))
+                  endpoint)
+        (refuse "The value contains whitespace."))
+      (when (search "://" endpoint)
+        (refuse (format nil "~S contains \"://\". The scheme comes from MNEMOSYNE_S3_SECURE and is put in front of this value, so a scheme here would appear twice in the request URL and the host would not be the one named." endpoint)))
+      (let ((bad (find-if (lambda (piece) (search piece endpoint)) +endpoint-forbidden+)))
+        (when bad
+          (refuse (format nil "~S contains ~S, which belongs to the rest of a URL rather than to a host." endpoint bad)))))))
+
+(defun %endpoint-uri (endpoint)
+  "ENDPOINT read as the request would read it: the URL shape %S3-URL builds, parsed with QURI,
+which is the parser dexador uses. Returns the QURI:URI, or NIL when it cannot be parsed.
+
+THE SCHEME IS ALWAYS PREPENDED, never conditionally. A blob endpoint is a bare authority such as
+\"localhost:9000\", and QURI:URI reads that as the scheme \"localhost\" with no host at all, so an
+endpoint has to be given a scheme before it is parsed. An earlier version prepended one only
+when the endpoint had no \"://\" of its own, which is exactly how evil.com://127.0.0.1 got past
+the check: see %CHECK-ENDPOINT-SHAPE. %CHECK-ENDPOINT-SHAPE now refuses such an endpoint, and
+this function no longer looks at what the endpoint contains -- between them the string parsed
+here and the string the request is built from are the same."
+  (let ((endpoint (and endpoint (string-trim " " endpoint))))
+    (and endpoint
+         (ignore-errors (quri:uri (concatenate 'string "http://" endpoint))))))
+
+(defun %endpoint-host (endpoint)
+  "ENDPOINT's host, without a port, as QURI reads it out of the URL the request is built from:
+\"localhost:9000\" gives \"localhost\" and \"[::1]:9000\" gives \"::1\". NIL when there is no host.
+
+THIS USED TO PARSE THE ENDPOINT ITSELF, AND THAT WAS THE FIRST DEFECT IN #1089. It took the text
+up to the first slash and, when that began with \"[\", returned what was inside the brackets. An
+endpoint may carry userinfo before an \"@\", and when the userinfo was a bracketed IPv6 address,
+stripping the brackets consumed the \"@\" with it: for \"[::1]@example.com\" it returned \"::1\",
+which %LOCAL-ENDPOINT-P allowed as loopback while dexador connected to example.com."
+  (let ((uri (%endpoint-uri endpoint)))
+    ;; QURI returns an IPv6 host with its brackets, as it appears in the URL, and every caller
+    ;; here wants the address itself, because that is what ADDRESS-CATEGORY and PARSE-ADDRESS
+    ;; read. Measured rather than assumed: for "[::1]:9000" QURI returns "[::1]", and without
+    ;; this a legitimate local IPv6 endpoint was refused.
+    (%strip-brackets (and uri (quri:uri-host uri)))))
+(defun %endpoint-userinfo (endpoint)
+  "The user name and password ENDPOINT carries before an \"@\", or NIL. An S3 endpoint has no use
+for either: their only effects here are to hide the real host from anyone reading the setting,
+and to defeat the check below (#1089), so %CHECK-PLAINTEXT-ENDPOINT refuses any endpoint that
+has them whatever the host turns out to be."
+  (let ((uri (%endpoint-uri endpoint)))
+    (and uri (quri:uri-userinfo uri))))
+
+(defun %check-endpoint-userinfo (endpoint)
+  "Signal BLOB-CONFIGURATION-ERROR when ENDPOINT carries a user name or password before an \"@\"
+(#1089).
+
+Refused whatever the scheme and whatever the host, and not only for a plaintext store, because
+the real damage is that the request goes somewhere other than where the setting appears to say.
+dexador connects to the host AFTER the \"@\", so an endpoint of that shape sends this store's
+SigV4-signed requests, and any session token, to that host -- over TLS if the store is secure,
+which hides the redirection rather than preventing it. An S3 endpoint has no legitimate use for
+userinfo, so there is nothing to weigh against refusing it.
+
+Checked when the store is made, as the credentials are, so a deployment with a wrong endpoint
+dies at boot naming the variable instead of on the first upload.
+
+%CHECK-ENDPOINT-SHAPE now refuses an \"@\" outright, so in practice it reports this first and
+this function is the second of two guards rather than the only one. It is kept because it names
+the specific mistake -- credentials in the endpoint instead of in
+MNEMOSYNE_S3_ACCESS_KEY -- and because it reads the host QURI found, which is the fact that
+makes the refusal worth explaining to whoever set the variable."
+  (let ((userinfo (and endpoint (%endpoint-userinfo endpoint))))
+    (when userinfo
+      (error 'blob-configuration-error
+             :missing (format nil "MNEMOSYNE_S3_ENDPOINT without a user name or password in it. The value carries userinfo before an \"@\", so the request would be sent to the host ~S rather than to what the setting appears to name, with this store's signed requests and any session token"
+                              (%endpoint-host endpoint))))))
+
+(defun %local-endpoint-p (endpoint)
+  "Whether ENDPOINT names something only this machine or this network can reach, so sending it
+requests in plaintext does not put them on the public internet (the hub's review of #970).
+
+\"localhost\" counts. An IP address is classified by AION/HTTP-CLIENT:ADDRESS-CATEGORY, and
+counts when it is loopback, private or link-local. Any other name is resolved, and counts only
+when it resolves and every address it resolves to is one of those, so a Docker Compose service
+name such as \"minio\" works while a name pointing at the internet does not. A name that does not
+resolve does not count: an endpoint that cannot be reached is not an endpoint known to be local.
+
+The host comes from %ENDPOINT-HOST, which reads it with QURI as dexador does. An endpoint whose
+host cannot be determined is not local (#1089)."
+  (let ((host (%endpoint-host endpoint)))
+    (flet ((local-p (address)
+             (member (http:address-category address) '(:loopback :private :link-local))))
+      (and host
+           (or (string-equal host "localhost")
+               (let ((literal (http:parse-address host)))
+                 (if literal
+                     (and (local-p literal) t)
+                     (let ((addresses (ignore-errors (http:resolve-host host))))
+                       (and addresses (every #'local-p addresses) t)))))))))
+
+(defun %secure-setting (value supplied-p endpoint path-style)
+  "The store's SECURE: VALUE when :SECURE was passed, else MNEMOSYNE_S3_SECURE, else T.
+
+The variable is read as true or false without regard to case, and unset means true, so plaintext
+http has to be asked for. Any other value signals BLOB-CONFIGURATION-ERROR rather than picking a
+default, so a misspelling cannot quietly change the store to http, and cannot quietly leave a
+local double unreachable either.
+
+MNEMOSYNE_S3_SECURE=false IS REFUSED FOR AN ENDPOINT THAT IS NOT LOCAL (the hub's review of
+#970). Without that, one environment variable turned a store still aimed at the default
+s3.amazonaws.com into one that sent its signed requests, and any session token, in plaintext
+across the internet. See %LOCAL-ENDPOINT-P. A caller that passes :SECURE NIL in code is not
+checked: that is a deliberate choice written by whoever owns the code, and it is the workaround
+#124 was filed with; the environment is the surface an operator changes without one.
+
+This reads oppositely from MNEMOSYNE_S3_PATH_STYLE beside it, where unset means NIL. That is
+deliberate: for path-style the safe default is off, and for secure it is on."
+  (if supplied-p
+      (and value t)
+      (let ((v (%setting "MNEMOSYNE_S3_SECURE")))
+        (cond ((null v) t)
+              ((string-equal v "true") t)
+              ((string-equal v "false")
+               ;; PLAINTEXT REQUIRES PATH-STYLE, because in virtual-host style the request does
+               ;; not go to the endpoint at all: %S3-HOST builds "BUCKET.ENDPOINT", a different
+               ;; DNS name, and nothing here can say where that resolves. The check approved
+               ;; 127.0.0.1 while the request went to bkt.127.0.0.1, and 10.1.2.3, LOCALHOST and
+               ;; a Compose name behaved the same way -- whoever controls the resolver or the
+               ;; search domain chooses where that name points. This has been so since #970 and
+               ;; was found in the review of #1090. Path-style sends the request to the endpoint
+               ;; itself, which is the host this check is about, so the two agree again.
+               (unless path-style
+                 (error 'blob-configuration-error
+                        :missing (format nil "MNEMOSYNE_S3_PATH_STYLE=true when MNEMOSYNE_S3_SECURE=false. In virtual-host style the request goes to the DNS name BUCKET.~A rather than to ~S, and nothing can say where that name resolves, so a plaintext store must address the endpoint itself. A local S3 double such as MinIO wants path-style anyway"
+                                         endpoint endpoint)))
+               (unless (%local-endpoint-p endpoint)
+                 (error 'blob-configuration-error
+                        :missing (format nil "MNEMOSYNE_S3_SECURE=false, which sends every request in plaintext, and MNEMOSYNE_S3_ENDPOINT is ~S, which is not a loopback, private or link-local address. Plaintext is for a local S3 double; point the endpoint at one, or pass :secure nil in code if this is really what you want"
+                                         endpoint)))
+               nil)
+              (t (error 'blob-configuration-error
+                        :missing (format nil "MNEMOSYNE_S3_SECURE must be true or false, not ~S" v)))))))
 
 (defun %upload-acl-setting (value)
   "The store's UPLOAD-ACL: VALUE when given, else MNEMOSYNE_S3_UPLOAD_ACL, else :NONE.
@@ -82,7 +289,7 @@ with ACLs enabled. Leave it :NONE for an AWS bucket with ACLs disabled, the defa
 AWS bucket, which refuses an upload naming `private' with 400 AccessControlListNotSupported,
 and for Cloudflare R2, which does not implement the header (the maintainer's ruling on #796)."
   (let ((value (or value
-                   (let ((v (uiop:getenv "MNEMOSYNE_S3_UPLOAD_ACL")))
+                   (let ((v (%setting "MNEMOSYNE_S3_UPLOAD_ACL")))
                      (and v (plusp (length v))
                           (cond ((string-equal v "private") :private)
                                 ((string-equal v "none") :none)

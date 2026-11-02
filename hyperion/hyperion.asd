@@ -108,6 +108,8 @@
                              (:file "i18n")     ; locale dictionaries + negotiation
                              (:file "page-meta") ; Open Graph + Twitter-card tags (#821); after i18n
                              (:file "consent")  ; cookie/tracking consent (GDPR/ePrivacy)
+                             (:file "notice")   ; in-page notices; htmx error responses shown (#980)
+                             (:file "appearance") ; theme, contrast and look, and the --hy-* tokens (#981)
                              (:file "static")   ; static asset serving
                              (:file "markdown") ; Markdown -> HTML (safe by default)
                              (:file "js")       ; Parenscript (poller + helpers)
@@ -287,7 +289,8 @@
                              (:static-file "bulma.min.css")))
                ;; The tree's own component stylesheets (#489), embedded the same way.
                (:module "assets/components"
-                :components ((:static-file "calendar.css")))
+                :components ((:static-file "calendar.css")
+                             (:static-file "kit.css")))
                (:file "src/assets"))
   :in-order-to ((test-op (test-op "hyperion/assets/tests"))))
 
@@ -310,6 +313,36 @@
   :depends-on ("hyperion/calendar" "hyperion" "aion/tz" "spinneret" "fiveam")
   :components ((:file "tests/calendar-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/calendar/tests :run-tests)))
+
+(defsystem "hyperion/kit"
+  :description "Generic collection-page components: page header, breadcrumbs, empty state, segmented control, toggle group, dialogs, the destructive confirm, the undo notice, the list toolbar, the properties panel (#981), and the dock panel (#67)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; Its stylesheet is served by hyperion/assets, which this system does not depend on, the
+  ;; same arrangement as hyperion/calendar.
+  ;; hyperion for hyperion/output, which compiles the components' Parenscript the way
+  ;; hyperion/js does. hyperion/list for the toolbar, which reads a list's spec and state.
+  :depends-on ("hyperion" "hyperion/list" "spinneret" "parenscript")
+  :serial t
+  :components ((:module "src/kit"
+                :serial t
+                :components ((:file "page")
+                             (:file "toggle")
+                             (:file "dialog")
+                             (:file "toolbar")
+                             (:file "panel")
+                             (:file "dock"))))
+  :in-order-to ((test-op (test-op "hyperion/kit/tests"))))
+
+(defsystem "hyperion/kit/tests"
+  :description "Tests for hyperion/kit: each component's roles, names and pressed state, read from the markup it writes."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  ;; plump parses the markup, so a test reads elements and attributes, not strings.
+  :depends-on ("hyperion/kit" "hyperion/list" "spinneret" "plump" "fiveam")
+  :components ((:file "tests/kit-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/kit/tests :run-tests)))
 
 (defsystem "hyperion/list"
   :description "Paging, sorting and filtering a list from the query string, against a spec the app declares: the state, the mnemosyne clauses, links, and the pager and sort-heading components (#488)."
@@ -346,6 +379,45 @@
   :depends-on ("hyperion/list-db" "hyperion/list" "mnemosyne" "fiveam")
   :components ((:file "tests/list-db-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/list-db/tests :run-tests)))
+
+(defsystem "hyperion/notifications"
+  :description "In-app notifications: a store protocol and a memory store, NOTIFY with per-kind delivery to the list or the app's email function, the bell and list components, their router, and a prune job (#792)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; hyperion for hyperion/http, i18n, router and csrf. aion/clock for the ids, aion/log for a
+  ;; failed email. No database (hyperion/notifications-db) and no hermes: email is the app's
+  ;; function, because nothing in the line depends on a satellite.
+  :depends-on ("hyperion" "spinneret" "bordeaux-threads" "aion/clock" "aion/log")
+  :components ((:file "src/notifications"))
+  :in-order-to ((test-op (test-op "hyperion/notifications/tests"))))
+
+(defsystem "hyperion/notifications/tests"
+  :description "Tests for hyperion/notifications: the store protocol on the memory store, collapsing by group key, delivery per kind, the link check, the components' markup and the routes."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion/notifications" "hyperion" "spinneret" "flexi-streams" "fiveam"
+               "aion/schedule")   ; the prune job is run the way the docs define it
+  :components ((:file "tests/notifications-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/notifications/tests :run-tests)))
+
+(defsystem "hyperion/notifications-db"
+  :description "A mnemosyne store for hyperion/notifications, with the DDL for the app's migrations and a check that its tables exist (#792)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; mnemosyne is to hyperion's left in the DAG; bordeaux-threads for the one-connection lock.
+  :depends-on ("hyperion/notifications" "mnemosyne" "bordeaux-threads" "aion/log")
+  :components ((:file "src/notifications-db"))
+  :in-order-to ((test-op (test-op "hyperion/notifications-db/tests"))))
+
+(defsystem "hyperion/notifications-db/tests"
+  :description "Tests for hyperion/notifications-db against SQLite in memory, and Postgres when MNEMOSYNE_TEST_PG_URL is set."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion/notifications-db" "hyperion/notifications" "mnemosyne" "fiveam")
+  :components ((:file "tests/notifications-db-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/notifications-db/tests :run-tests)))
 
 (defsystem "hyperion/sidecar"
   :description "Dev sidecars: helper processes, such as a webhook forwarder, started and stopped with a dev server (#700)."
@@ -388,10 +460,15 @@
   ;; the consumer -- here the consumer is the test).
   :depends-on ("hyperion/assets" "hyperion"   ; assets-tests.lisp calls router: and server:
                "hyperion/test-ports" "fiveam" "ironclad" "clack-handler-hunchentoot"
+               ;; kit-browser-tests runs hyperion/kit's dialogs in the smoke page's browser (#981).
+               "hyperion/kit" "hyperion/list" "spinneret"
                (:require "sb-bsd-sockets"))
   :serial t
   :components ((:file "tests/assets-tests")
-               (:file "tests/htmx-smoke-tests"))
+               (:file "tests/htmx-smoke-tests")
+               ;; after htmx-smoke-tests, whose browser helpers it uses (#980)
+               (:file "tests/notice-smoke-tests")
+               (:file "tests/kit-browser-tests"))   ; uses the smoke page's browser helpers
   :perform (test-op (o c) (uiop:symbol-call :hyperion/assets/tests :run-tests)))
 
 ;;; Durable session store, backed by mnemosyne. A separate system so hyperion core keeps
@@ -409,7 +486,8 @@
   ;; DEPENDS ON hyperion/desktop, not on nothing: the suite resolves the launcher through
   ;; desktop:default-launcher rather than rebuilding that logic, so if resolution moves
   ;; the suite moves with it instead of quietly testing a path nobody uses.
-  :depends-on ("aion/fs" "aion/platform" "hyperion/desktop" "fiveam")   ; view-tests.lisp compares with aion/platform (#416)
+  :depends-on ("aion/fs" "aion/platform" "hyperion/desktop" "fiveam"   ; view-tests.lisp compares with aion/platform (#416)
+               "aion/test-http")   ; the pages a real window with --dialogs loads, on CI (#986)
   :serial t
   :components ((:file "tests/view-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/view/tests :run-tests)))
@@ -422,7 +500,9 @@
                ;; ShellExecuteW for the :browser shell, so no URL passes through cmd (#851)
                (:feature :win32 "aion/windows"))
   :serial t
-  :components ((:file "src/desktop")))
+  :components ((:file "src/desktop")
+               ;; #986: the native dialogs' request, checked and rendered for a page
+               (:file "src/desktop-dialogs")))
 
 ;;; The desktop self-updater (ADR-0010, pre-publication issue 76). An aux system: only a desktop app pulls it,
 ;;; and hyperion core stays free of crypto and of an HTTP client.
@@ -722,6 +802,8 @@
                              (:file "same-origin-tests")
                              (:file "desktop-window-tests")
                              (:file "browser-tests")   ; the :browser shell opens no shell (#851)
+                             (:file "notice-tests")    ; after i18n-tests, whose %HT it uses (#980)
+                             (:file "desktop-dialogs-tests")   ; the dialog call a page renders (#986)
                              (:file "ratelimit-tests")
                              (:file "proxy-tests")   ; after ratelimit-tests, whose helpers it uses (#381)
                              (:file "entropy-tests")
@@ -733,5 +815,6 @@
                              (:file "import-tests")
                              (:file "markdown-tests")
                              (:file "html-attributes-tests")
-                             (:file "page-meta-tests"))))  ; after i18n-tests, whose %ATTR-P it uses
+                             (:file "page-meta-tests")  ; after i18n-tests, whose %ATTR-P it uses
+                             (:file "appearance-tests"))))
   :perform (test-op (op c) (uiop:symbol-call :hyperion/tests :run-tests)))

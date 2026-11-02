@@ -62,7 +62,13 @@ run once more on a fresh one.
 OVER ONE CONNECTION, every operation takes turns on it under the store's lock. Pass BACKEND, the
 backend that connection was opened from, so the store can open a new connection when Postgres
 ends that one; without it, a lost connection fails every later operation until the process
-restarts, as before #636."
+restarts, as before #636.
+
+DO NOT GIVE TWO STORES THE SAME CONNECTION (#711). The lock is this store's own, so it does not
+stop another store over that connection, a HYPERION/AUTH-DB store for example, from sending a
+statement on it at the same moment from another handler thread. That can happen under
+Hunchentoot, which runs each connection on its own thread, as well as under :WORKERS. Give every
+store the same mnemosyne pool instead, the one the app passes to WRAP-CONNECTION."
   ;; THE NAME IS CHECKED HERE, NOT ONLY WHEN DDL IS MADE (Copilot's review of #652): with :ENSURE
   ;; NIL, an app's own migrations path, every operation still writes the name into SQL.
   (%check-table table)

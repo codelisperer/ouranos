@@ -102,7 +102,8 @@ so the loaded image carries them and never consults the source tree again."
                 :fingerprint "67fa26df"
                 :bytes (%embed "assets/vendor/bulma.min.css"))
         ;; First-party component stylesheets (#489). Not pinned: see %FIRST-PARTY.
-        (%first-party :calendar "calendar.css" "assets/components/calendar.css"))
+        (%first-party :calendar "calendar.css" "assets/components/calendar.css")
+        (%first-party :kit "kit.css" "assets/components/kit.css"))
   "Every asset served from memory: the vendored ones, whose provenance and licences are in
 assets/vendor/ASSETS.pin, and the tree's own component stylesheets.")
 

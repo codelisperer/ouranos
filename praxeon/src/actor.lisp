@@ -106,7 +106,8 @@ client rendering `agent-history' still shows the whole conversation."
   ;; TAINT-SCOPE says how long untrusted content keeps a turn untrusted. :TURN (the default):
   ;; until the user's next message. :CONVERSATION: while the history sent to the model still
   ;; holds a call whose result may be untrusted (the whole history, whether or not a budget
-  ;; trims what is sent), so a later turn starts untrusted too.
+  ;; trims what is sent), or the recorded CONVERSATION-TAINT is :UNTRUSTED or :DELEGATED
+  ;; (#948), so a later turn starts untrusted too.
   (guard nil)
   (untrusted-inputs '() :type list)
   ;; The ids of the calls whose result was untrusted when it ran, by the means's registration or
@@ -118,7 +119,58 @@ client rendering `agent-history' still shows the whole conversation."
   ;; prompt in place of the messages they were distilled from, once enough has been observed.
   (thread-memory nil)
   (taint-scope :turn)
+  ;; #983: PRIVATE keeps the agent's content out of every log line and out of events, so an app
+  ;; whose agent works over content it may not keep, such as a writer's manuscript, can rely on
+  ;; that. RETAIN-CONTENT lets events carry content for a private agent again, for an app that
+  ;; shows a trace and means to; logs stay without it either way. See %WITH-AGENT-PRIVACY.
+  (private nil)
+  (retain-content nil)
+  ;; A new slot that holds part of the conversation, rather than how the agent is configured,
+  ;; is also copied by MOVE-CONVERSATION; the actor tests list every slot as one or the other.
+  ;; #948: whether untrusted content has entered this conversation, recorded as it happens, so
+  ;; :CONVERSATION works for an app that rebuilds the history from text with no tool calls in
+  ;; it. :UNTRUSTED when the agent read untrusted content; :DELEGATED when the only such
+  ;; content is a task a coordinating agent gave it; :CLEAN when neither; NIL when not
+  ;; recorded. The app stores it beside its transcript and passes it to MAKE-AGENT as
+  ;; :CONVERSATION-TAINT. Setting it to :CLEAN starts over only when the history no longer
+  ;; holds the untrusted calls either, since :CONVERSATION finds those in the history as well.
+  ;; See %CONVERSATION-TAINTED-P.
+  (conversation-taint nil)
   (history '() :type list))               ; list of praxeon/llm messages
+
+(defun %higher-taint (a b)
+  "The higher of two conversation-taint values, in the order NIL, :CLEAN, :DELEGATED, :UNTRUSTED.
+NIL means not recorded, so either recorded value is kept over it."
+  (let ((order '(nil :clean :delegated :untrusted)))
+    (if (< (position a order) (position b order)) b a)))
+
+(defun move-conversation (from to)
+  "Give TO, an agent just made, FROM's conversation, and return TO. What moves is the history and
+the state needed to read it as it was read before: the retrieved context, the offloaded and
+cleared tool results with the store they are in, the untrusted-content records, the turn guard,
+and the thread memory. TO's conversation taint becomes the higher of the two agents' values
+(%HIGHER-TAINT), so a value the app gave TO is not lowered. TO is private when either agent is,
+so a conversation that was private stays private on an agent the app built without :PRIVATE
+(#983, the hub's review of #1027). TO keeps the rest of its own configuration: provider, system
+prompt, means, budgets, taint scope and RETAIN-CONTENT. An app does this when what an agent may
+do changes and its conversation should go on, such as praxeon/web when a session's grant
+changes (#67). The two agents share the moved tables afterwards, so FROM is not used again."
+  (setf (agent-history to) (agent-history from)
+        (agent-context to) (agent-context from)
+        (agent-result-index to) (agent-result-index from)
+        (agent-cleared to) (agent-cleared from)
+        (agent-guard to) (agent-guard from)
+        (agent-untrusted-inputs to) (agent-untrusted-inputs from)
+        (agent-untrusted-calls to) (agent-untrusted-calls from)
+        (agent-conversation-taint to) (%higher-taint (agent-conversation-taint from)
+                                                     (agent-conversation-taint to))
+        (agent-private to) (or (agent-private from) (agent-private to))
+        (agent-thread-memory to) (agent-thread-memory from))
+  ;; The result index names results in FROM's store, so the store goes with it.
+  (when (agent-result-store from)
+    (setf (agent-result-store to) (agent-result-store from)
+          (agent-conversation to) (agent-conversation from)))
+  to)
 
 (defvar *principal* nil
   "The user the current turn runs for, as the app identifies its users, or NIL (#527). RUN-TURN
@@ -142,6 +194,31 @@ turn (#531).")
 ;; Inheritable for the reason *PRINCIPAL* is: a thread that continues this turn acts under the
 ;; same policy (#158).
 (aion/dynamic:register-inheritable '*on-hold*)
+
+(defstruct (turn-cancel (:constructor make-turn-cancel ()))
+  "A handle that cancels a turn (#984). Make one, pass it to RUN-TURN as :CANCEL, and call
+CANCEL-TURN on it from another thread. One handle cancels for good: a turn started with a handle
+already cancelled ends before its first model call."
+  (request (http:make-request-cancel) :read-only t))
+
+(defun cancel-turn (cancel)
+  "Cancel the turn running with CANCEL, a TURN-CANCEL, from any thread. A model call in progress
+on a provider that streams (PRAXEON/LLM:SUPPORTS-STREAMING-P) has its connection closed, so the
+provider stops generating. A tool call in progress is not interrupted; the turn ends before the
+next model call. Returns T."
+  (http:cancel-request (turn-cancel-request cancel)))
+
+(defun turn-cancelled-p (cancel)
+  "True once CANCEL-TURN has been called on CANCEL."
+  (http:request-cancelled-p (turn-cancel-request cancel)))
+
+(defvar *turn-cancel* nil
+  "The TURN-CANCEL of the running turn, or NIL. RUN-TURN binds it from :CANCEL; a delegated
+sub-turn keeps it, so cancelling the turn cancels the sub-agent's model calls too.")
+
+;; Inherited by threads that carry on the turn, such as a parallel sub-agent, for the reason
+;; *PRINCIPAL* is: they are part of the turn being cancelled.
+(aion/dynamic:register-inheritable '*turn-cancel*)
 (aion/dynamic:register-inheritable '*hold-allowed*)
 
 (defun register-means (agent name description fn &key schema capability source confirm
@@ -197,11 +274,39 @@ Returns NAME."
 ;;; agent rebuilt from its history), the guard is rebuilt from the history in the safe
 ;;; direction: every reader call in the turn counts as having run, and no URL is allowed.
 
-(defstruct (turn-guard (:constructor %make-turn-guard (key &optional untrusted)))
+(defstruct (turn-guard (:constructor %make-turn-guard (key &optional untrusted agent)))
   key
+  ;; NIL, T when the turn read untrusted content, or :DELEGATED when its only untrusted content
+  ;; is a delegated task earlier in a :CONVERSATION (#948). Either true value makes the turn
+  ;; untrusted; only T is passed on to a coordinator (REGISTER-AGENT-AS-MEANS).
   (untrusted nil)
+  ;; The agent whose turn this is, so %TAINT-GUARD can record the conversation's taint (#948).
+  (agent nil)
   (counts (make-hash-table :test #'equal))
   (urls '() :type list))
+
+(defun %taint-guard (guard)
+  "Mark GUARD's turn untrusted, and record that untrusted content has entered its agent's
+conversation (#948). Every place that makes a turn untrusted calls this."
+  (setf (turn-guard-untrusted guard) t)
+  (when (turn-guard-agent guard)
+    (setf (agent-conversation-taint (turn-guard-agent guard)) :untrusted))
+  guard)
+
+(defun %taint-guard-by-delegation (guard)
+  "Mark GUARD's turn untrusted because a delegated task is earlier in its conversation, unless
+it already read untrusted content (#948). Records nothing: the agent's taint says so already."
+  (unless (eq (turn-guard-untrusted guard) t)
+    (setf (turn-guard-untrusted guard) :delegated))
+  guard)
+
+(defun %taint-guard-from (guard taint)
+  "Taint GUARD as TAINT, a value of %HISTORY-UNTRUSTED-P or *DECIDED-AFTER-UNTRUSTED*: T for
+read content, :DELEGATED for a delegated task, NIL for nothing."
+  (case taint
+    ((nil))
+    (:delegated (%taint-guard-by-delegation guard))
+    (t (%taint-guard guard))))
 
 (defvar *current-guard* nil
   "The guard of the turn whose call is running, or NIL outside a call.")
@@ -209,7 +314,8 @@ Returns NAME."
   "A box, (NIL) or (T), for the call that is running: MARK-UNTRUSTED sets it, so the call's
 result is recorded as untrusted (AGENT-UNTRUSTED-CALLS). NIL outside a call.")
 (defvar *decided-after-untrusted* nil
-  "True while a call runs that the model decided after untrusted content entered its turn. A
+  "True while a call runs that the model decided after untrusted content entered its turn: the
+turn guard's UNTRUSTED value, T or :DELEGATED. A
 sub-turn started inside such a call, such as a delegated agent's, starts with untrusted
 content already present, and its task is not counted as the user's text.")
 (defparameter *read-result-means* "read-result"
@@ -288,24 +394,81 @@ longer registered, whose result cannot be judged, or one recorded as untrusted w
           append (remove :tool-use content :key (lambda (p) (getf p :type)) :test-not #'eq)))
 
 (defun %rebuild-guard (agent key messages)
-  (let ((guard (%make-turn-guard key (%history-untrusted-p agent))))
+  (let ((guard (%make-turn-guard key nil agent)))
+    (%taint-guard-from guard (%history-untrusted-p agent))
     (dolist (p (%tool-uses (rest messages)))
       (when (gethash (getf p :name) (agent-means agent))
         (incf (gethash (getf p :name) (turn-guard-counts guard) 0)))
       (when (%untrusted-call-p agent p)
-        (setf (turn-guard-untrusted guard) t)))
+        (%taint-guard guard)))
     guard))
 
+(define-condition conversation-taint-unrecorded (warning)
+  ((agent :initarg :agent :reader conversation-taint-unrecorded-agent))
+  (:report (lambda (c stream)
+             (let ((agent (conversation-taint-unrecorded-agent c)))
+               (format stream (concatenate
+                               'string
+                               "praxeon/actor: agent ~S (conversation ~S) has :taint-scope "
+                               ":conversation and a history with earlier turns but no tool calls, "
+                               "and its conversation-taint was not recorded, so whether untrusted "
+                               "content entered the conversation cannot be told. The turn is "
+                               "treated as untrusted. To fix it, store (agent-conversation-taint "
+                               "agent) beside the transcript after each turn, and pass it to "
+                               "make-agent as :conversation-taint when the agent is rebuilt.")
+                       (agent-name agent) (agent-conversation agent)))))
+  (:documentation "Signalled, as a warning, when an agent under :TAINT-SCOPE :CONVERSATION was
+given a history whose earlier turns hold no tool calls, such as one rebuilt from a text
+transcript, and no recorded CONVERSATION-TAINT (#948). The turn is treated as untrusted
+whatever a handler does: muffling the warning does not make the turn trusted."))
+
+(defun %check-conversation-taint (agent)
+  (unless (member (agent-conversation-taint agent) '(nil :clean :delegated :untrusted))
+    (error (concatenate 'string "praxeon/actor: :conversation-taint must be :untrusted, "
+                        ":delegated, :clean or nil, not ~S")
+           (agent-conversation-taint agent))))
+
+(defun %conversation-tainted-p (agent earlier)
+  "Under :CONVERSATION, whether untrusted content entered AGENT's conversation before the
+current turn, whose earlier messages are EARLIER. T when the recorded CONVERSATION-TAINT is
+:UNTRUSTED, or EARLIER holds a call whose result may be untrusted. :DELEGATED when the only
+such content is a task a coordinating agent gave it (recorded :DELEGATED). When neither can tell,
+because EARLIER holds turns but no tool calls and nothing was recorded, warns
+CONVERSATION-TAINT-UNRECORDED, logs it, records :UNTRUSTED and returns true: the safe direction.
+When nothing was recorded and EARLIER can be judged, records what it shows, so the app has a
+value to store."
+  (let* ((uses (%tool-uses earlier))
+         (scanned (some (lambda (p) (%untrusted-call-p agent p)) uses)))
+    (case (agent-conversation-taint agent)
+      (:untrusted t)
+      (:delegated (if scanned t :delegated))
+      (:clean (and scanned t))
+      (t (cond ((or uses (null earlier))
+                (setf (agent-conversation-taint agent) (if scanned :untrusted :clean))
+                (and scanned t))
+               (t
+                ;; Recorded before the warning, so the warning and the log line come once per
+                ;; agent, and a handler that unwinds still leaves the conversation untrusted.
+                (setf (agent-conversation-taint agent) :untrusted)
+                (log:warn "praxeon/actor: conversation taint not recorded; treating it as untrusted"
+                          :agent (agent-name agent) :conversation (agent-conversation agent)
+                          :earlier-messages (length earlier))
+                (warn 'conversation-taint-unrecorded :agent agent)
+                t))))))
+
 (defun %history-untrusted-p (agent &optional (before (first (%current-turn-messages agent))))
-  "True when AGENT's taint scope is :CONVERSATION and its history, before the message BEFORE,
-holds a call whose result may be untrusted: that content is still sent to the model."
+  "True when AGENT's taint scope is :CONVERSATION and untrusted content entered its conversation
+before the message BEFORE: its history before BEFORE holds a call whose result may be untrusted,
+or its recorded CONVERSATION-TAINT says so (#948). T or :DELEGATED, as %CONVERSATION-TAINTED-P
+returns. Signals when the taint scope or the recorded taint is not a known value."
   (let ((scope (agent-taint-scope agent)))
     (unless (member scope '(:turn :conversation))
       (error "praxeon/actor: :taint-scope must be :turn or :conversation, not ~S" scope))
+    (%check-conversation-taint agent)
     (and (eq scope :conversation)
-         (some (lambda (p) (%untrusted-call-p agent p))
-               (%tool-uses (ldiff (agent-history agent)
-                                  (member before (agent-history agent) :test #'eq)))))))
+         (%conversation-tainted-p agent (ldiff (agent-history agent)
+                                               (member before (agent-history agent)
+                                                       :test #'eq))))))
 
 (defun untrusted-window-predicate (agent)
   "A function of a list of messages from AGENT's history, true when they hold content from
@@ -324,10 +487,14 @@ the user's, so the default takes it as trusted."
         (some (lambda (m) (member m (agent-untrusted-inputs agent) :test #'eq)) messages)
         ;; Under :CONVERSATION, untrusted content earlier in the history keeps every later turn
         ;; untrusted, so it keeps every later window untrusted too (#906's review).
+        ;; The recorded taint counts too (#948), because a history rebuilt from text has no calls
+        ;; to find. It does not say where in the history the content entered, so it marks every
+        ;; window, the earlier ones included.
         (and (eq (agent-taint-scope agent) :conversation)
-             (let ((at (member (first messages) (agent-history agent) :test #'eq)))
-               (and at (some (lambda (p) (%untrusted-call-p agent p))
-                             (%tool-uses (ldiff (agent-history agent) at)))))))))
+             (or (member (agent-conversation-taint agent) '(:untrusted :delegated))
+                 (let ((at (member (first messages) (agent-history agent) :test #'eq)))
+                   (and at (some (lambda (p) (%untrusted-call-p agent p))
+                                 (%tool-uses (ldiff (agent-history agent) at))))))))))
 
 (defun %turn-guard (agent)
   "AGENT's guard for its current turn, rebuilt from the history when the stored one belongs
@@ -340,7 +507,9 @@ to another turn."
         (setf (agent-guard agent) (%rebuild-guard agent key messages)))))
 
 (defun turn-untrusted-p (agent)
-  "True when untrusted content has entered AGENT's current turn."
+  "True when untrusted content has entered AGENT's current turn. When the turn's guard has to be
+rebuilt from the history under :CONVERSATION, this can record AGENT-CONVERSATION-TAINT and, when
+nothing was recorded, warn CONVERSATION-TAINT-UNRECORDED (#948)."
   (turn-guard-untrusted (%turn-guard agent)))
 
 (defun turn-urls (agent)
@@ -364,7 +533,7 @@ Outside a call, does nothing."
 result is untrusted only sometimes, such as a delegated agent that read a page. Outside a
 call, does nothing."
   (when *current-guard*
-    (setf (turn-guard-untrusted *current-guard*) t))
+    (%taint-guard *current-guard*))
   (when *call-taint*
     (setf (car *call-taint*) t)))
 
@@ -713,14 +882,14 @@ untrusted, the turn becomes untrusted (#317's taint ruling)."
         ;; An untrusted observation in the block makes the turn untrusted, as an untrusted
         ;; context item does, under either scope (#317's taint ruling).
         (when untrusted
-          (setf (turn-guard-untrusted (%turn-guard agent)) t))))
+          (%taint-guard (%turn-guard agent)))))
     ;; AN UNTRUSTED ITEM IN THE PROMPT MAKES THE TURN UNTRUSTED, under either taint scope
     ;; (#317's taint ruling). Stricter than the rule for a raw untrusted result, which :TURN stops
     ;; counting after the user's next message: an item such as a condensed observation is a
     ;; model's summary of untrusted content, and it can make an injected instruction read like
     ;; the member's own wish, so its source is harder to see than the original's.
     (when (some #'ctx:ctx-item-untrusted assembled)
-      (setf (turn-guard-untrusted (%turn-guard agent)) t))
+      (%taint-guard (%turn-guard agent)))
     (let* ((messages (if facts
                          (prompt:attach-context trimmed facts)
                          trimmed))
@@ -1051,12 +1220,38 @@ to the model at all (#90)."
   (unless (agent-provider agent)
     (error 'cnd:deliberation-failure :detail "no provider configured"))
   (multiple-value-bind (messages estimate breakdown) (request-messages agent)
-    (values (llm:complete (agent-provider agent)
-                          messages
-                          :system (agent-system-parts agent)
-                          :tools (agent-tool-specs agent :permit permit)
-                          :max-tokens (%output-limit agent max-tokens))
-            estimate breakdown)))
+    ;; A cancelled call reports the prompt estimate too, so a ledger can charge it when the
+    ;; provider had reported no input count (#984).
+    (handler-bind ((cnd:completion-cancelled
+                     (lambda (c) (setf (cnd:completion-cancelled-estimated-input c) estimate))))
+      (values (llm:complete (agent-provider agent)
+                            messages
+                            :system (agent-system-parts agent)
+                            :tools (agent-tool-specs agent :permit permit)
+                            :max-tokens (%output-limit agent max-tokens))
+              estimate breakdown))))
+
+(defun %deliberate-step (agent permit limit step)
+  "DELIBERATE for STEP of a turn, with the turn's cancel handle given to the provider and, while
+an observer is bound, each piece of the model's text emitted as a :TEXT-DELTA event (#984)."
+  (let ((llm:*cancel* (and *turn-cancel* (turn-cancel-request *turn-cancel*)))
+        (llm:*on-text* (and evt:*observer*
+                            (lambda (piece) (evt:emit :text-delta :text piece :step step)))))
+    (deliberate agent :permit permit :max-tokens limit)))
+
+(defun %end-cancelled (step &optional stopped)
+  "End a cancelled turn at STEP. STOPPED is the COMPLETION-CANCELLED of a model call the cancel
+stopped, or NIL when the turn was cancelled between calls. Returns RUN-TURN's values."
+  (when stopped
+    (evt:emit :usage :input (cnd:completion-cancelled-input-tokens stopped)
+                     :output (cnd:completion-cancelled-output-tokens stopped)
+                     :cache-read (cnd:completion-cancelled-cache-read-tokens stopped)
+                     :cache-write (cnd:completion-cancelled-cache-write-tokens stopped)
+                     :estimated-input (cnd:completion-cancelled-estimated-input stopped)
+                     :estimated-output (cnd:completion-cancelled-estimated-output stopped)
+                     :cancelled t))
+  (evt:emit :turn-ended :reason :cancelled :step step)
+  (values nil :cancelled))
 
 (defun act (agent means-name argument &key permit)
   "Apply a registered means by name to ARGUMENT, establishing recovery restarts.
@@ -1163,11 +1358,51 @@ and ends the turn when nothing handles it, as before."
   (let ((entry (gethash name (agent-means agent))))
     (and entry (means-entry-source entry))))
 
+;;; --- a private agent (#983) -----------------------------------------------------------------
+;;;
+;;; Praxeon's own log lines record counts, ids, durations and type names, never a prompt, a tool
+;;; argument, a tool result or a reply (docs/logging.md). Two routes could still carry content
+;;; while an agent runs, and a private agent closes both for the whole of its turn, on every
+;;; thread the turn continues on:
+;;;   - AION/LOG:*LOG-CONDITION-DETAILS*, a development setting, would make AION/LOG:EXCEPTION
+;;;     write a condition's report and the backtrace's arguments, which can quote any of these.
+;;;     It is bound to NIL.
+;;;   - Events: a tool call's arguments, a tool result, an answer's text and a delegated task
+;;;     reach EVT:*OBSERVER*, which the studio's status printer and praxeon/web print. They are
+;;;     :WITHHELD (EVT:*WITHHOLD-CONTENT*), unless the agent says RETAIN-CONTENT.
+;;; A sub-agent delegated to from a private agent's turn runs under the same bindings.
+
+(aion/dynamic:register-inheritable 'aion/log:*log-condition-details*)
+
+(defun %withhold-content-for (agent)
+  "What EVT:*WITHHOLD-CONTENT* is during a turn of AGENT: true when an enclosing turn already
+withholds, or AGENT is private and does not retain content."
+  (or evt:*withhold-content* (and (agent-private agent) (not (agent-retain-content agent)))))
+
+(defun %withhold-from-logs-for (agent)
+  "What EVT:*WITHHOLD-FROM-LOGS* is during a turn of AGENT: true when an enclosing turn already
+withholds, or AGENT is private. RETAIN-CONTENT does not change it, because it is about events."
+  (or evt:*withhold-from-logs* (and (agent-private agent) t)))
+
+(defun %condition-details-for (agent)
+  "What AION/LOG:*LOG-CONDITION-DETAILS* is during a turn of AGENT: NIL when AGENT is private,
+and otherwise what it already was, which an enclosing private turn has made NIL."
+  (and (not (agent-private agent)) aion/log:*log-condition-details*))
+
+(defmacro %with-agent-privacy ((agent) &body body)
+  "Run BODY, a turn of AGENT, with its privacy in force (#983)."
+  (let ((a (gensym "AGENT")))
+    `(let* ((,a ,agent)
+            (evt:*withhold-content* (%withhold-content-for ,a))
+            (evt:*withhold-from-logs* (%withhold-from-logs-for ,a))
+            (aion/log:*log-condition-details* (%condition-details-for ,a)))
+       ,@body)))
+
 (defun %append-history (agent &rest messages)
   (setf (agent-history agent) (append (agent-history agent) messages)))
 
 (defun run-turn (agent user-input &key (max-steps 8) permit max-tokens principal
-                                       (on-hold nil on-hold-p) held claim)
+                                       (on-hold nil on-hold-p) held claim cancel)
   "Run one full turn: record USER-INPUT, then deliberate and act until the model
 replies with no further tool call. Returns the model's final text. MAX-STEPS
 bounds the deliberate/act cycle so a misbehaving loop stays finite.
@@ -1227,16 +1462,29 @@ HELD is the HELD-TURN of an earlier turn whose held calls were never decided. Wh
 ends with calls that have no results, RUN-TURN needs it, or an earlier ABANDON-HELD-TURN, and
 signals HELD-TURN-REQUIRED without it. With it, the held calls get \"not run: the user did not
 confirm\" before the new message. CLAIM is the app's function that records a decision once; see
-CONTINUE-TURN."
+CONTINUE-TURN.
+
+CANCEL is a TURN-CANCEL that another thread may call CANCEL-TURN on (#984). The turn checks it
+before each model call. A model call in progress on a provider that streams is stopped by
+closing its connection. A tool call in progress finishes, and the turn ends before the next model
+call. A cancelled turn emits a :USAGE event for a model call it stopped, with :CANCELLED T, the
+counts the provider had reported (usually no output count) and :ESTIMATED-OUTPUT, then a
+:TURN-ENDED event with :REASON :CANCELLED, and returns NIL and :CANCELLED. The text of a stopped
+model call is not added to the history. NIL keeps the handle of an enclosing turn.
+
+While an observer is bound (PRAXEON/EVENT:WITH-OBSERVER), a provider that streams sends its text
+as it is written, and the turn emits a :TEXT-DELTA event for each piece."
   (let* ((*principal* (or principal *principal*))
+         (*turn-cancel* (or cancel *turn-cancel*))
          (*on-hold* (cond (on-hold-p on-hold)
                           ((eq *on-hold* :hold) nil)
                           (t *on-hold*)))
          (*hold-allowed* on-hold-p))
-    (%settle-unanswered agent held claim)
-    (multiple-value-prog1 (%run-turn agent user-input max-steps permit max-tokens)
-      ;; The observer is given the history after every turn (#317, step C).
-      (%observe-after-turn agent))))
+    (%with-agent-privacy (agent)
+      (%settle-unanswered agent held claim)
+      (multiple-value-prog1 (%run-turn agent user-input max-steps permit max-tokens)
+        ;; The observer is given the history after every turn (#317, step C).
+        (%observe-after-turn agent)))))
 
 (defun %run-turn (agent user-input max-steps permit max-tokens)
   "RUN-TURN's steps, with *PRINCIPAL* and *ON-HOLD* already bound."
@@ -1244,8 +1492,20 @@ CONTINUE-TURN."
     (%append-history agent message)
     (when *delegated*
       (push message (agent-untrusted-inputs agent)))
-    (setf (agent-guard agent) (%make-turn-guard message (or *decided-after-untrusted*
-                                                            (%history-untrusted-p agent message)))))
+    ;; The first turn of a conversation starts it clean, under either scope (#948).
+    (when (and (null (agent-conversation-taint agent))
+               (eq message (first (agent-history agent))))
+      (setf (agent-conversation-taint agent) :clean))
+    (let ((guard (%make-turn-guard message nil agent)))
+      (setf (agent-guard agent) guard)
+      (%taint-guard-from guard *decided-after-untrusted*)
+      (%taint-guard-from guard (%history-untrusted-p agent message)))
+    ;; A delegated task is a model's text, and it stays in this agent's history, so the
+    ;; conversation is untrusted from the next turn on (#948). The task does not make this
+    ;; turn untrusted, as before; UNTRUSTED-INPUTS above only keeps it out of USER-TEXTS.
+    ;; :DELEGATED, not :UNTRUSTED, so a coordinator is not marked by it (#949's review).
+    (when (and *delegated* (not (eq (agent-conversation-taint agent) :untrusted)))
+      (setf (agent-conversation-taint agent) :delegated)))
   (%turn-loop agent max-steps permit (%output-limit agent max-tokens)))
 
 (defun %turn-loop (agent max-steps permit limit)
@@ -1256,9 +1516,12 @@ values. CONTINUE-TURN enters here too, after it has written a held step's result
                    (error 'cnd:deliberation-failure
                           :detail (format nil "no final answer within ~A steps"
                                           max-steps)))
+      (when (and *turn-cancel* (turn-cancelled-p *turn-cancel*))
+        (return (%end-cancelled step)))
       (evt:emit :deliberating :step step)
       (multiple-value-bind (completion estimate breakdown)
-          (deliberate agent :permit permit :max-tokens limit)
+          (handler-case (%deliberate-step agent permit limit step)
+            (cnd:completion-cancelled (c) (return (%end-cancelled step c))))
         ;; Economic calculation: report what this step cost so the scarce resource
         ;; (the token budget) is visible. :ESTIMATED-INPUT is what the history budget was
         ;; enforced against and :INPUT is what the provider actually charged -- two numbers
@@ -1410,7 +1673,7 @@ acyclic to stay finite."
        (let ((task (cond ((hash-table-p args) (gethash arg args))
                          ((stringp args) args)
                          (t nil))))
-         (evt:emit :delegate :agent (agent-name sub) :task task)
+         (evt:emit :delegate :agent (agent-name sub) :task (evt:unless-withheld task))
          ;; The sub-turn runs with the COORDINATOR's authority, not with none. A delegated
          ;; subtask that silently lost the permit would be a capability-bearing means becoming
          ;; unreachable one level down -- the same defect pre-publication issue 400 found in RUN-TURN, reached by
@@ -1420,8 +1683,11 @@ acyclic to stay finite."
          (multiple-value-prog1 (let ((*outer-user-texts* (user-texts coordinator))
                                      (*delegated* t))
                                  (run-turn sub (or task "") :permit permit))
-           ;; What the sub-agent read reaches the coordinator in its answer (#827).
-           (when (turn-untrusted-p sub)
+           ;; What the sub-agent read reaches the coordinator in its answer (#827). Only what
+           ;; it read: a sub-agent untrusted only because an earlier task was delegated to it
+           ;; (:DELEGATED) has nothing untrusted to pass back (#949's review).
+           (when (and (turn-untrusted-p sub)
+                      (eq t (turn-guard-untrusted (%turn-guard sub))))
              (mark-untrusted)))))
      :schema (%string-arg-schema
               arg (format nil "A self-contained instruction for the ~A agent."

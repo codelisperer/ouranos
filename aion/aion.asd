@@ -86,7 +86,28 @@
   :components ((:module "tests"
                 :serial t
                 :components ((:file "csv-types"))))
-  :perform (test-op (o c) (uiop:symbol-call :aion/csv/types/tests :run-tests)))
+  ;; Signals when a check fails, so that the exit code says so; aion/tests runs this
+  ;; through :in-order-to and relies on it (#992).
+  :perform (test-op (o c)
+             (unless (uiop:symbol-call :aion/csv/types/tests :run-tests)
+               (error "aion/csv/types/tests: a check failed; the FiveAM report above says which"))))
+
+;;; aion/sexp --- a safe reader and writer for s-expression data from outside the program
+;;; (#972). Dependency-free on purpose, like aion/csv: plain CL, its own parser, no CL:READ.
+(defsystem "aion/sexp"
+  :description "Read and write s-expression data safely: plain data only, nothing interned, every size and depth bounded."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  :depends-on ()
+  :components ((:module "src/sexp" :components ((:file "sexp"))))
+  :in-order-to ((test-op (test-op "aion/sexp/tests"))))
+
+(defsystem "aion/sexp/tests"
+  :description "Each attack #972 names, refused, beside the standard reader that falls for it; the limits; and round trips."
+  :depends-on ("aion/sexp" "fiveam")
+  :components ((:module "tests" :components ((:file "sexp"))))
+  :perform (test-op (o c) (uiop:symbol-call :aion/sexp/tests :run-tests)))
 
 (defsystem "aion/csv/tests"
   :description "Conformance tests for aion/csv (RFC 4180 + edge cases)."
@@ -95,7 +116,11 @@
   :components ((:module "tests"
                 :serial t
                 :components ((:file "csv"))))
-  :perform (test-op (o c) (uiop:symbol-call :aion/csv/tests :run-tests)))
+  ;; Signals when a check fails, so that the exit code says so; aion/tests runs this
+  ;; through :in-order-to and relies on it (#992).
+  :perform (test-op (o c)
+             (unless (uiop:symbol-call :aion/csv/tests :run-tests)
+               (error "aion/csv/tests: a check failed; the FiveAM report above says which"))))
 
 ;;; aion/uv --- libuv for Common Lisp. A separate, OPT-IN system: core aion stays pure
 ;;; and toolchain-free, while consumers that want an event loop, async/sync filesystem
@@ -198,7 +223,8 @@
 (defsystem "aion/uv/tests"
   :description "Tests for aion/uv. Requires a built libuv (scripts/build-libuv.lisp)."
   :depends-on ("aion/uv" "fiveam"
-               "aion/platform")   ; *search-source-tree*, which the loader tests bind (#472)
+               "aion/platform"    ; *search-source-tree*, which the loader tests bind (#472)
+               "aion/dynamic")    ; *blocking-forbidden*, which a loop callback must see bound (#79)
   :serial t
   :components ((:module "tests"
                 :serial t
@@ -302,6 +328,33 @@
 ;;; Lives here for the reason aion/interceptor does: the shape is request-response, not web.
 ;;; It had already been reimplemented twice before it moved -- internal to hermes, and three
 ;;; raw dex:post calls in praxeon -- which is the same evidence that settled pre-publication issue 177.
+(defsystem "aion/retry"
+  :description "Retry policy as data: bounded attempts, backoff with jitter, a deadline, and a runner built on restarts (#79)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; aion/log for the line each retry and each retry not taken writes; aion/dynamic for
+  ;; *BLOCKING-FORBIDDEN*, which aion/uv binds on its loop threads. Nothing native and nothing
+  ;; from the network: the HTTP methods of TRANSIENCE and RETRY-AFTER live in aion/http-client.
+  :depends-on ("aion/log" "aion/dynamic")
+  :serial t
+  :components ((:module "src/retry"
+                :serial t
+                :components ((:file "packages")
+                             (:file "retry"))))
+  :in-order-to ((test-op (test-op "aion/retry/tests"))))
+
+(defsystem "aion/retry/tests"
+  :description "Tests for aion/retry: the schedule, the runner's restarts, Retry-After, the deadline."
+  :depends-on ("aion/retry" "fiveam"
+               "aion/dynamic"   ; binds *blocking-forbidden* to test the refusal
+               "aion/log" "log4cl")   ; captures the log lines the runner writes
+  :serial t
+  :components ((:module "tests"
+                :serial t
+                :components ((:file "retry"))))
+  :perform (test-op (o c) (uiop:symbol-call :aion/retry/tests :run-tests)))
+
 (defsystem "aion/http-client"
   :description "An interceptor-shaped HTTP client: enter stages, one round-trip, leave stages."
   :author "Bob <eternal.recursion@proton.me>"
@@ -314,7 +367,8 @@
   ;; On Windows a pinned connection uses aion/tls for TLS and aion/windows for Windows' verdict
   ;; on the server's certificate (#536). aion/tls loads its mbedTLS on first use, not here.
   :depends-on ("dexador" "quri" "usocket" (:feature (:not :os-windows) "cl+ssl")
-               (:feature :os-windows "aion/tls") (:feature :os-windows "aion/windows"))
+               (:feature :os-windows "aion/tls") (:feature :os-windows "aion/windows")
+               "aion/retry")   ; TRANSIENCE and RETRY-AFTER methods for HTTP-ERROR (#79)
   :serial t
   :components ((:module "src/http-client"
                 :serial t
@@ -322,7 +376,8 @@
                              (:file "client")
                              (:file "openssl") ; a patch to cl+ssl for OpenSSL 4 (#706)
                              (:file "http1")   ; the pinned exchange on Windows (#536)
-                             (:file "fetch"))))
+                             (:file "fetch")
+                             (:file "stream"))))  ; a streamed response, cancellable (#984)
   :in-order-to ((test-op (test-op "aion/http-client/tests"))))
 
 (defsystem "aion/http-client/tests"
@@ -332,6 +387,8 @@
   ;; aion/tls and aion/windows directly (#536).
   :depends-on ("aion/http-client" "fiveam" "usocket" "bordeaux-threads" "aion/test-threads" "quri"
                "aion/test-http"
+               "aion/retry"   ; TRANSIENCE and RETRY-AFTER of an HTTP-ERROR (#79)
+               "dexador"      ; the default User-Agent a pinned request sends (#985)
                (:feature (:not :os-windows) "cl+ssl")
                (:feature :os-windows "aion/tls") (:feature :os-windows "aion/windows"))
   :serial t
@@ -808,7 +865,11 @@
   :components ((:module "tests"
                 :serial t
                 :components ((:file "clock"))))
-  :perform (test-op (o c) (uiop:symbol-call :aion/clock/tests :run-tests)))
+  ;; Signals when a check fails, so that the exit code says so; aion/tests runs this
+  ;; through :in-order-to and relies on it (#992).
+  :perform (test-op (o c)
+             (unless (uiop:symbol-call :aion/clock/tests :run-tests)
+               (error "aion/clock/tests: a check failed; the FiveAM report above says which"))))
 
 ;;; aion/log --- a backend-neutral logging facade over log4cl. A separate opt-in system so
 ;;; core aion stays dependency-light (coalton + alexandria); consumers that want logging
@@ -887,7 +948,11 @@
   :components ((:module "tests"
                 :serial t
                 :components ((:file "log"))))
-  :perform (test-op (o c) (uiop:symbol-call :aion/log/tests :run-tests)))
+  ;; Signals when a check fails, so that the exit code says so; aion/tests runs this
+  ;; through :in-order-to and relies on it (#992).
+  :perform (test-op (o c)
+             (unless (uiop:symbol-call :aion/log/tests :run-tests)
+               (error "aion/log/tests: a check failed; the FiveAM report above says which"))))
 
 (defsystem "aion/boundary/tests"
   :description "Tests for aion/boundary (#110)."
@@ -908,16 +973,16 @@
   :perform (test-op (o c) (uiop:symbol-call :aion/dynamic/tests :run-tests)))
 
 (defsystem "aion/tests"
-  :description "Umbrella test suite for Aion: runs every aion sub-suite."
-  :depends-on ("aion" "aion/csv/tests" "aion/csv/types/tests" "aion/clock/tests"
-               "aion/log/tests" "fiveam")
-  :serial t
-  :components ((:module "tests"
-                :serial t
-                :components ((:file "all"))))
-  ;; RUN-TESTS prints four FiveAM reports and returns NIL if any failed. That value used to be
-  ;; dropped, so a failing sub-suite still exited 0 (#605). Signalling makes the exit code say
-  ;; so, independently of the gate reading every report's Fail line.
-  :perform (test-op (o c)
-             (unless (uiop:symbol-call :aion/tests :run-tests)
-               (error "aion/tests: a sub-suite failed; the FiveAM reports above say which"))))
+  :description "Umbrella test suite for Aion: runs every aion sub-suite through ASDF."
+  :depends-on ("aion")
+  ;; No components: core aion has no tests of its own yet, so this system only runs the
+  ;; sub-suites of aion/csv, aion/csv/types, aion/clock and aion/log, through ASDF's test-op
+  ;; (#992). Before #992 a file here called each one's RUN-TESTS, which the gate's check that
+  ;; every compiled system's /tests suite is run could not see as running them.
+  ;;
+  ;; Each sub-suite's :perform signals when a check fails, so the exit code reports a failure
+  ;; (#605). As a consequence, a red aion run STOPS AT THE FIRST FAILING SUB-SUITE: ASDF does
+  ;; not run the sub-suites after it, so their reports are missing from that run. The gate
+  ;; still fails it, and a green run counts the same checks as before.
+  :in-order-to ((test-op (test-op "aion/csv/tests" "aion/csv/types/tests" "aion/clock/tests"
+                                  "aion/log/tests"))))

@@ -13,10 +13,17 @@
   :license "MIT"
   :version "0.0.0"
   :depends-on ("aion/http-client"  ; the interceptor-shaped client, shared (pre-publication issue 202)
+               ;; aion/retry for TRANSIENCE and RETRY-AFTER on hermes's own failures, so an app
+               ;; can ask what is worth another send (#79 step two). hermes never sleeps or
+               ;; retries by itself.
+               "aion/retry"
                "dexador"           ; still direct for hermes/blob's streaming needs
                "com.inuoe.jzon"    ; JSON (SendGrid body, Twilio response)
                "cl-base64"         ; Twilio Basic auth + inbound-signature encoding
                "ironclad"          ; HMAC-SHA1 for X-Twilio-Signature verification
+               ;; Twilio's API-BASE is read with the parser dexador parses the request URL with,
+               ;; so the check and the request agree on the host (#1077).
+               "quri"
                "aion/log"          ; framework logging facade (send attempts/failures)
                "aion/secret"       ; the Telegram bot token, held so it cannot be printed (#778)
                "aion/random")      ; the Facebook connect flow's state (#822)
@@ -39,12 +46,14 @@
 (defsystem "hermes/tests"
   :description "Test suite for hermes."
   :depends-on ("hermes" "aion/http-client" "fiveam"   ; hermes.lisp calls http: directly
+               "aion/retry"   ; the #79 tests ask TRANSIENCE and RETRY-AFTER about hermes's failures
                "aion/test-http" "aion/log" "aion/secret")  ; telegram.lisp: a local Bot API server, log lines, the token
   :serial t
   :components ((:module "tests"
                 :serial t
                 :components ((:file "hermes")
-                             (:file "telegram") (:file "facebook"))))
+                             (:file "telegram") (:file "facebook")
+                             (:file "timeouts"))))  ; a send that gets no answer (#1077)
   :perform (test-op (o c) (uiop:symbol-call :hermes/tests :run-tests)))
 
 ;;; The blob store. Bytes belong in object storage; a row holds a key and metadata, never
@@ -110,6 +119,12 @@
                "aion/log"   ; the framework logging facade -- already hermes core's
                "coalton"    ; the key/visibility core is typed
                "dexador"    ; the S3 backend's only transport
+               ;; The endpoint is parsed with the same parser dexador uses, so the check for a
+               ;; plaintext endpoint reads the host the request will go to (#1089).
+               "quri"
+               ;; address-category and resolve-host: a plaintext store is refused unless its
+               ;; endpoint is local (#970). Already hermes core's, so no new external dep.
+               "aion/http-client"
                "ironclad")  ; SHA-256 checksums on the way past, HMAC for SigV4
   :serial t
   :components ((:module "blob"

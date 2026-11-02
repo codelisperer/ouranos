@@ -28,6 +28,7 @@
                     (#:feed #:hyperion/feed)
                     (#:sse  #:hyperion/sse)
                     (#:meta #:hyperion/page-meta)
+                    (#:appr #:hyperion/appearance)
                     (#:bt      #:bordeaux-threads)
                     (#:imp     #:hyperion/import))
   (:export #:run-tests #:hyperion))

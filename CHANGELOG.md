@@ -14,6 +14,240 @@ its tag.
 
 ### An app may have to act
 
+- **hermes: a 429 from SendGrid or Twilio is now `delivery-rate-limited`, not a plain
+  `delivery-failure`** (#79 step two). An app that caught `delivery-failure` still catches it,
+  since `delivery-rate-limited` is a subtype, but one that *distinguished* a rate limit by
+  reading `delivery-failure-status` can now match on the class, and read
+  `delivery-rate-limited-retry-after` for the wait the response asked for. Telegram and Facebook
+  already signalled it; every backend does now.
+- **hermes/blob: an S3 endpoint that carries a user name or password is now refused when the
+  store is made** (#1089). `MNEMOSYNE_S3_ENDPOINT` values such as `user:pw@host` or
+  `[::1]@host` signal `blob-configuration-error`. An app that put userinfo in that variable has
+  to move it: S3 credentials belong in `MNEMOSYNE_S3_ACCESS_KEY` and
+  `MNEMOSYNE_S3_SECRET_KEY`.
+  **Why it is refused rather than ignored.** dexador connects to the host *after* the `@`, so
+  such an endpoint sent this store's SigV4-signed requests, and any session token, to that host
+  while the setting appeared to name another. With `MNEMOSYNE_S3_SECURE=false` it also defeated
+  the check added in #970: the endpoint's host was read by a parser of hermes's own, which
+  returned the bracketed IPv6 userinfo as the host and allowed plaintext to a public host. The
+  endpoint is now read with `quri`, the parser dexador itself uses, **out of the URL the request
+  is built from**, so the check and the request agree about where the bytes are going.
+- **hermes/blob: a plaintext S3 store must now use path-style addressing** (#1089).
+  `MNEMOSYNE_S3_SECURE=false` additionally requires `MNEMOSYNE_S3_PATH_STYLE=true`, or
+  `blob-configuration-error` names it. In virtual-host style the request does not go to the
+  endpoint at all: the host is `BUCKET.ENDPOINT`, a different DNS name, so the check added in
+  #970 approved `127.0.0.1` while the request went to `bkt.127.0.0.1`, and the same for
+  `10.1.2.3`, `localhost` and a Compose service name. Whoever controls the resolver or the search
+  domain chooses where such a name points, and nothing in hermes can speak for it. A local S3
+  double such as MinIO wants path-style anyway. **https is unaffected** and keeps virtual-host
+  style, which is what AWS expects, and `:secure nil` passed in code remains an unchecked
+  deliberate choice, as #124 settled.
+- **hermes/blob: surrounding whitespace in `MNEMOSYNE_S3_ENDPOINT` is trimmed before the value is
+  stored** (#1089). The checks used to trim a copy while the store kept the raw string, so
+  `" 127.0.0.1:9000"` passed every check and then built request URLs with a space in them: it
+  failed safe, but at the first upload rather than at boot. Whitespace *inside* an endpoint is
+  still refused.
+- **hermes/blob: an S3 endpoint must now be a bare host with an optional port** (#1089).
+  `MNEMOSYNE_S3_ENDPOINT` is refused when it contains `://`, `/`, `?`, `#`, `@` or whitespace, or
+  is empty. Values such as `localhost:9000`, `127.0.0.1:9000`, `[::1]:9000`, `minio:9000` and
+  `s3.amazonaws.com` are unaffected.
+  **Two shapes that used to be accepted no longer are, and neither ever worked.** An endpoint
+  carrying its own scheme, such as `http://127.0.0.1:9000`, produced the request URL
+  `http://http://127.0.0.1:9000/...`, whose host is `http`; it is now refused instead of
+  silently mangled. An endpoint such as `evil.com://127.0.0.1` passed the check added above as
+  loopback while the request went to `evil.com`, because the check read the endpoint and not the
+  URL built from it. A **bare IPv6 address** without brackets, such as `::1`, is also not a
+  working endpoint and is now reported as such: the request URL `http://::1/...` has the host `:`
+  and the port 1. Write it with brackets, as `[::1]:9000`.
+
+- **mnemosyne/conn: a Postgres connect gives up after 10 seconds, and an optional statement
+  timeout** (#959). `connect` and `make-pool` take `:connect-timeout`, in seconds, defaulting to
+  `*postgres-connect-timeout-seconds*` (10), and `:statement-timeout`, in milliseconds,
+  defaulting to `*postgres-statement-timeout-ms*` (NIL).
+  - A connect that is not finished in time, TCP connect through authentication, signals
+    `db-connect-timeout` (a `db-error`, with `db-connect-timeout-host`, `-port` and
+    `-seconds`). Before, a server that did not answer held the caller for about 127 s on Linux,
+    or forever if it accepted the TCP connection and sent nothing, and held a pool slot for that
+    long. A pooled connect that times out frees its slot at once. **This is a new default:** an
+    app whose Postgres connects take longer than 10 s passes a larger `:connect-timeout`, or
+    NIL for no limit.
+  - `:statement-timeout` sets `statement_timeout` on each new connection, and a pool sets it
+    again after its reset, which runs `RESET ALL`. A statement the server cancels for it
+    signals `db-statement-timeout` (a `db-error`), from `exec`, `query` and `map-query`.
+  - `mnemosyne/docs/user-guide.md` describes both, and the server-side fallback
+    `ALTER ROLE ... SET statement_timeout`.
+- **hermes/blob: `MNEMOSYNE_S3_SECURE=false` is refused unless the endpoint is local, and an
+  empty `MNEMOSYNE_S3_SESSION_TOKEN` is now no token** (#124).
+  - `make-s3-store` refuses `MNEMOSYNE_S3_SECURE=false` when `MNEMOSYNE_S3_ENDPOINT` is not a
+    loopback, private or link-local address, signalling `blob-configuration-error`. Before, that
+    one variable put a store still aimed at the default `s3.amazonaws.com` on plain http, sending
+    its signed requests and any session token across the internet in the clear. `localhost`, an
+    address in those ranges, and a name that resolves only to such addresses (a Docker Compose
+    service name, say) are all accepted. **An app that set `MNEMOSYNE_S3_SECURE=false` against a
+    public endpoint now fails to start** and should either point the endpoint at its local double
+    or, if plaintext to that endpoint is really meant, pass `:secure nil` in code, which is not
+    checked.
+  - An empty `MNEMOSYNE_S3_SESSION_TOKEN` is now no token, where it used to be sent as an empty
+    one.
+- **hermes/facebook: `facebook-page-health` answers `:missing-permission`, with the missing
+  scopes, where it answered `:reconnect`** (#978). A Page token that `debug_token` says is valid,
+  and is for the right Page, but lacks a scope in the new `+facebook-required-scopes+`
+  (`pages_manage_posts`), used to be `:reconnect`. It is now `:missing-permission`, and the
+  missing scope names are a third value. An app that shows "reconnect" for `:reconnect` shows it
+  for `:missing-permission` too, and can name the permission. The statuses are the exported type
+  `facebook-page-status`, documented value by value.
+- **A page that writes `hyperion/notice:notice-region` shows htmx error responses that it used
+  to drop** (#980). htmx 2 does not swap a 4xx or 5xx response, so an error answer to an htmx
+  request showed the user nothing. The region's script now adds the response's notices to the
+  region, or a fixed message when it has none (`:notice/failed`), `:notice/unreachable` when the
+  request failed without a response (`htmx:sendError`), and `:notice/timeout` when it timed out
+  (`htmx:timeout`). A page without the region is unchanged. Before adding the region, check what
+  the app's error responses say, because users will now read them. An element whose error responses
+  the app handles itself takes `data-hyperion-notices="off"`; `(notice-region :htmx-errors nil)`
+  turns the htmx handling off, and the script then only makes Dismiss work. The script does not act on a response the app already swaps, through
+  `htmx.config.responseHandling` or its own `htmx:beforeSwap` listener.
+- **`mnemosyne/migrate:migrate` logs each applied migration at DEBUG and one INFO line per
+  call** (#1046). The per-migration line `"migrate: applied"` (with `id`, `description` and `ms`)
+  is now DEBUG, as is `"migrate: applying"`. A call that had migrations to apply ends with one
+  INFO line, `"migrate: finished"`, with `pending`, `applied` and `ms` for the whole call, and
+  `failed` naming the migration that signalled when one did. A call with nothing to apply logs
+  nothing at INFO, as before. An app that searches its logs at INFO for `"migrate: applied"`
+  should search for `"migrate: finished"` instead, or log `mnemosyne/migrate` at DEBUG.
+
+- **A turn run with an observer now asks `anthropic` and `openai-compatible` providers for a
+  stream** (#984), so that it can emit `:text-delta` events. The completion, the events and the
+  usage are the same as before. An OpenAI-compatible request that streams also sends
+  `stream_options: {"include_usage": true}`, because the server otherwise reports no token
+  counts. A server that refuses either returns an error the turn reports as before. To keep the
+  old request for such a server, define `praxeon/llm:supports-streaming-p` to return `NIL` for
+  a subclass of `openai-compatible`; that also means a cancel cannot stop a call in progress.
+- **`hyperion/logging:wrap`'s "request start" line logs the query's parameter names, not the
+  raw query string** (#1007). The line is written at DEBUG, and `wrap` runs outside every
+  middleware an app adds, so with DEBUG on, every query string, with any token or personal data
+  in it, went into the log, and an app could not stop it.
+  - The `query` field is gone. The line has `query-keys` instead: the parameter names in the order
+    they first appear, each once, at most 20, each cut to 40 characters, such as `(page q)`.
+  - A part with no value is usually a token, so it is never named, and the line counts such
+    parts as `bare-parts`. That is a part with no `=`, as in `/reset?3f9a…`, or one whose value
+    is empty or only `=` signs, as in `?abc123secret=` or a base64 token with its padding.
+  - A query whose names have a malformed `%` escape or are not UTF-8 is logged as
+    `query-keys=unparsed`, with no text from it.
+  - Log tooling that searched for `query` should search for `query-keys`.
+  - No setting brings the raw query back.
+- **`praxeon/ceiling:make-ed25519-verifier` refuses a key that is not an Ed25519 public key**,
+  including NIL (part of #67). Before, a key that failed to load made a verifier that refused
+  every grant as "signature does not verify", so the fault looked like forged grants. Now the
+  call signals an error when the verifier is made. `praxeon/ceiling:*clock*`, a function
+  returning a universal time, is what a grant's expiry is checked against; it defaults to
+  `get-universal-time`. `praxeon/web:make-app` binds it to its own `:clock` around
+  `POST /embed/session` and around each turn, so the ledger's `:at` stamps use the app's clock
+  too. A `:sessions` table passed to `make-app` must be made with the same `:clock`, or
+  `make-app` signals an error. A JSON turn whose grant expires while it waits is answered 401,
+  not 500, so the client mints a new grant.
+
+- **praxeon/web: the chat page's message and poll routes now work from a cursor, and the
+  page's own message comes back through the poll** (part of #67). A page built on `make-app`'s
+  routes, rather than on its `GET /`, has to change:
+  - `GET /api/progress` takes `after`, the index of the first transcript item the page has not
+    shown, and returns the items from there plus an out-of-band `<input id="px-cursor">` holding
+    the next index. Without `after` it returns no items and the newest index. `GET /` renders the
+    field and sends it with each poll (`hx-include="#px-cursor"`).
+  - `POST /api/message` from the page returns an empty body and the header `HX-Trigger: px-poll`.
+    It no longer returns the user's bubble; the poll returns it, so every tab on the conversation
+    shows it. The page's poll runs on `px-poll` as well as on its timer.
+  - The JSON path (`Accept: application/json`) still answers `{"reply": ...}`. Its turns now
+    appear on a page open on the same conversation, and count towards its token total.
+- **`hyperion/http:json` signals instead of returning `"{}"` for a value that is not a property
+  list** (#1041). An argument that is not a list, such as a string, a number or a vector, signals
+  a `type-error`. A property list with an odd number of elements, whose last key has no value,
+  signals an error; before, that key was written with `null`. A caller that passed the wrong
+  value used to store an empty or partial object without any error, and now gets one. A property
+  list, including the empty list, encodes as before.
+
+- **`scripts/build-desktop-app.lisp` stops, instead of warning and exiting 0, when the bundle
+  needs hyperion-view or a library the runtime links against and it is missing** (#956). For an
+  app that loads `hyperion/desktop`, a `hyperion/hyperion-view/hyperion-view(.exe)` that was not
+  built now ends the build with exit code 3, naming the file and the command that builds it
+  (`hyperion/hyperion-view/build.sh`, or `build.ps1` on Windows). On macOS the same happens for a
+  library the SBCL runtime links against that is not on the build machine; it was printed as
+  `MISSING`, and when the runtime could not be patched (an `install_name_tool` or `codesign`
+  error) none of those libraries was carried and the build said "continuing UNPATCHED" and
+  exited 0; each is now named and refused. A build that deliberately does not carry them passes
+  **`--allow-missing-natives`**: it warns, goes on, and the build's summary line names what is
+  missing.
+  - An app that does not load `hyperion/desktop`, such as a console tool, needs no launcher, so
+    a missing hyperion-view does not stop its build. The macOS runtime-linked libraries above
+    still apply to it.
+  - Such an app also **no longer gets hyperion-view copied into its bundle** when hyperion-view
+    is built: the build says "no launcher carried -- this image does not load
+    hyperion/desktop".
+  - The tree's lazily loaded libraries (libuv, mbedTLS, libgit2) and its SQLite already stopped
+    the build when missing, and still do, with no option to go on without them.
+- **`scripts/build-libuv.lisp` rebuilds a libuv built from another release instead of keeping
+  it** (#977). It reused any `vendor/libuv/lib` library that existed, so after `libuv.pin` moved
+  (1.52.1 to 1.53.0 in train 77) a checkout kept the old build, said "already built" and exited 0,
+  and bundles carried the old release. It now writes `vendor/libuv/BUILT-FROM` with the version
+  and sha256 it built from, and reuses a library only when that stamp names the pin. **The first
+  run after updating rebuilds libuv once on every checkout**, because no existing build has a
+  stamp, so it needs the C toolchain build-libuv already requires. The stamp's format is shared
+  with `build-sqlite.lisp`'s, in `scripts/built-from.lisp`.
+- **`cons --strict` refuses a target it cannot check, instead of running it and exiting 0**
+  (#960). `--strict` judges only what a target loads with `:load` or `:test`. A target whose work
+  is `:eval`, `:call` or `:sh` with neither -- for example an `:eval` that calls
+  `asdf:load-system` -- ran with nothing checked. A target with `:sh` is not judged either,
+  whatever else it has: cons runs `:sh` in place of the target's `:load` and `:test`, so
+  `(x :load "app" :sh (...))` never loaded `app`. Under `--strict` such a target now exits 1
+  before running, naming it and why, and a `:steps` target names each such step once. Give the
+  target a `:load` clause naming the systems it builds and put the shell work in a target of its
+  own, or run it without `--strict`.
+  - A strict load (`cons/run:load-system-strictly` with `:force-own`) whose root holds none of the
+    systems it loads now signals an error naming the root, instead of loading everything with
+    its warnings muffled. Under `--strict` each `:load` entry is loaded this way, so **a `:load`
+    list that names a library from outside the project, such as `:load ("swank" "app")`, is now
+    refused**. Load the library through the project's own system instead (add it to that
+    system's `:depends-on`), or keep it in a target run without `--strict`.
+  - A `:steps` cycle is refused with the cycle named, with or without `--strict`; it used to
+    recurse until the stack ran out.
+  - Without `--strict`, nothing else changes.
+- **`bootstrap.lisp` no longer overwrites a source-registry drop-in that names another
+  checkout; it stops with exit code 3 before building anything** (#955). Bootstrap writes
+  `50-ouranos.conf` under the user's `common-lisp/source-registry.conf.d/`, which every Lisp
+  process the user runs reads. It used to rewrite the file on every run, so bootstrapping a
+  second checkout (a scratch clone pinned to an older Ouranos, or a worktree) silently moved
+  every other process on the machine to that checkout. Now:
+  - When the drop-in names another checkout that still exists, bootstrap prints both paths
+    and the command for each way forward on the current OS, and exits 3. The drop-in is left
+    byte for byte as it was. A drop-in that is not a single `(:tree "...")` form is refused
+    the same way.
+  - `OURANOS_BOOTSTRAP_LOCAL=1` builds this checkout without reading or writing the drop-in.
+    Bootstrap sets `CL_SOURCE_REGISTRY` to `<checkout>//:` (`//;` on Windows) for itself and
+    the child processes it starts, and prints that value to set in each shell that should use
+    this checkout.
+  - `OURANOS_BOOTSTRAP_FORCE=1` rewrites the drop-in to name this checkout, as bootstrap used
+    to do. Each switch is on only when its value is exactly `1`.
+  - A drop-in naming a checkout that no longer exists is still rewritten, with a line saying
+    which path it replaced, so moving a clone still needs only a second bootstrap.
+
+  A script or CI job that bootstraps a second checkout on a machine that already has one
+  (for example an app's scratch build of an older Ouranos) sets `OURANOS_BOOTSTRAP_LOCAL=1`,
+  and then `CL_SOURCE_REGISTRY` for the steps after bootstrap. A machine with one checkout,
+  and a fresh CI runner, need no change. The decision is in `scripts/source-registry.lisp`.
+- **`aion/log:exception` no longer writes the condition's report or the backtrace's frame
+  arguments, by default** (#1013). Both can hold outside data: a database driver's report can
+  quote row values, and a frame's arguments can hold a request body, and `hyperion/logging:wrap`
+  logs every error that escapes a route this way, at ERROR.
+  - **What it writes now.** Its line has `error-type`, the condition's fully qualified type such
+    as `COMMON-LISP::SIMPLE-ERROR`, and `backtrace`, the names of up to 40 frames with no
+    arguments. The `error` field is gone. Log tooling that searched for `error` should search for
+    `error-type`.
+  - **The old detail is a development setting.** `aion/log:*log-condition-details*`, NIL by
+    default, brings back the report as `error` and the frames' arguments. The `:debug` level does
+    not turn it on.
+  - **Other log lines with a report.** These now carry the condition's type through the new
+    `aion/log:condition-type` instead of its report:
+    - `hyperion/server-uv`'s eight error and debug lines that had `:condition` (for example "server-uv: handler signalled"), and its "a loop could not be closed" line, whose `:error` became `:condition`;
+    - `praxeon`'s "llm request failed" lines, whose `:error` became `:condition`.
+
 - **MCP resources and retrieval passages are untrusted by default, so in a prompt they refuse
   `:requires-user-intent` means for the turn** (#907, after #906). `praxeon/mcp:add-resource` and
   `praxeon/retrieval:passage->ctx-item` put outside content into an agent's context with nothing
@@ -51,6 +285,68 @@ its tag.
     `:server :hunchentoot`, or do not load `hyperion/server-uv`.
   - An app that chose `:uv` by hand (`HYPERION_SERVER`, else `:uv` when
     `aion/uv:library-path` loads, else Hunchentoot) can call `default-server` instead.
+
+- **praxeon/claude-code: the hook replaces a large search output with lines copied from it,
+  not with a list of facts a model wrote** (#465). #454's check refused nearly every list the
+  second model wrote, because the model rewrote line numbers and invented paths. Now:
+  - for `rg` and `grep` output that names a file on every line, the matches are grouped by file
+    with a count per file and the first five lines of each, and no model is called;
+  - otherwise the second model answers only with ranges of line numbers (`select_lines`, at most
+    40, no other field allowed), and the hook copies those lines in the output's order, cut to
+    `PRAXEON_CC_SUMMARY_BUDGET`, with `[praxeon-claude-code: N lines omitted]` for each gap;
+  - every line the hook writes itself starts with `[praxeon-claude-code: `, and the header says
+    `lines selected by ...` instead of `a summary of ... written by ...`;
+  - the log line gains `method` (`grouped` or `selected`); the refusal reasons are now `empty`,
+    `over-budget` and `too-little-smaller`, and `unsupported` is gone.
+
+  Removed from `praxeon/claude-code/hook`: `check-summary`, `unsupported-tokens`,
+  `validate-facts`, `facts-spec`, and the generic `summarize`, which is now `select-lines` and
+  returns `(from . to)` pairs. `decide` takes `:group nil` to skip the grouping. The rules for
+  what the hook never replaces are unchanged. This raises how often a replacement is accepted;
+  it does not change which outputs are eligible, and on the maintainer's sessions #454 found
+  none of 38 large outputs eligible. `praxeon/scripts/claude-code-trials.lisp` measures it, and
+  calls no model unless `PRAXEON_CC_TRIALS=run` is set. Rebuild `bin/praxeon-claude-code` to get
+  it.
+- **praxeon/actor: `:taint-scope :conversation` works for an app that rebuilds the agent from a
+  text transcript, and warns when it cannot tell** (#948). Before, `:conversation` looked only
+  for untrusted tool calls in the history, so a history rebuilt from text, which has none,
+  made it behave like `:turn` without saying so. Now:
+  - The agent records the conversation's taint in the new slot `agent-conversation-taint`:
+    `:untrusted` once the agent has read untrusted content, `:delegated` when the only such
+    content is a task a coordinating agent gave it, `:clean` from a first turn until either,
+    `nil` when not recorded. `make-agent` takes `:conversation-taint`; any other value signals
+    an error when the agent runs a turn.
+  - **An app that stores text transcripts** stores this value with each transcript and passes it
+    to `make-agent` when it rebuilds the agent.
+  - Under `:conversation`, an agent with earlier turns, no tool calls in them and nothing recorded
+    is treated as untrusted. Praxeon records `:untrusted`, logs it once for that agent, and
+    signals the warning `praxeon/actor:conversation-taint-unrecorded`, whose message names the
+    fix. Muffling the warning does not make the turn trusted.
+  - Once an agent records `:untrusted` or `:delegated`, it stays untrusted under `:conversation`
+    even if the app removes the untrusted call from the history. To start over, set the slot to
+    `:clean` and remove the untrusted calls from the history too.
+  - `untrusted-window-predicate` reads the recorded value too, so an observer agrees with the turn.
+  - **`:conversation` now refuses more than before:** a sub-agent given a task by
+    `register-agent-as-means` records `:delegated`, because the task is another model's text and
+    stays in its history. Under `:conversation`, the sub-agent's later turns are untrusted, so a
+    spending means is refused in them. The delegated turn itself is treated as before, except
+    when the app rebuilds the sub-agent partway through that turn and passes `:delegated` back:
+    the rebuilt turn is then untrusted too, which refuses more, not less.
+    `:delegated` is kept apart from `:untrusted` so that delegating to the same sub-agent again
+    does not make the coordinator untrusted; the coordinator is marked only when the sub-agent
+    read untrusted content, as before. A coordinator that delegated after its own turn had
+    become untrusted leaves the sub-agent recording `:untrusted`, because that task was written
+    after the coordinator read untrusted content, so a later delegation to it marks the
+    coordinator.
+- **hyperion/i18n: `load-dictionary` and `make-json-source` signal `empty-dictionary` when
+  their directory holds no locale files** (#294). `make-json-source` calls `load-dictionary`,
+  so everything below applies to both. Before, a wrong, missing or empty directory returned a
+  dictionary with no locales, and every string rendered as its `[section/key]` marker. The
+  condition's message gives the absolute directory searched, says when it does not exist, when
+  the path given was relative and what it was resolved against, and when the path lacks its
+  trailing slash. Both also warn `default-locale-not-loaded` when the `:default` locale has no
+  file, and still return the dictionary. An app that relied on an empty dictionary
+  can build one with `make-dictionary` and an empty hash table.
 
 - **praxeon/retrieval and praxeon/memory-db on SQLite: similarity search works at real corpus
   sizes, and the stored embeddings change form** (#425). A SQLite store kept each embedding as
@@ -885,8 +1181,780 @@ its tag.
   `claude-sonnet-5-5` allows 128,000 output tokens, so `*default-max-tokens*` (8,192) is
   unchanged. The documentation's examples now name
   `claude-opus-5-5` where they named `claude-opus-4-8`.
+- **`aion/tests` runs its four sub-suites through ASDF, and a red aion run stops at the first
+  failing one** (#992). `aion/tests` has no components now. It names `aion/csv/tests`,
+  `aion/csv/types/tests`, `aion/clock/tests` and `aion/log/tests` in
+  `:in-order-to ((test-op (test-op …)))`, and each of those signals an error from its
+  `:perform` when a check fails, so `asdf:test-system` on any of them reports a failure through
+  the exit code. A green run counts the same checks as before (623 on macOS arm64). **When a
+  sub-suite fails, ASDF does not run the sub-suites after it**, so their reports are missing
+  from that run; before, all four ran and the verdict came at the end. The function
+  `aion/tests:run-tests` and the file `aion/tests/all.lisp` are gone: code that called
+  `aion/tests:run-tests` calls `(asdf:test-system :aion/tests)` instead, as `aion/cons.lisp`'s
+  `test` target now does.
+- **cons: the strict load fails a call to a function that does not exist in the project's own
+  code** (#1083). `cons build`, `cons test` and `cons --strict` load a project's own systems
+  through `load-system-strictly`, which failed on a full compile `WARNING` and let every
+  `STYLE-WARNING` through. SBCL reports a call to an undefined function as a `STYLE-WARNING`
+  (`undefined function: PKG::NAME`), so such a call built and tested clean and failed only when
+  it ran. It now fails the load, and the error names the function. **A project that loaded
+  before can now fail:** define the function, or correct the name or package of the call. Other
+  `STYLE-WARNING`s still do not fail, and an undefined function inside a library outside the
+  project directory is still muffled. `cons/docs/user-guide.md` says the same.
 
 ### Added
+
+- **hermes: how long a send waits is now hermes's own setting, `*send-connect-timeout*` and
+  `*send-read-timeout*`, both 10 seconds** (#1077). Each provider also takes `:connect-timeout`
+  and `:read-timeout`, read back with `sendgrid-connect-timeout`, `sendgrid-read-timeout`,
+  `twilio-connect-timeout` and `twilio-read-timeout`, and defaulting from the two specials.
+  **Nothing changes for an app that sets nothing.** Ten seconds is what SendGrid and Twilio
+  already waited: `aion/http-client` passes a timeout to dexador only when one is set, so an
+  unset timeout meant dexador's `*default-connect-timeout*` and `*default-read-timeout*`, which
+  are both 10. #1077 was filed believing a send with no timeout waited for ever, and that was
+  wrong; measured against a socket that accepts a connection and never answers, a send with both
+  timeouts `nil` fails after 10.0 seconds. What changes is that the figure is written down here
+  and can be set, instead of living in a dependency where an upgrade could move it unnoticed. An
+  app that wants to wait longer than 10 seconds for a provider's answer sets
+  `*send-read-timeout*`; the default is not raised for everyone, because a hung provider would
+  then hold `deliver` longer than it does today. A send cut off by the read timeout **may still
+  have been delivered**, because the request reached the provider.
+  **What these two do not bound.** The read timeout is the socket's receive timeout, so it limits
+  each read and is reset whenever a byte arrives: a provider that sends one byte every nine
+  seconds holds `deliver` for as long as it likes, and no setting here ends that. The connect
+  timeout bounds the connect and not name resolution. Putting a limit on a whole send remains an
+  app's to impose.
+- **hermes: `make-twilio` takes `:api-base`, and refuses a base that a request should not carry
+  Twilio credentials to** (#1077). It defaults to `https://api.twilio.com/2010-04-01` and exists so a test or
+  a local mock can be pointed at. Unlike every other Twilio setting it has **no environment
+  default**, and a base of `http://` to any host that is not `localhost`, a loopback, private or
+  link-local address, or a name resolving only to those, signals `configuration-error` when the
+  provider is made rather than at the first send. Every Twilio request carries the account SID
+  and auth token in an `Authorization` header, so a mistyped base would send them in the clear.
+  The base is parsed with `quri`, the parser dexador itself uses, and so is the URL a request is
+  actually built from, whose scheme and host must be the ones the check approved. Refused: a
+  scheme that is not `http` or `https`, any userinfo (whatever the scheme and host, since
+  Twilio's API uses none and it hides the real host), a query or fragment (the request's path is
+  appended to this value and would land inside them), no host, a bracketed IPv6 host (such a base
+  cannot send: the brackets are looked up as a name), an IPv4 host with a leading zero in an
+  octet (some stacks read that as octal, so the address checked need not be the one connected
+  to), and plaintext `http` to a host this machine or network cannot reach by itself. No refusal
+  repeats the value, because it may hold a password.
+  **What this does not cover.** A plaintext request judged local still goes through `HTTPS_PROXY`
+  or `HTTP_PROXY` if one is set, because dexador applies its proxy default and nothing here
+  passes `:proxy`; that is #1091 and it affects `hermes/blob`'s plaintext store the same way.
+  `make-sendgrid`'s `:endpoint` has no check at all, which is #1092. **The host is resolved once, when the provider
+  is made**, so a provider built while a name resolved locally is not re-checked if that name
+  later resolves elsewhere.
+  The local-host rule is `aion/http-client:address-category` as used by `hermes/blob` for S3
+  endpoints (#970); that it is written in both places is #1082, and the review of #1084 plus
+  #1089 found that both copies had holes, which is why that move is a fix rather than a tidy-up.
+
+- **`mnemosyne/query:sql` renders Microsoft Access (Jet/ACE) SQL with `:dialect :jet`**
+  (#1061). `:limit` renders as `SELECT TOP n`, with `n` written into the SQL, so it must be a
+  positive integer; Jet's `TOP` also returns rows tied with the last one on the `ORDER BY`
+  columns. `:offset` signals the new condition `mnemosyne/query:unsupported-query` when the
+  query is compiled, because Jet has no `OFFSET`. Names render in brackets (`[c].[email]`,
+  `(:quoted "First Name")` as `[First Name]`). The new forms `(:date y m d)` and
+  `(:timestamp y m d h mi s)` render as `#2026-09-14#` and `#2026-09-14 08:05:03#` on Jet and
+  are bound as ISO text on the other dialects. Values bind as `?`, and the param list is in
+  placeholder order, which is the order ADO binds them in. An aggregate in the SELECT list
+  without an alias gets one (`COUNT(*) AS [count]`, `SUM(o.total) AS [sum_total]`), avoiding
+  the names of the other columns. More than one join renders in nested parentheses, as Jet
+  requires, and `:full` and `:cross` joins signal `unsupported-query`. A leading
+  `(:distinct …)` item gives `SELECT DISTINCT TOP n`. `unsupported-query` also refuses what
+  Access rejects when it runs: `:escape` on `:like`, `:lower`, `:upper`, `:length` and
+  `:coalesce` (use `(:call :lcase …)` and the other Jet functions), `(:count (:distinct …))`,
+  `:returning`, `:on-conflict` and an INSERT of more than one row. The dialect
+  renders queries only: mnemosyne has no backend that runs them, `ddl:ddl` signals
+  `unsupported-ddl` for `:jet`, and `schema:schema-ddl` refuses it. `mnemosyne/field:Dialect`
+  has a new constructor, `D-Jet`, and `mnemosyne/field-shell:+dialects+` lists it, so Coalton
+  code that matches on `Dialect` without a wildcard arm needs a `D-Jet` arm. See
+  `mnemosyne/docs/user-guide.md`, "Dialects".
+- **`aion/sexp:read-data` can skip `;` line comments, with `:comments :skip`** (#1062), for a
+  data file a person edits by hand, such as a configuration file. A comment runs from the `;` to
+  the end of the line, and is skipped before the datum, between elements and after it; for a
+  string, a tail of only whitespace and comments is accepted. A `;` inside a string is part of
+  the string either way. A skipped comment counts toward `max-input`, so a file of nothing but
+  comments is still bounded. `#| |#` and `#;` comments are `#` forms and stay refused. The
+  default, `:comments :refuse`, refuses a comment exactly as before. Any other value signals an
+  error.
+- **hyperion/desktop: a desktop app's page can show the native open, save-as and folder dialogs,
+  on Windows, and the page receives the path the user chooses** (#986). `run-app` takes
+  `:dialogs`, default T, and on Windows passes `--dialogs` to hyperion-view, which then defines
+  `window.hyperionDialog(request)` in the app's page. It resolves to `{path}`, `{paths}` for
+  `:open-many`, `{cancelled: true}`, or `{error}`. `hyperion/desktop:dialog-onclick` renders a
+  button's onclick that shows the dialog and posts the choice to one of the app's routes with htmx,
+  as the field `path`, or `paths` (a JSON array) for `:open-many`.
+  `hyperion/desktop:dialog-request-json` renders the request on its own, and both signal
+  `hyperion/desktop:dialog-request-refused` for a request hyperion-view would refuse; its
+  `dialog-request-refused-reason` is the keyword for hyperion-view's reason (`:kind`, `:title`,
+  `:folder`, `:name`, `:filters`, `:filter-label`, `:filter-patterns` or `:pattern`). A save
+  dialog with filters starts on the first filter and adds its first pattern's extension to a name
+  typed without one. `hyperion/desktop:dialogs-available-p` says whether the
+  page has the function now; when it does not, show a field for a pasted path instead.
+  - **The page's script receives the path, which says something about the user's machine.** The
+    function exists only in the top-level frame and only while it shows the origin of the URL
+    `run-app` started with: iframes, and pages from any other origin, do not get it. A call
+    without the token hyperion-view makes at each launch is refused by hyperion-view itself, and a
+    call made outside a user action (a click or a key) is refused where the webview can tell: on
+    Windows (WebView2) and on macOS 13.3 and later. The answer is delivered only while the window
+    still shows the app's origin, so a page the window has gone to since the call does not receive
+    the path. One dialog is shown at a time; a second call gets `{error: "busy"}`. A `folder` must be a
+    local drive path (`C:\Users`, `c:/data`), and any other folder is refused, because other forms
+    (`\\host\share`, `file://host/share`) reach a network share, and opening one makes Windows
+    send the user's credentials to that host. An app that shows
+    third-party content in its window should pass `:dialogs nil`.
+  - **Only Windows shows a dialog in this change.** On macOS and Linux `run-app` does not pass
+    `--dialogs`, so a hyperion-view built before this change still starts there; the page has no
+    `window.hyperionDialog`, and `dialogs-available-p` is NIL. Their dialogs follow in separate
+    changes. A view built with this change answers `{error: "unavailable"}` there if it is started
+    with `--dialogs` directly.
+  - hyperion-view gains `--dialogs`, `--exit-after SECONDS` (closes the window after SECONDS, for
+    tests), and two modes that make no window: `--dialog-request TOKEN PARAMS` prints how a call is
+    checked, and `--dialog-origin URL` prints the origin the function is offered to. With
+    `--dialogs`, hyperion-view exits 2 if it cannot make the launch's token or the URL has no
+    origin. For tests, `HYPERION_VIEW_FAKE_DIALOG=1`, honoured only when `GITHUB_ACTIONS` is set
+    too, answers every call with `{path: "fake-path"}` after three seconds, shows no dialog, skips
+    the user-action check, and says so on stderr. On Windows, a
+    hyperion-view built before this change refuses `--dialogs` as an unknown option and opens no
+    window, so rebuild it with `hyperion/hyperion-view/build.ps1` (it now links `uuid.lib` and
+    `bcrypt.lib`).
+  - `aion/test-http`'s `start-server` and `with-server` take `:concurrent`, which serves each
+    connection on a thread of its own, so a connection that sends nothing, as a browser opens,
+    does not hold up the next request. The default is unchanged.
+- **hyperion/notifications: in-app notifications, with per-kind delivery to the list, to email
+  through the app's own function, or both** (#792). These are new opt-in systems:
+  - `hyperion/notifications` has:
+    - `notify`, `define-notification-kind` and `*notification-email*`;
+    - the store protocol `notification-put`, `notification-list`, `unread-count`, `mark-read`,
+      `mark-all-read`, `prune-notifications`, `delivery-ref` and `delivery-set`;
+    - `make-memory-notification-store`;
+    - the components `notification-bell`, `notification-panel` and `delivery-form`;
+    - `notification-router`;
+    - `prune-notifications-job` for aion/schedule.
+  - `hyperion/notifications-db` has `make-db-notification-store`, and the DDL for the app's
+    migrations: `notifications-ddl`, `notifications-index-ddl`, `notifications-unread-key-ddl`
+    and `delivery-ddl`. The store refuses to start without its tables
+    (`missing-notification-tables`). A table name is 1 to 47 ASCII letters, digits and
+    underscores. The database store needs Postgres 9.5 or later, or SQLite 3.35 or later, for
+    `INSERT ... ON CONFLICT ... RETURNING`. With an older SQLite, the first `notification-put`
+    signals `mnemosyne/conn:db-error` for a syntax error at `RETURNING`. A
+    desktop bundle carries the SQLite pinned in `sqlite.pin`; elsewhere the system's copy is
+    used, and `mnemosyne/sqlite-library:loaded-library` names it.
+
+  How it behaves:
+  - A notification with the group key of an unread item collapses into it and raises its `count`.
+    In the database store this is one statement, so it is safe when two calls race, including
+    inside the app's own transaction.
+  - A store refuses a notification whose id it already holds, unless it collapses:
+    `invalid-notification` from the memory store, the database's error from the database store.
+  - A link must be a path on the app's own site.
+  - The router takes the recipient from the app's `:recipient-fn`, never from the request.
+  - The bell announces the unread count through a status region, once per change.
+
+  See `hyperion/docs/notifications.md`.
+- **`aion/http-client:status-transience` is exported**: given an HTTP status and a transport
+  phase, either of which may be `nil`, it returns `:transient`, `:unknown` or `nil`. It is the
+  one place that mapping is written, so a library turning HTTP failures into its own conditions
+  reaches the same verdict by calling it instead of repeating the `cond` over
+  `+transient-statuses+` and `+unknown-statuses+`. `aion/http-client:transience` on an
+  `http-error` and `hermes`'s method on a `delivery-failure` both call it.
+- **hermes: `aion/retry:transience` and `aion/retry:retry-after` answer for hermes's own
+  failures, so an app can ask what is worth sending again** (#79 step two). `hermes` depends on
+  `aion/retry` for this and **still never sleeps or retries by itself**: a rate limit or a transient failure is
+  classified, and the app schedules the next attempt, for example with
+  `aion/schedule:schedule-once`. `aion/retry:with-retry` is deliberately not used inside hermes,
+  because it sleeps, and a send is not safe to repeat blindly.
+  - `delivery-rate-limited` is `:transient`, and its `retry-after` is what to schedule by. The
+    Graph codes 4, 17, 32, 613 and 80001 reach it with the wait from
+    `X-Business-Use-Case-Usage`, and Telegram's with its own `retry_after`.
+  - `delivery-failure` is classified from its status, using aion/http-client's own
+    `+transient-statuses+` and `+unknown-statuses+` rather than a second copy of those lists; and
+    where there is no status, from the new `delivery-failure-phase`, carried from
+    `http-error-phase`: `:connect` means the message was never sent (`:transient`), `:response`
+    that the provider may already have sent it (`:unknown`). A failure hermes raised itself is
+    neither, so the default policy will not send a message twice.
+  - `aion/http-client` exports `+transient-statuses+` and `+unknown-statuses+` for this.
+
+- **New bindings exported for the credential backends** (#1035), used by
+  `hades/credentials`: `aion/windows/ffi:cred-enumerate-w` (`CredEnumerateW`, which lists a
+  user's credentials matching a filter); `aion/darwin/ffi:+err-sec-interaction-not-allowed+`
+  (`errSecInteractionNotAllowed`, -25308, which a locked Keychain returns instead of prompting
+  when the query sets `kSecUseAuthenticationUIFail`); and
+  `aion/darwin:cf-array-get-count` and `aion/darwin:cf-array-get-value-at-index`, for walking the
+  `CFArray` an attributes-only Keychain query returns.
+- **hades/credentials: `credential-exists-p` and `credential-names` answer without returning any
+  secret, and on macOS and Linux without decrypting one** (#1035). `credential-exists-p service
+  account` says whether a credential is stored, and `credential-names service` lists the accounts
+  under one service. **On Windows the values are decrypted and then erased**, because Windows has
+  no call that lists or reads a credential without its value: `CredEnumerateW` with the filter
+  `SERVICE/*` returns a whole `CREDENTIALW` for every matching target, plaintext
+  `CredentialBlob` included, and `CredReadW` does the same. hades writes zeros over every blob
+  before freeing what Windows returned, so nothing is left in freed memory and no value is
+  returned, but on Windows an app should treat these two functions as it treats
+  `fetch-credential` in that respect. An earlier wording of this entry said "without decrypting
+  or copying a value", which was false on Windows. An app showing "a key is saved", or offering to remove one, no longer
+  fetches the secret to decide a label, and no longer has to keep its own list of what it saved,
+  which could drift from the store.
+  - macOS asks the Keychain for attributes only (`kSecReturnAttributes`, never
+    `kSecReturnData`), and Linux searches the Secret Service and reads item attributes, which it
+    stores unencrypted, without `SECRET_SEARCH_LOAD_SECRETS` and without `SECRET_SEARCH_UNLOCK`.
+    Neither decrypts a value.
+  - **On Windows the value is decrypted and then erased**, because Windows offers no other way:
+    `CredEnumerateW` and `CredReadW` both return the whole `CREDENTIALW`, including the plaintext
+    `CredentialBlob`. hades writes zeros over every blob before freeing what Windows returned, so
+    a listing leaves nothing in freed memory, but the value does pass through the process. An app
+    on Windows should treat `credential-names` as it treats `fetch-credential` in that respect.
+  - A service name containing `*` is refused for both functions, on every platform, because on
+    Windows it would widen `CredEnumerateW`'s filter and make Windows enumerate, and so decrypt,
+    other applications' credentials.
+  - On Windows a target is matched exactly against the service and the stored account, not by
+    prefix, so `credential-names "S"` does not report an item of the service `"S/x"`. macOS and
+    Linux already matched exactly; this makes the three agree.
+  - **Neither prompts.** On macOS the query sets `kSecUseAuthenticationUIFail`, so a Keychain that
+    could only answer by asking signals `credential-store-unavailable` instead of showing a
+    dialog; **that path is not covered by a test**, since nothing here locks a keychain. On Linux
+    a locked keyring answers without prompting, which is exercised, so `credential-exists-p` can
+    be true for an item `fetch-credential` would refuse to read until the keyring is unlocked.
+  - Nothing is logged by either, so no account name can reach a log.
+  - `aion/libsecret` gains `search-attribute-values` and the bindings it needs
+    (`secret_service_search_sync`, `secret_item_get_attributes`, `g_hash_table_lookup`,
+    `g_list_free_full`).
+- **aion/retry: a retry policy as data, and `with-retry`, which retries through restarts**
+  (#79). `make-retry-policy` takes `:max-attempts`, `:base-delay`, `:multiplier`, `:max-delay`,
+  `:jitter` (`:full`, `:equal` or `:none`), `:deadline` and `:retryable`, and `retry-delay`
+  computes the schedule as a pure function. `with-retry` and `call-with-retry` run each attempt
+  inside a `retry` restart, signal `retry-scheduled` before each wait (a handler can take
+  `give-up` or `retry-now`), and let the original condition through unchanged when the policy
+  allows no more attempts. A server's Retry-After is a floor on the wait, and one longer than
+  `:max-delay` stops the retrying. Which conditions are retried by default is the `transience`
+  protocol: `transient-p` covers failures after which the request was not acted on, and
+  `transient-or-unknown-p` adds those after which it may have been, for idempotent calls.
+  `with-retry` signals `retry-would-block` on an aion/uv loop thread, which binds the new
+  `aion/dynamic:*blocking-forbidden*`.
+  - The wait happens after the failed attempt has unwound, so its `unwind-protect` cleanups
+    have run and its locks are free while the runner waits.
+  - `:retryable` takes a function, the name of one, or a list of condition types. A symbol
+    that names no function is refused when the policy is made.
+  - When a `:retryable` function, or a `transience` or `retry-after` method, signals while the
+    runner asks about a failure, the error is logged and the failure is not retried. The caller
+    sees the original condition.
+  - A `with-retry` inside another multiplies the attempts.
+
+  Nothing in the tree retries yet; praxeon and hermes adopt it, opt-in, in a later change.
+- **aion/http-client: `http-error` carries `http-error-retry-after` and `http-error-phase`**
+  (#79). `ensure-2xx` reads the response's Retry-After header, in seconds or as an HTTP date,
+  into `http-error-retry-after`. A transport failure has `http-error-phase` `:connect` when no
+  connection was made, so the request was not sent, and `:response` for a socket or stream
+  failure after it was made. A TLS failure, and anything else that is not a socket or stream
+  failure, has no phase, so it is never retried. On the pinned path (`:connect-address`,
+  `fetch-public`) the phase comes from where the call failed, not from the condition's type,
+  and a connection that ends before the response does (a `malformed-response` saying "the
+  connection ended") is `:response`. On Windows, where dexador uses WinHTTP, the phase comes
+  from WinHTTP's error code: 12029 and 12007 are `:connect`; 12002, 12030 and 12152 are
+  `:response`. aion/http-client now depends on `aion/retry` and defines the `transience` and
+  `retry-after` methods for `http-error`: 408, 425, 429, 503, 529 and `:connect` are
+  `:transient`; 500, 502, 504 and `:response` are `:unknown`.
+  - **Pooled connections.** Through dexador on Linux and macOS, a failure to connect is
+    `:connect` only for a request that could not have used dexador's connection pool. Otherwise
+    dexador may have sent the request on a pooled connection that then dropped, before its
+    reconnect failed. So a request whose method is not idempotent, such as POST or PATCH, is
+    now sent with `:use-connection-pool nil` and `:keep-alive nil`. A pooled request's failure
+    to connect, such as a GET's, is `:response`.
+  - **WinHTTP's 12152.** On Windows, a reply WinHTTP refuses as not HTTP (12152) is now
+    signalled as `malformed-response`, as this client's own reader signals one on the pinned
+    path, still with phase `:response`. It was a plain `http-error`.
+- **hyperion/page-meta: `:visibility :unlisted` writes the full preview card plus `robots
+  noindex`** (#947). `page-meta`, `meta-tags` and `meta-tags-string` accept `:unlisted` beside
+  `:public`, `:noindex` and `:private`. It is for a page anyone with the link may see and
+  share but that should not appear in search results. An app that added its own robots tag
+  next to `:visibility :public` for this can pass `:unlisted` and drop that tag. `:noindex` and
+  `:private` are unchanged: they still write only the site's name and fallback image. Robots
+  noindex is a request crawlers may ignore, so a page whose content must stay private still
+  uses `:private`.
+- **hermes: `make-email` takes `:headers`, so an email can carry `List-Unsubscribe` and
+  `List-Unsubscribe-Post`** (#106). `:headers` is an alist of `(name . value)` strings, read
+  back with `email-headers`. SendGrid receives them as its `headers` object, and the dev
+  transport prints them. `make-email` signals `invalid-message` for a name that is not a valid
+  header name or is given twice, a reserved header (`To`, `From`, `Subject`, `Reply-To`, `Cc`,
+  `Bcc`, `Content-Type` and the others `hermes:reserved-email-headers` returns), a header
+  longer than 998 characters, or a value with anything but printable ASCII and tabs, so a
+  carriage return or line feed cannot add a header of its own. Non-ASCII header text is not
+  encoded and is refused. An email without `:headers` sends the same SendGrid request as
+  before. A new email backend's `deliver` sends `email-headers` or signals `invalid-message`
+  when there are any; it never drops them.
+- **hermes/blob: `make-s3-store` reads `MNEMOSYNE_S3_SECURE`, so a local S3 double can be
+  configured from the environment alone** (#124). Before, `:secure` was the one setting with no
+  environment fallback, and `store-from-env` could only make an https store. Now
+  `MNEMOSYNE_S3_SECURE=false` with `MNEMOSYNE_S3_PATH_STYLE=true` and
+  `MNEMOSYNE_S3_ENDPOINT=localhost:9000` reaches a MinIO. Unset or empty still means https, the
+  value is read as `true` or `false` without regard to case, and anything else signals
+  `blob-configuration-error`. An app that registered its own store with `:secure nil` for this,
+  such as an `"s3-local"` store, can set the variable and use `"s3"` instead. The `MNEMOSYNE_`
+  prefix on the blob variables is historical; the `make-s3-store` and `store-from-env`
+  docstrings now say they are hermes settings.
+- **hermes/blob: a blob setting set to the empty string means the same as an unset one** (#124).
+  `MNEMOSYNE_BLOB_IMPL`, `MNEMOSYNE_BLOB_ROOT`, `MNEMOSYNE_BLOB_BASE_URL` and every
+  `MNEMOSYNE_S3_*` variable now fall back to their defaults when empty, as a blank line in a
+  `.env` file sets them. Before, an empty `MNEMOSYNE_BLOB_IMPL` made `store-from-env` look for a
+  store named `""` and signal, and an empty `MNEMOSYNE_S3_ENDPOINT` failed `make-s3-store`.
+- **hermes/facebook: `facebook-token-info` reports a Page token's scopes and expiry, and a post
+  can upload a photo's octets** (#978).
+  - `facebook-token-info provider page` returns a `facebook-token-info` from Graph's
+    `debug_token`: `facebook-token-info-valid-p`, `-scopes`, `-expires-at` (a universal time, or
+    `:never` for an `expires_at` of 0, which is observed, not documented), `-data-access-expires-at`,
+    `-page-id` and `-app-id`. It needs the app's id and secret and signals `configuration-error`
+    without them. A token that never expires still has a data-access expiry; show both.
+  - `make-facebook-post` takes `:image-octets` and `:image-type`, for a photo the app already holds
+    (from `hermes/blob:get-blob`, say). It is uploaded to `POST /{page}/photos` as
+    `multipart/form-data` (field `source`), with the message and link as its caption. Refused with
+    `invalid-message`: octets together with `:image-url`, more than `+facebook-photo-max-octets+`
+    (Meta's 10MB), or a type outside `+facebook-photo-types+`. A photo alone is a post.
+- **praxeon: a private agent keeps its prompts, tool arguments, tool results and replies out of
+  every log sink and out of events** (#983). `actor:make-agent` takes `:private`, default NIL.
+  While a private agent's turn runs, through `run-turn`, `continue-turn` or
+  `abandon-held-turn`, and on every thread the turn continues on:
+  - **Logs.** `aion/log:*log-condition-details*` is NIL, so `aion/log:exception` writes a
+    condition's type and frame names, never its report or a frame's arguments, even when an app
+    turned the setting on for development.
+    - This holds for handlers that run inside the turn, such as an app's `handler-bind` around
+      `run-turn`, which runs while the turn's bindings are in force. A `handler-case` outside
+      `run-turn` runs after the turn has unwound, so `log:exception` there with the setting on
+      writes the report, and the report can hold content.
+    - praxeon's own log lines record only counts, ids, durations and type names. The two "llm
+      request failed" lines changed to the condition's type in #1013, and each line was checked
+      for this change.
+    - The host `read-web-page` reads, and the resource an MCP resource line names, are logged as
+      `:withheld` for a private agent, because they say what the user asked about. This follows
+      the new `evt:*withhold-from-logs*`, which a private agent's turn binds whether or not the
+      agent retains content, and `mcp:add-resource` binds from the agent it is given, so a call
+      outside a turn is covered. `actor:agent-private` is now exported.
+    - `actor:continue-turn` and `actor:abandon-held-turn` run with the same privacy as
+      `actor:run-turn`, so the rest of a held turn is covered too.
+    - `actor:move-conversation` leaves the new agent private when either agent was, so an app
+      whose factory leaves out `:private` does not make a private conversation public. The new
+      agent's `:retain-content` is its own.
+  - **Events.** `evt:*withhold-content*` is true, and `evt:emit` replaces every content field
+    with `:withheld`. The content fields are `evt:+content-keys+`: `:arguments`, `:content`,
+    `:text`, `:message`, `:schema` and `:url`. This covers what the studio's status printer and
+    praxeon/web's progress line show. The other fields still arrive.
+    - A delegation's `:task` text is withheld by the emitter, through the new
+      `evt:unless-withheld`. `:task` is not a content key, because on the MCP task events it is
+      the task object an app answers with, and that always arrives.
+    - An MCP task records whether the turn that started it withheld content
+      (`mcp:task-private`, and `"private"` in `task-to-json`). Its events, such as
+      `:task-input-required`, withhold the server's message, schema and URL by that record,
+      whichever thread or turn polls the task.
+  - **Retaining content.** `:retain-content t` keeps content in events for a private agent, for
+    an app that shows a trace and means to. Logs stay without it either way.
+
+  A sub-agent delegated to from a private agent's turn runs under the same rules.
+- **hyperion/notice: in-page notices for an error, a warning or a success** (#980). In core
+  `hyperion`:
+  - `notice` writes one notice;
+  - `notice-oob` writes one for an htmx response to add out of band;
+  - `notice-region` writes the place they appear, with errors in `role="alert"
+    aria-live="assertive"` and the rest in `role="status" aria-live="polite"`;
+  - `notices-script` returns the region's script, for a Content-Security-Policy that needs it
+    served or hashed; pass `:script nil` to `notice-region` then.
+
+  A notice's Dismiss button has no inline handler, so it works under a Content-Security-Policy
+  with nonces; the region's script handles the click. The fixed texts are the i18n keys
+  `:notice/failed`, `:notice/unreachable`, `:notice/timeout` and `:notice/dismiss`. See `hyperion/docs/notice.md`. A notice is not stored; the notification list
+  is #792.
+- **aion/windows/com: `variant-to-lisp` reads a one-dimensional SAFEARRAY, so a long-binary
+  value arrives as an octet vector** (#964). `VT_ARRAY|VT_UI1` (8209), the type of an ADO or DAO
+  long-binary column, of `GetChunk` and of an Automation `byte[]`, signalled "no Lisp mapping for
+  VARIANT type 8209"; it is now an `(unsigned-byte 8)` vector. Arrays of the integer and float
+  types, of `VT_BOOL` (as `T` and `NIL`), of `VT_BSTR` and of `VT_VARIANT` become simple vectors,
+  and a NULL array is an empty vector; a NULL BSTR element is NIL, as a single NULL BSTR is. A single `VT_I1` or `VT_UINT` value, which signalled before, is now read
+  as an integer too. A multi-dimensional array, an array of any other element type and a
+  `VT_ARRAY|VT_BYREF` value signal `com-error` with the reason. The elements are copied out under
+  `SafeArrayAccessData`, and the array is unlocked however the copy ends; when the copy signalled
+  and the unlock fails too, the copy's error is signalled and the unlock failure is a
+  `safearray-unlock-failed` warning, which carries the HRESULT. The VARIANT's owner frees the
+  array, as before. New in
+  `aion/windows/com/ffi`: `+vt-array+`, `safearraybound` and the oleaut32 SAFEARRAY functions
+  (`safe-array-get-dim`, `safe-array-access-data` and the rest).
+- **`mnemosyne/test-template`: a test suite can migrate one SQLite database per run and give
+  each test a copy** (#1047). `make-sqlite-template` applies an app's migrations to an in-memory
+  database once (`:setup` configures its connection first); `copy-sqlite-template` and
+  `with-sqlite-template-copy` give a test its own in-memory copy, made with SQLite's backup API,
+  and `close-sqlite-template` closes the template. A copy is a separate database, so what one
+  test writes is not seen by the next. With 300 migrations on an Apple Silicon Mac, a copy took
+  0.5 ms per test against 15 ms to migrate a fresh database. It is test support: load it from
+  the app's test system. SQLite only. See `docs/migrations.md`, §10.
+- **`hyperion/auth-db:*pbkdf2-iterations*` is exported, so an app's test suite can lower the
+  password hashing cost** (#1045). It was internal, reachable only as
+  `hyperion/auth-db::*pbkdf2-iterations*`. The default stays 100000. A test runner can
+  `(setf auth:*pbkdf2-iterations* 1000)` for its run; production must not lower it. Each hash
+  stores its count, so hashes made at either count verify under the other. `hyperion/auth-db/tests`
+  now runs at 1000, about 29 s to 8 s on an Apple Silicon Mac. See `hyperion/docs/user-guide.md`,
+  "Identity and roles".
+
+- **praxeon: a turn can stream the model's text as it is written, and be cancelled so the
+  provider stops generating** (#984).
+  - `praxeon/actor:run-turn` takes **`:cancel`**, a handle from **`make-turn-cancel`**. Calling
+    **`cancel-turn`** on it from another thread stops the turn. A model call in progress has its
+    connection closed. A tool call in progress finishes, and the turn ends before the next model
+    call. The turn then returns `NIL` and `:cancelled`, after a `:usage` event with
+    `:cancelled t` for a call it stopped and a **`:turn-ended`** event with `:reason
+    :cancelled`. **`turn-cancelled-p`** reads the handle.
+  - The stopped call's `:usage` has the counts the provider had reported. Anthropic reports
+    output tokens only at the end, so `:output` is usually `NIL`. **`:estimated-output`** is
+    praxeon's count of the output that arrived: text, tool names and tool arguments, at one token
+    per UTF-8 octet, which cannot come out below the tokens that arrived.
+  - **`praxeon/ceiling:record-usage`** takes `:estimated-input` and `:estimated-output` and
+    charges each in place of a count that is `NIL`. The usage line keeps the reported count as
+    `NIL` and adds `:estimated t` and the estimate it charged. **`record-usage-event`** charges
+    a `:usage` event this way, and `meter` takes `:estimated-input-fn` and
+    `:estimated-output-fn`. `praxeon/studio:status-observer` shows a stopped call's output
+    tokens, marked `(estimated)` when they are the estimate.
+  - While an observer is bound, each piece of text is a **`:text-delta`** event with `:text` and
+    `:step`. `praxeon/llm:complete` streams when **`*on-text*`** or **`*cancel*`** is bound, on
+    a provider whose **`supports-streaming-p`** is true (`anthropic` and `openai-compatible`), and
+    returns the same completion it returns without streaming. A cancel through `*cancel*`
+    signals **`praxeon/conditions:completion-cancelled`**.
+  - **`aion/http-client:open-response-stream`** returns a response's body as a stream once the
+    head has arrived, and **`read-event`** reads Server-Sent Events from it. A
+    **`make-request-cancel`** handle passed as `:cancel` lets another thread call
+    **`cancel-request`**, which shuts the socket down; reads then signal `request-cancelled`.
+    One handle can serve several requests at once, from several threads, and a cancel stops all
+    of them. `read-event` does not return an event that the stream ends in the middle of, before
+    the blank line that finishes it.
+  - A streamed reply that ends before the provider's end event (`message_stop` for Anthropic;
+    `[DONE]` or a finish reason for an OpenAI-compatible server), or that carries an event that
+    is not JSON, signals **`praxeon/conditions:provider-request-failed`**, rather than returning
+    what arrived as the whole reply. A tool call cut off halfway through its arguments signals it
+    too. Of the body of a non-2xx streamed request, the first 64 KiB are read and kept.
+- **praxeon/web: another site's page can show the chat in a frame** (part of #67). `make-app`,
+  `start` and `serve-forever` take `:embed-origins`, a list of origins such as
+  `"https://app.example.com"`, which needs `:grant-verifier`. With it:
+  - `GET /embed.js` serves a loader that a host page includes with one `<script src>` tag. Its
+    `data-grant-url` names a URL on the host's own origin that answers a POST with
+    `{"grant": TOKEN}` for the signed-in viewer. Without `data-container`, it docks a launcher
+    button and the panel it opens at the side `data-position` names (`right` by default);
+    `data-label` sets the button's text. With `data-container`, the frame fills that element.
+    Its styles use class names starting with `praxeon-embed-`.
+  - `GET /embed/panel` is the chat for the frame. It needs no session. It asks its host page for
+    a grant with `postMessage`, takes one only from its parent and only from an origin in
+    `:embed-origins`, and exchanges it at `POST /embed/session`. Until then the composer is
+    disabled and nothing is polled or streamed. A 401 makes it ask for a new grant. The grant is
+    never put in a URL.
+  - The panel's `Content-Security-Policy` names `:embed-origins` in `frame-ancestors`, and it
+    sends no `X-Frame-Options`. Every other route keeps the defaults, so it still cannot be
+    framed.
+  - `make-app` refuses `:embed-origins` that are not a list of lowercase `http://` or `https://`
+    origins with no path.
+  - Nothing in the panel or the loader loads an AMD or UMD loader or assigns `window.htmx`, so a
+    host page's own htmx is left alone.
+  - The chat page's parts (the stylesheet, the bubbles, the composer, the gate and the scripts)
+    moved to a new system, `praxeon/chat-ui`, which `praxeon/web` depends on. The page is
+    unchanged, except that the Send button now has the id `px-send`.
+
+- **hyperion/security-headers: a route can drop a header by setting it to NIL** (part of #67). A
+  response that sets one of the headers `wrap-security-headers` manages to NIL is sent without
+  that header; before, the NIL entry was passed on. The embed panel uses this to drop
+  `X-Frame-Options`.
+
+- **praxeon/web: the chat page can read its updates from a Server-Sent Events stream instead of
+  polling** (part of #67). `make-app` takes `:transport`, `:poll` (the default) or `:sse`. With
+  `:sse`, `GET /api/events` streams what `GET /api/progress` would answer, whenever it changes:
+  new transcript items, the status line and the token count. Each event's id is the page's
+  cursor, so a browser that reconnects sends it back as `Last-Event-ID` and gets nothing twice;
+  a cursor from a conversation that has been replaced gets the whole new transcript, as a poll
+  does. The page opens an `EventSource` instead of polling. A conversation with an open stream is
+  not dropped as idle, and a stream that ends counts as a request to it.
+  - `start` and `serve-forever` take `:transport :auto` (the default), `:poll` or `:sse`. `:auto`
+    streams on `:hunchentoot` and polls on `:woo` and `:uv`. `:sse` is refused on `:woo`, whose
+    handlers all run on one event-loop thread. On `:uv` each open page holds one of the server's
+    workers, two by default, so `:auto` polls there.
+  - With grants, an `EventSource` cannot send the session header. The page asks
+    `POST /embed/stream-ticket`, with the session header, for a ticket, and opens
+    `/api/events?ticket=…`. A ticket can be used once, within 30 seconds
+    (`make-session-table :ticket-seconds`), while its session is open, through
+    `praxeon/web-session:issue-ticket` and `redeem-ticket`. The stream ends when its session does.
+    An open stream does not keep its session from going idle: it checks with
+    `praxeon/web-session:session-open-p`, which does not count as a use.
+  - `praxeon/web` now declares `parenscript`, which hyperion already loads.
+
+- **praxeon/web: a service that takes signed grants and gives each browser a session** (part of
+  #67, for #90). `make-app`, `start` and `serve-forever` take `:grant-verifier` (a
+  `praxeon/ceiling` verifier), `:audience` (the name this service's grants are minted for) and
+  `:sessions` (a `praxeon/web-session:make-session-table`, which sets `:idle-seconds`, 30 minutes
+  by default, and `:max-seconds`, 12 hours). With them, `POST /embed/session` takes
+  `Authorization: Grant <token>` and answers `{"session": ID, "idle_seconds": N, "max_seconds":
+  N}`; every other route needs `Authorization: Session <ID>` and is answered 401 without one.
+  The conversation is the grant's principal's, and `:make-agent` is called with the principal and
+  a grant. Each turn runs on an agent made from the grant of the session that sent the message:
+  when that grant's capabilities, token cap or call cap differ from the ones the agent was made
+  from, `:make-agent` is called again and the conversation moves to the new agent, so a grant
+  with fewer capabilities takes effect at the next turn and the transcript goes on. A grant can
+  be exchanged for sessions any number of times until it expires, so keep grants short-lived.
+  A session ends when its grant expires, if it has not ended before: the host mints a new grant
+  for the page to exchange. `max_seconds` is the earlier of the table's limit and the grant's
+  expiry, and `praxeon/web-session:open-session` takes `:expires-at` for this. A turn whose
+  session's grant expired while it waited behind another ends in `praxeon/ceiling:grant-invalid`
+  without running. `make-app`'s `:clock` is also the clock of the session table it makes when
+  `:sessions` is not given, and the one a grant's expiry is checked against. Ended sessions are
+  removed on the same sweep as stale conversations, and `praxeon/web-session:prune-sessions`
+  removes them on demand. `make-app` refuses an `ed25519-verifier` with no key.
+  `make-app` refuses `:grant-verifier` without a non-empty `:audience`, because a grant
+  minted for another service would otherwise open a session here. A grant for another audience,
+  or with no principal, is refused even if the app's own verifier accepts it.
+- **praxeon/web: a key's conversation expires when it is idle, and every transcript item names
+  its turn** (part of #67). With `:conversation-key` or `:grant-verifier`, a key's conversation
+  and its agent are dropped once no request has reached them for `:conversation-idle-seconds`
+  (a new argument to `make-app`, `start` and `serve-forever`; 30 minutes by default, the same as
+  a session's idle limit), no turn of theirs is running, and their last turn ended at least that
+  long ago, so the reply to a turn that ran past the limit is kept for the page. The key's next
+  request finds its
+  conversation stale, calls `:make-agent` again and starts with an empty transcript, and any
+  request removes every stale conversation if a minute has passed since that was last done.
+  Before this, conversations were kept for the app's lifetime. A page still open on a dropped
+  conversation is not left showing nothing: the page's cursor now names its conversation, and
+  the next poll from the old one replaces the transcript with the new conversation's under a
+  notice that a new conversation has started. A cursor that is a bare index, with no
+  conversation named, is treated the same way. `make-app` returns, as a second value, a function
+  that returns how many conversations it holds. Every transcript item now carries `:turn N`, numbered from 1 in each
+  conversation, so a `:turn-ended` item says which turn it ends when two tabs send messages
+  close together. `:make-agent` no longer runs under the lock every key's requests take, so a
+  slow first request holds up only the requests with its own key; two first requests with one
+  key still make one agent. A turn's reply and its `:turn-ended` item are now published, and its
+  status line cleared, before the next queued turn starts.
+- **praxeon/actor: `move-conversation` moves an agent's conversation onto another agent** (part
+  of #67). It copies the history and the state needed to read it as before: retrieved context,
+  offloaded and cleared tool results with their store, the untrusted-content records and the
+  turn guard, and the thread memory. The new agent keeps its own provider, system prompt, means
+  and budgets.
+- **praxeon/ceiling: a grant as one string** (part of #67). `encode-grant-token` signs a grant's
+  JSON with an `aion/signature` private key and returns `base64url(payload).base64url(signature)`,
+  unpadded. `decode-grant-token` returns the payload and signature for `verify-grant`, and signals
+  `grant-invalid` for anything else. `make-ed25519-verifier` now also takes an `aion/signature`
+  public key.
+
+- **praxeon/web: one conversation per key, a transcript every tab reads in full, and an item
+  that marks the end of each turn** (part of #67). `make-app`, `start` and `serve-forever` take
+  `:conversation-key`, a function of the Clack env that returns the request's key (normally the
+  signed-in principal's id), and `:make-agent`, a function of a key that returns a fresh agent.
+  Requests with an `equal` key share a conversation; a request whose key is NIL is answered 403.
+  Without `:conversation-key` there is one conversation over `:agent`, as before, and `make-app`
+  refuses `:conversation-key` without `:make-agent`, or with `:agent`. Each conversation
+  publishes its transcript to a `hyperion/channel` as items (`:user`, `:assistant`, and one
+  `:turn-ended` with `:outcome :ok` or `:error` per turn), so two tabs on one conversation both
+  see every message; before, whichever tab polled first took it. A turn's reply is now rendered
+  by the poll that reads it. `praxeon/web` no longer depends on `sb-concurrency`.
+- **`praxeon/llm:provider-endpoint` says where a provider sends its requests, and
+  `endpoint-loopback-p` says whether that is this machine** (#1034). An app that keeps model
+  requests on this machine no longer has to read `oai-base-url` through `praxeon/llm::`.
+  - `provider-endpoint` returns an `endpoint`, with `endpoint-scheme` (`"http"` or `"https"`),
+    `endpoint-host` (lowercase, an IPv6 address without brackets) and `endpoint-port` (the
+    scheme's default when the URL names none).
+  - It has methods for `anthropic`, `openai-compatible`, the remote embedding providers
+    (`openai-compatible-embeddings`, `voyage-embeddings`), `voyage-reranker`, and
+    `praxeon/image`'s `openai-images` and `google-images`. Each method reads the setting that
+    the provider builds its request URLs from.
+  - It returns NIL for a provider whose destination is not known, such as one that runs in this
+    process or a class with no method of its own.
+  - `endpoint-loopback-p` is true for `localhost`, 127.0.0.0/8, `::1`, and an IPv6 address
+    carrying an IPv4 loopback address. It decides from the text without a DNS lookup, so it
+    returns NIL for another name that resolves to loopback, and for NIL.
+  - `parse-endpoint` reads an http or https URL into an `endpoint`. It signals an error for
+    anything else, and for an authority that HTTP clients read in different ways: one with a
+    backslash, whitespace, a control character or more than one `@`, or a host outside brackets
+    with `[` or `]` in it. `http://evil.com\@127.0.0.1/` goes to `evil.com` in some clients, so
+    it is refused rather than reported as loopback.
+  - The egress hook (#988) is to receive this same value.
+  - An OpenAI-compatible tool call whose arguments are not JSON, such as arguments cut off when a
+    reply ends with `finish_reason: "length"`, signals `provider-request-failed`, whether the
+    reply was streamed or not. Before, the tool was called with an empty object. Arguments that
+    are empty or missing are still an empty object.
+
+- **praxeon/image: the generate-image means offers the model a `mask`, so it can change only part
+  of an image** (#946). With `:resolve-reference` and a provider that takes a mask
+  (`image-provider-accepts-mask-p`, true for OpenAI), the tool schema offers `mask`: a reference,
+  resolved by the same `:resolve-reference` function as `reference_images`, to a PNG with
+  transparency the size of the first reference image. It is checked as a `:mask` given to
+  `generate-image` is, and refused before any request with `image-input-invalid` when it does
+  not fit. The `:image-usage` event of a request with a mask carries `:mask t`. Google's provider
+  is not offered `mask`, and one the model gives anyway is refused with the reason.
+- **`aion/sexp`: a safe reader and writer for s-expression data from outside the program**
+  (#972). `read-data` accepts plain data only -- lists, dotted pairs, strings, integers, ratios,
+  floats, `t`, `nil`, keywords that already exist, and the symbols in its `:symbols` list -- and
+  signals `aion/sexp:unsafe-data`, with a `reason`, for anything else. It is a parser of its
+  own, not `cl:read`, so it interns nothing (`:intern-keywords t` allows new keywords), refuses
+  every `#` form (`#S`, `#.`, `#+`, `#P`, `#n=`, `#(` and the rest), quote and backquote,
+  `|escaped|` symbols and package prefixes, and keeps its own stack, so deep nesting is
+  `unsafe-data :too-deep` and never a `storage-condition`. Limits: `:max-depth` (64),
+  `:max-elements` (100 000, each list and each atom counted once), `:max-string-length` (65 536), `:max-number-digits` (100) and
+  `:max-input` (1 MiB characters), each also a special variable. A float's type follows its
+  exponent marker, not `*read-default-float-format*`; an exponent past a float's range is
+  `:number-out-of-range` and `1/0` is `:division-by-zero`. Symbol tokens are folded to upper
+  case, as the standard reader folds them. `write-data` and `write-data-to-string` write only
+  what `read-data` accepts, and refuse anything else before writing a character, including a symbol whose name would read back as a number or as CL's `t` or `nil`. An app that
+  reads data it did not write with `cl:read`, even with `*read-eval*` nil, should move to it.
+- **`hyperion/kit/dock`: a panel that loads its contents from a route into an element the page
+  already has** (part of #67). It is for a second view beside a page's own content, such as a
+  chat or a help pane.
+  - `dock-panel` writes a `<section>` that htmx fills from a URL. It has no width, position or
+    overlay of its own, so it fills the column, tab or drawer it is put in and resizes with it.
+    With `:load :at-once` (the default) it loads with the page, also inside a tab that is not
+    shown, and switching tabs does not reload it. With `:load :on-open` it loads the first time
+    it receives the event `hy-dock-open`.
+  - `dock-launcher` writes a button that shows and hides a panel and keeps `aria-expanded` in
+    step. `dock-js`, included once per page, makes it work and sends `hy-dock-open` to a panel it
+    opens. A page's own tab or drawer code can send the same event.
+  - Nothing in it loads a script or changes `window.htmx`; the page's own htmx loads the
+    contents. `dock-panel` signals when its content URL is not http, https or relative
+    (`hyperion/kit/page:safe-href-p`), because the host's htmx would fetch a `data:` or
+    `javascript:` URL. `*dock-id*` is the default id, `hy-dock`. The styles are in `kit.css`.
+
+- **hyperion/appearance: text-size roles, a UI font and a prose font, and a focus-ring colour**
+  (#981). `appearance-css` writes seven text-size tokens: `--hy-text-caps` 0.6875rem,
+  `--hy-text-meta` 0.75rem, `--hy-text-dense` 0.8125rem, `--hy-text-body` 0.875rem,
+  `--hy-text-heading` 1rem, `--hy-text-title` 1.25rem and `--hy-text-prose` 1.0625rem. It also
+  writes two font tokens: `--hy-font-ui`, a system-ui stack, and `--hy-font-prose`, a serif
+  stack. Bulma's `--bulma-size-1` to `--bulma-size-7` are unchanged.
+  - `make-appearance-table` takes `:type-scale` and `:fonts`, plists merged over
+    `*default-type-scale*` and `*default-fonts*`. It signals on an unknown role or font, a value
+    that is not a string, or a value containing `;`, `{`, `}`, `<` or a newline.
+  - `--hy-focus-ring` is a new colour token in every scheme and contrast setting:
+    `#485fc7` light, `#7a9cff` dark, `#0033cc` light high-contrast and `#ffd400` dark
+    high-contrast. `appearance-contrast-failures` checks it at 3:1
+    (`*minimum-ring-contrast*`) against `:surface`, `:surface-raised` and `:header`
+    (`*ring-backgrounds*`) in every look, and each failure now carries `:required`, the ratio it
+    was held to. An app whose table sets one of those backgrounds may now get ring failures it
+    did not get before.
+  - In the gradient look, primary and danger buttons get hover (a grey layer over the
+    background), press (`filter: brightness(0.92)`) and `:focus-visible` (a 2px
+    `--hy-focus-ring` outline) rules.
+  - `kit.css` uses the text roles instead of Bulma's sizes. A selectable row's focus outline is
+    `--hy-focus-ring`, and the segmented-control, toggle-group, toolbar and confirm buttons get
+    hover, press and focus rules.
+
+- **hyperion/kit: a list toolbar and a properties panel** (#981, part four). `hyperion/kit` now
+  also depends on `hyperion/list`.
+  - `hyperion/kit/toolbar:list-toolbar` takes a `hyperion/list` state and writes a GET form with
+    `role="search"`: a search field for a `:text` filter (`:search`), a select for each
+    `:values` filter (`:filters`, with an "All" option first), a select of sort keys
+    (`:sorts`), and an Active/Trash segmented control for a `:values` filter (`:trash`). The
+    list's other parameters and the page's own parameters are hidden fields, and the page is
+    left out, so a new search starts on page 1. With an htmx target the form re-requests the
+    list 300ms after typing stops, when a select changes, and on submit. It signals when a name
+    is not a filter or sort key of the right kind, and, on that request only, when the trash
+    filter's choices for the request leave out `:trash-value`. The submit button is labelled by
+    `:submit-label`, "Apply" by default, so it does not share the search field's name.
+  - `hyperion/kit/toolbar:toolbar-js`, included once per page, makes the toolbar's requests
+    carry the same parameters `list-href` writes for the same change: it sends them to the
+    page's own path, leaves out a filter set to All and the default sort key, and drops the
+    direction when the sort key changes.
+  - `hyperion/kit/panel:selectable-row` returns the attributes, for Spinneret's `:attrs`, of a
+    row that loads an item's properties into a `panel-region`, and `row-activator` writes the
+    `<button>` for the row's first cell that does the same. The button is what a keyboard
+    reaches, and Enter and Space press it; the row is not a tab stop and has no role. A click on
+    the row also loads the panel, unless it comes from a link, button or form field inside the
+    row. `properties-panel` writes the panel, an `<aside>` named by its title with a close
+    button. `panel-js` marks the chosen row with `aria-current="true"`, and the close button or
+    Escape empties the panel and returns focus to that row's button.
+  - `hyperion/list` exports `list-param-name`, the query-parameter name a spec reads for a
+    filter or setting; `list-carried-params`, the hidden fields a GET form for the list needs;
+    and the spec readers `list-spec-sorts`, `list-spec-default-sort`, `list-spec-filters` and
+    `list-spec-hx-target`.
+  - `kit.css` styles the toolbar, the chosen row, the row's button and the panel.
+- **hyperion/list: a filter's choices can depend on the request** (#1014). The `:values` of a
+  filter given to `hyperion/list:make-list-spec` may be a function of the request's env instead
+  of a list of strings, for choices such as the projects the signed-in user may see.
+  `read-list-state` calls it once per request, keeps the request's value only when it is one of
+  the returned strings, and drops any other value, as it drops a value outside a fixed list.
+  The new `hyperion/list:filter-choices` returns the choices for that request; `list-href`
+  checks a value against them, and `hyperion/kit/toolbar:list-toolbar` shows them as the
+  select's options. A function that returns anything but a list of strings signals an error.
+
+- **hyperion/kit: dialogs, a destructive-action confirm and an undo notice** (#981, part
+  three). The new package `hyperion/kit/dialog`; `hyperion/kit` now also depends on
+  `parenscript`, which `hyperion` already loads.
+  - `dialog` writes a closed native `<dialog>` named by its title through `aria-labelledby`,
+    with a close button. `dialog-opener` writes the button that opens it; with `:href`, htmx
+    loads the dialog's contents first and the dialog opens when they have settled.
+  - `confirm-dialog` writes a dialog whose form posts to `:action-href` with htmx. Cancel is on
+    the left and has the initial focus, so Enter cancels; the action is on the right, labelled
+    by `:action-label` and styled as danger. The action is disabled while its request is in
+    flight, so a double click posts once. The dialog closes when the request succeeds. It
+    signals unless `:action-href` and `:action-label` are given, and when `:action-href` has a
+    scheme other than `http` or `https`, such as `javascript:`, because the form's action is
+    where a browser without htmx submits it.
+  - `notice-region` writes an empty `role="status"` live region, and `undo-notice` writes a
+    notice with Undo and Dismiss buttons and no timer. With `:oob t` a handler can return the
+    notice with any response and htmx appends it to the region.
+  - `dialog-js` returns the script for all of them, to include once per page. Escape closes a
+    dialog, and closing it returns focus to the button that opened it, including in browsers
+    where clicking a button does not focus it. The browser itself focuses the dialog's
+    `autofocus` element when it opens.
+  - `kit.css` styles the dialogs and notices.
+
+- **hyperion/kit: a page header, breadcrumbs, an empty state, a segmented control and a toggle
+  group for collection pages** (#981, part two). A new opt-in system, `hyperion/kit`. Each
+  component writes into Spinneret's `*html*`, like `hyperion/list:pager`, and is styled by
+  `(hyperion/assets:url :kit)` in the `--hy-*` tokens of `hyperion/appearance`.
+  - `hyperion/kit/page:page-header` takes a title, which becomes the page's `<h1>`, and
+    optionally `:subtitle`, `:breadcrumbs` and `:actions`. `:actions` is a function that writes
+    the action buttons.
+  - `hyperion/kit/page:breadcrumbs` takes `(label . href)` items and writes an ordered list in a
+    `<nav>` with an `aria-label`. The last item is the current page: it has
+    `aria-current="page"` and is not a link. The separators are drawn by CSS, so a screen
+    reader does not read them.
+  - `hyperion/kit/page:empty-state` writes a heading, one line of text and an optional primary
+    link.
+  - A breadcrumb href or an empty state's `:action-href` becomes a link only when it has no
+    scheme or its scheme is `http` or `https`. Any other, such as `javascript:` or `data:`, is
+    left out of the page, and the label is written as plain text. Nothing is signalled. The
+    check is exported as `hyperion/kit/page:safe-href-p`.
+  - `hyperion/kit/toggle:segmented-control` (exactly one option pressed) and
+    `hyperion/kit/toggle:toggle-group` (any number pressed) write buttons with `aria-pressed`
+    in a `role="group"` with an `aria-label`. Each button loads its href with htmx.
+    `segmented-control` signals when `:selected` does not name exactly one option.
+  - `hyperion/assets` serves the new stylesheet `kit.css` under the key `:kit`, so
+    `(hyperion/assets:assets)` now has five entries.
+
+- **hyperion/appearance: theme, contrast and look as one visitor setting, and the `--hy-*`
+  appearance tokens** (#981, part one). A page's appearance is three attributes on `<html>`:
+  `data-theme` (`light` or `dark`), `data-contrast` (`normal` or `high`) and the new
+  `data-look` (`flat` or `gradient`). The default for theme and for contrast is the system:
+  with the attribute absent, `prefers-color-scheme` and `prefers-contrast: more` decide. With
+  `data-look` absent the look is flat.
+  - `make-appearance` and `appearance-from-strings` build the setting, and `html-attributes`
+    returns the attributes for `<html>`, leaving out any setting that follows the system.
+  - `read-appearance` and `persist-appearance` are a store protocol.
+    `make-cookie-appearance-store` keeps the setting in one cookie, named `appearance` by
+    default, for example `dark.system.gradient`. An app that stores it elsewhere supplies its
+    own store.
+  - `make-appearance-table` takes token values for the light, dark, light high-contrast and dark
+    high-contrast schemes, merged over hyperion's defaults. Each scheme has a `:gradient` plist
+    for the values the gradient look changes. `appearance-css` writes CSS for every combination,
+    plus `--hy-space-1` to `--hy-space-7` (a 4px base).
+  - The tokens are `--hy-surface`, `--hy-surface-raised`, `--hy-header`, `--hy-button`,
+    `--hy-button-primary` and `--hy-button-danger`, each with a `-text` token. Their names are
+    the same in both looks. A background token is a colour in the flat look and may be a
+    `linear-gradient` in the gradient look, so use it with `background:`, not
+    `background-color:`.
+  - In the gradient look, the CSS also applies the tokens to Bulma's `.button.is-primary`,
+    `.button.is-danger`, `.navbar`, `.modal-card-head`, `.card-header`, `.box` and `.card`,
+    with `background:`, so a plain colour given as a gradient-look value replaces Bulma's own
+    background. The outlined, light and inverted button variants keep Bulma's colours.
+  - A browser without the `prefers-contrast` media feature (Chrome before 96, Firefox before
+    101) shows the light, flat look on a page that sets no `data-contrast`.
+  - The text roles are their own tokens: see the entry for the text roles, fonts and focus ring.
+    Bulma's `--bulma-size-1` to `--bulma-size-7`, set through `hyperion/assets:theme`, are
+    unchanged.
+  - `appearance-contrast-failures` checks every text token against its background in all eight
+    combinations, at WCAG AA (4.5:1). For a gradient it checks every stop and 19 points between
+    each pair of stops. A button's text (`:button`, `:button-primary`, `:button-danger`) is also
+    checked on hover, under the grey hover layer, and when pressed, at `brightness(0.92)`, and
+    each failure names its `:state` (`:resting`, `:hover` or `:pressed`). Hyperion's own table
+    passes; its dark danger button's text is `#000000`, because `#0b0c0e` fell to 4.46:1 when
+    pressed. An app calls the check in its own tests on its own table. `contrast-ratio` and
+    `relative-luminance` are exported.
 
 - **praxeon/actor: every deliberation step records how many of the prompt's estimated tokens came
   from each source** (#317, step D). `praxeon/actor:request-messages` returns a third value, and
@@ -913,6 +1981,33 @@ its tag.
   `hyperion-view --restore-placement PATH X0 Y0 X1 Y1 ...` prints where a saved frame would
   open for a given list of screens, without opening a window. Rebuild `hyperion-view` to get
   it.
+
+- **cons: `cons init NAME --template web --db sqlite` or `--db postgres` scaffolds a web app
+  with a database, and every web app gets a test suite that starts it** (#711).
+  - With `--db`, the generated `src/db.lisp` makes one mnemosyne pool from `DATABASE_URL` and
+    gives that pool to a session store (`hyperion/session-db:make-db-store`), to a user store
+    (`hyperion/auth-db:make-db-auth`), and to `hyperion/db-connection:wrap-connection`, which
+    lends each request its own connection in `*db*`. The page counts visits in the session.
+    SQLite uses `data/NAME.db` when `DATABASE_URL` is unset; Postgres requires it. A `start`
+    that fails closes the pool it opened. In every web app, with or without `--db`, a second
+    `start` while the app is running is refused.
+    `.env.example` carries the line, and the generated `.gitignore` covers `data/`.
+  - The web template now declares `aion/uv` and `aion/log`, its `start` logs which server
+    `hyperion/server:default-server` chose and why (`server chosen server=uv
+    reason=preferred`), and it no longer passes `:workers`, so `:uv` gets
+    `default-workers` (#710).
+  - The generated `tests/NAME-tests.lisp` starts the app on a free port, sends GET / over a
+    socket and checks that `hyperion/server-uv`'s handler answered. With `--db` it also checks
+    that two requests with the session cookie count two visits and that the session is in the
+    database. They load the project's `.env` first, as `start` does. A Postgres app's tests
+    skip when `DATABASE_URL` is unset there and in the environment.
+  - A template manifest may offer `:options`; each choice adds dependencies, files that
+    replace or add to `files/`, and markers (`cons/docs/templates-design.md` §4). New in
+    `cons/init`: `template-options`, `template-option-choices`, `templates-with-option`,
+    `template-variants`, and `scaffold`'s `:options`. `cons template check` builds every
+    variant.
+  - The docstrings of `make-db-store`, `make-db-auth` and `wrap-connection`, and the hyperion
+    user guide, now say to give every store the same pool, never one shared connection.
 
 - **praxeon/actor: an agent can send its thread's observations in place of the messages they
   were distilled from** (#317, step C). `(praxeon/actor:attach-thread-memory agent store subject
@@ -2234,6 +3329,83 @@ its tag.
 
 ### Fixed
 
+- **aion/http-client: on Windows, a pinned request's read that returned is no longer reported as
+  a timeout** (#1063). A request with `:connect-address`, which `fetch-public` makes, keeps its
+  read timeout on Windows with a timer that closes the socket. When the timer fired just as a
+  read returned, the read's data was dropped and `sb-sys:io-timeout` signalled. Now a read that
+  returns is returned, and the timeout is signalled only for a read the timer ended. The
+  `make-request` docstring now says that a request with `:connect-address` follows no redirect
+  whatever `:follow-redirects` says, and that its own HTTP/1.1 is used on every OS, not only on
+  Windows.
+- **aion/http-client: a failure on a pinned connection no longer reconnects through DNS or sends
+  the request again** (#985). A request with `:connect-address`, which `fetch-public` always
+  makes, handed its connection to dexador on Linux and macOS. After any failure on it, such as a
+  read timeout or a reset, dexador opened a second connection by resolving the URL's host name,
+  bypassing the address `fetch-public` had checked, and sent the request again, a POST included.
+  The pinned path now writes the request and reads the response itself on every platform, as it
+  already did on Windows (#536), so it uses exactly one connection. Visible differences on Linux
+  and macOS: the request asks for `Accept-Encoding: identity` instead of gzip; a pinned
+  `send-request` does not follow redirects itself (`fetch-public` follows them, as before);
+  responses are read under http1.lisp's limits and refused with `malformed-response` outside
+  HTTP/1.1's grammar; an alist `:content` whose values are pathnames (dexador's multipart) is not
+  supported there. As through dexador, the default `User-Agent` and `Accept: */*` are sent,
+  string or octet content without a Content-Type is `text/plain`, and a request without content
+  other than GET or HEAD sends `Content-Length: 0`. Those four are now also what the Windows
+  pinned path sends.
+
+- **aion/http-client: on Windows, a pinned request's `:read-timeout` and `fetch-public`'s
+  `:deadline` end a read from a server that never answers** (#985). Neither did before: the
+  socket's receive timeout had no effect on Windows, and the deadline shut the socket down,
+  which did not wake the read there. Measured, a `fetch-public` with `:deadline 2` to such a
+  server was still waiting after 20 seconds, so a user-supplied URL could hold a Windows caller
+  for as long as the server kept the connection open. The read timeout now ends the read with
+  an `http-error` whose phase is `:response` and whose detail says "I/O timeout", and the
+  deadline closes the socket on Windows, so the fetch ends with `fetch-deadline-exceeded`.
+- **praxeon/actor: `move-conversation` no longer lowers the new agent's conversation taint.** It
+  copied the old agent's `agent-conversation-taint` over the new agent's, so a new agent made with
+  `:conversation-taint :untrusted` and given a conversation recorded as `:clean` ended up `:clean`.
+  The new agent now gets the higher of the two, in the order not recorded (`nil`), `:clean`,
+  `:delegated`, `:untrusted`. A new agent made without the argument still takes the old agent's
+  value. When a session's grant changes, `praxeon/web` moves the conversation onto the agent the
+  app's rebuild function makes; that agent keeps the old value unless the rebuild function passes
+  a higher one.
+
+- **praxeon/ceiling: `verify-grant` refuses a signed payload that is not a grant** (part of #67).
+  A payload that is not a JSON object, a `principal`, `group` or `audience` that is not a string,
+  or `capabilities` that is not an array of strings now signals `grant-invalid`, which
+  `praxeon/web` answers 401. Before, each signalled another error, answered 500.
+- **praxeon/web: `GET /api/reload-epoch` and `GET /api/dev-error` exist only with `:dev t`**
+  (part of #67). Before, every app answered them, without a session even when the app takes
+  grants. The hot-reload poller that reads them is on the page only in a dev app.
+
+- **cons: in a project made with `cons init --template web --db`, a pool that cannot be closed
+  during cleanup no longer hides the error that caused the cleanup, and `*pool*` is always
+  cleared** (#1006). When `open-database` could not make a store, or `start` could not start the
+  server, and `conn:close-pool` then signalled as well, the caller saw the pool's error instead
+  of the original one, and `*pool*` stayed set, so the next `open-database` refused with "the
+  database is already open". Both cleanups now call the new `close-database-during-cleanup`,
+  which logs a close failure with its condition type only and lets the original error continue.
+  `close-database` clears `*pool*`, `*sessions*` and `*users*` even when closing the pool
+  signals. A project made before this change can copy `close-database` and
+  `close-database-during-cleanup` from the template's `src/db.lisp`.
+- **A desktop bundle, and `cons bin`, refuse to carry a `vendor/libuv` whose `BUILT-FROM` stamp
+  is missing or does not name `libuv.pin`** (#1001). Before this, a checkout that pulled a
+  `libuv.pin` bump and did not run `scripts/build-libuv.lisp` shipped the old libuv with no
+  message. `verify-natives-will-be-carried` in `scripts/tree-natives.lisp` now exits with code 3
+  and names the stamp's version, the pin's version and the command
+  `sbcl --script scripts/build-libuv.lisp`. A libuv built before #991 has no stamp and is refused
+  until it is rebuilt once. `build-libuv.lisp` also deletes the old stamp before it compiles, so
+  a `--force` rebuild that fails no longer leaves a stamp saying the library is current.
+
+- **cons: in a project made with `cons init --template web --db`, `open-database` closes the
+  pool only when making the session or user store did not finish** (#944). It used to close the
+  pool from a `handler-bind` on `error`, which runs as soon as an error is signalled, so a store
+  constructor that signalled an error and recovered from it through a restart carried on with a
+  closed pool and failed with `mnemosyne/conn:pool-closed`. It now closes the pool from an
+  `unwind-protect`, as the template's `start` already did. When a store cannot be made,
+  `*pool*`, `*sessions*` and `*users*` are all `nil` afterwards. A project already generated
+  keeps the old `open-database` in its own `src/db.lisp`; the change can be copied there by hand.
+
 - **macOS bundles: a carried dylib no longer keeps the build machine's path as its install
   name** (#957). The tree's libuv was carried with the install name it was built with, an
   absolute path under the build machine's `vendor/`, and a library the runtime links, such as
@@ -2270,6 +3442,19 @@ its tag.
   form, or an RSA key in PKCS#1 form (`-----BEGIN RSA PRIVATE KEY-----`). A key that does not
   match its certificate is reported as before. The restriction is lifted when a TF-PSA-Crypto
   release carrying upstream commit 841da2ad is pinned.
+
+- **aion/uv: `ensure-available` keeps signalling `libuv-abi-mismatch` after a failed ABI check,
+  instead of treating libuv as available from the second call on** (#940). `load-libuv` marks
+  libuv loaded before `verify-abi` runs, and `ensure-available` checked the ABI only while libuv
+  was not loaded, so a libuv that loaded but failed the check was used on every later call in
+  the same image. The check now runs until it has passed. New:
+  `aion/uv/ffi:abi-verified-p`, true once `verify-abi` has passed against the libuv now loaded.
+
+- **aion/http-client: on Windows, a pinned https request to an IPv6 address written in a long
+  form verifies the certificate against the address's canonical form** (#921). The Windows path
+  removed the brackets from the URL's host and passed the rest on as it was, so
+  `https://[0:0:0:0:0:0:0:1]/` was verified against `0:0:0:0:0:0:0:1`. It now uses the same
+  name as Linux and macOS (since #915): the address as usocket writes it, here `::1`.
 
 - **aion/http-client: an https request to an IPv6 address such as `https://[::1]/` verifies the
   certificate against the address, and a request to any IP address sends no SNI name** (#915).
