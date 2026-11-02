@@ -489,7 +489,14 @@ fasl is seen; see LOAD-SYSTEM-STRICTLY."
         (uiop:quit
          (if (and (or fresh (spec:target-isolate tgt)) (%lisp-target-p tgt))
              (%run-subprocess spec tgt pmap)
-             (%perform spec tgt pmap))))
+             ;; #701: a contrib that fails to load says why, before the error itself is
+             ;; reported. Said once, since ASDF can signal the same failure more than once.
+             (let ((explained nil))
+               (handler-bind ((error (lambda (c)
+                                       (unless explained
+                                         (setf explained
+                                               (cons/toolchain:explain-contrib-failure c))))))
+                 (%perform spec tgt pmap))))))
     (error (e)
       (format *error-output* "~&cons ~A: ~A~%" name e)
       (uiop:quit 1))))

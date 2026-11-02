@@ -60,11 +60,14 @@
     against SBCL_HOME and SBCL_HOME does not. Asks the CAPABILITY (can a contrib be
     required?) rather than comparing the variable -- a healthy SBCL overwrites SBCL_HOME
     with its own answer, so the variable agrees precisely when it does not matter. Also
-    names the quieter case: an SBCL upgrade leaves a dumped bin/cons working but stale,
-    while `--fresh` targets run under the new sbcl. DIAGNOSE is pure over gathered FACTS,
-    so the fatal branch is testable on a machine where it is false. uiop-only.")
+    names what an SBCL upgrade does to a dumped bin/cons: stale but working while the old
+    install's contribs are on disk, and unable to load a contrib it did not bake in once
+    they are replaced (#701), which it reads from a contrib fasl's header. DIAGNOSE is pure
+    over gathered FACTS, so the fatal branch is testable on a machine where it is false.
+    uiop-only.")
   (:export #:check #:diagnose #:facts #:report #:fatal-p #:sbcl-on-path-version
-           #:*probe-contrib*))
+           #:*probe-contrib* #:fasl-header-version #:contrib-version-in #:contrib-load-failure-p
+           #:contrib-failure-lines #:explain-contrib-failure))
 
 (cl:defpackage #:cons/setup
   (:use #:cl)
