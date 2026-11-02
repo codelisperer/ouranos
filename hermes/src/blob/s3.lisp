@@ -150,7 +150,17 @@ the request is built from without that qualification, which was false for virtua
         (refuse "The value contains \"://\". The scheme comes from MNEMOSYNE_S3_SECURE and is put in front of this value, so a scheme here would appear twice in the request URL and the host would not be the one named."))
       (let ((bad (find-if (lambda (piece) (search piece endpoint)) +endpoint-forbidden+)))
         (when bad
-          (refuse (format nil "The value contains ~S, which belongs to the rest of a URL rather than to a host." bad)))))))
+          (refuse (format nil "The value contains ~S, which belongs to the rest of a URL rather than to a host." bad))))
+      ;; A BARE IPv6 ADDRESS IS REFUSED, WHATEVER THE MODE. An endpoint of "::1" passed every
+      ;; check when MNEMOSYNE_S3_SECURE was unset, because the plaintext rule never ran, and
+      ;; produced the request URL "https://::1/bkt/k" -- which QURI reads as the host ":" with
+      ;; port 1, so it could never have connected. The plaintext path already refused it for a
+      ;; different reason, which is why this went unnoticed (the review of #1094). Two or more
+      ;; colons and no leading bracket is an IPv6 address written without its brackets.
+      (when (and (not (char= #\[ (char endpoint 0)))
+                 (let ((first (position #\: endpoint)))
+                   (and first (position #\: endpoint :start (1+ first)))))
+        (refuse "The value looks like an IPv6 address without brackets. A request URL built from it has no usable host: write it as [::1]:9000, with the brackets and a port."))))) 
 
 (defun %endpoint-url (endpoint)
   "ENDPOINT as the URL a request would be built from: the scheme, \"://\", then the endpoint.
