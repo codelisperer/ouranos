@@ -134,16 +134,20 @@ output: +MARKER+, the kind of definition, its name with its package, then the ne
 source file. The line is printed as it happens, so it is in the output even if THUNK then fails.
 The redefinition itself goes ahead, as it would without this.
 
-UIOP's lists of conditions ASDF muffles are bound without the redefinition warnings while THUNK
-runs. UIOP:*USUAL-UNINTERESTING-CONDITIONS* holds them, and when UIOP:*UNINTERESTING-CONDITIONS*
-is set to it, ASDF's own handlers muffle each redefinition before this handler sees it (#1121)."
+UIOP's lists of conditions ASDF muffles are bound, while THUNK runs, so that no entry matches a
+redefinition warning. UIOP:*USUAL-UNINTERESTING-CONDITIONS* holds them, and when
+UIOP:*UNINTERESTING-CONDITIONS* is set to it, ASDF's own handlers muffle each redefinition before
+this handler sees it (#1121). Each entry is wrapped rather than the redefinition ones removed,
+because one of them, SB-KERNEL:UNINTERESTING-REDEFINITION, is a type made of SATISFIES tests,
+which SUBTYPEP cannot place under SB-KERNEL:REDEFINITION-WARNING."
   (progv '(uiop:*uninteresting-conditions* uiop:*uninteresting-compiler-conditions*
            uiop:*uninteresting-loader-conditions*)
       (mapcar (lambda (list)
-                (remove-if (lambda (c)
-                             (and c (symbolp c)
-                                  (ignore-errors (subtypep c 'sb-kernel:redefinition-warning))))
-                           list))
+                (mapcar (lambda (entry)
+                          (lambda (c)
+                            (and (not (typep c 'sb-kernel:redefinition-warning))
+                                 (uiop:match-condition-p entry c))))
+                        list))
               (list uiop:*uninteresting-conditions* uiop:*uninteresting-compiler-conditions*
                     uiop:*uninteresting-loader-conditions*))
     (%call-reporting-redefinitions thunk roots)))

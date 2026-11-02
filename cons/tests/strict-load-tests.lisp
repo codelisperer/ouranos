@@ -551,6 +551,44 @@ copies of a project whose two files both define HELPER."
         (is (search "OURANOS-REDEFINED defun " out)
             "the gate's check reported nothing under the muffle:~%~A" out)))))
 
+(test a-generic-function-added-to-another-file-fails-under-the-usual-muffle
+  "Review of #1128: SB-KERNEL:UNINTERESTING-REDEFINITION, in UIOP's usual list, is a type made of
+SATISFIES tests, so a filter that removed the list's subtypes of REDEFINITION-WARNING kept it.
+With the muffle set, a.lisp's DEFGENERIC GG reloading from the same file was then hidden, so
+this build was not seen to define GG, and b.lisp's DEFGENERIC GG, replacing a definition the
+image already had, was not counted. The child builds with GG in a.lisp only, adds it to b.lisp,
+and builds again in the same image; the second build fails. The control is the first build. The
+gate's CALL-REPORTING-REDEFINITIONS, given the same filter change, then reports GG on a forced
+build. That check also passed with the old filter, measured on 2026-11-02, so it guards the
+gate's report and is not evidence for the change."
+  (%with-two-file-cons-project (dir name "(defun helper () 1)" "(defun other () 2)")
+    (let* ((package (string-upcase name))
+           (script (uiop:native-namestring
+                    (merge-pathnames "scripts/redefinitions.lisp"
+                                     (uiop:pathname-parent-directory-pathname
+                                      (asdf:system-source-directory :cons)))))
+           (head (format nil "(defpackage ~S (:use #:cl))~%(in-package ~S)~%" package package))
+           (b-head (format nil "(in-package ~S)~%" package)))
+      (multiple-value-bind (code out)
+          (%forms-in-child
+           dir
+           (list "(setf uiop:*uninteresting-conditions* uiop:*usual-uninteresting-conditions*)"
+                 (%write-form dir "a.lisp" (format nil "~A(defgeneric gg (x))~%" head))
+                 (%strict-build-form "FIRST" name dir)
+                 (%write-form dir "b.lisp" (format nil "~A(defun other () 2)~%(defgeneric gg (x))~%"
+                                                   b-head))
+                 (%strict-build-form "ADDED" name dir)
+                 (format nil "(load ~S)" script)
+                 (format nil "(ouranos-redefinitions:call-reporting-redefinitions (lambda () (asdf:load-system ~S :force t)) (list ~S))"
+                         name (uiop:native-namestring dir))))
+        (is (eql 0 code) "the child exited ~A:~%~A" code out)
+        (is (search "FIRST ok" out) "control: GG in a.lisp only:~%~A" out)
+        (is (search "ADDED failed:" out) "GG added to b.lisp passed under the muffle:~%~A" out)
+        (is (search (format nil "defgeneric ~A::GG in " package) out)
+            "the error names the generic function:~%~A" out)
+        (is (search (format nil "OURANOS-REDEFINED defgeneric ~A::GG " package) out)
+            "the gate's check did not report GG under the muffle:~%~A" out)))))
+
 ;;; --- #960: --strict and the targets it cannot judge, and fasls written outside cons --------
 
 (test the-targets-strict-cannot-judge-are-the-ones-that-load-nothing

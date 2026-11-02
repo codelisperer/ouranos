@@ -189,15 +189,21 @@ both upcased for the standard readtable."
                             (add (fdefinition setf-name))))))
                     set))
                 (uninteresting (list)
-                  ;; LIST, one of UIOP's lists of conditions that ASDF muffles, without the
-                  ;; redefinition warnings. UIOP:*USUAL-UNINTERESTING-CONDITIONS* holds them,
-                  ;; and when an app sets UIOP:*UNINTERESTING-CONDITIONS* to it, ASDF's own
-                  ;; handlers muffle every redefinition before the handler below sees it.
+                  ;; LIST, one of UIOP's lists of conditions that ASDF muffles, made to match
+                  ;; no redefinition warning. UIOP:*USUAL-UNINTERESTING-CONDITIONS* holds
+                  ;; them, and when an app sets UIOP:*UNINTERESTING-CONDITIONS* to it, ASDF's
+                  ;; own handlers muffle every redefinition before the handler below sees it.
+                  ;; Each entry is wrapped rather than the redefinition ones removed, because
+                  ;; one of them, SB-KERNEL:UNINTERESTING-REDEFINITION, is a type made of
+                  ;; SATISFIES tests, which SUBTYPEP cannot place under REDEFINITION-WARNING.
                   (let ((parent (uiop:find-symbol* :redefinition-warning :sb-kernel nil)))
-                    (remove-if (lambda (c)
-                                 (and parent c (symbolp c)
-                                      (ignore-errors (subtypep c parent))))
-                               list)))
+                    (if parent
+                        (mapcar (lambda (entry)
+                                  (lambda (c)
+                                    (and (not (typep c parent))
+                                         (uiop:match-condition-p entry c))))
+                                list)
+                        list)))
                 (cross-file-redefinition (w)
                   ;; #1121: under --strict, a DEFUN, DEFMACRO, DEFGENERIC or DEFMETHOD that
                   ;; replaces a definition from another file of the project is counted. SBCL
