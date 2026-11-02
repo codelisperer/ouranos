@@ -90,8 +90,13 @@ REPOSITORY-CLOSED if it has been closed."
 /.git/ itself, and on Windows it cannot resolve the doubled separator a trailing one leaves
 (\"failed to resolve path 'C:/.../dir//.git/'\", #470's first Windows run). POSIX realpath
 accepts it, which is why macOS and Linux never showed this. A drive root such as C:\\ keeps
-its separator."
-  (let ((name (uiop:native-namestring (uiop:ensure-directory-pathname directory))))
+its separator. A string is a native name already and is used as it is: parsing it as a Lisp
+namestring dropped a backslash on Linux and macOS and read [ ] * ? as wildcard syntax (#1096). A
+pathname is given its native name directly, not through UIOP:ENSURE-DIRECTORY-PATHNAME, whose
+FILE-NAMESTRING escapes those same characters in the last name."
+  (let ((name (if (stringp directory)
+                  directory
+                  (uiop:native-namestring (translate-logical-pathname directory)))))
     (loop while (and (> (length name) 1)
                      (member (char name (1- (length name))) '(#\/ #\\))
                      (not (and (= (length name) 3) (char= (char name 1) #\:))))
@@ -109,7 +114,8 @@ does not exist, and return it open. On a directory that is already a repository,
 reinitialises it, which changes nothing that is already there."
   (ensure-loaded)
   (let ((path (%directory-namestring directory)))
-    (ensure-directories-exist (uiop:ensure-directory-pathname directory))
+    (ensure-directories-exist
+     (uiop:parse-native-namestring (concatenate 'string path #+win32 "\\" #-win32 "/")))
     (cffi:with-foreign-object (out :pointer)
       (%check "git_repository_init" (%repository-init out path 0))
       (%wrap out))))

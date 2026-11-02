@@ -236,3 +236,46 @@ the test above passes because of the retry and not because the file was never he
              (is (probe-file (merge-pathnames "precious.txt" outside))))
         (ignore-errors (fs:delete-link link))
         (%cleanup base)))))
+
+;;; --- names that a Lisp namestring would read differently (#1096) ---------------------------
+
+(defun %sep () (if (uiop:os-windows-p) "\\" "/"))
+
+(defun %native-in (base name)
+  "The native name of NAME inside the directory BASE, built as a string and never parsed."
+  (concatenate 'string (string-right-trim "/\\" (uiop:native-namestring base)) (%sep) name))
+
+(defun %native-folder (native)
+  "Make the folder NATIVE and, inside it, a file named after the folder. Returns NATIVE."
+  (ensure-directories-exist (uiop:parse-native-namestring (concatenate 'string native (%sep))))
+  (%write (uiop:parse-native-namestring (concatenate 'string native (%sep) "in.txt")) "x")
+  native)
+
+(defun %native-exists-p (native)
+  (uiop:directory-exists-p (uiop:parse-native-namestring (concatenate 'string native (%sep)))))
+
+(defparameter +odd-names+
+  (list "a[1]" #-win32 (format nil "b~Cc" #\\) #-win32 "d*e?")
+  "Folder names with characters a Lisp namestring reads as wildcard syntax, and on Linux and macOS
+a backslash, which it reads as an escape. Windows allows none of these but the brackets.")
+
+(test a-folder-named-with-brackets-or-wildcards-inside-the-tree-is-deleted
+  "Before #1096 the walk turned each folder's name back into a pathname with
+UIOP:ENSURE-DIRECTORY-PATHNAME, which escapes these characters, and on Linux opendir then found
+no folder a\\[1]."
+  (let* ((base (%fresh)) (tree (merge-pathnames "tree/" base)))
+    (unwind-protect
+         (progn
+           (dolist (name +odd-names+) (%native-folder (%native-in tree name)))
+           (is (eq t (fs:delete-tree tree)))
+           (is-false (uiop:directory-exists-p tree)))
+      (%cleanup base))))
+
+(test a-root-given-as-a-native-string-is-not-parsed
+  (let ((base (%fresh)))
+    (unwind-protect
+         (dolist (name +odd-names+)
+           (let ((root (%native-folder (%native-in base name))))
+             (is (eq t (fs:delete-tree root)) "delete-tree ~S" root)
+             (is-false (%native-exists-p root) "~S is gone" root)))
+      (%cleanup base))))

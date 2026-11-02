@@ -3283,6 +3283,19 @@ its tag.
 
 ### Fixed
 
+- **aion/fs, aion/libgit and aion/windows: a path given as a string is used as written** (#1096).
+  These functions parsed a path string as a Lisp namestring, which reads `[`, `]`, `*` and `?` as
+  wildcard syntax and, on Linux and macOS, drops a backslash, so a name containing any of them
+  named another path or none. #1095 makes the same fix in aion/uv.
+  - `aion/fs:delete-tree` failed with "No such file or directory" on Linux and macOS when the tree
+    held a folder named, for example, `a[1]` or `b\c`. A ROOT given as a string is now
+    taken as a native name too; before, a string naming a folder such as `a[1]` was parsed and the
+    call failed.
+  - `aion/fs:make-directory-link` returned a pathname for a different path when the link's name
+    contained brackets.
+  - `aion/libgit:init-repository` and `open-repository` take a directory string as a native name.
+  - `aion/windows:spawn-in-job` takes `:directory`, and an `:error` file, given as a string as a
+    native name. Before, a folder or file named with brackets made the call fail.
 - **aion/http-client: on Windows, a pinned request's read that returned is no longer reported as
   a timeout** (#1063). A request with `:connect-address`, which `fetch-public` makes, keeps its
   read timeout on Windows with a timer that closes the socket. When the timer fired just as a

@@ -300,3 +300,22 @@ the job's last handle as the image ends, and that ends both."
              (is-true (%pid-alive-p child) "the child ended without a job to end it")
              (is-true (%pid-alive-p grandchild) "the grandchild ended without a job to end it")))
       (%end-image image log child grandchild))))
+
+(test a-directory-or-error-file-named-with-brackets-is-the-one-used
+  "#1096: DIRECTORY and an ERROR file given as strings were parsed as Lisp namestrings, which read
+[ ] as wildcard syntax, so a name with brackets named nothing."
+  (let* ((dir (concatenate 'string (string-right-trim "/\\" (uiop:native-namestring (uiop:temporary-directory)))
+                           "\\" (format nil "aion-spawn-~36R[1]" (random (expt 36 8) (make-random-state t)))))
+         (file (concatenate 'string dir "\\" "err[2].txt")))
+    (ensure-directories-exist (uiop:parse-native-namestring (concatenate 'string dir "\\")))
+    (unwind-protect
+         (progn
+           (with-child (p (%sbcl) (%child-args "(progn (prin1 (sb-ext:native-namestring *default-pathname-defaults*)) (terpri) (format *error-output* \"from child~%\") (finish-output) (finish-output *error-output*))")
+                        :output :stream :error file :directory dir)
+             (is (string-equal (concatenate 'string dir "\\")
+                               (read-from-string (read-line (w:job-process-output p))))
+                 "the child runs in ~S" dir)
+             (is-true (w:job-process-wait p 30)))
+           (is (equal '("from child") (uiop:read-file-lines (uiop:parse-native-namestring file)))))
+      (ignore-errors (delete-file (uiop:parse-native-namestring file)))
+      (ignore-errors (sb-ext:delete-directory (uiop:parse-native-namestring (concatenate 'string dir "\\")))))))

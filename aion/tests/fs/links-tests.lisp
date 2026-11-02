@@ -194,3 +194,19 @@ for want of the privilege, there is nothing to test, and the test says so by che
              (is (eq :target-unc (and c (fs:link-error-code c))) "~S" c)
              (is-false (probe-file link))))
       (%cleanup base))))
+
+(test a-directory-link-named-with-brackets-is-returned-by-that-name
+  "#1096: the pathname returned for LINK was built with UIOP:ENSURE-DIRECTORY-PATHNAME, which
+escapes [ and ] in the last name, so it named another path."
+  (let* ((base (%fresh))
+         (target (merge-pathnames "target/" base))
+         (link (%native-in base "l[1]")))
+    (unwind-protect
+         (progn
+           (%write (merge-pathnames "keep.txt" target) "keep")
+           (let ((made (fs:make-directory-link link target)))
+             (is (equal link (%name made)) "it returns ~S, not ~S" link (%name made))
+             (is (equal "keep" (%read (merge-pathnames "keep.txt" made)))
+                 "the target is reached through the pathname returned"))
+           (is (eq t (fs:delete-link link))))
+      (%cleanup base))))
