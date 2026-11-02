@@ -14,6 +14,46 @@ its tag.
 
 ### An app may have to act
 
+- **hermes/blob: an S3 endpoint that carries a user name or password is now refused when the
+  store is made** (#1089). `MNEMOSYNE_S3_ENDPOINT` values such as `user:pw@host` or
+  `[::1]@host` signal `blob-configuration-error`. An app that put userinfo in that variable has
+  to move it: S3 credentials belong in `MNEMOSYNE_S3_ACCESS_KEY` and
+  `MNEMOSYNE_S3_SECRET_KEY`.
+  **Why it is refused rather than ignored.** dexador connects to the host *after* the `@`, so
+  such an endpoint sent this store's SigV4-signed requests, and any session token, to that host
+  while the setting appeared to name another. With `MNEMOSYNE_S3_SECURE=false` it also defeated
+  the check added in #970: the endpoint's host was read by a parser of hermes's own, which
+  returned the bracketed IPv6 userinfo as the host and allowed plaintext to a public host. The
+  endpoint is now read with `quri`, the parser dexador itself uses, **out of the URL the request
+  is built from**, so the check and the request agree about where the bytes are going.
+- **hermes/blob: a plaintext S3 store must now use path-style addressing** (#1089).
+  `MNEMOSYNE_S3_SECURE=false` additionally requires `MNEMOSYNE_S3_PATH_STYLE=true`, or
+  `blob-configuration-error` names it. In virtual-host style the request does not go to the
+  endpoint at all: the host is `BUCKET.ENDPOINT`, a different DNS name, so the check added in
+  #970 approved `127.0.0.1` while the request went to `bkt.127.0.0.1`, and the same for
+  `10.1.2.3`, `localhost` and a Compose service name. Whoever controls the resolver or the search
+  domain chooses where such a name points, and nothing in hermes can speak for it. A local S3
+  double such as MinIO wants path-style anyway. **https is unaffected** and keeps virtual-host
+  style, which is what AWS expects, and `:secure nil` passed in code remains an unchecked
+  deliberate choice, as #124 settled.
+- **hermes/blob: surrounding whitespace in `MNEMOSYNE_S3_ENDPOINT` is trimmed before the value is
+  stored** (#1089). The checks used to trim a copy while the store kept the raw string, so
+  `" 127.0.0.1:9000"` passed every check and then built request URLs with a space in them: it
+  failed safe, but at the first upload rather than at boot. Whitespace *inside* an endpoint is
+  still refused.
+- **hermes/blob: an S3 endpoint must now be a bare host with an optional port** (#1089).
+  `MNEMOSYNE_S3_ENDPOINT` is refused when it contains `://`, `/`, `?`, `#`, `@` or whitespace, or
+  is empty. Values such as `localhost:9000`, `127.0.0.1:9000`, `[::1]:9000`, `minio:9000` and
+  `s3.amazonaws.com` are unaffected.
+  **Two shapes that used to be accepted no longer are, and neither ever worked.** An endpoint
+  carrying its own scheme, such as `http://127.0.0.1:9000`, produced the request URL
+  `http://http://127.0.0.1:9000/...`, whose host is `http`; it is now refused instead of
+  silently mangled. An endpoint such as `evil.com://127.0.0.1` passed the check added above as
+  loopback while the request went to `evil.com`, because the check read the endpoint and not the
+  URL built from it. A **bare IPv6 address** without brackets, such as `::1`, is also not a
+  working endpoint and is now reported as such: the request URL `http://::1/...` has the host `:`
+  and the port 1. Write it with brackets, as `[::1]:9000`.
+
 - **mnemosyne/conn: a Postgres connect gives up after 10 seconds, and an optional statement
   timeout** (#959). `connect` and `make-pool` take `:connect-timeout`, in seconds, defaulting to
   `*postgres-connect-timeout-seconds*` (10), and `:statement-timeout`, in milliseconds,

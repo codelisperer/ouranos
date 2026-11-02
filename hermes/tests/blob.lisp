@@ -2235,8 +2235,11 @@ BLOB-BACKEND-ERROR."
   ;; A local endpoint throughout: since #970's review, MNEMOSYNE_S3_SECURE=false is refused for
   ;; an endpoint that is not local, which PLAINTEXT-IS-REFUSED-FOR-AN-ENDPOINT-THAT-IS-NOT-LOCAL
   ;; covers. This test is about where the setting comes from, not about that rule.
+  ;; PATH-STYLE THROUGHOUT: since the review of #1090, a plaintext store must address the
+  ;; endpoint itself, because in virtual-host style the request goes to BUCKET.ENDPOINT, a DNS
+  ;; name no check here can speak for. A local double wants path-style anyway.
   (flet ((secure (&rest args)
-           (b::s3-secure-p (apply #'b:make-s3-store :endpoint "localhost:9000"
+           (b::s3-secure-p (apply #'b:make-s3-store :endpoint "localhost:9000" :path-style t
                                  :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x" args))))
     (with-environment-variable ("MNEMOSYNE_S3_SECURE" nil)
       (is (eq t (secure)) "unset is https")
@@ -2296,8 +2299,11 @@ BLOB-BACKEND-ERROR."
 (test plaintext-is-refused-for-an-endpoint-that-is-not-local
   ;; #970: MNEMOSYNE_S3_SECURE=false alone turned a store still aimed at s3.amazonaws.com into
   ;; one that sent signed requests, and any session token, in plaintext across the internet.
+  ;; PATH-STYLE by default here: a plaintext store requires it since the review of #1090, and
+  ;; these cases are about the endpoint rather than about that rule.
   (flet ((store (&rest args)
-           (apply #'b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x" args)))
+           (apply #'b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x"
+                  :path-style t args)))
     (with-environment-variable ("MNEMOSYNE_S3_SECURE" "false")
       ;; Refused: the default endpoint and any other public name or address.
       (with-environment-variable ("MNEMOSYNE_S3_ENDPOINT" nil)
@@ -2320,12 +2326,158 @@ BLOB-BACKEND-ERROR."
       (is (b::s3-secure-p (store :endpoint "localhost:9000")))
       (is (b::s3-secure-p (store :endpoint "s3.amazonaws.com"))))))
 
+(test an-endpoint-with-userinfo-is-refused-and-its-real-host-is-read
+  "#1089: the check for a plaintext endpoint read the endpoint with a parser of its own, taking
+the authority up to the first slash and stripping any brackets. An endpoint may carry userinfo
+before an \"@\", and when that userinfo was a bracketed IPv6 address the brackets took the \"@\"
+with them, so the function returned the userinfo as the host. %LOCAL-ENDPOINT-P then read ::1 and
+allowed plaintext, while dexador connected to the host after the @. The endpoint is now read with
+QURI, which is what dexador parses with, so the check and the request agree."
+  ;; The host is the one the request goes to, not the one hidden in the userinfo.
+  (dolist (case '(("[::1]@example.com" . "example.com")
+                  ("[::1]:80@example.com" . "example.com")
+                  ("user:pw@example.com" . "example.com")))
+    (is (string= (cdr case) (b::%endpoint-host (car case)))
+        "~A is an endpoint for ~A" (car case) (cdr case)))
+  ;; And such an endpoint is refused outright when the store is made, whatever the scheme and
+  ;; whatever the host, because the damage is that the request goes elsewhere.
+  ;; PATH-STYLE by default here: a plaintext store requires it since the review of #1090, and
+  ;; these cases are about the endpoint rather than about that rule.
+  (flet ((store (&rest args)
+           (apply #'b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x"
+                  :path-style t args)))
+    (dolist (endpoint '("[::1]@example.com" "[::1]:80@example.com" "user:pw@example.com"
+                        "[::1]@example.com:9000"))
+      (signals b:blob-configuration-error (store :endpoint endpoint)))
+    ;; Refused with MNEMOSYNE_S3_SECURE unset too, so this is not the plaintext rule firing.
+    (with-environment-variable ("MNEMOSYNE_S3_SECURE" nil)
+      (signals b:blob-configuration-error (store :endpoint "[::1]@example.com")))
+    ;; The controls: every legitimate shape still makes a store, including the ones QURI alone
+    ;; reads differently. A bare host:port has no scheme, and QURI reads "localhost:9000" as the
+    ;; SCHEME "localhost" with no host, so the endpoint gets a scheme before it is parsed. A bare
+    ;; IPv6 address cannot be read as an authority at all and is matched as a literal.
+    (dolist (endpoint '("localhost:9000" "127.0.0.1:9000" "[::1]:9000" "10.1.2.3:9000"
+                        "minio:9000"))
+      (is-true (b::s3-endpoint (store :endpoint endpoint))
+               "control: ~A is still a usable endpoint" endpoint))
+    ;; And the plaintext rule still reaches its own verdict on those, which is what would break
+    ;; if the host came back NIL or bracketed from the new parser.
+    (with-environment-variable ("MNEMOSYNE_S3_SECURE" "false")
+      (dolist (endpoint '("localhost:9000" "127.0.0.1:9000" "[::1]:9000"))
+        (is (not (b::s3-secure-p (store :endpoint endpoint)))
+            "control: ~A is still read as local, so plaintext is still allowed" endpoint))
+      ;; A bare IPv6 address is NOT allowed, because it is not a working endpoint: the request
+      ;; URL http://::1/bkt/k has the host ":" and the port 1. An earlier version of this test
+      ;; asserted that it was usable, which was a claim about a configuration that could never
+      ;; have connected (the review of #1090).
+      (signals b:blob-configuration-error (store :endpoint "::1"))
+      (signals b:blob-configuration-error (store :endpoint "[2606:2800:220:1:248:1893:25c8:1946]:9000")))))
+
+(test a-plaintext-store-must-address-the-endpoint-itself
+  "The review of #1090, and a hole that has been open since #970. The check approves the host in
+MNEMOSYNE_S3_ENDPOINT, but in virtual-host style the request does not go there: %S3-HOST builds
+BUCKET.ENDPOINT, a different DNS name. bkt.127.0.0.1, bkt.10.1.2.3, bkt.LOCALHOST and
+bkt.minio are all names whoever controls the resolver or the search domain can point anywhere,
+and nothing in this file could say otherwise. A plaintext store therefore has to use path-style,
+which addresses the endpoint the check is about."
+  (flet ((store (&rest args)
+           (apply #'b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x" args)))
+    (with-environment-variable ("MNEMOSYNE_S3_SECURE" "false")
+      ;; Refused even though every one of these endpoints is local: it is the bucket label in
+      ;; front that is unaccounted for, not the endpoint.
+      (dolist (endpoint '("127.0.0.1:9000" "10.1.2.3:9000" "localhost:9000" "[::1]:9000"))
+        (signals b:blob-configuration-error (store :endpoint endpoint))
+        (signals b:blob-configuration-error (store :endpoint endpoint :path-style nil)))
+      ;; The control: with path-style the same endpoints are allowed, and the URL that gets
+      ;; built addresses the endpoint rather than a name derived from the bucket.
+      (dolist (endpoint '("127.0.0.1:9000" "10.1.2.3:9000" "localhost:9000" "[::1]:9000"))
+        (let ((s (store :endpoint endpoint :path-style t)))
+          (is (not (b::s3-secure-p s)) "~A with path-style is allowed to speak plaintext" endpoint)
+          (is-false (search "bkt." (b::%s3-url s "bkt" "k"))
+                    "and its URL addresses the endpoint, not bkt.~A: ~A"
+                    endpoint (b::%s3-url s "bkt" "k")))))
+    ;; Over https the bucket label is unchanged, so virtual-host style stays available: the rule
+    ;; is about plaintext, where there is nothing protecting the connection to that name.
+    (with-environment-variable ("MNEMOSYNE_S3_SECURE" nil)
+      (let ((s (store :endpoint "s3.amazonaws.com")))
+        (is (b::s3-secure-p s))
+        (is-true (search "bkt." (b::%s3-url s "bkt" "k"))
+                 "control: https keeps virtual-host style, which is what AWS wants")))
+    ;; In code, :secure nil is still a deliberate choice and is not checked, as #124 settled.
+    (is (not (b::s3-secure-p (store :endpoint "127.0.0.1:9000" :secure nil)))
+        "control: :secure nil in code is not subject to this rule either")))
+
+(test an-endpoint-is-trimmed-once-and-stored-trimmed
+  "The review of #1090: the checks trimmed a copy of the endpoint while the store kept the raw
+string, so \" 127.0.0.1:9000\" passed every check and then built a URL with a space in it. It
+failed safe -- the request could not be made -- but it failed at the first upload rather than at
+boot, and the setting it came from was no longer in sight. The value is trimmed once, before
+anything looks at it."
+  (dolist (endpoint (list " 127.0.0.1:9000" "127.0.0.1:9000 " "  127.0.0.1:9000  "
+                          (format nil "~C127.0.0.1:9000" #\Tab)))
+    (let ((s (b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x"
+                              :endpoint endpoint :path-style t)))
+      (is (string= "127.0.0.1:9000" (b::s3-endpoint s))
+          "~S is stored as the trimmed value" endpoint)
+      (is (string= "http://127.0.0.1:9000/bkt/k"
+                   (b::%s3-url (b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE"
+                                                :secret-key "x" :endpoint endpoint
+                                                :path-style t :secure nil)
+                               "bkt" "k"))
+          "and the URL built from it has no space in it")))
+  ;; The control: whitespace INSIDE an endpoint is still refused, since that is not a host.
+  (dolist (endpoint '("local host:9000" "127.0.0.1 :9000"))
+    (signals b:blob-configuration-error
+      (b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x" :endpoint endpoint))))
+
+(test an-endpoint-that-is-not-a-bare-host-and-port-is-refused
+  "#1089's second bypass, from the adversarial review of #1090. The request URL is the scheme,
+then \"://\", then the endpoint as it stands, so anything the endpoint contains lands in the
+middle of a URL. The first fix read the endpoint with QURI, which is dexador's parser, but read
+the ENDPOINT and not the URL the request is built from -- and those are different strings."
+  ;; PATH-STYLE by default here: a plaintext store requires it since the review of #1090, and
+  ;; these cases are about the endpoint rather than about that rule.
+  (flet ((store (&rest args)
+           (apply #'b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x"
+                  :path-style t args)))
+    ;; Each of these passed the first fix's check as a local host while the request would have
+    ;; gone to the host before the "://".
+    (dolist (endpoint '("evil.com://127.0.0.1" "bucket.evil.com://localhost"
+                        "evil.com://[::1]:9000"))
+      (signals b:blob-configuration-error (store :endpoint endpoint)))
+    ;; And an endpoint carrying its own scheme is refused rather than silently mangled: it became
+    ;; http://http://127.0.0.1:9000/..., whose host is "http". It never worked, though an earlier
+    ;; docstring and CHANGELOG sentence of mine said it did.
+    (dolist (endpoint '("http://127.0.0.1:9000" "https://s3.amazonaws.com"))
+      (signals b:blob-configuration-error (store :endpoint endpoint)))
+    ;; The rest of a URL has no place in an endpoint either.
+    (dolist (endpoint '("localhost:9000/bucket" "localhost:9000?x=1" "localhost:9000#f"
+                        "local host:9000" "" "  "))
+      (signals b:blob-configuration-error (store :endpoint endpoint)))
+    ;; The controls: every shape that is a bare host with an optional port still works, and the
+    ;; URL built from it still names that host. This is what would break if the refusal above
+    ;; were written too widely.
+    (dolist (case '(("localhost:9000" . "http://localhost:9000/bkt/k")
+                    ("127.0.0.1:9000" . "http://127.0.0.1:9000/bkt/k")
+                    ("[::1]:9000" . "http://[::1]:9000/bkt/k")
+                    ("minio:9000" . "http://minio:9000/bkt/k")
+                    ("s3.amazonaws.com" . "http://s3.amazonaws.com/bkt/k")))
+      (let ((s (store :endpoint (car case) :secure nil :path-style t)))
+        (is (string= (cdr case) (b::%s3-url s "bkt" "k"))
+            "~A builds ~A" (car case) (cdr case))))))
+
 (test an-endpoint-host-is-read-without-its-port
   (dolist (case '(("s3.amazonaws.com" . "s3.amazonaws.com")
                   ("localhost:9000" . "localhost")
                   ("127.0.0.1:9000" . "127.0.0.1")
                   ("[::1]:9000" . "::1")
                   ("[2606:2800::1]" . "2606:2800::1")
-                  ("::1" . "::1")
+                  ;; A BARE IPv6 ADDRESS IS NOT A USABLE ENDPOINT, and this case used to claim
+                  ;; it read as "::1". The request URL is the scheme, "://", then the endpoint,
+                  ;; so "::1" makes http://::1/bkt/k, which QURI reads as the host ":" with port
+                  ;; 1 -- and QURI is what dexador parses with. The old host parser answered
+                  ;; "::1" about a configuration that could never have connected (#1089). An
+                  ;; IPv6 endpoint has to carry its brackets, as the case above it does.
+                  ("::1" . ":")
                   ("minio" . "minio")))
     (is (string= (cdr case) (b::%endpoint-host (car case))) "~A" (car case))))
