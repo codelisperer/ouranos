@@ -309,9 +309,13 @@ reported before the rescans stop."
 #-win32
 (test a-backslash-in-a-name-is-part-of-the-name-off-windows
   "Copilot's review of #1074: a backslash is an ordinary character in a Unix name, so it is not
-turned into a folder separator there."
+turned into a folder separator there. The file is made from a native name, because SBCL reads a
+backslash in a Lisp namestring as an escape, so %WRITE would make draftfinal.txt instead."
   (with-watched-folder (dir events)
-    (%write dir "draft\\final.txt" "kept")
+    (with-open-file (out (uiop:parse-native-namestring
+                          (concatenate 'string (uiop:native-namestring dir) "draft\\final.txt"))
+                         :direction :output :external-format :utf-8)
+      (write-string "kept" out))
     (let ((seen (%wait events (lambda (e) (%settled e "draft\\final.txt")))))
       (is (equal '((:settled "draft\\final.txt" 4)) seen) "~S" seen))))
 
