@@ -34,12 +34,14 @@ for f in "$DIR"/*.dylib; do
     FAILED=1
     continue
   fi
-  # otool prints a header line, the file's path and a colon, then the install name. For a
-  # universal dylib it prints a header and an install name per architecture, so only line 2 is
-  # read. A file with no install name gets the header alone, so line 2 is empty. Before #1131
-  # this read `head -n 2 | tail -n 1', which returned the header in that case; the header
-  # starts with the bundle directory, so a missing install name was reported as ok.
-  ID=$(printf '%s\n' "$OUT" | sed -n 2p)
+  # otool prints a header line ending in a colon, the file's path, then the install name. For a
+  # universal dylib it prints a header, "<path> (architecture arm64):", and an install name per
+  # architecture. A file with no install name gets the headers alone. So the header lines are
+  # dropped and the first line left is the install name, or nothing. Before #1131 this read
+  # `head -n 2 | tail -n 1', which returned a header when there was no install name, and a
+  # header starts with the bundle directory, so the check reported ok. Reading line 2 alone
+  # had the same fault for a universal file, whose line 2 is its second header.
+  ID=$(printf '%s\n' "$OUT" | grep -v ':$' | sed -n 1p)
   case "$ID" in
     "")
       echo "  FAIL -- otool -D printed no install name for $(basename "$f")"
