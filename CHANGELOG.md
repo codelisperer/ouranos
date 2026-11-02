@@ -24,9 +24,20 @@ its tag.
   while the setting appeared to name another. With `MNEMOSYNE_S3_SECURE=false` it also defeated
   the check added in #970: the endpoint's host was read by a parser of hermes's own, which
   returned the bracketed IPv6 userinfo as the host and allowed plaintext to a public host. The
-  endpoint is now read with `quri`, the parser dexador itself uses, so the check and the request
-  agree about where the bytes are going. Endpoints without userinfo are unaffected, including a
-  bare `host:port`, a bracketed IPv6 address with a port, and a bare IPv6 address.
+  endpoint is now read with `quri`, the parser dexador itself uses, **out of the URL the request
+  is built from**, so the check and the request agree about where the bytes are going.
+- **hermes/blob: an S3 endpoint must now be a bare host with an optional port** (#1089).
+  `MNEMOSYNE_S3_ENDPOINT` is refused when it contains `://`, `/`, `?`, `#`, `@` or whitespace, or
+  is empty. Values such as `localhost:9000`, `127.0.0.1:9000`, `[::1]:9000`, `minio:9000` and
+  `s3.amazonaws.com` are unaffected.
+  **Two shapes that used to be accepted no longer are, and neither ever worked.** An endpoint
+  carrying its own scheme, such as `http://127.0.0.1:9000`, produced the request URL
+  `http://http://127.0.0.1:9000/...`, whose host is `http`; it is now refused instead of
+  silently mangled. An endpoint such as `evil.com://127.0.0.1` passed the check added above as
+  loopback while the request went to `evil.com`, because the check read the endpoint and not the
+  URL built from it. A **bare IPv6 address** without brackets, such as `::1`, is also not a
+  working endpoint and is now reported as such: the request URL `http://::1/...` has the host `:`
+  and the port 1. Write it with brackets, as `[::1]:9000`.
 
 - **mnemosyne/conn: a Postgres connect gives up after 10 seconds, and an optional statement
   timeout** (#959). `connect` and `make-pool` take `:connect-timeout`, in seconds, defaulting to

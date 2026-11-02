@@ -65,9 +65,15 @@ moved to hermes, and the deployed names were kept rather than renamed. They are 
         (region (or region (%setting "MNEMOSYNE_S3_REGION") "us-east-1"))
         (access-key (or access-key (%setting "MNEMOSYNE_S3_ACCESS_KEY")))
         (secret-key (or secret-key (%setting "MNEMOSYNE_S3_SECRET_KEY"))))
-    (%check-endpoint-userinfo endpoint)
-    (make-instance 's3-store
-                   :endpoint (%require-setting endpoint "MNEMOSYNE_S3_ENDPOINT")
+    ;; The endpoint is required FIRST, so an empty one is reported as the missing setting it is,
+    ;; naming MNEMOSYNE_S3_ENDPOINT on its own. Only then is its shape judged: an empty value is
+    ;; a setting nobody filled in, and a malformed one is a setting filled in wrongly, and the
+    ;; two deserve different sentences (the review of #1090).
+    (let ((endpoint (%require-setting endpoint "MNEMOSYNE_S3_ENDPOINT")))
+      (%check-endpoint-shape endpoint)
+      (%check-endpoint-userinfo endpoint)
+      (make-instance 's3-store
+                   :endpoint endpoint
                    :region region
                    :access-key (%require-setting access-key "MNEMOSYNE_S3_ACCESS_KEY")
                    :secret-key (%require-setting secret-key "MNEMOSYNE_S3_SECRET_KEY")
@@ -78,65 +84,90 @@ moved to hermes, and the deployed names were kept rather than renamed. They are 
                                      (and v (string-equal v "true"))))
                    :public-base-url (or public-base-url
                                         (%setting "MNEMOSYNE_S3_PUBLIC_BASE_URL"))
-                   :upload-acl (%upload-acl-setting upload-acl))))
+                   :upload-acl (%upload-acl-setting upload-acl)))))
 
 (defun %strip-brackets (text)
   "TEXT without a surrounding pair of square brackets: \"[::1]\" gives \"::1\". Anything else is
-returned unchanged, so \"[::1]:9000\" and \"[::1]@host\" are not touched -- neither is wholly
-bracketed, and both have to be read as an authority rather than as an address."
+returned unchanged."
   (if (and text (> (length text) 1)
            (char= #\[ (char text 0))
            (char= #\] (char text (1- (length text)))))
       (subseq text 1 (1- (length text)))
       text))
 
-(defun %endpoint-uri (endpoint)
-  "ENDPOINT parsed with QURI, the parser dexador uses, after a scheme is prepended when it has
-none. Returns the QURI:URI, or NIL when it cannot be parsed.
+(defparameter +endpoint-forbidden+ '("://" "/" "?" "#" "@")
+  "Substrings an S3 endpoint may not contain (#1089). An endpoint is an authority -- a host with
+an optional port -- and nothing else. Each of these either moves the host somewhere this check
+would not look, or makes the request URL mean something other than what the setting appears to
+say.")
 
-THE SCHEME HAS TO BE PREPENDED. A blob endpoint is a bare authority such as \"localhost:9000\",
-and QURI:URI reads that as the scheme \"localhost\" with no host at all, so parsing an endpoint
-directly would leave every legitimate configuration with a NIL host. An endpoint that already
-carries a scheme is parsed as it stands, so a value such as \"http://minio:9000\" still reads
-correctly."
-  (let* ((endpoint (string-trim " " endpoint))
-         (text (if (search "://" endpoint)
-                   endpoint
-                   (concatenate 'string "http://" endpoint))))
-    (ignore-errors (quri:uri text))))
+(defun %check-endpoint-shape (endpoint)
+  "Signal BLOB-CONFIGURATION-ERROR unless ENDPOINT is a bare host with an optional port (#1089).
+
+WHY THE SHAPE IS CHECKED AND NOT ONLY THE HOST. The request URL is built as the scheme, then
+\"://\", then the endpoint as it stands (%S3-URL through %S3-HOST), so whatever the endpoint
+contains lands in the middle of a URL. The first fix for #1089 read the endpoint with QURI, the
+parser dexador uses, but read the ENDPOINT rather than the URL the request is built from, and
+the adversarial review found that these are not the same string:
+
+  evil.com://127.0.0.1        the check read the scheme \"evil.com\" and the host 127.0.0.1 and
+                              allowed plaintext, while the request URL was
+                              http://evil.com://127.0.0.1/bkt/k and dexador connected to
+                              evil.com:80
+  bucket.evil.com://localhost the same thing through the virtual-host form
+  http://127.0.0.1:9000       the request URL became http://http://127.0.0.1:9000/..., whose
+                              host is \"http\" -- an endpoint carrying a scheme never worked,
+                              although an earlier docstring of mine said it did
+
+Using dexador's parser was not enough, because it was handed a different string. Two things hold
+now: an endpoint may not contain the pieces that make a URL mean something else, and the host is
+read from the same shape the request is built from. Both matter -- the shape check is what keeps
+the host check's input honest -- so a later reader should not drop either as redundant."
+  (let ((endpoint (and endpoint (string-trim " " endpoint))))
+    (flet ((refuse (why)
+             (error 'blob-configuration-error
+                    :missing (format nil "MNEMOSYNE_S3_ENDPOINT to be a host with an optional port, such as s3.amazonaws.com or localhost:9000. ~A" why))))
+      (when (or (null endpoint) (zerop (length endpoint)))
+        (refuse "The value is empty."))
+      (when (some (lambda (c) (member c '(#\Space #\Tab #\Newline #\Return) :test #'char=))
+                  endpoint)
+        (refuse "The value contains whitespace."))
+      (when (search "://" endpoint)
+        (refuse (format nil "~S contains \"://\". The scheme comes from MNEMOSYNE_S3_SECURE and is put in front of this value, so a scheme here would appear twice in the request URL and the host would not be the one named." endpoint)))
+      (let ((bad (find-if (lambda (piece) (search piece endpoint)) +endpoint-forbidden+)))
+        (when bad
+          (refuse (format nil "~S contains ~S, which belongs to the rest of a URL rather than to a host." endpoint bad)))))))
+
+(defun %endpoint-uri (endpoint)
+  "ENDPOINT read as the request would read it: the URL shape %S3-URL builds, parsed with QURI,
+which is the parser dexador uses. Returns the QURI:URI, or NIL when it cannot be parsed.
+
+THE SCHEME IS ALWAYS PREPENDED, never conditionally. A blob endpoint is a bare authority such as
+\"localhost:9000\", and QURI:URI reads that as the scheme \"localhost\" with no host at all, so an
+endpoint has to be given a scheme before it is parsed. An earlier version prepended one only
+when the endpoint had no \"://\" of its own, which is exactly how evil.com://127.0.0.1 got past
+the check: see %CHECK-ENDPOINT-SHAPE. %CHECK-ENDPOINT-SHAPE now refuses such an endpoint, and
+this function no longer looks at what the endpoint contains -- between them the string parsed
+here and the string the request is built from are the same."
+  (let ((endpoint (and endpoint (string-trim " " endpoint))))
+    (and endpoint
+         (ignore-errors (quri:uri (concatenate 'string "http://" endpoint))))))
 
 (defun %endpoint-host (endpoint)
-  "ENDPOINT's host, without a port, as QURI reads it: \"localhost:9000\" gives \"localhost\" and
-\"[::1]:9000\" gives \"::1\". NIL when ENDPOINT has no host or cannot be parsed.
+  "ENDPOINT's host, without a port, as QURI reads it out of the URL the request is built from:
+\"localhost:9000\" gives \"localhost\" and \"[::1]:9000\" gives \"::1\". NIL when there is no host.
 
-THIS USED TO PARSE THE ENDPOINT ITSELF, AND THAT WAS THE DEFECT IN #1089. It took the text up to
-the first slash and, when that began with \"[\", returned what was inside the brackets. An
+THIS USED TO PARSE THE ENDPOINT ITSELF, AND THAT WAS THE FIRST DEFECT IN #1089. It took the text
+up to the first slash and, when that began with \"[\", returned what was inside the brackets. An
 endpoint may carry userinfo before an \"@\", and when the userinfo was a bracketed IPv6 address,
-stripping the brackets consumed the \"@\" with it: for \"[::1]@example.com\" the function returned
-\"::1\", which %LOCAL-ENDPOINT-P then allowed as loopback, while dexador connected to
-example.com. The check and the request disagreed about where the bytes were going, and only the
-request's reading counts. QURI is what dexador parses with, so this now asks the same question
-of the same parser."
-  (let* ((endpoint (and endpoint (string-trim " " endpoint)))
-         (bare (%strip-brackets endpoint)))
-    (cond
-      ;; An endpoint that is ENTIRELY an IP literal, with or without surrounding brackets, is
-      ;; its own host. This is here for a bare IPv6 address such as "::1", which QURI cannot
-      ;; read as an authority -- it returns ":" for it -- and which the parser this replaced
-      ;; accepted. The test is that the WHOLE string is an address, so nothing with an "@", a
-      ;; port or a path reaches this branch and it cannot be used to smuggle a host past the
-      ;; check below.
-      ((and bare (http:parse-address bare)) bare)
-      (t
-       (let* ((uri (%endpoint-uri endpoint))
-              (host (and uri (quri:uri-host uri))))
-         ;; QURI returns an IPv6 host with its brackets, as it appears in the URL. Every caller
-         ;; here wants the address itself, because that is what ADDRESS-CATEGORY and
-         ;; PARSE-ADDRESS read, so the brackets come off. Measured rather than assumed: for
-         ;; "[::1]:9000" QURI returns "[::1]", and before this line that value reached
-         ;; PARSE-ADDRESS, failed to parse, and made a legitimate local IPv6 endpoint be refused.
-         (%strip-brackets host))))))
-
+stripping the brackets consumed the \"@\" with it: for \"[::1]@example.com\" it returned \"::1\",
+which %LOCAL-ENDPOINT-P allowed as loopback while dexador connected to example.com."
+  (let ((uri (%endpoint-uri endpoint)))
+    ;; QURI returns an IPv6 host with its brackets, as it appears in the URL, and every caller
+    ;; here wants the address itself, because that is what ADDRESS-CATEGORY and PARSE-ADDRESS
+    ;; read. Measured rather than assumed: for "[::1]:9000" QURI returns "[::1]", and without
+    ;; this a legitimate local IPv6 endpoint was refused.
+    (%strip-brackets (and uri (quri:uri-host uri)))))
 (defun %endpoint-userinfo (endpoint)
   "The user name and password ENDPOINT carries before an \"@\", or NIL. An S3 endpoint has no use
 for either: their only effects here are to hide the real host from anyone reading the setting,
@@ -157,7 +188,13 @@ which hides the redirection rather than preventing it. An S3 endpoint has no leg
 userinfo, so there is nothing to weigh against refusing it.
 
 Checked when the store is made, as the credentials are, so a deployment with a wrong endpoint
-dies at boot naming the variable instead of on the first upload."
+dies at boot naming the variable instead of on the first upload.
+
+%CHECK-ENDPOINT-SHAPE now refuses an \"@\" outright, so in practice it reports this first and
+this function is the second of two guards rather than the only one. It is kept because it names
+the specific mistake -- credentials in the endpoint instead of in
+MNEMOSYNE_S3_ACCESS_KEY -- and because it reads the host QURI found, which is the fact that
+makes the refusal worth explaining to whoever set the variable."
   (let ((userinfo (and endpoint (%endpoint-userinfo endpoint))))
     (when userinfo
       (error 'blob-configuration-error
