@@ -21,6 +21,9 @@
                "com.inuoe.jzon"    ; JSON (SendGrid body, Twilio response)
                "cl-base64"         ; Twilio Basic auth + inbound-signature encoding
                "ironclad"          ; HMAC-SHA1 for X-Twilio-Signature verification
+               ;; Twilio's API-BASE is read with the parser dexador parses the request URL with,
+               ;; so the check and the request agree on the host (#1077).
+               "quri"
                "aion/log"          ; framework logging facade (send attempts/failures)
                "aion/secret"       ; the Telegram bot token, held so it cannot be printed (#778)
                "aion/random")      ; the Facebook connect flow's state (#822)
@@ -49,7 +52,8 @@
   :components ((:module "tests"
                 :serial t
                 :components ((:file "hermes")
-                             (:file "telegram") (:file "facebook"))))
+                             (:file "telegram") (:file "facebook")
+                             (:file "timeouts"))))  ; a send that gets no answer (#1077)
   :perform (test-op (o c) (uiop:symbol-call :hermes/tests :run-tests)))
 
 ;;; The blob store. Bytes belong in object storage; a row holds a key and metadata, never
