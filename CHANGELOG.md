@@ -1222,6 +1222,37 @@ its tag.
   - `aion/test-http`'s `start-server` and `with-server` take `:concurrent`, which serves each
     connection on a thread of its own, so a connection that sends nothing, as a browser opens,
     does not hold up the next request. The default is unchanged.
+- **hyperion/notifications: in-app notifications, with per-kind delivery to the list, to email
+  through the app's own function, or both** (#792). These are new opt-in systems:
+  - `hyperion/notifications` has:
+    - `notify`, `define-notification-kind` and `*notification-email*`;
+    - the store protocol `notification-put`, `notification-list`, `unread-count`, `mark-read`,
+      `mark-all-read`, `prune-notifications`, `delivery-ref` and `delivery-set`;
+    - `make-memory-notification-store`;
+    - the components `notification-bell`, `notification-panel` and `delivery-form`;
+    - `notification-router`;
+    - `prune-notifications-job` for aion/schedule.
+  - `hyperion/notifications-db` has `make-db-notification-store`, and the DDL for the app's
+    migrations: `notifications-ddl`, `notifications-index-ddl`, `notifications-unread-key-ddl`
+    and `delivery-ddl`. The store refuses to start without its tables
+    (`missing-notification-tables`). A table name is 1 to 47 ASCII letters, digits and
+    underscores. The database store needs Postgres 9.5 or later, or SQLite 3.35 or later, for
+    `INSERT ... ON CONFLICT ... RETURNING`. With an older SQLite, the first `notification-put`
+    signals `mnemosyne/conn:db-error` for a syntax error at `RETURNING`. A
+    desktop bundle carries the SQLite pinned in `sqlite.pin`; elsewhere the system's copy is
+    used, and `mnemosyne/sqlite-library:loaded-library` names it.
+
+  How it behaves:
+  - A notification with the group key of an unread item collapses into it and raises its `count`.
+    In the database store this is one statement, so it is safe when two calls race, including
+    inside the app's own transaction.
+  - A store refuses a notification whose id it already holds, unless it collapses:
+    `invalid-notification` from the memory store, the database's error from the database store.
+  - A link must be a path on the app's own site.
+  - The router takes the recipient from the app's `:recipient-fn`, never from the request.
+  - The bell announces the unread count through a status region, once per change.
+
+  See `hyperion/docs/notifications.md`.
 - **aion/retry: a retry policy as data, and `with-retry`, which retries through restarts**
   (#79). `make-retry-policy` takes `:max-attempts`, `:base-delay`, `:multiplier`, `:max-delay`,
   `:jitter` (`:full`, `:equal` or `:none`), `:deadline` and `:retryable`, and `retry-delay`
