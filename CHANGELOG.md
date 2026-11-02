@@ -1287,6 +1287,32 @@ its tag.
   connection follows the resolver. Other non-canonical spellings (`127.1`, `0x7f.0.0.1`,
   `2130706433`) are **kept**, because they go to the system resolver, which is the same resolver
   the connection uses, so there is no second parser to disagree with.
+- **hyperion/kit: an appearance picker for theme, contrast and look** (#981). The new
+  package `hyperion/kit/appearance` has five parts:
+  - `appearance-picker` writes a POST form with three labelled groups of buttons:
+    - theme: System, Light, Dark;
+    - contrast: System, Normal, High;
+    - look: Flat, Gradient.
+
+    Each button is a submit button with `aria-pressed`, so the form works without script. Its
+    text comes from a `:labels` plist, with `*default-picker-labels*` for any key left out.
+    With htmx, the buttons sit in a `<fieldset>` that is disabled while a request is in
+    flight, so a press made then visibly does nothing. Without that, htmx dropped such a press
+    with no sign. `apply-appearance-js` gives focus back to the pressed button when
+    the request ends, since disabling it moves focus to the page body.
+  - `appearance-from-form` reads the posted body. It checks every value against
+    `hyperion/appearance`'s values, and refuses the whole form, returning `nil`, for anything
+    else or for a setting posted twice.
+  - `merge-appearance` puts the change over the visitor's current settings.
+  - `appearance-response-headers` gives the store's `Set-Cookie` and an `HX-Trigger` event,
+    `hy-appearance`.
+  - `apply-appearance-js` is a script for the page that applies that event without a reload. It
+    sets or removes `data-theme`, `data-contrast` and `data-look` on `<html>`, and moves
+    `aria-pressed` in every picker on the page.
+
+  `hyperion/appearance` now exports `*themes*`, `*contrasts*` and `*looks*`, the values each
+  setting allows. The package's comment shows a handler that answers 400 for a refused form,
+  204 with the headers for htmx, and a 303 back to the page otherwise.
 
 - **hermes: how long a send waits is now hermes's own setting, `*send-connect-timeout*` and
   `*send-read-timeout*`, both 10 seconds** (#1077). Each provider also takes `:connect-timeout`

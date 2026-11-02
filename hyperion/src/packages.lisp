@@ -517,6 +517,7 @@
    ;; the visitor's choice
    #:appearance #:appearance-p #:make-appearance #:appearance-from-strings
    #:appearance-theme #:appearance-contrast #:appearance-look
+   #:*themes* #:*contrasts* #:*looks*
    #:html-attributes
    ;; store protocol + cookie backend
    #:read-appearance #:persist-appearance
