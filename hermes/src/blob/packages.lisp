@@ -49,6 +49,11 @@
                     ;; endpoint may be sent requests in the clear, and the host-from-a-URL
                     ;; reading it takes, used to be written here and in hermes core both.
                     (#:http #:aion/http-client))
+  ;; CALL-WITH-APPROVED-LOCAL-HOST is not exported from aion/http-client -- a plaintext request
+  ;; may only skip a proxy on a verdict the framework reached, never on one a caller asserts
+  ;; (#1091) -- so it is imported here by name, which puts this reach into aion's internals in
+  ;; this file rather than in a double colon at the call site (the final review of #1134).
+  (:import-from #:aion/http-client #:call-with-approved-local-host)
   (:documentation
    "The neutral blob-store protocol and its backends. Bytes live in object storage; rows
     hold metadata and a storage key, never the bytes. STORE is a class, and PUT-BLOB /

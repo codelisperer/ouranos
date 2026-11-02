@@ -520,3 +520,44 @@ object has."
     (is (equal "https://api.sendgrid.com/v3/mail/send" (hermes::sendgrid-endpoint ok))
         "control: an acceptable endpoint passed as an initarg is kept: ~S"
         (hermes::sendgrid-endpoint ok))))
+
+(define-condition %subclass-initarg-error (error) ()
+  (:report (lambda (c s) (declare (ignore c)) (format s "the subclass refused its own initarg"))))
+
+(defclass %sendgrid-with-an-after-method (hermes::sendgrid)
+  ()
+  (:documentation
+   "A subclass with its own SHARED-INITIALIZE :AFTER method, which runs INSIDE the superclass's
+:AROUND -- after the URL slot has been assigned. Its method signals for :X :BAD, which is how a
+failure arriving from inside CALL-NEXT-METHOD is reproduced (the final review of #1134)."))
+
+(defmethod shared-initialize :after ((p %sendgrid-with-an-after-method) slot-names
+                                     &rest initargs &key &allow-other-keys)
+  (declare (ignore slot-names))
+  (when (eq :bad (getf initargs :x))
+    (error '%subclass-initarg-error)))
+
+(test a-failure-from-inside-call-next-method-also-restores-the-url
+  "The final review of #1134, and a regression of #1129's property that the fix for it
+introduced. The restoring HANDLER-BIND wrapped only the %CHECK-* call, not CALL-NEXT-METHOD -- but
+a subclass :AFTER method on SHARED-INITIALIZE runs inside CALL-NEXT-METHOD, after the URL slot has
+been assigned. A failure there left the new, UNCHECKED URL in the slot, for exactly the callers
+#1129 is about: the ones that handle the error and carry on.
+
+Here the subclass refuses :X :BAD, so the error comes from inside CALL-NEXT-METHOD rather than
+from the URL check, and the URL being set in the same call is one the check would also have
+refused. Either way it must not survive."
+  (let ((p (make-instance '%sendgrid-with-an-after-method :api-key "SG.x")))
+    (is (equal hermes::+sendgrid-endpoint-default+ (hermes::sendgrid-endpoint p))
+        "it starts at the default: ~S" (hermes::sendgrid-endpoint p))
+    (signals %subclass-initarg-error
+      (reinitialize-instance p :endpoint "http://evil.example/x" :x :bad))
+    (is (equal hermes::+sendgrid-endpoint-default+ (hermes::sendgrid-endpoint p))
+        "and keeps it when the subclass's own method signals: ~S" (hermes::sendgrid-endpoint p))
+    (is-false (hermes::sendgrid-endpoint-approved-local p)
+              "with no approval claimed: ~S" (hermes::sendgrid-endpoint-approved-local p))
+    ;; The control: the same subclass accepts a good initarg and does move the endpoint, so the
+    ;; assertion above is about the failure and not about this subclass being unable to change.
+    (reinitialize-instance p :endpoint "https://accepted.example/v1" :x :fine)
+    (is (equal "https://accepted.example/v1" (hermes::sendgrid-endpoint p))
+        "control: a good initarg lets the endpoint move: ~S" (hermes::sendgrid-endpoint p))))

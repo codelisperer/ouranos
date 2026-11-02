@@ -84,22 +84,28 @@ that belongs to a URL the provider no longer has (#1091)."
   (let ((previous (and (slot-boundp p 'endpoint) (sendgrid-endpoint p)))
         (previous-verdict (and (slot-boundp p 'endpoint-approved-local) (slot-value p 'endpoint-approved-local))))
     (setf (slot-value p 'endpoint-approved-local) nil)
-    (let ((instance (call-next-method)))
-      (handler-bind ((error (lambda (c)
-                              (declare (ignore c))
-                              ;; BOTH SLOTS GO BACK, so a refusal really does leave the provider
-                              ;; as it was. Restoring the URL and clearing the verdict would
-                              ;; leave a provider that still points at an approved local host and
-                              ;; has forgotten that it was approved, which is safe -- it would be
-                              ;; proxied -- but it is not "unchanged", and the comment above said
-                              ;; it was (the re-review of #1134). The verdict belongs to the URL
-                              ;; being restored, so the two travel together.
-                              (if previous
-                                  (setf (slot-value p 'endpoint) previous)
-                                  (slot-makunbound p 'endpoint))
-                              (setf (slot-value p 'endpoint-approved-local) previous-verdict))))
-        (setf (slot-value p 'endpoint-approved-local) (%check-endpoint (sendgrid-endpoint p))))
-      instance)))
+    ;; CALL-NEXT-METHOD IS INSIDE THE HANDLER TOO, not only the check. A subclass :AFTER method on
+    ;; SHARED-INITIALIZE runs inside CALL-NEXT-METHOD, after the URL slot has been assigned, so if
+    ;; it signals -- for a bad initarg of its own, say -- the slot kept the new, unchecked URL and
+    ;; #1129's property was lost for exactly the callers who handle the error and carry on. With
+    ;; the whole body inside, any failure between here and the end puts the URL back (the final
+    ;; review of #1134).
+    (handler-bind ((error (lambda (c)
+                            (declare (ignore c))
+                            ;; BOTH SLOTS GO BACK, so a refusal really does leave the provider
+                            ;; as it was. Restoring the URL and clearing the verdict would leave a
+                            ;; provider that still points at an approved local host and has
+                            ;; forgotten that it was approved, which is safe -- it would be
+                            ;; proxied -- but it is not "unchanged" (the re-review of #1134). The
+                            ;; verdict belongs to the URL being restored, so the two travel
+                            ;; together.
+                            (if previous
+                                (setf (slot-value p 'endpoint) previous)
+                                (slot-makunbound p 'endpoint))
+                            (setf (slot-value p 'endpoint-approved-local) previous-verdict))))
+      (let ((instance (call-next-method)))
+        (setf (slot-value p 'endpoint-approved-local) (%check-endpoint (sendgrid-endpoint p)))
+        instance))))
 
 (defun %check-endpoint (endpoint)
   "Signal CONFIGURATION-ERROR unless ENDPOINT is a URL a SendGrid request may carry the API key

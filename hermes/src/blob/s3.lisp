@@ -521,7 +521,7 @@ body that cannot be read becomes a DETAIL saying so (#796)."
             ;; without this a plaintext store at a Compose service name such as "minio:9000" was
             ;; approved for plaintext at configuration time and then still sent its signed
             ;; requests, and any session token, to HTTP_PROXY in the clear (#1091).
-            (http::call-with-approved-local-host
+            (call-with-approved-local-host
              (s3-endpoint-approved-local store)
              (lambda ()
                (apply #'dex:request url :method method :headers headers :content content
