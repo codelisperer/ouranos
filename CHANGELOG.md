@@ -1224,6 +1224,22 @@ its tag.
 
 ### Added
 
+- **aion/path: one function for the name the operating system takes for a path** (#1103). The new
+  system `aion/path` exports `native-name`, `directory-pathname`, `separator-p` and `separators`.
+  `native-name` returns a string unchanged and gives a pathname its `uiop:native-namestring`,
+  after a logical pathname is translated; it refuses a wild pathname with an error, and anything
+  else, `nil` included, with `type-error`. `directory-pathname` makes a directory pathname from a
+  native string or a pathname without parsing the name as a Lisp namestring, which
+  `uiop:ensure-directory-pathname` does. aion/fs, aion/uv, aion/libgit and aion/windows each had
+  their own copy of this rule and call `aion/path` now; `aion/uv:native-path` remains, and returns
+  what `aion/path:native-name` does. `aion/path` needs only UIOP, so `scripts/fs.lisp` loads it
+  before aion/fs.
+  - Because the copies are now one function, `aion/fs:delete-tree`, `make-directory-link`,
+    `make-file-link`, `link-p` and `delete-link` accept a logical
+    pathname and translate it, as aion/uv, aion/libgit and aion/windows already did. Before, they
+    signalled an error, because `uiop:native-namestring` refuses a logical pathname. A wild
+    pathname is refused with an error, as before, now with the message `aion/path` gives.
+
 - **hermes: how long a send waits is now hermes's own setting, `*send-connect-timeout*` and
   `*send-read-timeout*`, both 10 seconds** (#1077). Each provider also takes `:connect-timeout`
   and `:read-timeout`, read back with `sendgrid-connect-timeout`, `sendgrid-read-timeout`,
@@ -3376,6 +3392,12 @@ its tag.
   "Long-running calls".
 
 ### Fixed
+
+- **aion/fs: `make-temporary-directory` takes an `:in` folder given as a string as a native name**
+  (#1103). It passed `:in` through `uiop:ensure-directory-pathname`, which parses a string as a
+  Lisp namestring, so a folder named, for example, `a[1]` named another path or none, and on Linux
+  and macOS a backslash in the name was dropped. The new directory's own name is now added as a
+  directory component rather than parsed.
 
 - **aion/uv: a path string reaches libuv as written, so a file with a backslash in its name works
   on Linux and macOS** (#1093). Every function that takes a path ran it through `cl:namestring`,

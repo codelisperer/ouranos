@@ -138,6 +138,7 @@
   :license "MIT"
   :version "0.0.0"
   :depends-on ("cffi" "coalton"
+               "aion/path"        ; native-path is aion/path:native-name (#1103)
                "aion/platform"    ; *search-source-tree*: a bundle does not search vendor/ (#472)
                "aion/dynamic")    ; unblock-interrupts, first in the loop thread (#541)
   :serial t
@@ -196,6 +197,7 @@
   :license "MIT"
   :version "0.0.0"
   :depends-on ("cffi"
+               "aion/path"       ; a directory's native name (#1103)
                "aion/platform"   ; *search-source-tree*: a bundle does not search vendor/ (#472)
                "aion/secret")    ; a credential's token may be a secret (#429)
   :serial t
@@ -513,6 +515,7 @@
                ;; GetFileAttributesW binding, kept in aion/fs because cons and the build scripts
                ;; load that without CFFI.
                "aion/fs"
+               "aion/path"       ; a program's, folder's or file's native name (#1103)
                "aion/dynamic")   ; unblock-interrupts, first in shell-open's thread (#896)
   :serial t
   :components ((:module "src/windows"
@@ -756,8 +759,8 @@
   :version "0.0.0"
   ;; UIOP only, plus sb-posix on Unix (an SBCL contrib, as in cons). Windows is reached through
   ;; SB-ALIEN rather than CFFI: the build scripts load this before Quicklisp, and cons, which
-  ;; depends on it, does not carry CFFI.
-  :depends-on ((:feature :unix (:require :sb-posix)))
+  ;; depends on it, does not carry CFFI. aion/path is UIOP only as well (#1103).
+  :depends-on ("aion/path" (:feature :unix (:require :sb-posix)))
   :serial t
   :components ((:module "src/fs"
                 :serial t
@@ -766,6 +769,18 @@
                              (:file "links")      ; make-directory-link, make-file-link (#825); after delete-tree, whose %KIND it uses
                              (:file "attributes")
                              (:file "temporary"))))
+  :in-order-to ((test-op (test-op "aion/fs/tests"))))
+
+(defsystem "aion/path"
+  :description "The operating system's name for a path given as a native string or a pathname, and a directory pathname built from it, without parsing the name as a Lisp namestring (#1103)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; NO DEPENDENCIES beyond UIOP, which arrives with ASDF: aion/fs depends on it, and the build
+  ;; scripts load aion/fs by path before Quicklisp (scripts/fs.lisp). Its tests are in
+  ;; aion/fs/tests.
+  :depends-on ()
+  :components ((:file "src/path/path"))
   :in-order-to ((test-op (test-op "aion/fs/tests"))))
 
 (defsystem "aion/fs/tests"
@@ -777,7 +792,8 @@
                 :components ((:file "delete-tree-tests")
                              (:file "attributes-tests")
                              (:file "temporary-tests")
-                             (:file "links-tests"))))   ; #825; uses delete-tree-tests' %FRESH and %WRITE
+                             (:file "links-tests")      ; #825; uses delete-tree-tests' %FRESH and %WRITE
+                             (:file "path-tests"))))    ; aion/path (#1103)
   :perform (test-op (o c) (uiop:symbol-call :aion/fs/tests :run-tests)))
 
 (defsystem "aion/platform"

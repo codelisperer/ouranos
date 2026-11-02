@@ -311,5 +311,5 @@ from a ROOT string deleted b and left b\\."
            ;; Checked without calling DELETE-TREE, which a missing refusal would let walk /.
            (dolist (root #-win32 (list "/.." "/./" "/tmp/..")
                          #+win32 (list "C:\\.." "C:\\.\\"))
-             (signals error (fs::%check-root (fs::%directory-pathname root)) "~S is refused" root)))
+             (signals error (fs::%check-root (aion/path:directory-pathname root)) "~S is refused" root)))
       (%cleanup base))))
