@@ -13,6 +13,22 @@
 ;;;; for pinned, reproducible deps) -- installed by scripts/setup.{sh,ps1}, which then
 ;;;; call this file. That is the entire bootstrap: OS setup -> seed -> cons -> warm.
 
+;;; SBCL contribs the framework tree loads on demand (Coalton -> sb-cltl2; the web
+;;; stack's sockets -> sb-bsd-sockets; crypto/ironclad -> sb-rotate-byte/sb-md5; ...).
+;;; bin/cons can load a contrib it does not carry only when SBCL finds a contrib/ directory
+;;; at run time, and in a dumped executable that usually means SBCL_HOME has to be exported
+;;; (cons/docs/user-guide.md, "Which contrib directory"). So they are baked into the image
+;;; now -- this is what makes `cons build` (in-process, in cons's warm image) able to compile
+;;; Coalton and start the web server. (A `--fresh` subprocess sbcl finds them itself.)
+;;; A contrib that does not load stops the bootstrap here, rather than leaving bin/cons to
+;;; fail at its first REQUIRE (#1099). This runs before (require :asdf), and ASDF is on the
+;;; list, because ASDF is a contrib as well; scripts/bake-contribs.lisp says more.
+(load (merge-pathnames "scripts/bake-contribs.lisp"
+                       (make-pathname :name nil :type nil :version nil
+                                      :defaults (or *load-truename* *load-pathname*
+                                                    (truename #p"./")))))
+(funcall (read-from-string "ouranos-bake:bake-contribs-or-die") "bootstrap" "bin/cons")
+
 (require :asdf)
 (load (merge-pathnames "scripts/human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
 
@@ -34,17 +50,6 @@
 (ouranos-heap:ensure-heap (or *load-truename* *load-pathname*)
                           :reexec-var "OURANOS_BOOTSTRAP_REEXEC"
                           :what "bin/cons")
-
-;;; SBCL contribs the framework tree loads on demand (Coalton -> sb-cltl2; the web
-;;; stack's sockets -> sb-bsd-sockets; crypto/ironclad -> sb-rotate-byte/sb-md5; ...).
-;;; A dumped STANDALONE executable cannot pull these from SBCL_HOME at runtime, so a
-;;; later in-image `(require :sb-cltl2)` fails with "System sb-cltl2 not found". Bake
-;;; them into the image NOW, while contribs are still reachable -- this is what makes
-;;; `cons build` (in-process, in cons's warm image) able to compile Coalton and start
-;;; the web server. (A `--fresh` subprocess sbcl gets them from SBCL_HOME instead.)
-(dolist (contrib '(:sb-cltl2 :sb-bsd-sockets :sb-posix :sb-rotate-byte
-                   :sb-md5 :sb-introspect :sb-concurrency))
-  (ignore-errors (require contrib)))
 
 ;;; The whole monorepo tree is discoverable to ASDF in one shot -- no per-project
 ;;; local-projects symlinks. This is what replaces the per-framework symlinks at cutover.

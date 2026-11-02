@@ -124,6 +124,87 @@ bot has a webhook set."))
 ;;; A backend registers a no-arg constructor thunk under its name; adding a vendor is a new
 ;;; class + one REGISTER-IMPL, with the selection layer staying neutral.
 
+(defun %check-credential-url (value &key setting example credential appends-path)
+  "Signal CONFIGURATION-ERROR unless VALUE is a URL this framework may send CREDENTIAL to
+(#1077, #1092). SETTING names the slot in the message, EXAMPLE is a URL that would be accepted,
+CREDENTIAL says what would travel -- \"the account SID and auth token\", \"the API key\" -- and
+APPENDS-PATH says whether the backend appends a path to VALUE.
+
+ONE CHECK FOR TWILIO'S API-BASE AND SENDGRID'S ENDPOINT. Those two, and no others yet: Telegram's
+api-base, Facebook's graph-base, Stripe's api-base and HERMES/BLOB's S3 endpoint do NOT call this,
+and blob keeps its own copy of the locality half. Bringing them here is #1106. An earlier version
+of this docstring said it was one check for \"every backend that sends a credential to a
+configured URL\", which was false when it was written (the review of #1104).
+
+The reason for sharing even two: hermes had this written once, for Twilio's API base in #1077, and
+hermes/blob had the locality half written again for an S3 endpoint; between them the two copies
+acquired three different holes, each a case the other's fix had already closed (#1089, and the
+reviews of #1084 and #1090). SendGrid had no check at all, which is #1092. Writing it a third
+time by hand was the bet that produced the first two.
+
+NO REFUSAL REPEATS VALUE, OR QURI'S ERROR TEXT. The value may carry a password -- that is one of
+the things refused -- and these reports reach logs and terminals. An earlier version printed it
+in every branch, and its parse-failure branch also appended quri's error, which quotes the URI
+again, so a password appeared twice (the review of #1084).
+
+What is refused, and why each is here rather than only the obvious one:
+
+  - anything QURI cannot parse. QURI is used because it is the parser dexador parses the request
+    URL with, so this asks the same question of the same parser;
+  - a scheme that is not http or https. Refusing only plaintext is not enough: for
+    \"evil.example://127.0.0.1\" quri reads the scheme \"evil.example\" and the host 127.0.0.1,
+    which a check looking for \"http\" lets through;
+  - any userinfo, whatever the scheme and host, including over https and including when the host
+    is local. No API here uses it, and its only effects are to hide the real host from a reader
+    and to defeat this check;
+  - no host;
+  - a query or a fragment, but only when APPENDS-PATH: the request's path would land inside them.
+    A backend that sends VALUE as it stands has no such problem, and refusing a query there would
+    turn away a legitimate local mock;
+  - a bracketed IPv6 host, which cannot be connected to -- usocket:socket-connect answers
+    NS-HOST-NOT-FOUND-ERROR for \"[::1]\" while \"::1\" resolves;
+  - plaintext http to a host this machine or this network cannot reach by itself, which is
+    AION/HTTP-CLIENT:LOCAL-HOST-P and not a rule written here. That function also refuses a
+    leading-zero IPv4 spelling, where its parser and the system resolver can disagree.
+
+The host is resolved at the moment this runs, once. A provider made while a name resolved
+locally is not re-checked if that name later resolves elsewhere -- and a plaintext request to a
+host approved by NAME still uses a configured proxy, which is #1091."
+  ;; CONTROL CHARACTERS ARE REFUSED FIRST, before the value is parsed. A newline in a URL is the
+  ;; shape of a header injection -- "http://127.0.0.1/x\nHost: evil.example" -- and although the
+  ;; credential would still have gone only to the local host, a value that cannot appear in a URL
+  ;; has no reading worth arguing about. Refusing it removes the question rather than answering
+  ;; it (the review of #1104).
+  (when (and (stringp value)
+             (some (lambda (c) (let ((n (char-code c))) (or (< n 32) (= n 127)))) value))
+    (error 'configuration-error
+           :missing (format nil "a ~A without control characters in it. The value contains at least one, and it is not repeated here because it may contain a password"
+                            setting)))
+  (let* ((uri (handler-case (quri:uri value)
+                (error ()
+                  (error 'configuration-error
+                         :missing (format nil "a ~A that parses as a URL. The value given does not, and it is not repeated here because it may contain a password"
+                                          setting)))))
+         (scheme (quri:uri-scheme uri))
+         (host (quri:uri-host uri)))
+    (flet ((refuse (why)
+             (error 'configuration-error
+                    :missing (format nil "a ~A such as ~A. ~A" setting example why))))
+      (when (quri:uri-userinfo uri)
+        (refuse (format nil "The value carries a user name or password before an \"@\", which this API does not use and which hides the host a request would reach. That host is ~S." host)))
+      (unless (and scheme (or (string-equal scheme "https") (string-equal scheme "http")))
+        (refuse (format nil "The scheme is ~S. Only http and https are sent, and another scheme means the host this check reads is not the host a request would reach." scheme)))
+      (unless host
+        (refuse "The value has no host."))
+      (when (and appends-path (or (quri:uri-query uri) (quri:uri-fragment uri)))
+        (refuse "The value carries a query or a fragment, and the rest of each request's path is appended to it, so the path would end up inside them."))
+      (when (and (plusp (length host)) (char= #\[ (char host 0)))
+        (refuse (format nil "The host ~S is a bracketed IPv6 address, which cannot be connected to: it is looked up as a name and no such name exists. Write the address without brackets, or use a name." host)))
+      (when (and (string-equal scheme "http") (not (local-host-p host)))
+        (refuse (format nil "The host ~S would receive ~A in the clear, because every request carries them in an Authorization header. Use https, or a host only this machine or this network can reach."
+                        host credential))))
+    uri))
+
 (defparameter *send-connect-timeout* 10
   "Seconds a backend waits for a connection to a provider before giving up (#1077).
 

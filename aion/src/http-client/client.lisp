@@ -499,6 +499,13 @@ every request, so no connection is reused."
                 ;; are still there.
                 :force-binary t
                 :max-redirects (or (request-follow-redirects req) 0))
+          ;; A PLAINTEXT REQUEST TO A LOCAL HOST IS NOT SENT THROUGH A PROXY (#1091). The
+          ;; decision is PROXY-ARGUMENTS, in fetch.lisp, because every caller that sends a
+          ;; request has to make it the same way -- including hermes/blob's S3 backend, which
+          ;; calls dexador directly and so never reaches this function. When this lived here,
+          ;; that backend was not covered while a comment and the CHANGELOG said it was (the
+          ;; review of #1094).
+          (proxy-arguments (request-url req))
           (when (request-max-body-bytes req) (list :want-stream t))
           (when (request-ca-path req) (list :ca-path (request-ca-path req)))
           ;; Passed only when set, so an unset timeout means dexador's default rather than an
