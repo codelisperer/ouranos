@@ -91,7 +91,10 @@ both upcased for the standard readtable."
 ;;;
 ;;;   - The project's OWN systems, those whose .asd is under the project directory ROOT,
 ;;;     are loaded by ASDF directly. Nothing muffles them, so a WARNING is printed and fails
-;;;     the load; a STYLE-WARNING is printed and does not.
+;;;     the load; a STYLE-WARNING is printed and does not, except a call to an undefined
+;;;     function, which fails the load too (#1083). SBCL reports that as a STYLE-WARNING,
+;;;     but the call fails whenever it runs, and in a test that one machine skips it ran
+;;;     first on another (#1066).
 ;;;   - Everything else the own systems depend on (libraries, and on a consuming app the
 ;;;     framework) is loaded first with warnings muffled, as Quicklisp's quiet mode did. A
 ;;;     warning inside a library is not the app's to fix, and must not fail the app's build.
@@ -151,12 +154,18 @@ both upcased for the standard readtable."
                   ;; not counted: COMPILE-WARNED-WARNING reports that a file compiled with
                   ;; style-warnings only, and RECURSIVE-OPERATE that the loader was called from
                   ;; inside an ASDF operation, as it is when cons's own tests run under
-                  ;; ASDF:TEST-SYSTEM.
+                  ;; ASDF:TEST-SYSTEM. A STYLE-WARNING is counted only when it reports an
+                  ;; undefined function (#1083). SBCL signals that as a SIMPLE-STYLE-WARNING
+                  ;; printed as `undefined function: PKG::NAME', at the end of the unit, and
+                  ;; matching the printed text keeps this form free of SBCL's own symbols.
                   (let ((caught '())
                         (recursive (uiop:find-symbol* :recursive-operate :asdf/operate nil)))
                     (handler-bind ((warning (lambda (w)
-                                              (unless (or (typep w '(or style-warning
-                                                                     uiop:compile-warned-warning))
+                                              (unless (or (typep w 'uiop:compile-warned-warning)
+                                                          (and (typep w 'style-warning)
+                                                               (not (uiop:string-prefix-p
+                                                                     "undefined function: "
+                                                                     (princ-to-string w))))
                                                           (and recursive (typep w recursive)))
                                                 (push w caught)))))
                       (with-compilation-unit (:override t)

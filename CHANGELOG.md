@@ -20,6 +20,45 @@ its tag.
   reading `delivery-failure-status` can now match on the class, and read
   `delivery-rate-limited-retry-after` for the wait the response asked for. Telegram and Facebook
   already signalled it; every backend does now.
+- **hermes/blob: an S3 endpoint that carries a user name or password is now refused when the
+  store is made** (#1089). `MNEMOSYNE_S3_ENDPOINT` values such as `user:pw@host` or
+  `[::1]@host` signal `blob-configuration-error`. An app that put userinfo in that variable has
+  to move it: S3 credentials belong in `MNEMOSYNE_S3_ACCESS_KEY` and
+  `MNEMOSYNE_S3_SECRET_KEY`.
+  **Why it is refused rather than ignored.** dexador connects to the host *after* the `@`, so
+  such an endpoint sent this store's SigV4-signed requests, and any session token, to that host
+  while the setting appeared to name another. With `MNEMOSYNE_S3_SECURE=false` it also defeated
+  the check added in #970: the endpoint's host was read by a parser of hermes's own, which
+  returned the bracketed IPv6 userinfo as the host and allowed plaintext to a public host. The
+  endpoint is now read with `quri`, the parser dexador itself uses, **out of the URL the request
+  is built from**, so the check and the request agree about where the bytes are going.
+- **hermes/blob: a plaintext S3 store must now use path-style addressing** (#1089).
+  `MNEMOSYNE_S3_SECURE=false` additionally requires `MNEMOSYNE_S3_PATH_STYLE=true`, or
+  `blob-configuration-error` names it. In virtual-host style the request does not go to the
+  endpoint at all: the host is `BUCKET.ENDPOINT`, a different DNS name, so the check added in
+  #970 approved `127.0.0.1` while the request went to `bkt.127.0.0.1`, and the same for
+  `10.1.2.3`, `localhost` and a Compose service name. Whoever controls the resolver or the search
+  domain chooses where such a name points, and nothing in hermes can speak for it. A local S3
+  double such as MinIO wants path-style anyway. **https is unaffected** and keeps virtual-host
+  style, which is what AWS expects, and `:secure nil` passed in code remains an unchecked
+  deliberate choice, as #124 settled.
+- **hermes/blob: surrounding whitespace in `MNEMOSYNE_S3_ENDPOINT` is trimmed before the value is
+  stored** (#1089). The checks used to trim a copy while the store kept the raw string, so
+  `" 127.0.0.1:9000"` passed every check and then built request URLs with a space in them: it
+  failed safe, but at the first upload rather than at boot. Whitespace *inside* an endpoint is
+  still refused.
+- **hermes/blob: an S3 endpoint must now be a bare host with an optional port** (#1089).
+  `MNEMOSYNE_S3_ENDPOINT` is refused when it contains `://`, `/`, `?`, `#`, `@` or whitespace, or
+  is empty. Values such as `localhost:9000`, `127.0.0.1:9000`, `[::1]:9000`, `minio:9000` and
+  `s3.amazonaws.com` are unaffected.
+  **Two shapes that used to be accepted no longer are, and neither ever worked.** An endpoint
+  carrying its own scheme, such as `http://127.0.0.1:9000`, produced the request URL
+  `http://http://127.0.0.1:9000/...`, whose host is `http`; it is now refused instead of
+  silently mangled. An endpoint such as `evil.com://127.0.0.1` passed the check added above as
+  loopback while the request went to `evil.com`, because the check read the endpoint and not the
+  URL built from it. A **bare IPv6 address** without brackets, such as `::1`, is also not a
+  working endpoint and is now reported as such: the request URL `http://::1/...` has the host `:`
+  and the port 1. Write it with brackets, as `[::1]:9000`.
 
 - **mnemosyne/conn: a Postgres connect gives up after 10 seconds, and an optional statement
   timeout** (#959). `connect` and `make-pool` take `:connect-timeout`, in seconds, defaulting to
@@ -1153,6 +1192,15 @@ its tag.
   `aion/tests:run-tests` and the file `aion/tests/all.lisp` are gone: code that called
   `aion/tests:run-tests` calls `(asdf:test-system :aion/tests)` instead, as `aion/cons.lisp`'s
   `test` target now does.
+- **cons: the strict load fails a call to a function that does not exist in the project's own
+  code** (#1083). `cons build`, `cons test` and `cons --strict` load a project's own systems
+  through `load-system-strictly`, which failed on a full compile `WARNING` and let every
+  `STYLE-WARNING` through. SBCL reports a call to an undefined function as a `STYLE-WARNING`
+  (`undefined function: PKG::NAME`), so such a call built and tested clean and failed only when
+  it ran. It now fails the load, and the error names the function. **A project that loaded
+  before can now fail:** define the function, or correct the name or package of the call. Other
+  `STYLE-WARNING`s still do not fail, and an undefined function inside a library outside the
+  project directory is still muffled. `cons/docs/user-guide.md` says the same.
 - **`cons` refuses to run a build-spec target when the SBCL contribs on disk were compiled by
   a different SBCL version from the one that built `bin/cons`** (#701). After an SBCL install
   is replaced in place, `bin/cons` used to print its stale-image warning and continue, and a
@@ -1303,6 +1351,50 @@ its tag.
     neither, so the default policy will not send a message twice.
   - `aion/http-client` exports `+transient-statuses+` and `+unknown-statuses+` for this.
 
+- **New bindings exported for the credential backends** (#1035), used by
+  `hades/credentials`: `aion/windows/ffi:cred-enumerate-w` (`CredEnumerateW`, which lists a
+  user's credentials matching a filter); `aion/darwin/ffi:+err-sec-interaction-not-allowed+`
+  (`errSecInteractionNotAllowed`, -25308, which a locked Keychain returns instead of prompting
+  when the query sets `kSecUseAuthenticationUIFail`); and
+  `aion/darwin:cf-array-get-count` and `aion/darwin:cf-array-get-value-at-index`, for walking the
+  `CFArray` an attributes-only Keychain query returns.
+- **hades/credentials: `credential-exists-p` and `credential-names` answer without returning any
+  secret, and on macOS and Linux without decrypting one** (#1035). `credential-exists-p service
+  account` says whether a credential is stored, and `credential-names service` lists the accounts
+  under one service. **On Windows the values are decrypted and then erased**, because Windows has
+  no call that lists or reads a credential without its value: `CredEnumerateW` with the filter
+  `SERVICE/*` returns a whole `CREDENTIALW` for every matching target, plaintext
+  `CredentialBlob` included, and `CredReadW` does the same. hades writes zeros over every blob
+  before freeing what Windows returned, so nothing is left in freed memory and no value is
+  returned, but on Windows an app should treat these two functions as it treats
+  `fetch-credential` in that respect. An earlier wording of this entry said "without decrypting
+  or copying a value", which was false on Windows. An app showing "a key is saved", or offering to remove one, no longer
+  fetches the secret to decide a label, and no longer has to keep its own list of what it saved,
+  which could drift from the store.
+  - macOS asks the Keychain for attributes only (`kSecReturnAttributes`, never
+    `kSecReturnData`), and Linux searches the Secret Service and reads item attributes, which it
+    stores unencrypted, without `SECRET_SEARCH_LOAD_SECRETS` and without `SECRET_SEARCH_UNLOCK`.
+    Neither decrypts a value.
+  - **On Windows the value is decrypted and then erased**, because Windows offers no other way:
+    `CredEnumerateW` and `CredReadW` both return the whole `CREDENTIALW`, including the plaintext
+    `CredentialBlob`. hades writes zeros over every blob before freeing what Windows returned, so
+    a listing leaves nothing in freed memory, but the value does pass through the process. An app
+    on Windows should treat `credential-names` as it treats `fetch-credential` in that respect.
+  - A service name containing `*` is refused for both functions, on every platform, because on
+    Windows it would widen `CredEnumerateW`'s filter and make Windows enumerate, and so decrypt,
+    other applications' credentials.
+  - On Windows a target is matched exactly against the service and the stored account, not by
+    prefix, so `credential-names "S"` does not report an item of the service `"S/x"`. macOS and
+    Linux already matched exactly; this makes the three agree.
+  - **Neither prompts.** On macOS the query sets `kSecUseAuthenticationUIFail`, so a Keychain that
+    could only answer by asking signals `credential-store-unavailable` instead of showing a
+    dialog; **that path is not covered by a test**, since nothing here locks a keychain. On Linux
+    a locked keyring answers without prompting, which is exercised, so `credential-exists-p` can
+    be true for an item `fetch-credential` would refuse to read until the keyring is unlocked.
+  - Nothing is logged by either, so no account name can reach a log.
+  - `aion/libsecret` gains `search-attribute-values` and the bindings it needs
+    (`secret_service_search_sync`, `secret_item_get_attributes`, `g_hash_table_lookup`,
+    `g_list_free_full`).
 - **aion/retry: a retry policy as data, and `with-retry`, which retries through restarts**
   (#79). `make-retry-policy` takes `:max-attempts`, `:base-delay`, `:multiplier`, `:max-delay`,
   `:jitter` (`:full`, `:equal` or `:none`), `:deadline` and `:retryable`, and `retry-delay`

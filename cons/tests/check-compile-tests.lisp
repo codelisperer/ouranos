@@ -225,3 +225,98 @@ not fail the checked system for what the dependency does."
         (is (= 1 code) "exit ~D, expected 1:~%~A" code output)
         (is (search "FAIL    check-compile-fixture" output) "no FAIL line for the fixture:~%~A" output)
         (is (search (format nil "SKIPPED ~A" system) output) "no SKIPPED line:~%~A" output)))))
+
+;;; --- a call to a function that does not exist (#1076) ----------------------------------------
+;;;
+;;; SBCL reports an undefined function as a STYLE-WARNING, which WARNINGS-IN did not match, so a
+;;; test calling `is*' (#1066) passed check-compile and the gate on the machine that skipped it.
+;;; The packages below are named at run time: scripts/compile-warnings.lisp finds this tree's
+;;; packages by reading its source as text, and a literal DEFPACKAGE of a fixture's package in
+;;; this file would make the fixture's package one of this tree's.
+
+(defun %write-undefined-fixture (dir system package call &key depends-on)
+  "Write SYSTEM to DIR: one file defining PACKAGE, with a function whose body is CALL."
+  (with-open-file (out (merge-pathnames (format nil "~A.asd" system) dir) :direction :output)
+    (format out "(defsystem ~S~@[ :depends-on (~S)~] :components ((:file \"fixture\")))~%"
+            system depends-on))
+  (with-open-file (out (merge-pathnames "fixture.lisp" dir) :direction :output)
+    (format out "(~A #:~A (:use #:cl))~%(in-package #:~A)~%(defun answer () ~A)~%"
+            "defpackage" package package call)))
+
+(test an-undefined-function-fails-the-system
+  "#1066's shape: the system compiles and loads, and calls a function nothing defines. SBCL
+prints `caught STYLE-WARNING' and `undefined function:'; the script fails the system and shows
+the function."
+  (tempdir:with-temporary-directory (dir "check-compile-undefined")
+    (%write-undefined-fixture dir "check-compile-fixture" "cc-undefined-1076"
+                              "(no-such-function-1076 42)")
+    (multiple-value-bind (code output) (%run-check-compile dir)
+      (is (= 1 code) "exit ~D, expected 1:~%~A" code output)
+      (is (search "FAIL    check-compile-fixture" output)
+          "no FAIL line for the fixture:~%~A" output)
+      (is (search "undefined function: CC-UNDEFINED-1076::NO-SUCH-FUNCTION-1076" output)
+          "the report does not name the function:~%~A" output))))
+
+(test the-same-system-with-the-function-defined-passes
+  "The control for the test above: the same call, to a function the file defines."
+  (tempdir:with-temporary-directory (dir "check-compile-undefined")
+    (%write-undefined-fixture dir "check-compile-fixture" "cc-undefined-1076"
+                              "(flet ((no-such-function-1076 (x) x)) (no-such-function-1076 42))")
+    (multiple-value-bind (code output) (%run-check-compile dir)
+      (is (= 0 code) "exit ~D, expected 0:~%~A" code output)
+      (is (search "ok      check-compile-fixture" output)
+          "no ok line for the fixture:~%~A" output))))
+
+(test an-undefined-function-in-a-package-of-this-tree-fails-the-system
+  "The tests above take their packages from the fixture's own directory, which lies outside
+this tree. Here the fixture calls an undefined function in AION/CLOCK, a package only this
+tree's source defines, so the failure comes from the packages check-compile reads from this
+tree, the list the gate uses (review of #1078). The control calls NEXT-VID, which AION/CLOCK
+defines."
+  (tempdir:with-temporary-directory (dir "check-compile-undefined")
+    (%write-undefined-fixture dir "check-compile-fixture" "cc-undefined-1076"
+                              "(aion/clock::no-such-function-1076 42)" :depends-on "aion/clock")
+    (multiple-value-bind (code output) (%run-check-compile dir)
+      (is (= 1 code) "exit ~D, expected 1:~%~A" code output)
+      (is (search "undefined function: AION/CLOCK::NO-SUCH-FUNCTION-1076" output)
+          "the report does not name the function:~%~A" output)))
+  (tempdir:with-temporary-directory (dir "check-compile-undefined")
+    (%write-undefined-fixture dir "check-compile-fixture" "cc-undefined-1076"
+                              "(aion/clock::next-vid)" :depends-on "aion/clock")
+    (multiple-value-bind (code output) (%run-check-compile dir)
+      (is (= 0 code) "control: exit ~D, expected 0:~%~A" code output))))
+
+(test a-system-whose-asd-cannot-load-is-reported-and-the-run-goes-on
+  "An .asd with a syntax error fails in the child, and the script reports it and checks the
+next system, rather than ending when it looks the system up again to find its packages
+(review of #1078). The control is the second system, checked after the first."
+  (tempdir:with-temporary-directory (bad "check-compile-bad-asd")
+    (with-open-file (out (merge-pathnames "check-compile-bad.asd" bad) :direction :output)
+      (write-string "(defsystem \"check-compile-bad\" :components ((:file \"fixture\"))" out))
+    (tempdir:with-temporary-directory (dir "check-compile-undefined")
+      (%write-undefined-fixture dir "check-compile-fixture" "cc-undefined-1076" "42")
+      (multiple-value-bind (code output)
+          (%run-check-compile-on '("check-compile-bad" "check-compile-fixture") (list bad dir))
+        (is (= 1 code) "exit ~D, expected 1:~%~A" code output)
+        (is (search "FAIL    check-compile-bad" output) "no FAIL line for the bad .asd:~%~A" output)
+        (is (search "ok      check-compile-fixture" output)
+            "control: the next system was not checked:~%~A" output)))))
+
+(test an-undefined-function-in-a-dependencys-package-is-not-reported
+  "Only the checked code counts, as for redefinitions above. The checked system depends on a
+system in another temporary directory whose own code calls an undefined function; the checked
+system passes. The control checks that dependency itself, and it fails, so the same output with
+the dependency's package among the checked code's is reported."
+  (tempdir:with-temporary-directory (dep "check-compile-dep")
+    (%write-undefined-fixture dep "check-compile-dep" "cc-dep-1076" "(no-such-function-1076 42)")
+    (tempdir:with-temporary-directory (dir "check-compile-undefined")
+      (%write-undefined-fixture dir "check-compile-fixture" "cc-undefined-1076" "42"
+                                :depends-on "check-compile-dep")
+      (multiple-value-bind (code output) (%run-check-compile dir dep)
+        (is (= 0 code) "exit ~D, expected 0:~%~A" code output)
+        (is (search "ok      check-compile-fixture" output)
+            "no ok line for the fixture:~%~A" output))
+      (multiple-value-bind (code output) (%run-check-compile-on '("check-compile-dep") (list dep))
+        (is (= 1 code) "control: the dependency checked itself exited ~D:~%~A" code output)
+        (is (search "undefined function: CC-DEP-1076::NO-SUCH-FUNCTION-1076" output)
+            "control: the report does not name the function:~%~A" output)))))

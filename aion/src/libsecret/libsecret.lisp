@@ -211,3 +211,45 @@ when done. VALUE itself is not released."
            (octets (make-array n :element-type '(unsigned-byte 8))))
       (dotimes (i n octets)
         (setf (aref octets i) (cffi:mem-aref bytes :uint8 i))))))
+
+;;; --- searching without reading a value (#1035) ---------------------------------------------
+
+(defun search-attribute-values (schema attributes wanted)
+  "For every item matching SCHEMA and ATTRIBUTES, the value of the WANTED attribute, as a list of
+strings. An item that does not carry WANTED is left out.
+
+READS NO VALUE AND UNLOCKS NOTHING, which is what lets hades's CREDENTIAL-EXISTS-P and
+CREDENTIAL-NAMES answer without a prompt (#1035). The search passes SECRET_SEARCH_ALL alone: not
+SECRET_SEARCH_LOAD_SECRETS, which would fetch each item's secret, and not SECRET_SEARCH_UNLOCK,
+which would ask the service to unlock a locked collection, which can prompt. An item's attributes
+are stored unencrypted by the Secret Service, so a locked collection still answers.
+
+The caller holds the libsecret lock, as for the other calls here. Signals LIBSECRET-ERROR."
+  (let ((service (with-gerror (err "reaching the Secret Service")
+                   (ffi:secret-service-get-sync ffi:+secret-service-none+
+                                                (cffi:null-pointer) err))))
+    (unwind-protect
+         (let ((items (with-gerror (err "searching for the items")
+                        (ffi:secret-service-search-sync service schema attributes
+                                                        ffi:+secret-search-all+
+                                                        (cffi:null-pointer) err))))
+           (unwind-protect
+                (loop with found = '()
+                      for node = items
+                        then (cffi:foreign-slot-value node '(:struct ffi:g-list) 'ffi:next)
+                      until (cffi:null-pointer-p node)
+                      do (let ((item (cffi:foreign-slot-value node '(:struct ffi:g-list) 'ffi:data)))
+                           (unless (cffi:null-pointer-p item)
+                             (let ((table (ffi:secret-item-get-attributes item)))
+                               (unless (cffi:null-pointer-p table)
+                                 (unwind-protect
+                                      (let ((value (ffi:g-hash-table-lookup table wanted)))
+                                        (unless (cffi:null-pointer-p value)
+                                          (push (cffi:foreign-string-to-lisp value :encoding :utf-8)
+                                                found)))
+                                   (ffi:g-hash-table-unref table))))))
+                      finally (return (nreverse found)))
+             (unless (cffi:null-pointer-p items)
+               ;; Each item is a GObject the search gave us a reference to.
+               (ffi:g-list-free-full items (ffi:symbol-pointer "g_object_unref")))))
+      (unless (cffi:null-pointer-p service) (ffi:g-object-unref service)))))
