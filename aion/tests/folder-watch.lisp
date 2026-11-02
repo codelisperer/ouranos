@@ -38,7 +38,7 @@
   (uiop:native-namestring (merge-pathnames name dir)))
 
 (defun call-with-watched-folder (function &key setup (settle +settle+) (ignore :defaults)
-                                               report-existing also)
+                                               report-existing also (recursive t))
   "Make a fresh folder, call SETUP with it, watch it, and call FUNCTION with the folder and a
 function that returns the events reported so far, oldest first, as (KIND NAME SIZE). ALSO, when
 given, is called on the loop thread with each event and the FOLDER-WATCHER after the event is
@@ -61,7 +61,7 @@ recorded; the watcher is passed because *WATCHER* is bound on the test's thread 
                                                     (fw:folder-event-size e))
                                               events))
                                       (when also (funcall also e (car watcher-box))))
-                                    :settle settle :ignore ignore
+                                    :settle settle :ignore ignore :recursive recursive
                                     :report-existing report-existing)))
              (setf (car watcher-box) *watcher*)
              (uv:start-loop-thread loop)
@@ -269,6 +269,112 @@ file, on Linux. Each reported file under a path now missing is reported :REMOVED
       (is (equal '((:removed "sub/x.txt" nil) (:removed "sub/y.txt" nil))
                  (sort (remove :settled seen :key #'first) #'string< :key #'second))
           "~S" seen))))
+
+;;; --- Copilot's review of #1074 -----------------------------------------------------------
+
+(test a-folder-renamed-inside-the-watched-folder-reports-old-names-removed-and-new-settled
+  "Renaming a populated subfolder can be one event per name, for the folders only. The new name
+is scanned, and each reported file under the old name is reported removed."
+  (with-watched-folder (dir events :report-existing t
+                                   :setup (lambda (d) (%write d "sub/a.txt" "a") (%write d "sub/b.txt" "bb")))
+    (%wait events (lambda (e) (= 2 (length e))))
+    (uv:rename-path (%native dir "sub") (%native dir "moved"))
+    (let ((seen (%wait events (lambda (e) (= 6 (length e))))))
+      (sleep (* 3 +settle+))
+      (setf seen (subseq (funcall events) 2))
+      (is (equal '((:removed "sub/a.txt" nil) (:removed "sub/b.txt" nil)
+                   (:settled "moved/a.txt" 1) (:settled "moved/b.txt" 2))
+                 (sort (copy-list seen)
+                       (lambda (x y) (string< (format nil "~A ~A" (first x) (second x))
+                                              (format nil "~A ~A" (first y) (second y))))))
+          "~S" seen))))
+
+(test events-with-no-filename-do-not-hold-back-a-file-that-is-settling
+  "Copilot's review of #1074: a backend that sends events with no filename made every rescan
+restart the quiet period of each file waiting to settle, so while other files kept changing it
+never settled. Here a rescan runs on the loop every 0.2 s for 3 s, with SETTLE 1 s; the file is
+reported before the rescans stop."
+  (with-watched-folder (dir events :settle 1.0)
+    (%write dir "steady.txt" "steady")
+    (let ((watcher *watcher*)
+          (stop (+ (get-internal-real-time) (* 3 internal-time-units-per-second)))
+          (reported-at nil))
+      (loop while (< (get-internal-real-time) stop)
+            do (%on-loop (lambda () (fw::%rescan watcher)))
+               (when (and (null reported-at) (%settled (funcall events) "steady.txt"))
+                 (setf reported-at (get-internal-real-time)))
+               (sleep 0.2))
+      (is-true reported-at "settled while the rescans went on: ~S" (funcall events)))))
+
+#-win32
+(test a-backslash-in-a-name-is-part-of-the-name-off-windows
+  "Copilot's review of #1074: a backslash is an ordinary character in a Unix name, so it is not
+turned into a folder separator there."
+  (with-watched-folder (dir events)
+    (%write dir "draft\\final.txt" "kept")
+    (let ((seen (%wait events (lambda (e) (%settled e "draft\\final.txt")))))
+      (is (equal '((:settled "draft\\final.txt" 4)) seen) "~S" seen))))
+
+(test a-folder-that-cannot-be-listed-is-tried-again-not-taken-for-empty
+  "Copilot's review of #1074, as the hub read it: a listing that failed for any reason but the
+folder having gone was taken for an empty folder, so REPORT-EXISTING could leave files out
+without a word. The folder is now kept pending and tried again; its files are reported once it
+can be listed, and WATCH-FOLDER itself does not fail. The listing of locked/ fails for 1.5 s."
+  (let ((original fw::*%list-directory*)
+        (until (+ (get-internal-real-time) (* 1.5 internal-time-units-per-second))))
+    (unwind-protect
+         (progn
+           (setf fw::*%list-directory*
+                 (lambda (path)
+                   (if (and (search "locked" path) (< (get-internal-real-time) until))
+                       (error 'uv:permission-denied :code -13 :name "EACCES" :message "denied"
+                                                    :operation :list-directory :path path)
+                       (funcall original path))))
+           (with-watched-folder (dir events :report-existing t
+                                            :setup (lambda (d) (%write d "locked/a.txt" "a")
+                                                     (%write d "open.txt" "o")))
+             (let ((seen (%wait events (lambda (e) (%settled e "locked/a.txt")) :timeout 10)))
+               (is (%settled seen "open.txt") "the readable file: ~S" seen)
+               (is (%settled seen "locked/a.txt") "and the folder's file, once listed: ~S" seen))))
+      (setf fw::*%list-directory* original))))
+
+(test an-ignore-function-that-signals-at-start-leaves-nothing-running
+  "The hub's re-review of #1074: when the first scan signals, here from the caller's own ignore
+function, the caller gets no watcher to stop, so WATCH-FOLDER closes its watch and timer itself."
+  (let ((dir (aion/fs:make-temporary-directory "folder-watch-test"))
+        (loop (uv:make-loop)))
+    (unwind-protect
+         (progn
+           (%write dir "a.txt" "a")
+           (signals error
+             (fw:watch-folder loop dir (lambda (e) (declare (ignore e)))
+                              :ignore (list (lambda (name) (error "refusing ~A" name)))))
+           (uv:start-loop-thread loop)
+           (sleep 0.2)
+           ;; The loop thread's own :ASYNC handle stays; the watcher's are a watch and a timer.
+           (is (null (remove-if-not (lambda (h) (and (member (uv:handle-info-kind h) '(:fs-event :timer))
+                                                    (uv:handle-info-active h)
+                                                    (not (uv:handle-info-closing h))))
+                                    (uv:loop-handles loop)))
+               "no watch or timer left running: ~S" (uv:loop-handles loop)))
+      (uv:close-loop loop)
+      (ignore-errors (aion/fs:delete-tree dir)))))
+
+(test a-watch-that-is-not-recursive-does-not-report-a-folder-moved-in
+  "The hub's re-review of #1074: with :RECURSIVE NIL a directory event scanned the folder anyway,
+though the first scan does not. The control is the same move with a recursive watch, in
+a-folder-moved-in-reports-each-file-in-it, and a file at the top level here, which is reported."
+  (let ((source (aion/fs:make-temporary-directory "folder-watch-source")))
+    (unwind-protect
+         (with-watched-folder (dir events :recursive nil)
+           (%write (merge-pathnames "batch/" source) "one.txt" "one")
+           (uv:rename-path (%native source "batch") (%native dir "batch"))
+           (%write dir "top.txt" "top")
+           (let ((seen (%wait events (lambda (e) (%settled e "top.txt")))))
+             (sleep (* 3 +settle+))
+             (setf seen (funcall events))
+             (is (equal '((:settled "top.txt" 3)) seen) "only the top-level file: ~S" seen)))
+      (ignore-errors (aion/fs:delete-tree source)))))
 
 ;;; --- a file that cannot be read, and stopping --------------------------------------------
 

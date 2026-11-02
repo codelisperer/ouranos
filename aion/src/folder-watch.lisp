@@ -157,6 +157,7 @@ header)."
   watcher timer
   (pending (%table))    ; name -> %pending
   (reported (%table))   ; name -> (size . mtime) last reported
+  (unlisted (%table))   ; folder prefix -> T, while it cannot be listed
   (timer-running nil)
   (stopped nil))
 
@@ -205,8 +206,8 @@ rather than stopping the watcher (the hub's review of #1074)."
   (max 50 (round (* 1000 (folder-watcher-settle fw)) 4)))
 
 (defun %ensure-timer (fw)
-  "Start the timer unless it is running or the watch is stopped. Before WATCH-FOLDER has made it,
-do nothing: WATCH-FOLDER starts it after its first scan when that scan left files pending."
+  "Start the timer unless it is running or the watch is stopped. WATCH-FOLDER makes the timer
+before its first scan, so a file that scan puts in the pending table starts it."
   (when (and (folder-watcher-timer fw)
              (not (folder-watcher-timer-running fw))
              (not (folder-watcher-stopped fw)))
@@ -223,12 +224,36 @@ do nothing: WATCH-FOLDER starts it after its first scan when that scan left file
               (make-%pending :state state :changed-at (%now)))))
   (%ensure-timer fw))
 
+(defvar *%list-directory* #'uv:list-directory
+  "The function %LIST lists a folder with. For a test only, which sets it globally, to make a
+listing fail as an unreadable folder's does.")
+
+(defun %list (fw prefix)
+  "The entries of the folder PREFIX. A folder that has gone, or is no longer a folder, has none:
+it changed while it was being looked at, and its own event follows. Any other failure, such as
+EACCES on a subfolder, is not taken for an empty folder (Copilot's review of #1074), and is not
+signalled either, which would let one unreadable folder stop the watch: the folder goes in the
+pending table as :UNKNOWN, so each tick tries it again, and its files are reported once it can be
+listed. The first failure for a folder is recorded with AION/UV:NOTE-CALLBACK-ERROR, once, so a
+folder that stays unreadable is visible without one record per tick."
+  (handler-case
+      (prog1 (funcall *%list-directory* (%native fw prefix))
+        (remhash prefix (folder-watcher-unlisted fw)))
+    (uv:file-not-found () '())
+    (uv:not-a-directory () '())
+    (uv:uv-error (e)
+      (unless (gethash prefix (folder-watcher-unlisted fw))
+        (setf (gethash prefix (folder-watcher-unlisted fw)) t)
+        (uv:note-callback-error e))
+      (unless (string= prefix "")
+        (%pend fw (subseq prefix 0 (1- (length prefix))) :unknown))
+      '())))
+
 (defun %scan (fw function &optional (prefix ""))
   "Call FUNCTION with the relative name of every regular file under the folder PREFIX (relative to
 the watched folder, ending in /, or empty for the folder itself) that is not ignored, descending
 into subfolders that are not ignored when the watch is recursive."
-  (let ((entries (handler-case (uv:list-directory (%native fw prefix))
-                   (uv:uv-error () '()))))
+  (let ((entries (%list fw prefix)))
     (dolist (entry entries)
       (let ((name (concatenate 'string prefix (car entry))))
         (unless (ignored-p name (folder-watcher-patterns fw))
@@ -236,6 +261,18 @@ into subfolders that are not ignored when the watch is recursive."
             (:file (funcall function name))
             (:directory (when (folder-watcher-recursive fw)
                           (%scan fw function (concatenate 'string name "/"))))))))))
+
+(defun %consider (fw name state)
+  "Put NAME in the pending table with STATE, unless nothing has changed: it is pending already with
+that state, or it is not pending and STATE is what was last reported. A scan of a folder, and a
+rescan after an event with no filename, use this, so they do not restart the quiet period of a
+file still settling or put back every unchanged file in a folder (Copilot's and the hub's
+reviews of #1074)."
+  (let ((pending (gethash name (folder-watcher-pending fw))))
+    (unless (if pending
+                (equal state (%pending-state pending))
+                (equal state (gethash name (folder-watcher-reported fw))))
+      (%pend fw name state))))
 
 (defun %touch (fw name)
   "Note that NAME may have changed. A file goes in the pending table. A directory is scanned and
@@ -245,8 +282,11 @@ reports :REMOVED for its files (the hub's review of #1074)."
   (let ((state (%state fw name)))
     (cond ((eq state :directory)
            (remhash name (folder-watcher-pending fw))
-           (%scan fw (lambda (file) (%pend fw file (%state fw file)))
-                  (concatenate 'string name "/")))
+           ;; A watch that is not recursive does not look inside subfolders, as its first scan
+           ;; does not (the hub's re-review of #1074).
+           (when (folder-watcher-recursive fw)
+             (%scan fw (lambda (file) (%consider fw file (%state fw file)))
+                    (concatenate 'string name "/"))))
           (t
            (%pend fw name state)
            (when (eq state :missing)
@@ -295,6 +335,7 @@ error from the caller's function cannot leave the table half changed."
              pending)
     (dolist (name done) (remhash name pending))
     ;; A pending name that turned out to be a directory: scan it, as a raw event for it does.
+    ;; %TOUCH does nothing more for it when the watch is not recursive.
     (dolist (name directories) (%touch fw name))
     (dolist (event (nreverse events))
       (apply #'%emit fw event))
@@ -304,17 +345,20 @@ error from the caller's function cannot leave the table half changed."
       (setf (folder-watcher-timer-running fw) nil)
       (uv:stop-timer (folder-watcher-timer fw)))))
 
+
+
 (defun %rescan (fw)
   "A raw event with no filename: something under the folder changed. Every file whose state
-differs from what was last reported, and every reported file now missing, is touched."
-  (let ((seen (%table)))
+differs from what was last reported, and every reported file now missing, goes in the pending
+table, without restarting the quiet period of one already there unchanged."
+  (let ((seen (%table))
+        (reported (folder-watcher-reported fw)))
     (%scan fw (lambda (name)
                 (setf (gethash name seen) t)
-                (unless (equal (%state fw name) (gethash name (folder-watcher-reported fw)))
-                  (%touch fw name))))
+                (%consider fw name (%state fw name))))
     (maphash (lambda (name state) (declare (ignore state))
-               (unless (gethash name seen) (%touch fw name)))
-             (folder-watcher-reported fw))))
+               (unless (gethash name seen) (%consider fw name :missing)))
+             reported)))
 
 (defun %on-raw-event (fw events filename)
   (declare (ignore events))
@@ -322,7 +366,8 @@ differs from what was last reported, and every reported file now missing, is tou
     (if (null filename)
         (%rescan fw)
         ;; Windows reports a file under a subfolder of a recursive watch with backslashes.
-        (let ((name (substitute #\/ #\\ filename)))
+        ;; Elsewhere a backslash is an ordinary character in a name (Copilot's review of #1074).
+        (let ((name (if (uiop:os-windows-p) (substitute #\/ #\\ filename) filename)))
           (unless (ignored-p name (folder-watcher-patterns fw))
             (%touch fw name))))))
 
@@ -342,7 +387,8 @@ STOP-FOLDER-WATCH.
 SETTLE is the number of seconds a file's size and modification time must stay the same before
 it is reported. IGNORE is :DEFAULTS (+SYNC-LITTER+) or a list of patterns, strings or functions
 of the relative name, which may include :DEFAULTS. RECURSIVE watches subfolders too, where the
-operating system can (macOS and Windows; see this file's header for Linux). With REPORT-EXISTING,
+operating system can (macOS and Windows; see this file's header for Linux). A folder in it that
+cannot be listed is tried again on each tick, and its files are reported once it can be. With REPORT-EXISTING,
 every file already in the folder is reported once it is quiet for SETTLE seconds; otherwise
 those files are only remembered, and reported when they change.
 
@@ -362,12 +408,16 @@ not missed. As with AION/UV:WATCH, call this before the loop thread runs or on t
                       (%on-raw-event fw events filename))
                     ;; libuv honours :RECURSIVE on macOS and Windows only (aion/uv/watch.lisp).
                     :recursive (and recursive (or (uiop:os-macosx-p) (uiop:os-windows-p)))))
-    (%scan fw (lambda (name)
-                (let ((state (%state fw name)))
-                  (cond (report-existing (%pend fw name state))
-                        ((consp state) (setf (gethash name (folder-watcher-reported fw)) state))
-                        ;; Unreadable now: let it settle, and be reported, once it can be read.
-                        ((eq state :unknown) (%pend fw name state))))))
+    ;; An error in the first scan, such as from an ignore function the caller gave, reaches the
+    ;; caller, who then has no watcher to stop: the watch and timer made above are closed first,
+    ;; so a failed WATCH-FOLDER leaves nothing on the loop (the hub's re-review of #1074).
+    (handler-bind ((error (lambda (e) (declare (ignore e)) (stop-folder-watch fw))))
+      (%scan fw (lambda (name)
+                  (let ((state (%state fw name)))
+                    (cond (report-existing (%pend fw name state))
+                          ((consp state) (setf (gethash name (folder-watcher-reported fw)) state))
+                          ;; Unreadable now: let it settle, and be reported, once it can be read.
+                          ((eq state :unknown) (%pend fw name state)))))))
     fw))
 
 (defun stop-folder-watch (fw)
