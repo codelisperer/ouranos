@@ -84,6 +84,24 @@ that gets changed apart, and the review of #1084 found that both copies had the 
               (let ((addresses (ignore-errors (resolve-host host))))
                 (and addresses (every #'local-p addresses) t)))))))
 
+(defun %leading-zero-octet-p (host)
+  "Whether HOST looks like dotted-quad IPv4 with a leading zero in any octet, such as
+\"010.0.0.1\" (#1077, the review of #1084).
+
+AION/HTTP-CLIENT:PARSE-ADDRESS reads 010.0.0.1 as 10.0.0.1, and some stacks read a leading zero
+as octal instead, which would make the address this check approved a different address from the
+one connected to. Rather than decide which reading is right, such a host is refused: nobody
+writes a leading zero on purpose."
+  (let ((parts '()) (start 0))
+    (loop for dot = (position #\. host :start start)
+          do (push (subseq host start (or dot (length host))) parts)
+             (unless dot (return))
+             (setf start (1+ dot)))
+    (let ((parts (nreverse parts)))
+      (and (= 4 (length parts))
+           (every (lambda (p) (and (plusp (length p)) (every #'digit-char-p p))) parts)
+           (some (lambda (p) (and (> (length p) 1) (char= #\0 (char p 0)))) parts)))))
+
 (defun %check-api-base (base)
   "Signal CONFIGURATION-ERROR unless BASE is a URL this provider may send credentials to (#1077).
 
@@ -93,33 +111,43 @@ first send, so the failure arrives where the configuration is. THE NAME IS RESOL
 MOMENT, once: a provider made while a name resolved locally is not re-checked if the name later
 resolves elsewhere.
 
-WHAT IS CHECKED, AND WHY EACH PART IS HERE RATHER THAN ONLY THE OBVIOUS ONE. The first version of
-this check parsed the base with a parser of its own and judged the scheme and host it found. The
-review of #1084 broke it with \"http://[::1]@evil.com/x\", where that parser returned the host
-\"::1\" while quri -- which is what dexador parses with -- reads the host as evil.com and
-\"[::1]\" as userinfo. The equivalent rule in HERMES/BLOB then turned out to have two further
-holes of the same kind (#1089), and each one was a case the previous fix's docstring had quietly
-assumed away. So:
+NO REFUSAL HERE EVER ECHOES THE BASE, OR QURI'S ERROR TEXT. The base may contain a password --
+that is one of the things being refused -- and these reports reach logs and terminals. The first
+version printed the base with ~S in every branch, and the parse-failure branch also appended
+quri's error, which quotes the URI again, so a base of
+\"https://AC1:PASSWORD@api.example.com/...\" put the password in the report twice (the review of
+#1084). Each refusal names the setting and the specific problem, and the host when one was read.
+
+WHAT IS CHECKED, AND WHY EACH PART IS HERE RATHER THAN ONLY THE OBVIOUS ONE. The first version
+parsed the base with a parser of its own and judged what it found; the review of #1084 broke it
+with \"http://[::1]@evil.com/x\", where that parser returned the host \"::1\" while quri -- which
+is what dexador parses with -- reads the host as evil.com and \"[::1]\" as userinfo. The
+equivalent rule in HERMES/BLOB then turned out to have two further holes of the same kind
+(#1089), each a case the previous fix had quietly assumed away. So:
 
   - the base is parsed with QURI, the parser that will parse the request;
-  - the scheme must be http or https. Only refusing plaintext http is not enough: for
+  - the scheme must be http or https. Refusing only plaintext http is not enough: for
     \"evil.com://127.0.0.1\" quri reads the scheme \"evil.com\" and the host 127.0.0.1, which a
     check looking only for \"http\" lets through;
-  - userinfo is refused outright, whatever the scheme and host. Twilio's API takes none, so
-    there is nothing to weigh against refusing it, and its only effects here are to hide the
-    real host from a reader and to defeat this check;
+  - userinfo is refused outright, whatever the scheme and host;
   - a query or a fragment is refused, because the request's path is appended to this value and
     would land inside them;
+  - a bracketed IPv6 host is refused, because such a base cannot send: usocket:socket-connect
+    answers NS-HOST-NOT-FOUND-ERROR for \"[::1]\" while \"::1\" resolves. An earlier test of mine
+    asserted that such a base was accepted, which was a claim about a configuration that could
+    never have delivered a message;
+  - an IPv4 host with a leading zero in an octet is refused (%LEADING-ZERO-OCTET-P);
   - plaintext http is allowed only to a host this machine or network can reach by itself;
   - and finally the URL THE REQUEST IS ACTUALLY BUILT FROM is parsed, by calling
-    %TWILIO-ENDPOINT, and its scheme and host must be the ones just approved. That last step is
-    the one the hermes/blob holes would all have failed: there, the string checked and the string
-    built were different, and every fix that did not compare them left another way through."
+    %TWILIO-ENDPOINT, and its scheme and host must be the ones just approved. No input is known
+    to reach that branch now that the checks above refuse everything that could change the host
+    -- appending a path cannot -- so it is a guard against a future change to %TWILIO-ENDPOINT
+    rather than against any base. It is kept for that reason and has no test, because there is
+    nothing left to feed it."
   (let* ((uri (handler-case (quri:uri base)
-                (error (e)
+                (error ()
                   (error 'configuration-error
-                         :missing (format nil "a Twilio API-BASE that parses as a URL. ~S did not: ~A"
-                                          base e)))))
+                         :missing "a Twilio API-BASE that parses as a URL. The value given does not, and it is not repeated here because it may contain a password"))))
          (scheme (quri:uri-scheme uri))
          (host (quri:uri-host uri)))
     (flet ((refuse (why)
@@ -127,30 +155,26 @@ assumed away. So:
                     :missing (format nil "a Twilio API-BASE such as ~A. ~A"
                                      +twilio-api-base-default+ why))))
       (when (quri:uri-userinfo uri)
-        ;; The base is NOT echoed here, unlike every other message in this function: the part
-        ;; being complained about is a user name and password, and this text reaches a log or a
-        ;; terminal. The host is what the operator needs in order to see what went wrong.
-        (refuse (format nil "the value carries a user name or password before an \"@\", which Twilio's API does not use and which hides the host a request would go to. That host is ~S."
-                        host)))
+        (refuse (format nil "The value carries a user name or password before an \"@\", which Twilio's API does not use and which hides the host a request would reach. That host is ~S." host)))
       (unless (and scheme (or (string-equal scheme "https") (string-equal scheme "http")))
-        (refuse (format nil "~S has the scheme ~S. Only http and https are sent; another scheme means the host this check reads is not the host a request would reach."
-                        base scheme)))
+        (refuse (format nil "The scheme is ~S. Only http and https are sent, and another scheme means the host this check reads is not the host a request would reach." scheme)))
       (unless host
-        (refuse (format nil "~S has no host." base)))
+        (refuse "The value has no host."))
       (when (or (quri:uri-query uri) (quri:uri-fragment uri))
-        (refuse (format nil "~S carries a query or a fragment. The rest of each request's path is appended to this value, so it would end up inside them."
-                        base)))
+        (refuse "The value carries a query or a fragment, and the rest of each request's path is appended to it, so the path would end up inside them."))
+      (when (and (plusp (length host)) (char= #\[ (char host 0)))
+        (refuse (format nil "The host ~S is a bracketed IPv6 address, which cannot be connected to: it is looked up as a name and no such name exists. Write the address without brackets, or use a name." host)))
+      (when (%leading-zero-octet-p host)
+        (refuse (format nil "The host ~S has a leading zero in an octet. Some stacks read that as octal, so the address checked here need not be the address connected to; write it without leading zeros." host)))
       (when (and (string-equal scheme "http") (not (%local-host-p host)))
-        (refuse (format nil "the host ~S would receive the account SID and auth token in the clear, because every request carries them in an Authorization header. Use https, or a host only this machine or this network can reach."
-                        host)))
-      ;; The string the request is built from, not the string that was configured.
-      (let* ((built (handler-case (quri:uri (%twilio-endpoint base "ACprobe"))
-                      (error () nil))))
+        (refuse (format nil "The host ~S would receive the account SID and auth token in the clear, because every request carries them in an Authorization header. Use https, or a host only this machine or this network can reach." host)))
+      (let ((built (handler-case (quri:uri (%twilio-endpoint base "ACprobe"))
+                     (error () nil))))
         (unless (and built
                      (equal (quri:uri-host built) host)
                      (and (quri:uri-scheme built) (string-equal (quri:uri-scheme built) scheme)))
-          (refuse (format nil "a request built from ~S would go to ~S over ~S, which is not the ~S over ~S this check approved."
-                          base (and built (quri:uri-host built)) (and built (quri:uri-scheme built))
+          (refuse (format nil "A request built from this value would go to ~S over ~S, which is not the ~S over ~S this check approved."
+                          (and built (quri:uri-host built)) (and built (quri:uri-scheme built))
                           host scheme)))))))
 
 (defmethod initialize-instance :after ((p twilio) &key)

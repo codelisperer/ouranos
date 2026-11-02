@@ -133,6 +133,9 @@ so an unset timeout has always meant dexador's own default, and that default is 
 (`*default-connect-timeout*` in dexador's src/util.lisp). Measured against a socket that accepts
 a connection and never answers: 10.0 seconds, with both timeouts NIL.
 
+THIS DOES NOT COVER NAME RESOLUTION. It bounds the connect itself, and a name that takes a long
+time to resolve, or hangs, is not bounded by it (#1077, the review of #1084).
+
 So this changes no behaviour. What it changes is that the figure is hermes's, written down and
 settable, instead of a number inside a dependency that an upgrade could move without anyone
 here noticing. Setting this, or passing :CONNECT-TIMEOUT to a provider's constructor, now wins
@@ -143,6 +146,12 @@ for ever.")
   "Seconds a backend waits for a provider's answer once the connection was made (#1077). Ten,
 for the reason in *SEND-CONNECT-TIMEOUT*: it is what dexador already did, so nothing changes for
 an app that sets nothing.
+
+THIS IS A LIMIT ON EACH SOCKET READ, NOT ON THE WHOLE RESPONSE. It is the socket's receive
+timeout, so it is reset every time a byte arrives: a provider that sends one byte every nine
+seconds holds DELIVER for as long as it cares to, and no setting here ends that. Bounding a whole
+response needs a deadline around the call, which is an app's to impose (#1077, the review of
+#1084).
 
 A send that is cut off here has reached the provider, and raising this is a judgement about
 responsiveness against failing a send that would have been answered. An app that wants to wait

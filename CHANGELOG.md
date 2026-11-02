@@ -1153,6 +1153,11 @@ its tag.
   `*send-read-timeout*`; the default is not raised for everyone, because a hung provider would
   then hold `deliver` longer than it does today. A send cut off by the read timeout **may still
   have been delivered**, because the request reached the provider.
+  **What these two do not bound.** The read timeout is the socket's receive timeout, so it limits
+  each read and is reset whenever a byte arrives: a provider that sends one byte every nine
+  seconds holds `deliver` for as long as it likes, and no setting here ends that. The connect
+  timeout bounds the connect and not name resolution. Putting a limit on a whole send remains an
+  app's to impose.
 - **hermes: `make-twilio` takes `:api-base`, and refuses a base that a request should not carry
   Twilio credentials to** (#1077). It defaults to `https://api.twilio.com/2010-04-01` and exists so a test or
   a local mock can be pointed at. Unlike every other Twilio setting it has **no environment
@@ -1164,8 +1169,15 @@ its tag.
   actually built from, whose scheme and host must be the ones the check approved. Refused: a
   scheme that is not `http` or `https`, any userinfo (whatever the scheme and host, since
   Twilio's API uses none and it hides the real host), a query or fragment (the request's path is
-  appended to this value and would land inside them), no host, and plaintext `http` to a host
-  this machine or network cannot reach by itself. **The host is resolved once, when the provider
+  appended to this value and would land inside them), no host, a bracketed IPv6 host (such a base
+  cannot send: the brackets are looked up as a name), an IPv4 host with a leading zero in an
+  octet (some stacks read that as octal, so the address checked need not be the one connected
+  to), and plaintext `http` to a host this machine or network cannot reach by itself. No refusal
+  repeats the value, because it may hold a password.
+  **What this does not cover.** A plaintext request judged local still goes through `HTTPS_PROXY`
+  or `HTTP_PROXY` if one is set, because dexador applies its proxy default and nothing here
+  passes `:proxy`; that is #1091 and it affects `hermes/blob`'s plaintext store the same way.
+  `make-sendgrid`'s `:endpoint` has no check at all, which is #1092. **The host is resolved once, when the provider
   is made**, so a provider built while a name resolved locally is not re-checked if that name
   later resolves elsewhere.
   The local-host rule is `aion/http-client:address-category` as used by `hermes/blob` for S3

@@ -165,46 +165,67 @@ that sets nothing. The point of the settings is that the figure is hermes's and 
     (is (eql 7 (h:sendgrid-read-timeout (h:make-sendgrid :api-key "k")))
         "the special is the default, so changing it changes providers made afterwards")))
 
-(test a-plaintext-twilio-api-base-is-refused-unless-the-host-is-local
-  "#1077: every Twilio request carries the account SID and auth token in an Authorization header,
-so an http base to a remote host sends them in the clear. Refused when the provider is made, not
-at the first send, so the failure arrives where the configuration is."
-  (dolist (base '("http://api.twilio.com/2010-04-01"
-                  "http://example.com"
-                  "http://8.8.8.8/2010-04-01"
-                  "http://[2001:4860:4860::8888]/x"
-                  ;; The review of #1084 and the three holes the same rule had in hermes/blob
-                  ;; (#1089). Each of these was accepted by some earlier version of this check.
-                  "http://[::1]@evil.com/x"        ; quri reads the host as evil.com
-                  "http://[::1]:80@evil.com/x"
-                  "http://user:pw@evil.com"
-                  "https://[::1]@evil.com/x"       ; userinfo is refused over https too
-                  "https://[::1]@127.0.0.1/x"      ; and even when the host IS local
-                  "evil.com://127.0.0.1"           ; a scheme that is neither http nor https
-                  "api.twilio.com/2010-04-01"      ; no scheme at all
-                  "//evil.com/x"
-                  "https://api.twilio.com/x?q=1"   ; the request path would land in the query
-                  "https://api.twilio.com/x#f"))
-    (let ((c (handler-case (progn (h:make-twilio :account-sid "a" :auth-token "t" :api-base base)
-                                  nil)
-               (h:configuration-error (e) e))))
-      (is-true c "a plaintext base to a remote host is refused: ~S" base)))
-  ;; Accepted: https anywhere, and plaintext to a host only this machine or network can reach.
-  (dolist (base '("https://api.twilio.com/2010-04-01"
-                  "https://example.com"
-                  "http://localhost:4010"
-                  "http://127.0.0.1:4010/2010-04-01"
-                  "http://[::1]:4010"
-                  "http://10.0.0.5/2010-04-01"
-                  "http://192.168.1.9:8080"
-                  "http://169.254.10.10"))
-    (is-true (h:twilio-api-base (h:make-twilio :account-sid "a" :auth-token "t" :api-base base))
-             "accepted: ~S" base))
-  ;; The control that the refusal is about the scheme and the host together, not about either
-  ;; alone: the same remote host over https is fine, and the same plaintext scheme is fine
-  ;; locally. Without this pair, a check that refused everything would pass the list above.
-  (is-true (h:make-twilio :account-sid "a" :auth-token "t"
-                          :api-base "https://api.twilio.com/2010-04-01")
-           "control: https to the same remote host that http was refused for")
-  (is-true (h:make-twilio :account-sid "a" :auth-token "t" :api-base "http://127.0.0.1:1/x")
-           "control: http to a local host, the same scheme that was refused remotely"))
+(defun %api-base-refusal (base)
+  "The report of the CONFIGURATION-ERROR that refusing BASE produced, or NIL if it was accepted."
+  (handler-case (progn (h:make-twilio :account-sid "ACx" :auth-token "t" :api-base base) nil)
+    (h:configuration-error (e) (princ-to-string e))))
+
+(test a-twilio-api-base-is-refused-for-the-reason-it-deserves
+  "#1077 and the reviews of #1084 and #1089. Every Twilio request carries the account SID and
+auth token in an Authorization header, so where a request goes is where those go.
+
+EACH CASE ASSERTS WHICH CHECK REFUSED IT, not merely that something did. A list of bases that all
+signal the same condition would pass if one check were doing all the work, and that is how a
+refusal written for one reason comes to be relied on for another (the review of #1084).
+
+NO NETWORK: every host here is an IP literal or a name under .invalid, which cannot resolve, so
+nothing in this test depends on DNS answering. Two earlier cases used example.com and
+api.twilio.com, which did resolve, contradicting this file's own header."
+  (dolist (case '(("https://AC1:pw@api.example.invalid/x" . "user name or password")
+                  ("http://user:pw@host.invalid" . "user name or password")
+                  ("http://[::1]@host.invalid/x" . "user name or password")
+                  ("https://[::1]@127.0.0.1/x" . "user name or password")
+                  ("evil.invalid://127.0.0.1" . "The scheme is")
+                  ("api.twilio.invalid/2010-04-01" . "The scheme is")
+                  ("//host.invalid/x" . "The scheme is")
+                  ("https://api.example.invalid/x?q=1" . "query or a fragment")
+                  ("https://api.example.invalid/x#f" . "query or a fragment")
+                  ("http://[::1]:4010" . "bracketed IPv6")
+                  ("http://010.0.0.1:4010" . "leading zero")
+                  ("http://8.8.8.8" . "in the clear")
+                  ("http://host.invalid" . "in the clear")))
+    (let ((report (%api-base-refusal (car case))))
+      (is-true report "~S is refused" (car case))
+      (is-true (and report (search (cdr case) report))
+               "~S is refused for ~S, and the report says so: ~A" (car case) (cdr case) report)))
+  ;; A password must not appear in any refusal, however the base is shaped. The parse-failure
+  ;; branch used to print the base and then quri's error text, which quotes the URI again, so a
+  ;; password appeared twice (the review of #1084).
+  (dolist (base (list "https://AC1:tOpS3cret@api.example.invalid/2010-04-01"
+                      "https://AC1:tOpS3cret with spaces@api.example.invalid/x"
+                      "https://AC1:tOpS3cret\"@api.example.invalid/x"
+                      "https://AC1:tOpS3cret<@api.example.invalid/x"
+                      "http://AC1:tOpS3cret@127.0.0.1:4010"))
+    (let ((report (%api-base-refusal base)))
+      (is-true report "~S is refused" base)
+      (is-false (and report (search "tOpS3cret" report))
+                "and its report does not contain the password: ~A" report)))
+  ;; The controls: every legitimate base is accepted, and the URL a request is built from
+  ;; addresses the host that was approved.
+  (dolist (case '(("https://api.twilio.invalid/2010-04-01"
+                   . "https://api.twilio.invalid/2010-04-01/Accounts/ACx/Messages.json")
+                  ("http://localhost:4010" . "http://localhost:4010/Accounts/ACx/Messages.json")
+                  ("http://127.0.0.1:4010/2010-04-01"
+                   . "http://127.0.0.1:4010/2010-04-01/Accounts/ACx/Messages.json")
+                  ("http://10.0.0.5" . "http://10.0.0.5/Accounts/ACx/Messages.json")
+                  ("http://192.168.1.9:8080" . "http://192.168.1.9:8080/Accounts/ACx/Messages.json")
+                  ("http://169.254.10.10" . "http://169.254.10.10/Accounts/ACx/Messages.json")))
+    (let ((p (h:make-twilio :account-sid "ACx" :auth-token "t" :api-base (car case))))
+      (is (string= (cdr case) (hermes::%twilio-endpoint (h:twilio-api-base p) "ACx"))
+          "~A is accepted and builds ~A" (car case) (cdr case))))
+  ;; And the pair that shows the plaintext rule is about the scheme and the host together: the
+  ;; same remote host over https is fine, and the same plaintext scheme is fine locally.
+  (is-false (%api-base-refusal "https://api.twilio.invalid/2010-04-01")
+            "control: https to a remote host that http was refused for")
+  (is-false (%api-base-refusal "http://127.0.0.1:1/x")
+            "control: http to a local host, the same scheme refused remotely"))
