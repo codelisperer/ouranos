@@ -699,6 +699,79 @@ which is what it read before #1130: A still names the build path and does not lo
                                out)))))
               (aion/fs:delete-tree tree :if-does-not-exist :ignore)))))))
 
+(test a-library-reached-through-a-symbolic-link-is-relinked-by-its-source-path
+  "Review of #1137: as with Homebrew's /opt/homebrew/lib/libzstd.dylib, A names B by a symbolic
+link, app/libfixb.dylib, while B's real file is app/libfixb.1.dylib and its install name is that
+real file. So neither A's load command nor its file name matches the install name recorded for
+the carried B. The build directory is kept while RELINK-BUNDLE runs, so the load command
+resolves on this machine to the file B was copied from, and that is the match that points A at
+libfixb.1.dylib. The control is RELINK-BUNDLE with the record empty: A still names the link."
+  (let ((why (%relink-skip-reason)))
+    (if why
+        (skip why)
+        (let* ((tree (%fresh-tree))
+               (app (ensure-directories-exist (merge-pathnames "app/" tree)))
+               (bundle (ensure-directories-exist (merge-pathnames "bundle/" tree)))
+               (origins (find-symbol "*CARRIED-ORIGINS*" "OURANOS-CARRY"))
+               (quiet (make-broadcast-stream)))
+          (%load-carry-natives)
+          (progv (list origins) (list '())
+            (unwind-protect
+                 (let* ((link (merge-pathnames "libfixb.dylib" app))
+                        (real (merge-pathnames "libfixb.1.dylib" app))
+                        (carried-a (merge-pathnames "libfixa.dylib" bundle))
+                        (carried-b (merge-pathnames "libfixb.1.dylib" bundle)))
+                   (flet ((tool-ok (&rest args)
+                            (eql 0 (nth-value 2 (uiop:run-program
+                                                 args :ignore-error-status t
+                                                      :output nil :error-output nil))))
+                          (a-links ()
+                            (uiop:run-program (list "otool" "-L"
+                                                    (uiop:native-namestring carried-a))
+                                              :output :string :ignore-error-status t)))
+                     (if (not (and (%dylib-pair app)
+                                   (rename-file link real)
+                                   (tool-ok "install_name_tool" "-id" (uiop:native-namestring real)
+                                        (uiop:native-namestring real))
+                                   (tool-ok "codesign" "--force" "-s" "-"
+                                        (uiop:native-namestring real))
+                                   (tool-ok "ln" "-s" "libfixb.1.dylib"
+                                        (uiop:native-namestring link))))
+                         (fail "the fixture dylibs were not built")
+                         (progn
+                           (%write (merge-pathnames "LICENSE" app) "test license")
+                           (uiop:copy-file real carried-b)
+                           (funcall (%carry-fn "STAMP-INSTALL-NAME") carried-b
+                                    :report quiet :source real)
+                           (is (equal (uiop:native-namestring real)
+                                      (second (first (symbol-value origins))))
+                               "the recorded install name is not B's real file: ~S"
+                               (symbol-value origins))
+                           (funcall (%carry-fn "CARRY-DECLARED-LIBRARIES")
+                                    (list (merge-pathnames "libfixa.dylib" app)) bundle
+                                    :report quiet)
+                           (is (search (uiop:native-namestring link) (a-links))
+                               "A does not name B by the link, so this tests nothing:~%~A"
+                               (a-links))
+                           ;; The control: the same relink without the record.
+                           (progv (list origins) (list '())
+                             (funcall (%carry-fn "RELINK-BUNDLE") bundle :report quiet))
+                           (is (search (uiop:native-namestring link) (a-links))
+                               "control: without the record A no longer names the link:~%~A"
+                               (a-links))
+                           (let ((report (make-string-output-stream)))
+                             (funcall (%carry-fn "RELINK-BUNDLE") bundle :report report)
+                             (is (search (format nil "~A now names @loader_path/libfixb.1.dylib"
+                                                 (uiop:native-namestring link))
+                                         (get-output-stream-string report))
+                                 "the relink was not reported"))
+                           (is (search "@loader_path/libfixb.1.dylib" (a-links))
+                               "A does not name the carried B:~%~A" (a-links))
+                           (aion/fs:delete-tree app)
+                           (let ((out (%load-carried carried-a)))
+                             (is (search "FIXA 43" out)
+                                 "A did not load after RELINK-BUNDLE:~%~A" out))))))
+              (aion/fs:delete-tree tree :if-does-not-exist :ignore)))))))
 (defun %with-failing-install-name-tool (function)
   "Call FUNCTION with PATH starting at a fresh directory whose `install_name_tool' prints the
 error it gives when a header has no room for a longer name, and exits 1."
