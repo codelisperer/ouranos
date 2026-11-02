@@ -20,6 +20,33 @@ its tag.
   reading `delivery-failure-status` can now match on the class, and read
   `delivery-rate-limited-retry-after` for the wait the response asked for. Telegram and Facebook
   already signalled it; every backend does now.
+
+- **A plaintext request to a local host is no longer sent through a proxy** (#1091, #1082).
+  dexador sets its proxy from `HTTPS_PROXY` or `HTTP_PROXY` when it loads and honours no
+  `NO_PROXY`, and nothing here passed `:proxy`, so a caller that had checked its destination was
+  local — hermes for a Twilio `api-base`, `hermes/blob` for an S3 endpoint — could still have its
+  credentials carried off the machine in the clear, because the bytes went to the proxy rather
+  than to the host that was checked. An `http` request to `localhost` or to a loopback, private
+  or link-local **address** is now sent with `:proxy nil`, by
+  `aion/http-client:proxy-arguments`, which **every** sender uses: `send-request` and
+  `hermes/blob`'s S3 backend, which calls dexador directly.
+  **An app that deliberately proxied plaintext requests to a local host will see them stop going
+  through the proxy.** https is unaffected, because a proxied https request is a `CONNECT` tunnel
+  and the credentials are inside TLS, and plaintext to a host that is not local is unaffected.
+  **A DNS NAME IS NOT COVERED, AND THAT CASE IS STILL OPEN.** A plaintext store or provider whose
+  host is a name — a Compose service such as `minio:9000`, or any name resolving to a loopback or
+  private address — is approved by the configuration-time check and then **still uses a configured
+  proxy**, so its requests go to that proxy in the clear, with the signed `Authorization` header
+  and any session token. That is **#1091**, which this does not close.
+  The send-time decision resolves no name on purpose: a lookup there is a blocking resolution
+  that `connect-timeout` does not cover, and a name that answers private now can answer public at
+  connect time, which would skip a configured egress proxy on the strength of a resolution that
+  no longer holds. The fix is for the configuration-time verdict to be carried to the send rather
+  than recomputed, which is what #1091 proposes. Until it lands, an app that must not send through
+  a proxy should address a local store **by IP address**, which is covered. Clearing the
+  environment variables works only before the image loads dexador, because it reads them once
+  into `dexador:*default-proxy*` when it loads (`defvar`, so unsetting them later changes
+  nothing); setting that variable to `nil` is the runtime equivalent.
 - **hermes/blob: an S3 endpoint that carries a user name or password is now refused when the
   store is made** (#1089). `MNEMOSYNE_S3_ENDPOINT` values such as `user:pw@host` or
   `[::1]@host` signal `blob-configuration-error`. An app that put userinfo in that variable has
@@ -1223,6 +1250,29 @@ its tag.
   `contrib-load-failure-p`, `contrib-failure-lines` and `explain-contrib-failure`.
 
 ### Added
+
+- **`aion/http-client:local-host-p` and `aion/http-client:url-host` are exported** (#1082).
+  `local-host-p` takes a host name or an IP address in text and says whether only this machine or
+  this network can reach it, which is the one question a caller must answer before sending
+  credentials in the clear. `url-host` reads a URL's host with `quri`, the parser dexador parses
+  a request URL with, and strips the brackets from an IPv6 host so the result can go straight to
+  `parse-address`.
+  **Both were written twice before this**, in hermes core for a Twilio `api-base` and in
+  `hermes/blob` for an S3 endpoint, and the two copies acquired different holes: a bracketed IPv6
+  address in the userinfo got past one, a scheme inside the endpoint got past the other, and a
+  bucket label in front of the host got past both (#1089, and the review of #1084). Both callers
+  now use these.
+  **`local-host-p` does not treat a 6to4 or NAT64 address as local**, although
+  `address-category` reports each by the IPv4 address it carries, so `2002:7f00:1::` and
+  `64:ff9b::7f00:1` are `:loopback` there. That is the right conservative answer for a guard
+  deciding whether a destination may be reached at all, and the wrong one here, because both
+  reach the IPv4 address through a relay or gateway that need not be this network's.
+  `address-category` is unchanged. **Nor is a host spelled as dotted-quad IPv4 with a leading
+  zero**, such as `010.8.8.8`: that is the one IPv4 spelling where this tree's parser and the
+  system resolver can disagree — the parser reads it as `10.8.8.8` and calls it private — and the
+  connection follows the resolver. Other non-canonical spellings (`127.1`, `0x7f.0.0.1`,
+  `2130706433`) are **kept**, because they go to the system resolver, which is the same resolver
+  the connection uses, so there is no second parser to disagree with.
 
 - **hermes: how long a send waits is now hermes's own setting, `*send-connect-timeout*` and
   `*send-read-timeout*`, both 10 seconds** (#1077). Each provider also takes `:connect-timeout`

@@ -162,6 +162,153 @@ address (IPv4-mapped, NAT64, 6to4) is classified by the IPv4 address it carries,
                         when (%in-prefix-p a prefix bits) return category)
                   :public))))))
 
+(defun %6to4-p (address)
+  "Whether ADDRESS is a 6to4 address, 2002::/16. Such an address carries an IPv4 address, and
+ADDRESS-CATEGORY classifies it by that inner address, so 2002:7f00:1:: reports :LOOPBACK. That
+is the conservative answer for a guard deciding whether a destination may be reached at all,
+which is what ADDRESS-CATEGORY is for. It is the WRONG answer for a decision about whether a
+destination is local, because 6to4 traffic reaches its destination through a public relay, so
+LOCAL-HOST-P excludes these (#1082, the review of #1084)."
+  (let ((a (parse-address address)))
+    (and a (= 16 (length a)) (%in-prefix-p a #(32 2 0 0 0 0 0 0 0 0 0 0 0 0 0 0) 16) t)))
+
+(defun url-host (url)
+  "URL's host, without brackets and without a port: \"http://[::1]:9000/x\" gives \"::1\". NIL when
+URL has no host or cannot be parsed.
+
+QURI is used because it is the parser dexador parses a request URL with, so a caller asking this
+asks the same question of the same parser rather than of one of its own. It returns an IPv6 host
+with its brackets, as the URL carries them, and every caller wants the address itself, because
+that is what PARSE-ADDRESS and ADDRESS-CATEGORY read.
+
+Both hermes core and hermes/blob had written this, and both had holes: see #1089 and the review
+of #1084. It is here because it belongs next to the primitives it feeds, and because one copy
+can be fixed once."
+  (let* ((uri (ignore-errors (quri:uri url)))
+         (host (and uri (quri:uri-host uri))))
+    (if (and host (> (length host) 1)
+             (char= #\[ (char host 0))
+             (char= #\] (char host (1- (length host)))))
+        (subseq host 1 (1- (length host)))
+        host)))
+
+(defun %nat64-p (address)
+  "Whether ADDRESS is NAT64: the well-known prefix 64:ff9b::/96, or the local-use 64:ff9b:1::/48
+of RFC 8215. Such an address carries an IPv4 address and ADDRESS-CATEGORY reports it by that, so
+64:ff9b::7f00:1 reads :LOOPBACK.
+
+EXCLUDED FROM LOCAL-HOST-P for the same reason as 6to4: reaching the IPv4 address means going
+through a NAT64 gateway, which is frequently the carrier's rather than this network's, so the
+bytes leave the machine and the network whatever the inner address says (#1082, the review of
+#1094). ADDRESS-CATEGORY is left alone, because a guard deciding whether a destination may be
+reached at all wants the conservative answer."
+  (let ((a (parse-address address)))
+    (and a (= 16 (length a))
+         (or (%in-prefix-p a #(0 100 255 155 0 0 0 0 0 0 0 0 0 0 0 0) 96)
+             (%in-prefix-p a #(0 100 255 155 0 1 0 0 0 0 0 0 0 0 0 0) 48))
+         t)))
+
+(defun %leading-zero-quad-p (host)
+  "Whether HOST is dotted-quad IPv4 with a leading zero in an octet, such as \"010.0.0.1\".
+
+REFUSED BY LOCAL-HOST-P, because this is the one IPv4 spelling where PARSE-ADDRESS and the
+system resolver can disagree: PARSE-ADDRESS reads 010.8.8.8 as 10.8.8.8 and calls it private,
+while a resolver reading the leading zero as octal gets something else, and the connection
+follows the resolver. Rather than decide which reading is right, a host spelled this way is not
+local (#1082, the review of #1094).
+
+THE OTHER NON-CANONICAL SPELLINGS ARE DELIBERATELY NOT REFUSED. \"127.1\", \"0x7f.0.0.1\" and
+\"2130706433\" all fail PARSE-ADDRESS, so LOCAL-HOST-P hands them to RESOLVE-HOST -- the same
+system resolver the connection will use -- and takes the answer it gives. There is no
+disagreement to guard against there, because only one parser is involved."
+  (and (stringp host)
+       (let ((parts '()) (start 0))
+         (loop for dot = (position #\. host :start start)
+               do (push (subseq host start (or dot (length host))) parts)
+                  (unless dot (return))
+                  (setf start (1+ dot)))
+         (let ((parts (nreverse parts)))
+           (and (= 4 (length parts))
+                (every (lambda (p) (and (plusp (length p)) (every #'digit-char-p p))) parts)
+                (some (lambda (p) (and (> (length p) 1) (char= #\0 (char p 0)))) parts))))))
+
+(defun %local-address-p (address)
+  "Whether ADDRESS, an octet vector or text, is one this machine or this network reaches by
+itself: loopback, private or link-local, and neither 6to4 nor NAT64."
+  (and (not (%6to4-p address))
+       (not (%nat64-p address))
+       (member (address-category address) '(:loopback :private :link-local))
+       t))
+
+(defun local-host-p (host)
+  "Whether HOST names something only this machine or this network can reach, so sending it
+requests in plaintext does not put them on the public internet. HOST is a name or an IP address
+in text, without brackets or a port -- see URL-HOST.
+
+\"localhost\" counts, without a lookup. An IP address counts when ADDRESS-CATEGORY says
+:LOOPBACK, :PRIVATE or :LINK-LOCAL, except for a 6to4 (%6TO4-P) or NAT64 (%NAT64-P) address,
+each of which reaches its destination through a gateway or relay that need not be this
+network's, whatever IPv4 address it carries. A host spelled as dotted-quad IPv4 with a leading
+zero is refused outright (%LEADING-ZERO-QUAD-P), and so is an empty or blank HOST, whose
+meaning to a resolver is platform-dependent. Any other name is resolved,
+and counts only when it resolves and EVERY address it resolves to is one of those, so a Docker
+Compose service name works while a name pointing at the internet does not. A name that does not
+resolve does not count: a host that cannot be reached is not a host known to be local.
+
+THE NAME IS RESOLVED HERE AND NOW, once. A caller that asks this when it is configured, as
+hermes and hermes/blob do, has an answer about that moment and not a standing guarantee.
+
+WHY THIS IS IN AION RATHER THAN IN EACH CALLER. hermes core wrote it for a Twilio API base and
+hermes/blob for an S3 endpoint, and the two copies acquired different holes -- a bracketed IPv6
+userinfo got past one, a scheme in the endpoint got past the other, and a bucket label in front
+of the host got past both (#1089, the review of #1084). A rule that decides whether credentials
+may travel in the clear is the last rule that should exist twice (#1082)."
+  (and host
+       ;; A HOST HAS TO BE A HOST. An empty or blank string is refused before anything resolves
+       ;; it, because what a resolver makes of one differs by platform: on Linux
+       ;; usocket:get-hosts-by-name "" signals NS-HOST-NOT-FOUND-ERROR, so this answered NIL,
+       ;; while on Windows getaddrinfo resolves an empty node name to the loopback address, so
+       ;; this answered T -- truthfully about where Windows would connect, and wrongly about
+       ;; whether a caller has a host at all. Measured: the Windows leg of run 41388319932
+       ;; failed exactly this check while the other three legs passed (#1082).
+       (plusp (length (string-trim '(#\Space #\Tab #\Newline #\Return) host)))
+       (not (%leading-zero-quad-p host))
+       (or (string-equal host "localhost")
+           (let ((literal (parse-address host)))
+             (if literal
+                 (%local-address-p literal)
+                 (let ((addresses (ignore-errors (resolve-host host))))
+                   (and addresses (every #'%local-address-p addresses) t)))))))
+
+(defun proxy-arguments (url)
+  "The dexador keyword arguments that say how URL is to be proxied: (:PROXY NIL) for a plaintext
+request to a host this machine reaches by itself, and no arguments otherwise (#1091).
+
+EVERY CALLER THAT SENDS A REQUEST MUST USE THIS, including one that calls dexador directly.
+dexador sets *DEFAULT-PROXY* from HTTPS_PROXY or HTTP_PROXY when it loads and honours no
+NO_PROXY, so a caller that has checked its destination is local can still have its credentials
+carried off the machine in the clear, because the bytes go to the proxy rather than to the host
+that was checked. The first version of this lived inside %DEX-ARGS, which meant hermes/blob's
+S3 backend was NOT covered -- it calls dexador directly -- while the CHANGELOG and a comment
+both said it was (the review of #1094).
+
+NO NAME IS RESOLVED HERE. The decision is made for \"localhost\" and for IP literals only, and a
+DNS name keeps whatever proxy is configured. Two reasons. A lookup on this path would be a
+blocking resolution on every plaintext request, which CONNECT-TIMEOUT does not cover. And a name
+that answers private now can answer public at connect time, which would mean skipping a
+configured egress proxy on the strength of a resolution that no longer holds; deciding by name
+belongs at configuration time, where hermes and hermes/blob do it and where a wrong answer is a
+refusal rather than a silently unproxied request."
+  (let* ((uri (ignore-errors (quri:uri url)))
+         (scheme (and uri (quri:uri-scheme uri)))
+         (host (and uri (url-host url))))
+    (if (and scheme (string-equal scheme "http") host
+             (or (string-equal host "localhost")
+                 (let ((literal (parse-address host)))
+                   (and literal (not (%leading-zero-quad-p host)) (%local-address-p literal)))))
+        (list :proxy nil)
+        '())))
+
 (defun resolve-host (host)
   "The addresses HOST resolves to, as octet vectors; NIL when it does not resolve. A host that is
 an IP address in text resolves to itself."

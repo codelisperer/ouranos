@@ -77,7 +77,10 @@ than quietly fall through to a default."
   (:use #:cl #:fiveam)
   (:local-nicknames (#:b #:hermes/blob)
                     (#:k #:hermes/blob-key)
-                    (#:tk #:hermes/blob/tests-key))
+                    (#:tk #:hermes/blob/tests-key)
+                    ;; RESOLVE-HOST, stubbed to show that a malformed endpoint is refused before
+                    ;; any name is looked up (#1082, the review of #1094).
+                    (#:http #:aion/http-client))
   (:export #:run-tests))
 
 (in-package #:hermes/blob/tests)
@@ -2429,6 +2432,90 @@ anything looks at it."
   (dolist (endpoint '("local host:9000" "127.0.0.1 :9000"))
     (signals b:blob-configuration-error
       (b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x" :endpoint endpoint))))
+
+(test a-plaintext-store-sends-with-no-proxy
+  "#1091 and the review of #1094. The first fix for #1091 put the decision inside
+AION/HTTP-CLIENT's %DEX-ARGS, and THIS BACKEND NEVER GOES THROUGH IT: %S3-REQUEST calls dexador
+directly. So a plaintext store at a local endpoint still sent its signed requests, and any
+session token, to whatever HTTPS_PROXY named -- while the CHANGELOG, the commit message and a
+comment in aion all said hermes/blob was covered. The decision is now
+AION/HTTP-CLIENT:PROXY-ARGUMENTS and both senders use it.
+
+The assertion is on what dexador is GIVEN, not on what a request returns: a fixture whose proxy
+is unreachable would pass for the wrong reason."
+  (let ((seen '())
+        (original (fdefinition 'dex:request)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'dex:request)
+                 (lambda (url &rest args)
+                   (push (list url (if (member :proxy args) (list :proxy (getf args :proxy)) :none))
+                         seen)
+                   (error "stopped before sending")))
+           (with-environment-variable ("MNEMOSYNE_S3_SECURE" "false")
+             (let ((store (b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x"
+                                           :endpoint "127.0.0.1:9000" :path-style t)))
+               (ignore-errors (b:get-blob store "bkt" "k"))))
+           (with-environment-variable ("MNEMOSYNE_S3_SECURE" nil)
+             (let ((store (b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x"
+                                           :endpoint "s3.amazonaws.com")))
+               (ignore-errors (b:get-blob store "bkt" "k")))))
+      (setf (fdefinition 'dex:request) original))
+    (let ((calls (reverse seen)))
+      (is (= 2 (length calls)) "both requests reached dexador: ~S" calls)
+      (is (equal '(:proxy nil) (second (first calls)))
+          "the plaintext local request is sent with :proxy nil: ~S" (first calls))
+      (is (eq :none (second (second calls)))
+          "and the https one keeps whatever proxy is configured: ~S" (second calls)))))
+
+(test no-endpoint-refusal-repeats-the-endpoint
+  "The review of #1094. Every branch of %CHECK-ENDPOINT-SHAPE printed the endpoint with ~S, so an
+endpoint carrying a password put it in the report -- and these reports reach logs. The same
+mistake had been fixed in hermes core's Twilio check one review earlier and this copy was missed,
+which is what two copies of a rule do even after one of them is corrected."
+  (dolist (endpoint (list "AKIA:hunter2@127.0.0.1:9000"
+                          "http://u:hunter2@127.0.0.1"
+                          "hunter2@127.0.0.1:9000"
+                          "127.0.0.1:9000/hunter2"
+                          (format nil "127.0.0.1:9000~Chunter2" #\Space)))
+    (let ((report (handler-case
+                      (progn (b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x"
+                                              :endpoint endpoint)
+                             nil)
+                    (b:blob-configuration-error (e) (princ-to-string e)))))
+      (is-true report "~S is refused" endpoint)
+      (is-false (and report (search "hunter2" report))
+                "and its report does not repeat the value: ~A" report))))
+
+(test the-endpoint-is-judged-before-any-name-is-looked-up
+  "The review of #1090: the shape and userinfo checks sat below %SECURE-SETTING, which calls
+%LOCAL-ENDPOINT-P and so resolves a name, meaning a malformed endpoint went to a resolver before
+being refused. It failed safe, since the store was never built, but a value about to be rejected
+should not be sent to a resolver first.
+
+The assertion is on whether RESOLVE-HOST was reached, not on the refusal, which would have passed
+before the change too."
+  (let ((looked-up '())
+        (original (fdefinition 'http:resolve-host)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'http:resolve-host)
+                 (lambda (host) (push host looked-up) (funcall original host)))
+           (with-environment-variable ("MNEMOSYNE_S3_SECURE" "false")
+             (dolist (endpoint '("evil.invalid://127.0.0.1" "u:pw@127.0.0.1:9000"
+                                 "127.0.0.1:9000/bucket" "http://127.0.0.1:9000"))
+               (signals b:blob-configuration-error
+                 (b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x"
+                                  :path-style t :endpoint endpoint)))
+             (is (null looked-up)
+                 "no name was looked up while refusing malformed endpoints: ~S" looked-up)
+             ;; The control: a well-formed endpoint that needs a verdict DOES reach the resolver,
+             ;; so the assertion above is about ordering and not about the stub being unreachable.
+             (ignore-errors (b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x"
+                                             :path-style t :endpoint "minio.invalid:9000"))
+             (is-true (member "minio.invalid" looked-up :test #'string=)
+                      "control: a well-formed name is looked up: ~S" looked-up)))
+      (setf (fdefinition 'http:resolve-host) original))))
 
 (test an-endpoint-that-is-not-a-bare-host-and-port-is-refused
   "#1089's second bypass, from the adversarial review of #1090. The request URL is the scheme,
