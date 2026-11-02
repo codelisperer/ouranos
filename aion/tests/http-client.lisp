@@ -2263,3 +2263,150 @@ use; that path has its own tests."
               "public.example"
               (lambda () (http:proxy-arguments "http://public.example/x"))))
       "control: the internal binding still grants it"))
+
+(defun %hops-for (url target &key (headers '(("Authorization" . "Bearer secret")
+                                             ("Cookie" . "session=secret")
+                                             ("Content-Type" . "application/json")))
+                                  (method :post) (follow 5))
+  "Send one request that is answered with a 307 to TARGET, and return what dexador was given for
+each hop: a list of (url . headers), in order.
+
+THE STUB ANSWERS DEXADOR'S OWN CONVENTION -- (values body status headers) with a hash-table of
+lowercased header names -- because that is what %HTTP-ONCE reads. The assertion downstream is on
+the SECOND entry: the first hop is identical whatever the fix does."
+  (let ((seen '())
+        (original (fdefinition 'dex:request)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'dex:request)
+                 (lambda (u &rest args)
+                   (push (cons u (getf args :headers)) seen)
+                   (if (= 1 (length seen))
+                       (values "" 307 (let ((h (make-hash-table :test #'equal)))
+                                        (setf (gethash "location" h) target)
+                                        h))
+                       (values "done" 200 (make-hash-table :test #'equal)))))
+           (http:send-request (http:make-request :method method :url url :headers headers
+                                                 :follow-redirects follow)
+                              '()))
+      (setf (fdefinition 'dex:request) original))
+    (reverse seen)))
+
+(defun %carried (hop name)
+  (cdr (assoc name (cdr hop) :test #'string-equal)))
+
+(test a-cross-origin-redirect-does-not-carry-the-credential
+  "#1139. dexador follows a redirect to a DIFFERENT host by recursing into its own REQUEST with
+the same arguments and the same headers -- it prepends a new Host and keeps the rest, in the
+cross-host branch of src/backend/usocket.lisp -- so an Authorization header built for one host
+was delivered to whatever a 3xx named. Nothing in this tree would have noticed: the configuration
+checks in #1077, #1092 and #1106 check the base a request is sent TO, which is the right thing to
+check and a different thing from where a redirect then leads.
+
+THE ASSERTION IS ON WHAT THE SECOND REQUEST CARRIED, not on whether the request succeeded. A
+fixture whose redirect target is unreachable would pass for the wrong reason, because the first
+hop looks identical either way.
+
+BOTH DIRECTIONS, and the same-origin one is why this is not simply `stop following redirects': an
+API that renames a path answers 301 and expects the credential to follow it. Origin is scheme,
+host and port, so a change in any of the three drops the headers -- including a hop from https to
+http on the same host, which is the one a reader is most likely to assume is safe."
+  ;; A hop to another host: the credential headers are gone, the others stay.
+  (let ((hops (%hops-for "https://api.example.com/v1/x" "https://evil.example/collect")))
+    (is (= 2 (length hops)) "both hops reached dexador: ~S" hops)
+    (is (equal "Bearer secret" (%carried (first hops) "authorization"))
+        "the first hop carries the credential, as it must: ~S" (first hops))
+    (is-false (%carried (second hops) "authorization")
+              "and the second does not: ~S" (second hops))
+    (is-false (%carried (second hops) "cookie")
+              "nor the cookie: ~S" (second hops))
+    (is (equal "application/json" (%carried (second hops) "content-type"))
+        "while a header that is not a credential survives: ~S" (second hops))
+    (is (equal "https://evil.example/collect" (car (second hops)))
+        "and the hop went where the Location said: ~S" (second hops)))
+  ;; A hop within the same origin keeps them.
+  (let ((hops (%hops-for "https://api.example.com/v1/x" "https://api.example.com/v2/x")))
+    (is (equal "Bearer secret" (%carried (second hops) "authorization"))
+        "a same-origin redirect keeps the credential: ~S" (second hops))
+    (is (equal "session=secret" (%carried (second hops) "cookie"))
+        "and the cookie: ~S" (second hops)))
+  ;; A relative Location is resolved against the URL it came from, and stays same-origin.
+  (let ((hops (%hops-for "https://api.example.com/v1/x" "/v2/x")))
+    (is (equal "https://api.example.com/v2/x" (car (second hops)))
+        "a relative Location is merged with the URL it came from: ~S" (second hops))
+    (is (equal "Bearer secret" (%carried (second hops) "authorization"))
+        "and is still the same origin, so the credential follows: ~S" (second hops)))
+  ;; THE THREE PARTS OF AN ORIGIN, each on its own. The scheme and port cases are the ones a
+  ;; reader is most likely to think safe, because the host has not changed.
+  (dolist (case '(("https://api.example.com/v1/x" . "http://api.example.com/v1/x")
+                  ("https://api.example.com/v1/x" . "https://api.example.com:8443/v1/x")
+                  ("https://api.example.com/v1/x" . "https://other.example.com/v1/x")))
+    (let ((hops (%hops-for (car case) (cdr case))))
+      (is-false (%carried (second hops) "authorization")
+                "~A -> ~A is a different origin, so the credential is dropped: ~S"
+                (car case) (cdr case) (second hops))))
+  ;; A request with no credential is left on dexador's own path: one call, with the redirect
+  ;; followed inside dexador rather than here.
+  (let ((hops (%hops-for "https://api.example.com/v1/x" "https://evil.example/collect"
+                         :headers '(("Content-Type" . "application/json")))))
+    (is (= 1 (length hops))
+        "a request carrying no credential is not followed hop by hop here: ~S" hops))
+  ;; And FOLLOW-REDIRECTS NIL still returns the 3xx itself rather than following it.
+  (let ((hops (%hops-for "https://api.example.com/v1/x" "https://evil.example/collect"
+                         :follow nil)))
+    (is (= 1 (length hops)) "follow-redirects NIL follows nothing: ~S" hops)))
+
+(test a-redirect-chain-is-bounded-and-changes-method-as-dexador-does
+  "#1139, the two properties the hop loop has to preserve now that it is this client's loop
+rather than dexador's.
+
+THE CAP IS THE REQUEST'S OWN FOLLOW-REDIRECTS, counted in hops, so a server answering a redirect
+for ever cannot keep this going. THE METHOD CHANGES ON 301, 302 AND 303 and is kept on 307 and
+308, which is what dexador does, what browsers do, and the entire reason 307 and 308 exist; a
+loop that silently turned a POST into a GET on a 307, or kept a POST on a 303, would be a
+different client than the one every caller was written against."
+  (let ((seen '())
+        (original (fdefinition 'dex:request)))
+    (unwind-protect
+         (progn
+           ;; A server that always redirects, to a new path each time.
+           (setf (fdefinition 'dex:request)
+                 (lambda (u &rest args)
+                   (push (list u (getf args :method)) seen)
+                   (values "" 307 (let ((h (make-hash-table :test #'equal)))
+                                    (setf (gethash "location" h)
+                                          (format nil "https://api.example.com/~D" (length seen)))
+                                    h))))
+           (http:send-request
+            (http:make-request :method :post :url "https://api.example.com/start"
+                               :headers '(("Authorization" . "Bearer secret"))
+                               :follow-redirects 3)
+            '()))
+      (setf (fdefinition 'dex:request) original))
+    (is (= 4 (length seen))
+        "a cap of 3 makes 4 requests in all -- the first and three hops: ~D" (length seen))
+    (is (every (lambda (call) (eq :post (second call))) seen)
+        "and a 307 keeps the method throughout: ~S" (reverse seen)))
+  ;; 303 turns a POST into a GET; 307 does not. Asserted on what the second hop was given.
+  (dolist (case '((303 . :get) (302 . :get) (301 . :get) (307 . :post) (308 . :post)))
+    (let ((seen '())
+          (original (fdefinition 'dex:request)))
+      (unwind-protect
+           (progn
+             (setf (fdefinition 'dex:request)
+                   (lambda (u &rest args)
+                     (push (list u (getf args :method)) seen)
+                     (if (= 1 (length seen))
+                         (values "" (car case)
+                                 (let ((h (make-hash-table :test #'equal)))
+                                   (setf (gethash "location" h) "https://api.example.com/next")
+                                   h))
+                         (values "done" 200 (make-hash-table :test #'equal)))))
+             (http:send-request
+              (http:make-request :method :post :url "https://api.example.com/start"
+                                 :headers '(("Authorization" . "Bearer secret"))
+                                 :follow-redirects 5)
+              '()))
+        (setf (fdefinition 'dex:request) original))
+      (is (eq (cdr case) (second (second (reverse seen))))
+          "a ~D sends the next hop as ~S: ~S" (car case) (cdr case) (reverse seen)))))
