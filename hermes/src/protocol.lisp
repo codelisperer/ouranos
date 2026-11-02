@@ -130,12 +130,17 @@ bot has a webhook set."))
 CREDENTIAL says what would travel -- \"the account SID and auth token\", \"the API key\" -- and
 APPENDS-PATH says whether the backend appends a path to VALUE.
 
-ONE CHECK FOR EVERY BACKEND THAT SENDS A CREDENTIAL TO A CONFIGURED URL, rather than one per
-backend. hermes had this written once, for Twilio's API base in #1077, and hermes/blob had the
-locality half written again for an S3 endpoint; between them the two copies acquired three
-different holes, each a case the other's fix had already closed (#1089, and the reviews of #1084
-and #1090). SendGrid had no check at all, which is #1092. Writing it a third time by hand was
-the bet that produced the first two.
+ONE CHECK FOR TWILIO'S API-BASE AND SENDGRID'S ENDPOINT. Those two, and no others yet: Telegram's
+api-base, Facebook's graph-base, Stripe's api-base and HERMES/BLOB's S3 endpoint do NOT call this,
+and blob keeps its own copy of the locality half. Bringing them here is #1106. An earlier version
+of this docstring said it was one check for \"every backend that sends a credential to a
+configured URL\", which was false when it was written (the review of #1104).
+
+The reason for sharing even two: hermes had this written once, for Twilio's API base in #1077, and
+hermes/blob had the locality half written again for an S3 endpoint; between them the two copies
+acquired three different holes, each a case the other's fix had already closed (#1089, and the
+reviews of #1084 and #1090). SendGrid had no check at all, which is #1092. Writing it a third
+time by hand was the bet that produced the first two.
 
 NO REFUSAL REPEATS VALUE, OR QURI'S ERROR TEXT. The value may carry a password -- that is one of
 the things refused -- and these reports reach logs and terminals. An earlier version printed it
@@ -165,6 +170,16 @@ What is refused, and why each is here rather than only the obvious one:
 The host is resolved at the moment this runs, once. A provider made while a name resolved
 locally is not re-checked if that name later resolves elsewhere -- and a plaintext request to a
 host approved by NAME still uses a configured proxy, which is #1091."
+  ;; CONTROL CHARACTERS ARE REFUSED FIRST, before the value is parsed. A newline in a URL is the
+  ;; shape of a header injection -- "http://127.0.0.1/x\nHost: evil.example" -- and although the
+  ;; credential would still have gone only to the local host, a value that cannot appear in a URL
+  ;; has no reading worth arguing about. Refusing it removes the question rather than answering
+  ;; it (the review of #1104).
+  (when (and (stringp value)
+             (some (lambda (c) (let ((n (char-code c))) (or (< n 32) (= n 127)))) value))
+    (error 'configuration-error
+           :missing (format nil "a ~A without control characters in it. The value contains at least one, and it is not repeated here because it may contain a password"
+                            setting)))
   (let* ((uri (handler-case (quri:uri value)
                 (error ()
                   (error 'configuration-error

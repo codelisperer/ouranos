@@ -295,8 +295,54 @@ all signal the same condition would pass if one check were doing all the work."
                (h:sendgrid-endpoint (h:make-sendgrid :api-key "SG.key")))
       "the default endpoint still makes a provider"))
 
+(test a-configured-url-is-checked-on-reinitialize-too
+  "The review of #1104. The check hung off INITIALIZE-INSTANCE :AFTER, which
+REINITIALIZE-INSTANCE does not call, so a provider could be made with a good URL and then pointed
+somewhere else:
+
+  (reinitialize-instance (make-instance 'hermes::sendgrid :api-key \"k\") :endpoint \"http://evil/x\")
+
+was accepted, and the next send carried the credential there in plaintext. Both backends check on
+SHARED-INITIALIZE :AFTER now, which runs for both."
+  (let ((p (h:make-sendgrid :api-key "SG.key")))
+    (signals h:configuration-error
+      (reinitialize-instance p :endpoint "http://evil.invalid/v3/mail/send"))
+    ;; The control: a legitimate endpoint still reinitializes, so the refusal is about the value
+    ;; and not about REINITIALIZE-INSTANCE having been closed off.
+    (reinitialize-instance p :endpoint "http://127.0.0.1:4010/v3/mail/send")
+    (is (string= "http://127.0.0.1:4010/v3/mail/send" (h:sendgrid-endpoint p))
+        "control: a local endpoint is accepted on reinitialize"))
+  (let ((p (h:make-twilio :account-sid "ACx" :auth-token "t")))
+    (signals h:configuration-error
+      (reinitialize-instance p :api-base "http://evil.invalid/2010-04-01"))
+    (reinitialize-instance p :api-base "http://127.0.0.1:4010/2010-04-01")
+    (is (string= "http://127.0.0.1:4010/2010-04-01" (h:twilio-api-base p))
+        "control: and the same for Twilio")))
+
+(test a-control-character-in-a-configured-url-is-refused
+  "The review of #1104 found that \"http://127.0.0.1/x\" with a newline and a Host: line after it
+was accepted. The credential would still have gone only to the local host, so this was not an
+escape, but a value that cannot appear in a URL has no reading worth arguing about: refusing it
+removes the question instead of answering it."
+  (dolist (bad (list (format nil "http://127.0.0.1:4010/x~CHost: evil.invalid" #\Newline)
+                     (format nil "http://127.0.0.1:4010/x~C" #\Return)
+                     (format nil "http://127.0.0.1:4010/~Cx" #\Tab)
+                     (format nil "http://127.0.0.1:4010/~Cx" (code-char 0))
+                     (format nil "http://127.0.0.1:4010/~Cx" (code-char 127))))
+    (dolist (refusal (list (%sendgrid-refusal bad) (%api-base-refusal bad)))
+      (is-true refusal "a control character is refused")
+      (is-true (and refusal (search "control characters" refusal))
+               "and the report says which check refused it: ~A" refusal)))
+  ;; The control: the same URL without the control character is accepted by both.
+  (is-false (%sendgrid-refusal "http://127.0.0.1:4010/x") "control: the clean URL is accepted")
+  (is-false (%api-base-refusal "http://127.0.0.1:4010/x") "by both backends"))
+
 (test the-credential-url-check-is-one-check-for-both-backends
-  "#1092's reason for existing. The locality half of this rule was written twice -- hermes core
+  "#1092's reason for existing. TWO BACKENDS, not every backend: Telegram, Facebook, Stripe and
+hermes/blob do not call this yet, which is #1106, and an earlier version of this file's prose
+claimed otherwise (the review of #1104).
+
+The locality half of this rule was written twice -- hermes core
 for a Twilio API base, hermes/blob for an S3 endpoint -- and the two copies acquired three
 different holes between them, each a case the other's fix had already closed (#1089, and the
 reviews of #1084 and #1090). SendGrid had no check at all. A third hand-written copy would have

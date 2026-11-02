@@ -1244,16 +1244,6 @@ its tag.
 
 ### Added
 
-- **hermes: one check for every backend that sends a credential to a configured URL** (#1092).
-  Twilio's `api-base` and SendGrid's `:endpoint` now share `%check-credential-url`, which takes
-  the setting's name, an example, what credential would travel, and whether the backend appends a
-  path to the value. Each report still names its own setting and credential, so an operator is
-  told which variable to fix and what would have gone to the wrong host.
-  **Why one and not three.** The locality half of this rule was written twice — hermes core for a
-  Twilio `api-base`, `hermes/blob` for an S3 endpoint — and the two copies acquired three
-  different holes between them, each a case the other's fix had already closed (#1089, and the
-  reviews of #1084 and #1090). A third hand-written copy was the same bet. The locality rule
-  itself is `aion/http-client:local-host-p` (#1082).
 
 - **`aion/http-client:local-host-p` and `aion/http-client:url-host` are exported** (#1082).
   `local-host-p` takes a host name or an IP address in text and says whether only this machine or
