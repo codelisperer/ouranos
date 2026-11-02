@@ -90,17 +90,16 @@ REPOSITORY-CLOSED if it has been closed."
 /.git/ itself, and on Windows it cannot resolve the doubled separator a trailing one leaves
 (\"failed to resolve path 'C:/.../dir//.git/'\", #470's first Windows run). POSIX realpath
 accepts it, which is why macOS and Linux never showed this. A drive root such as C:\\ keeps
-its separator. A string is a native name already and is used as it is: parsing it as a Lisp
-namestring dropped a backslash on Linux and macOS and read [ ] * ? as wildcard syntax (#1096). A
-pathname is given its native name directly, not through UIOP:ENSURE-DIRECTORY-PATHNAME, whose
-FILE-NAMESTRING escapes those same characters in the last name."
-  (let ((name (if (stringp directory)
-                  directory
-                  (uiop:native-namestring (translate-logical-pathname directory)))))
+its separator. The name is AION/PATH:NATIVE-NAME's (#1103): a string is used as it is, because
+parsing it as a Lisp namestring dropped a backslash on Linux and macOS and read [ ] * ? as wildcard
+syntax (#1096), and a pathname is given its native name directly, not through
+UIOP:ENSURE-DIRECTORY-PATHNAME, whose FILE-NAMESTRING escapes those same characters in the last
+name."
+  (let ((name (path:native-name directory)))
     (loop while (and (> (length name) 1)
                      ;; A backslash is a separator only on Windows; elsewhere a name can end in
                      ;; one, and trimming it named the sibling without it (Copilot on #1101).
-                     (member (char name (1- (length name))) #+win32 '(#\/ #\\) #-win32 '(#\/))
+                     (path:separator-p (char name (1- (length name))))
                      (not (and (= (length name) 3) (char= (char name 1) #\:))))
           do (setf name (subseq name 0 (1- (length name)))))
     name))
@@ -116,8 +115,7 @@ does not exist, and return it open. On a directory that is already a repository,
 reinitialises it, which changes nothing that is already there."
   (ensure-loaded)
   (let ((path (%directory-namestring directory)))
-    (ensure-directories-exist
-     (uiop:parse-native-namestring (concatenate 'string path #+win32 "\\" #-win32 "/")))
+    (ensure-directories-exist (path:directory-pathname path))
     (cffi:with-foreign-object (out :pointer)
       (%check "git_repository_init" (%repository-init out path 0))
       (%wrap out))))

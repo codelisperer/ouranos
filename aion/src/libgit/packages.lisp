@@ -3,6 +3,7 @@
 
 (cl:defpackage #:aion/libgit
   (:use #:cl)
+  (:local-nicknames (#:path #:aion/path))
   (:documentation
    "Versioned history for the framework, over the libgit2 that scripts/build-libgit2.lisp
     builds from libgit2.pin. Opt-in: nothing that loads aion gets a native library from this
