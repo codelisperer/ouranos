@@ -2,9 +2,9 @@
 ;;;;
 ;;;; Each test loads scripts/bake-contribs.lisp in a fresh sbcl, because REQUIRE of a contrib
 ;;;; this image already has returns at once and could not fail. The failing cases are a
-;;;; contrib that does not exist, and a real contrib with SBCL_HOME pointing at an empty
-;;;; directory, which is what a Windows bootstrap would meet if SBCL looked for its contribs in
-;;;; the wrong place. The control for both is the real list under the real home.
+;;;; contrib that does not exist, and a real contrib with SBCL_HOME pointing at a home whose
+;;;; contrib/ directory is empty, which is what a bootstrap would meet if SBCL looked for its
+;;;; contribs in the wrong place. The control for both is the real list under the real home.
 
 (in-package #:checkers/tests)
 
@@ -62,9 +62,15 @@ Now it exits 1 and names the contrib, the SBCL version and SBCL_HOME."
 (test a-real-contrib-under-an-empty-sbcl-home-stops-the-dump
   "A contrib SBCL cannot find because SBCL_HOME points at the wrong directory. sb-sprof is not
 loaded by --non-interactive, so the child really has to find it on disk. Run with this SBCL's
-own home it loads, which is the control."
+own home it loads, which is the control.
+
+The home has an empty contrib/ directory. SBCL uses SBCL_HOME only when it holds contrib/, and
+otherwise falls back to the home beside its runtime (SB-IMPL::%SBCL-HOMEDIR-PATHNAME, SBCL
+2.6.9). With a directory holding nothing, the Linux and Windows legs fell back to the real
+install and loaded sb-sprof; macOS failed only because Homebrew's runtime has no home beside it."
   (let ((empty (%fresh-tree))
         (form "(ouranos-bake:bake-contribs-or-die \"t\" \"img\" '(:sb-sprof))"))
+    (ensure-directories-exist (merge-pathnames "contrib/" empty))
     (multiple-value-bind (code output) (%bake-child form :sbcl-home empty)
       (is (= 1 code) "exit was ~D~%~A" code output)
       (is (search "sb-sprof:" output) "~A" output)
