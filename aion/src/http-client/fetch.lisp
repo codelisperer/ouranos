@@ -355,33 +355,51 @@ CHAIN), both for the caller to free. A directory is refused: aion/tls reads one 
    (timed-out :initform nil :accessor %timed-out)))
 
 #+os-windows
+(defun %watch-fire (s state)
+  "What %CALL-WATCHED's timer does when it fires: when STATE, a cons whose car is the read's
+state, is still :READING, claim it as :FIRED, mark S timed out and close its socket. When the
+read has already claimed it as :DONE, do nothing, so a timer that fires between the read's
+return and its unscheduling cannot end a read that finished (#1063)."
+  (when (eq :reading (sb-ext:compare-and-swap (car state) :reading :fired))
+    (setf (%timed-out s) t)
+    (ignore-errors (usocket:socket-close (%watched-socket s)))))
+
+#+os-windows
 (defun %call-watched (s thunk)
   "Call THUNK, a read from S's inner stream. When the read would wait, a timer closes S's socket
-after S's seconds; a read woken that way signals SB-SYS:IO-TIMEOUT."
+after S's seconds; a read woken that way signals SB-SYS:IO-TIMEOUT.
+
+A read that returns is never reported as a timeout (#1063). The read and the timer each try to
+move one state from :READING, with COMPARE-AND-SWAP, and only the one that moves it acts: a
+read that finishes first leaves the timer nothing to do, even if it fires before it is
+unscheduled; a timer that fires first closes the socket. When the read still returns after
+that, its result is returned, and the closed socket makes the next read signal the timeout."
   (if (listen (%inner s))
       (funcall thunk)
-      ;; THREAD-LIFETIME: a timer made with :THREAD T starts its thread only when it fires.
-      ;; That thread sets the flag, closes the socket and ends. A read that finishes first
-      ;; unschedules the timer below, and then no thread is made.
-      ;; INTERRUPTS: not needed -- SBCL makes the thread, which runs one socket close and ends.
-      (let ((timer (sb-ext:make-timer
-                    (lambda ()
-                      (setf (%timed-out s) t)
-                      (ignore-errors (usocket:socket-close (%watched-socket s))))
-                    :thread t :name "aion/http-client read timeout")))
+      (let* ((state (list :reading))
+             ;; THREAD-LIFETIME: a timer made with :THREAD T starts its thread only when it
+             ;; fires. That thread claims the state, closes the socket and ends. A read that
+             ;; finishes first unschedules the timer below, and then no thread is made.
+             ;; INTERRUPTS: not needed -- SBCL makes the thread, which runs one socket close and
+             ;; ends.
+             (timer (sb-ext:make-timer (lambda () (%watch-fire s state))
+                                       :thread t :name "aion/http-client read timeout")))
         (sb-ext:schedule-timer timer (%watch-seconds s))
-        (let ((result (unwind-protect (%unless-timed-out s thunk)
-                        (sb-ext:unschedule-timer timer))))
-          (when (%timed-out s)
+        (multiple-value-bind (result returned)
+            (unwind-protect (%unless-timed-out s thunk)
+              (sb-ext:compare-and-swap (car state) :reading :done)
+              (sb-ext:unschedule-timer timer))
+          (unless returned
             (error 'sb-sys:io-timeout :stream s :direction :input :seconds (%watch-seconds s)))
           result))))
 
 #+os-windows
 (defun %unless-timed-out (s thunk)
-  "Call THUNK. When it fails because the timer closed the socket, return NIL, so the caller
-signals the timeout instead of whatever the closed socket reported."
-  (handler-case (funcall thunk)
-    (error (e) (if (%timed-out s) nil (error e)))))
+  "Call THUNK and return (VALUES its-value T). When it fails because the timer closed the socket,
+on this read or an earlier one, return (VALUES NIL NIL), so the caller signals the timeout
+instead of whatever the closed socket reported."
+  (handler-case (values (funcall thunk) t)
+    (error (e) (if (%timed-out s) (values nil nil) (error e)))))
 
 #+os-windows
 (defmethod sb-gray:stream-read-byte ((s %idle-watched-stream))
