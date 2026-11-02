@@ -44,7 +44,7 @@
            #:carry-declared-libraries
            #:carry-refused
            #:open-carried-libraries #:runtime-directory
-           #:stamp-install-name
+           #:stamp-install-name #:relink-bundle
            #:sqlite-file-name
            #:tree-sqlite-carry))
 
@@ -243,22 +243,32 @@ where the copy is, beside the executable, and the form the runtime's own load co
 machine and is left as it is. Changing the install name invalidates the signature, and arm64
 does not load an invalidly signed dylib, so FILE is re-signed with `codesign --force -s -'.
 
-Signals CARRY-REFUSED when install_name_tool or codesign fails."
+When install_name_tool cannot set the new name, FILE is left as it was, with its signature
+intact, a warning naming the reason goes to REPORT, and this returns NIL. That happens when the
+header has no room for the longer name, for a dylib linked with a short absolute install name
+and without -headerpad_max_install_names. The stamp only removes a build-machine path that
+nothing loads the copy by, so the bundle still works without it (#958's review).
+
+Signals CARRY-REFUSED when FILE is a Mach-O that otool cannot read (%OTOOL), and when codesign
+cannot re-sign FILE after its install name changed."
   (when (and *stamp* (uiop:os-macosx-p))
     (let ((id (%install-name file))
           (path (uiop:native-namestring file)))
       (when (and id (plusp (length id)) (char= (char id 0) #\/))
         (let ((new (concatenate 'string "@executable_path/" (file-namestring file))))
           (multiple-value-bind (out code) (%run-tool (list "install_name_tool" "-id" new path))
-            (unless (eql code 0)
-              (error 'carry-refused :path file
-                                    :reason (format nil "install_name_tool could not set its install name to ~A: ~A" new out))))
-          (multiple-value-bind (out code) (%run-tool (list "codesign" "--force" "-s" "-" path))
-            (unless (eql code 0)
-              (error 'carry-refused :path file
-                                    :reason (format nil "codesign could not re-sign it after its install name changed: ~A" out))))
-          (format report "~&            install name is now ~A~%" new)
-          new)))))
+            (cond
+              ((eql code 0)
+               (multiple-value-bind (out code) (%run-tool (list "codesign" "--force" "-s" "-" path))
+                 (unless (eql code 0)
+                   (error 'carry-refused :path file
+                                         :reason (format nil "codesign could not re-sign it after its install name changed: ~A" out))))
+               (format report "~&            install name is now ~A~%" new)
+               new)
+              (t
+               (format report "~&            warning: install name left as ~A, because install_name_tool could not set it to ~A: ~A~%"
+                       id new (string-trim '(#\Newline #\Space) out))
+               nil))))))))
 
 (defun %macho-dependencies (file)
   "The install names FILE's load commands name, as otool -L lists them, without FILE's own
@@ -289,36 +299,65 @@ A load command is rewritten only when it names another carried file, by resolved
 file name. System libraries and names already relative (@...) are never touched. Rewriting
 invalidates the signature, and arm64 will not load an invalidly signed dylib, so each changed
 file is re-signed with `codesign --force -s -'."
-  (let ((truenames (mapcar #'first plan))
-        (names (mapcar #'second plan)))
-    (loop for (nil name) in plan
-          for dst = (merge-pathnames name bundle)
-          for changed = nil
-          do (dolist (dep (%macho-dependencies dst))
-               (unless (or (char= (char dep 0) #\@)
-                           (uiop:string-prefix-p "/usr/lib/" dep)
-                           (uiop:string-prefix-p "/System/" dep))
-                 (let* ((dep-true (ignore-errors (probe-file dep)))
-                        (target (or (and dep-true
-                                         (let ((i (position dep-true truenames :test #'equal)))
-                                           (and i (nth i names))))
-                                    (find (file-namestring dep) names :test #'%same-file-name-p))))
-                   (when (and target (not (%same-file-name-p target name)))
-                     (multiple-value-bind (out code)
-                         (%run-tool (list "install_name_tool" "-change" dep
-                                          (format nil "@loader_path/~A" target)
-                                          (uiop:native-namestring dst)))
-                       (unless (eql code 0)
-                         (error 'carry-refused :path dst
-                                               :reason (format nil "install_name_tool could not point it at the carried ~A: ~A" target out))))
-                     (format report "~&            ~A now names @loader_path/~A~%" dep target)
-                     (setf changed t)))))
-             (when changed
-               (multiple-value-bind (out code)
-                   (%run-tool (list "codesign" "--force" "-s" "-" (uiop:native-namestring dst)))
-                 (unless (eql code 0)
-                   (error 'carry-refused :path dst
-                                         :reason (format nil "codesign could not re-sign it after relinking: ~A" out))))))))
+  (%relink-files (mapcar #'second plan) (mapcar #'first plan) (mapcar #'second plan)
+                 bundle report))
+
+(defun %relink-files (files truenames names bundle report)
+  "Rewrite the load commands of each of FILES, file names in BUNDLE, that name one of NAMES,
+the carried files' names, to @loader_path/<name>, and re-sign each file that changed, as
+%RELINK-CARRIED describes. A load command matches a name by file name, or, when TRUENAMES is
+given in the same order as NAMES, by the path it resolves to on this machine."
+  (loop for name in files
+        for dst = (merge-pathnames name bundle)
+        for changed = nil
+        do (dolist (dep (%macho-dependencies dst))
+             (unless (or (char= (char dep 0) #\@)
+                         (uiop:string-prefix-p "/usr/lib/" dep)
+                         (uiop:string-prefix-p "/System/" dep))
+               (let* ((dep-true (and truenames (ignore-errors (probe-file dep))))
+                      (target (or (and dep-true
+                                       (let ((i (position dep-true truenames :test #'equal)))
+                                         (and i (nth i names))))
+                                  (find (file-namestring dep) names :test #'%same-file-name-p))))
+                 (when (and target (not (%same-file-name-p target name)))
+                   (multiple-value-bind (out code)
+                       (%run-tool (list "install_name_tool" "-change" dep
+                                        (format nil "@loader_path/~A" target)
+                                        (uiop:native-namestring dst)))
+                     (unless (eql code 0)
+                       (error 'carry-refused :path dst
+                                             :reason (format nil "install_name_tool could not point it at the carried ~A: ~A" target out))))
+                   (format report "~&            ~A now names @loader_path/~A~%" dep target)
+                   (setf changed t)))))
+           (when changed
+             (multiple-value-bind (out code)
+                 (%run-tool (list "codesign" "--force" "-s" "-" (uiop:native-namestring dst)))
+               (unless (eql code 0)
+                 (error 'carry-refused :path dst
+                                       :reason (format nil "codesign could not re-sign it after relinking: ~A" out)))))))
+
+(defun relink-bundle (bundle &key (report *standard-output*))
+  "On macOS, relink every dylib directly in BUNDLE against every other one there, after all the
+carry steps have run, as CARRY-DECLARED-LIBRARIES relinks the libraries of one --carry list.
+Returns the list of dylib file names it read. Does nothing when *RELINK* is NIL.
+
+Why: build-desktop-app.lisp carries in three steps, the app's --carry libraries, the tree's own
+libraries and the libraries the runtime links against, and each step relinks only its own
+files. A carried library from one step can need one from another: a --carry libarchive or
+libcurl links Homebrew's libzstd, which the runtime step carries. Before #957 the carried
+libzstd kept Homebrew's path as its install name, and dyld reused the copy already open by
+that name (#334). STAMP-INSTALL-NAME now gives it @executable_path/libzstd.1.dylib, so the
+names no longer match, and on a Mac without Homebrew dyld stops with `Library not loaded'
+unless the load command is rewritten to the copy beside it (#958's review).
+
+Signals CARRY-REFUSED as %RELINK-CARRIED does."
+  (when (and *relink* (uiop:os-macosx-p))
+    (let ((names (loop for f in (uiop:directory-files bundle)
+                       for name = (file-namestring f)
+                       when (and (string-equal "dylib" (pathname-type f)) (%macho-p f))
+                         collect name)))
+      (%relink-files names nil names bundle report)
+      names)))
 
 (defun carry-declared-libraries (carries bundle &key vendor tree-carries
                                                      (report *standard-output*))

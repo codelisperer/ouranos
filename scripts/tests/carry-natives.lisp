@@ -569,6 +569,126 @@ dylib is stamped."
                          "control: the real otool reads it and the stamp runs")))
             (aion/fs:delete-tree tree :if-does-not-exist :ignore))))))
 
+;;; The stamp and the carry steps (#958's review). build-desktop-app.lisp carries in three steps,
+;;; and each relinks only its own files, so a library one step carried that needs a library
+;;; another step carried and stamped was left naming the build path. RELINK-BUNDLE runs after
+;;; all three.
+
+(defun %load-carried (file)
+  "Load FILE, a carried libfixa.dylib, in a fresh image and call fixa. Returns what the image
+printed."
+  (let ((out (make-string-output-stream)))
+    (uiop:run-program
+     (list (uiop:native-namestring sb-ext:*runtime-pathname*)
+           "--noinform" "--no-userinit" "--no-sysinit" "--non-interactive"
+           "--eval" "(require :asdf)"
+           "--eval" "(load (merge-pathnames \"quicklisp/setup.lisp\" (user-homedir-pathname)))"
+           "--eval" "(asdf:load-system :cffi)"
+           "--eval" (format nil "(cffi:load-foreign-library ~S)" (uiop:native-namestring file))
+           "--eval" "(format t \"~&FIXA ~A~%\" (cffi:foreign-funcall \"fixa\" :int))")
+     :output out :error-output out :ignore-error-status t)
+    (get-output-stream-string out)))
+
+(test a-library-carried-by-another-step-is-relinked-after-every-step
+  "#958's review: B is carried and stamped by one step, as the runtime step carries libzstd, and
+A, which needs B by B's build path, is carried by CARRY-DECLARED-LIBRARIES on its own, as a
+--carry libarchive is. With the build directory gone, A does not load until RELINK-BUNDLE has
+run, and then it loads and calls B. The load before RELINK-BUNDLE is the control."
+  (let ((why (%relink-skip-reason)))
+    (if why
+        (skip why)
+        (let* ((tree (%fresh-tree))
+               (app (ensure-directories-exist (merge-pathnames "app/" tree)))
+               (bundle (ensure-directories-exist (merge-pathnames "bundle/" tree)))
+               (quiet (make-broadcast-stream))
+               (report (make-string-output-stream)))
+          (%load-carry-natives)
+          (unwind-protect
+               (if (not (%dylib-pair app))
+                   (fail "the fixture dylibs were not built")
+                   (let ((carried-a (merge-pathnames "libfixa.dylib" bundle))
+                         (carried-b (merge-pathnames "libfixb.dylib" bundle)))
+                     (%write (merge-pathnames "LICENSE" app) "test license")
+                     (uiop:copy-file (merge-pathnames "libfixb.dylib" app) carried-b)
+                     (is (equal "@executable_path/libfixb.dylib"
+                                (funcall (%carry-fn "STAMP-INSTALL-NAME") carried-b :report quiet))
+                         "B was not stamped")
+                     (funcall (%carry-fn "CARRY-DECLARED-LIBRARIES")
+                              (list (merge-pathnames "libfixa.dylib" app)) bundle :report quiet)
+                     (aion/fs:delete-tree app)
+                     (let ((out (%load-carried carried-a)))
+                       (is (search "Library not loaded" out)
+                           "control: A loaded before RELINK-BUNDLE, so this cannot show it is needed:~%~A"
+                           out))
+                     (let ((names (funcall (%carry-fn "RELINK-BUNDLE") bundle :report report)))
+                       (is (equal '("libfixa.dylib" "libfixb.dylib") (sort (copy-list names) #'string<))
+                           "RELINK-BUNDLE read ~S" names))
+                     (is (search "now names @loader_path/libfixb.dylib" (get-output-stream-string report))
+                         "the relink was not reported")
+                     (is (eql 0 (nth-value 2 (uiop:run-program
+                                              (list "codesign" "--verify" "--strict"
+                                                    (uiop:native-namestring carried-a))
+                                              :ignore-error-status t :output nil :error-output nil)))
+                         "the relinked A does not verify")
+                     (let ((out (%load-carried carried-a)))
+                       (is (search "FIXA 43" out) "A did not load after RELINK-BUNDLE:~%~A" out))))
+            (aion/fs:delete-tree tree :if-does-not-exist :ignore))))))
+
+(defun %with-failing-install-name-tool (function)
+  "Call FUNCTION with PATH starting at a fresh directory whose `install_name_tool' prints the
+error it gives when a header has no room for a longer name, and exits 1."
+  (let* ((tree (%fresh-tree))
+         (bin (ensure-directories-exist (merge-pathnames "bin/" tree)))
+         (stub (merge-pathnames "install_name_tool" bin))
+         (path (uiop:getenv "PATH")))
+    (%write stub (format nil "#!/bin/sh~%echo 'error: install_name_tool: changing install names or rpaths can not be redone for: x (for architecture arm64) because larger updated load commands do not fit (the program must be relinked, and you may need to use -headerpad or -headerpad_max_install_names)' >&2~%exit 1~%"))
+    (uiop:run-program (list "chmod" "+x" (uiop:native-namestring stub)))
+    (setf (uiop:getenv "PATH") (concatenate 'string (uiop:native-namestring bin) ":" path))
+    (unwind-protect (funcall function)
+      (setf (uiop:getenv "PATH") path)
+      (aion/fs:delete-tree tree :if-does-not-exist :ignore))))
+
+(test a-stamp-that-does-not-fit-warns-and-leaves-the-library-as-it-was
+  "#958's review: when install_name_tool cannot set the new install name, STAMP-INSTALL-NAME
+returns NIL with a warning on its report instead of refusing the carry, and the file keeps its
+install name and a valid signature. Control: with the real install_name_tool the same file is
+stamped."
+  (let ((why (%relink-skip-reason)))
+    (if why
+        (skip why)
+        (let* ((tree (%fresh-tree))
+               (dir (ensure-directories-exist (merge-pathnames "lib/" tree)))
+               (stamp (%carry-fn "STAMP-INSTALL-NAME"))
+               (quiet (make-broadcast-stream)))
+          (unwind-protect
+               (if (not (%dylib-pair dir))
+                   (fail "the fixture dylibs were not built")
+                   (let* ((dylib (merge-pathnames "libfixa.dylib" dir))
+                          (before (uiop:run-program (list "otool" "-D" (uiop:native-namestring dylib))
+                                                    :output :string))
+                          (report (make-string-output-stream)))
+                     (%with-failing-install-name-tool
+                      (lambda ()
+                        (let ((refused nil) (result :unset))
+                          (handler-case (setf result (funcall stamp dylib :report report))
+                            (error (e) (setf refused e)))
+                          (is (null refused) "the stamp refused: ~A" refused)
+                          (is (null result) "the stamp returned ~S" result))))
+                     (let ((said (get-output-stream-string report)))
+                       (is (search "warning: install name left as" said) "no warning:~%~A" said)
+                       (is (search "do not fit" said) "the warning does not give the reason:~%~A" said))
+                     (is (equal before (uiop:run-program (list "otool" "-D" (uiop:native-namestring dylib))
+                                                         :output :string))
+                         "the install name changed")
+                     (is (eql 0 (nth-value 2 (uiop:run-program
+                                              (list "codesign" "--verify" "--strict"
+                                                    (uiop:native-namestring dylib))
+                                              :ignore-error-status t :output nil :error-output nil)))
+                         "the signature is no longer valid")
+                     (is (equal "@executable_path/libfixa.dylib" (funcall stamp dylib :report quiet))
+                         "control: the real install_name_tool stamps it")))
+            (aion/fs:delete-tree tree :if-does-not-exist :ignore))))))
+
 (test carried-dylibs-that-link-each-other-fail-without-the-relink
   "The control: the same carry with the relink off. A still names B's build path, which has
 been deleted, so A cannot load. Without this, the test above could pass on a machine where B

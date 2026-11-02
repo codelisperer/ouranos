@@ -193,7 +193,8 @@ for f in "$DIR"/*.dylib; do
     FAILED=1
     continue
   fi
-  ID=$(printf '%s\n' "$OUT" | tail -n +2)
+  # The first id only: for a universal dylib otool prints a header and an id per architecture.
+  ID=$(printf '%s\n' "$OUT" | head -n 2 | tail -n 1)
   case "$ID" in
     "")
       echo "  FAIL -- otool -D printed no install name for $(basename "$f")"

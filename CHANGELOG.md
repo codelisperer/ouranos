@@ -3417,7 +3417,14 @@ its tag.
   already relative, such as `./libpdfium.dylib`, is left as it is. When `otool` exits
   non-zero on a Mach-O, as `/usr/bin/otool` does on a Mac without the Xcode Command Line Tools,
   the build stops with `carry-refused` instead of carrying the file unchanged; the relink of
-  carried libraries that need each other stops the same way.
+  carried libraries that need each other stops the same way. When `install_name_tool` cannot
+  set the new name, because the header has no room for it, the library is carried as it was
+  and the build prints a warning. `build-desktop-app.lisp` now relinks the bundle's dylibs
+  against each other after all three carry steps, through the new
+  `ouranos-carry:relink-bundle`, because each step relinks only its own files: an app's
+  `--carry` library that links Homebrew's libzstd, such as libarchive or libcurl, would
+  otherwise have kept naming the Homebrew path once the runtime's libzstd was stamped, and
+  stopped with `Library not loaded` on a Mac without Homebrew.
   `scripts/verify-bundle-macos.sh` warns, in its new check 1b, about any carried dylib whose
   install name is an absolute path outside the bundle, and fails when it cannot read one.
 
