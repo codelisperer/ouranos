@@ -14,17 +14,23 @@ its tag.
 
 ### An app may have to act
 
-- **A plaintext request to a host this tree judges local is no longer sent through a proxy**
-  (#1091, #1082). dexador sets its proxy from `HTTPS_PROXY` or `HTTP_PROXY` when it loads and
-  honours no `NO_PROXY`, and `aion/http-client` never passed `:proxy`, so a caller that had
-  checked its destination was local — hermes for a Twilio `api-base`, `hermes/blob` for an S3
-  endpoint — could still have its credentials carried off the machine in the clear, because the
-  bytes went to the proxy rather than to the host that was checked. An `http` request to
-  `localhost`, a loopback, private or link-local address, or a name resolving only to those, is
-  now sent with `:proxy nil`. **An app that deliberately proxied plaintext requests to a local
-  host will see them stop going through the proxy.** https is unaffected, because a proxied https
-  request is a `CONNECT` tunnel and the credentials are inside TLS, and plaintext to a host that
-  is not local is unaffected too.
+- **A plaintext request to a local host is no longer sent through a proxy** (#1091, #1082).
+  dexador sets its proxy from `HTTPS_PROXY` or `HTTP_PROXY` when it loads and honours no
+  `NO_PROXY`, and nothing here passed `:proxy`, so a caller that had checked its destination was
+  local — hermes for a Twilio `api-base`, `hermes/blob` for an S3 endpoint — could still have its
+  credentials carried off the machine in the clear, because the bytes went to the proxy rather
+  than to the host that was checked. An `http` request to `localhost` or to a loopback, private
+  or link-local **address** is now sent with `:proxy nil`, by
+  `aion/http-client:proxy-arguments`, which **every** sender uses: `send-request` and
+  `hermes/blob`'s S3 backend, which calls dexador directly.
+  **An app that deliberately proxied plaintext requests to a local host will see them stop going
+  through the proxy.** https is unaffected, because a proxied https request is a `CONNECT` tunnel
+  and the credentials are inside TLS, and plaintext to a host that is not local is unaffected.
+  **A DNS name is not decided here**: it keeps whatever proxy is configured. Resolving on the
+  send path would be a blocking lookup that `connect-timeout` does not cover, and a name that
+  answers private now can answer public at connect time, which would skip a configured egress
+  proxy on the strength of a resolution that no longer holds. Deciding by name belongs at
+  configuration time, where hermes and `hermes/blob` do it and where a wrong answer is a refusal.
 
 - **hermes/blob: an S3 endpoint that carries a user name or password is now refused when the
   store is made** (#1089). `MNEMOSYNE_S3_ENDPOINT` values such as `user:pw@host` or
@@ -1201,11 +1207,17 @@ its tag.
   address in the userinfo got past one, a scheme inside the endpoint got past the other, and a
   bucket label in front of the host got past both (#1089, and the review of #1084). Both callers
   now use these.
-  **`local-host-p` does not treat a 6to4 address as local**, although `address-category` reports
-  one by the IPv4 address it carries, so `2002:7f00:1::` is `:loopback` there. That is the right
-  conservative answer for a guard deciding whether a destination may be reached at all, and the
-  wrong one here, because 6to4 traffic reaches its destination through a public relay.
-  `address-category` is unchanged.
+  **`local-host-p` does not treat a 6to4 or NAT64 address as local**, although
+  `address-category` reports each by the IPv4 address it carries, so `2002:7f00:1::` and
+  `64:ff9b::7f00:1` are `:loopback` there. That is the right conservative answer for a guard
+  deciding whether a destination may be reached at all, and the wrong one here, because both
+  reach the IPv4 address through a relay or gateway that need not be this network's.
+  `address-category` is unchanged. **Nor is a host spelled as dotted-quad IPv4 with a leading
+  zero**, such as `010.8.8.8`: that is the one IPv4 spelling where this tree's parser and the
+  system resolver can disagree — the parser reads it as `10.8.8.8` and calls it private — and the
+  connection follows the resolver. Other non-canonical spellings (`127.1`, `0x7f.0.0.1`,
+  `2130706433`) are **kept**, because they go to the system resolver, which is the same resolver
+  the connection uses, so there is no second parser to disagree with.
 
 - **hermes: how long a send waits is now hermes's own setting, `*send-connect-timeout*` and
   `*send-read-timeout*`, both 10 seconds** (#1077). Each provider also takes `:connect-timeout`

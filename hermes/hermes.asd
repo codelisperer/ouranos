@@ -137,6 +137,10 @@
 (defsystem "hermes/blob/tests"
   :description "Test suite for the blob store."
   :depends-on ("aion/fs" "hermes/blob" "aion/clock" "aion/log" "fiveam"  ; blob.lisp calls both directly
+               ;; RESOLVE-HOST, stubbed to show a malformed endpoint is refused before any name
+               ;; is looked up (#1082). No new external dep: hermes/blob already declares it.
+               "aion/http-client"
+               "dexador"    ; blob.lisp stubs DEX:REQUEST to read the proxy argument (#1091)
                "ironclad")  ; public-image.lisp builds PNG fixtures with their CRCs
   :serial t
   :components ((:module "blob-tests"

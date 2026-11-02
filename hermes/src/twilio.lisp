@@ -60,24 +60,6 @@ timeouts from *SEND-CONNECT-TIMEOUT* and *SEND-READ-TIMEOUT* (#1077)."
   (format nil "Basic ~A"
           (b64:string-to-base64-string (format nil "~A:~A" user pass))))
 
-(defun %leading-zero-octet-p (host)
-  "Whether HOST looks like dotted-quad IPv4 with a leading zero in any octet, such as
-\"010.0.0.1\" (#1077, the review of #1084).
-
-AION/HTTP-CLIENT:PARSE-ADDRESS reads 010.0.0.1 as 10.0.0.1, and some stacks read a leading zero
-as octal instead, which would make the address this check approved a different address from the
-one connected to. Rather than decide which reading is right, such a host is refused: nobody
-writes a leading zero on purpose."
-  (let ((parts '()) (start 0))
-    (loop for dot = (position #\. host :start start)
-          do (push (subseq host start (or dot (length host))) parts)
-             (unless dot (return))
-             (setf start (1+ dot)))
-    (let ((parts (nreverse parts)))
-      (and (= 4 (length parts))
-           (every (lambda (p) (and (plusp (length p)) (every #'digit-char-p p))) parts)
-           (some (lambda (p) (and (> (length p) 1) (char= #\0 (char p 0)))) parts)))))
-
 (defun %check-api-base (base)
   "Signal CONFIGURATION-ERROR unless BASE is a URL this provider may send credentials to (#1077).
 
@@ -114,7 +96,9 @@ equivalent rule in HERMES/BLOB then turned out to have two further holes of the 
     answers NS-HOST-NOT-FOUND-ERROR for \"[::1]\" while \"::1\" resolves. An earlier test of mine
     asserted that such a base was accepted, which was a claim about a configuration that could
     never have delivered a message;
-  - an IPv4 host with a leading zero in an octet is refused (%LEADING-ZERO-OCTET-P);
+  - an IPv4 host with a leading zero in an octet is not local, so plaintext to it is refused by
+    the rule below rather than by a check of its own: AION/HTTP-CLIENT:LOCAL-HOST-P owns that,
+    since PARSE-ADDRESS and the system resolver can read such a spelling differently (#1082);
   - plaintext http is allowed only to a host this machine or network can reach by itself;
   - and finally the URL THE REQUEST IS ACTUALLY BUILT FROM is parsed, by calling
     %TWILIO-ENDPOINT, and its scheme and host must be the ones just approved. No input is known
@@ -142,8 +126,6 @@ equivalent rule in HERMES/BLOB then turned out to have two further holes of the 
         (refuse "The value carries a query or a fragment, and the rest of each request's path is appended to it, so the path would end up inside them."))
       (when (and (plusp (length host)) (char= #\[ (char host 0)))
         (refuse (format nil "The host ~S is a bracketed IPv6 address, which cannot be connected to: it is looked up as a name and no such name exists. Write the address without brackets, or use a name." host)))
-      (when (%leading-zero-octet-p host)
-        (refuse (format nil "The host ~S has a leading zero in an octet. Some stacks read that as octal, so the address checked here need not be the address connected to; write it without leading zeros." host)))
       (when (and (string-equal scheme "http") (not (local-host-p host)))
         (refuse (format nil "The host ~S would receive the account SID and auth token in the clear, because every request carries them in an Authorization header. Use https, or a host only this machine or this network can reach." host)))
       (let ((built (handler-case (quri:uri (%twilio-endpoint base "ACprobe"))

@@ -86,17 +86,17 @@ moved to hermes, and the deployed names were kept rather than renamed. They are 
       (%check-endpoint-shape endpoint)
       (%check-endpoint-userinfo endpoint)
       (let ((secure (%secure-setting secure secure-p endpoint path-style)))
-      (make-instance 's3-store
-                   :endpoint endpoint
-                   :region region
-                   :access-key (%require-setting access-key "MNEMOSYNE_S3_ACCESS_KEY")
-                   :secret-key (%require-setting secret-key "MNEMOSYNE_S3_SECRET_KEY")
-                   :session-token (or session-token (%setting "MNEMOSYNE_S3_SESSION_TOKEN"))
-                   :secure secure
-                   :path-style path-style
-                   :public-base-url (or public-base-url
-                                        (%setting "MNEMOSYNE_S3_PUBLIC_BASE_URL"))
-                   :upload-acl (%upload-acl-setting upload-acl))))))
+        (make-instance 's3-store
+                       :endpoint endpoint
+                       :region region
+                       :access-key (%require-setting access-key "MNEMOSYNE_S3_ACCESS_KEY")
+                       :secret-key (%require-setting secret-key "MNEMOSYNE_S3_SECRET_KEY")
+                       :session-token (or session-token (%setting "MNEMOSYNE_S3_SESSION_TOKEN"))
+                       :secure secure
+                       :path-style path-style
+                       :public-base-url (or public-base-url
+                                            (%setting "MNEMOSYNE_S3_PUBLIC_BASE_URL"))
+                       :upload-acl (%upload-acl-setting upload-acl))))))
 
 (defparameter +endpoint-forbidden+ '("://" "/" "?" "#" "@")
   "Substrings an S3 endpoint may not contain (#1089). An endpoint is an authority -- a host with
@@ -133,6 +133,11 @@ resolver says, so no check here can speak for it. That is why %SECURE-SETTING re
 for a plaintext store. An earlier version of this docstring said the host was read from the shape
 the request is built from without that qualification, which was false for virtual-host style."
   (let ((endpoint (and endpoint (string-trim " " endpoint))))
+    ;; NO REFUSAL HERE REPEATS THE VALUE. An endpoint may carry a password -- that is one of the
+    ;; things being refused -- and these reports reach logs and terminals. Every branch printed
+    ;; it with ~S until the review of #1094, so "AKIA:PASSWORD@127.0.0.1:9000" put the password
+    ;; in the report. The same mistake was fixed in hermes core's Twilio check one review
+    ;; earlier, and this copy was missed.
     (flet ((refuse (why)
              (error 'blob-configuration-error
                     :missing (format nil "MNEMOSYNE_S3_ENDPOINT to be a host with an optional port, such as s3.amazonaws.com or localhost:9000. ~A" why))))
@@ -142,10 +147,10 @@ the request is built from without that qualification, which was false for virtua
                   endpoint)
         (refuse "The value contains whitespace."))
       (when (search "://" endpoint)
-        (refuse (format nil "~S contains \"://\". The scheme comes from MNEMOSYNE_S3_SECURE and is put in front of this value, so a scheme here would appear twice in the request URL and the host would not be the one named." endpoint)))
+        (refuse "The value contains \"://\". The scheme comes from MNEMOSYNE_S3_SECURE and is put in front of this value, so a scheme here would appear twice in the request URL and the host would not be the one named."))
       (let ((bad (find-if (lambda (piece) (search piece endpoint)) +endpoint-forbidden+)))
         (when bad
-          (refuse (format nil "~S contains ~S, which belongs to the rest of a URL rather than to a host." endpoint bad)))))))
+          (refuse (format nil "The value contains ~S, which belongs to the rest of a URL rather than to a host." bad)))))))
 
 (defun %endpoint-url (endpoint)
   "ENDPOINT as the URL a request would be built from: the scheme, \"://\", then the endpoint.
@@ -157,21 +162,6 @@ when the endpoint had no \"://\" of its own, which is exactly how evil.com://127
 the check: see %CHECK-ENDPOINT-SHAPE, which now refuses such an endpoint."
   (let ((endpoint (and endpoint (string-trim " " endpoint))))
     (and endpoint (concatenate 'string "http://" endpoint))))
-
-(defun %endpoint-uri (endpoint)
-  "ENDPOINT read as the request would read it: the URL shape %S3-URL builds, parsed with QURI,
-which is the parser dexador uses. Returns the QURI:URI, or NIL when it cannot be parsed.
-
-THE SCHEME IS ALWAYS PREPENDED, never conditionally. A blob endpoint is a bare authority such as
-\"localhost:9000\", and QURI:URI reads that as the scheme \"localhost\" with no host at all, so an
-endpoint has to be given a scheme before it is parsed. An earlier version prepended one only
-when the endpoint had no \"://\" of its own, which is exactly how evil.com://127.0.0.1 got past
-the check: see %CHECK-ENDPOINT-SHAPE. %CHECK-ENDPOINT-SHAPE now refuses such an endpoint, and
-this function no longer looks at what the endpoint contains -- between them the string parsed
-here and the string the request is built from are the same."
-  (let ((endpoint (and endpoint (string-trim " " endpoint))))
-    (and endpoint
-         (ignore-errors (quri:uri (concatenate 'string "http://" endpoint))))))
 
 (defun %endpoint-host (endpoint)
   "ENDPOINT's host, without a port, as QURI reads it out of the URL the request is built from:
@@ -458,9 +448,17 @@ body that cannot be read becomes a DETAIL saying so (#796)."
          (url (%s3-url store bucket key (and query (plusp (length query)) query))))
     (multiple-value-bind (body status resp-headers)
         (handler-case
-            (dex:request url :method method :headers headers :content content
-                             :want-stream want-stream :force-binary t
-                             :keep-alive nil)
+            ;; THE PROXY DECISION COMES FROM AION, not from dexador's default. This backend
+            ;; calls dexador directly rather than through AION/HTTP-CLIENT:SEND-REQUEST, so it
+            ;; does not pick up what %DEX-ARGS passes, and when #1091 was first fixed there this
+            ;; path was left sending plaintext requests for a LOCAL endpoint to whatever
+            ;; HTTPS_PROXY named -- the signed Authorization header and any session token with
+            ;; them -- while a comment and the CHANGELOG said hermes/blob was covered (the
+            ;; review of #1094).
+            (apply #'dex:request url :method method :headers headers :content content
+                                     :want-stream want-stream :force-binary t
+                                     :keep-alive nil
+                                     (http:proxy-arguments url))
           (dex:http-request-failed (e)
             (let ((status (dex:response-status e))
                   ;; With WANT-STREAM the error's body is an open stream on the connection.

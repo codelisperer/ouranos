@@ -191,7 +191,10 @@ api.twilio.com, which did resolve, contradicting this file's own header."
                   ("https://api.example.invalid/x?q=1" . "query or a fragment")
                   ("https://api.example.invalid/x#f" . "query or a fragment")
                   ("http://[::1]:4010" . "bracketed IPv6")
-                  ("http://010.0.0.1:4010" . "leading zero")
+                  ;; Refused by the locality rule rather than by a check of its own: a
+                  ;; leading-zero spelling is not local, because PARSE-ADDRESS and the system
+                  ;; resolver can read it differently (#1082 moved that into LOCAL-HOST-P).
+                  ("http://010.0.0.1:4010" . "in the clear")
                   ("http://8.8.8.8" . "in the clear")
                   ("http://host.invalid" . "in the clear")))
     (let ((report (%api-base-refusal (car case))))

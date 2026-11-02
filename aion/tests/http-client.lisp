@@ -1869,8 +1869,40 @@ lives here now, next to the primitives it uses, so there is one implementation t
     (is-true (member (http:address-category host) '(:loopback :private))
              "control: ~A still reports a non-public category, which the SSRF guard needs" host)
     (is-false (http:local-host-p host) "but ~A is not local, because 6to4 goes over a relay" host))
-  ;; An IPv4-mapped loopback address IS local: there is no relay, it is the same stack.
+  ;; NAT64 IS NOT LOCAL either, and for the same reason: reaching the IPv4 address means going
+  ;; through a gateway that is often the carrier's (the review of #1094). Both the well-known
+  ;; prefix and RFC 8215's local-use one.
+  (dolist (host '("64:ff9b::7f00:1" "64:ff9b::a00:5"))
+    (is-true (member (http:address-category host) '(:loopback :private))
+             "control: ~A still reports a non-public category for the SSRF guard" host)
+    (is-false (http:local-host-p host) "but ~A is not local, because NAT64 goes through a gateway" host))
+  ;; RFC 8215's local-use prefix, 64:ff9b:1::/48, is NOT one ADDRESS-CATEGORY recognises:
+  ;; %EMBEDDED-IPV4 handles only the well-known /96, so 64:ff9b:1::7f00:1 reports :PUBLIC and was
+  ;; never local. Measured, after a control of mine asserted it was :LOOPBACK and failed. The
+  ;; LOCAL-HOST-P exclusion covers it anyway, so the answer does not depend on which of the two
+  ;; reasons applies.
+  (is (eq :public (http:address-category "64:ff9b:1::7f00:1"))
+      "the local-use NAT64 prefix is not read as carrying an IPv4 address")
+  (is-false (http:local-host-p "64:ff9b:1::7f00:1"))
+  ;; An IPv4-mapped loopback address IS local: there is no relay or gateway, it is the same stack.
   (is-true (http:local-host-p "::ffff:127.0.0.1"))
+  ;; A LEADING ZERO IN A DOTTED QUAD IS NOT LOCAL, whatever the octets say. This is the one IPv4
+  ;; spelling where PARSE-ADDRESS and the system resolver can disagree, and the connection
+  ;; follows the resolver. 010.8.8.8 is the case that matters: PARSE-ADDRESS reads it as
+  ;; 10.8.8.8 and calls it private (the review of #1094).
+  (dolist (host '("010.8.8.8" "010.0.0.1" "0127.0.0.1" "127.000.0.1"))
+    (is-false (http:local-host-p host) "~A is not local: its spelling is ambiguous" host))
+  (is (eq :private (http:address-category "010.8.8.8"))
+      "control: PARSE-ADDRESS does read 010.8.8.8 as a private address, which is the disagreement")
+  ;; THE OTHER NON-CANONICAL SPELLINGS ARE KEPT, deliberately: they fail PARSE-ADDRESS, so they
+  ;; go to RESOLVE-HOST -- the same resolver the connection uses -- and there is no second parser
+  ;; to disagree with. If the resolver says loopback, the connection goes to loopback.
+  (dolist (host '("127.1" "0x7f.0.0.1" "2130706433"))
+    (let ((resolved (http:resolve-host host)))
+      (when resolved
+        (is-true (http:local-host-p host)
+                 "~A resolves to ~S, and that is the resolver the connection uses too"
+                 host resolved))))
   (is-false (http:local-host-p nil) "no host is not a local host")
   (is-false (http:local-host-p "") "and neither is an empty one"))
 
@@ -1895,6 +1927,37 @@ every caller feeds the result to PARSE-ADDRESS or ADDRESS-CATEGORY."
   (is-false (equal "localhost" (http:url-host "localhost:9000"))
             "control: a bare host:port is NOT a URL, which is why callers add a scheme first"))
 
+(test proxy-arguments-decides-without-resolving-a-name
+  "The review of #1094. This decision used to call LOCAL-HOST-P, which resolves a name, on every
+plaintext request. Two problems: a blocking lookup on the send path that CONNECT-TIMEOUT does not
+cover, and a rebinding window -- a name that answers private now can answer public at connect
+time, and the request would then skip a configured egress proxy on the strength of a resolution
+that no longer holds. The decision is made for \"localhost\" and IP literals only; deciding by
+name belongs at configuration time, where a wrong answer is a refusal rather than a silently
+unproxied request."
+  (let ((looked-up '())
+        (original (fdefinition 'http:resolve-host)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'http:resolve-host)
+                 (lambda (host) (push host looked-up) (funcall original host)))
+           (dolist (url '("http://127.0.0.1:9000/x" "http://localhost/x" "http://[::1]/x"
+                          "http://10.0.0.5/x" "http://a-name.invalid/x" "https://a-name.invalid/x"
+                          "http://8.8.8.8/x"))
+             (http:proxy-arguments url))
+           (is (null looked-up)
+               "no name was resolved to decide how to proxy: ~S" looked-up)
+           ;; The control: the stub does fire when something asks LOCAL-HOST-P about a name, so
+           ;; the assertion above is about this path and not about an unreachable stub.
+           (http:local-host-p "another-name.invalid")
+           (is-true (member "another-name.invalid" looked-up :test #'string=)
+                    "control: LOCAL-HOST-P does resolve a name: ~S" looked-up))
+      (setf (fdefinition 'http:resolve-host) original)))
+  ;; A DNS name keeps whatever proxy is configured, local-looking or not.
+  (dolist (url '("http://a-name.invalid/x" "http://minio/x"))
+    (is (null (http:proxy-arguments url))
+        "~A is a name, so its proxy is left alone" url)))
+
 (test a-plaintext-request-to-a-local-host-is-not-sent-through-a-proxy
   "#1091: dexador sets *DEFAULT-PROXY* from HTTPS_PROXY or HTTP_PROXY when it loads and honours
 no NO_PROXY, and %DEX-ARGS never passed :PROXY. So a caller that had checked its destination was
@@ -1905,18 +1968,23 @@ to the host that was checked.
 The assertion is on what dexador is given, not on what a request returns: a fixture whose proxy
 is unreachable would pass for the wrong reason."
   (flet ((proxy-arg (url)
+           ;; Through %DEX-ARGS, which is the path AION/HTTP-CLIENT:SEND-REQUEST takes. The
+           ;; decision itself is PROXY-ARGUMENTS, which hermes/blob's direct dexador call uses
+           ;; too -- when it lived only here, that backend was not covered (the review of #1094).
            (let ((args (http::%dex-args (http:make-request :method :get :url url))))
              (if (member :proxy args) (list :passed (getf args :proxy)) :not-passed))))
     ;; Exempted: plaintext to a local host, by name or by address.
     (dolist (url '("http://127.0.0.1:9000/x" "http://localhost/x" "http://[::1]:9000/x"
-                   "http://10.0.0.5/x"))
+                   "http://10.0.0.5/x" "http://169.254.1.2/x"))
       (is (equal '(:passed nil) (proxy-arg url))
           "~A is sent with :proxy nil, so no proxy can see it" url))
     ;; Not exempted: https anywhere, because a proxied https request is a CONNECT tunnel and the
     ;; credentials are inside TLS; and plaintext to a host that is not local, where whoever
     ;; configured it is already sending in the clear.
     (dolist (url '("https://127.0.0.1/x" "https://api.example.invalid/x" "http://8.8.8.8/x"
-                   "http://api.example.invalid/x"))
+                   ;; A NAME keeps its proxy now, even one that might resolve locally: see
+                   ;; PROXY-ARGUMENTS-DECIDES-WITHOUT-RESOLVING-A-NAME.
+                   "http://api.example.invalid/x" "http://minio/x"))
       (is (eq :not-passed (proxy-arg url))
           "~A keeps whatever proxy is configured" url))
     ;; 6to4 is not local, so it is not exempted either.
