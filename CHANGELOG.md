@@ -3441,6 +3441,16 @@ its tag.
 
 ### Fixed
 
+- **A macOS desktop bundle relinks a carried library against a dependency that another carry
+  step copied under a different file name** (#1130). `ouranos-carry:relink-bundle`, which runs
+  after the three carry steps in `build-desktop-app.lisp`, matched a load command to a carried
+  file by file name only. A library that records its dependency as `/build/libb.dylib`, while a
+  step carried that dependency as `libb.1.dylib`, kept naming the build machine's path, and on a
+  Mac without it dyld stopped with `Library not loaded`. `ouranos-carry:stamp-install-name` now
+  takes `:source` and records each copy's install name before the stamp and the file it came
+  from, in `ouranos-carry:*carried-origins*`, and `relink-bundle` also matches a load command by
+  those.
+
 - **aion/uv: a path string reaches libuv as written, so a file with a backslash in its name works
   on Linux and macOS** (#1093). Every function that takes a path ran it through `cl:namestring`,
   and on Linux and macOS that drops a backslash, so `a\b.txt` was used as `ab.txt`. The affected

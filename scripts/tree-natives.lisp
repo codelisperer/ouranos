@@ -347,11 +347,12 @@ src/ is carried once."
             (push file found)))))
     (nreverse found)))
 
-(defun %stamp (file)
-  "OURANOS-CARRY:STAMP-INSTALL-NAME on FILE, a library just copied into the bundle (#957). Ends
+(defun %stamp (file source)
+  "OURANOS-CARRY:STAMP-INSTALL-NAME on FILE, a library just copied into the bundle from SOURCE
+(#957, #1130). Ends
 the process with exit code 3, naming the problem, when it cannot be done: a bundle whose library
 is invalidly signed would not load it on arm64."
-  (handler-case (ouranos-carry:stamp-install-name file)
+  (handler-case (ouranos-carry:stamp-install-name file :source source)
     (ouranos-carry:carry-refused (e)
       (format *error-output* "~&~A: ~A~%" *label* e)
       (sb-ext:exit :code 3))))
@@ -398,7 +399,7 @@ be missing from a step named for waking."
                    ;; NAME is CFFI's synthetic symbol for a library loaded by path
                    ;; (LIBUV.SO.1-459) -- true and useless. Report the files.
                    (format t "~&  carry     ~A  <- ~A~%" (file-namestring dst) (human-path:human-path truename))
-                   (%stamp dst)
+                   (%stamp dst truename)
                    (dolist (license (license-files truename))
                      (let ((dst (merge-pathnames
                                  (format nil "LICENSES/~A-~A"
