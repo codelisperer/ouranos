@@ -353,10 +353,10 @@ not about an expression inside it; an `ok` line is about failures, not about cov
   unregistered suite, an unrun suite and a passing suite are identical at the exit code.
 - A cold-cache test must assert it was cold (fasl count, compile count). Clear the fasl
   cache after a control run — a stale fasl reproduces a false failure across runs.
-- **Clearing means deleting the cached fasl, not touching the source.** ASDF compares write
-  rebuilds only when the source is newer than its fasl, and a touch that lands in the same second
-  as the control run's build is not newer — so restoring a file and touching it leaves the
-  control's code loaded.
+- **Clearing means deleting the cached fasl, not touching the source.** ASDF rebuilds only when
+  the source is newer than its fasl, and a touch that lands in the same second as the control
+  run's build is not newer — so restoring a file and touching it leaves the control's code
+  loaded.
   **A correct file on disk is not evidence that the image loaded it**, and the two failures look
   nothing alike: the suite either reports the control's failures against code that no longer
   exists, or reports a pass because the control happened to pass. Delete the fasl
