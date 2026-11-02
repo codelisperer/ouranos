@@ -2267,7 +2267,7 @@ use; that path has its own tests."
 (defun %hops-for (url target &key (headers '(("Authorization" . "Bearer secret")
                                              ("Cookie" . "session=secret")
                                              ("Content-Type" . "application/json")))
-                                  (method :post) (follow 5))
+                                  (method :post) (follow 5) content)
   "Send one request that is answered with a 307 to TARGET, and return what dexador was given for
 each hop: a list of (url . headers), in order.
 
@@ -2287,7 +2287,7 @@ the SECOND entry: the first hop is identical whatever the fix does."
                                         h))
                        (values "done" 200 (make-hash-table :test #'equal)))))
            (http:send-request (http:make-request :method method :url url :headers headers
-                                                 :follow-redirects follow)
+                                                 :content content :follow-redirects follow)
                               '()))
       (setf (fdefinition 'dex:request) original))
     (reverse seen)))
@@ -2410,3 +2410,193 @@ different client than the one every caller was written against."
         (setf (fdefinition 'dex:request) original))
       (is (eq (cdr case) (second (second (reverse seen))))
           "a ~D sends the next hop as ~S: ~S" (car case) (cdr case) (reverse seen)))))
+
+(test every-credential-header-this-tree-sends-is-dropped-across-an-origin
+  "The review of #1141. The first version of this decided the path and stripped the headers from
+two lists written separately -- Authorization and Cookie -- so Anthropic's x-api-key
+(praxeon/src/llm.lisp) and Google's x-goog-api-key (praxeon/src/image-google.lisp), both of which
+go through SEND-REQUEST, were still forwarded to whatever a cross-host 307 named. PRINT-OBJECT
+had named all four since #844, one screen away.
+
++CREDENTIAL-HEADERS+ is the one list now, read by both.
+
+THE NAMES ARE WRITTEN OUT HERE, not read from that list. A first version of this test walked
++CREDENTIAL-HEADERS+, which made it VACUOUS IN THE DIRECTION THAT MATTERS: shrinking the list
+back to Authorization and Cookie shrank the test with it and still passed, so it could not have
+caught the defect it was written for. My own control is what showed that. The four names are a
+claim about what this tree sends -- Authorization and Cookie anywhere, x-api-key in
+praxeon/src/llm.lisp, x-goog-api-key in praxeon/src/image-google.lisp -- and a claim about the
+tree has to be written down, not derived from the thing under test. The list-walk is kept as a
+second loop, so a name added to the list without being handled fails too."
+  (dolist (name '("authorization" "cookie" "x-api-key" "x-goog-api-key"))
+    (let ((hops (%hops-for "https://api.example.com/v1/x" "https://evil.example/collect"
+                           :headers (list (cons name "secret")
+                                          (cons "Content-Type" "application/json")))))
+      (is (= 2 (length hops))
+          "a request carrying ~A is followed hop by hop here: ~S" name hops)
+      (is (equal "secret" (%carried (first hops) name))
+          "~A is sent on the first hop, as it must be: ~S" name (first hops))
+      (is-false (%carried (second hops) name)
+                "~A does not reach the other origin: ~S" name (second hops))
+      (is (equal "application/json" (%carried (second hops) "content-type"))
+          "while a header that is not a credential survives: ~S" (second hops))))
+  ;; Every name the list holds, so one added there without being handled fails as well. This is
+  ;; the loop that cannot catch a name MISSING from the list, which is why the names above are
+  ;; written out.
+  (dolist (name http::+credential-headers+)
+    (let ((hops (%hops-for "https://api.example.com/v1/x" "https://evil.example/collect"
+                           :headers (list (cons name "secret")))))
+      (is (= 2 (length hops)) "~A is recognised as a credential header: ~S" name hops)
+      (is-false (%carried (second hops) name)
+                "~A does not reach the other origin: ~S" name (second hops))))
+  ;; The control: a header that is NOT on the list is carried across, so the assertions above
+  ;; are about the list and not about every header being stripped.
+  (let ((hops (%hops-for "https://api.example.com/v1/x" "https://evil.example/collect"
+                         :headers '(("Authorization" . "Bearer s")
+                                    ("X-Request-Id" . "abc123")))))
+    (is (equal "abc123" (%carried (second hops) "x-request-id"))
+        "control: a header that identifies nobody is still carried: ~S" (second hops))))
+
+(test a-body-is-not-repeated-to-another-origin
+  "The review of #1141, and the half that stripping headers says nothing about: A CREDENTIAL CAN
+BE IN THE BODY. Facebook's POST carries access_token in the form body, so a 307 or 308 across
+origin would have handed it over with every header correctly removed.
+
+307 and 308 repeat the request as it was, body included. There is no way to follow such a hop
+safely -- the body is the caller's to re-send or not -- so the 3xx is returned and the caller
+decides. 301, 302 and 303 turn a non-GET into a GET, and the body goes with the method: a GET
+carrying the old form body and its Content-Type is neither what the server will read nor what the
+caller sent."
+  ;; A cross-origin 307 with a body: not followed, and the 3xx is the answer.
+  (let ((hops (%hops-for "https://api.example.com/v1/x" "https://evil.example/collect"
+                         :content "access_token=secret&message=hi")))
+    (is (= 1 (length hops))
+        "a cross-origin 307 carrying a body is not followed: ~S" hops))
+  ;; The control: the same hop WITHIN the origin is followed, with the body intact, because
+  ;; nothing leaves the origin that sent it.
+  (let ((hops (%hops-for "https://api.example.com/v1/x" "https://api.example.com/v2/x"
+                         :content "access_token=secret&message=hi")))
+    (is (= 2 (length hops))
+        "control: a same-origin 307 with a body is still followed: ~S" hops)
+    (is (equal "Bearer secret" (%carried (second hops) "authorization"))
+        "control: and still carries the credential: ~S" (second hops)))
+  ;; And a cross-origin 307 with NO body is followed, headers stripped -- so the refusal above is
+  ;; about the body and not about 307 itself.
+  (let ((hops (%hops-for "https://api.example.com/v1/x" "https://evil.example/collect"
+                         :content nil)))
+    (is (= 2 (length hops))
+        "control: a cross-origin 307 with no body is followed: ~S" hops)
+    (is-false (%carried (second hops) "authorization")
+              "control: with the credential dropped: ~S" (second hops))))
+
+(test a-redirect-that-becomes-a-get-drops-the-body-and-its-content-type
+  "The review of #1141. The loop turned a POST into a GET on 301, 302 and 303 -- which is right,
+and what dexador and every browser do -- and kept the content and the Content-Type, which is
+not. A GET carrying the previous request's form body is neither what the server will read nor
+what the caller sent, and when the body holds a credential it is one more place for it to go."
+  (dolist (status '(301 302 303))
+    (let ((seen '())
+          (original (fdefinition 'dex:request)))
+      (unwind-protect
+           (progn
+             (setf (fdefinition 'dex:request)
+                   (lambda (u &rest args)
+                     (push (list u (getf args :method) (getf args :content)
+                                 (getf args :headers))
+                           seen)
+                     (if (= 1 (length seen))
+                         (values "" status
+                                 (let ((h (make-hash-table :test #'equal)))
+                                   (setf (gethash "location" h) "https://api.example.com/next")
+                                   h))
+                         (values "done" 200 (make-hash-table :test #'equal)))))
+             (http:send-request
+              (http:make-request :method :post :url "https://api.example.com/start"
+                                 :headers '(("Authorization" . "Bearer secret")
+                                            ("Content-Type" . "application/x-www-form-urlencoded"))
+                                 :content "access_token=secret"
+                                 :follow-redirects 5)
+              '()))
+        (setf (fdefinition 'dex:request) original))
+      (let ((second (second (reverse seen))))
+        (is (eq :get (second second)) "a ~D sends the next hop as a GET: ~S" status second)
+        (is-false (third second) "with no body: ~S" status second)
+        (is-false (cdr (assoc "content-type" (fourth second) :test #'string-equal))
+                  "and no Content-Type: ~S" second))))
+  ;; The control: a 307 keeps the method, the body and the Content-Type, within the origin.
+  (let ((seen '())
+        (original (fdefinition 'dex:request)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'dex:request)
+                 (lambda (u &rest args)
+                   (push (list u (getf args :method) (getf args :content)) seen)
+                   (if (= 1 (length seen))
+                       (values "" 307 (let ((h (make-hash-table :test #'equal)))
+                                        (setf (gethash "location" h)
+                                              "https://api.example.com/next")
+                                        h))
+                       (values "done" 200 (make-hash-table :test #'equal)))))
+           (http:send-request
+            (http:make-request :method :post :url "https://api.example.com/start"
+                               :headers '(("Authorization" . "Bearer secret"))
+                               :content "x=1" :follow-redirects 5)
+            '()))
+      (setf (fdefinition 'dex:request) original))
+    (let ((second (second (reverse seen))))
+      (is (eq :post (second second)) "control: a 307 keeps the method: ~S" second)
+      (is (equal "x=1" (third second)) "control: and the body: ~S" second))))
+
+(test an-approved-local-request-still-follows-no-redirect
+  "The review of #1141, and a rule of #1134's that this loop bypassed. PROXY-ARGUMENTS answers
+:MAX-REDIRECTS 0 for a request to a host a configuration step approved as local, because dexador
+carries both the proxy exemption and the credential across a cross-host redirect. dexador obeyed
+that -- and then %HTTP-FOLLOWING-REDIRECTS followed the 3xx itself, so the rule held for every
+request except the ones it was written for. The docstring in fetch.lisp saying a 3xx is the
+response for such a request was false while that was so.
+
+The dispatch sends an approved request down the single-shot path instead, which keeps the rule
+where it already lives rather than restating it here, so the two cannot drift.
+
+THE ASSERTION GOES THROUGH SEND-REQUEST, not through PROXY-ARGUMENTS: the bypass was in the
+layer above it, so asking PROXY-ARGUMENTS would have answered correctly while the request was
+still followed."
+  (let ((seen '())
+        (original (fdefinition 'dex:request)))
+    (unwind-protect
+         (progn
+           ;; THE STUB TERMINATES, answering 200 once the redirect has been taken. Answering 307
+           ;; to everything made the control follow until its budget ran out, and an assertion on
+           ;; the number of calls then measured the budget rather than the approval.
+           (setf (fdefinition 'dex:request)
+                 (lambda (u &rest args)
+                   (push (list u (getf args :max-redirects)) seen)
+                   (if (search "collect" u)
+                       (values "done" 200 (make-hash-table :test #'equal))
+                       (values "" 307 (let ((h (make-hash-table :test #'equal)))
+                                        (setf (gethash "location" h)
+                                              "http://evil.example/collect")
+                                        h)))))
+           ;; Under an approval for this host.
+           (http::call-with-approved-local-host
+            "approved.invalid"
+            (lambda ()
+              (http:send-request
+               (http:make-request :method :get :url "http://approved.invalid/v1/x"
+                                  :headers '(("Authorization" . "Bearer secret"))
+                                  :follow-redirects 5)
+               '())))
+           ;; And the control, with no approval: the same 3xx IS followed, hop by hop.
+           (http:send-request
+            (http:make-request :method :get :url "http://other.invalid/v1/x"
+                               :headers '(("Authorization" . "Bearer secret"))
+                               :follow-redirects 5)
+            '()))
+      (setf (fdefinition 'dex:request) original))
+    (let ((calls (reverse seen)))
+      (is (equal '("http://approved.invalid/v1/x" 0) (first calls))
+          "an approved request is sent once, with :max-redirects 0: ~S" (first calls))
+      (is (equal "http://other.invalid/v1/x" (first (second calls)))
+          "control: an unapproved request starts the same way: ~S" (second calls))
+      (is (= 3 (length calls))
+          "and is followed, so the approval is what stopped the first: ~S" calls))))

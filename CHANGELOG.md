@@ -14,14 +14,30 @@ its tag.
 
 ### An app may have to act
 
-- **A redirect that changes origin no longer carries the `Authorization` or `Cookie` header**
+- **A redirect that changes origin no longer carries a credential, in a header or in a body**
   (#1139). dexador follows a redirect to a different host by recursing with the same arguments
   **and the same headers** — it prepends a new `Host` and keeps the rest — so a credential built
   for one host was delivered to whatever a `3xx` named. The configuration checks in #1077, #1092
   and #1106 check the base a request is sent *to*, which is a different thing from where a
   redirect then leads. `aion/http-client:send-request` now follows the redirects of a request that
-  carries one of those headers itself, one hop at a time, and drops both headers when the next hop
-  changes origin.
+  carries a credential itself, one hop at a time, and drops it when the next hop changes origin.
+  **Which locations are covered**, because stripping headers alone would have left two of them:
+
+  - **the four credential headers this tree sends** — `Authorization`, `Cookie`, `x-api-key`
+    (Anthropic, `praxeon/src/llm.lisp`) and `x-goog-api-key` (Google,
+    `praxeon/src/image-google.lisp`) — are removed on a hop that changes origin. They are one
+    list, `+credential-headers+`, read both to decide the path and to strip;
+  - **a credential in the request body**, such as Facebook's `access_token` in a POST form: a
+    `307` or `308` repeats the body, and there is no way to strip it, so **a cross-origin `307`
+    or `308` for a request with a body is not followed at all** — the `3xx` is returned and the
+    caller decides;
+  - **a body carried into a method change**: `301`, `302` and `303` turn a non-GET into a `GET`,
+    and the body and its `Content-Type` now go with the method rather than being re-sent on a
+    request that cannot carry them.
+
+  **A request already exempt from the proxy under a recorded local approval still follows no
+  redirect at all**, which is #1134's rule; this follows redirects only for requests that rule
+  does not already stop.
   **A same-origin redirect keeps them**, which is the default an app should expect: an API that
   renames a path answers `301` and the credential follows it. Origin is scheme, host **and** port,
   so `https` → `http` on the same host, or a change of port, drops them — those are the two a
@@ -32,7 +48,9 @@ its tag.
   `301`, `302` and `303` still turn a non-GET into a `GET` while `307` and `308` keep the method.
   **An app relying on a cross-origin redirect to carry its credential will see that request fail
   to authenticate**, and should send it to the final host directly. `fetch-public` has behaved
-  this way since #295; this brings the ordinary client into line with it.
+  this way since #295, and the widened header list applies there too, so `fetch-public` now drops
+  `x-api-key` and `x-goog-api-key` across an origin change as well; this brings the ordinary
+  client into line with it.
 
 - **Telegram, Facebook and Stripe now check the URL they send a credential to, and refuse to
   build when it is one they may not** (#1106). `make-telegram`'s `:api-base`, `make-facebook`'s

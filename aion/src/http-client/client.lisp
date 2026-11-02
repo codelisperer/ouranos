@@ -615,25 +615,37 @@ comparison for deciding whether a redirect may keep a credential (#1139)."
         (string-downcase (or (quri:uri-host uri) ""))
         (%port-of uri)))
 
-(defun %without-credentials (headers)
-  "HEADERS with the ones that authenticate the caller removed.
+(defparameter +credential-headers+
+  '("authorization" "cookie" "x-api-key" "x-goog-api-key")
+  "The header names whose value authenticates the caller rather than describing the request.
 
-AUTHORIZATION AND COOKIE, and the list is short on purpose: those two are the headers whose whole
-content is who the caller is."
-  (remove-if (lambda (h) (member (string (car h)) '("authorization" "cookie")
-                                 :test #'string-equal))
+THE SAME FOUR PRINT-OBJECT NAMES, and for the same reason: these are what this tree actually
+sends. Anthropic's key goes in x-api-key (praxeon/src/llm.lisp) and Google's in x-goog-api-key
+(praxeon/src/image-google.lisp), both through SEND-REQUEST, so a list of Authorization and Cookie
+alone left two of this tree's four credential headers being forwarded across a cross-host
+redirect (#1139, and the review of #1141).
+
+THIS LIST IS NOT A SECURITY BOUNDARY, and PRINT-OBJECT is the place that says why: a provider's
+own key header is not on any list, so PRINT-OBJECT hides EVERY header value rather than these.
+Here a list is unavoidable -- something has to decide which headers a redirect may carry -- so it
+is written once and every name this tree sends is on it. A new provider with a header of its own
+adds it here.")
+
+(defun %without-credentials (headers)
+  "HEADERS with the ones that authenticate the caller removed: +CREDENTIAL-HEADERS+."
+  (remove-if (lambda (h) (member (string (car h)) +credential-headers+ :test #'string-equal))
              headers))
 
 (defun %credential-bearing-p (headers)
   "Whether HEADERS carry something that authenticates the caller rather than describing the body.
 
-THE SAME TWO NAMES %WITHOUT-CREDENTIALS REMOVES, and the list is short on purpose: Authorization
-and Cookie are the headers whose whole content is `this is who I am', and they are the ones a
-redirect must not carry to a host the caller never named (#1139)."
+THE SAME LIST %WITHOUT-CREDENTIALS REMOVES, read from +CREDENTIAL-HEADERS+ rather than written
+again here: deciding the path from one list and stripping from another is how x-api-key and
+x-goog-api-key came to be forwarded while Authorization was not (the review of #1141)."
   (and (listp headers)
        (some (lambda (h)
                (and (consp h)
-                    (member (string (car h)) '("authorization" "cookie") :test #'string-equal)))
+                    (member (string (car h)) +credential-headers+ :test #'string-equal)))
              headers)
        t))
 
@@ -690,18 +702,35 @@ to follow any redirect for a credential-bearing request -- would have broken an 
              (next (and (plusp hops) (%redirect-target response (request-url current)))))
         (unless next
           (return response))
-        (decf hops)
         (let* ((from (quri:uri (request-url current)))
                (to (quri:uri next))
+               (status (response-status response))
                (cross-origin (not (equal (%origin from) (%origin to))))
-               (headers (if cross-origin
-                            (%without-credentials (request-headers current))
-                            (request-headers current))))
-          (setf current (copy-request current))
-          (setf (request-url current) next
-                (request-method current) (%redirect-method (request-method current)
-                                                           (response-status response))
-                (request-headers current) headers))))))
+               (keeps-the-body (member status '(307 308))))
+          ;; A BODY IS NOT RE-SENT TO ANOTHER ORIGIN. 307 and 308 repeat the request as it was,
+          ;; body included, and a credential can be IN that body rather than in a header:
+          ;; Facebook's POST carries access_token in the form, and stripping headers says nothing
+          ;; about it. There is no way to follow such a hop safely, so the 3xx is the answer and
+          ;; the caller decides (the review of #1141).
+          (when (and cross-origin keeps-the-body (request-content current))
+            (return response))
+          (decf hops)
+          (let ((headers (if cross-origin
+                             (%without-credentials (request-headers current))
+                             (request-headers current)))
+                (method (%redirect-method (request-method current) status)))
+            (setf current (copy-request current))
+            ;; A METHOD CHANGED TO GET LOSES THE BODY WITH IT, and its Content-Type. 301, 302 and
+            ;; 303 turn a non-GET into a GET, and a GET carrying the old request's form body and
+            ;; Content-Type is neither what the server will read nor what the caller sent.
+            (when (and (eq method :get) (not (eq method (request-method current))))
+              (setf (request-content current) nil
+                    headers (remove-if (lambda (h)
+                                         (string-equal (string (car h)) "content-type"))
+                                       headers)))
+            (setf (request-url current) next
+                  (request-method current) method
+                  (request-headers current) headers)))))))
 
 (defun %http (req)
   "Perform REQ and return a RESPONSE, following redirects in whichever way is safe for it.
@@ -714,7 +743,13 @@ The pinned path (CONNECT-ADDRESS) follows no redirects at all by design -- a red
 would need an address of its own -- so it is already outside this question."
   (if (and (%credential-bearing-p (request-headers req))
            (plusp (or (request-follow-redirects req) 0))
-           (not (request-connect-address req)))
+           (not (request-connect-address req))
+           ;; AN APPROVED-LOCAL REQUEST FOLLOWS NOTHING, which is #1134's rule and was bypassed
+           ;; by this loop: PROXY-ARGUMENTS answers :MAX-REDIRECTS 0 for such a request, dexador
+           ;; obeyed it, and then the loop followed the 3xx itself. Sending it down the
+           ;; single-shot path keeps the rule where it already is rather than restating it, so
+           ;; the two cannot drift (the review of #1141).
+           (not (eql 0 (getf (proxy-arguments (request-url req)) :max-redirects))))
       (%http-following-redirects req)
       (%http-once req)))
 
