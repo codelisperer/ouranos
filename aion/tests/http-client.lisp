@@ -1904,7 +1904,18 @@ lives here now, next to the primitives it uses, so there is one implementation t
                  "~A resolves to ~S, and that is the resolver the connection uses too"
                  host resolved))))
   (is-false (http:local-host-p nil) "no host is not a local host")
-  (is-false (http:local-host-p "") "and neither is an empty one"))
+  ;; AN EMPTY OR BLANK HOST IS REFUSED ON EVERY PLATFORM, which it was not before. On Linux
+  ;; usocket:get-hosts-by-name "" signals NS-HOST-NOT-FOUND-ERROR, so the answer was NIL by
+  ;; accident; on Windows getaddrinfo resolves an empty node name to the loopback address, so the
+  ;; answer was T. This check passed on three legs and failed on Windows, which is the shape of a
+  ;; test that is really asking what the local resolver does (#1082).
+  (dolist (host (list "" " " "   " (format nil "~C" #\Tab)))
+    (is-false (http:local-host-p host) "~S is not a local host" host))
+  ;; The control: a name that does resolve locally is still local, so the refusal above is about
+  ;; the host being empty and not about names having stopped working.
+  (let ((resolved (http:resolve-host "localhost")))
+    (is-true (and resolved (http:local-host-p "localhost"))
+             "control: localhost is still local")))
 
 (test url-host-reads-the-host-quri-would-connect-to
   "#1082: both callers had written this, and both got it wrong in their own way. QURI is used

@@ -249,7 +249,8 @@ in text, without brackets or a port -- see URL-HOST.
 :LOOPBACK, :PRIVATE or :LINK-LOCAL, except for a 6to4 (%6TO4-P) or NAT64 (%NAT64-P) address,
 each of which reaches its destination through a gateway or relay that need not be this
 network's, whatever IPv4 address it carries. A host spelled as dotted-quad IPv4 with a leading
-zero is refused outright (%LEADING-ZERO-QUAD-P). Any other name is resolved,
+zero is refused outright (%LEADING-ZERO-QUAD-P), and so is an empty or blank HOST, whose
+meaning to a resolver is platform-dependent. Any other name is resolved,
 and counts only when it resolves and EVERY address it resolves to is one of those, so a Docker
 Compose service name works while a name pointing at the internet does not. A name that does not
 resolve does not count: a host that cannot be reached is not a host known to be local.
@@ -263,6 +264,14 @@ userinfo got past one, a scheme in the endpoint got past the other, and a bucket
 of the host got past both (#1089, the review of #1084). A rule that decides whether credentials
 may travel in the clear is the last rule that should exist twice (#1082)."
   (and host
+       ;; A HOST HAS TO BE A HOST. An empty or blank string is refused before anything resolves
+       ;; it, because what a resolver makes of one differs by platform: on Linux
+       ;; usocket:get-hosts-by-name "" signals NS-HOST-NOT-FOUND-ERROR, so this answered NIL,
+       ;; while on Windows getaddrinfo resolves an empty node name to the loopback address, so
+       ;; this answered T -- truthfully about where Windows would connect, and wrongly about
+       ;; whether a caller has a host at all. Measured: the Windows leg of run 41388319932
+       ;; failed exactly this check while the other three legs passed (#1082).
+       (plusp (length (string-trim '(#\Space #\Tab #\Newline #\Return) host)))
        (not (%leading-zero-quad-p host))
        (or (string-equal host "localhost")
            (let ((literal (parse-address host)))
