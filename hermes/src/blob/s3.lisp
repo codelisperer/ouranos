@@ -23,6 +23,14 @@
    (secret-key :initarg :secret-key :reader s3-secret-key)
    (session-token :initarg :session-token :initform nil :reader s3-session-token)
    (secure :initarg :secure :initform t :reader s3-secure-p)
+   (endpoint-approved-local
+    :initarg :endpoint-approved-local :initform nil :reader s3-endpoint-approved-local
+    :documentation
+    "Whether this store's endpoint was resolved and approved as LOCAL when the store was made,
+so a plaintext request to it is not sent through a proxy (#1091). MAKE-S3-STORE sets it from
+%SECURE-SETTING's verdict; see PROXY-ARGUMENTS for why this is a recorded verdict rather than a
+lookup on the send path. The initform is NIL, so a store built with MAKE-INSTANCE directly --
+which runs no check -- keeps whatever proxy is configured.")
    (path-style :initarg :path-style :initform nil :reader s3-path-style-p
                :documentation
                "Address the bucket as a PATH (endpoint/bucket/key) rather than as a
@@ -85,9 +93,11 @@ moved to hermes, and the deployed names were kept rather than renamed. They are 
       ;; first (the review of #1090).
       (%check-endpoint-shape endpoint)
       (%check-endpoint-userinfo endpoint)
-      (let ((secure (%secure-setting secure secure-p endpoint path-style)))
+      (multiple-value-bind (secure endpoint-approved-local)
+          (%secure-setting secure secure-p endpoint path-style)
         (make-instance 's3-store
                        :endpoint endpoint
+                       :endpoint-approved-local endpoint-approved-local
                        :region region
                        :access-key (%require-setting access-key "MNEMOSYNE_S3_ACCESS_KEY")
                        :secret-key (%require-setting secret-key "MNEMOSYNE_S3_SECRET_KEY")
@@ -234,6 +244,14 @@ dexador parses it with. An endpoint whose host cannot be determined is not local
 (defun %secure-setting (value supplied-p endpoint path-style)
   "The store's SECURE: VALUE when :SECURE was passed, else MNEMOSYNE_S3_SECURE, else T.
 
+RETURNS TWO VALUES: that setting, and whether this function APPROVED the endpoint as local. The
+second is for #1091, and it is true in exactly one case -- MNEMOSYNE_S3_SECURE=false, where the
+%LOCAL-ENDPOINT-P check below has to pass. It is false for a secure store, whose endpoint is
+never resolved here, and FALSE FOR A CODE-SUPPLIED :SECURE NIL, which returns at the first branch
+without checking the endpoint at all. That last case is the one worth stating: nothing approved
+that host, so nothing may claim it was approved, and a plaintext request to it keeps whatever
+proxy is configured unless PROXY-ARGUMENTS recognises the host as a literal by itself.
+
 The variable is read as true or false without regard to case, and unset means true, so plaintext
 http has to be asked for. Any other value signals BLOB-CONFIGURATION-ERROR rather than picking a
 default, so a misspelling cannot quietly change the store to http, and cannot quietly leave a
@@ -249,10 +267,10 @@ checked: that is a deliberate choice written by whoever owns the code, and it is
 This reads oppositely from MNEMOSYNE_S3_PATH_STYLE beside it, where unset means NIL. That is
 deliberate: for path-style the safe default is off, and for secure it is on."
   (if supplied-p
-      (and value t)
+      (values (and value t) nil)
       (let ((v (%setting "MNEMOSYNE_S3_SECURE")))
-        (cond ((null v) t)
-              ((string-equal v "true") t)
+        (cond ((null v) (values t nil))
+              ((string-equal v "true") (values t nil))
               ((string-equal v "false")
                ;; PLAINTEXT REQUIRES PATH-STYLE, because in virtual-host style the request does
                ;; not go to the endpoint at all: %S3-HOST builds "BUCKET.ENDPOINT", a different
@@ -270,7 +288,10 @@ deliberate: for path-style the safe default is off, and for secure it is on."
                  (error 'blob-configuration-error
                         :missing (format nil "MNEMOSYNE_S3_SECURE=false, which sends every request in plaintext, and MNEMOSYNE_S3_ENDPOINT is ~S, which is not a loopback, private or link-local address. Plaintext is for a local S3 double; point the endpoint at one, or pass :secure nil in code if this is really what you want"
                                          endpoint)))
-               nil)
+               ;; THE SECOND VALUE IS READ OFF THE CHECK ABOVE rather than resolved again:
+               ;; reaching here means %LOCAL-ENDPOINT-P said yes, since its only other way out
+               ;; is the refusal (#1091).
+               (values nil t))
               (t (error 'blob-configuration-error
                         :missing (format nil "MNEMOSYNE_S3_SECURE must be true or false, not ~S" v)))))))
 
@@ -465,10 +486,18 @@ body that cannot be read becomes a DETAIL saying so (#796)."
             ;; HTTPS_PROXY named -- the signed Authorization header and any session token with
             ;; them -- while a comment and the CHANGELOG said hermes/blob was covered (the
             ;; review of #1094).
+            ;;
+            ;; APPROVED-LOCAL carries the verdict this store recorded when it was made, which is
+            ;; what covers an endpoint that is a NAME: PROXY-ARGUMENTS resolves nothing, so
+            ;; without this a plaintext store at a Compose service name such as "minio:9000" was
+            ;; approved for plaintext at configuration time and then still sent its signed
+            ;; requests, and any session token, to HTTP_PROXY in the clear (#1091).
             (apply #'dex:request url :method method :headers headers :content content
                                      :want-stream want-stream :force-binary t
                                      :keep-alive nil
-                                     (http:proxy-arguments url))
+                                     (http:proxy-arguments
+                                      url
+                                      :approved-local (s3-endpoint-approved-local store)))
           (dex:http-request-failed (e)
             (let ((status (dex:response-status e))
                   ;; With WANT-STREAM the error's body is an open stream on the connection.

@@ -168,8 +168,15 @@ What is refused, and why each is here rather than only the obvious one:
     leading-zero IPv4 spelling, where its parser and the system resolver can disagree.
 
 The host is resolved at the moment this runs, once. A provider made while a name resolved
-locally is not re-checked if that name later resolves elsewhere -- and a plaintext request to a
-host approved by NAME still uses a configured proxy, which is #1091."
+locally is not re-checked if that name later resolves elsewhere.
+
+RETURNS TWO VALUES: the parsed URI, and whether the host was approved as LOCAL. The second is
+what #1091 needed, and it costs no second lookup, because it is already known here: a plaintext
+URL that this function returns at all is one whose host LOCAL-HOST-P approved -- that is the last
+branch below, and the alternative is a refusal. A caller records it and passes it to
+AION/HTTP-CLIENT as APPROVED-LOCAL, so the plaintext request it then sends is not handed to a
+proxy. It is false for an https URL, whose host is never resolved here, which matches
+PROXY-ARGUMENTS: the proxy decision is only made for plaintext."
   ;; CONTROL CHARACTERS ARE REFUSED FIRST, before the value is parsed. A newline in a URL is the
   ;; shape of a header injection -- "http://127.0.0.1/x\nHost: evil.example" -- and although the
   ;; credential would still have gone only to the local host, a value that cannot appear in a URL
@@ -186,7 +193,8 @@ host approved by NAME still uses a configured proxy, which is #1091."
                          :missing (format nil "a ~A that parses as a URL. The value given does not, and it is not repeated here because it may contain a password"
                                           setting)))))
          (scheme (quri:uri-scheme uri))
-         (host (quri:uri-host uri)))
+         (host (quri:uri-host uri))
+         (approved-local nil))
     (flet ((refuse (why)
              (error 'configuration-error
                     :missing (format nil "a ~A such as ~A. ~A" setting example why))))
@@ -202,8 +210,12 @@ host approved by NAME still uses a configured proxy, which is #1091."
         (refuse (format nil "The host ~S is a bracketed IPv6 address, which cannot be connected to: it is looked up as a name and no such name exists. Write the address without brackets, or use a name." host)))
       (when (and (string-equal scheme "http") (not (local-host-p host)))
         (refuse (format nil "The host ~S would receive ~A in the clear, because every request carries them in an Authorization header. Use https, or a host only this machine or this network can reach."
-                        host credential))))
-    uri))
+                        host credential)))
+      ;; THE SECOND VALUE IS READ OFF THE BRANCH ABOVE rather than resolved again. Reaching here
+      ;; with an http scheme means LOCAL-HOST-P said yes, since the only other way out of that
+      ;; branch is a refusal (#1091).
+      (setf approved-local (and scheme (string-equal scheme "http") t)))
+    (values uri approved-local)))
 
 (defparameter *send-connect-timeout* 10
   "Seconds a backend waits for a connection to a provider before giving up (#1077).

@@ -46,20 +46,37 @@ its tag.
   **An app that deliberately proxied plaintext requests to a local host will see them stop going
   through the proxy.** https is unaffected, because a proxied https request is a `CONNECT` tunnel
   and the credentials are inside TLS, and plaintext to a host that is not local is unaffected.
-  **A DNS NAME IS NOT COVERED, AND THAT CASE IS STILL OPEN.** A plaintext store or provider whose
-  host is a name — a Compose service such as `minio:9000`, or any name resolving to a loopback or
-  private address — is approved by the configuration-time check and then **still uses a configured
-  proxy**, so its requests go to that proxy in the clear, with the signed `Authorization` header
-  and any session token. That is **#1091**, which this does not close.
+  **A host that is a DNS name is now covered too, by the change below**; this entry described it
+  as still open, which was true when it was written.
   The send-time decision resolves no name on purpose: a lookup there is a blocking resolution
   that `connect-timeout` does not cover, and a name that answers private now can answer public at
   connect time, which would skip a configured egress proxy on the strength of a resolution that
-  no longer holds. The fix is for the configuration-time verdict to be carried to the send rather
-  than recomputed, which is what #1091 proposes. Until it lands, an app that must not send through
-  a proxy should address a local store **by IP address**, which is covered. Clearing the
-  environment variables works only before the image loads dexador, because it reads them once
-  into `dexador:*default-proxy*` when it loads (`defvar`, so unsetting them later changes
-  nothing); setting that variable to `nil` is the runtime equivalent.
+  no longer holds. Clearing the environment variables works only before the image loads dexador,
+  because it reads them once into `dexador:*default-proxy*` when it loads (`defvar`, so unsetting
+  them later changes nothing); setting that variable to `nil` is the runtime equivalent.
+
+- **A plaintext store or provider whose host is a NAME is no longer sent through a proxy either**
+  (#1091, closing it). The change above decided by host spelling, so `127.0.0.1` was covered and
+  a Compose service name such as `minio:9000` was not: it was approved for plaintext by the
+  configuration-time check and then still sent its requests to `HTTP_PROXY` in the clear, with
+  the signed `Authorization` header or the API key and any session token. The two answers
+  disagreed about the same destination — the configuration check said local, and the send-time
+  decision declined to answer because the host was a name.
+  **The verdict the configuration check already reached is now carried to the send instead of
+  being recomputed there**, so no name is resolved on the send path. `aion/http-client:proxy-arguments`
+  takes `:approved-local`, `make-request` takes `:approved-local` (read back with
+  `request-approved-local`), `hermes/blob`'s `s3-store` records
+  `s3-endpoint-approved-local`, and hermes's Twilio and SendGrid providers record
+  `twilio-api-base-approved-local` and `sendgrid-endpoint-approved-local`. Neither provider slot
+  has an initarg: the value is a verdict this framework reached, and a caller able to pass it
+  could assert that a public host had been approved.
+  **A `:secure nil` passed in code still goes through a configured proxy**, because that path
+  never checks the endpoint's locality — `%secure-setting` returns before the check — so there is
+  no verdict to carry. Only `MNEMOSYNE_S3_SECURE=false`, which does check, records one. A
+  plaintext store addressed by **IP address** is covered either way, by the rule above.
+  **An app that deliberately proxied plaintext requests to a local store named by DNS will see
+  them stop going through the proxy**, which is the same consequence the entry above describes
+  for addresses.
 - **hermes/blob: an S3 endpoint that carries a user name or password is now refused when the
   store is made** (#1089). `MNEMOSYNE_S3_ENDPOINT` values such as `user:pw@host` or
   `[::1]@host` signal `blob-configuration-error`. An app that put userinfo in that variable has

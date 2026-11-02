@@ -2568,3 +2568,64 @@ the ENDPOINT and not the URL the request is built from -- and those are differen
                   ("::1" . ":")
                   ("minio" . "minio")))
     (is (string= (cdr case) (b::%endpoint-host (car case))) "~A" (car case))))
+
+(test a-plaintext-store-at-a-local-NAME-sends-with-no-proxy
+  "#1091, the half #1094 left open. PROXY-ARGUMENTS resolves no name -- deliberately, because a
+lookup on the send path is not covered by CONNECT-TIMEOUT and a name that answers private now can
+answer public at connect time -- so a plaintext store at a NAME was approved for plaintext at
+configuration time and then still sent its signed requests, and any session token, to HTTP_PROXY
+in the clear. Measured on Linux before this change, with a name /etc/hosts maps to a loopback
+address: LOCAL-HOST-P said T and PROXY-ARGUMENTS said NIL for the same destination.
+
+The store now records the verdict its configuration check already reached, and %S3-REQUEST passes
+it. The assertion is on WHAT DEXADOR IS GIVEN, not on what a request returns: a fixture whose
+proxy is unreachable would pass for the wrong reason.
+
+THE THIRD CASE IS THE ONE THAT IS EASY TO GET WRONG. A code-supplied :SECURE NIL is not checked
+for locality at all -- %SECURE-SETTING returns at its first branch -- so there is no verdict to
+carry, and the proxy stays. Inferring the verdict from `the store is plaintext' would have been
+the obvious implementation and would have claimed an approval that never happened."
+  (let ((seen '())
+        (original-request (fdefinition 'dex:request))
+        (original-resolve (fdefinition 'http:resolve-host)))
+    (unwind-protect
+         (progn
+           ;; The name resolves to a loopback address, so the configuration check approves it.
+           (setf (fdefinition 'http:resolve-host)
+                 (lambda (host)
+                   (if (string= host "minio.invalid")
+                       (funcall original-resolve "127.0.0.1")
+                       (funcall original-resolve host))))
+           (setf (fdefinition 'dex:request)
+                 (lambda (url &rest args)
+                   (push (list url (if (member :proxy args) (list :proxy (getf args :proxy)) :none))
+                         seen)
+                   (error "stopped before sending")))
+           (with-environment-variable ("MNEMOSYNE_S3_SECURE" "false")
+             (let ((store (b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x"
+                                           :endpoint "minio.invalid:9000" :path-style t)))
+               (is-true (hermes/blob::s3-endpoint-approved-local store)
+                        "the store recorded that its endpoint was approved as local")
+               (ignore-errors (b:get-blob store "bkt" "k"))))
+           ;; A code-supplied :SECURE NIL: nothing resolved the endpoint, so nothing approved it.
+           (let ((store (b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x"
+                                         :endpoint "minio.invalid:9000" :path-style t
+                                         :secure nil)))
+             (is-false (hermes/blob::s3-endpoint-approved-local store)
+                       "an unchecked :secure nil records no approval")
+             (ignore-errors (b:get-blob store "bkt" "k")))
+           ;; And an ordinary secure store at the same name.
+           (let ((store (b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x"
+                                         :endpoint "minio.invalid:9000" :path-style t)))
+             (ignore-errors (b:get-blob store "bkt" "k"))))
+      (setf (fdefinition 'dex:request) original-request)
+      (setf (fdefinition 'http:resolve-host) original-resolve))
+    (let ((calls (reverse seen)))
+      (is (= 3 (length calls)) "all three requests reached dexador: ~S" calls)
+      (is (equal '(:proxy nil) (second (first calls)))
+          "the plaintext request to the approved NAME is sent with :proxy nil: ~S" (first calls))
+      (is (eq :none (second (second calls)))
+          "a code-supplied :secure nil, which was never checked, keeps the proxy: ~S"
+          (second calls))
+      (is (eq :none (second (third calls)))
+          "and so does an https request to the same name: ~S" (third calls)))))

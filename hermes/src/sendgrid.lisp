@@ -23,6 +23,13 @@ once because the docstring explaining that quoted the marker it was describing (
    (endpoint :initarg :endpoint
              :initform +sendgrid-endpoint-default+
              :reader sendgrid-endpoint)
+   (endpoint-approved-local
+    :initform nil :reader sendgrid-endpoint-approved-local
+    :documentation
+    "Whether ENDPOINT's host was resolved and approved as LOCAL by the check that runs when this
+provider is initialized, so a plaintext send is not handed to a proxy (#1091). NO INITARG, for
+the reason TWILIO-API-BASE-APPROVED-LOCAL gives: a caller that could pass it could assert that a
+public host had been approved.")
    (connect-timeout :initarg :connect-timeout
                     :initform *send-connect-timeout*
                     :reader sendgrid-connect-timeout)
@@ -46,7 +53,8 @@ INITIALIZE-INSTANCE :AFTER, which REINITIALIZE-INSTANCE does not call, so
 was accepted and the next send carried the credential there in plaintext. SHARED-INITIALIZE runs
 for both, so there is no second door (the review of #1104)."
   (declare (ignore slot-names initargs))
-  (%check-endpoint (sendgrid-endpoint p)))
+  (setf (slot-value p 'endpoint-approved-local)
+        (%check-endpoint (sendgrid-endpoint p))))
 
 (defun %check-endpoint (endpoint)
   "Signal CONFIGURATION-ERROR unless ENDPOINT is a URL a SendGrid request may carry the API key
@@ -65,11 +73,12 @@ copy would have been the same bet.
 APPENDS-PATH IS NIL, because DELIVER sends this value as the request URL exactly as it stands --
 unlike Twilio's API base, which has a path appended to it. So a query or a fragment is harmless
 here and is not refused, and there is no second string to compare the approved host against."
-  (%check-credential-url endpoint
-                         :setting "SendGrid ENDPOINT"
-                         :example +sendgrid-endpoint-default+
-                         :credential "the API key"
-                         :appends-path nil))
+  ;; The second value is the verdict for #1091: see SENDGRID-ENDPOINT-APPROVED-LOCAL.
+  (nth-value 1 (%check-credential-url endpoint
+                                      :setting "SendGrid ENDPOINT"
+                                      :example +sendgrid-endpoint-default+
+                                      :credential "the API key"
+                                      :appends-path nil)))
 
 (defun make-sendgrid (&rest initargs &key api-key endpoint connect-timeout read-timeout)
   "A SendGrid provider. API-KEY defaults from $SENDGRID_API_KEY, and the two timeouts from
@@ -135,7 +144,10 @@ disposition given; an inline attachment also carries its content_id."
                             :url (sendgrid-endpoint p)
                             :content (jzon:stringify (%sendgrid-body m))
                             :connect-timeout (sendgrid-connect-timeout p)
-                            :read-timeout (sendgrid-read-timeout p)))
+                            :read-timeout (sendgrid-read-timeout p)
+                            ;; A plaintext send to a host the check approved as local is not
+                            ;; handed to a proxy (#1091).
+                            :approved-local (sendgrid-endpoint-approved-local p)))
          (resp (as-delivery :sendgrid
                  (send-request
                   req

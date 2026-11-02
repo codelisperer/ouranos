@@ -177,7 +177,8 @@ on. A body cut short by the deadline is never returned as a response."))
                                                      (headers '()) content
                                                      connect-timeout read-timeout
                                                      (follow-redirects 5) max-body-bytes
-                                                     connect-address ca-path)))
+                                                     connect-address ca-path
+                                                     approved-local)))
   "An outbound HTTP request being built. HEADERS is an alist of (name . value); CONTENT is a
 JSON/string body or an alist (dexador form-encodes an alist).
 
@@ -203,7 +204,11 @@ CONNECT-ADDRESS   an IP address, as a string or an octet vector, to connect to i
                   Windows decides about the certificate (#536), and over cl+ssl elsewhere. See
                   %REQUEST-PINNED.
 CA-PATH           trust roots for certificate verification (a PEM file or a directory; on
-                  Windows a PEM file only). NIL uses the system's."
+                  Windows a PEM file only). NIL uses the system's.
+APPROVED-LOCAL    a configuration step already resolved this URL's host and approved it as
+                  local, so a plaintext request to it is not sent through a proxy (#1091).
+                  hermes's providers pass it from the verdict their configuration check
+                  recorded. NIL leaves a configured proxy in place."
   (method :get :type keyword)
   (url "" :type string)
   (headers (quote ()) :type list)
@@ -213,7 +218,12 @@ CA-PATH           trust roots for certificate verification (a PEM file or a dire
   (follow-redirects 5)
   (max-body-bytes nil)
   (connect-address nil)
-  (ca-path nil))
+  (ca-path nil)
+  ;; A configuration step resolved this URL's host and approved it as local, so a plaintext
+  ;; request to it is not sent through a proxy (#1091). See PROXY-ARGUMENTS: this is a recorded
+  ;; verdict, not a resolution made on the send path, and NIL means "no verdict was recorded",
+  ;; which leaves a configured proxy in place.
+  (approved-local nil))
 
 (defparameter +no-bytes+
   (make-array 0 :element-type '(unsigned-byte 8))
@@ -505,7 +515,8 @@ every request, so no connection is reused."
           ;; calls dexador directly and so never reaches this function. When this lived here,
           ;; that backend was not covered while a comment and the CHANGELOG said it was (the
           ;; review of #1094).
-          (proxy-arguments (request-url req))
+          (proxy-arguments (request-url req)
+                           :approved-local (request-approved-local req))
           (when (request-max-body-bytes req) (list :want-stream t))
           (when (request-ca-path req) (list :ca-path (request-ca-path req)))
           ;; Passed only when set, so an unset timeout means dexador's default rather than an

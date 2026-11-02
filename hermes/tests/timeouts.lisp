@@ -376,3 +376,60 @@ the same stated reason."
            "and each says what would have travelled")
   (is-true (search "account SID and auth token" (or (%api-base-refusal "http://evil.invalid/x") ""))
            "which is not the same credential"))
+
+(test a-plaintext-provider-at-a-local-NAME-sends-with-no-proxy
+  "#1091, for the two providers that send a credential to a configured URL. The same defect as
+hermes/blob's, and the same fix: PROXY-ARGUMENTS resolves no name, so a plaintext API base or
+endpoint at a NAME was approved for plaintext when the provider was made and then still sent the
+credential -- the account SID and auth token in an Authorization header, or the API key -- to
+whatever HTTPS_PROXY named, in the clear.
+
+Each provider records the verdict its configuration check already reached, and passes it with the
+request. The assertion is on WHAT DEXADOR IS GIVEN: a fixture whose proxy is unreachable would
+pass for the wrong reason, and a fixture that only read the slot back would not test that the
+value reaches the send at all."
+  (let ((seen '())
+        (original-request (fdefinition 'dex:request))
+        (original-resolve (fdefinition 'aion/http-client:resolve-host)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'aion/http-client:resolve-host)
+                 (lambda (host)
+                   (if (string= host "provider.invalid")
+                       (funcall original-resolve "127.0.0.1")
+                       (funcall original-resolve host))))
+           (setf (fdefinition 'dex:request)
+                 (lambda (url &rest args)
+                   (push (list url (if (member :proxy args) (list :proxy (getf args :proxy)) :none))
+                         seen)
+                   (error "stopped before sending")))
+           (let ((twilio (hermes::make-twilio :account-sid "ACtest" :auth-token "t"
+                                              :from "+15005550006"
+                                              :api-base "http://provider.invalid:4010/2010-04-01")))
+             (is-true (hermes::twilio-api-base-approved-local twilio)
+                      "twilio recorded that its api-base was approved as local")
+             (ignore-errors (h:deliver twilio (%an-sms))))
+           (let ((sendgrid (hermes::make-sendgrid
+                            :api-key "SG.test"
+                            :endpoint "http://provider.invalid:4010/v3/mail/send")))
+             (is-true (hermes::sendgrid-endpoint-approved-local sendgrid)
+                      "sendgrid recorded that its endpoint was approved as local")
+             (ignore-errors (h:deliver sendgrid (%an-email))))
+           ;; The controls: the real https endpoints, whose hosts are never resolved by the
+           ;; check and must keep whatever proxy is configured.
+           (ignore-errors (h:deliver (hermes::make-twilio :account-sid "ACtest" :auth-token "t"
+                                                          :from "+15005550006")
+                                     (%an-sms)))
+           (ignore-errors (h:deliver (hermes::make-sendgrid :api-key "SG.test") (%an-email))))
+      (setf (fdefinition 'dex:request) original-request)
+      (setf (fdefinition 'aion/http-client:resolve-host) original-resolve))
+    (let ((calls (reverse seen)))
+      (is (= 4 (length calls)) "all four sends reached dexador: ~S" calls)
+      (is (equal '(:proxy nil) (second (first calls)))
+          "twilio's plaintext send to the approved name is not proxied: ~S" (first calls))
+      (is (equal '(:proxy nil) (second (second calls)))
+          "and neither is sendgrid's: ~S" (second calls))
+      (is (eq :none (second (third calls)))
+          "twilio's https send keeps whatever proxy is configured: ~S" (third calls))
+      (is (eq :none (second (fourth calls)))
+          "and so does sendgrid's: ~S" (fourth calls)))))

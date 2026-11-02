@@ -29,6 +29,16 @@ describing. Hence no URL here but the value itself (#1077).")
    (api-base :initarg :api-base
              :initform +twilio-api-base-default+
              :reader twilio-api-base)
+   (api-base-approved-local
+    :initform nil :reader twilio-api-base-approved-local
+    :documentation
+    "Whether API-BASE's host was resolved and approved as LOCAL by the check that runs when this
+provider is initialized, so a plaintext send is not handed to a proxy (#1091).
+
+NO INITARG, deliberately. The value is a verdict this code reached, and a caller that could pass
+it could assert that a public host had been approved and have the credentials sent straight to
+it, bypassing an egress proxy. SHARED-INITIALIZE sets it on every initialization, beside the
+check that produces it.")
    (connect-timeout :initarg :connect-timeout
                     :initform *send-connect-timeout*
                     :reader twilio-connect-timeout)
@@ -75,12 +85,13 @@ checked and the string built were different -- and %TWILIO-ENDPOINT appends a pa
 the two are not the same string here either. No input is known to reach the refusal now that the
 shared check rejects everything that could move the host, so it has no test: it is a guard
 against a future change to %TWILIO-ENDPOINT rather than against any base."
-  (let* ((uri (%check-credential-url base
-                                     :setting "Twilio API-BASE"
-                                     :example +twilio-api-base-default+
-                                     :credential "the account SID and auth token"
-                                     :appends-path t))
-         (scheme (quri:uri-scheme uri))
+  (multiple-value-bind (uri approved-local)
+      (%check-credential-url base
+                             :setting "Twilio API-BASE"
+                             :example +twilio-api-base-default+
+                             :credential "the account SID and auth token"
+                             :appends-path t)
+   (let* ((scheme (quri:uri-scheme uri))
          (host (quri:uri-host uri))
          (built (handler-case (quri:uri (%twilio-endpoint base "ACprobe"))
                   (error () nil))))
@@ -91,7 +102,9 @@ against a future change to %TWILIO-ENDPOINT rather than against any base."
              :missing (format nil "a Twilio API-BASE such as ~A. A request built from this value would go to ~S over ~S, which is not the ~S over ~S this check approved."
                               +twilio-api-base-default+
                               (and built (quri:uri-host built)) (and built (quri:uri-scheme built))
-                              host scheme)))))
+                              host scheme))))
+    ;; The verdict the check above already made: see TWILIO-API-BASE-APPROVED-LOCAL (#1091).
+    approved-local))
 
 (defmethod shared-initialize :after ((p twilio) slot-names &rest initargs &key &allow-other-keys)
   "Check the configured URL on EVERY initialization, not only the first.
@@ -104,7 +117,8 @@ INITIALIZE-INSTANCE :AFTER, which REINITIALIZE-INSTANCE does not call, so
 was accepted and the next send carried the credential there in plaintext. SHARED-INITIALIZE runs
 for both, so there is no second door (the review of #1104)."
   (declare (ignore slot-names initargs))
-  (%check-api-base (twilio-api-base p)))
+  (setf (slot-value p 'api-base-approved-local)
+        (%check-api-base (twilio-api-base p))))
 
 (defun %twilio-endpoint (base sid)
   (format nil "~A/Accounts/~A/Messages.json" base sid))
@@ -129,7 +143,10 @@ for both, so there is no second door (the review of #1104)."
                                            (cons "From" from)
                                            (cons "Body" (sms-text m)))
                             :connect-timeout (twilio-connect-timeout p)
-                            :read-timeout (twilio-read-timeout p)))
+                            :read-timeout (twilio-read-timeout p)
+                            ;; A plaintext send to a host the check approved as local is not
+                            ;; handed to a proxy (#1091).
+                            :approved-local (twilio-api-base-approved-local p)))
          (resp (as-delivery :twilio
                  (send-request
                   req

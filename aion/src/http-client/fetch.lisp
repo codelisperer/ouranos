@@ -280,9 +280,13 @@ may travel in the clear is the last rule that should exist twice (#1082)."
                  (let ((addresses (ignore-errors (resolve-host host))))
                    (and addresses (every #'%local-address-p addresses) t)))))))
 
-(defun proxy-arguments (url)
+(defun proxy-arguments (url &key approved-local)
   "The dexador keyword arguments that say how URL is to be proxied: (:PROXY NIL) for a plaintext
 request to a host this machine reaches by itself, and no arguments otherwise (#1091).
+
+APPROVED-LOCAL says that a configuration step has ALREADY resolved this host and approved it as
+local, so the answer does not depend on the host's spelling. Pass it from a recorded verdict, not
+from a resolution made now; see below for why that distinction is the whole point.
 
 EVERY CALLER THAT SENDS A REQUEST MUST USE THIS, including one that calls dexador directly.
 dexador sets *DEFAULT-PROXY* from HTTPS_PROXY or HTTP_PROXY when it loads and honours no
@@ -292,18 +296,33 @@ that was checked. The first version of this lived inside %DEX-ARGS, which meant 
 S3 backend was NOT covered -- it calls dexador directly -- while the CHANGELOG and a comment
 both said it was (the review of #1094).
 
-NO NAME IS RESOLVED HERE. The decision is made for \"localhost\" and for IP literals only, and a
-DNS name keeps whatever proxy is configured. Two reasons. A lookup on this path would be a
-blocking resolution on every plaintext request, which CONNECT-TIMEOUT does not cover. And a name
-that answers private now can answer public at connect time, which would mean skipping a
-configured egress proxy on the strength of a resolution that no longer holds; deciding by name
-belongs at configuration time, where hermes and hermes/blob do it and where a wrong answer is a
-refusal rather than a silently unproxied request."
+NO NAME IS RESOLVED HERE, in either case. Without APPROVED-LOCAL the decision is made for
+\"localhost\" and for IP literals only, and a DNS name keeps whatever proxy is configured. Two
+reasons. A lookup on this path would be a blocking resolution on every plaintext request, which
+CONNECT-TIMEOUT does not cover. And a name that answers private now can answer public at connect
+time, which would mean skipping a configured egress proxy on the strength of a resolution that no
+longer holds.
+
+THAT IS WHY APPROVED-LOCAL IS A RECORDED VERDICT RATHER THAN A LOOKUP. \"This host was approved as
+local when the configuration was built\" is a statement about the past, and it stays true; \"this
+name resolves locally right now\" is a guess about the present, made on the send path, and it is
+the thing the paragraph above refuses to do. A caller that has no configuration step passes
+nothing and gets the literal rule.
+
+Until a caller passed APPROVED-LOCAL the two answers disagreed for the same destination: a
+plaintext store or provider at a NAME that resolves to a loopback address was approved for
+plaintext at configuration time and then still sent its credentials to HTTP_PROXY in the clear,
+because this function would not decide by name. Measured on Linux before the fix, with a name
+/etc/hosts maps to a loopback address:
+
+  <a local name>  local-host-p=T  proxy-arguments=NIL
+  localhost       local-host-p=T  proxy-arguments=(:PROXY NIL)"
   (let* ((uri (ignore-errors (quri:uri url)))
          (scheme (and uri (quri:uri-scheme uri)))
          (host (and uri (url-host url))))
     (if (and scheme (string-equal scheme "http") host
-             (or (string-equal host "localhost")
+             (or approved-local
+                 (string-equal host "localhost")
                  (let ((literal (parse-address host)))
                    (and literal (not (%leading-zero-quad-p host)) (%local-address-p literal)))))
         (list :proxy nil)
