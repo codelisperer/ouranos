@@ -42,9 +42,12 @@
 ;;; them into the image NOW, while contribs are still reachable -- this is what makes
 ;;; `cons build` (in-process, in cons's warm image) able to compile Coalton and start
 ;;; the web server. (A `--fresh` subprocess sbcl gets them from SBCL_HOME instead.)
-(dolist (contrib '(:sb-cltl2 :sb-bsd-sockets :sb-posix :sb-rotate-byte
-                   :sb-md5 :sb-introspect :sb-concurrency))
-  (ignore-errors (require contrib)))
+;;; A contrib that does not load stops the bootstrap here, rather than leaving bin/cons to
+;;; fail at its first REQUIRE (#1099). The list and the check are in scripts/bake-contribs.lisp.
+(load (merge-pathnames "scripts/bake-contribs.lisp"
+                       (uiop:pathname-directory-pathname
+                        (or *load-truename* *load-pathname* (truename #p"./")))))
+(funcall (read-from-string "ouranos-bake:bake-contribs-or-die") "bootstrap" "bin/cons")
 
 ;;; The whole monorepo tree is discoverable to ASDF in one shot -- no per-project
 ;;; local-projects symlinks. This is what replaces the per-framework symlinks at cutover.

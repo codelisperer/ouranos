@@ -598,9 +598,11 @@ a later step does: a resource update rewrites the file and drops an Authenticode
       (%finish-windows-bundle (%bundle-directory))
       (sb-ext:exit :code 0))))
 
-(dolist (contrib '(:sb-cltl2 :sb-bsd-sockets :sb-posix :sb-rotate-byte
-                   :sb-md5 :sb-introspect :sb-concurrency))
-  (ignore-errors (require contrib)))
+;;; The contribs the app image carries; a contrib that does not load stops the build (#1099).
+(load (merge-pathnames "bake-contribs.lisp"
+                       (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))
+(funcall (read-from-string "ouranos-bake:bake-contribs-or-die")
+         "build-desktop-app" "the app image")
 
 (load (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))
 
