@@ -26,11 +26,20 @@ its tag.
   **An app that deliberately proxied plaintext requests to a local host will see them stop going
   through the proxy.** https is unaffected, because a proxied https request is a `CONNECT` tunnel
   and the credentials are inside TLS, and plaintext to a host that is not local is unaffected.
-  **A DNS name is not decided here**: it keeps whatever proxy is configured. Resolving on the
-  send path would be a blocking lookup that `connect-timeout` does not cover, and a name that
-  answers private now can answer public at connect time, which would skip a configured egress
-  proxy on the strength of a resolution that no longer holds. Deciding by name belongs at
-  configuration time, where hermes and `hermes/blob` do it and where a wrong answer is a refusal.
+  **A DNS NAME IS NOT COVERED, AND THAT CASE IS STILL OPEN.** A plaintext store or provider whose
+  host is a name — a Compose service such as `minio:9000`, or any name resolving to a loopback or
+  private address — is approved by the configuration-time check and then **still uses a configured
+  proxy**, so its requests go to that proxy in the clear, with the signed `Authorization` header
+  and any session token. That is **#1091**, which this does not close.
+  The send-time decision resolves no name on purpose: a lookup there is a blocking resolution
+  that `connect-timeout` does not cover, and a name that answers private now can answer public at
+  connect time, which would skip a configured egress proxy on the strength of a resolution that
+  no longer holds. The fix is for the configuration-time verdict to be carried to the send rather
+  than recomputed, which is what #1091 proposes. Until it lands, an app that must not send through
+  a proxy should address a local store **by IP address**, which is covered. Clearing the
+  environment variables works only before the image loads dexador, because it reads them once
+  into `dexador:*default-proxy*` when it loads (`defvar`, so unsetting them later changes
+  nothing); setting that variable to `nil` is the runtime equivalent.
 
 - **hermes/blob: an S3 endpoint that carries a user name or password is now refused when the
   store is made** (#1089). `MNEMOSYNE_S3_ENDPOINT` values such as `user:pw@host` or
