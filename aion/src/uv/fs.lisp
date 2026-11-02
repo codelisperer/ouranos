@@ -124,12 +124,65 @@ hangs off the request, and it is libuv's to free -- never ours."
 
 (defun native-path (path)
   "PATH as the string libuv is given. A string is passed through unchanged: it is already the
-operating system's name for the file. A pathname is converted with UIOP:NATIVE-NAMESTRING.
-CL:NAMESTRING is used for neither: on Linux and macOS it reads a backslash in a string as an escape
-and drops it, so a file whose name has one could not be used (#1093)."
-  (if (stringp path)
-      path
-      (uiop:native-namestring path)))
+operating system's name for the file. A pathname is converted with UIOP:NATIVE-NAMESTRING, after
+a logical pathname is translated to a physical one. A wild pathname, one with * or ? in it as a
+pattern, names no single file, so it is refused with an error before libuv is called. Anything
+else, NIL included, is a TYPE-ERROR.
+
+CL:NAMESTRING is used for neither: on Linux and macOS it reads a backslash in a string as an
+escape and drops it, so a file whose name has one could not be used (#1093)."
+  (etypecase path
+    (string path)
+    (pathname
+     (let ((physical (translate-logical-pathname path)))
+       (when (wild-pathname-p physical)
+         (error "aion/uv: ~S is a wild pathname, which names no single file." path))
+       (uiop:native-namestring physical)))))
+
+(defun %separator-p (char)
+  "Whether CHAR separates the components of a path: / everywhere, and a backslash on Windows."
+  (or (char= char #\/) (and (uiop:os-windows-p) (char= char #\\))))
+
+(defun %root-length (path)
+  "How many characters at the start of the native path PATH name its root, with the root's
+separator: 1 for /, and 0 for a relative path. On Windows a root can also be a drive (C: or C:
+and a separator), a server's share (two separators, server, separator, share, separator), or an
+extended-length or device prefix (two separators, ? or ., separator) followed by a drive, by UNC
+and a share, or by a device name. MAKE-DIRECTORY does not create the root, and WATCH does not
+take the root's separator off (#1093)."
+  (let ((n (length path)))
+    (labels ((sep-p (i) (and (< i n) (%separator-p (char path i))))
+             (past-component (i)
+               (let ((j (position-if #'%separator-p path :start (min i n))))
+                 (if j (1+ j) n)))
+             (drive-p (i) (and (< (1+ i) n) (alpha-char-p (char path i))
+                               (char= #\: (char path (1+ i))))))
+      (cond ((not (uiop:os-windows-p)) (if (sep-p 0) 1 0))
+            ((and (sep-p 0) (sep-p 1) (< 2 n) (member (char path 2) '(#\? #\.)) (sep-p 3))
+             (cond ((drive-p 4) (if (sep-p 6) 7 6))
+                   ((and (<= 8 n) (string-equal "UNC" path :start2 4 :end2 7) (sep-p 7))
+                    (past-component (past-component 8)))
+                   (t (past-component 4))))
+            ((and (sep-p 0) (sep-p 1)) (past-component (past-component 2)))
+            ((drive-p 0) (if (sep-p 2) 3 2))
+            ((sep-p 0) 1)
+            (t 0)))))
+
+(defun %parent-chain (path)
+  "The folders MAKE-DIRECTORY with :PARENTS creates for the native path PATH, outermost first,
+ending with PATH itself without its trailing separators. The root is not in it. On Windows the
+parts are joined with a backslash, which an extended-length path requires."
+  (let* ((root (min (%root-length path) (length path)))
+         (rest (string-right-trim (if (uiop:os-windows-p) "/\\" "/") (subseq path root)))
+         (joint (if (uiop:os-windows-p) "\\" "/"))
+         (so-far (subseq path 0 root))
+         (chain '()))
+    (dolist (component (split-path rest) (nreverse chain))
+      (unless (string= component "")
+        (setf so-far (if (or (string= so-far "") (%separator-p (char so-far (1- (length so-far)))))
+                         (concatenate 'string so-far component)
+                         (concatenate 'string so-far joint component)))
+        (push so-far chain)))))
 
 ;;; ----------------------------------------------------------- synchronous API
 
@@ -243,8 +296,7 @@ truncating) or :ERROR (refuse if the path exists)."
   "Create directory PATH. With PARENTS, create missing intermediate directories and do
 not complain if it already exists."
   (ensure-available)
-  ;; A backslash is a separator only on Windows; elsewhere it can end a name (#1093).
-  (let ((path (string-right-trim (if (uiop:os-windows-p) "/\\" "/") (native-path path))))
+  (let ((path (native-path path)))
     (flet ((mkdir (p)
              (with-fs-req (req)
                (let ((code (ffi:uv-fs-mkdir (default-loop-pointer) req p mode (%null))))
@@ -252,15 +304,9 @@ not complain if it already exists."
                           (string= (ffi:uv-err-name code) "EEXIST"))
                      0
                      (check code :operation :make-directory :path p))))))
-      (if parents
-          (let ((so-far nil))
-            (dolist (component (split-path path) path)
-              (setf so-far (if so-far
-                               (concatenate 'string so-far "/" component)
-                               component))
-              (unless (string= so-far "")
-                (mkdir so-far))))
-          (progn (mkdir path) path)))))
+      (let ((chain (%parent-chain path)))
+        (cond (parents (dolist (p chain) (mkdir p)) (or (car (last chain)) path))
+              (t (let ((p (or (car (last chain)) path))) (mkdir p) p)))))))
 
 (defun split-path (path)
   "Split PATH on / into components, and on Windows on a backslash too, keeping a leading empty
