@@ -51,7 +51,7 @@ means SBCL is looking in the wrong place."
               prefix image (length failed))
       (loop for (contrib . reason) in failed
             do (format t "~A:   ~(~A~): ~A~%" prefix contrib reason))
-      (format t "~A: SBCL ~A looks for contribs in ~A (SBCL_HOME is ~A).~%"
+      (format t "~A: SBCL ~A looks for contribs in ~A (SBCL_HOME is ~A; SBCL ignores it unless it holds a contrib/ directory).~%"
               prefix (lisp-implementation-version)
               (let ((home (ignore-errors (sb-int:sbcl-homedir-pathname))))
                 (if home (merge-pathnames "contrib/" home) "no directory"))

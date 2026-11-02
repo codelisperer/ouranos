@@ -196,9 +196,11 @@ bakes in (`sb-cltl2`, `sb-bsd-sockets`, `sb-posix`, `sb-rotate-byte`, `sb-md5`,
 `sb-introspect`, `sb-concurrency`). Any other contrib, `sb-sprof` for example, it loads from
 a contrib directory when something first requires it.
 
-**Which contrib directory, if any, depends on `SBCL_HOME`.** In a dumped image SBCL takes its
-home from `SBCL_HOME`, or from `lib/sbcl/` beside the executable when that exists, and
-otherwise has none: it does not fall back to the directory SBCL was installed in. The Windows
+**Which contrib directory, if any, depends on `SBCL_HOME`.** SBCL takes as its home the first
+of these that has a `contrib/` directory: `SBCL_HOME`; the executable's own directory;
+`<executable's directory>/../lib/sbcl/`; the current directory. With none, it has no home. So
+an `SBCL_HOME` without `contrib/` is ignored, not reported. For `bin/cons` none of the others
+is the directory SBCL was installed in, so in practice its home is `SBCL_HOME` or nothing. The Windows
 installer sets `SBCL_HOME` for every process. On macOS and Linux it is usually not exported:
 Homebrew's `sbcl` command sets it for its own process only. So:
 
@@ -212,7 +214,7 @@ When an upgrade changes the `sbcl` on `PATH`, `cons` warns, and says what it cou
 
 ```
 cons: this cons was built by SBCL 2.6.5, but SBCL 2.6.7 is now on PATH.
-cons: cons has no SBCL home (SBCL_HOME is not set, and there is no lib/sbcl beside the executable), so it cannot check the contribs on disk and can load only the ones it baked in.
+cons: cons has no SBCL home (SBCL_HOME is not set or has no contrib/ directory, and neither has <executable's directory>/../lib/sbcl), so it cannot check the contribs on disk and can load only the ones it baked in.
 cons: `--fresh` targets run under the PATH sbcl, so one build can span two compilers.
 cons: Rebuild: sbcl --dynamic-space-size 4096 --script bootstrap.lisp
 ```
@@ -240,8 +242,8 @@ loads contribs from before the error itself. With no SBCL home:
 
 ```
 cons: a contrib could not be loaded: System "sb-sprof" not found
-cons: This cons has no SBCL home: SBCL_HOME is not set, and there is no lib/sbcl beside the executable. It can load only the contribs bootstrap.lisp baked in.
-cons: Export SBCL_HOME as the lib/sbcl directory of the SBCL that built cons, or add the contrib to the list bootstrap.lisp bakes in and rebuild.
+cons: This cons has no SBCL home: SBCL_HOME is not set or has no contrib/ directory, and neither has <executable's directory>/../lib/sbcl. It can load only the contribs bootstrap.lisp baked in.
+cons: Export SBCL_HOME as the directory holding contrib/ of the SBCL that built cons (its lib/sbcl), or add the contrib to the list bootstrap.lisp bakes in and rebuild.
 cons build: System "sb-sprof" not found
 ```
 

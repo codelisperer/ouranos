@@ -3985,7 +3985,10 @@ its tag.
   and the image failed much later at the first `require` of it, for example with
   `Don't know how to REQUIRE sb-posix.` Now each one must load and appear on `*modules*`, or
   the script exits 1 before dumping, naming each contrib, its error, the directory SBCL looked
-  in and `SBCL_HOME`. The list and the check are in the new `scripts/bake-contribs.lisp`.
+  in and `SBCL_HOME`. The list and the check are in the new `scripts/bake-contribs.lisp`. The
+  messages and `cons/docs/user-guide.md` now say that SBCL ignores an `SBCL_HOME` that has no
+  `contrib/` directory, and that the other place it looks is
+  `<executable's directory>/../lib/sbcl/`.
 
 ## v0.1.7 — 2026-09-30
 
