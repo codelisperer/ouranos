@@ -63,12 +63,16 @@
 (defun checked-packages (name)
   "The packages in which an undefined function fails system NAME: this tree's, and those the
 checked system's own directory defines when it lies outside the tree, as the controls in
-cons/tests do. The same two places SCRIPTS/REDEFINITIONS.LISP counts as the checked code."
-  (let* ((system (asdf:find-system name nil))
+cons/tests do. The same two places SCRIPTS/REDEFINITIONS.LISP counts as the checked code.
+An .asd this image cannot load, which the child has already reported as a failure, gives
+this tree's packages alone, so the error is not raised a second time here, where it would
+end the run before the system's FAIL line and the systems after it (review of #1078)."
+  (let* ((system (ignore-errors (asdf:find-system name nil)))
          (dir (and system (asdf:system-source-directory system))))
     (if (and dir (not (uiop:subpathp dir *root*)))
         (union *tree-packages* (ouranos-compile-warnings:tree-packages dir) :test #'string=)
         *tree-packages*)))
+
 (defparameter *quicklisp* (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))
 
 (defun die (fmt &rest args)

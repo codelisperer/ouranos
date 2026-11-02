@@ -267,6 +267,41 @@ the function."
       (is (search "ok      check-compile-fixture" output)
           "no ok line for the fixture:~%~A" output))))
 
+(test an-undefined-function-in-a-package-of-this-tree-fails-the-system
+  "The tests above take their packages from the fixture's own directory, which lies outside
+this tree. Here the fixture calls an undefined function in AION/CLOCK, a package only this
+tree's source defines, so the failure comes from the packages check-compile reads from this
+tree, the list the gate uses (review of #1078). The control calls NEXT-VID, which AION/CLOCK
+defines."
+  (tempdir:with-temporary-directory (dir "check-compile-undefined")
+    (%write-undefined-fixture dir "check-compile-fixture" "cc-undefined-1076"
+                              "(aion/clock::no-such-function-1076 42)" :depends-on "aion/clock")
+    (multiple-value-bind (code output) (%run-check-compile dir)
+      (is (= 1 code) "exit ~D, expected 1:~%~A" code output)
+      (is (search "undefined function: AION/CLOCK::NO-SUCH-FUNCTION-1076" output)
+          "the report does not name the function:~%~A" output)))
+  (tempdir:with-temporary-directory (dir "check-compile-undefined")
+    (%write-undefined-fixture dir "check-compile-fixture" "cc-undefined-1076"
+                              "(aion/clock::next-vid)" :depends-on "aion/clock")
+    (multiple-value-bind (code output) (%run-check-compile dir)
+      (is (= 0 code) "control: exit ~D, expected 0:~%~A" code output))))
+
+(test a-system-whose-asd-cannot-load-is-reported-and-the-run-goes-on
+  "An .asd with a syntax error fails in the child, and the script reports it and checks the
+next system, rather than ending when it looks the system up again to find its packages
+(review of #1078). The control is the second system, checked after the first."
+  (tempdir:with-temporary-directory (bad "check-compile-bad-asd")
+    (with-open-file (out (merge-pathnames "check-compile-bad.asd" bad) :direction :output)
+      (write-string "(defsystem \"check-compile-bad\" :components ((:file \"fixture\"))" out))
+    (tempdir:with-temporary-directory (dir "check-compile-undefined")
+      (%write-undefined-fixture dir "check-compile-fixture" "cc-undefined-1076" "42")
+      (multiple-value-bind (code output)
+          (%run-check-compile-on '("check-compile-bad" "check-compile-fixture") (list bad dir))
+        (is (= 1 code) "exit ~D, expected 1:~%~A" code output)
+        (is (search "FAIL    check-compile-bad" output) "no FAIL line for the bad .asd:~%~A" output)
+        (is (search "ok      check-compile-fixture" output)
+            "control: the next system was not checked:~%~A" output)))))
+
 (test an-undefined-function-in-a-dependencys-package-is-not-reported
   "Only the checked code counts, as for redefinitions above. The checked system depends on a
 system in another temporary directory whose own code calls an undefined function; the checked
