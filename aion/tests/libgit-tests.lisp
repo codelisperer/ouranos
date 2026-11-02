@@ -851,5 +851,16 @@ and, on Linux and macOS, drops a backslash."
              (is-true (uiop:directory-exists-p
                        (uiop:parse-native-namestring (concatenate 'string dir sep ".git" sep))))
              (git:with-repository (repo (git:open-repository dir))
-               (is (null (git:history repo)))))
+               (is (null (git:history repo)))
+               ;; STAGE, the hub's review of #1101: a[1].txt was a wild pathname, and in a
+               ;; directory with a backslash the file was not found and left out of the index.
+               (with-open-file (out (uiop:parse-native-namestring (concatenate 'string dir sep "a[1].txt"))
+                                    :direction :output)
+                 (write-string "one" out))
+               (git:stage repo (list "a[1].txt"))
+               (git:commit repo "first" :author "Aion Test" :email "aion@example.invalid")
+               (is (equal '("a[1].txt")
+                          (lines (uiop:run-program (list "git" "-C" dir "ls-files")
+                                                   :output :string :external-format :utf-8)))
+                   "a[1].txt is committed in ~S" dir)))
         (fs:delete-tree dir :if-does-not-exist :ignore)))))

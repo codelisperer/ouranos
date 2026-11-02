@@ -81,7 +81,7 @@ quoted by QUOTE-WINDOWS-ARGUMENT and separated by one space."
 
 (defun %candidates (name)
   "NAME as given when it has an extension, otherwise NAME with .exe and then .com."
-  (if (pathname-type (pathname name))
+  (if (pathname-type (uiop:parse-native-namestring name))
       (list name)
       (list (concatenate 'string name ".exe") (concatenate 'string name ".com"))))
 
@@ -89,9 +89,11 @@ quoted by QUOTE-WINDOWS-ARGUMENT and separated by one space."
   "The native namestring of the .exe or .com file NAME names, or NIL. A NAME with a directory in
 it is looked for there. A bare NAME is looked for in each directory of PATH in turn. A NAME
 without an extension is tried with .exe and then .com. Batch files are not looked for, and a NAME
-that ends in .bat or .cmd is returned as it is found, for SPAWN-IN-JOB to refuse."
+that ends in .bat or .cmd is returned as it is found, for SPAWN-IN-JOB to refuse. NAME and
+each directory of PATH are native names, not Lisp namestrings, so [ ] in them are ordinary
+characters."
   (flet ((existing (candidate)
-           (let ((found (probe-file candidate)))
+           (let ((found (probe-file (uiop:parse-native-namestring candidate))))
              (and found
                   (pathname-name found)
                   (or (%executable-type-p (pathname-type found))
@@ -278,7 +280,7 @@ When IF-NO-JOB is :CONTINUE, the process runs outside any job."
          (parent-ends (list :input nil :output nil :error nil))
          (process nil) (job nil) (job-error nil) (thread nil)
          (done nil))
-    (when (%batch-type-p (pathname-type (pathname path)))
+    (when (%batch-type-p (pathname-type (uiop:parse-native-namestring path)))
       (cl:error 'process-not-started :program program :reason :batch-file))
     (flet ((pipe (slot child-reads)
              (multiple-value-bind (r w) (sb-unix:unix-pipe)

@@ -255,9 +255,11 @@ the test above passes because of the retry and not because the file was never he
   (uiop:directory-exists-p (uiop:parse-native-namestring (concatenate 'string native (%sep)))))
 
 (defparameter +odd-names+
-  (list "a[1]" #-win32 (format nil "b~Cc" #\\) #-win32 "d*e?")
+  (list "a[1]" #-win32 (format nil "b~Cc" #\\) #-win32 "d*e?"
+        #-win32 (format nil "x~C" #\\) #-win32 (string #\\))
   "Folder names with characters a Lisp namestring reads as wildcard syntax, and on Linux and macOS
-a backslash, which it reads as an escape. Windows allows none of these but the brackets.")
+a backslash, which it reads as an escape, including a name that ends in one and a name that is
+one. Windows allows none of these but the brackets.")
 
 (test a-folder-named-with-brackets-or-wildcards-inside-the-tree-is-deleted
   "Before #1096 the walk turned each folder's name back into a pathname with
@@ -278,4 +280,36 @@ no folder a\\[1]."
            (let ((root (%native-folder (%native-in base name))))
              (is (eq t (fs:delete-tree root)) "delete-tree ~S" root)
              (is-false (%native-exists-p root) "~S is gone" root)))
+      (%cleanup base))))
+
+#-win32
+(test a-root-ending-in-a-backslash-is-not-its-sibling-without-one
+  "The hub's review of #1101: on Linux and macOS b\\ and b are two folders. Trimming the backslash
+from a ROOT string deleted b and left b\\."
+  (let* ((base (%fresh))
+         (plain (%native-folder (%native-in base "b")))
+         (odd (%native-folder (%native-in base (format nil "b~C" #\\)))))
+    (unwind-protect
+         (progn
+           (is (eq t (fs:delete-tree odd)))
+           (is-false (%native-exists-p odd) "~S is gone" odd)
+           (is-true (%native-exists-p plain) "~S is still there" plain)
+           (is-true (probe-file (uiop:parse-native-namestring (concatenate 'string plain "/in.txt")))
+                    "and so is its file"))
+      (%cleanup base))))
+
+(test a-root-with-dot-dot-or-dot-is-refused-and-nothing-is-deleted
+  "The hub's review of #1101: BASE/x/.. names BASE, and /.. names the filesystem root."
+  (let* ((base (%fresh))
+         (x (%native-folder (%native-in base "x"))))
+    (unwind-protect
+         (progn
+           (dolist (root (list (%native-in x "..") (%native-in x ".")))
+             (signals error (fs:delete-tree root))
+             (is-true (probe-file (uiop:parse-native-namestring (concatenate 'string x (%sep) "in.txt")))
+                      "nothing under ~S was deleted" root))
+           ;; Checked without calling DELETE-TREE, which a missing refusal would let walk /.
+           (dolist (root #-win32 (list "/.." "/./" "/tmp/..")
+                         #+win32 (list "C:\\.." "C:\\.\\"))
+             (signals error (fs::%check-root (fs::%directory-pathname root)) "~S is refused" root)))
       (%cleanup base))))

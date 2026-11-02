@@ -3291,11 +3291,21 @@ its tag.
     held a folder named, for example, `a[1]` or `b\c`. A ROOT given as a string is now
     taken as a native name too; before, a string naming a folder such as `a[1]` was parsed and the
     call failed.
+  - On Linux and macOS, `aion/fs:delete-tree` no longer trims a backslash from the end of a name.
+    A tree holding an entry whose name ends in a backslash failed at rmdir, and one holding an
+    entry named just `\` recursed until SBCL exhausted its control stack, which ends the image.
+  - `aion/fs:delete-tree` refuses a ROOT with `.` or `..` in it, as it already refused a
+    filesystem root. `/..` names the filesystem root, and after a symbolic link `..` names the
+    parent of the link's target.
   - `aion/fs:make-directory-link` returned a pathname for a different path when the link's name
     contained brackets.
   - `aion/libgit:init-repository` and `open-repository` take a directory string as a native name.
+    `aion/libgit:stage` finds a file named with brackets, which signalled a wild-pathname error,
+    and on Linux and macOS a file in a working directory whose name has a backslash, which it
+    took for deleted and removed from the index.
   - `aion/windows:spawn-in-job` takes `:directory`, and an `:error` file, given as a string as a
-    native name. Before, a folder or file named with brackets made the call fail.
+    native name, and `aion/windows:find-executable` takes NAME and the directories on PATH as
+    native names. Before, a folder, file or program named with brackets made the call fail.
 - **aion/http-client: on Windows, a pinned request's read that returned is no longer reported as
   a timeout** (#1063). A request with `:connect-address`, which `fetch-public` makes, keeps its
   read timeout on Windows with a timer that closes the socket. When the timer fired just as a

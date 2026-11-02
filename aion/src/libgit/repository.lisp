@@ -162,7 +162,12 @@ run by another process would be overwritten by the copy from before it."
              (progn
                (%check "git_index_read" (%index-read index 0))
                (dolist (path paths)
-                 (if (probe-file (merge-pathnames path (repository-workdir repository)))
+                 ;; By native name: MERGE-PATHNAMES parses PATH and the working directory as
+                 ;; Lisp namestrings, so a[1].txt signalled a wild-pathname error and a working
+                 ;; directory with a backslash lost it (the hub's review of #1101). libgit2's
+                 ;; working directory always ends in /.
+                 (if (probe-file (uiop:parse-native-namestring
+                                  (concatenate 'string (repository-workdir repository) path)))
                      (%check "git_index_add_bypath" (%index-add-bypath index path))
                      (%check "git_index_remove_bypath" (%index-remove-bypath index path))))
                (%check "git_index_write" (%index-write index)))

@@ -319,3 +319,19 @@ the job's last handle as the image ends, and that ends both."
            (is (equal '("from child") (uiop:read-file-lines (uiop:parse-native-namestring file)))))
       (ignore-errors (delete-file (uiop:parse-native-namestring file)))
       (ignore-errors (sb-ext:delete-directory (uiop:parse-native-namestring (concatenate 'string dir "\\")))))))
+
+(test find-executable-finds-a-program-named-with-brackets
+  "The hub's review of #1101: NAME was parsed as a Lisp namestring, so brackets in it, or in the
+directory it was looked for in, named nothing."
+  (let* ((dir (concatenate 'string (string-right-trim "/\\" (uiop:native-namestring (uiop:temporary-directory)))
+                           "\\" (format nil "aion-exe-~36R[1]" (random (expt 36 8) (make-random-state t)))))
+         (exe (concatenate 'string dir "\\" "tool[2].exe")))
+    (ensure-directories-exist (uiop:parse-native-namestring (concatenate 'string dir "\\")))
+    (unwind-protect
+         (progn
+           (uiop:copy-file (uiop:parse-native-namestring (%sbcl)) (uiop:parse-native-namestring exe))
+           (is (string-equal exe (w:find-executable (concatenate 'string dir "\\" "tool[2]")))
+               "by its full name")
+           (is (string-equal exe (w:find-executable "tool[2]" :path dir)) "on PATH"))
+      (ignore-errors (delete-file (uiop:parse-native-namestring exe)))
+      (ignore-errors (sb-ext:delete-directory (uiop:parse-native-namestring (concatenate 'string dir "\\")))))))

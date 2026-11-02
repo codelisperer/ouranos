@@ -210,3 +210,19 @@ escapes [ and ] in the last name, so it named another path."
                  "the target is reached through the pathname returned"))
            (is (eq t (fs:delete-link link))))
       (%cleanup base))))
+
+#-win32
+(test a-link-name-ending-in-a-backslash-is-made-by-that-name
+  "The hub's review of #1101: on Linux and macOS a LINK of l\\ was made at l."
+  (let* ((base (%fresh))
+         (target (merge-pathnames "target/" base))
+         (link (%native-in base (format nil "l~C" #\\)))
+         (plain (%native-in base "l")))
+    (unwind-protect
+         (progn
+           (%write (merge-pathnames "keep.txt" target) "keep")
+           (fs:make-directory-link link target)
+           (is-true (fs:link-p link) "~S is a link" link)
+           (is (eq :missing (fs::%kind plain)) "nothing was made at ~S" plain)
+           (is (eq t (fs:delete-link link))))
+      (%cleanup base))))
