@@ -1218,10 +1218,16 @@ its tag.
   produced `<img src="outer.png" alt="<img src="onerror=alert(1)" alt="x" />" />`, which gives
   the outer image an `onerror` attribute with the unquoted value `alert(1)`; the relative source
   passes the URL check, and the outer image's source then fails to load, which runs the handler.
-  An emitted image's alt label is now reduced to one plain string, with any nested image or link
-  contributing the text of its label and never its URL. **An alt text that contained emphasis or
-  code now renders as the text inside it**, because an `alt` attribute cannot hold markup; alt
-  text with no nested markup is unchanged. `%label-text` does the reduction.
+  An emitted image's alt label is now reduced to text and entities, with any nested image or link
+  contributing the text of its label and never its URL. `%label-text` does the reduction. **What
+  an `alt` value looks like now**, since an attribute cannot hold markup:
+
+  - plain text, and an entity such as `&copy;`, are unchanged;
+  - emphasis, code and any other nested markup become the text inside them, so an alt label
+    written `a *b*` gives `alt="a b"` where it gave `alt="a <em>b</em>"`;
+  - a nested image or link becomes the text of its label, and its URL does not appear;
+  - a hard line break becomes a space, so the words around it stay separate words. It wrote a
+    literal `<br/>` into the attribute before.
 
 ### Added
 

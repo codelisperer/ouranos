@@ -201,7 +201,8 @@ it."
         finally (return (nreverse items))))
 
 (defun %label-text (elements)
-  "ELEMENTS as one plain string, with every nested element reduced to the text inside it (#1132).
+  "ELEMENTS as a label holding nothing but text and entities, with every other nested element
+reduced to the text inside it (#1132).
 
 FOR AN ALT ATTRIBUTE, WHICH CANNOT HOLD MARKUP. 3bmd writes an image's alt label by rendering it
 to HTML and putting the result inside alt=\"...\" without escaping it, so a nested element wrote
@@ -216,22 +217,48 @@ outer image: ONERROR with the unquoted value ALERT(1). The source passes %SAFE-U
 a relative URL, and the outer image's own source then fails to load, which is what runs the
 handler.
 
-A plain string in a label is escaped by 3bmd, so reducing the label to one string is what closes
-this. NO URL IS EVER COLLECTED: a nested image or link contributes the text of its label and
-nothing else, so a URL cannot reach an attribute by this route even if a future node shape
-carries one somewhere new."
-  (with-output-to-string (out)
-    (labels ((walk (e)
-               (cond ((stringp e) (write-string e out))
+A plain string in a label is escaped by 3bmd, so reducing the label to text is what closes this.
+NO URL IS EVER COLLECTED: a nested image or link contributes the text of its label and nothing
+else, so a URL cannot reach an attribute by this route even if a future node shape carries one
+somewhere new.
+
+TWO KINDS OF NODE SURVIVE, because flattening them lost text that belongs in the alt (the review
+of #1133):
+
+  - AN ENTITY IS KEPT AS A NODE. Writing it as text made 3bmd escape its ampersand, so
+    `![a &copy; b](o.png)' turned alt=\"a &copy; b\" into alt=\"a &amp;copy; b\" and the reader saw
+    the markup rather than the character. An entity reaches the attribute raw, which is right:
+    a character reference does not end an attribute value, so it cannot break out of one.
+  - A HARD LINE BREAK BECOMES A SPACE. It contributed nothing, so \"line1\" and \"line2\" around
+    one came out as alt=\"line1line2\". It cannot stay a BR, because that is markup and an
+    attribute cannot hold it -- which is what the old behaviour did: a break inside an alt label
+    used to write a literal <br/> into the attribute.
+
+That is why the return value is a LIST of label elements rather than a single string: a label
+that is all text is one string, and one that contains an entity is text and entity nodes."
+  (let ((parts '())
+        (text (make-string-output-stream)))
+    (labels ((flush ()
+               (let ((s (get-output-stream-string text)))
+                 (when (plusp (length s)) (push s parts))))
+             (walk (e)
+               (cond ((stringp e) (write-string e text))
                      ((and (consp e) (keywordp (car e)))
                       (case (car e)
+                        ;; Kept whole, so 3bmd writes it raw instead of escaping its ampersand.
+                        (:entity (flush) (push e parts))
+                        ;; Not a BR: markup cannot go in an attribute. A space, because the words
+                        ;; on either side of a break are separate words.
+                        (:line-break (write-char #\Space text))
                         ;; (:IMAGE (:EXPLICIT-LINK :LABEL ...)): the wrapped link's label.
                         (:image (walk (first (cdr e))))
                         ((:explicit-link :reference-link :link)
                          (mapc #'walk (getf (cdr e) :label)))
                         (t (mapc #'walk (%plist-free-children (cdr e))))))
                      ((consp e) (mapc #'walk e)))))
-      (mapc #'walk elements))))
+      (mapc #'walk elements)
+      (flush)
+      (nreverse parts))))
 
 (defun %sanitize-node (node references)
   "A list of nodes to put in place of NODE. See %SANITIZE."
@@ -260,7 +287,7 @@ carries one somewhere new."
              ;; when no image is emitted the label becomes ordinary content, where an element
              ;; is markup rather than an attribute value.
              (list (list :image (list* :explicit-link
-                                       :label (list (%label-text label))
+                                       :label (%label-text label)
                                        :source url
                                        (loop for (k v) on link by #'cddr
                                              unless (member k '(:label :source))

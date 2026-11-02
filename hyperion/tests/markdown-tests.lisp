@@ -502,10 +502,19 @@ both miss the real case and fail on a safe one. What must hold is that the alt v
                      "![![x](i.png)![y](j.png)](outer.png)"
                      "![![x onerror=alert(1)](i.png)](outer.png)"
                      "![a *b* ![n](m.png)](outer.png)"
-                     "![![<script>alert(1)</script>](i.png)](outer.png)")))
+                     "![![<script>alert(1)</script>](i.png)](outer.png)"
+                     ;; An entity is written into the attribute raw, so it is worth asserting
+                     ;; that it cannot end one: a character reference is not a quote to the
+                     ;; tokenizer, whatever it decodes to.
+                     "![a &quot; b](o.png)"
+                     "![![a &quot; b](i.png)](outer.png)")))
     (dolist (md cases)
       ;; The default options first: this is reached without asking for anything.
-      (dolist (options '(() (:images t :links t) (:images t :links :text)
+      ;; :ALLOW-HTML T goes through this same branch and had no test of its own (the review of
+      ;; #1133). It cannot be combined with the untrusted options -- that is refused -- so it is
+      ;; its own entry rather than a third axis.
+      (dolist (options '(() (:allow-html t)
+                         (:images t :links t) (:images t :links :text)
                          (:images nil :links t) (:images nil :links :text)))
         (let* ((html (apply #'hyperion/markdown:render md options))
                (images-on (let ((v (getf options :images :unsupplied)))
@@ -527,3 +536,32 @@ both miss the real case and fail on a safe one. What must hold is that the alt v
           (is-false (search "/>\"" html)
                     "no stray fragment after an early tag close for ~S with ~S: ~A"
                     md options html))))))
+
+(test an-alt-label-keeps-its-entities-and-its-word-breaks
+  "The review of #1133, which found two things the alt flattening lost. Both are regressions
+against what #1132 was fixing, so both have a control here.
+
+AN ENTITY WAS ESCAPED TWICE. %LABEL-TEXT wrote the (:ENTITY \"&copy;\") node's text as plain text
+and 3bmd then escaped the ampersand, so alt=\"a &copy; b\" became alt=\"a &amp;copy; b\" and the
+reader saw the markup instead of the character.
+
+A HARD LINE BREAK CONTRIBUTED NOTHING, so the words on either side of one were joined:
+alt=\"line1line2\". It cannot stay a BR -- an attribute cannot hold markup, and writing a literal
+<br/> into the attribute is what the code did BEFORE #1132, measured at 052737ea. A space is what
+is left, because they are separate words.
+
+The emphasis case is here to record a loss that IS intended: an alt attribute cannot hold markup,
+so emphasis and code inside one become their text."
+  (let ((entities (md:render "![a &copy; &quot; b](o.png)"))
+        (broken (md:render (format nil "![line1  ~%line2](o.png)")))
+        (marked (md:render "![a *b* `c` d](o.png)")))
+    (is (equal "a &copy; &quot; b" (%attribute-value "alt" entities))
+        "an entity reaches the alt as itself: ~A" entities)
+    (is-false (search "&amp;copy;" entities)
+              "and is not escaped a second time: ~A" entities)
+    (is (equal "line1 line2" (%attribute-value "alt" broken))
+        "a hard line break separates the words: ~A" broken)
+    (is-false (search "<br" broken)
+              "and does not put a BR in the attribute: ~A" broken)
+    (is (equal "a b c d" (%attribute-value "alt" marked))
+        "while emphasis and code become their text, which an attribute cannot hold: ~A" marked)))
