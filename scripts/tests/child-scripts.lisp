@@ -104,3 +104,38 @@ are not child scripts, and exactly one script is checked."
       (is (= 0 code) "exit was ~D~%~A" code output)
       (is (search "ok -- 1 child script," output) "exactly one child script is checked:~%~A"
           output))))
+
+(test a-call-with-the-wrong-number-of-arguments-fails
+  "Review of #1088: a full WARNING other than an undefined variable fails the check, so a call
+with the wrong number of arguments is caught. The control is the passing script, which has no
+such call and uses no undefined variable warning to pass."
+  (let ((script (%child-fixture
+                 (apply #'%lines (append +child-script-lines+
+                                         (list "(defun child-two () (child-helper 1 2))"))))))
+    (multiple-value-bind (code output) (%run-child script)
+      (is (= 1 code) "exit was ~D~%~A" code output)
+      (is (search "WARNING: " output) "the warning is not named:~%~A" output)
+      (is (search "CHILD-HELPER" output) "the function is not named:~%~A" output))))
+
+(test an-undefined-variable-does-not-fail
+  "A child script may use a variable its test defines with --eval before loading it, which is
+an undefined-variable WARNING when the file is compiled alone."
+  (let ((script (%child-fixture
+                 (apply #'%lines (append +child-script-lines+
+                                         (list "(defun child-root () *child-root-from-eval*)"))))))
+    (multiple-value-bind (code output) (%run-child script)
+      (is (= 0 code) "exit was ~D~%~A" code output))))
+
+(test read-time-evaluation-is-refused
+  "Review of #1088: the check binds *READ-EVAL* to NIL, so `#.' in a script is a failure to
+compile and its code does not run. The form would create a file if it ran."
+  (let* ((marker (merge-pathnames "read-eval-ran" (%fresh-tree)))
+         (script (%child-fixture
+                  (%lines (format nil "(defvar *x* #.(progn (close (open ~S ~A)) 1))"
+                                  (namestring marker)
+                                  ":direction :output :if-does-not-exist :create")))))
+    (multiple-value-bind (code output) (%run-child script)
+      (is (= 1 code) "exit was ~D~%~A" code output)
+      (is (search "could not be compiled" output) "~A" output)
+      (is (not (probe-file marker)) "the #. form ran"))))
+

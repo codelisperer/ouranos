@@ -1,4 +1,4 @@
-;;;; check-child-scripts.lisp --- a test's child script calls only functions that exist (#1086).
+;;;; check-child-scripts.lisp --- a test's child script compiles without warnings (#1086).
 ;;;;
 ;;;; Run:  sbcl --script scripts/check-child-scripts.lisp
 ;;;;
@@ -10,23 +10,36 @@
 ;;;; compiled code fail on such a call; this does the same for the child scripts.
 ;;;;
 ;;;; HOW. Each child script is compiled with COMPILE-FILE inside one compilation unit, in a
-;;;; fresh sbcl of its own, and every `undefined function:' STYLE-WARNING it signals is a
-;;;; failure. Not by loading it: --script muffles every warning, and loading a source file
-;;;; compiles it one form at a time, so a call to a function defined further down warns as if
-;;;; it were undefined (measured on SBCL 2.6.9). COMPILE-FILE treats each DEFUN as a
-;;;; definition and reports what is still undefined when the unit ends. One sbcl per script,
-;;;; because COMPILE-FILE records the functions a file defines in the image, and a function
-;;;; one script defines would hide an undefined call to it in the next.
+;;;; fresh sbcl of its own. Every `undefined function:' STYLE-WARNING it signals is a failure,
+;;;; and so is every full WARNING except an undefined variable (below), which covers a call
+;;;; with the wrong number of arguments. COMPILE-FILE treats each DEFUN as a definition and
+;;;; reports what is still undefined when the unit ends, so a call to a function defined
+;;;; further down the file is not reported. One sbcl per script, because COMPILE-FILE records
+;;;; the functions a file defines in the image, and a function one script defines would hide
+;;;; an undefined call to it in the next.
 ;;;;
-;;;; COMPILE-FILE does not run the script's toplevel forms, so the REQUIREs in it do not
-;;;; happen. The image loads asdf and sb-bsd-sockets first, which is every package the
-;;;; current scripts name when they are read. A script that names another one is reported as
-;;;; a failure to compile, never passed over. COMPILE-FILE handles a read error itself and
-;;;; returns, so the condition is recorded by a handler as it is signalled.
+;;;; WHY A SEPARATE CHECKER RATHER THAN A CHECK INSIDE EACH CHILD, which #1086 proposed. A
+;;;; child that loads its own body inside WITH-COMPILATION-UNIT with a HANDLER-BIND does see
+;;;; undefined functions, forward references excepted, even under --script (measured on SBCL
+;;;; 2.6.9 in the review of #1088). But these scripts end by calling QUIT, which aborts the
+;;;; unit before it reports anything, and the check would run only when a test starts the
+;;;; child. This checker runs on every leg of the gate and needs no change to the scripts.
 ;;;;
-;;;; Only undefined functions are judged. A child script may use a variable its test defines
+;;;; COMPILE-FILE runs a script's compile-time code (EVAL-WHEN :COMPILE-TOPLEVEL forms and
+;;;; macro bodies) but not its other toplevel forms, so the REQUIREs in it do not happen. The
+;;;; image loads asdf and sb-bsd-sockets first, which is every package the current scripts
+;;;; name when they are read. A script that names another one is reported as a failure to
+;;;; compile, never passed over. COMPILE-FILE handles a read error itself and returns, so the
+;;;; condition is recorded by a handler as it is signalled. *READ-EVAL* is NIL, so a `#.' in
+;;;; a script is a read error rather than code run by the check.
+;;;;
+;;;; An undefined VARIABLE is not judged: a child script may use a variable its test defines
 ;;;; with --eval before loading it, as server-uv-template-child.lisp uses
 ;;;; CL-USER::*PROJECT-ROOT*, which is an undefined-variable WARNING when compiled alone.
+;;;;
+;;;; A DATA FILE under tests/ must not end in .lisp. COMPILE-FILE would compile a fixture such
+;;;; as `(:name "fixture")' as a call to :NAME and fail the gate; give it another extension,
+;;;; such as .sexp.
 ;;;;
 ;;;; Which files are child scripts is found, not listed: every .lisp under a tests/ directory
 ;;;; whose path is not a component of a system some .asd in this tree defines. A directory
@@ -116,14 +129,17 @@ files are loaded, which defines their systems and loads nothing else."
                                 (push (substitute #\\Space #\\Newline (princ-to-string e)) errors)))
                             (warning
                               (lambda (w)
-                                (let ((text (princ-to-string w)))
-                                  (when (and (typep w 'style-warning)
-                                             (uiop:string-prefix-p \"undefined function: \" text))
-                                    (push text found)))
+                                (let ((text (substitute #\\Space #\\Newline (princ-to-string w))))
+                                  (cond ((typep w 'style-warning)
+                                         (when (uiop:string-prefix-p \"undefined function: \" text)
+                                           (push text found)))
+                                        ((not (uiop:string-prefix-p \"undefined variable: \" text))
+                                         (push (concatenate 'string \"WARNING: \" text) found))))
                                 (muffle-warning w))))
                (with-compilation-unit (:override t)
                  (let ((*standard-output* (make-broadcast-stream))
-                       (*error-output* (make-broadcast-stream)))
+                       (*error-output* (make-broadcast-stream))
+                       (*read-eval* nil))
                    (compile-file file :output-file fasl))))
           (uiop:delete-file-if-exists fasl))
       (error (e)
@@ -139,8 +155,8 @@ files are loaded, which defines their systems and loads nothing else."
 two --eval forms that load asdf and sb-bsd-sockets: this form is read before it runs, so the
 packages it names must exist by then. It is read in CL-USER, so it names only CL, UIOP, SB-EXT
 and SB-C symbols. SB-C:COMPILER-ERROR, which COMPILE-FILE signals for a read error, is not an
-ERROR. It prints an UNDEFINED line per undefined function, then COMPILED; a script it
-cannot compile prints COMPILE-ERROR.")
+ERROR. It prints an UNDEFINED line per undefined function and per full WARNING other than an
+undefined variable, then COMPILED; a script it cannot compile prints COMPILE-ERROR.")
 
 (defun check-script (file)
   "Compile FILE in a fresh sbcl. (values UNDEFINED-LINES PROBLEM), where PROBLEM is NIL or why
@@ -187,12 +203,12 @@ the compile could not be judged."
                 (t (format t "  ok      ~A~%" name))))))
     (cond ((zerop failed)
            (format t "check-child-scripts: ok -- ~D child script~:P, ~A~%"
-                   (length scripts) "no call to an undefined function")
+                   (length scripts) "no undefined function and no compiler warning")
            (uiop:quit 0))
           (t
            (format t "check-child-scripts: FAIL -- ~D of ~D child script~:P~%"
                    failed (length scripts))
-           (format t "Define each function named above, or correct the call. A child script~%")
+           (format t "Correct each function or warning named above. A child script~%")
            (format t "runs in a separate sbcl, so check-compile and the gate's LOADING never~%")
            (format t "compile it.~%")
            (uiop:quit 1)))))
