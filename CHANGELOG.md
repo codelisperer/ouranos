@@ -1313,6 +1313,11 @@ its tag.
   `hyperion/appearance` now exports `*themes*`, `*contrasts*` and `*looks*`, the values each
   setting allows. The package's comment shows a handler that answers 400 for a refused form,
   204 with the headers for htmx, and a 303 back to the page otherwise.
+- **praxeon/chat-ui: `composer` takes `:action`, the route its form posts to** (#1117). It
+  defaults to `/api/message`, the route `praxeon/web` serves, so a page that passes nothing
+  posts where it did before. A host app that renders the chat parts in its own page, with its
+  routes under a prefix, scoped to one conversation, or with its own `/api/message`, passes its
+  route instead of mounting its handler at `/api/message`. `:action` must be a string.
 
 - **hermes: how long a send waits is now hermes's own setting, `*send-connect-timeout*` and
   `*send-read-timeout*`, both 10 seconds** (#1077). Each provider also takes `:connect-timeout`
