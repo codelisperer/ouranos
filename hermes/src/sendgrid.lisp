@@ -13,13 +13,21 @@
             :reader sendgrid-api-key)
    (endpoint :initarg :endpoint
              :initform "https://api.sendgrid.com/v3/mail/send"
-             :reader sendgrid-endpoint))
+             :reader sendgrid-endpoint)
+   (connect-timeout :initarg :connect-timeout
+                    :initform *send-connect-timeout*
+                    :reader sendgrid-connect-timeout)
+   (read-timeout :initarg :read-timeout
+                 :initform *send-read-timeout*
+                 :reader sendgrid-read-timeout))
   (:documentation "The SendGrid v3 mail/send API as an email-provider. API-KEY defaults to
-$SENDGRID_API_KEY."))
+$SENDGRID_API_KEY. CONNECT-TIMEOUT and READ-TIMEOUT are seconds and default from
+*SEND-CONNECT-TIMEOUT* and *SEND-READ-TIMEOUT*; NIL for either waits forever (#1077)."))
 
-(defun make-sendgrid (&rest initargs &key api-key endpoint)
-  "A SendGrid provider. API-KEY/ENDPOINT default from the environment."
-  (declare (ignore api-key endpoint))
+(defun make-sendgrid (&rest initargs &key api-key endpoint connect-timeout read-timeout)
+  "A SendGrid provider. API-KEY/ENDPOINT default from the environment, and the two timeouts from
+*SEND-CONNECT-TIMEOUT* and *SEND-READ-TIMEOUT* (#1077)."
+  (declare (ignore api-key endpoint connect-timeout read-timeout))
   (apply #'make-instance 'sendgrid initargs))
 
 (defun %obj (&rest kvs)
@@ -76,7 +84,9 @@ disposition given; an inline attachment also carries its content_id."
   (let* ((key (%require (sendgrid-api-key p) "SENDGRID_API_KEY"))
          (req (make-request :method :post
                             :url (sendgrid-endpoint p)
-                            :content (jzon:stringify (%sendgrid-body m))))
+                            :content (jzon:stringify (%sendgrid-body m))
+                            :connect-timeout (sendgrid-connect-timeout p)
+                            :read-timeout (sendgrid-read-timeout p)))
          (resp (as-delivery :sendgrid
                  (send-request
                   req

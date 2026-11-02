@@ -124,6 +124,35 @@ bot has a webhook set."))
 ;;; A backend registers a no-arg constructor thunk under its name; adding a vendor is a new
 ;;; class + one REGISTER-IMPL, with the selection layer staying neutral.
 
+(defparameter *send-connect-timeout* 10
+  "Seconds a backend waits for a connection to a provider before giving up (#1077).
+
+TEN IS WHAT HAPPENED ALREADY, now stated here. #1077 was filed believing a send with no timeout
+waited for ever; it does not. AION/HTTP-CLIENT passes a timeout to dexador only when one is set,
+so an unset timeout has always meant dexador's own default, and that default is ten seconds
+(`*default-connect-timeout*` in dexador's src/util.lisp). Measured against a socket that accepts
+a connection and never answers: 10.0 seconds, with both timeouts NIL.
+
+So this changes no behaviour. What it changes is that the figure is hermes's, written down and
+settable, instead of a number inside a dependency that an upgrade could move without anyone
+here noticing. Setting this, or passing :CONNECT-TIMEOUT to a provider's constructor, now wins
+over dexador's default. NIL still means \"say nothing to dexador\", which is dexador's ten, not
+for ever.")
+
+(defparameter *send-read-timeout* 10
+  "Seconds a backend waits for a provider's answer once the connection was made (#1077). Ten,
+for the reason in *SEND-CONNECT-TIMEOUT*: it is what dexador already did, so nothing changes for
+an app that sets nothing.
+
+A send that is cut off here has reached the provider, and raising this is a judgement about
+responsiveness against failing a send that would have been answered. An app that wants to wait
+longer sets it; the default is not raised for everybody, because a hung provider would then hold
+DELIVER longer than it does today.
+
+A SEND WHOSE READ TIMES OUT MAY ALREADY HAVE BEEN DELIVERED. The request reached the provider,
+so the failure says only that no answer arrived. An app that retries one of these can deliver
+the same message twice, and it should check the provider rather than assume either way.")
+
 (defvar *impls* (make-hash-table :test #'equal)
   "Map of \"channel/name\" -> a thunk returning a fresh provider.")
 

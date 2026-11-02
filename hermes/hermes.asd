@@ -44,7 +44,8 @@
   :components ((:module "tests"
                 :serial t
                 :components ((:file "hermes")
-                             (:file "telegram") (:file "facebook"))))
+                             (:file "telegram") (:file "facebook")
+                             (:file "timeouts"))))  ; a send that gets no answer (#1077)
   :perform (test-op (o c) (uiop:symbol-call :hermes/tests :run-tests)))
 
 ;;; The blob store. Bytes belong in object storage; a row holds a key and metadata, never
