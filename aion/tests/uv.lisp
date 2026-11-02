@@ -33,7 +33,11 @@
   (concatenate 'string *scratch* name))
 
 (defun call-with-scratch (thunk)
-  (let ((*scratch* (format nil "/tmp/aion-uv-tests-~D/" (get-universal-time))))
+  ;; Each call gets a folder of its own. With the time alone, tests run in the same second
+  ;; shared one folder, and macOS reported files an earlier test had made there to a later
+  ;; test's watch (the macOS leg of run 41390308646).
+  (let ((*scratch* (format nil "/tmp/aion-uv-tests-~D-~D/" (get-universal-time)
+                           (random 1000000000 (make-random-state t)))))
     (uv:make-directory *scratch* :parents t)
     (unwind-protect (funcall thunk)
       (ignore-errors
@@ -289,6 +293,209 @@ with the real expectations back, ENSURE-AVAILABLE returns T and libuv counts as 
     (uv:rename-path (scratch "from.txt") (scratch "to.txt"))
     (is (string= "content" (uv:read-file (scratch "to.txt") :as :string)))
     (signals uv:file-not-found (uv:read-file (scratch "from.txt")))))
+
+;;; --- names that a Lisp namestring would change (#1093) ----------------------------
+;;;
+;;; Every entry point used to pass PATH through CL:NAMESTRING. For a string that parses it as a
+;;; Lisp namestring, and on Linux and macOS a backslash there is an escape, so a file named
+;;; a\b.txt was looked up as ab.txt. These tests make names that a namestring would change, and
+;;; check each one through CL as well, so a reader other than aion/uv agrees on the name.
+
+(defun %bs (&rest parts)
+  "PARTS joined with a backslash: written this way so the test source has no escapes to misread."
+  (format nil (concatenate 'string "~{~A~^" (string #\\) "~}") parts))
+
+(defun %cl-sees-p (native)
+  "Whether CL, given NATIVE as an operating-system name, finds a file there."
+  (probe-file (uiop:parse-native-namestring native)))
+
+(test native-path-passes-a-string-through-and-converts-a-pathname
+  (let ((with-backslash (%bs "dir" "a.txt")))
+    (is (eq with-backslash (uv:native-path with-backslash))
+        "a string is returned as it is, not reparsed"))
+  (is (string= "a*b?[1].txt" (uv:native-path "a*b?[1].txt")))
+  (let ((p (uiop:parse-native-namestring
+            (concatenate 'string (uiop:native-namestring (uiop:temporary-directory)) "x.txt"))))
+    (is (string= (uiop:native-namestring p) (uv:native-path p)))))
+
+(defun %round-trip (from to)
+  "Create FROM in the scratch folder, then stat, list, rename to TO, read and delete it, through
+aion/uv, checking with CL at each step that the file has the name given."
+  (let ((a (scratch from)) (b (scratch to)))
+    (unwind-protect
+         (progn
+           (is (= 4 (uv:write-file a "kept")) "write ~S" from)
+           (is-true (%cl-sees-p a) "CL finds ~S" from)
+           (is (= 4 (uv:file-info-size (uv:file-info a))) "stat ~S" from)
+           (is (member from (mapcar #'car (uv:list-directory *scratch*)) :test #'string=)
+               "listed as ~S: ~S" from (uv:list-directory *scratch*))
+           (uv:rename-path a b)
+           (is-false (%cl-sees-p a) "~S is gone after the rename" from)
+           (is-true (%cl-sees-p b) "CL finds ~S" to)
+           (is (string= "kept" (uv:read-file b :as :string)) "read ~S" to)
+           (uv:with-loop (l)
+             (let ((future (uv:read-file-async l b)))
+               (uv:run l :mode :default)
+               (is (string= "kept" (sb-ext:octets-to-string (uv:await future :timeout 10)))
+                   "read ~S asynchronously" to)))
+           (uv:delete-file* b)
+           (is-false (%cl-sees-p b) "~S deleted" to))
+      (ignore-errors (uv:delete-file* a))
+      (ignore-errors (uv:delete-file* b)))))
+
+#-win32
+(test a-backslash-in-a-name-round-trips
+  "On Linux and macOS a backslash is an ordinary character in a name. Before #1093 every one of
+these calls used the name without it."
+  (with-scratch (%round-trip (%bs "draft" "one.txt") (%bs "final" "two.txt"))))
+
+#-win32
+(test star-and-question-mark-in-a-name-round-trip
+  "Windows does not allow * or ? in a name."
+  (with-scratch (%round-trip "a*b?.txt" "c?d*.txt")))
+
+(test brackets-in-a-name-round-trip
+  (with-scratch (%round-trip "a[1].txt" "b[2].txt")))
+
+#+win32
+(test a-backslash-is-a-separator-on-windows
+  "On Windows a string reaches libuv as written, so a backslash is a separator there, including
+for MAKE-DIRECTORY with :PARENTS, which splits on both."
+  (with-scratch
+    (let ((deep (scratch (%bs "p" "q" "r"))))
+      (uv:make-directory deep :parents t)
+      (is (eq :directory (uv:file-info-kind (uv:file-info deep))))
+      (uv:write-file (concatenate 'string deep (string #\\) "f.txt") "kept")
+      (is (string= "kept" (uv:read-file (scratch "p/q/r/f.txt") :as :string)))
+      (uv:delete-file* (scratch "p/q/r/f.txt"))
+      (uv:delete-directory deep)
+      (uv:delete-directory (scratch "p/q"))
+      (uv:delete-directory (scratch "p")))))
+
+(test a-pathname-is-converted-to-its-native-name
+  (with-scratch
+    (let ((p (uiop:parse-native-namestring (scratch "as-pathname.txt"))))
+      (uv:write-file p "kept")
+      (is (string= "kept" (uv:read-file (scratch "as-pathname.txt") :as :string)))
+      (is (= 4 (uv:file-info-size (uv:file-info p))))
+      (uv:delete-file* p)
+      (is-false (probe-file p)))))
+
+(test watching-a-folder-named-with-a-trailing-separator-reports-plain-names
+  "A directory pathname's native name ends in a separator, a backslash on Windows, and libuv on
+Windows then reported each name with a backslash in front of it (#1093). The folder is watched by
+its directory pathname and by that pathname's native name, and on Windows also by its
+extended-length name, and each event names just the file. macOS can also report the creation of
+the watched folder itself, under the folder's own name, even after the watch started (the hub's
+review of #1095), so that one name is allowed too."
+  (with-scratch
+    (let* ((directory (uiop:ensure-directory-pathname (uiop:parse-native-namestring *scratch*)))
+           (own-name (car (last (pathname-directory directory))))
+           (spellings (list directory (uiop:native-namestring directory))))
+      #+win32 (setf spellings
+                    (append spellings
+                            (list (concatenate 'string "\\\\?\\"
+                                               (uiop:native-namestring (truename directory))))))
+      (dolist (spelling spellings)
+        (let ((l (uv:make-loop))
+              (names '())
+              (lock (sb-thread:make-mutex))
+              (fired (sb-thread:make-semaphore)))
+          (unwind-protect
+               (progn
+                 (uv:watch l spelling
+                           (lambda (kinds name watcher)
+                             (declare (ignore kinds watcher))
+                             (sb-thread:with-mutex (lock) (push name names))
+                             (sb-thread:signal-semaphore fired)))
+                 (uv:start-loop-thread l)
+                 (sleep 0.2)
+                 (uv:write-file (scratch "named.txt") "trigger")
+                 (is-true (sb-thread:wait-on-semaphore fired :timeout 10))
+                 (sleep 0.3)
+                 (let ((seen (sb-thread:with-mutex (lock)
+                               (remove-duplicates names :test #'equal))))
+                   (is (member "named.txt" seen :test #'equal)
+                       "watching ~S reported ~S" spelling seen)
+                   (is (null (remove-if (lambda (name) (member name (list "named.txt" own-name)
+                                                               :test #'equal))
+                                        seen))
+                       "and no other name: ~S" seen)))
+            (uv:close-loop l)))))))
+
+(test native-path-refuses-what-names-no-single-file
+  "The hub's review of #1095: NIL was taken as a pathname, so MAKE-DIRECTORY made a folder named
+NIL. A wild pathname is refused before libuv sees it."
+  (signals type-error (uv:native-path nil))
+  (signals type-error (uv:native-path 42))
+  (signals simple-error (uv:native-path (make-pathname :name :wild :type "txt"
+                                                       :directory '(:absolute "tmp"))))
+  (signals type-error (uv:make-directory nil)))
+
+(test a-logical-pathname-is-translated-first
+  (with-scratch
+    (let ((host "AIONUVTESTS"))
+      (setf (logical-pathname-translations host)
+            `(("**;*.*.*" ,(merge-pathnames
+                            (make-pathname :directory '(:relative :wild-inferiors)
+                                           :name :wild :type :wild :version :wild)
+                            (uiop:ensure-directory-pathname
+                             (uiop:parse-native-namestring *scratch*))))))
+      (unwind-protect
+           (let ((logical (logical-pathname (format nil "~A:LOGICAL.TXT" host))))
+             (uv:write-file logical "kept")
+             (is (string= "kept" (uv:read-file (uv:native-path logical) :as :string)))
+             (is (= 4 (uv:file-info-size (uv:file-info logical))))
+             (uv:delete-file* logical))
+        (setf (logical-pathname-translations host) nil)))))
+
+#+win32
+(test windows-roots-are-recognised
+  "The hub's review of #1095: a root's separator is kept when WATCH takes a trailing one off, and
+MAKE-DIRECTORY :PARENTS creates nothing at or above the root, for a drive, an extended-length
+drive and a server's share."
+  (flet ((bs (s) (substitute #\\ #\| s)))
+    (dolist (case '(("C:|" 3) ("C:|a|b" 3) ("C:" 2) ("|tmp|x" 1) ("/tmp/x" 1) ("a|b" 0)
+                    ("||?|C:|" 7) ("||?|C:|a" 7) ("||server|share|" 15) ("||server|share|a" 15)
+                    ("||?|UNC|server|share|a" 21) ("||.|pipe|x" 9)))
+      (is (= (second case) (aion/uv::%root-length (bs (first case))))
+          "root of ~S" (first case)))
+    (dolist (case '(("C:|" "C:|") ("||?|C:|" "||?|C:|") ("||server|share|" "||server|share|")
+                    ("C:|a|" "C:|a") ("||?|C:|a|" "||?|C:|a") ("C:/a/" "C:/a/")))
+      (is (string= (bs (second case)) (aion/uv::%watch-path (bs (first case))))
+          "watch path for ~S" (first case)))
+    (dolist (case '(("||server|share|a|b" ("||server|share|a" "||server|share|a|b"))
+                    ("||?|C:|a|b|" ("||?|C:|a" "||?|C:|a|b"))
+                    ("C:|a" ("C:|a"))
+                    ("/tmp/x" ("/tmp" "/tmp|x"))))
+      (is (equal (mapcar #'bs (second case)) (aion/uv::%parent-chain (bs (first case))))
+          "folders made for ~S" (first case)))))
+
+#+win32
+(test make-directory-with-parents-takes-an-extended-length-path
+  "Before, the extended-length prefix was split as if it were folders, and the mkdir of its
+first part failed."
+  (with-scratch
+    (let* ((absolute (uiop:native-namestring (truename (uiop:parse-native-namestring *scratch*))))
+           (deep (concatenate 'string "\\\\?\\" absolute "x\\y")))
+      (uv:make-directory deep :parents t)
+      (is (eq :directory (uv:file-info-kind (uv:file-info (scratch "x/y")))))
+      (uv:delete-directory (scratch "x/y"))
+      (uv:delete-directory (scratch "x")))))
+
+(test a-watch-that-cannot-start-leaves-a-loop-that-closes
+  "The hub's review of #1095: when uv_fs_event_start failed, WATCH freed a handle the loop still
+held, and CLOSE-LOOP then aborted the process. The handle is now closed, and freed when libuv is
+done with it."
+  (let ((l (uv:make-loop)))
+    (signals uv:uv-error
+      (uv:watch l (format nil "/aion-uv-no-such-folder-~D/" (get-universal-time))
+                (lambda (kinds name watcher) (declare (ignore kinds name watcher)))))
+    (let ((left-unfreed nil))
+      (handler-bind ((uv:loop-left-unfreed (lambda (w) (setf left-unfreed w) (muffle-warning w))))
+        (uv:close-loop l))
+      (is (null left-unfreed) "the loop was left unfreed: ~A" left-unfreed)
+      (is (eq :freed (aion/uv::loop-freed-p l)) "and its memory was freed"))))
 
 ;;; --- timers ----------------------------------------------------------------------
 

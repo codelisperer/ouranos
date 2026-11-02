@@ -297,7 +297,7 @@ was made is removed first, so nothing is left at LINK."
     (funcall maker l tg)
     (%made l tg)
     (if (eq kind :directory)
-        (uiop:ensure-directory-pathname (uiop:parse-native-namestring l))
+        (%directory-pathname l)
         (uiop:parse-native-namestring l))))
 
 (defun make-directory-link (link target)

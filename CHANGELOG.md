@@ -1201,6 +1201,26 @@ its tag.
   before can now fail:** define the function, or correct the name or package of the call. Other
   `STYLE-WARNING`s still do not fail, and an undefined function inside a library outside the
   project directory is still muffled. `cons/docs/user-guide.md` says the same.
+- **`cons` refuses to run a build-spec target when the SBCL contribs on disk were compiled by
+  a different SBCL version from the one that built `bin/cons`** (#701). After an SBCL install
+  is replaced in place, `bin/cons` used to print its stale-image warning and continue, and a
+  target then failed at its first `require` of a contrib it had not baked in, with
+  `Don't know how to REQUIRE`, `System "sb-…" not found` or a fasl-version error. When
+  `bin/cons` has a contrib directory, which in a dumped image means `SBCL_HOME` is set (the
+  Windows installer sets it; on macOS and Linux it is usually not exported), `cons` now reads
+  the version from the header of `sb-posix.fasl` there at startup. On a mismatch it prints both
+  versions, the directory and the rebuild command
+  (`sbcl --dynamic-space-size 4096 --script bootstrap.lisp`), then exits 1 before running the
+  target. The built-in commands (`cons version`, `cons help`, `cons setup`, …) and `--fresh`
+  targets still run. Any fatal toolchain finding now stops a target this way, including the
+  existing "contribs cannot be loaded" one. When a contrib fails to load during a target for any
+  other reason, `cons` prints where it loads contribs from before the error, or, with no
+  `SBCL_HOME`, that it can load only the contribs `bootstrap.lisp` baked in. The stale-image
+  warning no longer says that a dumped image carries its own contribs, and says whether it
+  could check the contribs on disk. To act: rebuild `bin/cons` after every SBCL upgrade, and on
+  macOS or Linux export `SBCL_HOME` if a project needs a contrib `bootstrap.lisp` does not
+  bake in. New exports from `cons/toolchain`: `fasl-header-version`, `contrib-version-in`,
+  `contrib-load-failure-p`, `contrib-failure-lines` and `explain-contrib-failure`.
 
 ### Added
 
@@ -1249,6 +1269,34 @@ its tag.
   The local-host rule is `aion/http-client:address-category` as used by `hermes/blob` for S3
   endpoints (#970); that it is written in both places is #1082, and the review of #1084 plus
   #1089 found that both copies had holes, which is why that move is a fix rather than a tidy-up.
+- **aion/folder-watch: watch a folder and be told when each file has finished being written,
+  without the litter sync clients leave** (#996, step 1). `watch-folder` takes a loop, a folder
+  and a function, and returns a `folder-watcher`. It calls the function on the loop thread with a
+  `folder-event`, read with `folder-event-kind`, `folder-event-path`, `folder-event-name`,
+  `folder-event-size`, `folder-event-modified` and `folder-event-placeholder`:
+  - `:settled` once a file's size and modification time have not changed for `:settle` seconds
+    (default 1.5), and `:removed` once a file reported `:settled` has been gone that long. A file
+    created and deleted before it settled is not reported.
+  - A rename is the old name removed and the new one settled, and a save through a temporary
+    file is one `:settled`. A folder moved in reports each file in it, and a folder deleted
+    reports each of its files removed. A file that cannot be read for a while (a sharing
+    violation, EACCES) waits and is reported once it can be.
+  - A writer that pauses for longer than `:settle` is reported at the pause and again at the end.
+  - On Windows and macOS two names that differ only in case are one file.
+  - `:ignore` takes string patterns with `*` and `?`, matched against each component of the path,
+    and functions of the relative path. The default is `+sync-litter+`: Dropbox conflicted
+    copies, selective sync conflicts, `.dropbox`, `.dropbox.attr` and `.dropbox.cache`; OneDrive
+    and Office `~$*` and `*.tmp`; Google Drive's `.tmp.drivedownload` and `.tmp.driveupload`;
+    partial browser downloads (`*.crdownload`, `*.download`, `*.partial`), which Proton Drive
+    does not sync; editor swap and lock files; and `.DS_Store`, `._*`, `Icon` followed by a
+    carriage return, `desktop.ini` and `Thumbs.db`. `ignored-p` and `glob-match-p` apply the same
+    matching.
+  - `:report-existing` reports the files already there. `stop-folder-watch` stops it, also from
+    inside the function.
+
+  On Linux, subfolders are not watched yet (a scan still descends into them), and there is no
+  polling fallback or placeholder detection yet; those are #996's later steps. An app that
+  debounced `aion/uv:watch` itself can use this instead.
 
 - **`mnemosyne/query:sql` renders Microsoft Access (Jet/ACE) SQL with `:dialect :jet`**
   (#1061). `:limit` renders as `SELECT TOP n`, with `n` written into the SQL, so it must be a
@@ -3329,6 +3377,56 @@ its tag.
 
 ### Fixed
 
+- **aion/uv: a path string reaches libuv as written, so a file with a backslash in its name works
+  on Linux and macOS** (#1093). Every function that takes a path ran it through `cl:namestring`,
+  and on Linux and macOS that drops a backslash, so `a\b.txt` was used as `ab.txt`. The affected
+  functions are:
+  - `file-info`, `read-file`, `write-file`, `make-directory`, `delete-file*`, `delete-directory`,
+    `rename-path`, `real-path` and `list-directory`;
+  - `read-file-async`, `file-info-async` and `write-file-async`, and `watch`;
+  - `aion/uv/net`'s `listen-pipe` and `connect-pipe`, and `aion/uv/process`'s `spawn` `:cwd`.
+
+  A string is now passed through unchanged. A pathname is converted with
+  `uiop:native-namestring`, after a logical pathname is translated, so on Windows it reaches
+  libuv with backslashes, as does `uv-error-path` in a condition about it. Before, both had
+  forward slashes. A string with backslashes on Windows also keeps them now. A wild pathname is
+  refused with an error before libuv is called, and anything that is neither a string nor a
+  pathname, `nil` included, signals `type-error`; before, `(make-directory nil)` made a folder
+  named `NIL`. The new exported function `native-path` returns the string a path is given to
+  libuv as.
+  - `make-directory` with `:parents` creates nothing at or above the root. On Windows a root can
+    be a drive, a server's share, or an extended-length prefix (`\\?\C:\`); before, the
+    first two characters of a share or extended-length path were taken as a folder, and the
+    call failed.
+  - On Windows `watch` drops a trailing backslash from the folder's path, because libuv then
+    reports each filename with a backslash in front of it. A root keeps its separator.
+  - When `watch` cannot start, for example on a folder that does not exist, the handle is now
+    closed rather than freed while the loop still held it. Before, `close-loop` afterwards could
+    abort the process.
+
+- **aion/fs, aion/libgit and aion/windows: a path given as a string is used as written** (#1096).
+  These functions parsed a path string as a Lisp namestring, which reads `[`, `]`, `*` and `?` as
+  wildcard syntax and, on Linux and macOS, drops a backslash, so a name containing any of them
+  named another path or none. #1095 makes the same fix in aion/uv.
+  - `aion/fs:delete-tree` failed with "No such file or directory" on Linux and macOS when the tree
+    held a folder named, for example, `a[1]` or `b\c`. A ROOT given as a string is now
+    taken as a native name too; before, a string naming a folder such as `a[1]` was parsed and the
+    call failed.
+  - On Linux and macOS, `aion/fs:delete-tree` no longer trims a backslash from the end of a name.
+    A tree holding an entry whose name ends in a backslash failed at rmdir, and one holding an
+    entry named just `\` recursed until SBCL exhausted its control stack, which ends the image.
+  - `aion/fs:delete-tree` refuses a ROOT with `.` or `..` in it, as it already refused a
+    filesystem root. `/..` names the filesystem root, and after a symbolic link `..` names the
+    parent of the link's target.
+  - `aion/fs:make-directory-link` returned a pathname for a different path when the link's name
+    contained brackets.
+  - `aion/libgit:init-repository` and `open-repository` take a directory string as a native name.
+    `aion/libgit:stage` finds a file named with brackets, which signalled a wild-pathname error,
+    and on Linux and macOS a file in a working directory whose name has a backslash, which it
+    took for deleted and removed from the index.
+  - `aion/windows:spawn-in-job` takes `:directory`, and an `:error` file, given as a string as a
+    native name, and `aion/windows:find-executable` takes NAME and the directories on PATH as
+    native names. Before, a folder, file or program named with brackets made the call fail.
 - **aion/http-client: on Windows, a pinned request's read that returned is no longer reported as
   a timeout** (#1063). A request with `:connect-address`, which `fetch-public` makes, keeps its
   read timeout on Windows with a timer that closes the socket. When the timer fired just as a
