@@ -1213,12 +1213,18 @@ its tag.
   machine send that request and whatever the URL carries with it; in a desktop webview with no
   Content-Security-Policy nothing stops it. And in a desktop webview, following a link replaces
   the app's own page with the linked one.
-  Both apply to every form the markdown can take — an explicit link or image, a reference link,
-  an autolink — and to relative and `mailto` URLs as well as `http` and `https`.
-  - **`render` now signals an error in two new cases**, both of them a request it cannot honour:
+  Both apply to an explicit link or image and to a reference link, and to relative and `mailto`
+  URLs as well as `http` and `https`. **An autolink needs neither option**: in the safe mode 3bmd
+  never builds one, because the angle brackets are escaped as text before it parses, so
+  `<https://host/>` already reaches the output as text — and the only mode that does build one is
+  `:allow-html t`, which these options refuse.
+  - **`render` now signals `hyperion/markdown:render-option-error` in two new cases**, both of
+    them a request it cannot honour:
     `:allow-html t` passed together with `:images nil` or `:links :text`, and any value for
     `:images` other than `t` or `nil`, or for `:links` other than `t` or `:text`. Nothing that
-    passes neither new argument can reach either signal, so no existing call changes.
+    passes neither new argument can reach either signal, so no existing call changes. It is a
+    named condition rather than a plain `error` so an app can catch this misuse and nothing
+    else: these are mistakes in the call, not failures to render.
   - `:allow-html t` with either mode is refused because raw HTML is not parsed into the tree
     these options filter: an `img` or `href` written directly in the source survives them, so
     `:images nil` would report no image while the output carried one. The two arguments also

@@ -136,6 +136,25 @@ the check."
         (setf (gethash (3bmd::print-label-to-string (getf (cdr node) :label)) table)
               (getf (cdr node) :source))))))
 
+(define-condition render-option-error (error)
+  ((argument :initarg :argument :reader render-option-error-argument)
+   (value :initarg :value :initform nil :reader render-option-error-value)
+   (detail :initarg :detail :reader render-option-error-detail))
+  (:report (lambda (c s)
+             (format s "hyperion/markdown: ~A~@[ (~S was ~S)~]"
+                     (render-option-error-detail c)
+                     (render-option-error-argument c)
+                     (render-option-error-value c))))
+  (:documentation
+   "RENDER was asked for something it cannot do (#1119). Signalled for an unrecognised :IMAGES or
+:LINKS value, and for :ALLOW-HTML T combined with either untrusted mode.
+
+A NAMED CONDITION RATHER THAN A PLAIN ERROR so a caller can catch this misuse and nothing else.
+These are programmer mistakes in the call, not failures to render, and an app that wants to
+report a bad configuration without swallowing every other error needs to be able to say which it
+means. ARGUMENT is the keyword at fault, or NIL for the combination, and VALUE is what it was
+given."))
+
 (defvar *images* t
   "Whether RENDER may emit an IMG element. NIL renders each image as its alt text (#1119). Bound
 by RENDER from its :IMAGES argument; not meant to be set directly.")
@@ -146,8 +165,20 @@ from its :LINKS argument; not meant to be set directly.")
 
 (defun %sanitize (elements references)
   "ELEMENTS (a list of 3bmd document nodes and strings) with every link, image and
-reference definition made safe. A link or reference link whose URL %SAFE-URL refuses is
-replaced by its label, and an image by its alt text, so the words stay and the URL goes."
+reference definition made safe. A link or reference link is replaced by its label, and an image
+by its alt text, so the words stay and the URL goes.
+
+THREE REASONS THAT CAN HAPPEN, not one. The first was here from #66; the other two came with
+#1119, and this docstring described only the first until the review of #1120:
+
+  - %SAFE-URL refuses the URL, because its scheme is not http, https or mailto and it is not
+    relative -- a `javascript:' link, for instance;
+  - *LINKS* is :TEXT, so no link may carry an HREF at all;
+  - *IMAGES* is NIL, so no image may become an IMG element. The URL is not even read in that
+    case, so nothing depends on %SAFE-URL's verdict.
+
+RENDER binds the last two from its :LINKS and :IMAGES arguments, for text the app did not
+write."
   (loop for e in elements
         nconc (if (and (consp e) (keywordp (car e)))
                   (%sanitize-node e references)
@@ -344,12 +375,21 @@ FOR UNTRUSTED TEXT, such as a model's reply shown in a chat, pass :IMAGES NIL an
   :LINKS :TEXT renders each link as its text and emits no HREF. In a desktop webview, following
                a link replaces the app's own page with the linked one.
 
-Both apply to every form the markdown can take: an explicit link or image, a reference link, and
-an autolink. NEITHER CAN BE COMBINED WITH :ALLOW-HTML T, which signals: raw HTML is not parsed
-into the tree these options filter, so an IMG or HREF written directly in the source would
-survive them, and the option would be promising something it does not do. :IMAGES accepts T or NIL and :LINKS accepts T or :TEXT; ANY OTHER VALUE SIGNALS
-rather than falling back to the default, because the default is the permissive one and a typo in
-a security option must not read as `render everything'."
+Both apply to an explicit link or image and to a reference link. AN AUTOLINK NEEDS NEITHER
+OPTION and is not covered by them: in the safe mode 3bmd never builds one, because the angle
+brackets are escaped as text before it parses, and the only mode that does build one is
+:ALLOW-HTML T, which these options refuse. So `<https://host/>' reaches the output as text either
+way, and the :LINK branch of %SANITIZE-NODE is unreachable while :LINKS is :TEXT. It is written
+to honour the option regardless, so that a change in how 3bmd parses cannot quietly turn
+autolinks back into links, but nothing here should be read as the option doing that work today.
+
+NEITHER CAN BE COMBINED WITH :ALLOW-HTML T, which signals RENDER-OPTION-ERROR: raw HTML is not
+parsed into the tree these options filter, so an IMG or HREF written directly in the source would
+survive them, and the option would be promising something it does not do.
+
+:IMAGES accepts T or NIL and :LINKS accepts T or :TEXT. ANY OTHER VALUE SIGNALS
+RENDER-OPTION-ERROR rather than falling back to the default, because the default is the
+permissive one and a typo in a security option must not read as `render everything'."
   ;; :ALLOW-HTML T CANNOT BE COMBINED WITH EITHER UNTRUSTED MODE, and the combination signals
   ;; rather than doing its best. Measured: with :ALLOW-HTML T a raw `<img src=...>' or
   ;; `<a href=...>' in the source passes through untouched, because raw HTML is not parsed into
@@ -358,11 +398,19 @@ a security option must not read as `render everything'."
   ;; content this app wrote, and these modes are for content it did not. An option that promises
   ;; a guarantee it cannot deliver is worse than no option (#1119).
   (when (and allow-html (or (null images) (eq links :text)))
-    (error "hyperion/markdown: :ALLOW-HTML T cannot be combined with :IMAGES NIL or :LINKS :TEXT. Raw HTML passes through unparsed, so an IMG or an HREF written directly in the source would survive both. Render untrusted text without :ALLOW-HTML."))
+    (error 'render-option-error
+           :argument nil
+           :detail (concatenate 'string
+                                ":ALLOW-HTML T cannot be combined with :IMAGES NIL or :LINKS "
+                                ":TEXT. Raw HTML passes through unparsed, so an IMG or an HREF "
+                                "written directly in the source would survive both. Render "
+                                "untrusted text without :ALLOW-HTML.")))
   (unless (member images '(t nil))
-    (error "hyperion/markdown: :IMAGES must be T or NIL, not ~S" images))
+    (error 'render-option-error :argument :images :value images
+                                :detail ":IMAGES must be T or NIL"))
   (unless (member links '(t :text))
-    (error "hyperion/markdown: :LINKS must be T or :TEXT, not ~S" links))
+    (error 'render-option-error :argument :links :value links
+                                :detail ":LINKS must be T or :TEXT"))
   (if (and markdown (plusp (length markdown)))
       (let ((*images* images)
             (*links* links)

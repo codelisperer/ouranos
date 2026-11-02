@@ -578,7 +578,11 @@
     so user/untrusted content cannot inject markup; pass :allow-html t only for
     trusted content. Fenced code blocks (```lang) are supported. Used by chat
     bubbles, CMS content, and anywhere user-authored prose becomes HTML.")
-  (:export #:render #:escape-html))
+  (:export #:render #:escape-html
+           ;; Signalled when RENDER is asked for something it cannot do, so an app can catch
+           ;; that misuse and nothing else (#1119).
+           #:render-option-error #:render-option-error-argument #:render-option-error-value
+           #:render-option-error-detail))
 
 ;;; --- Parenscript helpers (CL -> JS, no Node) ----------------------------
 (cl:defpackage #:hyperion/js
