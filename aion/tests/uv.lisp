@@ -33,7 +33,11 @@
   (concatenate 'string *scratch* name))
 
 (defun call-with-scratch (thunk)
-  (let ((*scratch* (format nil "/tmp/aion-uv-tests-~D/" (get-universal-time))))
+  ;; Each call gets a folder of its own. With the time alone, tests run in the same second
+  ;; shared one folder, and macOS reported files an earlier test had made there to a later
+  ;; test's watch (the macOS leg of run 41390308646).
+  (let ((*scratch* (format nil "/tmp/aion-uv-tests-~D-~D/" (get-universal-time)
+                           (random 1000000000 (make-random-state t)))))
     (uv:make-directory *scratch* :parents t)
     (unwind-protect (funcall thunk)
       (ignore-errors
