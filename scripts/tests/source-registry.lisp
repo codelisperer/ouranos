@@ -216,7 +216,7 @@ of building in this tree."
   (let ((tree (%fresh-tree)))
     (uiop:copy-file (merge-pathnames "bootstrap.lisp" td-root) (merge-pathnames "bootstrap.lisp" tree))
     (ensure-directories-exist (merge-pathnames "scripts/" tree))
-    (dolist (name '("human-path.lisp" "heap-guard.lisp" "source-registry.lisp"))
+    (dolist (name '("human-path.lisp" "heap-guard.lisp" "bake-contribs.lisp" "source-registry.lisp"))
       (uiop:copy-file (merge-pathnames name *scripts*) (merge-pathnames name (merge-pathnames "scripts/" tree))))
     tree))
 

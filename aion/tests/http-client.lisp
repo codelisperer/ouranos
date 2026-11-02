@@ -1919,3 +1919,227 @@ sends nothing."
         (close body))
       (loop repeat 30 until (car closed-at) do (sleep 0.1))
       (is-true (car closed-at) "the server saw the connection close"))))
+
+;;; --- one rule for whether a host may be sent requests in the clear (#1082) ---------------
+
+(test local-host-p-answers-for-names-literals-and-the-forms-that-look-local
+  "#1082: hermes core and hermes/blob each wrote this rule, for a Twilio API base and an S3
+endpoint, and the two copies acquired different holes -- see #1089 and the review of #1084. It
+lives here now, next to the primitives it uses, so there is one implementation to get right."
+  ;; Local: the name, and every literal whose category says so.
+  (dolist (host '("localhost" "LOCALHOST" "127.0.0.1" "127.1.2.3" "::1" "10.0.0.5"
+                  "172.17.0.2" "192.168.1.9" "169.254.1.2" "fc00::1" "fe80::1"))
+    (is-true (http:local-host-p host) "~A is local" host))
+  ;; Not local: public literals, and a name that does not resolve.
+  (dolist (host '("8.8.8.8" "93.184.216.34" "2606:2800:220:1:248:1893:25c8:1946"
+                  "nothing-here.invalid" "a.b.c.invalid"))
+    (is-false (http:local-host-p host) "~A is not local" host))
+  ;; 6TO4 IS NOT LOCAL, whatever address it carries. ADDRESS-CATEGORY answers about it by the
+  ;; IPv4 address inside, which is the right conservative answer for a guard deciding whether a
+  ;; destination may be reached at all, and the wrong answer for this question: 6to4 reaches its
+  ;; destination through a public relay (the review of #1084).
+  (dolist (host '("2002:7f00:1::" "2002:a00:5::" "2002:c0a8:109::"))
+    (is-true (member (http:address-category host) '(:loopback :private))
+             "control: ~A still reports a non-public category, which the SSRF guard needs" host)
+    (is-false (http:local-host-p host) "but ~A is not local, because 6to4 goes over a relay" host))
+  ;; NAT64 IS NOT LOCAL either, and for the same reason: reaching the IPv4 address means going
+  ;; through a gateway that is often the carrier's (the review of #1094). Both the well-known
+  ;; prefix and RFC 8215's local-use one.
+  (dolist (host '("64:ff9b::7f00:1" "64:ff9b::a00:5"))
+    (is-true (member (http:address-category host) '(:loopback :private))
+             "control: ~A still reports a non-public category for the SSRF guard" host)
+    (is-false (http:local-host-p host) "but ~A is not local, because NAT64 goes through a gateway" host))
+  ;; RFC 8215's local-use prefix, 64:ff9b:1::/48, is NOT one ADDRESS-CATEGORY recognises:
+  ;; %EMBEDDED-IPV4 handles only the well-known /96, so 64:ff9b:1::7f00:1 reports :PUBLIC and was
+  ;; never local. Measured, after a control of mine asserted it was :LOOPBACK and failed. The
+  ;; LOCAL-HOST-P exclusion covers it anyway, so the answer does not depend on which of the two
+  ;; reasons applies.
+  (is (eq :public (http:address-category "64:ff9b:1::7f00:1"))
+      "the local-use NAT64 prefix is not read as carrying an IPv4 address")
+  (is-false (http:local-host-p "64:ff9b:1::7f00:1"))
+  ;; An IPv4-mapped loopback address IS local: there is no relay or gateway, it is the same stack.
+  (is-true (http:local-host-p "::ffff:127.0.0.1"))
+  ;; A LEADING ZERO IN A DOTTED QUAD IS NOT LOCAL, whatever the octets say. This is the one IPv4
+  ;; spelling where PARSE-ADDRESS and the system resolver can disagree, and the connection
+  ;; follows the resolver. 010.8.8.8 is the case that matters: PARSE-ADDRESS reads it as
+  ;; 10.8.8.8 and calls it private (the review of #1094).
+  (dolist (host '("010.8.8.8" "010.0.0.1" "0127.0.0.1" "127.000.0.1"))
+    (is-false (http:local-host-p host) "~A is not local: its spelling is ambiguous" host))
+  (is (eq :private (http:address-category "010.8.8.8"))
+      "control: PARSE-ADDRESS does read 010.8.8.8 as a private address, which is the disagreement")
+  ;; THE OTHER NON-CANONICAL SPELLINGS ARE KEPT, deliberately: they fail PARSE-ADDRESS, so they
+  ;; go to RESOLVE-HOST -- the same resolver the connection uses -- and there is no second parser
+  ;; to disagree with. If the resolver says loopback, the connection goes to loopback.
+  ;;
+  ;; ASSERTED UNCONDITIONALLY, AGAINST WHAT THE RESOLVER SAYS. An earlier version of this ran the
+  ;; assertion only (WHEN RESOLVED), so a platform whose resolver declined these spellings turned
+  ;; the check into nothing rather than into a failure -- the same shape as the empty-host case
+  ;; above, which passed on three legs and failed on Windows for a reason unrelated to the
+  ;; property it names. The expectation is now derived from the resolver's own answer, so it holds
+  ;; whichever way a platform goes and still fails if LOCAL-HOST-P disagrees with it.
+  ;;
+  ;; %LOCAL-ADDRESS-P is the function LOCAL-HOST-P itself uses, not a copy of the rule written
+  ;; here: what is being asserted is that LOCAL-HOST-P is RESOLVE-HOST composed with that
+  ;; predicate, which is its contract. A control that re-derived locality would be checking a
+  ;; copy of the thing under test.
+  (dolist (host '("127.1" "0x7f.0.0.1" "2130706433" "localhost"))
+    (let* ((addresses (http:resolve-host host))
+           (expected (and addresses (every #'http::%local-address-p addresses) t)))
+      (is (eq expected (and (http:local-host-p host) t))
+          "~A: this resolver answers ~S, so LOCAL-HOST-P must be ~S" host addresses expected)))
+  (is-false (http:local-host-p nil) "no host is not a local host")
+  ;; AN EMPTY OR BLANK HOST IS REFUSED ON EVERY PLATFORM, which it was not before. On Linux
+  ;; usocket:get-hosts-by-name "" signals NS-HOST-NOT-FOUND-ERROR, so the answer was NIL by
+  ;; accident; on Windows getaddrinfo resolves an empty node name to the loopback address, so the
+  ;; answer was T. This check passed on three legs and failed on Windows, which is the shape of a
+  ;; test that is really asking what the local resolver does (#1082).
+  (dolist (host (list "" " " "   " (format nil "~C" #\Tab)))
+    (is-false (http:local-host-p host) "~S is not a local host" host))
+  ;; The control: a name that does resolve locally is still local, so the refusal above is about
+  ;; the host being empty and not about names having stopped working.
+  (let ((resolved (http:resolve-host "localhost")))
+    (is-true (and resolved (http:local-host-p "localhost"))
+             "control: localhost is still local")))
+
+(test local-host-p-requires-every-resolved-address-to-be-local
+  "The review of #1094, and the sharpest finding in it: nothing exercised a name with more than
+one resolved address, so changing EVERY to SOME in LOCAL-HOST-P passed the whole suite.
+Measured before writing this -- 493 checks, Fail 0, with SOME in place.
+
+That is the property that matters. A name resolving to one private address AND one public one
+must NOT be local: the connection may go to either, so approving it would allow plaintext to a
+public host on the strength of a loopback entry beside it.
+
+RESOLUTION IS STUBBED rather than arranged in DNS, because the cases that matter -- mixed,
+public-only, a resolution error -- cannot be conjured from a real resolver on a build machine,
+and a test that waits for the network to produce them is a test that silently stops running."
+  (let ((original (fdefinition 'http:resolve-host)))
+    (unwind-protect
+         (flet ((answering (addresses)
+                  ;; ADDRESSES is a list, or :ERROR to make resolution signal.
+                  (setf (fdefinition 'http:resolve-host)
+                        (lambda (host)
+                          (declare (ignore host))
+                          (if (eq addresses :error)
+                              (error "aion/http-client/tests: the resolver failed")
+                              addresses)))))
+           (dolist (case '((:all-local ((127 0 0 1)) t)
+                           (:all-local-several ((127 0 0 1) (10 0 0 5) (192 168 1 9)) t)
+                           (:public-only ((8 8 8 8)) nil)
+                           (:public-several ((8 8 8 8) (93 184 216 34)) nil)
+                           ;; THE CASE THAT KILLS "SOME": one local, one public. EVERY says no,
+                           ;; SOME says yes, and the connection may use either address.
+                           (:mixed-local-first ((127 0 0 1) (8 8 8 8)) nil)
+                           (:mixed-public-first ((8 8 8 8) (127 0 0 1)) nil)
+                           (:mixed-private-and-public ((10 0 0 5) (93 184 216 34)) nil)
+                           (:empty () nil)))
+             (destructuring-bind (name octet-lists expected) case
+               (answering (mapcar (lambda (o) (coerce o 'vector)) octet-lists))
+               (is (eq expected (and (http:local-host-p "a-name.invalid") t))
+                   "~A: a name resolving to ~S is ~:[not ~;~]local"
+                   name octet-lists expected)))
+           ;; 6to4 among the answers: not local, however local the address it carries looks.
+           (answering (list (http:parse-address "2002:7f00:1::")))
+           (is-false (http:local-host-p "a-name.invalid")
+                     "a name resolving only to 6to4 is not local")
+           (answering (list (http:parse-address "127.0.0.1") (http:parse-address "2002:7f00:1::")))
+           (is-false (http:local-host-p "a-name.invalid")
+                     "nor is one resolving to a loopback address and a 6to4 address")
+           ;; NAT64 likewise.
+           (answering (list (http:parse-address "64:ff9b::7f00:1")))
+           (is-false (http:local-host-p "a-name.invalid")
+                     "nor one resolving only to NAT64")
+           ;; A resolution error is not a local answer. LOCAL-HOST-P swallows it, so the point is
+           ;; that it swallows it to NIL and not to T.
+           (answering :error)
+           (is-false (http:local-host-p "a-name.invalid")
+                     "a name whose resolution signals is not local"))
+      (setf (fdefinition 'http:resolve-host) original)))
+  ;; The control: with resolution restored, a name that really does resolve locally is local
+  ;; again, so the cases above were about the fixture and not about the stub being left in place.
+  (is-true (http:local-host-p "localhost") "control: resolution is restored"))
+
+(test url-host-reads-the-host-quri-would-connect-to
+  "#1082: both callers had written this, and both got it wrong in their own way. QURI is used
+because it is the parser dexador parses a request URL with, and the brackets come off because
+every caller feeds the result to PARSE-ADDRESS or ADDRESS-CATEGORY."
+  (dolist (case '(("http://localhost:9000/x" . "localhost")
+                  ("http://127.0.0.1:9000" . "127.0.0.1")
+                  ("http://[::1]:9000/x" . "::1")
+                  ("https://[2606:2800::1]/x" . "2606:2800::1")
+                  ("http://minio:9000" . "minio")
+                  ;; The bypass that started #1089: a bracketed IPv6 in the userinfo. A parser
+                  ;; that stripped brackets returned "::1" here and the request went elsewhere.
+                  ("http://[::1]@evil.invalid/x" . "evil.invalid")
+                  ("http://[::1]:80@evil.invalid/x" . "evil.invalid")
+                  ("http://user:pw@evil.invalid" . "evil.invalid")))
+    (is (equal (cdr case) (http:url-host (car case)))
+        "~A has the host ~A" (car case) (cdr case)))
+  (is-false (http:url-host "not a url at all") "a value with no host reads as none")
+  ;; A bare authority has no scheme, and QURI reads the host as a scheme: callers prepend one.
+  (is-false (equal "localhost" (http:url-host "localhost:9000"))
+            "control: a bare host:port is NOT a URL, which is why callers add a scheme first"))
+
+(test proxy-arguments-decides-without-resolving-a-name
+  "The review of #1094. This decision used to call LOCAL-HOST-P, which resolves a name, on every
+plaintext request. Two problems: a blocking lookup on the send path that CONNECT-TIMEOUT does not
+cover, and a rebinding window -- a name that answers private now can answer public at connect
+time, and the request would then skip a configured egress proxy on the strength of a resolution
+that no longer holds. The decision is made for \"localhost\" and IP literals only; deciding by
+name belongs at configuration time, where a wrong answer is a refusal rather than a silently
+unproxied request."
+  (let ((looked-up '())
+        (original (fdefinition 'http:resolve-host)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'http:resolve-host)
+                 (lambda (host) (push host looked-up) (funcall original host)))
+           (dolist (url '("http://127.0.0.1:9000/x" "http://localhost/x" "http://[::1]/x"
+                          "http://10.0.0.5/x" "http://a-name.invalid/x" "https://a-name.invalid/x"
+                          "http://8.8.8.8/x"))
+             (http:proxy-arguments url))
+           (is (null looked-up)
+               "no name was resolved to decide how to proxy: ~S" looked-up)
+           ;; The control: the stub does fire when something asks LOCAL-HOST-P about a name, so
+           ;; the assertion above is about this path and not about an unreachable stub.
+           (http:local-host-p "another-name.invalid")
+           (is-true (member "another-name.invalid" looked-up :test #'string=)
+                    "control: LOCAL-HOST-P does resolve a name: ~S" looked-up))
+      (setf (fdefinition 'http:resolve-host) original)))
+  ;; A DNS name keeps whatever proxy is configured, local-looking or not.
+  (dolist (url '("http://a-name.invalid/x" "http://minio/x"))
+    (is (null (http:proxy-arguments url))
+        "~A is a name, so its proxy is left alone" url)))
+
+(test a-plaintext-request-to-a-local-host-is-not-sent-through-a-proxy
+  "#1091: dexador sets *DEFAULT-PROXY* from HTTPS_PROXY or HTTP_PROXY when it loads and honours
+no NO_PROXY, and %DEX-ARGS never passed :PROXY. So a caller that had checked its destination was
+local -- hermes for a Twilio API base, hermes/blob for an S3 endpoint -- could still have its
+credentials carried off the machine in the clear, because the bytes went to the proxy instead of
+to the host that was checked.
+
+The assertion is on what dexador is given, not on what a request returns: a fixture whose proxy
+is unreachable would pass for the wrong reason."
+  (flet ((proxy-arg (url)
+           ;; Through %DEX-ARGS, which is the path AION/HTTP-CLIENT:SEND-REQUEST takes. The
+           ;; decision itself is PROXY-ARGUMENTS, which hermes/blob's direct dexador call uses
+           ;; too -- when it lived only here, that backend was not covered (the review of #1094).
+           (let ((args (http::%dex-args (http:make-request :method :get :url url))))
+             (if (member :proxy args) (list :passed (getf args :proxy)) :not-passed))))
+    ;; Exempted: plaintext to a local host, by name or by address.
+    (dolist (url '("http://127.0.0.1:9000/x" "http://localhost/x" "http://[::1]:9000/x"
+                   "http://10.0.0.5/x" "http://169.254.1.2/x"))
+      (is (equal '(:passed nil) (proxy-arg url))
+          "~A is sent with :proxy nil, so no proxy can see it" url))
+    ;; Not exempted: https anywhere, because a proxied https request is a CONNECT tunnel and the
+    ;; credentials are inside TLS; and plaintext to a host that is not local, where whoever
+    ;; configured it is already sending in the clear.
+    (dolist (url '("https://127.0.0.1/x" "https://api.example.invalid/x" "http://8.8.8.8/x"
+                   ;; A NAME keeps its proxy now, even one that might resolve locally: see
+                   ;; PROXY-ARGUMENTS-DECIDES-WITHOUT-RESOLVING-A-NAME.
+                   "http://api.example.invalid/x" "http://minio/x"))
+      (is (eq :not-passed (proxy-arg url))
+          "~A keeps whatever proxy is configured" url))
+    ;; 6to4 is not local, so it is not exempted either.
+    (is (eq :not-passed (proxy-arg "http://2002:7f00:1::/x"))
+        "a 6to4 address is not local, so its request is not exempted")))

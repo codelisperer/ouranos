@@ -77,30 +77,26 @@ moved to hermes, and the deployed names were kept rather than renamed. They are 
                                   (%require-setting endpoint "MNEMOSYNE_S3_ENDPOINT")))
            (path-style (or path-style
                            (let ((v (%setting "MNEMOSYNE_S3_PATH_STYLE")))
-                             (and v (string-equal v "true")))))
-           (secure (%secure-setting secure secure-p endpoint path-style)))
+                             (and v (string-equal v "true"))))))
+      ;; THE SHAPE AND USERINFO CHECKS RUN BEFORE ANYTHING RESOLVES A NAME. They were below
+      ;; %SECURE-SETTING, which calls %LOCAL-ENDPOINT-P and so performs a DNS lookup, meaning a
+      ;; malformed endpoint was looked up before being refused. The store was never built, so it
+      ;; failed safe, but a value this code is about to reject should not be sent to a resolver
+      ;; first (the review of #1090).
       (%check-endpoint-shape endpoint)
       (%check-endpoint-userinfo endpoint)
-      (make-instance 's3-store
-                   :endpoint endpoint
-                   :region region
-                   :access-key (%require-setting access-key "MNEMOSYNE_S3_ACCESS_KEY")
-                   :secret-key (%require-setting secret-key "MNEMOSYNE_S3_SECRET_KEY")
-                   :session-token (or session-token (%setting "MNEMOSYNE_S3_SESSION_TOKEN"))
-                   :secure secure
-                   :path-style path-style
-                   :public-base-url (or public-base-url
-                                        (%setting "MNEMOSYNE_S3_PUBLIC_BASE_URL"))
-                   :upload-acl (%upload-acl-setting upload-acl)))))
-
-(defun %strip-brackets (text)
-  "TEXT without a surrounding pair of square brackets: \"[::1]\" gives \"::1\". Anything else is
-returned unchanged."
-  (if (and text (> (length text) 1)
-           (char= #\[ (char text 0))
-           (char= #\] (char text (1- (length text)))))
-      (subseq text 1 (1- (length text)))
-      text))
+      (let ((secure (%secure-setting secure secure-p endpoint path-style)))
+        (make-instance 's3-store
+                       :endpoint endpoint
+                       :region region
+                       :access-key (%require-setting access-key "MNEMOSYNE_S3_ACCESS_KEY")
+                       :secret-key (%require-setting secret-key "MNEMOSYNE_S3_SECRET_KEY")
+                       :session-token (or session-token (%setting "MNEMOSYNE_S3_SESSION_TOKEN"))
+                       :secure secure
+                       :path-style path-style
+                       :public-base-url (or public-base-url
+                                            (%setting "MNEMOSYNE_S3_PUBLIC_BASE_URL"))
+                       :upload-acl (%upload-acl-setting upload-acl))))))
 
 (defparameter +endpoint-forbidden+ '("://" "/" "?" "#" "@")
   "Substrings an S3 endpoint may not contain (#1089). An endpoint is an authority -- a host with
@@ -137,6 +133,11 @@ resolver says, so no check here can speak for it. That is why %SECURE-SETTING re
 for a plaintext store. An earlier version of this docstring said the host was read from the shape
 the request is built from without that qualification, which was false for virtual-host style."
   (let ((endpoint (and endpoint (string-trim " " endpoint))))
+    ;; NO REFUSAL HERE REPEATS THE VALUE. An endpoint may carry a password -- that is one of the
+    ;; things being refused -- and these reports reach logs and terminals. Every branch printed
+    ;; it with ~S until the review of #1094, so "AKIA:PASSWORD@127.0.0.1:9000" put the password
+    ;; in the report. The same mistake was fixed in hermes core's Twilio check one review
+    ;; earlier, and this copy was missed.
     (flet ((refuse (why)
              (error 'blob-configuration-error
                     :missing (format nil "MNEMOSYNE_S3_ENDPOINT to be a host with an optional port, such as s3.amazonaws.com or localhost:9000. ~A" why))))
@@ -146,25 +147,31 @@ the request is built from without that qualification, which was false for virtua
                   endpoint)
         (refuse "The value contains whitespace."))
       (when (search "://" endpoint)
-        (refuse (format nil "~S contains \"://\". The scheme comes from MNEMOSYNE_S3_SECURE and is put in front of this value, so a scheme here would appear twice in the request URL and the host would not be the one named." endpoint)))
+        (refuse "The value contains \"://\". The scheme comes from MNEMOSYNE_S3_SECURE and is put in front of this value, so a scheme here would appear twice in the request URL and the host would not be the one named."))
       (let ((bad (find-if (lambda (piece) (search piece endpoint)) +endpoint-forbidden+)))
         (when bad
-          (refuse (format nil "~S contains ~S, which belongs to the rest of a URL rather than to a host." endpoint bad)))))))
+          (refuse (format nil "The value contains ~S, which belongs to the rest of a URL rather than to a host." bad))))
+      ;; A BARE IPv6 ADDRESS IS REFUSED, WHATEVER THE MODE. An endpoint of "::1" passed every
+      ;; check when MNEMOSYNE_S3_SECURE was unset, because the plaintext rule never ran, and
+      ;; produced the request URL "https://::1/bkt/k" -- which QURI reads as the host ":" with
+      ;; port 1, so it could never have connected. The plaintext path already refused it for a
+      ;; different reason, which is why this went unnoticed (the review of #1094). Two or more
+      ;; colons and no leading bracket is an IPv6 address written without its brackets.
+      (when (and (not (char= #\[ (char endpoint 0)))
+                 (let ((first (position #\: endpoint)))
+                   (and first (position #\: endpoint :start (1+ first)))))
+        (refuse "The value looks like an IPv6 address without brackets. A request URL built from it has no usable host: write it as [::1]:9000, with the brackets and a port."))))) 
 
-(defun %endpoint-uri (endpoint)
-  "ENDPOINT read as the request would read it: the URL shape %S3-URL builds, parsed with QURI,
-which is the parser dexador uses. Returns the QURI:URI, or NIL when it cannot be parsed.
+(defun %endpoint-url (endpoint)
+  "ENDPOINT as the URL a request would be built from: the scheme, \"://\", then the endpoint.
 
 THE SCHEME IS ALWAYS PREPENDED, never conditionally. A blob endpoint is a bare authority such as
-\"localhost:9000\", and QURI:URI reads that as the scheme \"localhost\" with no host at all, so an
+\"localhost:9000\", and QURI reads that as the scheme \"localhost\" with no host at all, so an
 endpoint has to be given a scheme before it is parsed. An earlier version prepended one only
 when the endpoint had no \"://\" of its own, which is exactly how evil.com://127.0.0.1 got past
-the check: see %CHECK-ENDPOINT-SHAPE. %CHECK-ENDPOINT-SHAPE now refuses such an endpoint, and
-this function no longer looks at what the endpoint contains -- between them the string parsed
-here and the string the request is built from are the same."
+the check: see %CHECK-ENDPOINT-SHAPE, which now refuses such an endpoint."
   (let ((endpoint (and endpoint (string-trim " " endpoint))))
-    (and endpoint
-         (ignore-errors (quri:uri (concatenate 'string "http://" endpoint))))))
+    (and endpoint (concatenate 'string "http://" endpoint))))
 
 (defun %endpoint-host (endpoint)
   "ENDPOINT's host, without a port, as QURI reads it out of the URL the request is built from:
@@ -175,18 +182,13 @@ up to the first slash and, when that began with \"[\", returned what was inside 
 endpoint may carry userinfo before an \"@\", and when the userinfo was a bracketed IPv6 address,
 stripping the brackets consumed the \"@\" with it: for \"[::1]@example.com\" it returned \"::1\",
 which %LOCAL-ENDPOINT-P allowed as loopback while dexador connected to example.com."
-  (let ((uri (%endpoint-uri endpoint)))
-    ;; QURI returns an IPv6 host with its brackets, as it appears in the URL, and every caller
-    ;; here wants the address itself, because that is what ADDRESS-CATEGORY and PARSE-ADDRESS
-    ;; read. Measured rather than assumed: for "[::1]:9000" QURI returns "[::1]", and without
-    ;; this a legitimate local IPv6 endpoint was refused.
-    (%strip-brackets (and uri (quri:uri-host uri)))))
+  (http:url-host (%endpoint-url endpoint)))
 (defun %endpoint-userinfo (endpoint)
   "The user name and password ENDPOINT carries before an \"@\", or NIL. An S3 endpoint has no use
 for either: their only effects here are to hide the real host from anyone reading the setting,
 and to defeat the check below (#1089), so %CHECK-PLAINTEXT-ENDPOINT refuses any endpoint that
 has them whatever the host turns out to be."
-  (let ((uri (%endpoint-uri endpoint)))
+  (let ((uri (ignore-errors (quri:uri (%endpoint-url endpoint)))))
     (and uri (quri:uri-userinfo uri))))
 
 (defun %check-endpoint-userinfo (endpoint)
@@ -216,26 +218,18 @@ makes the refusal worth explaining to whoever set the variable."
 
 (defun %local-endpoint-p (endpoint)
   "Whether ENDPOINT names something only this machine or this network can reach, so sending it
-requests in plaintext does not put them on the public internet (the hub's review of #970).
+requests in plaintext does not put them on the public internet.
 
-\"localhost\" counts. An IP address is classified by AION/HTTP-CLIENT:ADDRESS-CATEGORY, and
-counts when it is loopback, private or link-local. Any other name is resolved, and counts only
-when it resolves and every address it resolves to is one of those, so a Docker Compose service
-name such as \"minio\" works while a name pointing at the internet does not. A name that does not
-resolve does not count: an endpoint that cannot be reached is not an endpoint known to be local.
+THE RULE IS AION/HTTP-CLIENT:LOCAL-HOST-P, not a copy written here. It was a copy until #1082,
+and so was hermes core's for a Twilio API base, and the two acquired different holes: a
+bracketed IPv6 userinfo got past one, a scheme inside the endpoint got past the other, and a
+bucket label in front of the host got past both (#1089, the review of #1084). A rule that
+decides whether credentials may travel in the clear is the last rule that should exist twice.
 
-The host comes from %ENDPOINT-HOST, which reads it with QURI as dexador does. An endpoint whose
-host cannot be determined is not local (#1089)."
+The host comes from %ENDPOINT-HOST, which reads the URL a request is built from with the parser
+dexador parses it with. An endpoint whose host cannot be determined is not local (#1089)."
   (let ((host (%endpoint-host endpoint)))
-    (flet ((local-p (address)
-             (member (http:address-category address) '(:loopback :private :link-local))))
-      (and host
-           (or (string-equal host "localhost")
-               (let ((literal (http:parse-address host)))
-                 (if literal
-                     (and (local-p literal) t)
-                     (let ((addresses (ignore-errors (http:resolve-host host))))
-                       (and addresses (every #'local-p addresses) t)))))))))
+    (and host (http:local-host-p host))))
 
 (defun %secure-setting (value supplied-p endpoint path-style)
   "The store's SECURE: VALUE when :SECURE was passed, else MNEMOSYNE_S3_SECURE, else T.
@@ -464,9 +458,17 @@ body that cannot be read becomes a DETAIL saying so (#796)."
          (url (%s3-url store bucket key (and query (plusp (length query)) query))))
     (multiple-value-bind (body status resp-headers)
         (handler-case
-            (dex:request url :method method :headers headers :content content
-                             :want-stream want-stream :force-binary t
-                             :keep-alive nil)
+            ;; THE PROXY DECISION COMES FROM AION, not from dexador's default. This backend
+            ;; calls dexador directly rather than through AION/HTTP-CLIENT:SEND-REQUEST, so it
+            ;; does not pick up what %DEX-ARGS passes, and when #1091 was first fixed there this
+            ;; path was left sending plaintext requests for a LOCAL endpoint to whatever
+            ;; HTTPS_PROXY named -- the signed Authorization header and any session token with
+            ;; them -- while a comment and the CHANGELOG said hermes/blob was covered (the
+            ;; review of #1094).
+            (apply #'dex:request url :method method :headers headers :content content
+                                     :want-stream want-stream :force-binary t
+                                     :keep-alive nil
+                                     (http:proxy-arguments url))
           (dex:http-request-failed (e)
             (let ((status (dex:response-status e))
                   ;; With WANT-STREAM the error's body is an open stream on the connection.

