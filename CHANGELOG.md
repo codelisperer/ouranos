@@ -26,6 +26,21 @@ its tag.
   returned the bracketed IPv6 userinfo as the host and allowed plaintext to a public host. The
   endpoint is now read with `quri`, the parser dexador itself uses, **out of the URL the request
   is built from**, so the check and the request agree about where the bytes are going.
+- **hermes/blob: a plaintext S3 store must now use path-style addressing** (#1089).
+  `MNEMOSYNE_S3_SECURE=false` additionally requires `MNEMOSYNE_S3_PATH_STYLE=true`, or
+  `blob-configuration-error` names it. In virtual-host style the request does not go to the
+  endpoint at all: the host is `BUCKET.ENDPOINT`, a different DNS name, so the check added in
+  #970 approved `127.0.0.1` while the request went to `bkt.127.0.0.1`, and the same for
+  `10.1.2.3`, `localhost` and a Compose service name. Whoever controls the resolver or the search
+  domain chooses where such a name points, and nothing in hermes can speak for it. A local S3
+  double such as MinIO wants path-style anyway. **https is unaffected** and keeps virtual-host
+  style, which is what AWS expects, and `:secure nil` passed in code remains an unchecked
+  deliberate choice, as #124 settled.
+- **hermes/blob: surrounding whitespace in `MNEMOSYNE_S3_ENDPOINT` is trimmed before the value is
+  stored** (#1089). The checks used to trim a copy while the store kept the raw string, so
+  `" 127.0.0.1:9000"` passed every check and then built request URLs with a space in them: it
+  failed safe, but at the first upload rather than at boot. Whitespace *inside* an endpoint is
+  still refused.
 - **hermes/blob: an S3 endpoint must now be a bare host with an optional port** (#1089).
   `MNEMOSYNE_S3_ENDPOINT` is refused when it contains `://`, `/`, `?`, `#`, `@` or whitespace, or
   is empty. Values such as `localhost:9000`, `127.0.0.1:9000`, `[::1]:9000`, `minio:9000` and

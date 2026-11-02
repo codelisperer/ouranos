@@ -69,7 +69,16 @@ moved to hermes, and the deployed names were kept rather than renamed. They are 
     ;; naming MNEMOSYNE_S3_ENDPOINT on its own. Only then is its shape judged: an empty value is
     ;; a setting nobody filled in, and a malformed one is a setting filled in wrongly, and the
     ;; two deserve different sentences (the review of #1090).
-    (let ((endpoint (%require-setting endpoint "MNEMOSYNE_S3_ENDPOINT")))
+    ;; TRIMMED ONCE, HERE, and the trimmed value is what is both checked and stored. The checks
+    ;; used to trim their own copy while the store kept the raw string, so " 127.0.0.1" passed
+    ;; the checks and then every request was built from a URL with a space in it (the review of
+    ;; #1090). One normalisation, before anything looks at the value.
+    (let* ((endpoint (string-trim '(#\Space #\Tab #\Newline #\Return)
+                                  (%require-setting endpoint "MNEMOSYNE_S3_ENDPOINT")))
+           (path-style (or path-style
+                           (let ((v (%setting "MNEMOSYNE_S3_PATH_STYLE")))
+                             (and v (string-equal v "true")))))
+           (secure (%secure-setting secure secure-p endpoint path-style)))
       (%check-endpoint-shape endpoint)
       (%check-endpoint-userinfo endpoint)
       (make-instance 's3-store
@@ -78,10 +87,8 @@ moved to hermes, and the deployed names were kept rather than renamed. They are 
                    :access-key (%require-setting access-key "MNEMOSYNE_S3_ACCESS_KEY")
                    :secret-key (%require-setting secret-key "MNEMOSYNE_S3_SECRET_KEY")
                    :session-token (or session-token (%setting "MNEMOSYNE_S3_SESSION_TOKEN"))
-                   :secure (%secure-setting secure secure-p endpoint)
-                   :path-style (or path-style
-                                   (let ((v (%setting "MNEMOSYNE_S3_PATH_STYLE")))
-                                     (and v (string-equal v "true"))))
+                   :secure secure
+                   :path-style path-style
                    :public-base-url (or public-base-url
                                         (%setting "MNEMOSYNE_S3_PUBLIC_BASE_URL"))
                    :upload-acl (%upload-acl-setting upload-acl)))))
@@ -121,8 +128,14 @@ the adversarial review found that these are not the same string:
 
 Using dexador's parser was not enough, because it was handed a different string. Two things hold
 now: an endpoint may not contain the pieces that make a URL mean something else, and the host is
-read from the same shape the request is built from. Both matter -- the shape check is what keeps
-the host check's input honest -- so a later reader should not drop either as redundant."
+read from the shape a PATH-STYLE request is built from. Both matter -- the shape check is what
+keeps the host check's input honest -- so a later reader should not drop either as redundant.
+
+PATH-STYLE IS PART OF THAT CLAIM AND NOT AN ASIDE. In virtual-host style %S3-HOST builds
+\"BUCKET.ENDPOINT\", which is a different DNS name from the endpoint and resolves wherever its
+resolver says, so no check here can speak for it. That is why %SECURE-SETTING requires path-style
+for a plaintext store. An earlier version of this docstring said the host was read from the shape
+the request is built from without that qualification, which was false for virtual-host style."
   (let ((endpoint (and endpoint (string-trim " " endpoint))))
     (flet ((refuse (why)
              (error 'blob-configuration-error
@@ -224,7 +237,7 @@ host cannot be determined is not local (#1089)."
                      (let ((addresses (ignore-errors (http:resolve-host host))))
                        (and addresses (every #'local-p addresses) t)))))))))
 
-(defun %secure-setting (value supplied-p endpoint)
+(defun %secure-setting (value supplied-p endpoint path-style)
   "The store's SECURE: VALUE when :SECURE was passed, else MNEMOSYNE_S3_SECURE, else T.
 
 The variable is read as true or false without regard to case, and unset means true, so plaintext
@@ -247,6 +260,18 @@ deliberate: for path-style the safe default is off, and for secure it is on."
         (cond ((null v) t)
               ((string-equal v "true") t)
               ((string-equal v "false")
+               ;; PLAINTEXT REQUIRES PATH-STYLE, because in virtual-host style the request does
+               ;; not go to the endpoint at all: %S3-HOST builds "BUCKET.ENDPOINT", a different
+               ;; DNS name, and nothing here can say where that resolves. The check approved
+               ;; 127.0.0.1 while the request went to bkt.127.0.0.1, and 10.1.2.3, LOCALHOST and
+               ;; a Compose name behaved the same way -- whoever controls the resolver or the
+               ;; search domain chooses where that name points. This has been so since #970 and
+               ;; was found in the review of #1090. Path-style sends the request to the endpoint
+               ;; itself, which is the host this check is about, so the two agree again.
+               (unless path-style
+                 (error 'blob-configuration-error
+                        :missing (format nil "MNEMOSYNE_S3_PATH_STYLE=true when MNEMOSYNE_S3_SECURE=false. In virtual-host style the request goes to the DNS name BUCKET.~A rather than to ~S, and nothing can say where that name resolves, so a plaintext store must address the endpoint itself. A local S3 double such as MinIO wants path-style anyway"
+                                         endpoint endpoint)))
                (unless (%local-endpoint-p endpoint)
                  (error 'blob-configuration-error
                         :missing (format nil "MNEMOSYNE_S3_SECURE=false, which sends every request in plaintext, and MNEMOSYNE_S3_ENDPOINT is ~S, which is not a loopback, private or link-local address. Plaintext is for a local S3 double; point the endpoint at one, or pass :secure nil in code if this is really what you want"
