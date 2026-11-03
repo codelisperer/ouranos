@@ -565,3 +565,58 @@ so emphasis and code inside one become their text."
               "and does not put a BR in the attribute: ~A" broken)
     (is (equal "a b c d" (%attribute-value "alt" marked))
         "while emphasis and code become their text, which an attribute cannot hold: ~A" marked)))
+
+(test an-autolink-in-an-alt-label-renders-as-its-url-escaped-once
+  "The review of #1133, and a crash rather than a wrong render. An autolink's node is POSITIONAL
+-- (:LINK url), not a plist -- and %LABEL-TEXT looked it up with GETF, which signals
+
+  SIMPLE-TYPE-ERROR: malformed property list: (\"https://example.com\")
+
+for `![see <https://example.com>](outer.png)' with :ALLOW-HTML T. The safe mode never builds an
+autolink, because the angle brackets are escaped before 3bmd parses, which is why it went unseen:
+every test of this code ran in the mode where the node cannot occur.
+
+ITS TEXT IS ITS URL, which is what a reader sees when it renders. The URL in the node has already
+been attribute-escaped by %SAFE-URL, so it is decoded before being written and 3bmd escapes it
+once -- the assertions below are on the exact alt value, because escaping it twice is the defect
+next door and `&amp;amp;' is the only thing that distinguishes them."
+  (flet ((alt (markdown &rest options)
+           (%attribute-value "alt" (apply #'hyperion/markdown:render markdown options))))
+    ;; The case that signalled.
+    (is (equal "see https://example.com"
+               (alt "![see <https://example.com>](outer.png)" :allow-html t))
+        "an autolink in an alt label is its URL as text")
+    ;; A URL with an ampersand in it: escaped ONCE. &amp;amp; here would be the double escape.
+    (is (equal "https://a.example/?x=1&amp;y=2"
+               (alt "![<https://a.example/?x=1&y=2>](outer.png)" :allow-html t))
+        "and its ampersand is escaped once, not twice")
+    ;; A refused scheme is not a :LINK node at all -- %SANITIZE-NODE returns the raw text -- so
+    ;; it arrives as a string and keeps its angle brackets.
+    (is (equal "&lt;javascript:alert(1)&gt;"
+               (alt "![<javascript:alert(1)>](outer.png)" :allow-html t))
+        "a refused autolink stays literal text")
+    ;; And in the safe mode, where no autolink node exists, the brackets are text.
+    (is (equal "see &lt;https://example.com&gt;"
+               (alt "![see <https://example.com>](outer.png)"))
+        "the safe mode has no autolink node to flatten")))
+
+(test an-alt-label-escapes-entities-and-code-spans-exactly-once
+  "The review of #1133 asked for exact alt-text assertions on entities, including inside a code
+span. The entity double-escape itself was fixed in 9652057c -- flattening an (:ENTITY ...) node
+into the string made 3bmd escape its ampersand a second time -- and these are the assertions on
+the values rather than on the absence of `&amp;amp;'.
+
+WHAT EACH ONE MEANS IN A BROWSER, since an alt value is read decoded:
+  `Tom &amp; Jerry &copy;'  displays  Tom & Jerry (C)
+  `a &amp;copy; b'          displays  a &copy; b        -- the code span, kept literal
+
+So the second is NOT a double escape even though it looks like one: a code span's content is
+literal text, 3bmd does not parse an entity inside it, and escaping that text once is what makes
+the reader see the spelling the author typed."
+  (flet ((alt (markdown &rest options)
+           (%attribute-value "alt" (apply #'hyperion/markdown:render markdown options))))
+    (dolist (options (list '() '(:allow-html t)))
+      (is (equal "Tom &amp; Jerry &copy;" (apply #'alt "![Tom &amp; Jerry &copy;](outer.png)" options))
+          "entities reach the alt as themselves with ~S" options)
+      (is (equal "a &amp;copy; b" (apply #'alt "![a `&copy;` b](o.png)" options))
+          "an entity spelling inside a code span stays literal with ~S" options))))

@@ -252,7 +252,19 @@ that is all text is one string, and one that contains an entity is text and enti
                         (:line-break (write-char #\Space text))
                         ;; (:IMAGE (:EXPLICIT-LINK :LABEL ...)): the wrapped link's label.
                         (:image (walk (first (cdr e))))
-                        ((:explicit-link :reference-link :link)
+                        ;; AN AUTOLINK IS POSITIONAL -- (:LINK url), not a plist -- so GETF on
+                        ;; its tail signals "malformed property list" for a one-element list.
+                        ;; `![see <https://example.com>](outer.png)' with :ALLOW-HTML T did
+                        ;; exactly that: an error instead of a render (the review of #1133). The
+                        ;; safe mode never builds one, because the angle brackets are escaped
+                        ;; before 3bmd parses, which is why this went unseen.
+                        ;;
+                        ;; ITS TEXT IS ITS URL, which is what a reader sees when it renders, so
+                        ;; that is what belongs in the alt. The URL in the node has already been
+                        ;; attribute-escaped by %SAFE-URL, and 3bmd escapes the alt again when it
+                        ;; writes it, so it is decoded here and escaped once rather than twice.
+                        (:link (write-string (%decode-references (or (first (cdr e)) "")) text))
+                        ((:explicit-link :reference-link)
                          (mapc #'walk (getf (cdr e) :label)))
                         (t (mapc #'walk (%plist-free-children (cdr e))))))
                      ((consp e) (mapc #'walk e)))))
