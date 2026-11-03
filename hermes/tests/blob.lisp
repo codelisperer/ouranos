@@ -2764,6 +2764,27 @@ wherever the slot now points."
                  (is (equal "minio.invalid" (hermes/blob::s3-endpoint-approved-local store))
                      "~S is refused and the approval is unchanged: ~S" endpoint
                      (hermes/blob::s3-endpoint-approved-local store)))
+               ;; A REFUSAL CHANGES NO SLOT, not just the endpoint and the approval. The same
+               ;; call that is refused can carry other initargs, and CALL-NEXT-METHOD assigns
+               ;; them all before the checks run. A secure store reinitialized with :SECURE NIL
+               ;; and a refused endpoint was left PLAINTEXT, at a local name, with no approval --
+               ;; so its signed requests went through HTTP_PROXY in the clear (the hub's review of
+               ;; #1140). The store above is plaintext, so the case needs a secure one.
+               (let ((secure (b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x"
+                                              :endpoint "minio.invalid:9000" :path-style t
+                                              :secure t)))
+                 (signals b:blob-configuration-error
+                   (reinitialize-instance secure :secure nil :endpoint "u:pw@x"))
+                 (is (eq t (b::s3-secure-p secure))
+                     "a refused reinitialize leaves a secure store secure: ~S"
+                     (b::s3-secure-p secure))
+                 (is (equal "https://minio.invalid:9000/bkt/k" (b::%s3-url secure "bkt" "k"))
+                     "and its requests still go over https: ~S" (b::%s3-url secure "bkt" "k"))
+                 (signals b:blob-configuration-error
+                   (reinitialize-instance secure :path-style nil :endpoint "[::1]:9000"))
+                 (is (eq t (b::s3-path-style-p secure))
+                     "and a refused call leaves the addressing alone too: ~S"
+                     (b::s3-path-style-p secure)))
                ;; The control: an endpoint the checks accept DOES replace it, so the assertions
                ;; above are about the refusals and not about the slot having become read-only.
                (reinitialize-instance store :endpoint "other.invalid:9000")

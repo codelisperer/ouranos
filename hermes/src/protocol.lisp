@@ -156,6 +156,27 @@ carrying a credential in the clear has nothing to say about it."
       (error 'configuration-error :missing reason))
     (values uri approved-local)))
 
+(defun %slot-snapshot (object)
+  "Every slot of OBJECT as (NAME . (VALUE)) when bound and (NAME) when unbound, for
+%RESTORE-SLOTS, read through the MOP so a slot added to the class later is covered.
+
+THERE IS A SECOND COPY in hermes/blob's s3.lisp, deliberately: hermes/blob does not depend on
+hermes core and must not start to, and this is eight lines of mechanism rather than a rule about
+where a credential may go -- the kind of thing #1106 moved into one place."
+  (mapcar (lambda (slot)
+            (let ((name (sb-mop:slot-definition-name slot)))
+              (if (slot-boundp object name)
+                  (cons name (list (slot-value object name)))
+                  (list name))))
+          (sb-mop:class-slots (class-of object))))
+
+(defun %restore-slots (object snapshot)
+  "Put OBJECT's slots back as %SLOT-SNAPSHOT recorded them, unbinding the ones that were unbound."
+  (dolist (entry snapshot)
+    (if (cdr entry)
+        (setf (slot-value object (car entry)) (second entry))
+        (slot-makunbound object (car entry)))))
+
 (defun %call-with-url-check (provider url-slot verdict-slot check next)
   "Run NEXT -- a provider's CALL-NEXT-METHOD -- and then check the URL in URL-SLOT, recording
 CHECK's verdict in VERDICT-SLOT; put both slots back if anything signals (#1106).
@@ -173,23 +194,23 @@ times:
   - NEXT IS INSIDE THE HANDLER, not only the check. A subclass :AFTER method on
     SHARED-INITIALIZE runs inside CALL-NEXT-METHOD, after the URL slot has been assigned, so a
     failure there left the new, unchecked URL in the slot.
-  - BOTH SLOTS GO BACK TOGETHER on a failure, so a refusal leaves the provider as it was rather
-    than pointing at an approved host having forgotten the approval.
+  - EVERY SLOT GOES BACK on a failure, so a refusal leaves the provider as it was. This said
+    \"both slots\" -- the URL and the verdict -- and restored only those two, while the same
+    CALL-NEXT-METHOD assigns every other initarg in the call before the check runs. For these
+    providers that leaked nothing, because the scheme lives in the URL slot, which was restored;
+    but hermes/blob's copy of this ordering missed SECURE the same way and was left plaintext
+    with no approval (the hub's review of #1140). A list of slots to restore is a list someone
+    has to keep complete, so none is kept: the whole object is snapshotted.
   - THE HANDLER DECLINES. HANDLER-BIND rather than HANDLER-CASE, so the slots are restored and
     the condition still reaches the caller unchanged.
 
 Why any of this matters: a provider whose URL check refuses is one a caller may handle and carry
 on from, and the next send then carries a credential to whatever is in the slot (#1129)."
-  (let ((previous (and (slot-boundp provider url-slot) (slot-value provider url-slot)))
-        (previous-verdict (and (slot-boundp provider verdict-slot)
-                               (slot-value provider verdict-slot))))
+  (let ((snapshot (%slot-snapshot provider)))
     (setf (slot-value provider verdict-slot) nil)
     (handler-bind ((error (lambda (c)
                             (declare (ignore c))
-                            (if previous
-                                (setf (slot-value provider url-slot) previous)
-                                (slot-makunbound provider url-slot))
-                            (setf (slot-value provider verdict-slot) previous-verdict))))
+                            (%restore-slots provider snapshot))))
       (let ((instance (funcall next)))
         (setf (slot-value provider verdict-slot)
               (funcall check (slot-value provider url-slot)))

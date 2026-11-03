@@ -311,6 +311,28 @@ deliberate: for path-style the safe default is off, and for secure it is on."
               (t (error 'blob-configuration-error
                         :missing (format nil "MNEMOSYNE_S3_SECURE must be true or false, not ~S" v)))))))
 
+(defun %slot-snapshot (object)
+  "Every slot of OBJECT as (NAME . (VALUE)) when bound and (NAME) when unbound, for
+%RESTORE-SLOTS. Read through the MOP so that a slot added to the class later is covered without
+anyone remembering to add it here.
+
+THERE IS A SECOND COPY in hermes core's protocol.lisp, deliberately: this system does not depend
+on hermes core and must not start to, and this is eight lines of mechanism rather than a rule
+about where a credential may go."
+  (mapcar (lambda (slot)
+            (let ((name (sb-mop:slot-definition-name slot)))
+              (if (slot-boundp object name)
+                  (cons name (list (slot-value object name)))
+                  (list name))))
+          (sb-mop:class-slots (class-of object))))
+
+(defun %restore-slots (object snapshot)
+  "Put OBJECT's slots back as %SLOT-SNAPSHOT recorded them, unbinding the ones that were unbound."
+  (dolist (entry snapshot)
+    (if (cdr entry)
+        (setf (slot-value object (car entry)) (second entry))
+        (slot-makunbound object (car entry)))))
+
 (defmethod shared-initialize :around ((s s3-store) slot-names &rest initargs
                                      &key &allow-other-keys)
   "Recompute ENDPOINT-APPROVED-LOCAL from the endpoint the store actually ends up with (#1091).
@@ -326,10 +348,21 @@ A SECURE STORE RESOLVES NOTHING. The verdict is only consulted for a plaintext r
 is no reason to look up the endpoint of a store that will not send one, and the common case pays
 nothing for this.
 
-Unlike the refusals in MAKE-S3-STORE this does not reject anything: a store whose endpoint is not
-local simply gets NIL and keeps whatever proxy is configured. The checks that refuse live in the
-constructor, so MAKE-INSTANCE still builds an unchecked store -- it just cannot build one that
-claims to have been checked."
+IT ALSO REFUSES AN ENDPOINT, on every initialization, which this docstring used to deny: the
+shape check and the shared URL rule run here as well as in MAKE-S3-STORE (Copilot's review of
+#1140), so MAKE-INSTANCE and REINITIALIZE-INSTANCE both signal BLOB-CONFIGURATION-ERROR for an
+endpoint the constructor would refuse. What MAKE-INSTANCE still does not do is the constructor's
+reading of the environment and its credential requirements; those stay in MAKE-S3-STORE.
+
+A store whose endpoint is accepted but not local simply gets NIL and keeps whatever proxy is
+configured.
+
+A REFUSAL LEAVES EVERY SLOT AS IT WAS, not only the endpoint and the verdict. CALL-NEXT-METHOD
+assigns all the initargs before the checks run, so a refused
+(reinitialize-instance store :secure nil :endpoint \"u:pw@x\") had already made the store
+plaintext; restoring only the endpoint and the verdict left a plaintext store at a local name with
+no approval, whose signed requests then went through HTTP_PROXY in the clear (#1091, the hub's
+review of #1140). Every slot is snapshotted before CALL-NEXT-METHOD and all of them are put back."
   (declare (ignore slot-names initargs))
   ;; THE ENDPOINT CHECKS RUN HERE TOO, not only in MAKE-S3-STORE, because REINITIALIZE-INSTANCE
   ;; does not go through the constructor. A store built with a good endpoint could be moved to a
@@ -353,16 +386,15 @@ claims to have been checked."
   ;; same reasoning here: a caller may handle the error and carry on, and the next request would
   ;; go wherever the slot now points. The previous endpoint and verdict are put back by a
   ;; HANDLER-BIND that then declines, so the condition reaches the caller unchanged.
-  (let ((previous (and (slot-boundp s 'endpoint) (s3-endpoint s)))
-        (previous-verdict (and (slot-boundp s 'endpoint-approved-local)
-                               (slot-value s 'endpoint-approved-local))))
+  ;; EVERY SLOT, NOT A LIST OF THEM. The first version restored the endpoint and the verdict by
+  ;; name, and SECURE -- assigned by the same CALL-NEXT-METHOD -- was not on the list. Naming
+  ;; the slots to restore is a list someone has to keep complete as the class grows, and the
+  ;; slot it missed was the one that decides plaintext.
+  (let ((snapshot (%slot-snapshot s)))
     (setf (slot-value s 'endpoint-approved-local) nil)
     (handler-bind ((error (lambda (c)
                             (declare (ignore c))
-                            (if previous
-                                (setf (slot-value s 'endpoint) previous)
-                                (slot-makunbound s 'endpoint))
-                            (setf (slot-value s 'endpoint-approved-local) previous-verdict))))
+                            (%restore-slots s snapshot))))
       (let ((instance (call-next-method)))
         (when (slot-boundp s 'endpoint)
           (%check-endpoint-shape (s3-endpoint s))
