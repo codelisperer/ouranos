@@ -768,6 +768,7 @@
                              (:file "delete-tree")
                              (:file "links")      ; make-directory-link, make-file-link (#825); after delete-tree, whose %KIND it uses
                              (:file "attributes")
+                             (:file "reparse")    ; reparse-kind (#1164); uses delete-tree's %attributes
                              (:file "temporary"))))
   :in-order-to ((test-op (test-op "aion/fs/tests"))))
 
@@ -794,6 +795,7 @@
                              (:file "attributes-tests")
                              (:file "temporary-tests")
                              (:file "links-tests")      ; #825; uses delete-tree-tests' %FRESH and %WRITE
+                             (:file "reparse-tests")    ; #1164; uses links-tests' %REFUSAL
                              (:file "path-tests"))))    ; aion/path (#1103)
   :perform (test-op (o c) (uiop:symbol-call :aion/fs/tests :run-tests)))
 

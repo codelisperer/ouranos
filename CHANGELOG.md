@@ -1490,6 +1490,19 @@ its tag.
 
 ### Added
 
+- **`aion/fs:reparse-kind` says which kind of link or Windows reparse point a path is: `:symlink`,
+  `:junction`, `:cloud`, `:other`, or `nil` for a plain file or directory** (#1164).
+  `aion/fs:file-attributes` reports `:reparse-point` and `aion/fs:link-p` is true for every
+  reparse point, so an app that refused links also refused a folder synced by OneDrive, whose
+  files-on-demand placeholders are reparse points with a cloud tag. An app can now refuse
+  `:symlink` and `:junction` and accept `:cloud`. `aion/fs:reparse-tag` gives the tag itself,
+  read from `FindFirstFileW` without opening the file, so asking does not make OneDrive download
+  it. `aion/fs:reparse-tag-kind` classifies a tag: `IO_REPARSE_TAG_CLOUD` and `_CLOUD_1` to
+  `_CLOUD_F` are `:cloud`. On Linux and macOS a symbolic link is `:symlink` and anything else
+  `nil`. Both signal `aion/fs:reparse-kind-error` when the path cannot be read, for example
+  because it does not exist. `link-p` and `delete-tree` are unchanged and still treat every
+  reparse point, a cloud placeholder included, as a link.
+
 - **`aion/http-client:credential-url-refusal`**, the rule deciding whether a URL is one a
   framework may send a credential to (#1106). It **returns a refusal sentence rather than
   signalling**, so each caller signals its own condition: hermes signals `configuration-error`
