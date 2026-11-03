@@ -862,3 +862,69 @@ a runtime in a directory named `br [x]*' has a *RUNTIME-PATHNAME* that is not wi
     (is (string= (concatenate 'string want "libsqlite3.dylib")
                  (uiop:native-namestring (merge-pathnames "libsqlite3.dylib" dir)))
         "a carried file name merged into it is not the file beside the executable")))
+
+;;; --- a carried path is read as a native file name (#1145) -------------------------------
+;;;
+;;; --carry and --carry-license paths come from the command line as the operating system's
+;;; names for the files. Each test makes its files from native strings that are never parsed
+;;; as Lisp namestrings, gives those strings to CARRY-DECLARED-LIBRARIES, and checks the
+;;; bundle by native name, so a fixture cannot pass by going through the same parsing.
+
+(defun %native-sep () (if (uiop:os-windows-p) "\\" "/"))
+
+(defun %native-file (tree &rest parts)
+  "Make the file PARTS (folder names, then a file name) under the directory TREE, each part
+joined as a native string, and return the file's native name."
+  (let ((native (concatenate 'string (string-right-trim "/\\" (uiop:native-namestring tree))
+                             (format nil (concatenate 'string "~{" (%native-sep) "~A~}") parts))))
+    (%write (uiop:parse-native-namestring native) "x")
+    native))
+
+(defun %native-in-bundle-p (bundle &rest parts)
+  "Whether the file PARTS, joined as a native string under BUNDLE, exists."
+  (uiop:file-exists-p
+   (uiop:parse-native-namestring
+    (concatenate 'string (string-right-trim "/\\" (uiop:native-namestring bundle))
+                 (format nil (concatenate 'string "~{" (%native-sep) "~A~}") parts)))))
+
+(defparameter +odd-folder-names+
+  (list "lib [x]" #-win32 "a\\b")
+  "Folder names a Lisp namestring reads differently from the native name: brackets, which it
+reads as a wildcard, and on Linux and macOS a backslash, which it reads as an escape. Windows
+allows neither * nor ? nor a backslash in a name.")
+
+(test a-carry-path-in-a-folder-named-with-brackets-is-carried
+  "#1145: CARRY-DECLARED-LIBRARIES gave each --carry path to PROBE-FILE, which parses it as a
+Lisp namestring, so a library in a folder named lib [x] stopped the build with a wild-pathname
+file error. The library and the LICENSE beside it must be carried."
+  (dolist (folder +odd-folder-names+)
+    (let* ((tree (%fresh-tree))
+           (lib (%native-file tree folder "thing.dll")))
+      (%native-file tree folder "LICENSE")
+      (multiple-value-bind (e bundle) (%carry-refusal (list lib))
+        (is (null e) "~S was refused: ~A" lib e)
+        (is-true (%native-in-bundle-p bundle "thing.dll") "~S was not copied into the bundle" lib)
+        (is-true (%native-in-bundle-p bundle "LICENSES" "thing-LICENSE")
+                 "the LICENSE beside ~S was not carried" lib)))))
+
+(test a-carry-license-in-a-folder-named-with-brackets-is-carried
+  "#1145: a --carry-license path went through PROBE-FILE the same way as a --carry path."
+  (dolist (folder +odd-folder-names+)
+    (let* ((tree (%fresh-tree))
+           (lib (%native-file tree "dll" "sqlite3.dll"))
+           (note (%native-file tree folder "PUBLIC-DOMAIN.txt")))
+      (multiple-value-bind (e bundle) (%carry-refusal (list (list lib note)))
+        (is (null e) "the license ~S was refused: ~A" note e)
+        (is-true (%native-in-bundle-p bundle "LICENSES" "sqlite3-PUBLIC-DOMAIN.txt")
+                 "the license ~S was not carried" note)))))
+
+(test a-carried-file-whose-name-has-brackets-keeps-its-name
+  "#1145: the bundle's copy was named by merging the file name into the bundle directory, which
+parses it as a Lisp namestring, so a library named thing[1].dll gave a wild pathname. The copy
+must have the library's own name."
+  (let* ((tree (%fresh-tree))
+         (lib (%native-file tree "dll" "thing[1].dll")))
+    (%native-file tree "dll" "LICENSE")
+    (multiple-value-bind (e bundle) (%carry-refusal (list lib))
+      (is (null e) "~S was refused: ~A" lib e)
+      (is-true (%native-in-bundle-p bundle "thing[1].dll") "~S was not copied as thing[1].dll" lib))))
