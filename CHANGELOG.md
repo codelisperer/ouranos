@@ -3710,12 +3710,16 @@ its tag.
   and no longer relinks one that names a different library with the same file name** (#1143).
   `ouranos-carry:relink-bundle` skipped every load command starting with `@`, so a library
   that records its dependency as `@rpath/libb.dylib` kept that name, and the bundle has no rpath
-  that finds the carried copy. Such a load command is now matched by the install name recorded
-  in `ouranos-carry:*carried-origins*` and rewritten to `@loader_path/<file name>`. A load
-  command that resolves to a file on the build machine is now matched only by that file, so a
-  library linked against `/b/libb.dylib` is no longer pointed at a carried `libb.dylib` copied
-  from somewhere else; the build prints a line naming the load command it left as it is. A load
-  command that resolves to no file is still matched by file name.
+  that finds the carried copy. Each load command is now resolved on the build machine the way
+  dyld would resolve it, from the file the dependent was copied from and the dependent's own
+  rpaths. When it resolves to the source of a carried copy, it is rewritten to
+  `@loader_path/<file name>`. When it resolves to some other file, it is left as it is, even if
+  a carried library has the same file name or the same `@rpath/` install name, and the build
+  prints a line naming it. A library linked against `/b/libb.dylib` is therefore no longer
+  pointed at a carried `libb.dylib` copied from somewhere else. A load command that resolves to
+  no file is matched by the install name recorded in `ouranos-carry:*carried-origins*`, and
+  failing that by file name. `stamp-install-name` needs `:source` for a library to be matched
+  by the file it resolves to.
 
 - **aion/uv: a path string reaches libuv as written, so a file with a backslash in its name works
   on Linux and macOS** (#1093). Every function that takes a path ran it through `cl:namestring`,

@@ -317,49 +317,108 @@ libcrypto.3.dylib's own name is .../opt/openssl@3/lib/libcrypto.3.dylib. Measure
 the app exited 3 on `Library not loaded' for libcrypto, and started once libssl was relinked.
 
 A load command is rewritten only when it names another carried file, as %RELINK-TARGET
-decides: by the path it resolves to, or by file name when it resolves to no file on this
-machine. System libraries are never touched. Rewriting
-invalidates the signature, and arm64 will not load an invalidly signed dylib, so each changed
-file is re-signed with `codesign --force -s -'."
+decides: by the file it resolves to from the dependent's source and rpaths, or, when it resolves
+to no file on this machine, by install name or file name. System libraries are never touched.
+Rewriting invalidates the signature, and arm64 will not load an invalidly signed dylib, so each
+changed file is re-signed with `codesign --force -s -'."
   (%relink-files (mapcar #'second plan) (mapcar #'first plan) (mapcar #'second plan)
                  bundle report))
 
-(defun %relink-target (dep truenames names origins)
-  "The name in NAMES that the load command DEP should point at, or NIL. When it is NIL, the
-second value is a carried name that DEP shares only a file name with, or NIL.
+(defun %rpaths (file)
+  "The paths of FILE's LC_RPATH load commands, as otool -l prints them, in order."
+  (let ((lines (mapcar (lambda (l) (string-trim '(#\Space #\Tab) l))
+                       (uiop:split-string (or (%otool "-l" file) "") :separator '(#\Newline)))))
+    (loop for (line . rest) on lines
+          when (string= line "cmd LC_RPATH")
+            append (let ((path (find-if (lambda (l) (uiop:string-prefix-p "path " l)) rest)))
+                     (and path
+                          (list (subseq path 5 (or (search " (offset" path) (length path)))))))))
 
-DEP matches a carried file when it resolves on this machine to that file's truename in
-TRUENAMES, when it is the install name ORIGINS recorded for the file before the stamp, or when
-it resolves to the file ORIGINS recorded it was copied from. An install name that starts with @,
-such as @rpath/libzstd.1.dylib, does not resolve here, so it matches only a recorded install
-name. When DEP resolves to a file that none of these name, it is a different library from the
-carried one, even when the file names are the same, and it is not matched. Only a DEP that
-resolves to no file here is matched by its file name alone (#1143)."
+(defun %resolve-load-command (dep from rpaths)
+  "The truename of the file DEP, a load command of a library copied from FROM, names on this
+machine, or NIL. FROM is NIL when the copy's source is not known. @loader_path/ is FROM's
+directory, and @rpath/ is tried with each of RPATHS, the library's LC_RPATH paths, in order, as
+dyld tries them. @executable_path/ names the executable that loads the library, which is not
+known here, so it resolves to NIL, as does any @ form that needs FROM when FROM is NIL."
+  (labels ((probe (native) (ignore-errors (probe-file (uiop:parse-native-namestring native))))
+           (under-loader (rest)
+             (and from (probe (concatenate 'string
+                                           (uiop:native-namestring
+                                            (uiop:pathname-directory-pathname from))
+                                           rest))))
+           (expand (path)
+             (cond ((uiop:string-prefix-p "@loader_path/" path)
+                    (and from (concatenate 'string
+                                           (uiop:native-namestring
+                                            (uiop:pathname-directory-pathname from))
+                                           (subseq path (length "@loader_path/")))))
+                   ((string= path "@loader_path")
+                    (and from (uiop:native-namestring (uiop:pathname-directory-pathname from))))
+                   ((char= (char path 0) #\@) nil)
+                   (t path))))
+    (cond ((uiop:string-prefix-p "@loader_path/" dep)
+           (under-loader (subseq dep (length "@loader_path/"))))
+          ((uiop:string-prefix-p "@rpath/" dep)
+           (let ((rest (subseq dep (length "@rpath/"))))
+             (loop for r in rpaths
+                   for dir = (expand r)
+                   for found = (and dir (probe (concatenate 'string (string-right-trim "/" dir)
+                                                            "/" rest)))
+                   when found return found)))
+          ((char= (char dep 0) #\@) nil)
+          (t (probe dep)))))
+
+(defun %relink-target (dep from rpaths truenames names origins)
+  "The name in NAMES that the load command DEP, of a library copied from FROM with LC_RPATH
+paths RPATHS, should point at, or NIL. When it is NIL, the second value is a carried name that
+DEP shares only a file name or an install name with, or NIL.
+
+DEP is first resolved to the file it names on this machine, as dyld would from FROM
+(%RESOLVE-LOAD-COMMAND). When it resolves, it matches only the carried file whose source is
+that file: by TRUENAMES, the carried files' sources in the same order as NAMES, or by the source
+ORIGINS recorded. A carried file with the same file name or the same install name but another
+source is a different library, and is not matched: two libraries can both have the install name
+@rpath/libb.dylib, and the dependent's rpaths decide which one it loads (#1155's review). When
+DEP resolves to no file, it matches the carried file whose install name ORIGINS recorded before
+the stamp, and failing that, when DEP does not start with @, a carried file with its file name
+(#1143)."
   (let* ((at (char= (char dep 0) #\@))
-         (dep-true (and (not at) (ignore-errors (probe-file dep))))
+         (dep-true (%resolve-load-command dep from rpaths))
          (i (and dep-true truenames (position dep-true truenames :test #'equal)))
-         (origin (or (find dep origins :key #'second :test #'equal)
-                     (and dep-true (find dep-true origins :key #'third :test #'equal))))
+         (by-source (and dep-true (find dep-true origins :key #'third :test #'equal)))
+         (by-id (find dep origins :key #'second :test #'equal))
          (by-name (and (not at) (find (file-namestring dep) names :test #'%same-file-name-p))))
-    (cond (i (nth i names))
-          (origin (find (file-namestring (first origin)) names :test #'%same-file-name-p))
-          ((and by-name (not dep-true)) by-name)
-          (t (values nil by-name)))))
+    (flet ((carried (origin) (find (file-namestring (first origin)) names
+                                   :test #'%same-file-name-p)))
+      (cond (i (nth i names))
+            (by-source (carried by-source))
+            (dep-true (values nil (or (and by-id (carried by-id)) by-name)))
+            (by-id (carried by-id))
+            (by-name by-name)
+            (t (values nil nil))))))
 
 (defun %relink-files (files truenames names bundle report &optional origins)
   "Rewrite the load commands of each of FILES, file names in BUNDLE, that name one of NAMES,
 the carried files' names, to @loader_path/<name>, and re-sign each file that changed, as
 %RELINK-CARRIED describes. TRUENAMES, when given, are the files the carried ones were copied
 from, in the same order as NAMES. ORIGINS are entries of *CARRIED-ORIGINS* for files in BUNDLE.
-%RELINK-TARGET says which load commands match. A load command that names a different file with
-the same file name as a carried one is left as it is, and a line saying so goes to REPORT."
+%RELINK-TARGET says which load commands match, resolving each one from the file the dependent
+was copied from and the dependent's LC_RPATH paths. A load command that names a different file
+with the same file name or install name as a carried one is left as it is, and a line saying so
+goes to REPORT."
   (loop for name in files
         for dst = (merge-pathnames name bundle)
+        for dst-true = (ignore-errors (truename dst))
+        for from = (or (and truenames (let ((i (position name names :test #'equal)))
+                                        (and i (nth i truenames))))
+                       (third (find dst-true origins :key #'first :test #'equal)))
+        for rpaths = (%rpaths dst)
         for changed = nil
         do (dolist (dep (%macho-dependencies dst))
              (unless (or (uiop:string-prefix-p "/usr/lib/" dep)
                          (uiop:string-prefix-p "/System/" dep))
-               (multiple-value-bind (target same-name) (%relink-target dep truenames names origins)
+               (multiple-value-bind (target same-name)
+                   (%relink-target dep from rpaths truenames names origins)
                  (cond
                    ((and target (not (%same-file-name-p target name))
                          (not (equal dep (format nil "@loader_path/~A" target))))
@@ -402,9 +461,11 @@ was copied from. A step can carry a library under another file name than the one
 records: the runtime step names libzstd.1.dylib from its symbolic link, and a dependent can name
 the versioned file or a path whose file name differs. Matching by file name alone left that
 dependent naming the build machine's path (#1130). A load command that starts with @, such as
-@rpath/libzstd.1.dylib, is matched by the recorded install name, and one that resolves to a file
-on this machine is never matched by its file name alone, because that file is then a different
-library from the carried one (#1143).
+@rpath/libzstd.1.dylib, is resolved through the dependent's own source location and rpaths. A
+load command that resolves to a file on this machine matches only the carried copy of that file,
+never another carried file with the same file name or install name, because that is a different
+library. One that resolves to no file is matched by the recorded install name, and failing that
+by file name (#1143, #1155's review).
 
 Signals CARRY-REFUSED as %RELINK-CARRIED does."
   (when (and *relink* (uiop:os-macosx-p))
