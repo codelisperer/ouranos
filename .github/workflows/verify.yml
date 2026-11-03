@@ -72,7 +72,28 @@ jobs:
     # turn a slow cache miss into a red build. The limit was 40 minutes until 2026-10-04. By
     # then, Windows runs that missed the fasl cache (any change to an .asd file misses it) took
     # 35 to 40 minutes, and one was cancelled at the limit with every suite it had run passing.
-    timeout-minutes: 60
+    #
+    # WINDOWS GETS 90 AND THE OTHERS KEEP 60, from 2026-11-03 (#1146). The same thing happened
+    # again four weeks after the last raise: #1142's Windows leg was cancelled at 60m23s inside
+    # `Verify the tree`, and that pull request changes AGENTS.md and nothing else, so nothing in
+    # it could make a suite slower. The margins measured that day were
+    #
+    #   main 19d77df9   59m11s   49s under
+    #   #1134 a652d1ba  58m47s   1m13s under
+    #   #1120 052737ea  55m47s   4m13s under
+    #   #1141 0d8682fa  51m41s   8m19s under
+    #
+    # so two of five legs were within about a minute and which pull request got cancelled was
+    # a matter of how busy the runners were. Only Windows is raised: Linux and macOS finish well
+    # under 60 minutes, so the lower limit there still cancels a job that hangs, which is what a
+    # timeout is for.
+    #
+    # THIS IS THE SECOND RAISE, AND THAT IS THE PART TO NOTICE: 40 -> 60 -> 90, each time after
+    # a cancellation rather than before one. Raising the limit stops the cancellations without
+    # telling anyone how close the next one is, so #1146 asks for the job to print how long
+    # `Verify the tree` took and how far that was from the limit. Until it does, the figures
+    # above are the record of what the margin was when this limit was set.
+    timeout-minutes: ${{ matrix.os == 'windows-2022' && 90 || 60 }}
 
     # The credential-store tests (hades/credentials, #357) store, read and delete items in the
     # real Credential Manager, Keychain or Secret Service keyring of whoever runs them, so they
