@@ -103,7 +103,7 @@
   (:use #:common-lisp)
   ;; Re-exported from aion/fs, which holds the one GetFileAttributesW binding (#349).
   (:import-from #:aion/fs #:file-attributes #:file-attributes-error #:file-attributes-error-code)
-  (:local-nicknames (#:ffi #:aion/windows/ffi))
+  (:local-nicknames (#:ffi #:aion/windows/ffi) (#:path #:aion/path))
   (:documentation "The Windows-specific API surface for Ouranos.")
   (:export
    ;; platform

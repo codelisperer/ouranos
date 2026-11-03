@@ -2,6 +2,7 @@
 
 (defpackage #:aion/fs
   (:use #:cl)
+  (:local-nicknames (#:path #:aion/path))
   (:documentation "Filesystem operations the framework needs and UIOP does not give safely:
 a tree delete that never follows a link out of the tree (#347), and making a directory or file
 link without a shell (#825).")

@@ -152,7 +152,7 @@
 
 (defparameter +systems+
   '(;; core
-    :aion :aion/csv :aion/sexp :aion/tz :aion/platform :aion/fs :aion/clock :aion/log :aion/boundary :aion/dynamic :aion/pool :aion/interceptor :aion/signature :aion/http-client :aion/retry :cons :mnemosyne :elenchon :hyperion :praxeon
+    :aion :aion/csv :aion/sexp :aion/tz :aion/platform :aion/fs :aion/path :aion/clock :aion/log :aion/boundary :aion/dynamic :aion/pool :aion/interceptor :aion/signature :aion/http-client :aion/retry :cons :mnemosyne :elenchon :hyperion :praxeon
     :hermes
     :klio
     :hades :hades/single-instance :hades/credentials :hades/notify :hades/program :hades/open
@@ -1024,7 +1024,7 @@ fallback for a child that died without printing a condition at all."
 failing or warning system with a redefinition reports both, and a suite's checks still count."
   (when redefined
     (format t "  REDEF   ~a~%~{          ~a~%~}" system redefined)
-    (fail "~a defines ~D function~:P a second time in another file: ~{~a~^; ~}"
+    (fail "~a replaces ~D definition~:P with one from another file: ~{~a~^; ~}"
           system (length redefined) redefined)))
 
 (defun report-caught-errors (label output)

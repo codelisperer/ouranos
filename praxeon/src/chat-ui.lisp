@@ -170,12 +170,16 @@ session and has put #px-events in the page."
         (setf (@ window px-start-events) start)
         (funcall start))))))
 
-(defun composer (&key disabled)
-  "The message form: a multiline box and a Send button, posting to /api/message. The message
-comes back through the poll or the stream, like every other item, so the POST's own response
-has nothing to swap. DISABLED renders both disabled, for the embed panel until it has a session."
+(defun composer (&key disabled (action "/api/message"))
+  "The message form: a multiline box and a Send button, posting to ACTION, /api/message by
+default, which is the route praxeon/web serves. A host app that renders the chat parts in its
+own page passes its own route, for example one under a prefix or one per conversation. The
+message comes back through the poll or the stream, like every other item, so the POST's own
+response has nothing to swap. DISABLED renders both disabled, for the embed panel until it has a
+session."
+  (check-type action string)
   (spinneret:with-html-string
-    (:form :hx-post "/api/message" :hx-swap "none"
+    (:form :hx-post action :hx-swap "none"
            :onsubmit "setTimeout(() => this.reset(), 0)"
       (:div :class "field has-addons"
         (:div :class "control is-expanded"

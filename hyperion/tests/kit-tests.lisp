@@ -12,6 +12,10 @@
                     (#:tb #:hyperion/kit/toolbar)
                     (#:panel #:hyperion/kit/panel)
                     (#:dock #:hyperion/kit/dock)
+                    (#:picker #:hyperion/kit/appearance)
+                    (#:app #:hyperion/appearance)
+                    (#:http #:hyperion/http)
+                    (#:csrf #:hyperion/csrf)
                     (#:list #:hyperion/list)
                     (#:spin #:spinneret))
   (:export #:run-tests))
@@ -765,3 +769,164 @@ the-dock-panel-in-a-real-browser."
     (is (null (search "window.htmx=" js)))
     (is (null (search "define" js)))
     (is (null (search "<script" js)))))
+
+;;; --- the appearance picker ----------------------------------------------------------
+
+(defun %picker (appearance &rest args)
+  (%dom (lambda () (apply #'picker:appearance-picker appearance "/appearance" args))))
+
+(defun %groups (dom)
+  "Each of the picker's groups as (ARIA-LABEL (NAME VALUE TEXT PRESSED) ...)."
+  (mapcar (lambda (g)
+            (cons (%attr g "aria-label")
+                  (mapcar (lambda (b) (list (%attr b "name") (%attr b "value") (%text b)
+                                            (%attr b "aria-pressed")))
+                          (%all g "button"))))
+          (remove-if-not (lambda (d) (equal "group" (%attr d "role"))) (%all dom "div"))))
+
+(test the-appearance-picker-is-a-post-form-of-three-named-groups
+  "Without script the form posts the one button pressed, so every button is a submit button
+named after its setting, and the form has method post and an action. With htmx it posts the
+same, swaps nothing, and disables the fieldset holding the buttons until the answer arrives."
+  (let* ((dom (%picker (app:make-appearance) :id "ap"))
+         (form (%one dom "form")))
+    (is (equal "post" (%attr form "method")))
+    (is (equal "/appearance" (%attr form "action")))
+    (is (equal "/appearance" (%attr form "hx-post")))
+    (is (equal "none" (%attr form "hx-swap")))
+    (is (equal "ap" (%attr form "id")))
+    (is (equal "Appearance" (%attr form "aria-label")))
+    (is (equal '("Theme" "Contrast" "Look") (mapcar #'first (%groups dom))))
+    (is (equal '((("theme" "system" "System") ("theme" "light" "Light") ("theme" "dark" "Dark"))
+                 (("contrast" "system" "System") ("contrast" "normal" "Normal")
+                  ("contrast" "high" "High"))
+                 (("look" "flat" "Flat") ("look" "gradient" "Gradient")))
+               (mapcar (lambda (g) (mapcar (lambda (b) (subseq b 0 3)) (rest g))) (%groups dom))))
+    (is (every (lambda (b) (equal "submit" (%attr b "type"))) (%all dom "button")))
+    (is (= 8 (length (%all (%one form "fieldset") "button")))
+        "every button is in the one fieldset")
+    (is (equal "find fieldset" (%attr form "hx-disabled-elt"))
+        "the fieldset, and so every button, is disabled while a request is in flight")))
+
+(test the-appearance-picker-presses-the-current-setting-in-each-group
+  "System for a theme or contrast that follows the system, and Flat for the default look."
+  (flet ((pressed (appearance)
+           (mapcar (lambda (g) (second (find "true" (rest g) :key #'fourth :test #'equal)))
+                   (%groups (%picker appearance)))))
+    (is (equal '("system" "system" "flat") (pressed (app:make-appearance))))
+    (is (equal '("dark" "high" "gradient")
+               (pressed (app:make-appearance :theme :dark :contrast :high :look :gradient))))
+    (is (equal '("light" "system" "flat")
+               (pressed (app:make-appearance :theme :light :look :flat))))
+    (is (every (lambda (g) (= 1 (count "true" (rest g) :key #'fourth :test #'equal)))
+               (%groups (%picker (app:make-appearance :theme :dark))))
+        "exactly one button pressed in each group")))
+
+(test the-appearance-picker-takes-its-text-from-the-labels-plist
+  "A key the plist leaves out takes the default text."
+  (let ((dom (%picker (app:make-appearance)
+                      :labels '(:picker "Darstellung" :theme "Farbschema" :dark "Dunkel"))))
+    (is (equal "Darstellung" (%attr (%one dom "form") "aria-label")))
+    (is (equal '("Farbschema" "Contrast" "Look") (mapcar #'first (%groups dom))))
+    (is (equal '("System" "Light" "Dunkel")
+               (mapcar #'third (rest (first (%groups dom))))))))
+
+(test the-appearance-picker-refuses-an-unsafe-action
+  (signals error (picker:appearance-picker (app:make-appearance) "javascript:alert(1)"))
+  (signals error (picker:appearance-picker (app:make-appearance) nil))
+  (signals error (picker:appearance-picker (app:make-appearance) "/a" :labels '(:theme 3)))
+  ;; A label is checked before anything is written, so a refused picker leaves no part of a
+  ;; form behind, including for a label the picker writes last.
+  (dolist (labels '((:theme 3) (:gradient 3) (:picker 3)))
+    (let ((html (with-output-to-string (spin:*html*)
+                  (ignore-errors
+                   (picker:appearance-picker (app:make-appearance) "/a" :labels labels)))))
+      (is (string= "" html) "a refused picker wrote ~S for the labels ~S" html labels)))
+  (finishes (spin:with-html-string
+              (picker:appearance-picker (app:make-appearance) "https://example.com/a"))))
+
+(test the-appearance-picker-carries-the-csrf-token-outside-the-fieldset
+  "The request's CSRF token reaches the picker's form as the hidden field, outside the
+fieldset, so disabling the fieldset during a request does not stop it being posted."
+  (let* ((dom (let ((csrf:*token-thunk* (lambda () "tok-981")))
+                (%picker (app:make-appearance))))
+         (form (%one dom "form"))
+         (fields (remove-if-not (lambda (i) (equal csrf:*field-name* (%attr i "name")))
+                                (%all form "input"))))
+    (is (= 1 (length fields)) "the form has one token field: ~S" (length fields))
+    (is (equal "tok-981" (%attr (first fields) "value")))
+    (is (equal "hidden" (%attr (first fields) "type")))
+    (is (null (%all (%one form "fieldset") "input")) "the token field is inside the fieldset")))
+
+(defun %form (&rest pairs)
+  "A urlencoded body of PAIRS, alternating names and values, as a browser posts it."
+  (http:form-urlencode (loop for (k v) on pairs by #'cddr collect (cons k v))))
+
+(test appearance-from-form-reads-the-one-setting-posted
+  (is (equal '(:theme :dark) (picker:appearance-from-form (%form "theme" "dark"))))
+  (is (equal '(:theme nil) (picker:appearance-from-form (%form "theme" "system"))))
+  (is (equal '(:contrast :high) (picker:appearance-from-form (%form "contrast" "high"))))
+  (is (equal '(:contrast nil) (picker:appearance-from-form (%form "contrast" "system"))))
+  (is (equal '(:look :gradient) (picker:appearance-from-form (%form "look" "gradient"))))
+  (is (equal '(:look nil) (picker:appearance-from-form (%form "look" "flat")))
+      "flat is the default look, which is NIL")
+  (is (equal '(:theme :light :look :gradient)
+             (picker:appearance-from-form (%form "look" "gradient" "theme" "light")))
+      "more than one setting is read in the fixed order")
+  (is (equal '(:theme :dark)
+             (picker:appearance-from-form (%form "_csrf" "t0k" "theme" "dark")))
+      "fields with other names, such as a CSRF token, are ignored"))
+
+(test appearance-from-form-refuses-anything-outside-the-closed-set
+  "Every value is checked against hyperion/appearance's values, and a refused form returns NIL,
+not a plist with the value left out, so nothing from it reaches the page."
+  (dolist (body (list (%form "theme" "purple")
+                      (%form "theme" "Dark")
+                      (%form "theme" "dark ")
+                      (%form "theme" "")
+                      (%form "theme" "\"><script>alert(1)</script>")
+                      (%form "look" "system")
+                      (%form "contrast" "low")
+                      (%form "theme" "dark" "contrast" "bogus")
+                      (%form "theme" "dark" "theme" "light")
+                      (%form "theme" "dark" "theme" "dark")
+                      (%form "other" "dark")
+                      ""
+                      nil
+                      "theme=%4"))
+    (is (null (picker:appearance-from-form body)) "accepted ~S" body)))
+
+(test merge-appearance-puts-the-change-over-the-old-settings
+  (let ((old (app:make-appearance :theme :dark :contrast :high :look :gradient)))
+    (flet ((settings (a)
+             (list (app:appearance-theme a) (app:appearance-contrast a) (app:appearance-look a))))
+      (is (equal '(:light :high :gradient)
+                 (settings (picker:merge-appearance old '(:theme :light)))))
+      (is (equal '(nil :high :gradient) (settings (picker:merge-appearance old '(:theme nil))))
+          "NIL in the change means follow the system, not keep the old value")
+      (is (equal '(:dark :high nil) (settings (picker:merge-appearance old '(:look nil)))))
+      (is (equal '(:dark :high :gradient) (settings (picker:merge-appearance old '())))))))
+
+(test the-appearance-response-sets-the-cookie-and-triggers-the-event
+  "The headers persist the choice through the store and name every setting in the event's
+detail, with null for one that follows the system."
+  (let* ((store (app:make-cookie-appearance-store))
+         (appearance (app:make-appearance :theme :dark :look :gradient))
+         (headers (picker:appearance-response-headers store appearance))
+         (detail (gethash "hy-appearance"
+                          (com.inuoe.jzon:parse (getf headers :hx-trigger)))))
+    (is (equal (getf (app:persist-appearance store appearance) :set-cookie)
+               (getf headers :set-cookie)))
+    (is (equal "dark" (gethash "theme" detail)))
+    (is (eq 'null (gethash "contrast" detail)) "contrast follows the system: ~S"
+        (gethash "contrast" detail))
+    (is (equal "gradient" (gethash "look" detail)))
+    (is (equal "hy-appearance" picker:*appearance-event*))))
+
+(test the-apply-appearance-script-is-guarded-and-listens-for-the-event
+  "What the listener does is checked in a browser by kit-browser-tests."
+  (let ((js (picker:apply-appearance-js)))
+    (is (search "hyKitAppearance" js) "guarded so a page can include it twice")
+    (is (search "'hy-appearance'" js))
+    (is (search "removeAttribute" js))
+    (is (search "aria-pressed" js))))

