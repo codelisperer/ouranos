@@ -399,6 +399,47 @@ signalled. The string is now used as written."
     (let ((seen (%wait events (lambda (e) (%settled e "a.txt")))))
       (is (equal '((:settled "a.txt" 1)) seen) "~S" seen))))
 
+(defun %pathname-without-separator (native)
+  "The pathname UIOP:PARSE-NATIVE-NAMESTRING gives for NATIVE without its trailing separator: the
+last folder is then the pathname's name, which is the form UIOP:ENSURE-DIRECTORY-PATHNAME escaped
+(#1112)."
+  (uiop:parse-native-namestring
+   (string-right-trim (if (uiop:os-windows-p) "/\\" "/") native)))
+
+(test a-folder-given-as-a-pathname-whose-name-has-brackets-is-watched-by-that-name
+  "Copilot's review of #1109 (#1112): a pathname went through UIOP:ENSURE-DIRECTORY-PATHNAME, which
+escaped the brackets, so on Windows Photos ^[2026] was watched and WATCH-FOLDER signalled
+FILE-NOT-FOUND."
+  (with-watched-folder (dir events :report-existing t
+                                   :setup (lambda (d)
+                                            (let ((sub (%subfolder d "Photos [2026]")))
+                                              (uv:make-directory sub :parents t)
+                                              (uv:write-file (concatenate 'string sub "a.txt") "a")))
+                                   :path (lambda (d)
+                                           (%pathname-without-separator
+                                            (%subfolder d "Photos [2026]"))))
+    (let ((seen (%wait events (lambda (e) (%settled e "a.txt")))))
+      (is (equal '((:settled "a.txt" 1)) seen) "~S" seen))))
+
+#-win32
+(test a-folder-given-as-a-pathname-whose-name-has-a-backslash-is-watched-by-that-name
+  "As the test above, for w\\z given as a pathname on Linux and macOS, with wz beside it. Only
+w\\z's file may be reported (#1112)."
+  (with-watched-folder (dir events
+                        :report-existing t
+                        :setup (lambda (d)
+                                 (let ((odd (%subfolder d (format nil "w~Cz" #\\))))
+                                   (uv:make-directory odd :parents t)
+                                   (uv:write-file (concatenate 'string odd "inside.txt") "in"))
+                                 (%write d "wz/other.txt" "other"))
+                        :path (lambda (d)
+                                (%pathname-without-separator
+                                 (%subfolder d (format nil "w~Cz" #\\)))))
+    (let ((seen (%wait events (lambda (e) (%settled e "inside.txt")))))
+      (sleep (* 2 +settle+))
+      (setf seen (funcall events))
+      (is (equal '((:settled "inside.txt" 2)) seen) "~S" seen))))
+
 #-win32
 (test a-folder-whose-name-has-a-backslash-is-watched-by-that-name
   "On Linux and macOS a string path with a backslash in a folder's name lost the backslash, so

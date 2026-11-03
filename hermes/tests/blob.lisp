@@ -2428,10 +2428,28 @@ anything looks at it."
                                                 :path-style t :secure nil)
                                "bkt" "k"))
           "and the URL built from it has no space in it")))
-  ;; The control: whitespace INSIDE an endpoint is still refused, since that is not a host.
+  ;; REINITIALIZE-INSTANCE stores it trimmed too (Copilot's review of #1150, #1151). It used to
+  ;; check trimmed copies and keep the value as given, so the store below held
+  ;; " 127.0.0.1:9000 " and built "https:// 127.0.0.1:9000 /bkt/k".
+  (dolist (endpoint (list " 127.0.0.1:9000" "127.0.0.1:9000 " "  127.0.0.1:9000  "
+                          (format nil "~C127.0.0.1:9000" #\Tab)))
+    (let ((s (b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x"
+                              :endpoint "s3.example.com" :path-style t)))
+      (reinitialize-instance s :endpoint endpoint)
+      (is (string= "127.0.0.1:9000" (b::s3-endpoint s))
+          "~S is stored as the trimmed value by reinitialize-instance" endpoint)
+      (is (string= "https://127.0.0.1:9000/bkt/k" (b::%s3-url s "bkt" "k"))
+          "and the URL built from it after reinitializing has no space in it: ~S"
+          (b::%s3-url s "bkt" "k"))))
+  ;; The control: whitespace INSIDE an endpoint is still refused, since that is not a host, and
+  ;; by REINITIALIZE-INSTANCE as well as by the constructor.
   (dolist (endpoint '("local host:9000" "127.0.0.1 :9000"))
     (signals b:blob-configuration-error
-      (b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x" :endpoint endpoint))))
+      (b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x" :endpoint endpoint))
+    (signals b:blob-configuration-error
+      (reinitialize-instance (b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x"
+                                              :endpoint "s3.example.com")
+                             :endpoint endpoint))))
 
 (test a-plaintext-store-sends-with-no-proxy
   "#1091 and the review of #1094. The first fix for #1091 put the decision inside
@@ -2719,6 +2737,16 @@ did."
       (is-true bare "a bare IPv6 endpoint is refused")
       (is-true (and bare (search "without brackets" bare))
                "and names the unbracketed form: ~A" bare)
+      ;; Neither refusal may send the reader to the other spelling. The bracketed refusal comes
+      ;; from AION/HTTP-CLIENT:CREDENTIAL-URL-REFUSAL, which used to say "Write the address
+      ;; without brackets" -- and this store refuses the unbracketed form too, so following the
+      ;; advice produced a second error (Copilot's review of #1150, #1151).
+      (is-false (and bracketed (search "Write the address without brackets" bracketed))
+                "the bracketed refusal no longer recommends the bare spelling: ~A" bracketed)
+      (is-true (and bracketed (search "a name that resolves to the address" bracketed)
+                    (search "IPv4" bracketed))
+               "it recommends a resolving name or an IPv4 address, which this store accepts: ~A"
+               bracketed)
       ;; The advice must not send the reader to the other spelling, which is what it used to do.
       (is-false (and bare (search "write it as [::1]" bare))
                 "the refusal no longer recommends the spelling that cannot connect: ~A" bare)

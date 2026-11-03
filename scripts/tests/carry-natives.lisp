@@ -928,3 +928,264 @@ must have the library's own name."
     (multiple-value-bind (e bundle) (%carry-refusal (list lib))
       (is (null e) "~S was refused: ~A" lib e)
       (is-true (%native-in-bundle-p bundle "thing[1].dll") "~S was not copied as thing[1].dll" lib))))
+
+;;; --- check-install-names.sh, check 1b of verify-bundle-macos.sh (#957, #1131) -------------------
+;;;
+;;; The check read otool's second line with `head -n 2 | tail -n 1'. For a file with no install
+;;; name otool prints only its header, the file's path and a colon, and that pipeline returned
+;;; the header, which starts with the bundle directory and so was reported as ok. The check is
+;;; now a script of its own, scripts/check-install-names.sh, so this test runs it on real dylibs
+;;; without building or launching an app. A library with no install name is compiled with
+;;; `cc -bundle', which writes a Mach-O file with no LC_ID_DYLIB, and named .dylib; once for
+;;; this machine, and once universal (x86_64 and arm64), for which otool prints a header per
+;;; architecture and no install name.
+
+(defun %install-names-fixture (dir &key no-id)
+  "Compile into DIR dylibs whose install names are inside DIR, relative, and an absolute path
+outside DIR; with NO-ID, also noid.dylib and the universal noidfat.dylib, which have no install
+name. Returns true when every compile succeeded."
+  (let ((src (%write (merge-pathnames "f.c" dir) "int f(void) { return 1; }")))
+    (flet ((cc (&rest args)
+             (eql 0 (nth-value 2 (uiop:run-program (append (list "cc") args
+                                                           (list (uiop:native-namestring src)))
+                                                   :ignore-error-status t
+                                                   :output nil :error-output nil))))
+           (lib (name) (uiop:native-namestring (merge-pathnames name dir))))
+      (and (cc "-dynamiclib" "-install_name" (lib "libinside.dylib") "-o" (lib "libinside.dylib"))
+           (cc "-dynamiclib" "-install_name" "@executable_path/librel.dylib"
+               "-o" (lib "librel.dylib"))
+           (cc "-dynamiclib" "-install_name" "/opt/elsewhere/libabs.dylib"
+               "-o" (lib "libabs.dylib"))
+           (or (not no-id)
+               (and (cc "-bundle" "-o" (lib "noid.dylib"))
+                    (cc "-arch" "x86_64" "-arch" "arm64" "-bundle" "-o" (lib "noidfat.dylib"))))))))
+
+(defun %check-install-names (&rest args)
+  "Run scripts/check-install-names.sh with ARGS. (values EXIT-CODE OUTPUT)."
+  (multiple-value-bind (out err code)
+      (uiop:run-program (list* "sh" (uiop:native-namestring
+                                     (merge-pathnames "check-install-names.sh" *scripts*))
+                               args)
+                        :output :string :error-output :output :ignore-error-status t)
+    (declare (ignore err))
+    (values code out)))
+
+(test a-dylib-with-no-install-name-fails-the-install-name-check
+  "#1131: noid.dylib and the universal noidfat.dylib have no install name. The check exits 1 with
+a FAIL line naming each, and does not report either as ok. The control is the same directory
+without the two, which exits 0: the library inside the bundle and the relative one are ok, and
+the absolute path outside the bundle is a WARN, which does not fail."
+  (let ((why (%relink-skip-reason)))
+    (if why
+        (skip why)
+        (let ((dir (uiop:native-namestring (%fresh-tree)))
+              (control (uiop:native-namestring (%fresh-tree))))
+          (is-true (%install-names-fixture dir :no-id t) "the fixture dylibs did not compile")
+          (multiple-value-bind (code out) (%check-install-names dir)
+            (is (eql 1 code) "exit ~A, expected 1:~%~A" code out)
+            (is (search "FAIL -- otool -D printed no install name for noid.dylib" out)
+                "no FAIL line for noid.dylib:~%~A" out)
+            (is (not (search "ok -- noid.dylib" out)) "noid.dylib was reported ok:~%~A" out)
+            (is (search "FAIL -- otool -D printed no install name for noidfat.dylib" out)
+                "no FAIL line for the universal noidfat.dylib:~%~A" out)
+            (is (not (search "ok -- noidfat.dylib" out))
+                "the universal noidfat.dylib was reported ok:~%~A" out))
+          (is-true (%install-names-fixture control) "the control's dylibs did not compile")
+          (multiple-value-bind (code out) (%check-install-names control)
+            (is (eql 0 code) "control: exit ~A, expected 0:~%~A" code out)
+            (is (search "ok -- libinside.dylib" out) "control: libinside.dylib:~%~A" out)
+            (is (search "ok -- librel.dylib: @executable_path/librel.dylib" out)
+                "control: librel.dylib:~%~A" out)
+            (is (search "WARN -- libabs.dylib has the install name /opt/elsewhere/libabs.dylib"
+                        out)
+                "control: libabs.dylib:~%~A" out)
+            (is (not (search "FAIL" out)) "control: a FAIL line:~%~A" out))
+          (is (eql 2 (%check-install-names)) "no directory is a bad command line")))))
+
+;;; How RELINK-BUNDLE matches a load command to a carried library (#1143). It skipped every load
+;;; command that starts with @, so one that names a carried library through @rpath was left as
+;;; it was; and when nothing else matched it fell back to the file name alone, so a load command
+;;; naming a library that was not carried was pointed at a carried one with the same name.
+
+(defun %build-fixture-dylib (out source install-name &rest link-args)
+  "Compile SOURCE, C text, into the dylib OUT with INSTALL-NAME and LINK-ARGS, and sign it with
+codesign as %DYLIB-PAIR does. Returns true when both steps succeeded."
+  (let ((c (make-pathname :type "c" :defaults out)))
+    (%write c source)
+    (flet ((ok (args)
+             (eql 0 (nth-value 2 (uiop:run-program args :ignore-error-status t
+                                                        :output nil :error-output nil)))))
+      (and (ok (append (list "cc" "-dynamiclib" "-o" (uiop:native-namestring out)
+                             (uiop:native-namestring c) "-install_name" install-name)
+                       link-args))
+           (ok (list "codesign" "--force" "-s" "-" (uiop:native-namestring out)))))))
+
+(defun %otool-l (file)
+  "What otool -L prints for FILE."
+  (uiop:run-program (list "otool" "-L" (uiop:native-namestring file))
+                    :output :string :ignore-error-status t))
+
+(test a-carried-library-named-through-rpath-is-relinked
+  "#1143: B's install name is @rpath/libfixb.dylib and A, linked with an rpath of the build
+directory, names B as @rpath/libfixb.dylib. B is carried under the file name libfixb.1.dylib, as
+the runtime step names libzstd.1.dylib. RELINK-BUNDLE points A at @loader_path/libfixb.1.dylib,
+and A loads and calls B with the build directory gone. Before #1143 a load command starting
+with @ was never changed, so A still looked for @rpath/libfixb.dylib, which the bundle has no
+rpath to find."
+  (let ((why (%relink-skip-reason)))
+    (if why
+        (skip why)
+        (let* ((tree (%fresh-tree))
+               (app (ensure-directories-exist (merge-pathnames "app/" tree)))
+               (bundle (ensure-directories-exist (merge-pathnames "bundle/" tree)))
+               (build-b (merge-pathnames "libfixb.dylib" app))
+               (build-a (merge-pathnames "libfixa.dylib" app))
+               (carried-a (merge-pathnames "libfixa.dylib" bundle))
+               (carried-b (merge-pathnames "libfixb.1.dylib" bundle))
+               (quiet (make-broadcast-stream)))
+          (%load-carry-natives)
+          (unwind-protect
+               (if (not (and (%build-fixture-dylib build-b "int fixb(void) { return 42; }"
+                                                    "@rpath/libfixb.dylib")
+                             (%build-fixture-dylib
+                              build-a "int fixb(void); int fixa(void) { return fixb() + 1; }"
+                              (uiop:native-namestring build-a)
+                              "-L" (uiop:native-namestring app) "-lfixb"
+                              "-rpath" (uiop:native-namestring app))))
+                   (fail "the fixture dylibs were not built")
+                   (progn
+                     (is (search "@rpath/libfixb.dylib" (%otool-l build-a))
+                         "A does not name B through @rpath, so this tests nothing:~%~A"
+                         (%otool-l build-a))
+                     (uiop:copy-file build-b carried-b)
+                     (uiop:copy-file build-a carried-a)
+                     (funcall (%carry-fn "STAMP-INSTALL-NAME") carried-b :report quiet
+                                                                          :source build-b)
+                     (funcall (%carry-fn "STAMP-INSTALL-NAME") carried-a :report quiet
+                                                                          :source build-a)
+                     (let ((report (make-string-output-stream)))
+                       (funcall (%carry-fn "RELINK-BUNDLE") bundle :report report)
+                       (is (search "@rpath/libfixb.dylib now names @loader_path/libfixb.1.dylib"
+                                   (get-output-stream-string report))
+                           "the relink was not reported"))
+                     (is (search "@loader_path/libfixb.1.dylib" (%otool-l carried-a))
+                         "A does not name the carried B:~%~A" (%otool-l carried-a))
+                     (is (eql 0 (nth-value 2 (uiop:run-program
+                                              (list "codesign" "--verify" "--strict"
+                                                    (uiop:native-namestring carried-a))
+                                              :ignore-error-status t :output nil
+                                              :error-output nil)))
+                         "the relinked A does not verify")
+                     (aion/fs:delete-tree app)
+                     (let ((out (%load-carried carried-a)))
+                       (is (search "FIXA 43" out) "A did not load after RELINK-BUNDLE:~%~A" out))))
+            (aion/fs:delete-tree tree :if-does-not-exist :ignore))))))
+
+(test a-library-that-only-shares-a-file-name-with-a-carried-one-is-not-relinked
+  "#1143: two different libraries are both called libfixb.dylib. The one in a/ is carried; the
+one in b/ is not, and A needs the one in b/. RELINK-BUNDLE leaves A's load command naming
+b/libfixb.dylib, so A still calls b's fixb, which returns 7, and prints FIXA 8. Before #1143 a
+load command that nothing else matched was matched by its file name alone, so A was pointed at
+the carried a/libfixb.dylib and printed FIXA 43, calling a different library than it was built
+against."
+  (let ((why (%relink-skip-reason)))
+    (if why
+        (skip why)
+        (let* ((tree (%fresh-tree))
+               (dir-a (ensure-directories-exist (merge-pathnames "a/" tree)))
+               (dir-b (ensure-directories-exist (merge-pathnames "b/" tree)))
+               (bundle (ensure-directories-exist (merge-pathnames "bundle/" tree)))
+               (a-b (merge-pathnames "libfixb.dylib" dir-a))
+               (b-b (merge-pathnames "libfixb.dylib" dir-b))
+               (build-a (merge-pathnames "libfixa.dylib" dir-b))
+               (carried-a (merge-pathnames "libfixa.dylib" bundle))
+               (quiet (make-broadcast-stream)))
+          (%load-carry-natives)
+          (unwind-protect
+               (if (not (and (%build-fixture-dylib a-b "int fixb(void) { return 42; }"
+                                                    (uiop:native-namestring a-b))
+                             (%build-fixture-dylib b-b "int fixb(void) { return 7; }"
+                                                    (uiop:native-namestring b-b))
+                             (%build-fixture-dylib
+                              build-a "int fixb(void); int fixa(void) { return fixb() + 1; }"
+                              (uiop:native-namestring build-a)
+                              "-L" (uiop:native-namestring dir-b) "-lfixb")))
+                   (fail "the fixture dylibs were not built")
+                   (progn
+                     (is (search (uiop:native-namestring b-b) (%otool-l build-a))
+                         "A does not name b/libfixb.dylib, so this tests nothing:~%~A"
+                         (%otool-l build-a))
+                     (uiop:copy-file a-b (merge-pathnames "libfixb.dylib" bundle))
+                     (uiop:copy-file build-a carried-a)
+                     (funcall (%carry-fn "STAMP-INSTALL-NAME")
+                              (merge-pathnames "libfixb.dylib" bundle) :report quiet)
+                     (funcall (%carry-fn "STAMP-INSTALL-NAME") carried-a :report quiet)
+                     (let ((report (get-output-stream-string
+                                    (let ((s (make-string-output-stream)))
+                                      (funcall (%carry-fn "RELINK-BUNDLE") bundle :report s)
+                                      s))))
+                       (is (not (search "now names @loader_path/libfixb.dylib" report))
+                           "A was relinked to the carried library of the same name:~%~A" report))
+                     (is (search (uiop:native-namestring b-b) (%otool-l carried-a))
+                         "A no longer names b/libfixb.dylib:~%~A" (%otool-l carried-a))
+                     (let ((out (%load-carried carried-a)))
+                       (is (search "FIXA 8" out)
+                           "A did not call the library it was built against:~%~A" out))))
+            (aion/fs:delete-tree tree :if-does-not-exist :ignore))))))
+
+(test a-library-that-only-shares-an-rpath-install-name-with-a-carried-one-is-not-relinked
+  "#1155's review: two different libraries both have the install name @rpath/libfixb.dylib. The
+one in a/ (returns 42) is carried; A is built in b/ against the one in b/ (returns 7), with an
+rpath of b/, so dyld loads b's. RELINK-BUNDLE resolves A's load command through A's source
+location and rpaths to b/libfixb.dylib, which is not the carried file's source, and leaves it as
+it is, with a line in the report. A still prints FIXA 8. Matching by the recorded install name
+alone pointed A at the carried a/ copy, and A printed FIXA 43."
+  (let ((why (%relink-skip-reason)))
+    (if why
+        (skip why)
+        (let* ((tree (%fresh-tree))
+               (dir-a (ensure-directories-exist (merge-pathnames "a/" tree)))
+               (dir-b (ensure-directories-exist (merge-pathnames "b/" tree)))
+               (bundle (ensure-directories-exist (merge-pathnames "bundle/" tree)))
+               (a-b (merge-pathnames "libfixb.dylib" dir-a))
+               (b-b (merge-pathnames "libfixb.dylib" dir-b))
+               (build-a (merge-pathnames "libfixa.dylib" dir-b))
+               (carried-b (merge-pathnames "libfixb.dylib" bundle))
+               (carried-a (merge-pathnames "libfixa.dylib" bundle))
+               (quiet (make-broadcast-stream)))
+          (%load-carry-natives)
+          (unwind-protect
+               (if (not (and (%build-fixture-dylib a-b "int fixb(void) { return 42; }"
+                                                    "@rpath/libfixb.dylib")
+                             (%build-fixture-dylib b-b "int fixb(void) { return 7; }"
+                                                    "@rpath/libfixb.dylib")
+                             (%build-fixture-dylib
+                              build-a "int fixb(void); int fixa(void) { return fixb() + 1; }"
+                              (uiop:native-namestring build-a)
+                              "-L" (uiop:native-namestring dir-b) "-lfixb"
+                              "-rpath" (uiop:native-namestring dir-b))))
+                   (fail "the fixture dylibs were not built")
+                   (progn
+                     (is (search "@rpath/libfixb.dylib" (%otool-l build-a))
+                         "A does not name B through @rpath, so this tests nothing:~%~A"
+                         (%otool-l build-a))
+                     (uiop:copy-file a-b carried-b)
+                     (uiop:copy-file build-a carried-a)
+                     (funcall (%carry-fn "STAMP-INSTALL-NAME") carried-b :report quiet :source a-b)
+                     (funcall (%carry-fn "STAMP-INSTALL-NAME") carried-a :report quiet
+                                                                          :source build-a)
+                     (let ((report (get-output-stream-string
+                                    (let ((s (make-string-output-stream)))
+                                      (funcall (%carry-fn "RELINK-BUNDLE") bundle :report s)
+                                      s))))
+                       (is (not (search "now names @loader_path/libfixb.dylib" report))
+                           "A was relinked to the carried library with the same install name:~%~A"
+                           report)
+                       (is (search "@rpath/libfixb.dylib left as it is" report)
+                           "the load command left as it is was not reported:~%~A" report))
+                     (is (search "@rpath/libfixb.dylib" (%otool-l carried-a))
+                         "A no longer names @rpath/libfixb.dylib:~%~A" (%otool-l carried-a))
+                     (let ((out (%load-carried carried-a)))
+                       (is (search "FIXA 8" out)
+                           "A did not call the library its rpath finds:~%~A" out))))
+            (aion/fs:delete-tree tree :if-does-not-exist :ignore))))))
