@@ -1267,6 +1267,33 @@ its tag.
   `contrib-load-failure-p`, `contrib-failure-lines` and `explain-contrib-failure`; from
   `cons/run`, `toolchain-refusal`, which decides whether a target is refused.
 
+### Fixed
+
+- **`hyperion/markdown:render` no longer lets an image inside an image's alt text add attributes
+  to the outer `img`** (#1132). An app rendering untrusted markdown **with the default options**
+  was affected, so this is a fix to behaviour that shipped, not to the new untrusted mode. 3bmd
+  renders an image's alt label to HTML and writes the result into `alt="..."` without escaping
+  it, so a nested element put its own markup inside the attribute, the attribute ended at that
+  markup's first quote, and the rest was read as attributes of the outer `img`. The input
+
+  ```
+  ![![x](onerror=alert(1))](outer.png)
+  ```
+
+  produced `<img src="outer.png" alt="<img src="onerror=alert(1)" alt="x" />" />`, which gives
+  the outer image an `onerror` attribute with the unquoted value `alert(1)`; the relative source
+  passes the URL check, and the outer image's source then fails to load, which runs the handler.
+  An emitted image's alt label is now reduced to text and entities, with any nested image or link
+  contributing the text of its label and never its URL. `%label-text` does the reduction. **What
+  an `alt` value looks like now**, since an attribute cannot hold markup:
+
+  - plain text, and an entity such as `&copy;`, are unchanged;
+  - emphasis, code and any other nested markup become the text inside them, so an alt label
+    written `a *b*` gives `alt="a b"` where it gave `alt="a <em>b</em>"`;
+  - a nested image or link becomes the text of its label, and its URL does not appear;
+  - a hard line break becomes a space, so the words around it stay separate words. It wrote a
+    literal `<br/>` into the attribute before.
+
 ### Added
 
 

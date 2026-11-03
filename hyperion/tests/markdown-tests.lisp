@@ -463,3 +463,160 @@ responsible for rather than that something came back."
         (is-false (search "href" o) "no href with :links :text: ~A" o))
       (is-false (search "<img" (out ref-with-image nil :text))
                 "and no image with both off"))))
+
+(defun %attribute-value (name html)
+  "The value of the first NAME=\"...\" attribute in HTML, read to the next double quote, or NIL.
+
+READ EXACTLY AS A BROWSER'S TOKENIZER WOULD END IT -- at the first quote, not at the last one on
+the line. That is the whole point of #1132: the injected markup's own quote ended the attribute
+early, and a test that took the value as everything up to the final quote would see one long
+harmless-looking string and miss it."
+  (let ((start (search (concatenate 'string name "=\"") html)))
+    (when start
+      (let* ((from (+ start (length name) 2))
+             (end (position #\" html :start from)))
+        (and end (subseq html from end))))))
+
+(test an-image-inside-an-image-alt-cannot-add-attributes-to-it
+  "#1132, found by the hub's review of #1120, and ON MAIN WITH THE DEFAULT OPTIONS -- not only in
+the untrusted mode, which is what makes it the more serious half of this work.
+
+3bmd renders an image's alt label to HTML and writes the result into alt=\"...\" without escaping
+it, so a nested element put its own markup inside the attribute. Measured at 052737ea:
+
+  ![![x](onerror=alert(1))](outer.png)
+  -> <img src=\"outer.png\" alt=\"<img src=\"onerror=alert(1)\" alt=\"x\" />\" />
+
+The alt value ends at the inner src's first quote and the rest is read as attributes of the
+outer image: ONERROR, with the unquoted value ALERT(1). %SAFE-URL passes that source because it
+is a relative URL, and the outer source then fails to load, which runs the handler.
+
+THE ASSERTION IS ABOUT THE ATTRIBUTE, not about the string ONERROR. An alt text may legitimately
+contain the characters `onerror=alert(1)' as text -- `![![x onerror=alert(1)](i.png)](outer.png)'
+does, harmlessly, inside the quoted value -- so a test grepping the output for ONERROR would
+both miss the real case and fail on a safe one. What must hold is that the alt value ends where
+3bmd meant it to end: no quote and no < inside it, and exactly one IMG in the output."
+  (let ((cases (list "![![x](onerror=alert(1))](outer.png)"
+                     "![![x](i.png)](outer.png)"
+                     "![![x](i.png \"ttl\")](outer.png)"
+                     "![![x](i.png)![y](j.png)](outer.png)"
+                     "![![x onerror=alert(1)](i.png)](outer.png)"
+                     "![a *b* ![n](m.png)](outer.png)"
+                     "![![<script>alert(1)</script>](i.png)](outer.png)"
+                     ;; An entity is written into the attribute raw, so it is worth asserting
+                     ;; that it cannot end one: a character reference is not a quote to the
+                     ;; tokenizer, whatever it decodes to.
+                     "![a &quot; b](o.png)"
+                     "![![a &quot; b](i.png)](outer.png)")))
+    (dolist (md cases)
+      ;; The default options first: this is reached without asking for anything.
+      ;; :ALLOW-HTML T goes through this same branch and had no test of its own (the review of
+      ;; #1133). It cannot be combined with the untrusted options -- that is refused -- so it is
+      ;; its own entry rather than a third axis.
+      (dolist (options '(() (:allow-html t)
+                         (:images t :links t) (:images t :links :text)
+                         (:images nil :links t) (:images nil :links :text)))
+        (let* ((html (apply #'hyperion/markdown:render md options))
+               (images-on (let ((v (getf options :images :unsupplied)))
+                            (or (eq v :unsupplied) v)))
+               (imgs (%count-of "<img" html))
+               (alt (%attribute-value "alt" html)))
+          (if images-on
+              (progn
+                (is (= 1 imgs) "exactly one IMG for ~S with ~S: ~A" md options html)
+                (is-true alt "and it has an alt value for ~S with ~S: ~A" md options html)
+                (is-false (and alt (find #\" alt))
+                          "whose value holds no quote for ~S with ~S: ~A" md options html)
+                (is-false (and alt (find #\< alt))
+                          "and no < for ~S with ~S: ~A" md options html))
+              (is (= 0 imgs) "no IMG at all with :images nil for ~S: ~A" md html))
+          ;; Whatever the options, nothing may close the outer tag early and leave a stray
+          ;; fragment behind as content. The injected markup ended with `/>\"', so the quote
+          ;; was left in the document text.
+          (is-false (search "/>\"" html)
+                    "no stray fragment after an early tag close for ~S with ~S: ~A"
+                    md options html))))))
+
+(test an-alt-label-keeps-its-entities-and-its-word-breaks
+  "The review of #1133, which found two things the alt flattening lost. Both are regressions
+against what #1132 was fixing, so both have a control here.
+
+AN ENTITY WAS ESCAPED TWICE. %LABEL-TEXT wrote the (:ENTITY \"&copy;\") node's text as plain text
+and 3bmd then escaped the ampersand, so alt=\"a &copy; b\" became alt=\"a &amp;copy; b\" and the
+reader saw the markup instead of the character.
+
+A HARD LINE BREAK CONTRIBUTED NOTHING, so the words on either side of one were joined:
+alt=\"line1line2\". It cannot stay a BR -- an attribute cannot hold markup, and writing a literal
+<br/> into the attribute is what the code did BEFORE #1132, measured at 052737ea. A space is what
+is left, because they are separate words.
+
+The emphasis case is here to record a loss that IS intended: an alt attribute cannot hold markup,
+so emphasis and code inside one become their text."
+  (let ((entities (md:render "![a &copy; &quot; b](o.png)"))
+        (broken (md:render (format nil "![line1  ~%line2](o.png)")))
+        (marked (md:render "![a *b* `c` d](o.png)")))
+    (is (equal "a &copy; &quot; b" (%attribute-value "alt" entities))
+        "an entity reaches the alt as itself: ~A" entities)
+    (is-false (search "&amp;copy;" entities)
+              "and is not escaped a second time: ~A" entities)
+    (is (equal "line1 line2" (%attribute-value "alt" broken))
+        "a hard line break separates the words: ~A" broken)
+    (is-false (search "<br" broken)
+              "and does not put a BR in the attribute: ~A" broken)
+    (is (equal "a b c d" (%attribute-value "alt" marked))
+        "while emphasis and code become their text, which an attribute cannot hold: ~A" marked)))
+
+(test an-autolink-in-an-alt-label-renders-as-its-url-escaped-once
+  "The review of #1133, and a crash rather than a wrong render. An autolink's node is POSITIONAL
+-- (:LINK url), not a plist -- and %LABEL-TEXT looked it up with GETF, which signals
+
+  SIMPLE-TYPE-ERROR: malformed property list: (\"https://example.com\")
+
+for `![see <https://example.com>](outer.png)' with :ALLOW-HTML T. The safe mode never builds an
+autolink, because the angle brackets are escaped before 3bmd parses, which is why it went unseen:
+every test of this code ran in the mode where the node cannot occur.
+
+ITS TEXT IS ITS URL, which is what a reader sees when it renders. The URL in the node has already
+been attribute-escaped by %SAFE-URL, so it is decoded before being written and 3bmd escapes it
+once -- the assertions below are on the exact alt value, because escaping it twice is the defect
+next door and `&amp;amp;' is the only thing that distinguishes them."
+  (flet ((alt (markdown &rest options)
+           (%attribute-value "alt" (apply #'hyperion/markdown:render markdown options))))
+    ;; The case that signalled.
+    (is (equal "see https://example.com"
+               (alt "![see <https://example.com>](outer.png)" :allow-html t))
+        "an autolink in an alt label is its URL as text")
+    ;; A URL with an ampersand in it: escaped ONCE. &amp;amp; here would be the double escape.
+    (is (equal "https://a.example/?x=1&amp;y=2"
+               (alt "![<https://a.example/?x=1&y=2>](outer.png)" :allow-html t))
+        "and its ampersand is escaped once, not twice")
+    ;; A refused scheme is not a :LINK node at all -- %SANITIZE-NODE returns the raw text -- so
+    ;; it arrives as a string and keeps its angle brackets.
+    (is (equal "&lt;javascript:alert(1)&gt;"
+               (alt "![<javascript:alert(1)>](outer.png)" :allow-html t))
+        "a refused autolink stays literal text")
+    ;; And in the safe mode, where no autolink node exists, the brackets are text.
+    (is (equal "see &lt;https://example.com&gt;"
+               (alt "![see <https://example.com>](outer.png)"))
+        "the safe mode has no autolink node to flatten")))
+
+(test an-alt-label-escapes-entities-and-code-spans-exactly-once
+  "The review of #1133 asked for exact alt-text assertions on entities, including inside a code
+span. The entity double-escape itself was fixed in 9652057c -- flattening an (:ENTITY ...) node
+into the string made 3bmd escape its ampersand a second time -- and these are the assertions on
+the values rather than on the absence of `&amp;amp;'.
+
+WHAT EACH ONE MEANS IN A BROWSER, since an alt value is read decoded:
+  `Tom &amp; Jerry &copy;'  displays  Tom & Jerry (C)
+  `a &amp;copy; b'          displays  a &copy; b        -- the code span, kept literal
+
+So the second is NOT a double escape even though it looks like one: a code span's content is
+literal text, 3bmd does not parse an entity inside it, and escaping that text once is what makes
+the reader see the spelling the author typed."
+  (flet ((alt (markdown &rest options)
+           (%attribute-value "alt" (apply #'hyperion/markdown:render markdown options))))
+    (dolist (options (list '() '(:allow-html t)))
+      (is (equal "Tom &amp; Jerry &copy;" (apply #'alt "![Tom &amp; Jerry &copy;](outer.png)" options))
+          "entities reach the alt as themselves with ~S" options)
+      (is (equal "a &amp;copy; b" (apply #'alt "![a `&copy;` b](o.png)" options))
+          "an entity spelling inside a code span stays literal with ~S" options))))
