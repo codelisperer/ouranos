@@ -1510,7 +1510,15 @@ its tag.
     request to a local host is not proxied (#1091) and is unaffected.
 
   The interceptors run outside the deadline. With a substituted `:perform`, which opens no socket
-  the deadline can reach, the deadline is checked when it returns.
+  the deadline can reach, the deadline is checked when it returns. The condition names the hop
+  the call was on, after a redirect too, and the deadline is checked again between resolving a
+  host and connecting to it, so a lookup that outlasts the deadline does not add a connect
+  timeout to the wait.
+- **The reports of `fetch-deadline-exceeded` and `request-deadline-exceeded` print the URL with
+  a query value or a password hidden**, as a request prints it (#844), because a report is what
+  reaches a log (#1162). `fetch-deadline-exceeded-url` still returns the URL as given. Code that
+  matched a whole URL in the report text of `fetch-public`'s deadline condition will no longer
+  find a query value there.
 - **`aion/http-client:credential-url-refusal`**, the rule deciding whether a URL is one a
   framework may send a credential to (#1106). It **returns a refusal sentence rather than
   signalling**, so each caller signals its own condition: hermes signals `configuration-error`

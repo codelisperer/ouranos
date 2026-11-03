@@ -2963,3 +2963,84 @@ REQUEST-DEADLINE-EXCEEDED, and the same stub with no deadline returns its respon
                 (http:send-request (http:make-request :url "https://api.example.com/x") '()
                                    :perform #'slow-stub)))
         "control: without a deadline the same stub's response is returned")))
+
+(test a-deadline-report-hides-the-credentials-in-its-url
+  "Copilot's review of #1163. A deadline condition's report is what reaches a log, and it printed
+the URL as given, so a query-string key or a password in the URL went with it. Both reports, the
+new one and FETCH-PUBLIC's, now print the URL as a request prints it (#844). The reader still
+returns the URL as given, since a handler may need it."
+  (let ((url "https://user:hunter2@api.example.com/v1/x?key=SECRET-KEY&page=2"))
+    (dolist (type '(http:request-deadline-exceeded http:fetch-deadline-exceeded))
+      (let* ((c (make-condition type :url url :deadline 3))
+             (text (princ-to-string c)))
+        (is-false (search "SECRET-KEY" text) "~A's report hides the query value: ~A" type text)
+        (is-false (search "hunter2" text) "~A's report hides the password: ~A" type text)
+        (is-true (search "api.example.com/v1/x" text) "~A's report keeps the host and path: ~A"
+                 type text)
+        (is (equal url (http:fetch-deadline-exceeded-url c))
+            "~A's reader returns the URL as given" type)))))
+
+(test the-proxy-refusal-hides-the-credentials-in-both-urls
+  "Copilot's review of #1163. The refusal for a request that would be proxied named the request's
+URL and the proxy's as given, and a proxy URL often carries a user and password."
+  (let ((dexador.util:*default-proxy* "http://proxyuser:proxypass@127.0.0.1:9"))
+    (let ((text (handler-case (progn (http:send-request
+                                      (http:make-request
+                                       :url "https://api.example.invalid/x?key=SECRET-KEY")
+                                      '() :deadline 30)
+                                     nil)
+                  (http:http-error (e) (princ-to-string e)))))
+      (is-true text "the request is refused")
+      (is-false (and text (search "SECRET-KEY" text)) "the request's query value is hidden: ~A" text)
+      (is-false (and text (search "proxypass" text)) "the proxy's password is hidden: ~A" text)
+      (is-true (and text (search "proxy" text)) "and the refusal still says why: ~A" text))))
+
+(test a-deadline-names-the-hop-it-found-the-call-on
+  "Copilot's review of #1163. The condition's URL is documented as the hop the call was on, and
+it was the URL the call started from, because the deadline recorded that once. A redirect from
+/start to a slow /slow must be reported as /slow."
+  (let ((done nil))
+    (with-server (s (let ((slow (%slow-handler (lambda () done))))
+                      (lambda (path head stream)
+                        (if (string= path "/start")
+                            (%write-response stream 302 '(("Location" . "/slow")) "")
+                            (funcall slow path head stream)))))
+      (unwind-protect
+           (let ((c (handler-case
+                        (progn (http:send-request (http:make-request :url (%local s "/start")
+                                                                     :read-timeout 5)
+                                                  '() :deadline 3)
+                               nil)
+                      (http:request-deadline-exceeded (c) c))))
+             (is-true c "the deadline is reached on the slow hop")
+             (is (equal (%local s "/slow") (and c (http:fetch-deadline-exceeded-url c)))
+                 "and the condition names that hop: ~A"
+                 (and c (http:fetch-deadline-exceeded-url c))))
+        (setf done t)))))
+
+(test a-deadline-that-passes-while-resolving-does-not-wait-for-a-connect
+  "Copilot's review of #1163. Resolving a name and opening the connection cannot be interrupted,
+so a deadline that passed during the lookup used to be noticed only after the connect returned,
+adding a whole connect timeout to the wait. The deadline is now checked between the two.
+
+The lookup is replaced with one that takes 2 seconds and answers 192.0.2.1, an address reserved
+for documentation that nothing answers, so a connect to it waits for CONNECT-TIMEOUT, here 10
+seconds. With :DEADLINE 1 the call must end shortly after the lookup returns."
+  (let ((original (fdefinition 'http::resolve-host)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'http::resolve-host)
+                 (lambda (host) (declare (ignore host)) (sleep 2) (list #(192 0 2 1))))
+           (let* ((start (get-internal-real-time))
+                  (c (handler-case
+                         (progn (http:send-request (http:make-request :url "http://slow-dns.test/"
+                                                                      :connect-timeout 10
+                                                                      :read-timeout 5)
+                                                   '() :deadline 1)
+                                nil)
+                       (http:http-error (c) c)))
+                  (seconds (/ (- (get-internal-real-time) start) internal-time-units-per-second)))
+             (is (typep c 'http:request-deadline-exceeded) "the deadline is reported: ~A" c)
+             (is (< seconds 5) "and the call ended after ~,1F seconds, not after a connect timeout"
+                 seconds)))
+      (setf (fdefinition 'http::resolve-host) original))))

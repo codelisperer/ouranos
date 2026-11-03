@@ -166,15 +166,20 @@ resolved to (:LOOPBACK, :PRIVATE, :LINK-LOCAL and so on). ADDRESS is that addres
   ((url :initarg :url :reader fetch-deadline-exceeded-url)
    (deadline :initarg :deadline :reader fetch-deadline-exceeded-deadline))
   (:report (lambda (c s)
+             ;; THE URL AS A REQUEST PRINTS IT, with a query value or a password hidden (#844),
+             ;; because a report is what reaches a log. The reader still returns it as given
+             ;; (Copilot's review of #1163).
              (format s "fetch-public: ~A did not finish within its deadline of ~A seconds"
-                     (fetch-deadline-exceeded-url c) (fetch-deadline-exceeded-deadline c))))
+                     (%printable-url (fetch-deadline-exceeded-url c))
+                     (fetch-deadline-exceeded-deadline c))))
   (:documentation "FETCH-PUBLIC did not finish within its DEADLINE (#807). URL is the hop it was
 on. A body cut short by the deadline is never returned as a response."))
 
 (define-condition request-deadline-exceeded (fetch-deadline-exceeded) ()
   (:report (lambda (c s)
              (format s "send-request: ~A did not finish within its deadline of ~A seconds"
-                     (fetch-deadline-exceeded-url c) (fetch-deadline-exceeded-deadline c))))
+                     (%printable-url (fetch-deadline-exceeded-url c))
+                     (fetch-deadline-exceeded-deadline c))))
   (:documentation "SEND-REQUEST did not finish within its DEADLINE (#1162). URL is the hop it was
 on. A subclass of FETCH-DEADLINE-EXCEEDED, so one handler covers both, and it has the same two
 readers. A body cut short by the deadline is never returned as a response."))
@@ -770,6 +775,9 @@ before the body is read (#1156)."
                   (request-headers hop) headers)
             hop))))))
 
+(defvar *%deadline-hop* nil
+  "Inside a SEND-REQUEST with a deadline, a cons whose car is the URL of the hop in progress.")
+
 (defun %http-under-deadline (req)
   "Perform REQ, a request SEND-REQUEST is running under a DEADLINE, over connections this client
 opens itself, one hop at a time (#1162).
@@ -794,9 +802,18 @@ to make. The refusal is an HTTP-ERROR before anything is sent."
                   (local (proxy-arguments url)))
              (when (and dexador.util:*default-proxy* (not (member :proxy local)))
                (error 'http-error
-                      :detail (format nil "~A would be sent through the proxy ~A, and a deadline cannot be kept through a proxy: a request with a deadline goes over a connection this client opens directly, so it is refused rather than sent around the proxy" url dexador.util:*default-proxy*)))
+                      :detail (format nil "~A would be sent through the proxy ~A, and a deadline cannot be kept through a proxy: a request with a deadline goes over a connection this client opens directly, so it is refused rather than sent around the proxy" (%printable-url url) (%printable-url dexador.util:*default-proxy*))))
+             ;; THE HOP'S URL IS RECORDED, so the condition names the hop the deadline found the
+             ;; call on rather than the URL it started from (Copilot's review of #1163).
+             (when *%deadline-hop* (setf (car *%deadline-hop*) url))
              (let* ((host (quri:uri-host (quri:uri url)))
                     (address (and host (first (resolve-host host)))))
+               ;; CHECKED BETWEEN RESOLVING AND CONNECTING. Neither can be interrupted, so a
+               ;; deadline that passed while the name was being resolved would otherwise add a
+               ;; whole connect timeout to the wait (Copilot's review of #1163). Any error after
+               ;; the deadline is reported as the deadline, by %CALL-WITH-DEADLINE.
+               (when (%fired-p *%watch*)
+                 (error 'http-error :detail "the deadline passed before the connection was opened"))
                (unless address
                  (error 'http-error :detail (format nil "~A does not resolve" host)))
                (setf (request-connect-address hop) address)
@@ -903,10 +920,12 @@ same order."
          ;; for FETCH-PUBLIC's timer. Nothing interrupts it.
          (timer (sb-ext:make-timer (lambda () (%fire watch))
                                    :thread t :name "send-request deadline"))
-         (*%watch* watch))
+         (*%watch* watch)
+         (*%deadline-hop* (list url)))
     (flet ((check ()
              (when (%fired-p watch)
-               (error 'request-deadline-exceeded :url url :deadline deadline))))
+               (error 'request-deadline-exceeded :url (car *%deadline-hop*)
+                                                 :deadline deadline))))
       (sb-ext:schedule-timer timer deadline)
       (unwind-protect
            (handler-bind ((error (lambda (e)
