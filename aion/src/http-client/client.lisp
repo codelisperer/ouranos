@@ -616,14 +616,16 @@ comparison for deciding whether a redirect may keep a credential (#1139)."
         (%port-of uri)))
 
 (defparameter +credential-headers+
-  '("authorization" "cookie" "x-api-key" "x-goog-api-key")
+  '("authorization" "cookie" "x-api-key" "x-goog-api-key" "x-amz-security-token")
   "The header names whose value authenticates the caller rather than describing the request.
 
-THE SAME FOUR PRINT-OBJECT NAMES, and for the same reason: these are what this tree actually
-sends. Anthropic's key goes in x-api-key (praxeon/src/llm.lisp) and Google's in x-goog-api-key
+THESE ARE THE CREDENTIAL HEADERS THIS TREE SENDS. Anthropic's key goes in x-api-key (praxeon/src/llm.lisp) and Google's in x-goog-api-key
 (praxeon/src/image-google.lisp), both through SEND-REQUEST, so a list of Authorization and Cookie
 alone left two of this tree's four credential headers being forwarded across a cross-host
-redirect (#1139, and the review of #1141).
+redirect (#1139, and the review of #1141). X-AMZ-SECURITY-TOKEN carries an AWS session token
+beside an Authorization signature. hermes/blob sends it through its own dexador calls, not
+through SEND-REQUEST, but an app sending an AWS request through SEND-REQUEST would otherwise lose
+Authorization on a cross-origin redirect and still forward the token (#1156).
 
 THIS LIST IS NOT A SECURITY BOUNDARY, and PRINT-OBJECT is the place that says why: a provider's
 own key header is not on any list, so PRINT-OBJECT hides EVERY header value rather than these.
@@ -682,11 +684,13 @@ whatever a 307 named. Nothing in this tree would have noticed: the configuration
 #1092 and #1106 check the base a request is sent to, which is the right thing to check and is a
 different thing from where a redirect then leads.
 
-ONLY FOR A REQUEST THAT CARRIES A CREDENTIAL, and only when it is allowed to follow redirects at
-all. Every other request stays on dexador's own path, unchanged, because the hazard is specific:
-a redirect that carries no credential anywhere costs the caller nothing. That keeps one behaviour
-change rather than two, and it is why REDIRECTS-CAN-BE-REFUSED-CAPPED-OR-FOLLOWED still measures
-dexador's following.
+ONLY FOR A REQUEST THAT CARRIES A CREDENTIAL HEADER OR A BODY, and only when it is allowed to
+follow redirects at all. A body is included because it can hold a credential no header list can
+see, such as Facebook's access_token in a POST form, and such a request can now get a
+cross-origin 3xx back instead of having it followed (see below). Every other request stays on
+dexador's own path, unchanged, because the hazard is specific: a redirect that carries no
+credential and no body costs the caller nothing. That is why
+REDIRECTS-CAN-BE-REFUSED-CAPPED-OR-FOLLOWED still measures dexador's following.
 
 SAME-ORIGIN REDIRECTS STILL CARRY THE HEADERS, which is the behaviour an API that moves a path
 relies on. Origin is scheme, host and port, compared as %ORIGIN compares them; a change in any of
@@ -697,51 +701,75 @@ to follow any redirect for a credential-bearing request -- would have broken an 
         (current req))
     (loop
       (let* ((single (copy-request current))
+             (from current)
+             (budget hops)
+             (next nil)
              (response (progn (setf (request-follow-redirects single) 0)
-                              (%http-once single)))
-             (next (and (plusp hops) (%redirect-target response (request-url current)))))
+                              ;; THE DECISION IS MADE FROM THE STATUS AND HEADERS, BEFORE THE BODY
+                              ;; IS READ. A hop this loop follows has its body closed unread, so
+                              ;; MAX-BODY-BYTES is applied only to the response the caller gets.
+                              ;; It used to be applied to every hop, so a request capped at 5 bytes
+                              ;; failed with RESPONSE-TOO-LARGE on a 302 whose body was 10 bytes,
+                              ;; where dexador had followed it (#1156).
+                              (%http-once single
+                                          (lambda (status headers)
+                                            (setf next (and (plusp budget)
+                                                            (%next-hop from status headers))))))))
         (unless next
           (return response))
-        (let* ((from (quri:uri (request-url current)))
-               (to (quri:uri next))
-               (status (response-status response))
-               (cross-origin (not (equal (%origin from) (%origin to))))
-               (method (%redirect-method (request-method current) status))
-               ;; THE BODY THE NEXT HOP WOULD ACTUALLY CARRY, worked out rather than inferred
-               ;; from the status. The first version refused only a 307 or 308 with a body,
-               ;; reasoning that 301, 302 and 303 discard the body -- but they discard it only by
-               ;; changing the method to GET, and a request that was already a GET keeps its
-               ;; method, so a GET carrying a body went to the other origin with it (Copilot's
-               ;; review of #1141). The body goes only when the method changes to GET.
-               (drops-the-body (and (eq method :get) (not (eq method (request-method current)))))
-               (body (if drops-the-body nil (request-content current))))
-          ;; A BODY IS NEVER RE-SENT TO ANOTHER ORIGIN, whatever the status: it may hold a
-          ;; credential that no header list can see -- Facebook's POST carries access_token in
-          ;; the form -- and there is no way to strip one from a body. The 3xx is the answer and
-          ;; the caller decides.
-          (when (and cross-origin body)
-            (return response))
-          (decf hops)
+        (decf hops)
+        (setf current next)))))
+
+(defun %next-hop (current status headers)
+  "The request that follows CURRENT after a response with STATUS and HEADERS, or NIL when this
+response is the answer: it is not a redirect, it names no usable Location, or following it would
+send CURRENT's body to another origin.
+
+It needs only the status and headers, not the body, so %HTTP-FOLLOWING-REDIRECTS can decide
+before the body is read (#1156)."
+  (let ((next (%redirect-target (make-response :status status :headers headers)
+                                (request-url current))))
+    (when next
+      (let* ((from (quri:uri (request-url current)))
+             (to (quri:uri next))
+             (cross-origin (not (equal (%origin from) (%origin to))))
+             (method (%redirect-method (request-method current) status))
+             ;; THE BODY THE NEXT HOP WOULD ACTUALLY CARRY, worked out rather than inferred
+             ;; from the status. The first version refused only a 307 or 308 with a body,
+             ;; reasoning that 301, 302 and 303 discard the body -- but they discard it only by
+             ;; changing the method to GET, and a request that was already a GET keeps its
+             ;; method, so a GET carrying a body went to the other origin with it (Copilot's
+             ;; review of #1141). The body goes only when the method changes to GET.
+             (drops-the-body (and (eq method :get) (not (eq method (request-method current)))))
+             (body (if drops-the-body nil (request-content current))))
+        ;; A BODY IS NEVER RE-SENT TO ANOTHER ORIGIN, whatever the status: it may hold a
+        ;; credential that no header list can see -- Facebook's POST carries access_token in
+        ;; the form -- and there is no way to strip one from a body. The 3xx is the answer and
+        ;; the caller decides.
+        (unless (and cross-origin body)
           (let ((headers (if cross-origin
                              (%without-credentials (request-headers current))
-                             (request-headers current))))
-            (setf current (copy-request current))
+                             (request-headers current)))
+                (hop (copy-request current)))
             ;; A body dropped with a change to GET takes its Content-Type with it.
             (when drops-the-body
               (setf headers (remove-if (lambda (h)
                                          (string-equal (string (car h)) "content-type"))
                                        headers)))
-            (setf (request-url current) next
-                  (request-method current) method
-                  (request-content current) body
-                  (request-headers current) headers)))))))
+            (setf (request-url hop) next
+                  (request-method hop) method
+                  (request-content hop) body
+                  (request-headers hop) headers)
+            hop))))))
 
 (defun %http (req)
   "Perform REQ and return a RESPONSE, following redirects in whichever way is safe for it.
 
-A REQUEST THAT CARRIES A CREDENTIAL HAS ITS REDIRECTS FOLLOWED HERE, by
-%HTTP-FOLLOWING-REDIRECTS, so that a hop which changes origin does not take the credential with
-it (#1139). Every other request is handed to dexador as before, redirects included.
+A REQUEST THAT CARRIES A CREDENTIAL HEADER OR A BODY HAS ITS REDIRECTS FOLLOWED HERE, by
+%HTTP-FOLLOWING-REDIRECTS, so that a hop which changes origin takes neither the credential headers
+nor the body with it (#1139). A request with a body may therefore get a cross-origin 3xx back
+rather than have it followed. Every other request is handed to dexador as before, redirects
+included.
 
 The pinned path (CONNECT-ADDRESS) follows no redirects at all by design -- a redirect's host
 would need an address of its own -- so it is already outside this question."
@@ -764,8 +792,12 @@ would need an address of its own -- so it is already outside this question."
       (%http-following-redirects req)
       (%http-once req)))
 
-(defun %http-once (req)
+(defun %http-once (req &optional skip-body-p)
   "Perform the single dexador round-trip for REQ, returning a RESPONSE.
+
+SKIP-BODY-P, when given, is called with the status and headers before the body is read. When it
+returns true the body is closed unread, the response carries no bytes, and MAX-BODY-BYTES is not
+applied: the caller is a redirect loop that will not use this body (#1156).
 
 A non-2xx is captured as a RESPONSE rather than signalled -- dexador would signal, and that
 would decide the meaning of a status before any LEAVE stage got to. A transport-level failure
@@ -774,6 +806,11 @@ has no response to hand back, so it signals HTTP-ERROR directly."
         (url (request-url req))
         (*%connected* nil))
     (flet ((response (status headers body)
+             (when (and skip-body-p (funcall skip-body-p status headers))
+               (when (streamp body) (%close-body body))
+               (return-from %http-once
+                 (make-response :status status :headers headers
+                                :bytes (make-array 0 :element-type '(unsigned-byte 8)))))
              (let ((declared (and limit (%content-length headers))))
                (when (and declared (> declared limit))
                  (when (streamp body) (%close-body body))

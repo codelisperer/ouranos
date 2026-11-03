@@ -20,13 +20,15 @@ its tag.
   for one host was delivered to whatever a `3xx` named. The configuration checks in #1077, #1092
   and #1106 check the base a request is sent *to*, which is a different thing from where a
   redirect then leads. `aion/http-client:send-request` now follows the redirects of a request that
-  carries a credential itself, one hop at a time, and drops it when the next hop changes origin.
+  carries a credential header **or a body** itself, one hop at a time, and drops the credential
+  when the next hop changes origin.
   **Which locations are covered**, because stripping headers alone would have left two of them:
 
-  - **the four credential headers this tree sends** — `Authorization`, `Cookie`, `x-api-key`
-    (Anthropic, `praxeon/src/llm.lisp`) and `x-goog-api-key` (Google,
-    `praxeon/src/image-google.lisp`) — are removed on a hop that changes origin. They are one
-    list, `+credential-headers+`, read both to decide the path and to strip;
+  - **the credential headers this tree sends** — `Authorization`, `Cookie`, `x-api-key`
+    (Anthropic, `praxeon/src/llm.lisp`), `x-goog-api-key` (Google,
+    `praxeon/src/image-google.lisp`) and `x-amz-security-token` (an AWS session token, added in
+    #1156) — are removed on a hop that changes origin. They are one list, `+credential-headers+`,
+    read both to decide the path and to strip;
   - **a credential in the request body**, such as Facebook's `access_token` in a POST form, which
     no header list can see and no code can strip: **a body is never sent to another origin,
     whatever the redirect's status.** If the next hop would carry the body across an origin, it
@@ -51,15 +53,20 @@ its tag.
   renames a path answers `301` and the credential follows it. Origin is scheme, host **and** port,
   so `https` → `http` on the same host, or a change of port, drops them — those are the two a
   reader is most likely to assume are safe. This is what browsers do.
-  **Only a request carrying one of those headers changes path.** Everything else is still handed
-  to dexador with its redirects, so there is one behaviour change rather than two, and the
-  redirect cap and the method rules are unchanged: `follow-redirects` still bounds the hops, and
+  **Only a request carrying one of those headers or a body changes path.** Everything else is
+  still handed to dexador with its redirects, and the redirect cap and the method rules are
+  unchanged: `follow-redirects` still bounds the hops, and
   `301`, `302` and `303` still turn a non-GET into a `GET` while `307` and `308` keep the method.
   **An app relying on a cross-origin redirect to carry its credential will see that request fail
   to authenticate**, and should send it to the final host directly. `fetch-public` has behaved
   this way since #295, and the widened header list applies there too, so `fetch-public` now drops
-  `x-api-key` and `x-goog-api-key` across an origin change as well; this brings the ordinary
-  client into line with it.
+  `x-api-key`, `x-goog-api-key` and `x-amz-security-token` across an origin change as well; this
+  brings the ordinary client into line with it.
+  **`max-body-bytes` applies to the response returned, not to a `3xx` this client follows**
+  (#1156). A first version read each hop's body under the cap, so a request capped at 5 bytes
+  failed with `response-too-large` on a `302` whose own body was 10 bytes, where dexador had
+  followed it. A followed hop's body is now closed unread, and a `3xx` that is returned, such as a
+  refused cross-origin `307`, is still read under the cap.
 
 - **Telegram, Facebook and Stripe now check the URL they send a credential to, and refuse to
   build when it is one they may not** (#1106). `make-telegram`'s `:api-base`, `make-facebook`'s
