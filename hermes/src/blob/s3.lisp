@@ -331,17 +331,50 @@ local simply gets NIL and keeps whatever proxy is configured. The checks that re
 constructor, so MAKE-INSTANCE still builds an unchecked store -- it just cannot build one that
 claims to have been checked."
   (declare (ignore slot-names initargs))
-  ;; Cleared first, so a CALL-NEXT-METHOD that fails part-way cannot leave a verdict standing
-  ;; beside an endpoint it was not about.
-  (setf (slot-value s 'endpoint-approved-local) nil)
-  (prog1 (call-next-method)
-    (setf (slot-value s 'endpoint-approved-local)
-          (let* ((secure (or (not (slot-boundp s 'secure)) (s3-secure-p s)))
-                 (endpoint (and (not secure)
-                                (slot-boundp s 'endpoint)
-                                (s3-endpoint s)))
-                 (host (and endpoint (%endpoint-host endpoint))))
-            (and host (http:local-host-p host) host)))))
+  ;; THE ENDPOINT CHECKS RUN HERE TOO, not only in MAKE-S3-STORE, because REINITIALIZE-INSTANCE
+  ;; does not go through the constructor. A store built with a good endpoint could be moved to a
+  ;; refused one afterwards:
+  ;;
+  ;;   (reinitialize-instance store :endpoint "[::1]:9000")
+  ;;
+  ;; assigned a bracketed IPv6 endpoint -- which #1106 refuses, because a URL built from it
+  ;; cannot be connected to -- with no refusal at all, because this method only recomputed
+  ;; locality (Copilot's review of #1140).
+  ;;
+  ;; THEY ALSO STAY IN THE CONSTRUCTOR, deliberately, and that is not a duplicate for the sake
+  ;; of it: MAKE-S3-STORE runs them BEFORE %SECURE-SETTING, which resolves a name, so a malformed
+  ;; endpoint is refused without being sent to a resolver first (#1090, and the test
+  ;; THE-ENDPOINT-IS-JUDGED-BEFORE-ANY-NAME-IS-LOOKED-UP). Running them only here would put them
+  ;; after that lookup and lose the ordering. They are idempotent and neither resolves a name --
+  ;; %CHECK-ENDPOINT-URL asks about an https URL, so the locality branch does not fire -- so the
+  ;; second run costs nothing.
+  ;;
+  ;; A REFUSAL LEAVES THE STORE AS IT WAS, which is #1129's property for the providers and the
+  ;; same reasoning here: a caller may handle the error and carry on, and the next request would
+  ;; go wherever the slot now points. The previous endpoint and verdict are put back by a
+  ;; HANDLER-BIND that then declines, so the condition reaches the caller unchanged.
+  (let ((previous (and (slot-boundp s 'endpoint) (s3-endpoint s)))
+        (previous-verdict (and (slot-boundp s 'endpoint-approved-local)
+                               (slot-value s 'endpoint-approved-local))))
+    (setf (slot-value s 'endpoint-approved-local) nil)
+    (handler-bind ((error (lambda (c)
+                            (declare (ignore c))
+                            (if previous
+                                (setf (slot-value s 'endpoint) previous)
+                                (slot-makunbound s 'endpoint))
+                            (setf (slot-value s 'endpoint-approved-local) previous-verdict))))
+      (let ((instance (call-next-method)))
+        (when (slot-boundp s 'endpoint)
+          (%check-endpoint-shape (s3-endpoint s))
+          (%check-endpoint-url (s3-endpoint s)))
+        (setf (slot-value s 'endpoint-approved-local)
+              (let* ((secure (or (not (slot-boundp s 'secure)) (s3-secure-p s)))
+                     (endpoint (and (not secure)
+                                    (slot-boundp s 'endpoint)
+                                    (s3-endpoint s)))
+                     (host (and endpoint (%endpoint-host endpoint))))
+                (and host (http:local-host-p host) host)))
+        instance))))
 
 (defun %upload-acl-setting (value)
   "The store's UPLOAD-ACL: VALUE when given, else MNEMOSYNE_S3_UPLOAD_ACL, else :NONE.

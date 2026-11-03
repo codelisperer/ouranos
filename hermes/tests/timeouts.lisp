@@ -400,7 +400,8 @@ value reaches the send at all."
                        (funcall original-resolve host))))
            (setf (fdefinition 'dex:request)
                  (lambda (url &rest args)
-                   (push (list url (if (member :proxy args) (list :proxy (getf args :proxy)) :none))
+                   (push (list url (if (member :proxy args) (list :proxy (getf args :proxy)) :none)
+                               (getf args :max-redirects))
                          seen)
                    (error "stopped before sending")))
            (let ((twilio (hermes::make-twilio :account-sid "ACtest" :auth-token "t"
@@ -429,6 +430,9 @@ value reaches the send at all."
       (is (= 4 (length calls)) "all four sends reached dexador: ~S" calls)
       (is (equal '(:proxy nil) (second (first calls)))
           "twilio's plaintext send to the approved name is not proxied: ~S" (first calls))
+      (is (eql 0 (third (first calls)))
+          "and is given :max-redirects 0, as an approval does and the literal rule does not: ~S"
+          (first calls))
       (is (equal '(:proxy nil) (second (second calls)))
           "and neither is sendgrid's: ~S" (second calls))
       (is (eq :none (second (third calls)))
@@ -711,7 +715,14 @@ Both directions for each: a plaintext base at a host the check approved as local
                        (funcall original-resolve host))))
            (setf (fdefinition 'dex:request)
                  (lambda (url &rest args)
-                   (push (list url (if (member :proxy args) :no-proxy :proxied)) seen)
+                   (push (list url (if (member :proxy args) :no-proxy :proxied)
+                               ;; AND THE REDIRECT CAP: an approval answers
+                               ;; (:PROXY NIL :MAX-REDIRECTS 0) while the literal
+                               ;; rule answers (:PROXY NIL) alone, so recording only
+                               ;; :PROXY cannot tell which rule granted the exemption
+                               ;; (the review of #1140).
+                               (getf args :max-redirects))
+                         seen)
                    (error "stopped before sending")))
            ;; Telegram: the token is in the path, so this is the one where a proxy would log it.
            (dolist (base '("http://provider.invalid:8081" "https://api.telegram.org"))
@@ -738,5 +749,7 @@ Both directions for each: a plaintext base at a host the check approved as local
               (remote (nth (1+ (car pair)) calls)))
           (is (eq :no-proxy (second local))
               "~A's plaintext send to the approved host is not proxied: ~S" (cdr pair) local)
+          (is (eql 0 (third local))
+              "~A's approved send is also given :max-redirects 0: ~S" (cdr pair) local)
           (is (eq :proxied (second remote))
               "~A's https send keeps whatever proxy is configured: ~S" (cdr pair) remote))))))
