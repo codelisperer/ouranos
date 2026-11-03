@@ -2439,8 +2439,12 @@ caught the defect it was written for. My own control is what showed that. The fo
 claim about what this tree sends -- Authorization and Cookie anywhere, x-api-key in
 praxeon/src/llm.lisp, x-goog-api-key in praxeon/src/image-google.lisp -- and a claim about the
 tree has to be written down, not derived from the thing under test. The list-walk is kept as a
-second loop, so a name added to the list without being handled fails too."
-  (dolist (name '("authorization" "cookie" "x-api-key" "x-goog-api-key"))
+second loop, so a name added to the list without being handled fails too.
+
+x-amz-security-token was added in #1156: hermes/blob sends it beside an AWS Authorization
+signature, and an AWS request sent through SEND-REQUEST would otherwise have lost Authorization on
+a cross-origin redirect while still forwarding the session token."
+  (dolist (name '("authorization" "cookie" "x-api-key" "x-goog-api-key" "x-amz-security-token"))
     (let ((hops (%hops-for "https://api.example.com/v1/x" "https://evil.example/collect"
                            :headers (list (cons name "secret")
                                           (cons "Content-Type" "application/json")))))
@@ -2693,3 +2697,128 @@ dexador's path would also show one call, and only the 5 says who would have foll
   (let ((hops (%body-hops :get '() nil 307 "https://evil.example/collect")))
     (is (eql 5 (second (first hops)))
         "control: a plain GET still lets dexador follow its redirects: ~S" hops)))
+
+;;; --- redirects followed by this client, against real servers (#1156) -------------------
+;;;
+;;; Every test #1141 added for the redirect loop stubs DEX:REQUEST, and the real-server redirect
+;;; test above has neither a credential nor a body, so it never enters the loop. The tests below
+;;; go through SEND-REQUEST to servers on real sockets. They run on every leg, so on Windows
+;;; they go through dexador's WinHTTP backend and elsewhere through its usocket backend.
+
+(defun %received (server path)
+  "Every request SERVER received for PATH, oldest first."
+  (remove-if-not (lambda (r) (string= path (aion/test-http:request-path r)))
+                 (reverse (aion/test-http:server-requests server))))
+
+(defparameter +credential-test-headers+
+  '(("Authorization" . "Bearer secret-token")
+    ("X-Api-Key" . "secret-key")
+    ("X-Amz-Security-Token" . "secret-session")
+    ("X-Trace" . "not-a-credential"))
+  "One header of each credential kind the redirect loop strips, and one ordinary header it keeps.")
+
+(test a-redirect-body-over-the-cap-does-not-fail-the-request
+  "#1156, a regression from #1141. The redirect loop read every hop's body under MAX-BODY-BYTES,
+so a 3xx whose own body was over the cap failed the request with RESPONSE-TOO-LARGE, where
+dexador had followed it. Measured before the fix with a 5-byte cap and a 302 carrying the
+10-byte body \"Moved here\":
+
+  no credential header   (dexador follows)    (:STATUS 200 :BODY \"ok\")
+  Authorization header   (the loop follows)   (:SIGNALLED RESPONSE-TOO-LARGE)
+
+The loop now decides from the status and headers, before the body is read, and closes a
+followed hop's body unread. The cap still applies to the response the caller gets."
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore head))
+                    (cond ((string= path "/moved")
+                           (%write-response stream 302 '(("Location" . "/end")) "Moved here"))
+                          ((string= path "/moved-to-big")
+                           (%write-response stream 302 '(("Location" . "/big")) "Moved here"))
+                          ((string= path "/big") (%write-response stream 200 '() "0123456789"))
+                          (t (%write-response stream 200 '() "ok")))))
+    (flet ((send (path &rest args)
+             (handler-case
+                 (let ((r (http:send-request
+                           (apply #'http:make-request :url (%local s path) :max-body-bytes 5
+                                                      :read-timeout 10 args)
+                           '())))
+                   (list (http:response-status r) (http:response-body r)))
+               (http:response-too-large () :too-large))))
+      (is (equal '(200 "ok")
+                 (send "/moved" :headers '(("Authorization" . "Bearer s"))))
+          "a credential-bearing request follows a 302 whose body is over the cap")
+      (is (equal '(200 "ok")
+                 (send "/moved" :method :post :content "a=1"))
+          "so does a request with a body, which also takes the loop")
+      ;; The controls. The same request with no credential and no body, on dexador's own path,
+      ;; gives the same answer, so the two paths now agree. And the cap still applies to the
+      ;; response that is returned: a followed redirect to a 10-byte body is refused.
+      (is (equal '(200 "ok") (send "/moved"))
+          "control: dexador's own path gives the same answer")
+      (is (eq :too-large (send "/moved-to-big" :headers '(("Authorization" . "Bearer s"))))
+          "control: the cap still applies to the response the caller gets"))))
+
+(test a-real-cross-origin-redirect-receives-no-credential-and-no-body
+  "#1156, items 3 and 5. Two servers on different ports are two origins. The first redirects to
+the second, and the test reads what the second actually RECEIVED -- the headers and body on the
+socket -- rather than what a stub was handed.
+
+It also checks that the backend did not follow the redirect itself. The loop sends each hop
+with :MAX-REDIRECTS 0. If dexador ignored that and followed on its own, the second server would
+receive a request carrying the credential before the loop could remove it. So the second server
+must receive EXACTLY ONE request, and that one without any credential header. This is the
+property Copilot asked to be checked on both backends, usocket and WinHTTP: this test runs on
+every leg, so the Windows leg checks WinHTTP."
+  (with-server (b (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "landed")))
+    (let ((landing (%local b "/landing")))
+      (with-server (a (lambda (path head stream)
+                        (declare (ignore head))
+                        (cond ((string= path "/away")
+                               (%write-response stream 302 `(("Location" . ,landing)) ""))
+                              ((string= path "/away-307")
+                               (%write-response stream 307 `(("Location" . ,landing)) ""))
+                              ((string= path "/same")
+                               (%write-response stream 302 '(("Location" . "/here")) ""))
+                              ((string= path "/same-307")
+                               (%write-response stream 307 '(("Location" . "/here")) ""))
+                              (t (%write-response stream 200 '() "here")))))
+        (flet ((send (path &rest args)
+                 (http:send-request (apply #'http:make-request :url (%local a path)
+                                                               :read-timeout 10 args)
+                                    '())))
+          ;; Credential headers across origins: dropped, and the ordinary header kept.
+          (let ((r (send "/away" :headers +credential-test-headers+)))
+            (is (= 200 (http:response-status r)) "the cross-origin redirect is followed")
+            (let ((got (%received b "/landing")))
+              (is (= 1 (length got))
+                  "the other origin received exactly one request, so the backend did not follow the redirect itself: ~D"
+                  (length got))
+              (dolist (h '("Authorization" "X-Api-Key" "X-Amz-Security-Token"))
+                (is (null (and got (aion/test-http:request-header (first got) h)))
+                    "the other origin did not receive ~A" h))
+              (is (equal "not-a-credential"
+                         (and got (aion/test-http:request-header (first got) "X-Trace")))
+                  "and did receive the ordinary header")))
+          ;; A body across origins on a 307: not sent at all; the 307 is the answer.
+          (let ((before (length (%received b "/landing")))
+                (r (send "/away-307" :method :post :content "access_token=secret")))
+            (is (= 307 (http:response-status r))
+                "a cross-origin 307 for a request with a body is returned, not followed")
+            (is (= before (length (%received b "/landing")))
+                "and the other origin received nothing"))
+          ;; The controls, within one origin: the credential and the body are both kept.
+          (let ((r (send "/same" :headers +credential-test-headers+)))
+            (is (= 200 (http:response-status r)) "control: a same-origin redirect is followed")
+            (let ((got (%received a "/here")))
+              (is (equal "Bearer secret-token"
+                         (and got (aion/test-http:request-header (first got) "Authorization")))
+                  "control: and keeps the credential")))
+          (let ((r (send "/same-307" :method :post :content "access_token=secret")))
+            (is (= 200 (http:response-status r))
+                "control: a same-origin 307 with a body is followed")
+            (let ((got (%received a "/here")))
+              (is (equal "access_token=secret"
+                         (and got (aion/test-http:request-body-string (car (last got)))))
+                  "control: and the body arrives"))))))))
