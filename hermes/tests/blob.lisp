@@ -2606,7 +2606,13 @@ local, which is the third case below."
                        (funcall original-resolve host))))
            (setf (fdefinition 'dex:request)
                  (lambda (url &rest args)
-                   (push (list url (if (member :proxy args) (list :proxy (getf args :proxy)) :none))
+                   (push (list url
+                               (if (member :proxy args) (list :proxy (getf args :proxy)) :none)
+                               ;; BOTH ARGUMENTS: an approval answers (:PROXY NIL
+                               ;; :MAX-REDIRECTS 0) and the literal rule answers
+                               ;; (:PROXY NIL) alone, so recording only :PROXY cannot
+                               ;; tell which rule granted it (the review of #1140).
+                               (getf args :max-redirects))
                          seen)
                    (error "stopped before sending")))
            (with-environment-variable ("MNEMOSYNE_S3_SECURE" "false")
@@ -2635,6 +2641,9 @@ local, which is the third case below."
       (is (= 3 (length calls)) "all three requests reached dexador: ~S" calls)
       (is (equal '(:proxy nil) (second (first calls)))
           "the plaintext request to the approved NAME is sent with :proxy nil: ~S" (first calls))
+      (is (eql 0 (third (first calls)))
+          "and with :max-redirects 0, which is what tells an approval from the literal rule: ~S"
+          (first calls))
       (is (eq :none (second (second calls)))
           "a plaintext store at a public endpoint keeps the proxy: ~S" (second calls))
       (is (eq :none (second (third calls)))
@@ -2716,3 +2725,51 @@ did."
       ;; The control: a name and an IPv4 address are still usable endpoints.
       (dolist (endpoint '("minio.invalid:9000" "127.0.0.1:9000"))
         (is-false (refusal endpoint) "control: ~A is still accepted" endpoint)))))
+
+(test a-reinitialized-endpoint-is-checked-and-a-refusal-changes-nothing
+  "Copilot's review of #1140. The shape and shared URL checks ran only in MAKE-S3-STORE, and
+REINITIALIZE-INSTANCE does not go through the constructor, so a store built with a good endpoint
+could be moved to a refused one afterwards:
+
+  (reinitialize-instance store :endpoint \"[::1]:9000\")
+
+assigned a bracketed IPv6 endpoint -- which #1106 refuses, because a URL built from it cannot be
+connected to -- with no refusal at all. The SHARED-INITIALIZE method only recomputed locality.
+
+AND A REFUSAL LEAVES THE STORE AS IT WAS, which is #1129's property for the providers and the
+same reasoning here: a caller may handle the error and carry on, and the next request would go
+wherever the slot now points."
+  (let ((original-resolve (fdefinition 'http:resolve-host)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'http:resolve-host)
+                 (lambda (host)
+                   (if (string= host "minio.invalid")
+                       (funcall original-resolve "127.0.0.1")
+                       (funcall original-resolve host))))
+           (with-environment-variable ("MNEMOSYNE_S3_SECURE" "false")
+             (let ((store (b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x"
+                                           :endpoint "minio.invalid:9000" :path-style t)))
+               (is (equal "minio.invalid" (hermes/blob::s3-endpoint-approved-local store))
+                   "it starts approved: ~S" (hermes/blob::s3-endpoint-approved-local store))
+               ;; Each of these is refused by a different check, and all of them used to be
+               ;; accepted by REINITIALIZE-INSTANCE.
+               (dolist (endpoint '("[::1]:9000" "http://minio.invalid:9000" "u:pw@minio.invalid"
+                                   "minio.invalid:9000/bucket" "::1"))
+                 (signals b:blob-configuration-error
+                   (reinitialize-instance store :endpoint endpoint))
+                 (is (equal "minio.invalid:9000" (b::s3-endpoint store))
+                     "~S is refused and the endpoint is unchanged: ~S" endpoint
+                     (b::s3-endpoint store))
+                 (is (equal "minio.invalid" (hermes/blob::s3-endpoint-approved-local store))
+                     "~S is refused and the approval is unchanged: ~S" endpoint
+                     (hermes/blob::s3-endpoint-approved-local store)))
+               ;; The control: an endpoint the checks accept DOES replace it, so the assertions
+               ;; above are about the refusals and not about the slot having become read-only.
+               (reinitialize-instance store :endpoint "other.invalid:9000")
+               (is (equal "other.invalid:9000" (b::s3-endpoint store))
+                   "control: an acceptable endpoint replaces it: ~S" (b::s3-endpoint store))
+               (is-false (hermes/blob::s3-endpoint-approved-local store)
+                         "control: and its approval is recomputed, not inherited: ~S"
+                         (hermes/blob::s3-endpoint-approved-local store)))))
+      (setf (fdefinition 'http:resolve-host) original-resolve))))

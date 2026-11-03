@@ -915,7 +915,14 @@ and the https default is not."
                        (funcall original-resolve host))))
            (setf (fdefinition 'dex:request)
                  (lambda (url &rest args)
-                   (push (list url (if (member :proxy args) :no-proxy :proxied)) seen)
+                   (push (list url (if (member :proxy args) :no-proxy :proxied)
+                               ;; AND THE REDIRECT CAP: an approval answers
+                               ;; (:PROXY NIL :MAX-REDIRECTS 0) while the literal
+                               ;; rule answers (:PROXY NIL) alone, so recording only
+                               ;; :PROXY cannot tell which rule granted the exemption
+                               ;; (the review of #1140).
+                               (getf args :max-redirects))
+                         seen)
                    (error "stopped before sending")))
            (dolist (base '("http://provider.invalid:12111" "https://api.stripe.com"))
              (ignore-errors
@@ -930,5 +937,8 @@ and the https default is not."
       (is (= 2 (length calls)) "both sends reached dexador: ~S" calls)
       (is (eq :no-proxy (second (first calls)))
           "the plaintext send to the approved host is not proxied: ~S" (first calls))
+      (is (eql 0 (third (first calls)))
+          "and is given :max-redirects 0, as an approval does and the literal rule does not: ~S"
+          (first calls))
       (is (eq :proxied (second (second calls)))
           "and the https send keeps whatever proxy is configured: ~S" (second calls)))))
