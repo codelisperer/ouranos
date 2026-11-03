@@ -14,6 +14,53 @@ its tag.
 
 ### An app may have to act
 
+- **A redirect that changes origin no longer carries a credential, in a header or in a body**
+  (#1139). dexador follows a redirect to a different host by recursing with the same arguments
+  **and the same headers** — it prepends a new `Host` and keeps the rest — so a credential built
+  for one host was delivered to whatever a `3xx` named. The configuration checks in #1077, #1092
+  and #1106 check the base a request is sent *to*, which is a different thing from where a
+  redirect then leads. `aion/http-client:send-request` now follows the redirects of a request that
+  carries a credential itself, one hop at a time, and drops it when the next hop changes origin.
+  **Which locations are covered**, because stripping headers alone would have left two of them:
+
+  - **the four credential headers this tree sends** — `Authorization`, `Cookie`, `x-api-key`
+    (Anthropic, `praxeon/src/llm.lisp`) and `x-goog-api-key` (Google,
+    `praxeon/src/image-google.lisp`) — are removed on a hop that changes origin. They are one
+    list, `+credential-headers+`, read both to decide the path and to strip;
+  - **a credential in the request body**, such as Facebook's `access_token` in a POST form, which
+    no header list can see and no code can strip: **a body is never sent to another origin,
+    whatever the redirect's status.** If the next hop would carry the body across an origin, it
+    is not followed — the `3xx` is returned and the caller decides. **Any request with a body
+    follows its redirects through this client for that reason**, credential header or not;
+    deciding by headers alone sent Facebook's POST down dexador's own path, where a cross-origin
+    `307` re-sent the token;
+  - **a body dropped with a method change**: `301`, `302` and `303` turn a non-GET into a `GET`,
+    and then the body and its `Content-Type` go with the method, so such a hop is followed with
+    no body. **A request that was already a `GET` keeps its method on those codes, and so keeps
+    its body** — which is why the rule above is about the body the next hop would carry rather
+    than about the status code: a first version refused only `307` and `308`, and a `GET` with a
+    body followed a cross-origin `301` with the body still attached.
+  **A request with a body and no credential header may now get a `3xx` back where it used to be
+  followed**, when the redirect leaves its origin. A request with neither a body nor a credential
+  header is unaffected and still has its redirects followed by dexador.
+
+  **A request already exempt from the proxy under a recorded local approval still follows no
+  redirect at all**, which is #1134's rule; this follows redirects only for requests that rule
+  does not already stop.
+  **A same-origin redirect keeps them**, which is the default an app should expect: an API that
+  renames a path answers `301` and the credential follows it. Origin is scheme, host **and** port,
+  so `https` → `http` on the same host, or a change of port, drops them — those are the two a
+  reader is most likely to assume are safe. This is what browsers do.
+  **Only a request carrying one of those headers changes path.** Everything else is still handed
+  to dexador with its redirects, so there is one behaviour change rather than two, and the
+  redirect cap and the method rules are unchanged: `follow-redirects` still bounds the hops, and
+  `301`, `302` and `303` still turn a non-GET into a `GET` while `307` and `308` keep the method.
+  **An app relying on a cross-origin redirect to carry its credential will see that request fail
+  to authenticate**, and should send it to the final host directly. `fetch-public` has behaved
+  this way since #295, and the widened header list applies there too, so `fetch-public` now drops
+  `x-api-key` and `x-goog-api-key` across an origin change as well; this brings the ordinary
+  client into line with it.
+
 - **Telegram, Facebook and Stripe now check the URL they send a credential to, and refuse to
   build when it is one they may not** (#1106). `make-telegram`'s `:api-base`, `make-facebook`'s
   `:graph-base` and `make-stripe-payments`'s `:api-base` accepted any value; each now signals
