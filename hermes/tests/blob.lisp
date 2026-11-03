@@ -2794,3 +2794,65 @@ wherever the slot now points."
                          "control: and its approval is recomputed, not inherited: ~S"
                          (hermes/blob::s3-endpoint-approved-local store)))))
       (setf (fdefinition 'http:resolve-host) original-resolve))))
+
+(define-condition %store-subclass-refused (error) ()
+  (:report (lambda (c s) (declare (ignore c)) (format s "the store subclass refused its own initarg"))))
+
+(defclass %picky-store (b:s3-store) ()
+  (:documentation
+   "An S3 store subclass with its own SHARED-INITIALIZE :AFTER method, which runs INSIDE the
+store's :AROUND -- after the slots are assigned and before the verdict is recomputed. Its method
+signals for :X :BAD, which is how a failure arriving from inside CALL-NEXT-METHOD is reproduced
+(Copilot's review of #1149)."))
+
+(defmethod shared-initialize :after ((s %picky-store) slot-names &rest initargs
+                                     &key &allow-other-keys)
+  (declare (ignore slot-names))
+  (when (eq :bad (getf initargs :x))
+    (error '%store-subclass-refused)))
+
+(test a-failure-from-a-store-subclass-keeps-the-approval
+  "Copilot's review of #1149, on #1134's code. The SHARED-INITIALIZE :AROUND method cleared the
+approval before CALL-NEXT-METHOD and recomputed it afterwards, with nothing restoring it in
+between. A subclass :AFTER method runs inside CALL-NEXT-METHOD, so if it signals -- for an initarg
+of its own that has nothing to do with the endpoint -- the recompute never runs. Measured at
+#1134's 7e618520:
+
+  before : endpoint=minio.invalid:9000 secure=NIL approved=\"minio.invalid\"
+  (reinitialize-instance store :x :bad)  -> refused by the subclass
+  after  : endpoint=minio.invalid:9000 secure=NIL approved=NIL
+
+The store is still plaintext and still at the approved local name, but has lost the approval,
+so a caller that handles the error and carries on sends its signed requests through HTTP_PROXY
+in the clear -- the case #1091 exists to prevent.
+
+#1140 closed it without targeting it: every slot is snapshotted before CALL-NEXT-METHOD and put
+back by a handler that covers CALL-NEXT-METHOD as well as the checks, so the approval comes back
+with everything else. This test makes that coverage something that is checked rather than
+something that happens to be true."
+  (let ((original-resolve (fdefinition 'http:resolve-host)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'http:resolve-host)
+                 (lambda (host)
+                   (if (string= host "minio.invalid")
+                       (funcall original-resolve "127.0.0.1")
+                       (funcall original-resolve host))))
+           (let ((store (make-instance '%picky-store :endpoint "minio.invalid:9000" :secure nil
+                                       :path-style t :access-key "AKIAIOSFODNN7EXAMPLE"
+                                       :secret-key "x")))
+             (is (equal "minio.invalid" (hermes/blob::s3-endpoint-approved-local store))
+                 "it starts approved: ~S" (hermes/blob::s3-endpoint-approved-local store))
+             (signals %store-subclass-refused (reinitialize-instance store :x :bad))
+             (is (equal "minio.invalid" (hermes/blob::s3-endpoint-approved-local store))
+                 "and keeps its approval when the subclass's own method signals: ~S"
+                 (hermes/blob::s3-endpoint-approved-local store))
+             (is (equal "minio.invalid:9000" (b::s3-endpoint store))
+                 "with its endpoint unchanged: ~S" (b::s3-endpoint store))
+             ;; The control: an initarg the subclass accepts goes through, so the assertions
+             ;; above are about the refusal and not about the store refusing everything.
+             (reinitialize-instance store :x :fine :endpoint "other.invalid:9000")
+             (is (equal "other.invalid:9000" (b::s3-endpoint store))
+                 "control: an accepted call still moves the endpoint: ~S"
+                 (b::s3-endpoint store))))
+      (setf (fdefinition 'http:resolve-host) original-resolve))))
