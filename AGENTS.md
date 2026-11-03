@@ -353,6 +353,43 @@ not about an expression inside it; an `ok` line is about failures, not about cov
   unregistered suite, an unrun suite and a passing suite are identical at the exit code.
 - A cold-cache test must assert it was cold (fasl count, compile count). Clear the fasl
   cache after a control run — a stale fasl reproduces a false failure across runs.
+- **Clearing means deleting the cached fasl, not touching the source.** ASDF rebuilds only when
+  the source is newer than its fasl, and a touch that lands in the same second as the control
+  run's build is not newer — so restoring a file and touching it leaves the control's code
+  loaded.
+  **A correct file on disk is not evidence that the image loaded it.** Delete the cached fasls or
+  force the rebuild, then read the count back:
+  - **Where the fasls are** depends on the OS and on ASDF's output translations, so ask ASDF
+    rather than assuming: `asdf:*user-cache*` is the cache root, and
+    `(asdf:apply-output-translations (asdf:system-source-directory :NAME))` is the directory for
+    one system. The usual default is `~/.cache/common-lisp/` on Linux and macOS and
+    `~/AppData/Local/cache/common-lisp/` on Windows — the two paths `verify.yml`'s matrix caches —
+    with a subdirectory for the implementation and platform under it, such as
+    `sbcl-2.6.9-linux-x64/`, and then the source tree's own absolute path. A path written out by
+    hand without that subdirectory points nowhere, which is why asking ASDF beats remembering.
+  - **`:force t` rebuilds only the system named in the call, not its dependencies.** Measured
+    here: `(asdf:load-system :hermes :force t)` recompiled 11 hermes files and **none** of
+    `aion/http-client`, the system hermes depends on. The usual stale-fasl case is the other way
+    round — the change is in a dependency, and the system loaded is the one that uses it — so
+    `:force t` on the system you are testing leaves the stale build in place. Name every system
+    you changed instead: `(asdf:load-system :hermes :force '(:hermes :aion/http-client))`
+    recompiled both. `:force :all` is not usable in this tree: it rebuilds every library,
+    Quicklisp's included, and recompiling cl+ssl from scratch fails.
+- **A stale fasl can make a local suite PASS for a tree whose suite fails**, which is the half of
+  this that costs the most. The rule above and the sentence before it describe a stale fasl
+  turning a passing suite red; it does the opposite just as easily, because the code the image
+  holds can be a build in which the suite really did pass. **So a local `Fail: 0` is evidence only
+  when the fasls were deleted first, or the worktree is new enough not to have any yet** — the
+  cache path contains the worktree's own path, so a fresh worktree is cold on its first run and
+  warm after it.
+  The case: #1134 at `77d23085` was reported here as `Fail: 0` across every suite while **all four
+  CI legs failed**, on one check — a test calling `make-request` with a keyword that commit had
+  removed. The local script and the local suite had both loaded a build from before the removal,
+  so both agreed that the constructor accepted it. CI disagreed because CI always builds cold.
+  The same stale build had already produced a false claim about that keyword which reached a
+  commit message, a CHANGELOG line and a report to the hub.
+  The rule above has said *clear* since it was written; these two say what clear has to mean and
+  why a green local run is not a substitute for it.
 - The test harness must be able to see the failure before the failure can be asserted;
   the fixture must not be easier than reality (read the real artefact the generator writes).
 - A fixture that cleans up after itself is **relying** on cleanup; one with a genuinely
