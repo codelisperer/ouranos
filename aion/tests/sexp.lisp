@@ -151,6 +151,63 @@ reader folds it."
     (is (eq (sexp:read-data (format nil ":~A" name) :intern-keywords t)
             (find-symbol name :keyword)))))
 
+(defun %keyword-count ()
+  "The number of symbols in the KEYWORD package."
+  (let ((n 0))
+    (do-symbols (s :keyword n)
+      (declare (ignore s))
+      (incf n))))
+
+(defun %keyword-list-input (names)
+  "Text of a list of the keywords NAMES, followed by the existing keyword :TEST."
+  (format nil "(~{:~A~^ ~} :test)" names))
+
+(test existing-mode-reads-a-new-keyword-as-its-name-and-interns-nothing
+  "#1166: under :INTERN-KEYWORDS :EXISTING, 200 keywords made of names generated here, so none
+exists, read as their names, and the number of keywords in KEYWORD is the same after the read
+as before it. The existing :TEST still reads as the keyword. Control: the same kind of input
+under :INTERN-KEYWORDS T adds all 200 to KEYWORD."
+  (let* ((names (loop repeat 200 collect (%fresh-name "KW")))
+         (before (%keyword-count))
+         (datum (sexp:read-data (%keyword-list-input names) :intern-keywords :existing))
+         (after (%keyword-count)))
+    (is (= before after) "KEYWORD went from ~D to ~D symbols" before after)
+    (is (notany (lambda (n) (find-symbol n :keyword)) names) "a new name was interned")
+    (is (equal names (butlast datum)) "the new keywords did not read as their names")
+    (is (eq :test (car (last datum))) "an existing keyword did not read as itself"))
+  (is (equal "SEXP-1166-LOWER" (sexp:read-data ":sexp-1166-lower" :intern-keywords :existing))
+      "the name is not upper-cased as the keyword's would be")
+  (let* ((names (loop repeat 200 collect (%fresh-name "KW")))
+         (before (%keyword-count)))
+    (sexp:read-data (%keyword-list-input names) :intern-keywords t)
+    (is (= (+ before 200) (%keyword-count)) "control: T did not add the 200 keywords")
+    (is (every (lambda (n) (find-symbol n :keyword)) names)
+        "control: T did not intern every name")))
+
+(test max-new-keywords-refuses-the-keyword-past-the-limit-before-interning-it
+  "#1166: under :INTERN-KEYWORDS T with :MAX-NEW-KEYWORDS 3, a fourth new keyword is refused
+as :TOO-MANY-NEW-KEYWORDS and is not interned, while the three before it are. An existing
+keyword does not count toward the limit, and 3 new keywords under a limit of 3 are accepted."
+  (let ((names (loop repeat 4 collect (%fresh-name "LIM"))))
+    (is (eq :too-many-new-keywords
+            (reason (sexp:read-data (%keyword-list-input names) :intern-keywords t
+                                                                :max-new-keywords 3))))
+    (is (every (lambda (n) (find-symbol n :keyword)) (subseq names 0 3))
+        "the three keywords under the limit were not interned")
+    (is (null (find-symbol (fourth names) :keyword)) "the keyword past the limit was interned"))
+  (let ((names (loop repeat 3 collect (%fresh-name "LIM"))))
+    (is (eq :none (reason (sexp:read-data (%keyword-list-input names) :intern-keywords t
+                                                                     :max-new-keywords 3)))
+        "3 new keywords and an existing one were refused under a limit of 3"))
+  (let ((names (loop repeat 4 collect (%fresh-name "LIM"))))
+    (is (eq :none (reason (sexp:read-data (%keyword-list-input names) :intern-keywords t)))
+        "control: with no limit, 4 new keywords were refused")))
+
+(test the-keyword-arguments-are-checked
+  (signals error (sexp:read-data ":test" :intern-keywords :yes))
+  (signals error (sexp:read-data ":test" :max-new-keywords -1))
+  (signals error (sexp:read-data ":test" :max-new-keywords "3")))
+
 ;;; --- limits ------------------------------------------------------------------------------
 
 (test each-limit-accepts-its-value-and-refuses-one-more

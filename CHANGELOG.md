@@ -1490,6 +1490,17 @@ its tag.
 
 ### Added
 
+- **`aion/sexp:read-data` can read keywords from outside without creating new ones, or with a
+  limit on how many it creates** (#1166). With `:intern-keywords t`, every keyword in the input
+  was interned before the caller could look at it, and an interned keyword is never freed, so a
+  server reading user input could grow its memory without bound. `:intern-keywords :existing`
+  reads a keyword that already exists as the keyword and a new one as its name, a string,
+  upper-cased (`:foo` reads as `"FOO"`), and interns nothing; the caller decides what to accept.
+  Under `:intern-keywords t`, the new `:max-new-keywords` argument (default
+  `aion/sexp:*max-new-keywords*`, `nil`, meaning no limit) is the most keywords one call
+  creates: the next new keyword is refused with `unsafe-data` reason `:too-many-new-keywords`
+  before it is interned. `:intern-keywords` now accepts only `nil`, `t` and `:existing`, and
+  signals an error for any other value, where any true value used to mean `t`.
 - **`aion/http-client:credential-url-refusal`**, the rule deciding whether a URL is one a
   framework may send a credential to (#1106). It **returns a refusal sentence rather than
   signalling**, so each caller signals its own condition: hermes signals `configuration-error`

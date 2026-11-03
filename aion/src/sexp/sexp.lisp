@@ -17,7 +17,7 @@
   (:export #:read-data #:write-data #:write-data-to-string
            #:unsafe-data #:unsafe-data-reason #:unsafe-data-position #:unsafe-data-detail
            #:*max-depth* #:*max-elements* #:*max-string-length* #:*max-number-digits*
-           #:*max-input*))
+           #:*max-input* #:*max-new-keywords*))
 
 (in-package #:aion/sexp)
 
@@ -33,10 +33,10 @@
   (:documentation "READ-DATA was given input, or WRITE-DATA a datum, outside what this module
 accepts. REASON is a keyword: :DISPATCH-MACRO, :READER-MACRO, :ESCAPED-SYMBOL, :COMMENT,
 :UNKNOWN-SYMBOL, :PACKAGE-PREFIX, :TOO-DEEP, :TOO-MANY-ELEMENTS, :STRING-TOO-LONG,
-:NUMBER-TOO-LONG, :NUMBER-OUT-OF-RANGE, :DIVISION-BY-ZERO, :INPUT-TOO-LONG, :SYNTAX,
-:END-OF-INPUT or, from WRITE-DATA, :UNWRITABLE. POSITION is the character offset in the input,
-or NIL from WRITE-DATA. DETAIL quotes at most the first 40 characters of the offending
-token."))
+:NUMBER-TOO-LONG, :NUMBER-OUT-OF-RANGE, :DIVISION-BY-ZERO, :INPUT-TOO-LONG,
+:TOO-MANY-NEW-KEYWORDS, :SYNTAX, :END-OF-INPUT or, from WRITE-DATA, :UNWRITABLE. POSITION is
+the character offset in the input, or NIL from WRITE-DATA. DETAIL quotes at most the first 40
+characters of the offending token."))
 
 (defparameter *max-depth* 64 "The deepest nesting of lists accepted.")
 (defparameter *max-elements* 100000
@@ -47,6 +47,9 @@ lists and three atoms, and () is one. READ-DATA and WRITE-DATA count the same wa
   "The most digits in an integer, in each part of a ratio, and in a float's digits. A float's
 exponent is bounded separately, by the range of a double float.")
 (defparameter *max-input* 1048576 "The most characters READ-DATA reads for one datum.")
+(defparameter *max-new-keywords* nil
+  "The most keywords READ-DATA creates for one datum when :INTERN-KEYWORDS is T, or NIL for no
+limit other than MAX-ELEMENTS. An interned keyword is never freed (#1166).")
 
 (defun %unsafe (reason position &optional detail &rest args)
   (error 'unsafe-data :reason reason :position position
@@ -71,7 +74,8 @@ exponent is bounded separately, by the range of a double float.")
 
 (defstruct (%reader (:conc-name %r-))
   stream (position 0) (elements 0) symbols intern-keywords (comments :refuse)
-  max-depth max-elements max-string-length max-number-digits max-input)
+  max-depth max-elements max-string-length max-number-digits max-input
+  max-new-keywords (new-keywords 0))
 
 (defun %peek (r)
   (peek-char nil (%r-stream r) nil nil))
@@ -228,9 +232,21 @@ value too small for the type reads as zero, or as the nearest denormal: 1e-50 is
        (every #'%constituent-p name)
        (not (every (lambda (c) (char= c #\.)) name))))
 
+(defun %new-keyword (name r start)
+  "The keyword NAME, which does not exist yet, as :INTERN-KEYWORDS decides: under :EXISTING,
+NAME itself, a string, and nothing is interned; under T, the keyword, interned once the count of
+keywords this read has created is checked against MAX-NEW-KEYWORDS (#1166)."
+  (if (eq (%r-intern-keywords r) :existing)
+      name
+      (let ((limit (%r-max-new-keywords r)))
+        (when (and limit (> (incf (%r-new-keywords r)) limit))
+          (%unsafe :too-many-new-keywords start "more than ~D new keywords" limit))
+        (intern name "KEYWORD"))))
+
 (defun %resolve-symbol (token r start)
-  "The symbol TOKEN names, looked up and never created. Case is folded to upper case, as the
-standard reader does: foo, Foo and FOO all name the symbol whose name is \"FOO\"."
+  "The symbol TOKEN names, looked up and never created, except for a keyword under
+:INTERN-KEYWORDS (%NEW-KEYWORD). Case is folded to upper case, as the standard reader does:
+foo, Foo and FOO all name the symbol whose name is \"FOO\"."
   (let ((colon (position #\: token)))
     (cond
       ((null colon)
@@ -245,7 +261,7 @@ standard reader does: foo, Foo and FOO all name the symbol whose name is \"FOO\"
        (let ((name (string-upcase (subseq token 1))))
          (multiple-value-bind (symbol status) (find-symbol name "KEYWORD")
            (cond (status symbol)
-                 ((%r-intern-keywords r) (intern name "KEYWORD"))
+                 ((%r-intern-keywords r) (%new-keyword name r start))
                  (t (%unsafe :unknown-symbol start "the keyword ~A does not exist" (%clip token)))))))
       (t (%unsafe :package-prefix start "~A names a package" (%clip token))))))
 
@@ -327,15 +343,26 @@ is read."
 (defun read-data (source &key symbols intern-keywords (comments :refuse)
                               (max-depth *max-depth*) (max-elements *max-elements*)
                               (max-string-length *max-string-length*)
-                              (max-number-digits *max-number-digits*) (max-input *max-input*))
+                              (max-number-digits *max-number-digits*) (max-input *max-input*)
+                              (max-new-keywords *max-new-keywords*))
   "Read one datum from SOURCE, a string or a character input stream, accepting plain data only.
 Returns the datum and the number of characters read. Signals UNSAFE-DATA for anything else.
 
 Accepted: proper and dotted lists; strings, whose only escapes are \\\\ and \\\"; integers;
 ratios; floats (see below); T and NIL; keywords that already exist; and the symbols in SYMBOLS,
-a list. Nothing is interned unless INTERN-KEYWORDS is true, which allows new keywords, still
-bounded by MAX-ELEMENTS. SYMBOL CASE: a symbol or keyword token is folded to upper case, as the
+a list. SYMBOL CASE: a symbol or keyword token is folded to upper case, as the
 standard reader folds it, so foo and FOO both name the symbol whose name is \"FOO\".
+
+NEW KEYWORDS: a keyword that does not exist yet is refused, and nothing is interned, unless
+INTERN-KEYWORDS says otherwise (#1166):
+- NIL, the default: refused as :UNKNOWN-SYMBOL.
+- :EXISTING: read as its name, a string, upper-cased as the keyword's name would be, so :foo
+  reads as \"FOO\". Nothing is interned, and the caller decides what to accept. The string
+  cannot be told apart from a string literal \"FOO\" in the input.
+- T: interned. An interned keyword is never freed, so on input from outside each call can add
+  keywords for the life of the image. MAX-NEW-KEYWORDS, when not NIL, is the most keywords one
+  call creates; the next one is refused as :TOO-MANY-NEW-KEYWORDS before it is interned. The
+  keywords created before that stay interned.
 
 FLOATS: the exponent marker decides the type whatever *READ-DEFAULT-FLOAT-FORMAT* is: E, F and
 S, and no marker, give a single float; D and L a double float.
@@ -355,13 +382,19 @@ For a string, text after the datum is refused unless it is whitespace, or whites
 comments under :SKIP; for a stream, the stream is left just after the datum."
   (unless (member comments '(:refuse :skip))
     (error "aion/sexp: :COMMENTS must be :REFUSE or :SKIP, not ~S." comments))
+  (unless (member intern-keywords '(nil t :existing))
+    (error "aion/sexp: :INTERN-KEYWORDS must be NIL, T or :EXISTING, not ~S." intern-keywords))
+  (unless (or (null max-new-keywords) (typep max-new-keywords '(integer 0)))
+    (error "aion/sexp: :MAX-NEW-KEYWORDS must be NIL or a non-negative integer, not ~S."
+           max-new-keywords))
   (let* ((stream (if (stringp source) (make-string-input-stream source) source))
          (r (progn (%check-symbols-argument symbols)
                    (make-%reader :stream stream :symbols symbols :intern-keywords intern-keywords
                                  :comments comments
                           :max-depth max-depth :max-elements max-elements
                           :max-string-length max-string-length
-                          :max-number-digits max-number-digits :max-input max-input)))
+                          :max-number-digits max-number-digits :max-input max-input
+                          :max-new-keywords max-new-keywords)))
          (datum (%read r)))
     (when (stringp source)
       (%skip-whitespace r)
