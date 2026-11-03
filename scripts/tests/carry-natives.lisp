@@ -929,6 +929,64 @@ must have the library's own name."
       (is (null e) "~S was refused: ~A" lib e)
       (is-true (%native-in-bundle-p bundle "thing[1].dll") "~S was not copied as thing[1].dll" lib))))
 
+(test a-directory-of-notices-for-a-library-whose-name-has-brackets-keeps-its-name
+  "#1145, Copilot's review of #1157: a license that is a directory of notices was copied under
+a directory name made with UIOP:ENSURE-DIRECTORY-PATHNAME, which writes a [ as \\[, so the
+notices for thing[1].dll went under an escaped name. They must be under
+LICENSES/thing[1]-licenses/, also when the library is in a folder named with brackets."
+  (dolist (folder +odd-folder-names+)
+    (let* ((tree (%fresh-tree))
+           (lib (%native-file tree folder "thing[1].dll")))
+      (%native-file tree folder "licenses" "notice.txt")
+      (multiple-value-bind (e bundle) (%carry-refusal (list lib))
+        (is (null e) "~S was refused: ~A" lib e)
+        (is-true (%native-in-bundle-p bundle "LICENSES" "thing[1]-licenses" "notice.txt")
+                 "the notices beside ~S are not under LICENSES/thing[1]-licenses/" lib)))))
+
+(test the-build-scripts-own-carry-check-reads-a-path-with-brackets
+  "#1145, Copilot's review of #1157: build-desktop-app.lisp checks every --carry and
+--carry-license path with PROBE-FILE before it loads the app, and a folder named lib [x] made
+that a wild-pathname error. The build is run with a --carry that exists in such a folder and a
+--carry-license that does not, so it stops at that check, before loading anything. It must
+report only the missing license, by its native name, with exit code 3."
+  (dolist (folder +odd-folder-names+)
+    (let* ((tree (%fresh-tree))
+           (lib (%native-file tree folder "thing.dll"))
+           (missing (concatenate 'string (string-right-trim "/\\" (uiop:native-namestring tree))
+                                 (%native-sep) folder (%native-sep) "missing.txt")))
+      (let* ((out (make-string-output-stream))
+             (code (nth-value
+                    2 (uiop:run-program
+                       (list (uiop:native-namestring sb-ext:*runtime-pathname*) "--script"
+                             (uiop:native-namestring (merge-pathnames "build-desktop-app.lisp" *scripts*))
+                             "--system" "nosuchapp" "--entry" "nosuchapp:main" "--name" "nosuchapp"
+                             "--version" "0.0.1"
+                             "--out" (uiop:native-namestring (merge-pathnames "dist/" tree))
+                             "--carry" lib "--carry-license" missing)
+                       :directory tree :input nil :output out :error-output out
+                       :ignore-error-status t)))
+             (text (get-output-stream-string out)))
+        (is (eql 3 code) "exit code ~A for --carry ~S:~%~A" code lib text)
+        (is-true (search (format nil "--carry-license ~A: no such file" missing) text)
+                 "the missing license ~S was not reported:~%~A" missing text)
+        (is (null (search (format nil "--carry ~A: no such file" lib) text))
+            "the --carry ~S, which exists, was reported missing:~%~A" lib text)))))
+
+#+win32
+(test a-drive-relative-carry-of-sqlite-is-the-apps-own
+  "#1145, Copilot's review of #1157: C:sqlite3.dll names sqlite3.dll in drive C's current
+folder. The file name of a carried path was taken after its last / or \\, so this one was
+C:sqlite3.dll, and TREE-SQLITE-CARRY did not see that the app carries its own SQLite."
+  (%load-carry-natives)
+  (is (string= "sqlite3.dll" (funcall (%carry-fn "%FILE-NAME") "C:sqlite3.dll")))
+  (let ((vendor (merge-pathnames "vendor/" (%fresh-tree))))
+    (%build-fake-sqlite vendor :windows)
+    (multiple-value-bind (carries note e)
+        (%tree-sqlite-carry vendor '("C:sqlite3.dll") :loaded t :platform :windows)
+      (is (null e) "got ~A" e)
+      (is (null carries) "the tree's copy must not be carried beside the app's own")
+      (is (search "carries its own" (or note "")) "note: ~A" note))))
+
 ;;; --- check-install-names.sh, check 1b of verify-bundle-macos.sh (#957, #1131) -------------------
 ;;;
 ;;; The check read otool's second line with `head -n 2 | tail -n 1'. For a file with no install

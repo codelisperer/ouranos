@@ -1460,8 +1460,12 @@ its tag.
   a file error about a wild pathname, instead of being carried. The paths are now read as the
   operating system's names for the files, with `uiop:parse-native-namestring`. The copy in the
   bundle, its license under `LICENSES/`, and the file `open-carried-libraries` opens when the app
-  starts are named from the file's parts, so a library named `thing[1].dll` keeps that name.
-  A bundle that already built is not affected.
+  starts are named from the file's parts, so a library named `thing[1].dll` keeps that name,
+  and so does its directory of notices, `LICENSES/thing[1]-licenses/`. `build-desktop-app.lisp`
+  checks that each `--carry` and `--carry-license` file exists before it loads the app, and that
+  check reads the paths the same way. On Windows a drive-relative `--carry C:sqlite3.dll` is now
+  seen as the app's own SQLite, so the tree's copy is not carried beside it. A bundle that already
+  built is not affected.
 
 - **`reinitialize-instance` on an S3 blob store stores the endpoint trimmed, as `make-s3-store`
   does** (#1151). It used to check trimmed copies of `:endpoint` and keep the value as given, so

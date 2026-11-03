@@ -113,10 +113,13 @@ is."
 (defun %file-name (path)
   "The operating system's name for the file PATH, without its directory. PATH is a pathname or
 a native string. CL:FILE-NAMESTRING is not used, because SBCL writes a [ in a file name as \\[,
-and given a string it parses it as a Lisp namestring first (#1145)."
+and given a string it parses it as a Lisp namestring first (#1145). On Windows a backslash also
+ends the directory, and so does the colon of a drive: C:sqlite3.dll, a file in drive C's current
+folder, is sqlite3.dll."
   (let ((native (if (stringp path) path (uiop:native-namestring path))))
     (subseq native (1+ (or (position-if (lambda (c) (or (char= c #\/)
-                                                       (and (uiop:os-windows-p) (char= c #\\))))
+                                                       (and (uiop:os-windows-p)
+                                                            (or (char= c #\\) (char= c #\:)))))
                                         native :from-end t)
                            -1)))))
 
@@ -203,9 +206,11 @@ libssl.3.dylib, as CL:PATHNAME-NAME gives it, but without parsing NAME as a Lisp
         (dolist (file (directory (merge-pathnames "**/*.*" license)))
           (unless (uiop:directory-pathname-p file)
             (let ((dst (merge-pathnames (uiop:enough-pathname file license)
-                                        (uiop:ensure-directory-pathname
-                                         (%in-directory (format nil "~A-~A" lib-name root)
-                                                        bundle "LICENSES")))))
+                                        (merge-pathnames
+                                         (make-pathname :directory (list :relative "LICENSES"
+                                                                         (format nil "~A-~A" lib-name root))
+                                                        :name nil :type nil :version nil)
+                                         bundle))))
               (ensure-directories-exist dst)
               (uiop:copy-file file dst))))
         (format report "~&            + LICENSES/~A-~A/~%" lib-name root))
