@@ -316,48 +316,65 @@ libssl.3.dylib names .../Cellar/openssl@3/<version>/lib/libcrypto.3.dylib, while
 libcrypto.3.dylib's own name is .../opt/openssl@3/lib/libcrypto.3.dylib. Measured on #334:
 the app exited 3 on `Library not loaded' for libcrypto, and started once libssl was relinked.
 
-A load command is rewritten only when it names another carried file, by resolved path or by
-file name. System libraries and names already relative (@...) are never touched. Rewriting
+A load command is rewritten only when it names another carried file, as %RELINK-TARGET
+decides: by the path it resolves to, or by file name when it resolves to no file on this
+machine. System libraries are never touched. Rewriting
 invalidates the signature, and arm64 will not load an invalidly signed dylib, so each changed
 file is re-signed with `codesign --force -s -'."
   (%relink-files (mapcar #'second plan) (mapcar #'first plan) (mapcar #'second plan)
                  bundle report))
 
+(defun %relink-target (dep truenames names origins)
+  "The name in NAMES that the load command DEP should point at, or NIL. When it is NIL, the
+second value is a carried name that DEP shares only a file name with, or NIL.
+
+DEP matches a carried file when it resolves on this machine to that file's truename in
+TRUENAMES, when it is the install name ORIGINS recorded for the file before the stamp, or when
+it resolves to the file ORIGINS recorded it was copied from. An install name that starts with @,
+such as @rpath/libzstd.1.dylib, does not resolve here, so it matches only a recorded install
+name. When DEP resolves to a file that none of these name, it is a different library from the
+carried one, even when the file names are the same, and it is not matched. Only a DEP that
+resolves to no file here is matched by its file name alone (#1143)."
+  (let* ((at (char= (char dep 0) #\@))
+         (dep-true (and (not at) (ignore-errors (probe-file dep))))
+         (i (and dep-true truenames (position dep-true truenames :test #'equal)))
+         (origin (or (find dep origins :key #'second :test #'equal)
+                     (and dep-true (find dep-true origins :key #'third :test #'equal))))
+         (by-name (and (not at) (find (file-namestring dep) names :test #'%same-file-name-p))))
+    (cond (i (nth i names))
+          (origin (find (file-namestring (first origin)) names :test #'%same-file-name-p))
+          ((and by-name (not dep-true)) by-name)
+          (t (values nil by-name)))))
+
 (defun %relink-files (files truenames names bundle report &optional origins)
   "Rewrite the load commands of each of FILES, file names in BUNDLE, that name one of NAMES,
 the carried files' names, to @loader_path/<name>, and re-sign each file that changed, as
-%RELINK-CARRIED describes. A load command matches a name by file name, or, when TRUENAMES is
-given in the same order as NAMES, by the path it resolves to on this machine. ORIGINS, entries
-of *CARRIED-ORIGINS* for files in BUNDLE, match a load command that names a carried file's
-original install name, or resolves to the file it was copied from, whatever its file name."
+%RELINK-CARRIED describes. TRUENAMES, when given, are the files the carried ones were copied
+from, in the same order as NAMES. ORIGINS are entries of *CARRIED-ORIGINS* for files in BUNDLE.
+%RELINK-TARGET says which load commands match. A load command that names a different file with
+the same file name as a carried one is left as it is, and a line saying so goes to REPORT."
   (loop for name in files
         for dst = (merge-pathnames name bundle)
         for changed = nil
         do (dolist (dep (%macho-dependencies dst))
-             (unless (or (char= (char dep 0) #\@)
-                         (uiop:string-prefix-p "/usr/lib/" dep)
+             (unless (or (uiop:string-prefix-p "/usr/lib/" dep)
                          (uiop:string-prefix-p "/System/" dep))
-               (let* ((dep-true (and (or truenames origins) (ignore-errors (probe-file dep))))
-                      (origin (or (find dep origins :key #'second :test #'equal)
-                                  (and dep-true (find dep-true origins :key #'third
-                                                                       :test #'equal))))
-                      (target (or (and dep-true truenames
-                                       (let ((i (position dep-true truenames :test #'equal)))
-                                         (and i (nth i names))))
-                                  (and origin
-                                       (find (file-namestring (first origin)) names
-                                             :test #'%same-file-name-p))
-                                  (find (file-namestring dep) names :test #'%same-file-name-p))))
-                 (when (and target (not (%same-file-name-p target name)))
-                   (multiple-value-bind (out code)
-                       (%run-tool (list "install_name_tool" "-change" dep
-                                        (format nil "@loader_path/~A" target)
-                                        (uiop:native-namestring dst)))
-                     (unless (eql code 0)
-                       (error 'carry-refused :path dst
-                                             :reason (format nil "install_name_tool could not point it at the carried ~A: ~A" target out))))
-                   (format report "~&            ~A now names @loader_path/~A~%" dep target)
-                   (setf changed t)))))
+               (multiple-value-bind (target same-name) (%relink-target dep truenames names origins)
+                 (cond
+                   ((and target (not (%same-file-name-p target name))
+                         (not (equal dep (format nil "@loader_path/~A" target))))
+                    (multiple-value-bind (out code)
+                        (%run-tool (list "install_name_tool" "-change" dep
+                                         (format nil "@loader_path/~A" target)
+                                         (uiop:native-namestring dst)))
+                      (unless (eql code 0)
+                        (error 'carry-refused :path dst
+                                              :reason (format nil "install_name_tool could not point it at the carried ~A: ~A" target out))))
+                    (format report "~&            ~A now names @loader_path/~A~%" dep target)
+                    (setf changed t))
+                   (same-name
+                    (format report "~&            ~A left as it is: it is a different file from the carried ~A, with the same name~%"
+                            dep same-name))))))
            (when changed
              (multiple-value-bind (out code)
                  (%run-tool (list "codesign" "--force" "-s" "-" (uiop:native-namestring dst)))
@@ -384,7 +401,10 @@ recorded when each step copied it: the file's install name before the stamp, and
 was copied from. A step can carry a library under another file name than the one a dependent
 records: the runtime step names libzstd.1.dylib from its symbolic link, and a dependent can name
 the versioned file or a path whose file name differs. Matching by file name alone left that
-dependent naming the build machine's path (#1130).
+dependent naming the build machine's path (#1130). A load command that starts with @, such as
+@rpath/libzstd.1.dylib, is matched by the recorded install name, and one that resolves to a file
+on this machine is never matched by its file name alone, because that file is then a different
+library from the carried one (#1143).
 
 Signals CARRY-REFUSED as %RELINK-CARRIED does."
   (when (and *relink* (uiop:os-macosx-p))
