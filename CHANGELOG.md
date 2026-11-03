@@ -1501,7 +1501,9 @@ its tag.
   `_CLOUD_F` are `:cloud`. On Linux and macOS a symbolic link is `:symlink` and anything else
   `nil`. Both signal `aion/fs:reparse-kind-error` when the path cannot be read, for example
   because it does not exist. `link-p` and `delete-tree` are unchanged and still treat every
-  reparse point, a cloud placeholder included, as a link.
+  reparse point, a cloud placeholder included, as a link. `:cloud` is tested only through `reparse-tag-kind` on
+  the tags Windows defines, not on a real placeholder; `:symlink` and `:junction` are tested on
+  real links.
 
 - **`aion/http-client:credential-url-refusal`**, the rule deciding whether a URL is one a
   framework may send a credential to (#1106). It **returns a refusal sentence rather than
