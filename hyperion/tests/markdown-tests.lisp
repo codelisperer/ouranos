@@ -306,3 +306,160 @@ escaping a double quote, so the safe mode keeps it only when it is a name."
                 (md:render (format nil "```x\" onclick=\"a~%code~%```~%"))))
     (is (search "<pre class=\"c++\"><code>code</code></pre>"
                 (md:render (format nil "```c++~%code~%```~%"))))))
+
+;;; --- a render mode for untrusted text (#1119) ---------------------------------------------
+;;;
+;;; An image is fetched as soon as it is rendered, with no click, so a reply holding an image
+;;; URL makes the reader's machine send that request and whatever the URL carries with it. In a
+;;; desktop webview with no Content-Security-Policy nothing stops it, and following a link
+;;; replaces the app's own page. :IMAGES NIL and :LINKS :TEXT are for text the app did not write.
+
+(defun %untrusted (markdown)
+  (hyperion/markdown:render markdown :images nil :links :text))
+
+(test untrusted-render-emits-no-image-element-and-no-href
+  "#1119: in the untrusted mode no form of image or link reaches the output as markup. Each case
+asserts the ABSENCE of the markup and the PRESENCE of the text that replaces it, because a mode
+that produced nothing at all would satisfy the first half on its own."
+  (dolist (case '(("![alt text](https://elsewhere.example/?d=secret)" . "alt text")
+                  ("![a](/local.png)" . "a")
+                  ("![a](//host.example/i.png)" . "a")
+                  ("[click me](https://elsewhere.example/p)" . "click me")
+                  ("[mail](mailto:a@b.example)" . "mail")
+                  ("[rel](/page)" . "rel")
+                  ("text with ![an image](https://elsewhere.example/i.png) inside" . "an image")
+                  ("text with [a link](https://elsewhere.example/p) inside" . "a link")))
+    (let ((out (%untrusted (car case))))
+      (is-false (search "<img" out) "~S emits no img element: ~A" (car case) out)
+      (is-false (search "href" out) "~S emits no href: ~A" (car case) out)
+      (is-false (search "elsewhere.example" out)
+                "~S does not carry the URL into the output at all: ~A" (car case) out)
+      (is-true (search (cdr case) out)
+               "~S keeps its text ~S: ~A" (car case) (cdr case) out)))
+  ;; A reference link, whose URL lives in a definition elsewhere in the document.
+  ;; A DISTINCTIVE LABEL, because "r" appears in almost any HTML this could produce -- in `<p>',
+  ;; in `href', in any English word -- so searching for it proved nothing about the label
+  ;; surviving (the review of #1120).
+  (let ((out (%untrusted (format nil "[zqlabel][1]~%~%  [1]: https://elsewhere.example/p"))))
+    (is-false (search "href" out) "a reference link emits no href: ~A" out)
+    (is-false (search "elsewhere.example" out) "and does not carry its URL: ~A" out)
+    (is-true (search "zqlabel" out) "but keeps its text: ~A" out))
+  ;; An autolink. In the safe mode 3bmd does not make one at all -- the angle brackets are
+  ;; escaped -- so this asserts the absence rather than claiming the option did the work.
+  (let ((out (%untrusted "<https://elsewhere.example/p>")))
+    (is-false (search "href" out) "an autolink emits no href: ~A" out)))
+
+(test the-default-render-is-unchanged-by-the-untrusted-mode
+  "THE CONTROL for #1119, and the reason the options are opt-in: everything that renders trusted
+content must be untouched. Each case is the same input as the untrusted test above, asserting
+that the default still produces the markup."
+  (dolist (case '(("![alt text](https://elsewhere.example/i.png)" "<img" "alt text")
+                  ("![a](/local.png)" "<img" "/local.png")
+                  ("[click me](https://elsewhere.example/p)" "href" "click me")
+                  ("[mail](mailto:a@b.example)" "href" "mailto:a@b.example")
+                  ("[rel](/page)" "href" "/page")))
+    (destructuring-bind (markdown markup text) case
+      (let ((out (hyperion/markdown:render markdown)))
+        (is-true (search markup out) "~S still renders ~A: ~A" markdown markup out)
+        (is-true (search text out) "and keeps ~S: ~A" text out))))
+  ;; A reference link still renders as a link by default.
+  (let ((out (hyperion/markdown:render
+              (format nil "[zqlabel][1]~%~%  [1]: https://elsewhere.example/p"))))
+    (is-true (search "href" out) "a reference link still renders by default: ~A" out)
+    (is-true (search "zqlabel" out) "with its label: ~A" out))
+  ;; And the refusals #66 added are untouched by the new arguments, in both modes.
+  (dolist (markdown '("[x](javascript:alert(1))" "![x](javascript:alert(1))"))
+    (dolist (out (list (hyperion/markdown:render markdown) (%untrusted markdown)))
+      (is-false (search "javascript" out) "~S is still refused: ~A" markdown out))))
+
+(test the-untrusted-render-arguments-refuse-a-value-they-cannot-honour
+  "#1119: the default is the permissive one, so a typo in a security argument must not read as
+`render everything'. And :ALLOW-HTML T cannot be combined with either mode: raw HTML is not
+parsed into the tree these options filter, so an IMG or HREF written directly in the source
+survives them -- measured, before the combination was refused."
+  ;; THE NAMED CONDITION, not just ERROR: an app has to be able to catch this misuse and nothing
+  ;; else, so the tests name it (the review of #1120).
+  (dolist (bad '(:maybe :no "nil" 0))
+    (signals hyperion/markdown:render-option-error
+      (hyperion/markdown:render "x" :images bad)))
+  (dolist (bad '(:texts :plain "text" nil-is-fine))
+    (signals hyperion/markdown:render-option-error
+      (hyperion/markdown:render "x" :links bad)))
+  ;; And it carries which argument was at fault and what it was given, so a report can say.
+  (let ((c (handler-case (progn (hyperion/markdown:render "x" :links :texts) nil)
+             (hyperion/markdown:render-option-error (e) e))))
+    (is (eq :links (hyperion/markdown:render-option-error-argument c)))
+    (is (eq :texts (hyperion/markdown:render-option-error-value c)))
+    (is-true (search ":LINKS" (princ-to-string c)) "and prints readably: ~A" c))
+  ;; The four accepted combinations are exercised with real markup in
+  ;; EACH-OPTION-ACTS-ON-ITS-OWN-KIND-OF-MARKUP below, not here: rendering "x" showed only that a
+  ;; string came back, which is what let the reference-link bypass survive (the review of #1120).
+  (is-true (stringp (hyperion/markdown:render "x" :images t :links t)))
+  ;; The combination that cannot be honoured.
+  (signals hyperion/markdown:render-option-error
+    (hyperion/markdown:render "x" :allow-html t :images nil))
+  (signals hyperion/markdown:render-option-error
+    (hyperion/markdown:render "x" :allow-html t :links :text))
+  (signals hyperion/markdown:render-option-error
+    (hyperion/markdown:render "x" :allow-html t :images nil :links :text))
+  ;; The control: :ALLOW-HTML T on its own still works, and still passes raw HTML through, which
+  ;; is why the combination above is refused rather than quietly ignored.
+  (let ((out (hyperion/markdown:render "<img src=\"https://elsewhere.example/i.png\">"
+                                       :allow-html t)))
+    (is-true (search "<img" out) "control: raw HTML still passes with :allow-html t alone: ~A" out)))
+
+(test each-option-acts-on-its-own-kind-of-markup
+  "The review of #1120, and the bypass it found. The mixed combinations were only ever rendered
+with the input \"x\", so nothing checked what each option does on its own -- and the untrusted
+tests always set BOTH, so :LINKS :TEXT masked an image surviving :IMAGES NIL.
+
+THE BYPASS: an accepted reference link was returned whole, so its label was never walked. With
+:IMAGES NIL and the default :LINKS T, `[![alt](https://tracker.example/i.png)][r]' kept the
+image and would still have fetched it. Measured before the fix:
+
+  :images nil, :links t -> <p><a href=\"...\"><img src=\"https://tracker.example/i.png\" ...></a></p>
+
+Each row below is one input under all four accepted combinations, asserting what each option is
+responsible for rather than that something came back."
+  (let ((image "![alt](https://img.example/i.png)")
+        (link "[words](https://link.example/p)")
+        (ref-with-image (format nil "[![alt](https://img.example/i.png)][r]~%~%  [r]: https://link.example/p")))
+    (flet ((out (markdown images links)
+             (hyperion/markdown:render markdown :images images :links links)))
+      ;; An image: governed by :IMAGES alone, whatever :LINKS says.
+      (dolist (links '(t :text))
+        (is-true (search "<img" (out image t links))
+                 ":images t keeps the image with :links ~S" links)
+        (is-false (search "<img" (out image nil links))
+                  ":images nil drops it with :links ~S" links)
+        (is-true (search "alt" (out image nil links))
+                 "and leaves the alt text with :links ~S" links))
+      ;; A link: governed by :LINKS alone, whatever :IMAGES says.
+      (dolist (images '(t nil))
+        (is-true (search "href" (out link images t))
+                 ":links t keeps the href with :images ~S" images)
+        (is-false (search "href" (out link images :text))
+                  ":links :text drops it with :images ~S" images)
+        (is-true (search "words" (out link images :text))
+                 "and leaves the text with :images ~S" images))
+      ;; AN IMAGE INSIDE AN ACCEPTED REFERENCE LINK'S LABEL -- the bypass. The link is allowed
+      ;; here, so this is the case where only :IMAGES can stop the fetch.
+      (is-true (search "<img" (out ref-with-image t t))
+               "control: the default keeps both the link and the image")
+      (is-true (search "href" (out ref-with-image nil t))
+               ":links t keeps the reference link")
+      (is-false (search "<img" (out ref-with-image nil t))
+                "but :images nil drops the image inside its label: ~A" (out ref-with-image nil t))
+      (is-false (search "img.example" (out ref-with-image nil t))
+                "and the image URL does not reach the output: ~A" (out ref-with-image nil t))
+      (is-true (search "alt" (out ref-with-image nil t))
+               "while the alt text stays")
+      ;; THE LOOKUP KEY SURVIVES THE SANITISING. The label is rewritten, so the original is kept
+      ;; as the definition; without that the key would change and the href would not resolve.
+      (is-true (search "link.example/p" (out ref-with-image nil t))
+               "the reference still resolves to its definition: ~A" (out ref-with-image nil t))
+      ;; And with links off too, nothing of either remains.
+      (dolist (o (list (out ref-with-image nil :text) (out ref-with-image t :text)))
+        (is-false (search "href" o) "no href with :links :text: ~A" o))
+      (is-false (search "<img" (out ref-with-image nil :text))
+                "and no image with both off"))))
