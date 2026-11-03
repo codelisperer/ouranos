@@ -862,3 +862,76 @@ a runtime in a directory named `br [x]*' has a *RUNTIME-PATHNAME* that is not wi
     (is (string= (concatenate 'string want "libsqlite3.dylib")
                  (uiop:native-namestring (merge-pathnames "libsqlite3.dylib" dir)))
         "a carried file name merged into it is not the file beside the executable")))
+
+;;; --- check-install-names.sh, check 1b of verify-bundle-macos.sh (#957, #1131) -------------------
+;;;
+;;; The check read otool's second line with `head -n 2 | tail -n 1'. For a file with no install
+;;; name otool prints only its header, the file's path and a colon, and that pipeline returned
+;;; the header, which starts with the bundle directory and so was reported as ok. The check is
+;;; now a script of its own, scripts/check-install-names.sh, so this test runs it on real dylibs
+;;; without building or launching an app. A library with no install name is compiled with
+;;; `cc -bundle', which writes a Mach-O file with no LC_ID_DYLIB, and named .dylib; once for
+;;; this machine, and once universal (x86_64 and arm64), for which otool prints a header per
+;;; architecture and no install name.
+
+(defun %install-names-fixture (dir &key no-id)
+  "Compile into DIR dylibs whose install names are inside DIR, relative, and an absolute path
+outside DIR; with NO-ID, also noid.dylib and the universal noidfat.dylib, which have no install
+name. Returns true when every compile succeeded."
+  (let ((src (%write (merge-pathnames "f.c" dir) "int f(void) { return 1; }")))
+    (flet ((cc (&rest args)
+             (eql 0 (nth-value 2 (uiop:run-program (append (list "cc") args
+                                                           (list (uiop:native-namestring src)))
+                                                   :ignore-error-status t
+                                                   :output nil :error-output nil))))
+           (lib (name) (uiop:native-namestring (merge-pathnames name dir))))
+      (and (cc "-dynamiclib" "-install_name" (lib "libinside.dylib") "-o" (lib "libinside.dylib"))
+           (cc "-dynamiclib" "-install_name" "@executable_path/librel.dylib"
+               "-o" (lib "librel.dylib"))
+           (cc "-dynamiclib" "-install_name" "/opt/elsewhere/libabs.dylib"
+               "-o" (lib "libabs.dylib"))
+           (or (not no-id)
+               (and (cc "-bundle" "-o" (lib "noid.dylib"))
+                    (cc "-arch" "x86_64" "-arch" "arm64" "-bundle" "-o" (lib "noidfat.dylib"))))))))
+
+(defun %check-install-names (&rest args)
+  "Run scripts/check-install-names.sh with ARGS. (values EXIT-CODE OUTPUT)."
+  (multiple-value-bind (out err code)
+      (uiop:run-program (list* "sh" (uiop:native-namestring
+                                     (merge-pathnames "check-install-names.sh" *scripts*))
+                               args)
+                        :output :string :error-output :output :ignore-error-status t)
+    (declare (ignore err))
+    (values code out)))
+
+(test a-dylib-with-no-install-name-fails-the-install-name-check
+  "#1131: noid.dylib and the universal noidfat.dylib have no install name. The check exits 1 with
+a FAIL line naming each, and does not report either as ok. The control is the same directory
+without the two, which exits 0: the library inside the bundle and the relative one are ok, and
+the absolute path outside the bundle is a WARN, which does not fail."
+  (let ((why (%relink-skip-reason)))
+    (if why
+        (skip why)
+        (let ((dir (uiop:native-namestring (%fresh-tree)))
+              (control (uiop:native-namestring (%fresh-tree))))
+          (is-true (%install-names-fixture dir :no-id t) "the fixture dylibs did not compile")
+          (multiple-value-bind (code out) (%check-install-names dir)
+            (is (eql 1 code) "exit ~A, expected 1:~%~A" code out)
+            (is (search "FAIL -- otool -D printed no install name for noid.dylib" out)
+                "no FAIL line for noid.dylib:~%~A" out)
+            (is (not (search "ok -- noid.dylib" out)) "noid.dylib was reported ok:~%~A" out)
+            (is (search "FAIL -- otool -D printed no install name for noidfat.dylib" out)
+                "no FAIL line for the universal noidfat.dylib:~%~A" out)
+            (is (not (search "ok -- noidfat.dylib" out))
+                "the universal noidfat.dylib was reported ok:~%~A" out))
+          (is-true (%install-names-fixture control) "the control's dylibs did not compile")
+          (multiple-value-bind (code out) (%check-install-names control)
+            (is (eql 0 code) "control: exit ~A, expected 0:~%~A" code out)
+            (is (search "ok -- libinside.dylib" out) "control: libinside.dylib:~%~A" out)
+            (is (search "ok -- librel.dylib: @executable_path/librel.dylib" out)
+                "control: librel.dylib:~%~A" out)
+            (is (search "WARN -- libabs.dylib has the install name /opt/elsewhere/libabs.dylib"
+                        out)
+                "control: libabs.dylib:~%~A" out)
+            (is (not (search "FAIL" out)) "control: a FAIL line:~%~A" out))
+          (is (eql 2 (%check-install-names)) "no directory is a bad command line")))))
