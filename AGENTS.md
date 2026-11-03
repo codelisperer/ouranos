@@ -357,8 +357,24 @@ not about an expression inside it; an `ok` line is about failures, not about cov
   the source is newer than its fasl, and a touch that lands in the same second as the control
   run's build is not newer — so restoring a file and touching it leaves the control's code
   loaded.
-  **A correct file on disk is not evidence that the image loaded it.** Delete the fasl
-  (`~/.cache/common-lisp/**/<file>.fasl`) or load with `:force t`, then read the count back.
+  **A correct file on disk is not evidence that the image loaded it.** Delete the cached fasls or
+  force the rebuild, then read the count back:
+  - **Where the fasls are** depends on the OS and on ASDF's output translations, so ask ASDF
+    rather than assuming: `asdf:*user-cache*` is the cache root, and
+    `(asdf:apply-output-translations (asdf:system-source-directory :NAME))` is the directory for
+    one system. The usual default is `~/.cache/common-lisp/` on Linux and macOS and
+    `~/AppData/Local/cache/common-lisp/` on Windows — the two paths `verify.yml`'s matrix caches —
+    with a subdirectory for the implementation and platform under it, such as
+    `sbcl-2.6.9-linux-x64/`, and then the source tree's own absolute path. A path written out by
+    hand without that subdirectory points nowhere, which is why asking ASDF beats remembering.
+  - **`:force t` rebuilds only the system named in the call, not its dependencies.** Measured
+    here: `(asdf:load-system :hermes :force t)` recompiled 11 hermes files and **none** of
+    `aion/http-client`, the system hermes depends on. The usual stale-fasl case is the other way
+    round — the change is in a dependency, and the system loaded is the one that uses it — so
+    `:force t` on the system you are testing leaves the stale build in place. Name every system
+    you changed instead: `(asdf:load-system :hermes :force '(:hermes :aion/http-client))`
+    recompiled both. `:force :all` is not usable in this tree: it rebuilds every library,
+    Quicklisp's included, and recompiling cl+ssl from scratch fails.
 - **A stale fasl can make a local suite PASS for a tree whose suite fails**, which is the half of
   this that costs the most. The rule above and the sentence before it describe a stale fasl
   turning a passing suite red; it does the opposite just as easily, because the code the image
