@@ -27,13 +27,22 @@ its tag.
     (Anthropic, `praxeon/src/llm.lisp`) and `x-goog-api-key` (Google,
     `praxeon/src/image-google.lisp`) — are removed on a hop that changes origin. They are one
     list, `+credential-headers+`, read both to decide the path and to strip;
-  - **a credential in the request body**, such as Facebook's `access_token` in a POST form: a
-    `307` or `308` repeats the body, and there is no way to strip it, so **a cross-origin `307`
-    or `308` for a request with a body is not followed at all** — the `3xx` is returned and the
-    caller decides;
-  - **a body carried into a method change**: `301`, `302` and `303` turn a non-GET into a `GET`,
-    and the body and its `Content-Type` now go with the method rather than being re-sent on a
-    request that cannot carry them.
+  - **a credential in the request body**, such as Facebook's `access_token` in a POST form, which
+    no header list can see and no code can strip: **a body is never sent to another origin,
+    whatever the redirect's status.** If the next hop would carry the body across an origin, it
+    is not followed — the `3xx` is returned and the caller decides. **Any request with a body
+    follows its redirects through this client for that reason**, credential header or not;
+    deciding by headers alone sent Facebook's POST down dexador's own path, where a cross-origin
+    `307` re-sent the token;
+  - **a body dropped with a method change**: `301`, `302` and `303` turn a non-GET into a `GET`,
+    and then the body and its `Content-Type` go with the method, so such a hop is followed with
+    no body. **A request that was already a `GET` keeps its method on those codes, and so keeps
+    its body** — which is why the rule above is about the body the next hop would carry rather
+    than about the status code: a first version refused only `307` and `308`, and a `GET` with a
+    body followed a cross-origin `301` with the body still attached.
+  **A request with a body and no credential header may now get a `3xx` back where it used to be
+  followed**, when the redirect leaves its origin. A request with neither a body nor a credential
+  header is unaffected and still has its redirects followed by dexador.
 
   **A request already exempt from the proxy under a recorded local approval still follows no
   redirect at all**, which is #1134's rule; this follows redirects only for requests that rule

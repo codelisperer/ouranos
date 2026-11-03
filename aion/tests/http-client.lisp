@@ -2612,3 +2612,84 @@ still followed."
           "control: an unapproved request starts the same way: ~S" (second calls))
       (is (= 3 (length calls))
           "and is followed, so the approval is what stopped the first: ~S" calls))))
+
+(defun %body-hops (method headers content status target)
+  "Send one request answered with STATUS and a Location of TARGET, and return what dexador was
+given for each hop: (url max-redirects body-sent-p).
+
+THE BODY AND :MAX-REDIRECTS ARE BOTH RECORDED, because they answer two different questions. The
+body says whether it reached the next hop. :MAX-REDIRECTS says who was following redirects: 0
+means this client's own loop, 5 means dexador -- and with DEX:REQUEST stubbed, dexador's own
+redirect handling does not run, so a request left on dexador's path shows up as a single call
+whatever dexador would really have done. :MAX-REDIRECTS is what tells the two apart."
+  (let ((seen '())
+        (original (fdefinition 'dex:request)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'dex:request)
+                 (lambda (u &rest args)
+                   (push (list u (getf args :max-redirects) (and (getf args :content) t)) seen)
+                   (if (= 1 (length seen))
+                       (values "" status (let ((h (make-hash-table :test #'equal)))
+                                           (setf (gethash "location" h) target)
+                                           h))
+                       (values "done" 200 (make-hash-table :test #'equal)))))
+           (http:send-request (http:make-request :method method :url "https://api.example.com/x"
+                                                 :headers headers :content content
+                                                 :follow-redirects 5)
+                              '()))
+      (setf (fdefinition 'dex:request) original))
+    (reverse seen)))
+
+(test a-get-with-a-body-does-not-take-it-to-another-origin
+  "Copilot's review of #1141. The loop refused a cross-origin hop only for a 307 or 308 with a
+body, reasoning that 301, 302 and 303 discard the body. They discard it only by CHANGING THE
+METHOD TO GET, and a request that was already a GET keeps its method -- so a credential-bearing
+GET with a body followed a cross-origin 301 and took the body with it. Measured at e8d8987e:
+
+  (api.example.com/x 0 T) (evil.example/collect 0 T)
+
+The second entry is the body arriving at the other origin. The loop now works out the body the
+next hop would actually carry instead of inferring it from the status."
+  (dolist (status '(301 302 303))
+    (let ((hops (%body-hops :get '(("Authorization" . "Bearer s")) "q=1" status
+                            "https://evil.example/collect")))
+      (is (= 1 (length hops))
+          "a GET with a body is not followed across origins on a ~D: ~S" status hops)))
+  ;; The controls: the same GET within the origin is followed with its body, and a POST across
+  ;; origins on a 303 is followed with the body DROPPED -- the change to GET takes it away.
+  (let ((hops (%body-hops :get '(("Authorization" . "Bearer s")) "q=1" 301
+                          "https://api.example.com/y")))
+    (is (= 2 (length hops)) "control: within the origin it is followed: ~S" hops)
+    (is-true (third (second hops)) "control: with its body: ~S" hops))
+  (let ((hops (%body-hops :post '(("Authorization" . "Bearer s")) "q=1" 303
+                          "https://evil.example/collect")))
+    (is (= 2 (length hops)) "control: a POST on a cross-origin 303 is followed: ~S" hops)
+    (is-false (third (second hops)) "control: with the body dropped by the change to GET: ~S"
+              hops)))
+
+(test a-credential-in-the-body-is-not-sent-to-another-origin
+  "Copilot's review of #1141, and a token leak. Facebook's POST carries access_token in the form
+body and sends no credential header (hermes/src/facebook.lisp), and the dispatch chose the safe
+path by headers alone -- so that POST went down dexador's own path, where dexador re-sends the
+body on a cross-origin 307 or 308 and delivered the token to whatever the redirect named.
+Measured at e8d8987e: the request was handed to dexador with :MAX-REDIRECTS 5, so dexador was in
+charge of following it.
+
+Any request with a body now follows its redirects through this client's loop, where a body is
+never sent to another origin. The assertion is on :MAX-REDIRECTS as well as on the number of
+calls, because a stubbed DEX:REQUEST does not follow redirects itself: a request left on
+dexador's path would also show one call, and only the 5 says who would have followed."
+  (dolist (status '(307 308))
+    (let ((hops (%body-hops :post '() "access_token=secret&message=hi" status
+                            "https://evil.example/collect")))
+      (is (eql 0 (second (first hops)))
+          "a body with no credential header is followed by this client, not dexador, on a ~D: ~S"
+          status hops)
+      (is (= 1 (length hops))
+          "and is not sent to the other origin: ~S" hops)))
+  ;; The control: a request with neither a body nor a credential header is left on dexador's own
+  ;; path, as before, so the dispatch change is about bodies and not about every request.
+  (let ((hops (%body-hops :get '() nil 307 "https://evil.example/collect")))
+    (is (eql 5 (second (first hops)))
+        "control: a plain GET still lets dexador follow its redirects: ~S" hops)))

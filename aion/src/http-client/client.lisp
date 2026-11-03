@@ -706,30 +706,34 @@ to follow any redirect for a credential-bearing request -- would have broken an 
                (to (quri:uri next))
                (status (response-status response))
                (cross-origin (not (equal (%origin from) (%origin to))))
-               (keeps-the-body (member status '(307 308))))
-          ;; A BODY IS NOT RE-SENT TO ANOTHER ORIGIN. 307 and 308 repeat the request as it was,
-          ;; body included, and a credential can be IN that body rather than in a header:
-          ;; Facebook's POST carries access_token in the form, and stripping headers says nothing
-          ;; about it. There is no way to follow such a hop safely, so the 3xx is the answer and
-          ;; the caller decides (the review of #1141).
-          (when (and cross-origin keeps-the-body (request-content current))
+               (method (%redirect-method (request-method current) status))
+               ;; THE BODY THE NEXT HOP WOULD ACTUALLY CARRY, worked out rather than inferred
+               ;; from the status. The first version refused only a 307 or 308 with a body,
+               ;; reasoning that 301, 302 and 303 discard the body -- but they discard it only by
+               ;; changing the method to GET, and a request that was already a GET keeps its
+               ;; method, so a GET carrying a body went to the other origin with it (Copilot's
+               ;; review of #1141). The body goes only when the method changes to GET.
+               (drops-the-body (and (eq method :get) (not (eq method (request-method current)))))
+               (body (if drops-the-body nil (request-content current))))
+          ;; A BODY IS NEVER RE-SENT TO ANOTHER ORIGIN, whatever the status: it may hold a
+          ;; credential that no header list can see -- Facebook's POST carries access_token in
+          ;; the form -- and there is no way to strip one from a body. The 3xx is the answer and
+          ;; the caller decides.
+          (when (and cross-origin body)
             (return response))
           (decf hops)
           (let ((headers (if cross-origin
                              (%without-credentials (request-headers current))
-                             (request-headers current)))
-                (method (%redirect-method (request-method current) status)))
+                             (request-headers current))))
             (setf current (copy-request current))
-            ;; A METHOD CHANGED TO GET LOSES THE BODY WITH IT, and its Content-Type. 301, 302 and
-            ;; 303 turn a non-GET into a GET, and a GET carrying the old request's form body and
-            ;; Content-Type is neither what the server will read nor what the caller sent.
-            (when (and (eq method :get) (not (eq method (request-method current))))
-              (setf (request-content current) nil
-                    headers (remove-if (lambda (h)
+            ;; A body dropped with a change to GET takes its Content-Type with it.
+            (when drops-the-body
+              (setf headers (remove-if (lambda (h)
                                          (string-equal (string (car h)) "content-type"))
                                        headers)))
             (setf (request-url current) next
                   (request-method current) method
+                  (request-content current) body
                   (request-headers current) headers)))))))
 
 (defun %http (req)
@@ -741,7 +745,14 @@ it (#1139). Every other request is handed to dexador as before, redirects includ
 
 The pinned path (CONNECT-ADDRESS) follows no redirects at all by design -- a redirect's host
 would need an address of its own -- so it is already outside this question."
-  (if (and (%credential-bearing-p (request-headers req))
+  (if (and (or (%credential-bearing-p (request-headers req))
+               ;; A BODY CAN CARRY A CREDENTIAL THAT NO HEADER LIST CAN SEE. Facebook's POST puts
+               ;; access_token in the form and sends no credential header, so deciding by headers
+               ;; alone sent it down dexador's own path -- and dexador re-sends the body on a
+               ;; cross-origin 307 or 308, which delivered the token to whatever the redirect
+               ;; named (Copilot's review of #1141). Any request with a body follows its
+               ;; redirects here, where a body is never sent to another origin.
+               (request-content req))
            (plusp (or (request-follow-redirects req) 0))
            (not (request-connect-address req))
            ;; AN APPROVED-LOCAL REQUEST FOLLOWS NOTHING, which is #1134's rule and was bypassed
