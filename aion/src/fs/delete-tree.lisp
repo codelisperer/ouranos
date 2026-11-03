@@ -47,23 +47,13 @@ or symbolic link."))
   (:documentation "An entry DELETE-TREE could not remove. The tree is left partly removed."))
 
 (defun %native (path)
-  "PATH's native namestring without a trailing separator, which Windows and POSIX both need to
-name a directory, or a link to one, as the entry itself. A string is taken as a native path
-already and not parsed: parsing turns [ ] * ? into wildcard syntax, and a file named
-`a[1].txt' would then name nothing (#349). Only a separator is trimmed: / and \\ on Windows,
-/ alone on Linux and macOS, where \\ is an ordinary character and a name may end in it. Trimming
-it there turned b\\ into b, another folder (the hub's review of #1101)."
-  (string-right-trim #+win32 "/\\" #-win32 "/"
-                     (if (stringp path) path (uiop:native-namestring path))))
-
-(defun %directory-pathname (path)
-  "PATH, a native string or a pathname naming a directory, as a directory pathname. It is built by
-parsing PATH's native name with a separator added at the end, and not with
-UIOP:ENSURE-DIRECTORY-PATHNAME, which takes the last name from FILE-NAMESTRING. SBCL escapes
-[ ] * ? there, and on Linux and macOS a backslash too, so a folder named a[1] became one named
-a\\[1] (#1096)."
-  (uiop:parse-native-namestring
-   (concatenate 'string (%native path) #+win32 "\\" #-win32 "/")))
+  "PATH's native name without a trailing separator, which Windows and POSIX both need to name a
+directory, or a link to one, as the entry itself. The name is AION/PATH:NATIVE-NAME's: a string
+is used as written, so [ ] * ? and, on Linux and macOS, a backslash are ordinary characters in it
+(#349, #1096). Only a separator is trimmed: / and \\ on Windows, / alone on Linux and macOS,
+where \\ is an ordinary character and a name may end in it. Trimming it there turned b\\ into b,
+another folder (the hub's review of #1101)."
+  (string-right-trim (path:separators) (path:native-name path)))
 
 ;;; --- asking the operating system -------------------------------------------------------
 
@@ -233,7 +223,7 @@ another file or none (#1096)."
     (:link-file (%remove-file path))               ; a file link, or any POSIX symbolic link
     (:file (%remove-file path))
     (:directory
-     (let ((dir (if (stringp path) path (uiop:ensure-directory-pathname path))))
+     (let ((dir (if (stringp path) path (path:directory-pathname path))))
        (dolist (entry (%entries dir)) (%delete-entry entry))
        (%remove-directory dir)))))
 
@@ -261,7 +251,7 @@ IF-DOES-NOT-EXIST is :ERROR (the default) or :IGNORE.
 
 An entry that cannot be removed signals DELETE-TREE-ERROR, and the tree is left partly removed.
 Returns T when it removed the tree, NIL when ROOT did not exist and that was allowed."
-  (let ((root (%directory-pathname root)))
+  (let ((root (path:directory-pathname root)))
     (%check-root root)
     (ecase (%kind root)
       (:missing
