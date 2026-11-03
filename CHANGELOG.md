@@ -1452,6 +1452,21 @@ its tag.
 
 ### Fixed
 
+- **A `--carry` or `--carry-license` path in a folder whose name has brackets is now carried,
+  and so is a library whose own file name has them** (#1145). `carry-declared-libraries` in
+  `scripts/carry-natives.lisp` gave each path from the command line to `probe-file`, which reads
+  a string as a Lisp namestring, where `[ ] * ?` are wildcards and on Linux and macOS a
+  backslash is an escape. A library in a folder named `lib [x]` stopped the desktop build with
+  a file error about a wild pathname, instead of being carried. The paths are now read as the
+  operating system's names for the files, with `uiop:parse-native-namestring`. The copy in the
+  bundle, its license under `LICENSES/`, and the file `open-carried-libraries` opens when the app
+  starts are named from the file's parts, so a library named `thing[1].dll` keeps that name,
+  and so does its directory of notices, `LICENSES/thing[1]-licenses/`. `build-desktop-app.lisp`
+  checks that each `--carry` and `--carry-license` file exists before it loads the app, and that
+  check reads the paths the same way. On Windows a drive-relative `--carry C:sqlite3.dll` is now
+  seen as the app's own SQLite, so the tree's copy is not carried beside it. A bundle that already
+  built is not affected.
+
 - **`reinitialize-instance` on an S3 blob store stores the endpoint trimmed, as `make-s3-store`
   does** (#1151). It used to check trimmed copies of `:endpoint` and keep the value as given, so
   `(reinitialize-instance store :endpoint " 127.0.0.1:9000 ")` passed its checks and every URL

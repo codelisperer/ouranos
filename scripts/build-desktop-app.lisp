@@ -117,9 +117,12 @@ unless --allow-missing-natives was given; then warn and record it for the summar
 
 ;;; Checked here, before the minutes-long load, so a mistyped path is reported at once.
 ;;; CARRY-DECLARED-LIBRARIES checks it again, with the rest of its rules, before copying.
+;;; Each path is the operating system's name for the file, so it is read with
+;;; UIOP:PARSE-NATIVE-NAMESTRING: as a Lisp namestring, a folder named lib [x] is a wild
+;;; pathname that PROBE-FILE refuses with an error (#1145).
 (loop for (path . licenses) in *carry*
       do (dolist (file (cons path licenses))
-           (unless (probe-file file)
+           (unless (probe-file (uiop:parse-native-namestring file))
              (format *error-output* "~&build-desktop-app: ~:[--carry~;--carry-license~] ~A: no such file.~%"
                      (not (eq file path)) file)
              (sb-ext:exit :code 3))))
