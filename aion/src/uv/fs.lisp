@@ -123,25 +123,15 @@ hangs off the request, and it is libuv's to free -- never ours."
                (cffi:foreign-slot-pointer statbuf '(:struct ffi::uv-stat-t) 'ffi::st-ctim))))))
 
 (defun native-path (path)
-  "PATH as the string libuv is given. A string is passed through unchanged: it is already the
-operating system's name for the file. A pathname is converted with UIOP:NATIVE-NAMESTRING, after
-a logical pathname is translated to a physical one. A wild pathname, one with * or ? in it as a
-pattern, names no single file, so it is refused with an error before libuv is called. Anything
-else, NIL included, is a TYPE-ERROR.
+  "PATH as the string libuv is given: AION/PATH:NATIVE-NAME, which this calls (#1103). A string is
+passed through unchanged: it is already the operating system's name for the file. A pathname is
+converted with UIOP:NATIVE-NAMESTRING, after a logical pathname is translated to a physical one. A
+wild pathname, one with * or ? in it as a pattern, names no single file, so it is refused with an
+error before libuv is called. Anything else, NIL included, is a TYPE-ERROR.
 
 CL:NAMESTRING is used for neither: on Linux and macOS it reads a backslash in a string as an
 escape and drops it, so a file whose name has one could not be used (#1093)."
-  (etypecase path
-    (string path)
-    (pathname
-     (let ((physical (translate-logical-pathname path)))
-       (when (wild-pathname-p physical)
-         (error "aion/uv: ~S is a wild pathname, which names no single file." path))
-       (uiop:native-namestring physical)))))
-
-(defun %separator-p (char)
-  "Whether CHAR separates the components of a path: / everywhere, and a backslash on Windows."
-  (or (char= char #\/) (and (uiop:os-windows-p) (char= char #\\))))
+  (path:native-name path))
 
 (defun %root-length (path)
   "How many characters at the start of the native path PATH name its root, with the root's
@@ -151,9 +141,9 @@ extended-length or device prefix (two separators, ? or ., separator) followed by
 and a share, or by a device name. MAKE-DIRECTORY does not create the root, and WATCH does not
 take the root's separator off (#1093)."
   (let ((n (length path)))
-    (labels ((sep-p (i) (and (< i n) (%separator-p (char path i))))
+    (labels ((sep-p (i) (and (< i n) (path:separator-p (char path i))))
              (past-component (i)
-               (let ((j (position-if #'%separator-p path :start (min i n))))
+               (let ((j (position-if #'path:separator-p path :start (min i n))))
                  (if j (1+ j) n)))
              (drive-p (i) (and (< (1+ i) n) (alpha-char-p (char path i))
                                (char= #\: (char path (1+ i))))))
@@ -173,13 +163,13 @@ take the root's separator off (#1093)."
 ending with PATH itself without its trailing separators. The root is not in it. On Windows the
 parts are joined with a backslash, which an extended-length path requires."
   (let* ((root (min (%root-length path) (length path)))
-         (rest (string-right-trim (if (uiop:os-windows-p) "/\\" "/") (subseq path root)))
-         (joint (if (uiop:os-windows-p) "\\" "/"))
+         (rest (string-right-trim (path:separators) (subseq path root)))
+         (joint (path:native-separator))
          (so-far (subseq path 0 root))
          (chain '()))
     (dolist (component (split-path rest) (nreverse chain))
       (unless (string= component "")
-        (setf so-far (if (or (string= so-far "") (%separator-p (char so-far (1- (length so-far)))))
+        (setf so-far (if (or (string= so-far "") (path:separator-p (char so-far (1- (length so-far)))))
                          (concatenate 'string so-far component)
                          (concatenate 'string so-far joint component)))
         (push so-far chain)))))

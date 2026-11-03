@@ -44,7 +44,7 @@
            #:carry-declared-libraries
            #:carry-refused
            #:open-carried-libraries #:runtime-directory
-           #:stamp-install-name #:relink-bundle
+           #:stamp-install-name #:relink-bundle #:*carried-origins*
            #:sqlite-file-name
            #:tree-sqlite-carry))
 
@@ -230,7 +230,21 @@ CARRY-REFUSED when FILE is a Mach-O that otool cannot read (%OTOOL)."
   "Whether STAMP-INSTALL-NAME changes anything. Only a test turns it off, as the control for
 the stamp.")
 
-(defun stamp-install-name (file &key (report *standard-output*))
+(defvar *carried-origins* '()
+  "(DESTINATION INSTALL-NAME SOURCE) for each library STAMP-INSTALL-NAME was given, newest first:
+the truename of the copy in the bundle, the copy's install name before the stamp changed it, and
+the truename of the file it was copied from, or NIL when the caller did not say. RELINK-BUNDLE
+reads it to find a library that another carry step copied under a different file name (#1130).")
+
+(defun %record-origin (file source)
+  "Record FILE, a library just copied into a bundle from SOURCE, in *CARRIED-ORIGINS*, with its
+install name as it is now."
+  (let ((dst (ignore-errors (truename file))))
+    (when dst
+      (push (list dst (%install-name file) (and source (ignore-errors (truename source))))
+            *carried-origins*))))
+
+(defun stamp-install-name (file &key (report *standard-output*) source)
   "On macOS, when FILE, a dylib just copied into a bundle, has an absolute install name, set it
 to @executable_path/<file name> and re-sign FILE ad hoc (#957). Returns the new install name
 when it changed FILE, otherwise NIL.
@@ -249,8 +263,15 @@ header has no room for the longer name, for a dylib linked with a short absolute
 and without -headerpad_max_install_names. The stamp only removes a build-machine path that
 nothing loads the copy by, so the bundle still works without it (#958's review).
 
+Before anything changes, FILE's install name and SOURCE, the file it was copied from, are
+recorded in *CARRIED-ORIGINS*, also when *STAMP* is NIL. Each carry step calls this for every
+library it copies, so the record covers all of them, and RELINK-BUNDLE uses it after the last
+step (#1130).
+
 Signals CARRY-REFUSED when FILE is a Mach-O that otool cannot read (%OTOOL), and when codesign
 cannot re-sign FILE after its install name changed."
+  (when (uiop:os-macosx-p)
+    (%record-origin file source))
   (when (and *stamp* (uiop:os-macosx-p))
     (let ((id (%install-name file))
           (path (uiop:native-namestring file)))
@@ -302,11 +323,13 @@ file is re-signed with `codesign --force -s -'."
   (%relink-files (mapcar #'second plan) (mapcar #'first plan) (mapcar #'second plan)
                  bundle report))
 
-(defun %relink-files (files truenames names bundle report)
+(defun %relink-files (files truenames names bundle report &optional origins)
   "Rewrite the load commands of each of FILES, file names in BUNDLE, that name one of NAMES,
 the carried files' names, to @loader_path/<name>, and re-sign each file that changed, as
 %RELINK-CARRIED describes. A load command matches a name by file name, or, when TRUENAMES is
-given in the same order as NAMES, by the path it resolves to on this machine."
+given in the same order as NAMES, by the path it resolves to on this machine. ORIGINS, entries
+of *CARRIED-ORIGINS* for files in BUNDLE, match a load command that names a carried file's
+original install name, or resolves to the file it was copied from, whatever its file name."
   (loop for name in files
         for dst = (merge-pathnames name bundle)
         for changed = nil
@@ -314,10 +337,16 @@ given in the same order as NAMES, by the path it resolves to on this machine."
              (unless (or (char= (char dep 0) #\@)
                          (uiop:string-prefix-p "/usr/lib/" dep)
                          (uiop:string-prefix-p "/System/" dep))
-               (let* ((dep-true (and truenames (ignore-errors (probe-file dep))))
-                      (target (or (and dep-true
+               (let* ((dep-true (and (or truenames origins) (ignore-errors (probe-file dep))))
+                      (origin (or (find dep origins :key #'second :test #'equal)
+                                  (and dep-true (find dep-true origins :key #'third
+                                                                       :test #'equal))))
+                      (target (or (and dep-true truenames
                                        (let ((i (position dep-true truenames :test #'equal)))
                                          (and i (nth i names))))
+                                  (and origin
+                                       (find (file-namestring (first origin)) names
+                                             :test #'%same-file-name-p))
                                   (find (file-namestring dep) names :test #'%same-file-name-p))))
                  (when (and target (not (%same-file-name-p target name)))
                    (multiple-value-bind (out code)
@@ -350,13 +379,26 @@ that name (#334). STAMP-INSTALL-NAME now gives it @executable_path/libzstd.1.dyl
 names no longer match, and on a Mac without Homebrew dyld stops with `Library not loaded'
 unless the load command is rewritten to the copy beside it (#958's review).
 
+A load command is matched to a carried file by file name, and also by what *CARRIED-ORIGINS*
+recorded when each step copied it: the file's install name before the stamp, and the file it
+was copied from. A step can carry a library under another file name than the one a dependent
+records: the runtime step names libzstd.1.dylib from its symbolic link, and a dependent can name
+the versioned file or a path whose file name differs. Matching by file name alone left that
+dependent naming the build machine's path (#1130).
+
 Signals CARRY-REFUSED as %RELINK-CARRIED does."
   (when (and *relink* (uiop:os-macosx-p))
-    (let ((names (loop for f in (uiop:directory-files bundle)
-                       for name = (file-namestring f)
-                       when (and (string-equal "dylib" (pathname-type f)) (%macho-p f))
-                         collect name)))
-      (%relink-files names nil names bundle report)
+    (let* ((names (loop for f in (uiop:directory-files bundle)
+                        for name = (file-namestring f)
+                        when (and (string-equal "dylib" (pathname-type f)) (%macho-p f))
+                          collect name))
+           (dir (ignore-errors (truename bundle)))
+           (origins (remove-if-not (lambda (o)
+                                     (and dir (equal (namestring
+                                                      (uiop:pathname-directory-pathname (first o)))
+                                                     (namestring dir))))
+                                   *carried-origins*)))
+      (%relink-files names nil names bundle report origins)
       names)))
 
 (defun carry-declared-libraries (carries bundle &key vendor tree-carries
@@ -418,7 +460,7 @@ OPEN-CARRIED-LIBRARIES opens at startup."
                (unless (uiop:os-windows-p)
                  (uiop:run-program (list "chmod" "+x" (uiop:native-namestring dst)) :ignore-error-status t))
                (format report "~&  carry     ~A  <- ~A~%" name (uiop:native-namestring truename))
-               (stamp-install-name dst :report report)
+               (stamp-install-name dst :report report :source truename)
                (dolist (license licenses)
                  (%copy-license license (pathname-name name) bundle report))
                (cond

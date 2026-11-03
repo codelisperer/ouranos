@@ -58,13 +58,22 @@ them: hermes reads no engagement data, and lists Pages only in the connect flow,
 user token (+FACEBOOK-CONNECT-SCOPES+ asks for all three there). If Meta refuses a post for
 want of one of them, the refusal is FACEBOOK-NOT-PERMITTED, and the scope belongs here.")
 
+(defparameter +facebook-graph-base-default+ "https://graph.facebook.com"
+  "The Graph API host. Written once, for the reason +TELEGRAM-API-BASE-DEFAULT+ gives.")
+
 (defclass facebook (facebook-provider)
   ((app-id :initarg :app-id :initform (uiop:getenv "FACEBOOK_APP_ID") :reader facebook-app-id)
    (app-secret :initarg :app-secret :initform (uiop:getenv "FACEBOOK_APP_SECRET")
                :reader %facebook-app-secret)
    (page-tokens :initarg :page-tokens :initform #'%env-page-token :reader %facebook-page-tokens)
-   (graph-base :initarg :graph-base :initform "https://graph.facebook.com"
+   (graph-base :initarg :graph-base :initform +facebook-graph-base-default+
                :reader facebook-graph-base)
+   (graph-base-approved-local
+    :initform nil :reader facebook-graph-base-approved-local
+    :documentation
+    "THE HOST of GRAPH-BASE when the check that runs on every initialization resolved it and
+approved it as local, and NIL otherwise, so a plaintext send to it is not handed to a proxy
+(#1091). No initarg: the value is a verdict this code reached.")
    (dialog-base :initarg :dialog-base :initform "https://www.facebook.com"
                 :reader facebook-dialog-base))
   (:documentation "The Graph API as a facebook-provider. APP-ID and APP-SECRET are the Meta
@@ -98,6 +107,37 @@ FACEBOOK_PAGE_TOKEN, else NIL."
                                            (secret:make-secret token))))))
         (setf (slot-value p 'page-tokens)
               (lambda (page-id) (cdr (assoc page-id table :test #'string=))))))))
+
+(defun %check-facebook-graph-base (base)
+  "Signal CONFIGURATION-ERROR unless BASE is a URL a Graph API request may carry a page access
+token to (#1106). Returns the host approved as local, or NIL.
+
+DIALOG-BASE IS NOT CHECKED, and the difference is the point: no credential is sent to it. It is
+where a person's browser is sent to approve the app, so a rule about carrying a credential in the
+clear has nothing to say about it, and refusing a plaintext dialog base would turn away a working
+local setup for no reason."
+  (nth-value 1 (%check-credential-url
+                base
+                :setting "Facebook GRAPH-BASE"
+                :example +facebook-graph-base-default+
+                :credential "a page access token, the appsecret proof and the app secret"
+                ;; ALL THREE PLACES, because this backend uses all three and the default wording
+                ;; would have named only the first. A GET sends the token in an Authorization
+                ;; header; a POST puts access_token in the FORM BODY; and the connect step sends
+                ;; client_secret in the QUERY STRING. The query is the worst of the three, for the
+                ;; reason Telegram's path is: it is written into any access log along the way. A
+                ;; refusal that described only the header would have sent the reader looking in
+                ;; the wrong place for their own exposure (the review of #1140).
+                :carried-in "a GET carries the token in an Authorization header, a POST carries it in the form body, and the connect step carries the app secret in the query string, which any proxy or server along the way may log"
+                :appends-path t)))
+
+(defmethod shared-initialize :around ((p facebook) slot-names &rest initargs
+                                      &key &allow-other-keys)
+  "Check the Graph base on EVERY initialization, and leave the provider untouched if the check
+refuses (#1106). The ordering is %CALL-WITH-URL-CHECK's; read it there."
+  (declare (ignore slot-names initargs))
+  (%call-with-url-check p 'graph-base 'graph-base-approved-local #'%check-facebook-graph-base
+                        (lambda () (call-next-method))))
 
 (defun make-facebook (&rest initargs &key app-id app-secret page-tokens graph-base dialog-base)
   "A Facebook Page provider. APP-ID and APP-SECRET default to $FACEBOOK_APP_ID and
@@ -299,8 +339,15 @@ unwound first (see this file's header)."
                                                   :connect-timeout +facebook-connect-timeout+
                                                   :read-timeout +facebook-read-timeout+
                                                   :max-body-bytes +facebook-max-response-bytes+)))))
-                     (apply #'send-request req '()
-                            (when *facebook-perform* (list :perform *facebook-perform*))))
+                     ;; The approved host is bound around the send, so a plaintext request to a
+                     ;; host the configuration check approved as local is not handed to a proxy
+                     ;; (#1091).
+                     (call-with-approved-local-host
+                      (facebook-graph-base-approved-local p)
+                      (lambda ()
+                        (apply #'send-request req '()
+                               (when *facebook-perform*
+                                 (list :perform *facebook-perform*))))))
                  (http-error (c)
                    (error 'delivery-failure
                           :provider :facebook :status (http-error-status c)

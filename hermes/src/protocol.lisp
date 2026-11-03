@@ -124,101 +124,97 @@ bot has a webhook set."))
 ;;; A backend registers a no-arg constructor thunk under its name; adding a vendor is a new
 ;;; class + one REGISTER-IMPL, with the selection layer staying neutral.
 
-(defun %check-credential-url (value &key setting example credential appends-path)
+(defun %check-credential-url (value &key setting example credential carried-in appends-path)
   "Signal CONFIGURATION-ERROR unless VALUE is a URL this framework may send CREDENTIAL to
-(#1077, #1092). SETTING names the slot in the message, EXAMPLE is a URL that would be accepted,
-CREDENTIAL says what would travel -- \"the account SID and auth token\", \"the API key\" -- and
-APPENDS-PATH says whether the backend appends a path to VALUE.
+(#1077, #1092). Returns the parsed URI and, as a second value, the host that was approved as
+local.
 
-ONE CHECK FOR TWILIO'S API-BASE AND SENDGRID'S ENDPOINT. Those two, and no others yet: Telegram's
-api-base, Facebook's graph-base, Stripe's api-base and HERMES/BLOB's S3 endpoint do NOT call this,
-and blob keeps its own copy of the locality half. Bringing them here is #1106. An earlier version
-of this docstring said it was one check for \"every backend that sends a credential to a
-configured URL\", which was false when it was written (the review of #1104).
+THE RULE IS AION/HTTP-CLIENT:CREDENTIAL-URL-REFUSAL, not written here (#1106). This function is
+the part that is hermes': which condition to signal. The rule moved down beside LOCAL-HOST-P so
+that hermes/blob could use it too -- blob does not depend on hermes core, and the alternative to
+moving it was either a new dependency in that direction or a fifth copy of a rule that had
+already grown three holes across two copies.
 
-The reason for sharing even two: hermes had this written once, for Twilio's API base in #1077, and
-hermes/blob had the locality half written again for an S3 endpoint; between them the two copies
-acquired three different holes, each a case the other's fix had already closed (#1089, and the
-reviews of #1084 and #1090). SendGrid had no check at all, which is #1092. Writing it a third
-time by hand was the bet that produced the first two.
+CARRIED-IN says where the credential travels, and is passed through: Telegram's bot token is in
+the path of every request rather than in a header, and a refusal that described it wrongly would
+be telling the reader something false about their own configuration.
 
-NO REFUSAL REPEATS VALUE, OR QURI'S ERROR TEXT. The value may carry a password -- that is one of
-the things refused -- and these reports reach logs and terminals. An earlier version printed it
-in every branch, and its parse-failure branch also appended quri's error, which quotes the URI
-again, so a password appeared twice (the review of #1084).
-
-What is refused, and why each is here rather than only the obvious one:
-
-  - anything QURI cannot parse. QURI is used because it is the parser dexador parses the request
-    URL with, so this asks the same question of the same parser;
-  - a scheme that is not http or https. Refusing only plaintext is not enough: for
-    \"evil.example://127.0.0.1\" quri reads the scheme \"evil.example\" and the host 127.0.0.1,
-    which a check looking for \"http\" lets through;
-  - any userinfo, whatever the scheme and host, including over https and including when the host
-    is local. No API here uses it, and its only effects are to hide the real host from a reader
-    and to defeat this check;
-  - no host;
-  - a query or a fragment, but only when APPENDS-PATH: the request's path would land inside them.
-    A backend that sends VALUE as it stands has no such problem, and refusing a query there would
-    turn away a legitimate local mock;
-  - a bracketed IPv6 host, which cannot be connected to -- usocket:socket-connect answers
-    NS-HOST-NOT-FOUND-ERROR for \"[::1]\" while \"::1\" resolves;
-  - plaintext http to a host this machine or this network cannot reach by itself, which is
-    AION/HTTP-CLIENT:LOCAL-HOST-P and not a rule written here. That function also refuses a
-    leading-zero IPv4 spelling, where its parser and the system resolver can disagree.
-
-The host is resolved at the moment this runs, once. A provider made while a name resolved
-locally is not re-checked if that name later resolves elsewhere.
-
-RETURNS TWO VALUES: the parsed URI, and THE HOST that was approved as local, or NIL. The second
-is what #1091 needed, and it costs no second lookup, because it is already known here: a
-plaintext URL that this function returns at all is one whose host LOCAL-HOST-P approved -- that is
-the last branch below, and the alternative is a refusal. A caller records it and passes it to
-AION/HTTP-CLIENT as APPROVED-LOCAL, so the plaintext request it then sends is not handed to a
-proxy and does not follow redirects. It is NIL for an https URL, whose host is never resolved
-here, which matches PROXY-ARGUMENTS: the proxy decision is only made for plaintext.
-
-THE HOST RATHER THAN T, so that the recorded verdict cannot be read against a URL it was not
-about: PROXY-ARGUMENTS grants nothing unless the host it is given matches (the review of #1134)."
-  ;; CONTROL CHARACTERS ARE REFUSED FIRST, before the value is parsed. A newline in a URL is the
-  ;; shape of a header injection -- "http://127.0.0.1/x\nHost: evil.example" -- and although the
-  ;; credential would still have gone only to the local host, a value that cannot appear in a URL
-  ;; has no reading worth arguing about. Refusing it removes the question rather than answering
-  ;; it (the review of #1104).
-  (when (and (stringp value)
-             (some (lambda (c) (let ((n (char-code c))) (or (< n 32) (= n 127)))) value))
-    (error 'configuration-error
-           :missing (format nil "a ~A without control characters in it. The value contains at least one, and it is not repeated here because it may contain a password"
-                            setting)))
-  (let* ((uri (handler-case (quri:uri value)
-                (error ()
-                  (error 'configuration-error
-                         :missing (format nil "a ~A that parses as a URL. The value given does not, and it is not repeated here because it may contain a password"
-                                          setting)))))
-         (scheme (quri:uri-scheme uri))
-         (host (quri:uri-host uri))
-         (approved-local nil))
-    (flet ((refuse (why)
-             (error 'configuration-error
-                    :missing (format nil "a ~A such as ~A. ~A" setting example why))))
-      (when (quri:uri-userinfo uri)
-        (refuse (format nil "The value carries a user name or password before an \"@\", which this API does not use and which hides the host a request would reach. That host is ~S." host)))
-      (unless (and scheme (or (string-equal scheme "https") (string-equal scheme "http")))
-        (refuse (format nil "The scheme is ~S. Only http and https are sent, and another scheme means the host this check reads is not the host a request would reach." scheme)))
-      (unless host
-        (refuse "The value has no host."))
-      (when (and appends-path (or (quri:uri-query uri) (quri:uri-fragment uri)))
-        (refuse "The value carries a query or a fragment, and the rest of each request's path is appended to it, so the path would end up inside them."))
-      (when (and (plusp (length host)) (char= #\[ (char host 0)))
-        (refuse (format nil "The host ~S is a bracketed IPv6 address, which cannot be connected to: it is looked up as a name and no such name exists. Write the address without brackets, or use a name." host)))
-      (when (and (string-equal scheme "http") (not (local-host-p host)))
-        (refuse (format nil "The host ~S would receive ~A in the clear, because every request carries them in an Authorization header. Use https, or a host only this machine or this network can reach."
-                        host credential)))
-      ;; THE SECOND VALUE IS READ OFF THE BRANCH ABOVE rather than resolved again. Reaching here
-      ;; with an http scheme means LOCAL-HOST-P said yes, since the only other way out of that
-      ;; branch is a refusal (#1091).
-      (setf approved-local (and scheme (string-equal scheme "http") host)))
+WHAT CALLS THIS, AND WHAT DOES NOT. Twilio's API-BASE, SendGrid's ENDPOINT, Telegram's API-BASE,
+Facebook's GRAPH-BASE and Stripe's API-BASE all do (#1106). hermes/blob's S3 endpoint does not
+call THIS function, because it is in another system that must not depend on hermes core; it calls
+the same rule in aion directly and signals BLOB-CONFIGURATION-ERROR. Facebook's DIALOG-BASE does
+not: no credential is sent to it -- it is where a person's browser is sent -- so the rule about
+carrying a credential in the clear has nothing to say about it."
+  (multiple-value-bind (reason uri approved-local)
+      (apply #'credential-url-refusal value
+             :setting setting :example example :credential credential
+             :appends-path appends-path
+             ;; Passed only when given, so the default in CREDENTIAL-URL-REFUSAL is what decides
+             ;; the common wording rather than a NIL from here.
+             (when carried-in (list :carried-in carried-in)))
+    (when reason
+      (error 'configuration-error :missing reason))
     (values uri approved-local)))
+
+(defun %slot-snapshot (object)
+  "Every slot of OBJECT as (NAME . (VALUE)) when bound and (NAME) when unbound, for
+%RESTORE-SLOTS, read through the MOP so a slot added to the class later is covered.
+
+THERE IS A SECOND COPY in hermes/blob's s3.lisp, deliberately: hermes/blob does not depend on
+hermes core and must not start to, and this is eight lines of mechanism rather than a rule about
+where a credential may go -- the kind of thing #1106 moved into one place."
+  (mapcar (lambda (slot)
+            (let ((name (sb-mop:slot-definition-name slot)))
+              (if (slot-boundp object name)
+                  (cons name (list (slot-value object name)))
+                  (list name))))
+          (sb-mop:class-slots (class-of object))))
+
+(defun %restore-slots (object snapshot)
+  "Put OBJECT's slots back as %SLOT-SNAPSHOT recorded them, unbinding the ones that were unbound."
+  (dolist (entry snapshot)
+    (if (cdr entry)
+        (setf (slot-value object (car entry)) (second entry))
+        (slot-makunbound object (car entry)))))
+
+(defun %call-with-url-check (provider url-slot verdict-slot check next)
+  "Run NEXT -- a provider's CALL-NEXT-METHOD -- and then check the URL in URL-SLOT, recording
+CHECK's verdict in VERDICT-SLOT; put both slots back if anything signals (#1106).
+
+THE ORDERING IS THE WHOLE CONTENT OF THIS FUNCTION, and it exists once because three reviews in
+a row found a defect in it while it was written twice, and #1106 would have made that five
+times:
+
+  - THE CHECK RUNS AFTER NEXT, and reads the slot rather than working out the value that would
+    be in effect, so a subclass that gives the URL slot its own :INITFORM is checked too. On a
+    fresh instance there is no initarg, the slot is not yet bound, and the superclass's default
+    constant is not what the slot will hold.
+  - THE VERDICT IS CLEARED BEFORE NEXT, so a failure part-way through cannot leave a verdict
+    standing beside a URL it was not about.
+  - NEXT IS INSIDE THE HANDLER, not only the check. A subclass :AFTER method on
+    SHARED-INITIALIZE runs inside CALL-NEXT-METHOD, after the URL slot has been assigned, so a
+    failure there left the new, unchecked URL in the slot.
+  - EVERY SLOT GOES BACK on a failure, so a refusal leaves the provider as it was. This said
+    \"both slots\" -- the URL and the verdict -- and restored only those two, while the same
+    CALL-NEXT-METHOD assigns every other initarg in the call before the check runs. For these
+    providers that leaked nothing, because the scheme lives in the URL slot, which was restored;
+    but hermes/blob's copy of this ordering missed SECURE the same way and was left plaintext
+    with no approval (the hub's review of #1140). A list of slots to restore is a list someone
+    has to keep complete, so none is kept: the whole object is snapshotted.
+  - THE HANDLER DECLINES. HANDLER-BIND rather than HANDLER-CASE, so the slots are restored and
+    the condition still reaches the caller unchanged.
+
+Why any of this matters: a provider whose URL check refuses is one a caller may handle and carry
+on from, and the next send then carries a credential to whatever is in the slot (#1129)."
+  (let ((snapshot (%slot-snapshot provider)))
+    (setf (slot-value provider verdict-slot) nil)
+    (handler-bind ((error (lambda (c)
+                            (declare (ignore c))
+                            (%restore-slots provider snapshot))))
+      (let ((instance (funcall next)))
+        (setf (slot-value provider verdict-slot)
+              (funcall check (slot-value provider url-slot)))
+        instance))))
 
 (defparameter *send-connect-timeout* 10
   "Seconds a backend waits for a connection to a provider before giving up (#1077).

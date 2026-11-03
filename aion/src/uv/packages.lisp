@@ -100,7 +100,7 @@ benefit of the decoding having been checked.")
 
 (cl:defpackage #:aion/uv
   (:use #:cl)
-  (:local-nicknames (#:ffi #:aion/uv/ffi))
+  (:local-nicknames (#:ffi #:aion/uv/ffi) (#:path #:aion/path))
   (:documentation
    "libuv for Common Lisp: an event loop, asynchronous and synchronous filesystem
 operations, timers, and filesystem watching.

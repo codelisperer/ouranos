@@ -241,14 +241,6 @@ string followed by a NUL, and one more NUL at the end. Freed with CFFI:FOREIGN-S
    (format nil "~{~A~C~}" (loop for e in environment collect e collect (code-char 0)))
    :encoding :utf-16le))
 
-(defun %native-name (path)
-  "PATH as Windows takes it. A string is a native name already and is returned as it is; parsing it
-as a Lisp namestring reads [ ] * ? as wildcard syntax, so a folder named a[1] named nothing
-(#1096). A pathname is given its native name, after any logical-pathname translation."
-  (if (stringp path)
-      path
-      (uiop:native-namestring (translate-logical-pathname path))))
-
 (defun spawn-in-job (program arguments &key environment directory
                                             (input nil) (output nil) (error nil)
                                             (element-type :default)
@@ -292,7 +284,7 @@ When IF-NO-JOB is :CONTINUE, the process runs outside any job."
                  child)))
            (nul (access) (let ((h (%open-inheritable "NUL" access))) (push h child-ends) h))
            (file (spec)
-             (let ((h (%open-inheritable (%native-name spec)
+             (let ((h (%open-inheritable (path:native-name spec)
                                          ffi:+file-append-data+)))
                (push h child-ends)
                h)))
@@ -358,7 +350,7 @@ HANDLE of its main thread."
           (command (cffi:foreign-string-alloc command-line :encoding :utf-16le))
           (app (lisp-to-wide-string path))
           (env (and environment (%environment-block environment)))
-          (cwd (and directory (lisp-to-wide-string (%native-name directory)))))
+          (cwd (and directory (lisp-to-wide-string (path:native-name directory)))))
       (unwind-protect
            (progn
              (check-win32 (ffi:initialize-proc-thread-attribute-list attributes 1 0 size)
