@@ -93,7 +93,13 @@ jobs:
     # telling anyone how close the next one is, so #1146 asks for the job to print how long
     # `Verify the tree` took and how far that was from the limit. Until it does, the figures
     # above are the record of what the margin was when this limit was set.
-    timeout-minutes: ${{ matrix.os == 'windows-2022' && 90 || 60 }}
+    #
+    # THE LIMIT IS A MATRIX FIELD, from 2026-11-03 (#1146), so each number is written once and
+    # used twice: here, and by the job summary, which prints how close the job came to it. It was
+    # an expression keyed on the Windows runner label, and printing the margin would have meant
+    # writing the limit a second time as the summary's argument -- two copies that would drift
+    # the way a URL written in two places does.
+    timeout-minutes: ${{ matrix.timeout }}
 
     # The credential-store tests (hades/credentials, #357) store, read and delete items in the
     # real Credential Manager, Keychain or Secret Service keyring of whoever runs them, so they
@@ -129,16 +135,27 @@ jobs:
         # Linux one matters.
         include:
           - os: ubuntu-26.04
+            timeout: 60
             platform: linux-x86-64
             fasl: "~/.cache/common-lisp"
           - os: macos-26
+            timeout: 60
             platform: macos-arm64
             fasl: "~/.cache/common-lisp"
           - os: windows-2022
+            timeout: 90
             platform: windows-x86-64
             fasl: "~/AppData/Local/cache/common-lisp"
 
     steps:
+      # WHEN THE JOB STARTED, so the job summary can say how close it came to its limit (#1146).
+      # The steps context carries no timings, and the job cannot read its own start time, so it
+      # writes one down. This is the first step, after `Set up job', so the figure the summary
+      # prints overstates the margin by however long that took -- seconds, normally.
+      - name: Record when the job started
+        shell: bash
+        run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v7
 
       # --- caches -------------------------------------------------------------------
@@ -607,6 +624,7 @@ jobs:
         shell: bash
         env:
           STEPS_JSON: ${{ toJSON(steps) }}
+          JOB_TIMEOUT_MINUTES: ${{ matrix.timeout }}
         run: bash scripts/ci-job-summary.sh "${{ matrix.platform }}" verify.log readme.log
 
   # --- release mode ---------------------------------------------------------------
@@ -625,11 +643,33 @@ jobs:
   # well, so a representation violation is found before it merges. It skipped them while
   # the repo was private, for the same billing reason as the matrix above.
   release-mode:
-    name: release-mode (linux-x86-64)
+    name: ${{ matrix.label }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 120
+    # THE LIMIT IS STATED ONCE, as a one-entry matrix, because the job summary prints how close
+    # the job came to it (#1146) and `timeout-minutes' can read the matrix context but not the
+    # job's own `env'.
+    #
+    # THE NAME COMES FROM THE MATRIX TOO, and has to. GitHub appends a job's matrix values to its
+    # name unless the name itself refers to the matrix, so with a literal name this job showed as
+    # `release-mode (linux-x86-64) (120)' -- measured on #1148's first run, against a comment here
+    # that said the literal name would prevent it. The verify job above never had the problem
+    # because its name is already `${{ matrix.platform }}'.
+    strategy:
+      matrix:
+        include:
+          - label: release-mode (linux-x86-64)
+            timeout: 120
+    timeout-minutes: ${{ matrix.timeout }}
 
     steps:
+      # WHEN THE JOB STARTED, so the job summary can say how close it came to its limit (#1146).
+      # The steps context carries no timings, and the job cannot read its own start time, so it
+      # writes one down. This is the first step, after `Set up job', so the figure the summary
+      # prints overstates the margin by however long that took -- seconds, normally.
+      - name: Record when the job started
+        shell: bash
+        run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v7
 
       # Its OWN cache, keyed apart from the development one. Sharing would be the exact
@@ -788,4 +828,5 @@ jobs:
         shell: bash
         env:
           STEPS_JSON: ${{ toJSON(steps) }}
-        run: bash scripts/ci-job-summary.sh "release-mode (linux-x86-64)" verify.log
+          JOB_TIMEOUT_MINUTES: ${{ matrix.timeout }}
+        run: bash scripts/ci-job-summary.sh "${{ matrix.label }}" verify.log
