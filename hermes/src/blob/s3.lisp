@@ -23,6 +23,23 @@
    (secret-key :initarg :secret-key :reader s3-secret-key)
    (session-token :initarg :session-token :initform nil :reader s3-session-token)
    (secure :initarg :secure :initform t :reader s3-secure-p)
+   (endpoint-approved-local
+    :initform nil :reader s3-endpoint-approved-local
+    :documentation
+    "THE HOST of this store's endpoint, when the endpoint is plaintext and that host resolves to
+a loopback, private or link-local address, and NIL otherwise. A plaintext request to it is then
+sent with no proxy and follows no redirect (#1091); see PROXY-ARGUMENTS for why this is a
+recorded verdict rather than a lookup on the send path, and for why it is a host rather than T.
+
+NO INITARG, AND RECOMPUTED ON EVERY INITIALIZATION. It had an initarg, and S3-STORE is exported,
+so a caller could hand this slot a host of their choosing:
+
+  (make-instance 'hermes/blob:s3-store :endpoint \"public.example:80\" :secure nil
+                 :path-style t :endpoint-approved-local \"public.example\" ...)
+
+sent signed requests to a public host in plaintext with :PROXY NIL, which is the leak this slot
+exists to prevent. Recomputing also means REINITIALIZE-INSTANCE cannot leave a verdict standing
+that belonged to an endpoint the store no longer has (the review of #1134).")
    (path-style :initarg :path-style :initform nil :reader s3-path-style-p
                :documentation
                "Address the bucket as a PATH (endpoint/bucket/key) rather than as a
@@ -234,6 +251,7 @@ dexador parses it with. An endpoint whose host cannot be determined is not local
 (defun %secure-setting (value supplied-p endpoint path-style)
   "The store's SECURE: VALUE when :SECURE was passed, else MNEMOSYNE_S3_SECURE, else T.
 
+
 The variable is read as true or false without regard to case, and unset means true, so plaintext
 http has to be asked for. Any other value signals BLOB-CONFIGURATION-ERROR rather than picking a
 default, so a misspelling cannot quietly change the store to http, and cannot quietly leave a
@@ -273,6 +291,38 @@ deliberate: for path-style the safe default is off, and for secure it is on."
                nil)
               (t (error 'blob-configuration-error
                         :missing (format nil "MNEMOSYNE_S3_SECURE must be true or false, not ~S" v)))))))
+
+(defmethod shared-initialize :around ((s s3-store) slot-names &rest initargs
+                                     &key &allow-other-keys)
+  "Recompute ENDPOINT-APPROVED-LOCAL from the endpoint the store actually ends up with (#1091).
+
+THIS IS THE ONLY PLACE THE SLOT IS SET, which is what makes it a verdict rather than a value a
+caller can assert. It had an initarg and S3-STORE is exported, so a caller could pass a host of
+their choosing and have signed requests sent to a public host in plaintext with no proxy; and a
+REINITIALIZE-INSTANCE that moved the endpoint left the old verdict behind. Both are closed by
+computing it here, after CALL-NEXT-METHOD has assigned the slots, on every initialization (the
+review of #1134).
+
+A SECURE STORE RESOLVES NOTHING. The verdict is only consulted for a plaintext request, so there
+is no reason to look up the endpoint of a store that will not send one, and the common case pays
+nothing for this.
+
+Unlike the refusals in MAKE-S3-STORE this does not reject anything: a store whose endpoint is not
+local simply gets NIL and keeps whatever proxy is configured. The checks that refuse live in the
+constructor, so MAKE-INSTANCE still builds an unchecked store -- it just cannot build one that
+claims to have been checked."
+  (declare (ignore slot-names initargs))
+  ;; Cleared first, so a CALL-NEXT-METHOD that fails part-way cannot leave a verdict standing
+  ;; beside an endpoint it was not about.
+  (setf (slot-value s 'endpoint-approved-local) nil)
+  (prog1 (call-next-method)
+    (setf (slot-value s 'endpoint-approved-local)
+          (let* ((secure (or (not (slot-boundp s 'secure)) (s3-secure-p s)))
+                 (endpoint (and (not secure)
+                                (slot-boundp s 'endpoint)
+                                (s3-endpoint s)))
+                 (host (and endpoint (%endpoint-host endpoint))))
+            (and host (http:local-host-p host) host)))))
 
 (defun %upload-acl-setting (value)
   "The store's UPLOAD-ACL: VALUE when given, else MNEMOSYNE_S3_UPLOAD_ACL, else :NONE.
@@ -465,10 +515,19 @@ body that cannot be read becomes a DETAIL saying so (#796)."
             ;; HTTPS_PROXY named -- the signed Authorization header and any session token with
             ;; them -- while a comment and the CHANGELOG said hermes/blob was covered (the
             ;; review of #1094).
-            (apply #'dex:request url :method method :headers headers :content content
-                                     :want-stream want-stream :force-binary t
-                                     :keep-alive nil
-                                     (http:proxy-arguments url))
+            ;;
+            ;; APPROVED-LOCAL carries the verdict this store recorded when it was made, which is
+            ;; what covers an endpoint that is a NAME: PROXY-ARGUMENTS resolves nothing, so
+            ;; without this a plaintext store at a Compose service name such as "minio:9000" was
+            ;; approved for plaintext at configuration time and then still sent its signed
+            ;; requests, and any session token, to HTTP_PROXY in the clear (#1091).
+            (call-with-approved-local-host
+             (s3-endpoint-approved-local store)
+             (lambda ()
+               (apply #'dex:request url :method method :headers headers :content content
+                                        :want-stream want-stream :force-binary t
+                                        :keep-alive nil
+                                        (http:proxy-arguments url))))
           (dex:http-request-failed (e)
             (let ((status (dex:response-status e))
                   ;; With WANT-STREAM the error's body is an open stream on the connection.

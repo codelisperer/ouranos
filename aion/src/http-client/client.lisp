@@ -203,7 +203,10 @@ CONNECT-ADDRESS   an IP address, as a string or an octet vector, to connect to i
                   Windows decides about the certificate (#536), and over cl+ssl elsewhere. See
                   %REQUEST-PINNED.
 CA-PATH           trust roots for certificate verification (a PEM file or a directory; on
-                  Windows a PEM file only). NIL uses the system's."
+                  Windows a PEM file only). NIL uses the system's.
+There is no argument for the local-host proxy exemption, deliberately: see
+*APPROVED-LOCAL-HOST*, which is not exported, because a keyword here let any caller assert an
+approval for any host (#1091, and the re-review of #1134)."
   (method :get :type keyword)
   (url "" :type string)
   (headers (quote ()) :type list)
@@ -489,7 +492,8 @@ every request, so no connection is reused."
 
 (defun %dex-args (req)
   "The dexador keyword arguments REQ implies, apart from the URL and the stream."
-  (append (list :method (request-method req)
+  (let ((local (proxy-arguments (request-url req))))
+   (append (list :method (request-method req)
                 :headers (%dex-headers req)
                 :content (request-content req)
                 ;; ALWAYS binary (pre-publication issue 223). Left to itself dexador decides by
@@ -497,15 +501,26 @@ every request, so no connection is reused."
                 ;; which point the octets are gone and no caller can get them back. Decoding is
                 ;; this client's job now, and it happens in RESPONSE-BODY, once, from bytes that
                 ;; are still there.
-                :force-binary t
-                :max-redirects (or (request-follow-redirects req) 0))
+                :force-binary t)
+          ;; ONE DECISION, BOTH ARGUMENTS. A request exempted by a RECORDED APPROVAL gets
+          ;; :MAX-REDIRECTS 0 from LOCAL as well -- see PROXY-ARGUMENTS for why a redirect must
+          ;; not be followed under that exemption -- so this must not pass a second
+          ;; :MAX-REDIRECTS in that case.
+          ;;
+          ;; THE TEST IS FOR :MAX-REDIRECTS IN LOCAL, NOT FOR LOCAL ITSELF. An exemption from the
+          ;; literal rule carries no redirect cap, and asking whether LOCAL is non-empty dropped
+          ;; this request's own cap for every plaintext request to an address: dexador then used
+          ;; its own default of 5, so FOLLOW-REDIRECTS NIL followed redirects and a cap of 1
+          ;; followed three hops. REDIRECTS-CAN-BE-REFUSED-CAPPED-OR-FOLLOWED caught it.
+          local
+          (unless (member :max-redirects local)
+            (list :max-redirects (or (request-follow-redirects req) 0)))
           ;; A PLAINTEXT REQUEST TO A LOCAL HOST IS NOT SENT THROUGH A PROXY (#1091). The
           ;; decision is PROXY-ARGUMENTS, in fetch.lisp, because every caller that sends a
           ;; request has to make it the same way -- including hermes/blob's S3 backend, which
           ;; calls dexador directly and so never reaches this function. When this lived here,
           ;; that backend was not covered while a comment and the CHANGELOG said it was (the
           ;; review of #1094).
-          (proxy-arguments (request-url req))
           (when (request-max-body-bytes req) (list :want-stream t))
           (when (request-ca-path req) (list :ca-path (request-ca-path req)))
           ;; Passed only when set, so an unset timeout means dexador's default rather than an
@@ -516,7 +531,7 @@ every request, so no connection is reused."
             (list :read-timeout (request-read-timeout req)))
           ;; See %POOLED-P: a request that is not idempotent always gets a new connection.
           (unless (%pooled-p req)
-            (list :use-connection-pool nil :keep-alive nil))))
+            (list :use-connection-pool nil :keep-alive nil)))))
 
 (defvar *%connected* nil
   "Bound to NIL by %HTTP around one round trip, and set to T by the pinned path

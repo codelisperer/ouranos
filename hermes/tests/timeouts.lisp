@@ -376,3 +376,188 @@ the same stated reason."
            "and each says what would have travelled")
   (is-true (search "account SID and auth token" (or (%api-base-refusal "http://evil.invalid/x") ""))
            "which is not the same credential"))
+
+(test a-plaintext-provider-at-a-local-NAME-sends-with-no-proxy
+  "#1091, for the two providers that send a credential to a configured URL. The same defect as
+hermes/blob's, and the same fix: PROXY-ARGUMENTS resolves no name, so a plaintext API base or
+endpoint at a NAME was approved for plaintext when the provider was made and then still sent the
+credential -- the account SID and auth token in an Authorization header, or the API key -- to
+whatever HTTPS_PROXY named, in the clear.
+
+Each provider records the verdict its configuration check already reached, and passes it with the
+request. The assertion is on WHAT DEXADOR IS GIVEN: a fixture whose proxy is unreachable would
+pass for the wrong reason, and a fixture that only read the slot back would not test that the
+value reaches the send at all."
+  (let ((seen '())
+        (original-request (fdefinition 'dex:request))
+        (original-resolve (fdefinition 'aion/http-client:resolve-host)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'aion/http-client:resolve-host)
+                 (lambda (host)
+                   (if (string= host "provider.invalid")
+                       (funcall original-resolve "127.0.0.1")
+                       (funcall original-resolve host))))
+           (setf (fdefinition 'dex:request)
+                 (lambda (url &rest args)
+                   (push (list url (if (member :proxy args) (list :proxy (getf args :proxy)) :none))
+                         seen)
+                   (error "stopped before sending")))
+           (let ((twilio (hermes::make-twilio :account-sid "ACtest" :auth-token "t"
+                                              :from "+15005550006"
+                                              :api-base "http://provider.invalid:4010/2010-04-01")))
+             (is (equal "provider.invalid" (hermes::twilio-api-base-approved-local twilio))
+                 "twilio recorded the HOST it approved: ~S"
+                 (hermes::twilio-api-base-approved-local twilio))
+             (ignore-errors (h:deliver twilio (%an-sms))))
+           (let ((sendgrid (hermes::make-sendgrid
+                            :api-key "SG.test"
+                            :endpoint "http://provider.invalid:4010/v3/mail/send")))
+             (is (equal "provider.invalid" (hermes::sendgrid-endpoint-approved-local sendgrid))
+                 "sendgrid recorded the HOST it approved: ~S"
+                 (hermes::sendgrid-endpoint-approved-local sendgrid))
+             (ignore-errors (h:deliver sendgrid (%an-email))))
+           ;; The controls: the real https endpoints, whose hosts are never resolved by the
+           ;; check and must keep whatever proxy is configured.
+           (ignore-errors (h:deliver (hermes::make-twilio :account-sid "ACtest" :auth-token "t"
+                                                          :from "+15005550006")
+                                     (%an-sms)))
+           (ignore-errors (h:deliver (hermes::make-sendgrid :api-key "SG.test") (%an-email))))
+      (setf (fdefinition 'dex:request) original-request)
+      (setf (fdefinition 'aion/http-client:resolve-host) original-resolve))
+    (let ((calls (reverse seen)))
+      (is (= 4 (length calls)) "all four sends reached dexador: ~S" calls)
+      (is (equal '(:proxy nil) (second (first calls)))
+          "twilio's plaintext send to the approved name is not proxied: ~S" (first calls))
+      (is (equal '(:proxy nil) (second (second calls)))
+          "and neither is sendgrid's: ~S" (second calls))
+      (is (eq :none (second (third calls)))
+          "twilio's https send keeps whatever proxy is configured: ~S" (third calls))
+      (is (eq :none (second (fourth calls)))
+          "and so does sendgrid's: ~S" (fourth calls)))))
+
+(test a-refused-url-leaves-the-provider-as-it-was
+  "#1129, found by Copilot's review of #1126. The check hung off SHARED-INITIALIZE :AFTER, which
+runs once the slots have been assigned, so a refused REINITIALIZE-INSTANCE signalled the error
+and LEFT THE REFUSED URL IN THE SLOT. Measured at 7ca13e23:
+
+  (let ((p (make-sendgrid :api-key \"SG.x\")))
+    (handler-case (reinitialize-instance p :endpoint \"http://evil.example/x\") (error () nil))
+    (sendgrid-endpoint p))   =>  \"http://evil.example/x\"
+
+A caller that handled the refusal and carried on then sent the API key there, and nothing checked
+it again. #1104 had already moved the check from INITIALIZE-INSTANCE to SHARED-INITIALIZE so that
+REINITIALIZE-INSTANCE could not skip it; this is the door next to that one, where the check runs
+but the assignment has already happened.
+
+The check is in an :AROUND method now. It reads the slot after CALL-NEXT-METHOD -- so that a
+subclass with an :INITFORM of its own is checked too -- and puts the previous URL AND the previous
+verdict back before the refusal propagates.
+
+ONE CASE STARTS FROM AN APPROVED LOCAL ENDPOINT, which is the only way to tell restoring from
+clearing. Every case used to start at the https default, where the verdict is NIL already, so an
+implementation that dropped the verdict on refusal passed: there was nothing to drop (the
+re-review of #1134)."
+  (dolist (case (list (list (hermes::make-sendgrid :api-key "SG.x")
+                            :endpoint #'hermes::sendgrid-endpoint
+                            #'hermes::sendgrid-endpoint-approved-local nil)
+                      (list (hermes::make-twilio :account-sid "ACx" :auth-token "t"
+                                                 :from "+15005550006")
+                            :api-base #'hermes::twilio-api-base
+                            #'hermes::twilio-api-base-approved-local nil)
+                      ;; The same two, but configured at a local plaintext host that the check
+                      ;; approved, so both the URL and the verdict have something to lose.
+                      (list (hermes::make-sendgrid
+                             :api-key "SG.x" :endpoint "http://127.0.0.1:4010/v3/mail/send")
+                            :endpoint #'hermes::sendgrid-endpoint
+                            #'hermes::sendgrid-endpoint-approved-local "127.0.0.1")
+                      (list (hermes::make-twilio :account-sid "ACx" :auth-token "t"
+                                                 :from "+15005550006"
+                                                 :api-base "http://127.0.0.1:4010/2010-04-01")
+                            :api-base #'hermes::twilio-api-base
+                            #'hermes::twilio-api-base-approved-local "127.0.0.1")))
+    (destructuring-bind (provider key reader verdict expected-verdict) case
+      (let ((before (funcall reader provider)))
+        (is (equal expected-verdict (funcall verdict provider))
+            "the provider starts with the verdict this case needs: ~S"
+            (funcall verdict provider))
+        (signals h:configuration-error
+          (reinitialize-instance provider key "http://evil.example/x"))
+        (is (equal before (funcall reader provider))
+            "~S keeps its URL after a refusal: ~S" (type-of provider) (funcall reader provider))
+        (is (equal expected-verdict (funcall verdict provider))
+            "and keeps the verdict that belongs to it: ~S" (funcall verdict provider))
+        ;; The control: a URL the check accepts DOES move, so the assertion above is about the
+        ;; refusal and not about REINITIALIZE-INSTANCE being unable to change the slot.
+        (reinitialize-instance provider key "https://accepted.example/v1")
+        (is (equal "https://accepted.example/v1" (funcall reader provider))
+            "control: an accepted URL replaces it: ~S" (funcall reader provider))))))
+
+(defclass %sendgrid-with-its-own-default (hermes::sendgrid)
+  ((hermes::endpoint :initform "http://public.invalid/v3/mail/send"))
+  (:documentation
+   "A subclass that gives the endpoint slot an :INITFORM of its own, which is the case the check
+used to miss (the re-review of #1134). Its default is a PLAINTEXT PUBLIC host, so a check that
+looks at the slot refuses it and a check that looks at the superclass's default constant does
+not."))
+
+(test a-subclass-default-url-is-checked-too
+  "The re-review of #1134. The :AROUND check used to work out the value that WOULD be in effect:
+the initarg if one was supplied, else the slot if it was bound, else the superclass's default
+constant. On a fresh instance of a SUBCLASS that gives the slot its own :INITFORM, none of those
+is the value the slot ends up with -- there is no initarg, the slot is not yet bound, and the
+constant is the superclass's -- so the subclass's URL was never checked and a plaintext public
+endpoint was accepted.
+
+The check reads the slot after CALL-NEXT-METHOD now, so the value it judges is the value the
+object has."
+  (signals h:configuration-error (make-instance '%sendgrid-with-its-own-default :api-key "SG.x"))
+  ;; The control, so this is about the subclass's initform and not about the class being
+  ;; unbuildable for some other reason: the same subclass with an acceptable endpoint passed as
+  ;; an initarg builds.
+  (let ((ok (make-instance '%sendgrid-with-its-own-default
+                           :api-key "SG.x" :endpoint "https://api.sendgrid.com/v3/mail/send")))
+    (is (equal "https://api.sendgrid.com/v3/mail/send" (hermes::sendgrid-endpoint ok))
+        "control: an acceptable endpoint passed as an initarg is kept: ~S"
+        (hermes::sendgrid-endpoint ok))))
+
+(define-condition %subclass-initarg-error (error) ()
+  (:report (lambda (c s) (declare (ignore c)) (format s "the subclass refused its own initarg"))))
+
+(defclass %sendgrid-with-an-after-method (hermes::sendgrid)
+  ()
+  (:documentation
+   "A subclass with its own SHARED-INITIALIZE :AFTER method, which runs INSIDE the superclass's
+:AROUND -- after the URL slot has been assigned. Its method signals for :X :BAD, which is how a
+failure arriving from inside CALL-NEXT-METHOD is reproduced (the final review of #1134)."))
+
+(defmethod shared-initialize :after ((p %sendgrid-with-an-after-method) slot-names
+                                     &rest initargs &key &allow-other-keys)
+  (declare (ignore slot-names))
+  (when (eq :bad (getf initargs :x))
+    (error '%subclass-initarg-error)))
+
+(test a-failure-from-inside-call-next-method-also-restores-the-url
+  "The final review of #1134, and a regression of #1129's property that the fix for it
+introduced. The restoring HANDLER-BIND wrapped only the %CHECK-* call, not CALL-NEXT-METHOD -- but
+a subclass :AFTER method on SHARED-INITIALIZE runs inside CALL-NEXT-METHOD, after the URL slot has
+been assigned. A failure there left the new, UNCHECKED URL in the slot, for exactly the callers
+#1129 is about: the ones that handle the error and carry on.
+
+Here the subclass refuses :X :BAD, so the error comes from inside CALL-NEXT-METHOD rather than
+from the URL check, and the URL being set in the same call is one the check would also have
+refused. Either way it must not survive."
+  (let ((p (make-instance '%sendgrid-with-an-after-method :api-key "SG.x")))
+    (is (equal hermes::+sendgrid-endpoint-default+ (hermes::sendgrid-endpoint p))
+        "it starts at the default: ~S" (hermes::sendgrid-endpoint p))
+    (signals %subclass-initarg-error
+      (reinitialize-instance p :endpoint "http://evil.example/x" :x :bad))
+    (is (equal hermes::+sendgrid-endpoint-default+ (hermes::sendgrid-endpoint p))
+        "and keeps it when the subclass's own method signals: ~S" (hermes::sendgrid-endpoint p))
+    (is-false (hermes::sendgrid-endpoint-approved-local p)
+              "with no approval claimed: ~S" (hermes::sendgrid-endpoint-approved-local p))
+    ;; The control: the same subclass accepts a good initarg and does move the endpoint, so the
+    ;; assertion above is about the failure and not about this subclass being unable to change.
+    (reinitialize-instance p :endpoint "https://accepted.example/v1" :x :fine)
+    (is (equal "https://accepted.example/v1" (hermes::sendgrid-endpoint p))
+        "control: a good initarg lets the endpoint move: ~S" (hermes::sendgrid-endpoint p))))

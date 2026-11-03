@@ -2100,8 +2100,19 @@ unproxied request."
              (http:proxy-arguments url))
            (is (null looked-up)
                "no name was resolved to decide how to proxy: ~S" looked-up)
+           ;; THE APPROVAL PATH RESOLVES NOTHING EITHER, and nothing asserted that until the
+           ;; review of #1134. The whole point of carrying a recorded verdict is that the send
+           ;; path does no lookup; a lookup added to this branch alone would have satisfied every
+           ;; assertion above, because none of them set an approval. Both schemes, because the
+           ;; https case takes a different exit and could resolve on the way to it.
+           (dolist (url '("http://approved.invalid/x" "https://approved.invalid/x"
+                          "http://other.invalid/x"))
+             (http::call-with-approved-local-host "approved.invalid"
+                                                  (lambda () (http:proxy-arguments url))))
+           (is (null looked-up)
+               "no name was resolved with an approval set either: ~S" looked-up)
            ;; The control: the stub does fire when something asks LOCAL-HOST-P about a name, so
-           ;; the assertion above is about this path and not about an unreachable stub.
+           ;; the assertions above are about this path and not about an unreachable stub.
            (http:local-host-p "another-name.invalid")
            (is-true (member "another-name.invalid" looked-up :test #'string=)
                     "control: LOCAL-HOST-P does resolve a name: ~S" looked-up))
@@ -2143,3 +2154,124 @@ is unreachable would pass for the wrong reason."
     ;; 6to4 is not local, so it is not exempted either.
     (is (eq :not-passed (proxy-arg "http://2002:7f00:1::/x"))
         "a 6to4 address is not local, so its request is not exempted")))
+
+(test an-approval-exempts-only-its-own-host-and-follows-no-redirect
+  "The review of #1134, which found two ways the recorded approval reached a request it was not
+about.
+
+THE APPROVAL IS A HOST, NOT A BOOLEAN. As a boolean it said only that something had been
+approved, which is not a statement about the request being sent: a provider whose URL had moved
+on, or a verdict recorded for one host and read while another sat in the slot, exempted a request
+to a host nothing had approved. It now has to equal the URL's host.
+
+AN EXEMPTED REQUEST FOLLOWS NO REDIRECT. dexador follows a redirect to a DIFFERENT host by
+recursing with the same arguments and the same headers -- it prepends a new Host and keeps the
+rest, in the cross-host branch of its redirect handling in src/backend/usocket.lisp -- so a 307
+from the approved host to http://public.example/ would be fetched with :PROXY NIL AND with the
+Authorization header built for the approved host. That is the credential leaving the machine, not
+merely a proxy being skipped. The exemption is about a destination this machine reaches by
+itself, and a redirect leaves that destination, so :MAX-REDIRECTS 0 travels with it.
+
+THE LITERAL PATH KEEPS FOLLOWING REDIRECTS. It has the same hazard in principle -- a 307 from
+127.0.0.1 can name a public host just as easily -- but the cause is dexador carrying headers
+across a cross-host redirect rather than anything about this rule, the literal rule is what every
+caller of this client gets, and following a redirect to a local server is behaviour this client
+documents and tests. Turning it off here broke REDIRECTS-CAN-BE-REFUSED-CAPPED-OR-FOLLOWED, which
+follows redirects against a test server at 127.0.0.1. APPROVED-LOCAL, by contrast, is passed only
+by a configuration step about to send a credential, and none of those callers follows redirects."
+  ;; The host has to match.
+  (flet ((with-approval (host url)
+           (http::call-with-approved-local-host host (lambda () (http:proxy-arguments url)))))
+    (is (null (with-approval "approved.invalid" "http://other.invalid/x"))
+        "an approval for one host does not exempt a request to another")
+    (is (equal '(:proxy nil :max-redirects 0)
+               (with-approval "approved.invalid" "http://approved.invalid/x"))
+        "and does exempt its own host, with redirects off")
+    (is (null (with-approval "approved.invalid" "https://approved.invalid/x"))
+        "https is never exempted, approval or not")
+    ;; T is not a host, so the old boolean shape grants nothing rather than everything.
+    (is (null (with-approval t "http://approved.invalid/x"))
+        "T is not a host and grants no exemption"))
+
+  ;; And what a request actually hands dexador.
+  (flet ((args (url &key approved-local)
+           (http::call-with-approved-local-host
+            approved-local
+            (lambda ()
+              (http::%dex-args (http:make-request :method :get :url url
+                                                  :follow-redirects 5))))))
+    (let ((exempt (args "http://approved.invalid/x" :approved-local "approved.invalid"))
+          (literal (args "http://127.0.0.1:9000/x"))
+          (ordinary (args "http://public.invalid/x"))
+          (mismatched (args "http://other.invalid/x" :approved-local "approved.invalid")))
+      (is (eql 0 (getf exempt :max-redirects))
+          "an exempted request is given :max-redirects 0: ~S" exempt)
+      (is (= 1 (count :max-redirects exempt))
+          ":max-redirects is passed once, so the value cannot depend on argument order: ~S"
+          exempt)
+      (is (eql 5 (getf literal :max-redirects))
+          "while one exempted by an IP literal still follows redirects: ~S" literal)
+      (is (equal '(:proxy nil) (http:proxy-arguments "http://127.0.0.1:9000/x"))
+          "the literal rule exempts the proxy and says nothing about redirects")
+      ;; The controls: a request that is not exempt keeps the redirect budget it asked for.
+      (is (eql 5 (getf ordinary :max-redirects))
+          "control: an ordinary request still follows redirects: ~S" ordinary)
+      (is-false (member :proxy ordinary)
+                "control: and is not given :proxy at all: ~S" ordinary)
+      (is (eql 5 (getf mismatched :max-redirects))
+          "control: a mismatched approval changes neither argument: ~S" mismatched)
+      (is-false (member :proxy mismatched)
+                "control: and leaves the proxy alone: ~S" mismatched))))
+
+(test the-exported-surface-cannot-claim-a-host-is-local
+  "The re-review of #1134. The approval used to be :APPROVED-LOCAL, a keyword on MAKE-REQUEST and
+on PROXY-ARGUMENTS, both of which are exported -- so any caller could assert it for any host:
+
+  (make-request :url \"http://public.example/x\" :approved-local \"public.example\"
+                :headers <an Authorization header>)
+
+got :PROXY NIL and :MAX-REDIRECTS 0 for a public host, which is the same door that was closed by
+taking the initarg off hermes/blob's slot, left open one layer down. The approval is now
+*APPROVED-LOCAL-HOST*, which is not exported and is not an argument to anything exported.
+
+THIS TEST IS ABOUT THE EXPORTED SURFACE, so it uses only exported symbols to try to produce the
+exemption, and asserts that it cannot. The framework's own senders reach the internal binder with
+a double colon, which is the line this codebase draws around anything a caller is not meant to
+use; that path has its own tests."
+  ;; PROXY-ARGUMENTS takes one argument, so passing the old keyword to it is a PROGRAM-ERROR.
+  (signals program-error
+    (funcall (fdefinition 'http:proxy-arguments)
+             "http://public.example/x" :approved-local "public.example"))
+  ;; MAKE-REQUEST REJECTS IT TOO. SBCL signals SB-EXT:UNKNOWN-KEYWORD-ARGUMENT, which is a
+  ;; subtype of PROGRAM-ERROR: (subtypep (quote sb-ext:unknown-keyword-argument)
+  ;; (quote program-error)) answers T, measured rather than assumed, and the behaviour is the
+  ;; same compiled or interpreted.
+  ;;
+  ;; A COMMENT HERE ONCE CLAIMED THE OPPOSITE -- that the constructor accepted the keyword and
+  ;; ignored it -- on the strength of a script that printed "RETURNED NORMALLY". That script had
+  ;; loaded a STALE FASL, built before the keyword was removed, so what it measured was the old
+  ;; constructor accepting its own keyword. THE SUITE AGREED WITH THE SCRIPT for the same reason,
+  ;; in a worktree whose fasls were equally stale, and the first thing to disagree was a CI leg,
+  ;; which always builds cold. A measurement taken outside a cold build is worth only as much as
+  ;; the build it ran against -- and so is one taken inside a warm one.
+  (signals program-error
+    (funcall (fdefinition 'http:make-request)
+             :method :get :url "http://public.example/x" :approved-local "public.example"))
+  ;; And nothing an exported call can do produces the exemption for a public host.
+  (is (null (http:proxy-arguments "http://public.example/x"))
+      "a public host is not exempted")
+  (let ((args (http::%dex-args (http:make-request :method :get :url "http://public.example/x"
+                                                  :headers '(("Authorization" . "Bearer x"))))))
+    (is-false (member :proxy args)
+              "and a request built through the exported surface is given no :proxy: ~S" args)
+    ;; 5 is MAKE-REQUEST's default FOLLOW-REDIRECTS, so this asserts the redirect cap is left
+    ;; exactly as the caller's request asked for it.
+    (is (eql 5 (getf args :max-redirects))
+        "with its own redirect setting untouched: ~S" args))
+  ;; The control: the internal binder DOES produce it, so the assertions above are about the
+  ;; exported surface and not about the exemption having been removed altogether.
+  (is (equal '(:proxy nil :max-redirects 0)
+             (http::call-with-approved-local-host
+              "public.example"
+              (lambda () (http:proxy-arguments "http://public.example/x"))))
+      "control: the internal binding still grants it"))

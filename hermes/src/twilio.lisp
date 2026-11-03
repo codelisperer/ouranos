@@ -29,6 +29,18 @@ describing. Hence no URL here but the value itself (#1077).")
    (api-base :initarg :api-base
              :initform +twilio-api-base-default+
              :reader twilio-api-base)
+   (api-base-approved-local
+    :initform nil :reader twilio-api-base-approved-local
+    :documentation
+    "THE HOST of API-BASE, when the check that runs when this provider is initialized resolved it and
+approved it as local, and NIL otherwise. A host rather than T, so that PROXY-ARGUMENTS can refuse
+to apply it to a request for any other host (the review of #1134). It says that
+provider is initialized, so a plaintext send is not handed to a proxy (#1091).
+
+NO INITARG, deliberately. The value is a verdict this code reached, and a caller that could pass
+it could assert that a public host had been approved and have the credentials sent straight to
+it, bypassing an egress proxy. SHARED-INITIALIZE sets it on every initialization, beside the
+check that produces it.")
    (connect-timeout :initarg :connect-timeout
                     :initform *send-connect-timeout*
                     :reader twilio-connect-timeout)
@@ -75,36 +87,77 @@ checked and the string built were different -- and %TWILIO-ENDPOINT appends a pa
 the two are not the same string here either. No input is known to reach the refusal now that the
 shared check rejects everything that could move the host, so it has no test: it is a guard
 against a future change to %TWILIO-ENDPOINT rather than against any base."
-  (let* ((uri (%check-credential-url base
-                                     :setting "Twilio API-BASE"
-                                     :example +twilio-api-base-default+
-                                     :credential "the account SID and auth token"
-                                     :appends-path t))
-         (scheme (quri:uri-scheme uri))
-         (host (quri:uri-host uri))
-         (built (handler-case (quri:uri (%twilio-endpoint base "ACprobe"))
-                  (error () nil))))
-    (unless (and built
-                 (equal (quri:uri-host built) host)
-                 (and (quri:uri-scheme built) (string-equal (quri:uri-scheme built) scheme)))
-      (error 'configuration-error
-             :missing (format nil "a Twilio API-BASE such as ~A. A request built from this value would go to ~S over ~S, which is not the ~S over ~S this check approved."
-                              +twilio-api-base-default+
-                              (and built (quri:uri-host built)) (and built (quri:uri-scheme built))
-                              host scheme)))))
+  (multiple-value-bind (uri approved-local)
+      (%check-credential-url base
+                             :setting "Twilio API-BASE"
+                             :example +twilio-api-base-default+
+                             :credential "the account SID and auth token"
+                             :appends-path t)
+    (let* ((scheme (quri:uri-scheme uri))
+           (host (quri:uri-host uri))
+           (built (handler-case (quri:uri (%twilio-endpoint base "ACprobe"))
+                    (error () nil))))
+      (unless (and built
+                   (equal (quri:uri-host built) host)
+                   (and (quri:uri-scheme built) (string-equal (quri:uri-scheme built) scheme)))
+        (error 'configuration-error
+               :missing (format nil "a Twilio API-BASE such as ~A. A request built from this value would go to ~S over ~S, which is not the ~S over ~S this check approved."
+                                +twilio-api-base-default+
+                                (and built (quri:uri-host built))
+                                (and built (quri:uri-scheme built))
+                                host scheme))))
+    ;; The verdict the check above already made: see TWILIO-API-BASE-APPROVED-LOCAL (#1091).
+    approved-local))
 
-(defmethod shared-initialize :after ((p twilio) slot-names &rest initargs &key &allow-other-keys)
-  "Check the configured URL on EVERY initialization, not only the first.
+(defmethod shared-initialize :around ((p twilio) slot-names &rest initargs
+                                     &key &allow-other-keys)
+  "Check the API base BEFORE the slot is assigned, on every initialization (#1129).
 
-SHARED-INITIALIZE AND NOT INITIALIZE-INSTANCE. The check used to hang off
-INITIALIZE-INSTANCE :AFTER, which REINITIALIZE-INSTANCE does not call, so
+:AROUND AND NOT :AFTER, for the reason SENDGRID's method of the same name sets out at length: an
+:AFTER method runs once the slots are assigned, so a refused REINITIALIZE-INSTANCE left the
+refused URL in the slot and a caller that handled the refusal and carried on sent the account SID
+and auth token there. Measured at 7ca13e23, where (reinitialize-instance p :api-base
+\"http://evil.example/x\") was refused and TWILIO-API-BASE then read \"http://evil.example/x\".
 
-  (reinitialize-instance (make-instance 'hermes::twilio ...) :api-base \"http://evil.example/x\")
-
-was accepted and the next send carried the credential there in plaintext. SHARED-INITIALIZE runs
-for both, so there is no second door (the review of #1104)."
-  (declare (ignore slot-names initargs))
-  (%check-api-base (twilio-api-base p)))
+#1104 moved this check from INITIALIZE-INSTANCE to SHARED-INITIALIZE so that
+REINITIALIZE-INSTANCE could not skip it. That closed one door; this closes the one next to it,
+where the check runs but the assignment has already happened."
+  (declare (ignore slot-names))
+  ;; THE SLOT'S OWN VALUE IS WHAT IS CHECKED, after CALL-NEXT-METHOD has assigned it. Checking
+  ;; the value that WOULD be in effect -- the initarg, else the current slot, else the default
+  ;; constant -- missed a subclass that gives the slot an :INITFORM of its own, because neither
+  ;; an initarg nor a bound slot exists on a fresh instance and the constant is not what the slot
+  ;; will hold (the re-review of #1134).
+  ;;
+  ;; A REFUSAL STILL LEAVES THE PREVIOUS URL IN PLACE, which is what #1129 is about, so the
+  ;; previous value is put back before the error leaves this method. HANDLER-BIND rather than
+  ;; HANDLER-CASE: the handler runs and then declines, so the refusal still propagates to the
+  ;; caller with the same condition it had.
+  (let ((previous (and (slot-boundp p 'api-base) (twilio-api-base p)))
+        (previous-verdict (and (slot-boundp p 'api-base-approved-local) (slot-value p 'api-base-approved-local))))
+    (setf (slot-value p 'api-base-approved-local) nil)
+    ;; CALL-NEXT-METHOD IS INSIDE THE HANDLER TOO, not only the check. A subclass :AFTER method on
+    ;; SHARED-INITIALIZE runs inside CALL-NEXT-METHOD, after the URL slot has been assigned, so if
+    ;; it signals -- for a bad initarg of its own, say -- the slot kept the new, unchecked URL and
+    ;; #1129's property was lost for exactly the callers who handle the error and carry on. With
+    ;; the whole body inside, any failure between here and the end puts the URL back (the final
+    ;; review of #1134).
+    (handler-bind ((error (lambda (c)
+                            (declare (ignore c))
+                            ;; BOTH SLOTS GO BACK, so a refusal really does leave the provider
+                            ;; as it was. Restoring the URL and clearing the verdict would leave a
+                            ;; provider that still points at an approved local host and has
+                            ;; forgotten that it was approved, which is safe -- it would be
+                            ;; proxied -- but it is not "unchanged" (the re-review of #1134). The
+                            ;; verdict belongs to the URL being restored, so the two travel
+                            ;; together.
+                            (if previous
+                                (setf (slot-value p 'api-base) previous)
+                                (slot-makunbound p 'api-base))
+                            (setf (slot-value p 'api-base-approved-local) previous-verdict))))
+      (let ((instance (call-next-method)))
+        (setf (slot-value p 'api-base-approved-local) (%check-api-base (twilio-api-base p)))
+        instance))))
 
 (defun %twilio-endpoint (base sid)
   (format nil "~A/Accounts/~A/Messages.json" base sid))
@@ -130,11 +183,18 @@ for both, so there is no second door (the review of #1104)."
                                            (cons "Body" (sms-text m)))
                             :connect-timeout (twilio-connect-timeout p)
                             :read-timeout (twilio-read-timeout p)))
+         ;; A PLAINTEXT SEND TO A HOST THE CHECK APPROVED AS LOCAL IS NOT HANDED TO A PROXY
+         ;; (#1091). The verdict is bound around the send rather than passed with the request,
+         ;; because a keyword on MAKE-REQUEST was a keyword any caller could pass, for any host
+         ;; (the re-review of #1134).
          (resp (as-delivery :twilio
-                 (send-request
-                  req
-                  (list (add-header "Authorization" (%basic-auth sid token))
-                        (ensure-2xx :twilio)))))
+                 (call-with-approved-local-host
+                  (twilio-api-base-approved-local p)
+                  (lambda ()
+                    (send-request
+                     req
+                     (list (add-header "Authorization" (%basic-auth sid token))
+                           (ensure-2xx :twilio)))))))
          (json (jzon:parse (response-body resp))))
     (make-delivery-result
      :provider :twilio

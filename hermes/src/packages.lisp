@@ -17,6 +17,15 @@
                 ;; The HTTP client moved to aion (pre-publication issue 202). Imported rather than nicknamed so
                 ;; the backends' call sites are unchanged by the move -- the point of the
                 ;; exercise was to stop reimplementing it, not to churn its consumers.
+                ;; CALL-WITH-APPROVED-LOCAL-HOST is NOT exported from aion/http-client, and is
+                ;; imported by name rather than reached with a double colon at the call site, so
+                ;; that each package which touches it says so in its own definition. hermes/blob
+                ;; imports it the same way; this comment used to claim the reach was in one place,
+                ;; which was false the moment the S3 backend needed it too (the final review of
+                ;; #1134). It is unexported on purpose: a keyword on MAKE-REQUEST let any
+                ;; caller assert that a host had been approved as local and so send a plaintext
+                ;; request to it with no proxy (#1091, the re-review of #1134).
+                #:call-with-approved-local-host
                 #:make-request #:request-url #:request-method #:request-headers
                 #:request-content
                 #:make-response #:response-status #:response-headers #:response-body
