@@ -194,13 +194,18 @@ its tag.
   when its endpoint is local, even though that path does not check locality in order to refuse
   anything. A plaintext store whose endpoint is **not** local records no approval and keeps
   whatever proxy is configured.
-  **An exempted request no longer follows redirects**, and this applies to every request the rule
-  above exempts, including one exempted by an IP address. dexador follows a redirect to a
-  different host by recursing with the same arguments and the same headers, so a `307` from the
-  exempted host to `http://public.example/` was fetched with `:proxy nil` **and with the
-  `Authorization` header built for the exempted host**: the credential left the machine, not
-  merely the proxy being skipped. A `3xx` is now the response for such a request. Nothing else
-  changes about redirects.
+  **A request exempted on a recorded approval no longer follows redirects.** dexador follows a
+  redirect to a different host by recursing with the same arguments and the same headers, so a
+  `307` from the approved host to `http://public.example/` was fetched with `:proxy nil` **and
+  with the `Authorization` header built for the approved host**: the credential left the machine,
+  not merely the proxy being skipped. A `3xx` is now the response for such a request.
+  **A request exempted by an IP address or by `localhost` still follows redirects** with the
+  budget it asked for. That is the rule every caller of this client gets, following a redirect to
+  a local server is documented and tested behaviour, and suppressing it there broke the client's
+  own redirect test. This entry first said the suppression applied to every exempted request,
+  including one exempted by an IP address; that was written before the change was narrowed and
+  was not true of what shipped. The general hazard — dexador carrying headers across a cross-host
+  redirect for any request — is #1139.
   **An app that deliberately proxied plaintext requests to a local store named by DNS will see
   them stop going through the proxy**, which is the same consequence the entry above describes
   for addresses.
