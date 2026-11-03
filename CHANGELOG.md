@@ -46,6 +46,16 @@ its tag.
   IPv4 address. This is the same rule hermes has applied to a credential URL since #1077, and
   sharing the rule is what brought the two into agreement.
 
+- **`make-instance 'hermes/blob:s3-store` and `reinitialize-instance` on an S3 store now refuse
+  an endpoint too, not only `make-s3-store`** (#1106). Both signal `blob-configuration-error` for
+  any endpoint the constructor refuses — a bracketed or bare IPv6 address, a scheme, userinfo, a
+  path, a control character, no host. Before this, the checks ran only in `make-s3-store`, so
+  `(reinitialize-instance store :endpoint "[::1]:9000")` was accepted. **A refusal leaves the
+  store exactly as it was, every slot included**: a refused call that also carried `:secure nil`
+  used to leave a secure store plaintext, at a local name, with no approval, so its signed requests
+  went through `HTTP_PROXY` in the clear. `make-instance` still does not read the environment or
+  require credentials; that stays in `make-s3-store`.
+
 - **`hermes/blob` also refuses an S3 endpoint with a control character in it, or with no host**
   (#1106), both of which it accepted before. `MNEMOSYNE_S3_ENDPOINT` of `":9000"` has no host, and
   one containing a byte below 32 or 127 — a stray newline or `\x01` from a mangled environment
@@ -131,8 +141,9 @@ its tag.
   :endpoint-approved-local "public.example" ...)` sent signed requests to a public host in
   plaintext with no proxy — the leak the slot exists to prevent. Recomputing also means a
   `reinitialize-instance` that moves the endpoint cannot leave the old verdict behind.
-  **A refused `reinitialize-instance` now leaves a provider exactly as it was** (#1129) — both
-  the URL and the recorded verdict are put back. The endpoint and API base checks moved from
+  **A refused `reinitialize-instance` now leaves a provider exactly as it was** (#1129) — every
+  slot is put back, not only the URL and the recorded verdict, because the same call can carry
+  other initargs and they are assigned before the URL is checked. The endpoint and API base checks moved from
   `shared-initialize :after` to `:around`; previously the error was signalled with the refused URL
   already stored, and a caller that handled it and carried on sent the credential there.
   **A subclass that gives the slot its own `:initform` is checked too.** The check reads the

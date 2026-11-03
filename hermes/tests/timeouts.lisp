@@ -435,6 +435,10 @@ value reaches the send at all."
           (first calls))
       (is (equal '(:proxy nil) (second (second calls)))
           "and neither is sendgrid's: ~S" (second calls))
+      ;; SendGrid's redirect cap too. My reply on #1140 said both arguments were asserted for all
+      ;; five senders, and this one was missing until the hub's review of that PR found it.
+      (is (eql 0 (third (second calls)))
+          "and sendgrid's is given :max-redirects 0 as well: ~S" (second calls))
       (is (eq :none (second (third calls)))
           "twilio's https send keeps whatever proxy is configured: ~S" (third calls))
       (is (eq :none (second (fourth calls)))
@@ -753,3 +757,31 @@ Both directions for each: a plaintext base at a host the check approved as local
               "~A's approved send is also given :max-redirects 0: ~S" (cdr pair) local)
           (is (eq :proxied (second remote))
               "~A's https send keeps whatever proxy is configured: ~S" (cdr pair) remote))))))
+
+(test a-refused-url-leaves-every-other-slot-as-it-was
+  "The hub's review of #1140. The restore put back the URL and the recorded verdict by name, and
+CALL-NEXT-METHOD assigns every initarg in the call before the URL check runs. So a refused
+
+  (reinitialize-instance provider :read-timeout 99 :endpoint `http://evil.example/x')
+
+kept the new read timeout while putting the URL back, and the CHANGELOG said a refusal left the
+provider \"exactly as it was\". For these providers that leaked nothing -- the scheme lives in the
+URL slot, which was restored -- but hermes/blob's copy of the same ordering missed SECURE in the
+same way and was left plaintext with no approval. Every slot is snapshotted now, so the claim is
+true rather than true of the two slots someone remembered."
+  (dolist (case (list (list (hermes::make-sendgrid :api-key "SG.x" :read-timeout 5)
+                            :endpoint #'hermes::sendgrid-read-timeout)
+                      (list (hermes::make-twilio :account-sid "ACx" :auth-token "t"
+                                                 :from "+15005550006" :read-timeout 5)
+                            :api-base #'hermes::twilio-read-timeout)))
+    (destructuring-bind (provider key read-timeout) case
+      (signals h:configuration-error
+        (reinitialize-instance provider :read-timeout 99 key "http://evil.example/x"))
+      (is (eql 5 (funcall read-timeout provider))
+          "~S keeps its read timeout when the same call's URL is refused: ~S"
+          (type-of provider) (funcall read-timeout provider))
+      ;; The control: with an acceptable URL the same call does change the timeout, so the
+      ;; assertion above is about the refusal and not about the slot being unchangeable.
+      (reinitialize-instance provider :read-timeout 99 key "https://accepted.example/v1")
+      (is (eql 99 (funcall read-timeout provider))
+          "control: an accepted call changes it: ~S" (funcall read-timeout provider)))))
