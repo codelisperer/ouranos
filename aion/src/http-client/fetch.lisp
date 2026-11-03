@@ -378,7 +378,7 @@ it was not about."
         (when (and appends-path (or (quri:uri-query uri) (quri:uri-fragment uri)))
           (refuse "The value carries a query or a fragment, and the rest of each request's path is appended to it, so the path would end up inside them."))
         (when (and (plusp (length host)) (char= #\[ (char host 0)))
-          (refuse (format nil "The host ~S is a bracketed IPv6 address, which cannot be connected to: it is looked up as a name and no such name exists. Write the address without brackets, or use a name." host)))
+          (refuse (format nil "The host ~S is a bracketed IPv6 address, which cannot be connected to: it is looked up as a name and no such name exists. Use a name that resolves to the address, or an IPv4 address. Writing the address without brackets is not a fix: an S3 endpoint in hermes/blob refuses that spelling too." host)))
         (when (and (string-equal scheme "http") (not (local-host-p host)))
           (refuse (format nil "The host ~S would receive ~A in the clear, because ~A. Use https, or a host only this machine or this network can reach."
                           host credential carried-in))))

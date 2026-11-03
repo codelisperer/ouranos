@@ -1398,6 +1398,17 @@ its tag.
 
 ### Fixed
 
+- **`reinitialize-instance` on an S3 blob store stores the endpoint trimmed, as `make-s3-store`
+  does** (#1151). It used to check trimmed copies of `:endpoint` and keep the value as given, so
+  `(reinitialize-instance store :endpoint " 127.0.0.1:9000 ")` passed its checks and every URL
+  `hermes/blob` then built had the spaces in it. Both now trim spaces, tabs, carriage returns and
+  newlines. A side effect: reinitializing with a tab-padded endpoint used to be refused as
+  whitespace while `make-s3-store` accepted the same value; both accept it now.
+- **The refusal for a bracketed IPv6 host no longer advises writing the address without
+  brackets** (#1151). `aion/http-client:credential-url-refusal` said to, but a `hermes/blob` S3
+  endpoint refuses the unbracketed form too, so following the advice for `[::1]:9000` produced a
+  second error. It now recommends a name that resolves to the address, or an IPv4 address. Code
+  that matches on the phrase "bracketed IPv6 address" is unaffected; the sentence after it changed.
 - **`hyperion/markdown:render` no longer lets an image inside an image's alt text add attributes
   to the outer `img`** (#1132). An app rendering untrusted markdown **with the default options**
   was affected, so this is a fix to behaviour that shipped, not to the new untrusted mode. 3bmd
