@@ -2100,8 +2100,19 @@ unproxied request."
              (http:proxy-arguments url))
            (is (null looked-up)
                "no name was resolved to decide how to proxy: ~S" looked-up)
+           ;; THE APPROVAL PATH RESOLVES NOTHING EITHER, and nothing asserted that until the
+           ;; review of #1134. The whole point of carrying a recorded verdict is that the send
+           ;; path does no lookup; a lookup added to this branch alone would have satisfied every
+           ;; assertion above, because none of them set an approval. Both schemes, because the
+           ;; https case takes a different exit and could resolve on the way to it.
+           (dolist (url '("http://approved.invalid/x" "https://approved.invalid/x"
+                          "http://other.invalid/x"))
+             (http::call-with-approved-local-host "approved.invalid"
+                                                  (lambda () (http:proxy-arguments url))))
+           (is (null looked-up)
+               "no name was resolved with an approval set either: ~S" looked-up)
            ;; The control: the stub does fire when something asks LOCAL-HOST-P about a name, so
-           ;; the assertion above is about this path and not about an unreachable stub.
+           ;; the assertions above are about this path and not about an unreachable stub.
            (http:local-host-p "another-name.invalid")
            (is-true (member "another-name.invalid" looked-up :test #'string=)
                     "control: LOCAL-HOST-P does resolve a name: ~S" looked-up))
