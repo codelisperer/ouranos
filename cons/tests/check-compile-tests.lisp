@@ -152,7 +152,7 @@ one file is reported once, by the compiler, not again as a redefinition."
       (is (= 1 code) "exit ~D, expected 1:~%~A" code output)
       (is (search "Duplicate definition for HELPER found in one file" output)
           "the compiler's warning is the reason:~%~A" output)
-      (is (not (search "defined a second time in another file" output))
+      (is (not (search "replaced by one in another file" output))
           "and it is not also reported as a redefinition:~%~A" output))))
 
 (test one-file-reached-by-two-spellings-is-not-reported
@@ -192,6 +192,40 @@ not fail the checked system for what the dependency does."
         (is (search "ok      check-compile-fixture" output) "no ok line for the fixture:~%~A" output)
         (is (not (search "CHECK-COMPILE-DEP::HELPER" output))
             "the dependency's redefinition was reported:~%~A" output)))))
+
+;;; --- a macro, generic function or method defined in two files (#1121) ------------------------
+;;;
+;;; A consuming app's strict build passed while a helper in one file replaced one in another.
+;;; #577 handled DEFUN only; SBCL signals the same kind of warning for DEFMACRO, DEFGENERIC and a
+;;; DEFMETHOD with the same specializers, and the check now reports those too.
+
+(test a-macro-generic-or-method-defined-in-two-files-fails-the-system
+  "Each of the three kinds, alone in a fixture: b.lisp replaces what a.lisp defined. The script
+fails the system and names the kind, the definition and both files."
+  (loop for (kind a-source b-source name)
+          in '(("defmacro" "(defmacro helper (x) x)" "(defmacro helper (x) (list 'quote x))"
+                "CHECK-COMPILE-FIXTURE::HELPER")
+               ("defgeneric" "(defgeneric helper (x))" "(defgeneric helper (x))"
+                "CHECK-COMPILE-FIXTURE::HELPER")
+               ("defmethod" "(defmethod helper ((x integer)) x)"
+                "(defmethod helper ((x integer)) (1+ x))" "CHECK-COMPILE-FIXTURE::HELPER"))
+        do (%with-two-file-fixture (dir a-source b-source)
+             (multiple-value-bind (code output) (%run-check-compile dir)
+               (is (= 1 code) "~A: exit ~D, expected 1:~%~A" kind code output)
+               (is (search (format nil "~A ~A" kind name) output)
+                   "~A: the report does not name the kind and the definition:~%~A" kind output)
+               (is (and (search "a.lisp" output) (search "b.lisp" output))
+                   "~A: the report does not name both files:~%~A" kind output)))))
+
+(test a-method-on-other-specializers-in-another-file-passes
+  "The control for the method case: b.lisp adds a method for strings to the generic function
+a.lisp's method for integers belongs to. That adds a method and replaces nothing."
+  (%with-two-file-fixture (dir "(defmethod helper ((x integer)) x)"
+                               "(defmethod helper ((x string)) x)")
+    (multiple-value-bind (code output) (%run-check-compile dir)
+      (is (= 0 code) "exit ~D, expected 0:~%~A" code output)
+      (is (search "ok      check-compile-fixture" output)
+          "no ok line for the fixture:~%~A" output))))
 
 ;;; --- a system that cannot load on this host (#283) -------------------------------------------
 ;;;

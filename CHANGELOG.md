@@ -76,6 +76,19 @@ its tag.
   `sendgrid-endpoint`.
   **A query or fragment is allowed here**, unlike in a Twilio `api-base`: `deliver` sends this
   value as the request URL exactly as it stands, so nothing can land inside one.
+- **cons: `cons --strict build` and `cons --strict test` now fail when a `defun`, `defmacro`,
+  `defgeneric` or same-specializer `defmethod` in one of the project's files replaces one from
+  another of its files** (#1121). SBCL reports this only as a `STYLE-WARNING`, so the strict
+  build passed while the program ran with whichever file loaded last. The error names the kind
+  of definition, its name and both files. An app whose strict CI build passed before can fail
+  now; rename one of the two definitions, or delete the one that is not meant to be used. A
+  file loaded twice, a library outside the project, and a method on other specializers are not
+  counted, and neither is a definition left in the image by an earlier build, as in a REPL
+  after a function moved files. Setting `uiop:*uninteresting-conditions*` to
+  `uiop:*usual-uninteresting-conditions*` does not hide it. Without `--strict` nothing changes.
+  The tree's own gate (`verify-tree.lisp`,
+  `check-compile.lisp`, through `scripts/redefinitions.lisp`) already failed a cross-file
+  `defun` (#577) and now fails the other three kinds as well.
 
 - **hermes: a 429 from SendGrid or Twilio is now `delivery-rate-limited`, not a plain
   `delivery-failure`** (#79 step two). An app that caught `delivery-failure` still catches it,

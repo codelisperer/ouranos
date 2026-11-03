@@ -136,7 +136,12 @@ both upcased for the standard readtable."
                    (namestring (or (ignore-errors (truename r)) r))))
            (own '())
            (others '())
-           (seen (make-hash-table :test (function equal))))
+           (seen (make-hash-table :test (function equal)))
+           ;; Under --strict: every function, macro, generic function and method in the image
+           ;; before this load (an EQ set, made by the first OWN-LOAD), and a key for each
+           ;; definition this load has replaced so far. See CROSS-FILE-REDEFINITION (#1121).
+           (before nil)
+           (defined (make-hash-table :test (function equal))))
        (labels ((asdf (fn &rest args) (apply (function uiop:symbol-call) :asdf fn args))
                 (fetch (name) (uiop:symbol-call :ql :quickload name :silent t))
                 (quiet (name)
@@ -145,6 +150,123 @@ both upcased for the standard readtable."
                   (handler-bind ((warning (function muffle-warning)))
                     (with-compilation-unit (:override t)
                       (asdf :load-system name))))
+                (under-root-p (path)
+                  ;; Case-insensitive on Windows, as OWN-P below.
+                  (let ((p (namestring path)))
+                    (and (>= (length p) (length root))
+                         (if (uiop:os-windows-p)
+                             (string-equal root p :end2 (length root))
+                             (string= root p :end2 (length root))))))
+                (source-file (thing)
+                  ;; The truename of the file THING, a function or a method, was compiled
+                  ;; from, or NIL. sb-introspect is baked into bin/cons and required below.
+                  (let ((path (ignore-errors
+                               (uiop:symbol-call
+                                :sb-introspect :definition-source-pathname
+                                (uiop:symbol-call :sb-introspect :find-definition-source
+                                                  thing)))))
+                    (and path (ignore-errors (probe-file path)))))
+                (snapshot ()
+                  ;; The definitions already in the image, before this load makes any. A warm
+                  ;; image, such as bin/cons or a REPL that built the project once, holds the
+                  ;; project's own definitions from an earlier build, with the files they came
+                  ;; from then.
+                  (let ((set (make-hash-table :test (function eq))))
+                    (flet ((add (fn)
+                             (setf (gethash fn set) t)
+                             (when (typep fn 'generic-function)
+                               (dolist (m (ignore-errors
+                                           (uiop:symbol-call :sb-mop :generic-function-methods
+                                                             fn)))
+                                 (setf (gethash m set) t)))))
+                      (do-all-symbols (sym)
+                        (when (fboundp sym)
+                          (let ((fn (or (macro-function sym)
+                                        (ignore-errors (fdefinition sym)))))
+                            (when fn (add fn))))
+                        (let ((setf-name (list 'setf sym)))
+                          (when (ignore-errors (fboundp setf-name))
+                            (add (fdefinition setf-name))))))
+                    set))
+                (uninteresting (list)
+                  ;; LIST, one of UIOP's lists of conditions that ASDF muffles, made to match
+                  ;; no redefinition warning. UIOP:*USUAL-UNINTERESTING-CONDITIONS* holds
+                  ;; them, and when an app sets UIOP:*UNINTERESTING-CONDITIONS* to it, ASDF's
+                  ;; own handlers muffle every redefinition before the handler below sees it.
+                  ;; Each entry is wrapped rather than the redefinition ones removed, because
+                  ;; one of them, SB-KERNEL:UNINTERESTING-REDEFINITION, is a type made of
+                  ;; SATISFIES tests, which SUBTYPEP cannot place under REDEFINITION-WARNING.
+                  (let ((parent (uiop:find-symbol* :redefinition-warning :sb-kernel nil)))
+                    (if parent
+                        (mapcar (lambda (entry)
+                                  (lambda (c)
+                                    (and (not (typep c parent))
+                                         (uiop:match-condition-p entry c))))
+                                list)
+                        list)))
+                (cross-file-redefinition (w)
+                  ;; #1121: under --strict, a DEFUN, DEFMACRO, DEFGENERIC or DEFMETHOD that
+                  ;; replaces a definition from another file of the project is counted. SBCL
+                  ;; signals each as a STYLE-WARNING, a REDEFINITION-WARNING, and the load
+                  ;; went ahead with whichever file loaded last. Returns a line naming the
+                  ;; kind, the name and both files, or NIL. Same-file redefinitions, such as a
+                  ;; macro defined while its file compiles and again when it loads, and
+                  ;; definitions outside ROOT, are not counted. SBCL's names are looked up by
+                  ;; string so the printed form holds no SBCL symbol.
+                  (flet ((sb (name package) (uiop:find-symbol* name package nil)))
+                    (let ((kind (loop for (class . text)
+                                        in '((:redefinition-with-defun . "defun")
+                                             (:redefinition-with-defmacro . "defmacro")
+                                             (:redefinition-with-defgeneric . "defgeneric")
+                                             (:redefinition-with-defmethod . "defmethod"))
+                                      for type = (sb class :sb-kernel)
+                                      when (and type (typep w type)) return text)))
+                      (when (and kind (uiop:find-package* :sb-introspect nil))
+                        (let* ((name (slot-value w (sb :name :sb-kernel)))
+                               (new-function (sb :new-function :sb-kernel))
+                               (new-location (sb :new-location :sb-kernel))
+                               (new (if (and (slot-exists-p w new-function)
+                                             (slot-boundp w new-function))
+                                        (source-file (slot-value w new-function))
+                                        (let ((l (and (slot-boundp w new-location)
+                                                      (slot-value w new-location))))
+                                          (and l (ignore-errors
+                                                  (probe-file
+                                                   (uiop:symbol-call
+                                                    :sb-c :definition-source-location-namestring
+                                                    l)))))))
+                               ;; The handler runs before the replacement, so the old
+                               ;; definition is still in place.
+                               (old-object (cond ((string= kind "defmethod")
+                                                  (slot-value w (sb :old-method :sb-kernel)))
+                                                 ((string= kind "defmacro")
+                                                  (and (symbolp name) (macro-function name)))
+                                                 (t (and (fboundp name) (fdefinition name)))))
+                               (key (if (string= kind "defmethod")
+                                        (list kind name
+                                              (slot-value w (sb :qualifiers :sb-kernel))
+                                              (slot-value w (sb :specializers :sb-kernel)))
+                                        (list kind name)))
+                               ;; Counted only when the definition replaced was made by this
+                               ;; load. One that was in the image before it (see SNAPSHOT) is
+                               ;; from an earlier build, and its file may no longer define it,
+                               ;; as when a function moved to another file. It counts once this
+                               ;; load has defined the name itself, as when two files both
+                               ;; define it.
+                               (this-load (or (gethash key defined)
+                                              (not (and before old-object
+                                                        (gethash old-object before)))))
+                               (old (and this-load old-object (source-file old-object))))
+                          (setf (gethash key defined) t)
+                          (when (and new old (under-root-p new) (under-root-p old)
+                                     (not (funcall (if (uiop:os-windows-p)
+                                                       (function string-equal)
+                                                       (function string=))
+                                                   (namestring new) (namestring old))))
+                            (let ((*package* (find-package :keyword)))
+                              (format nil "~A ~S in ~A replaces the one in ~A"
+                                      kind name (uiop:native-namestring new)
+                                      (uiop:native-namestring old)))))))))
                 (own-load (name)
                   ;; ASDF fails the load itself on a WARNING that COMPILE-FILE reports. The
                   ;; handler is for the ones it does not fail on: those deferred to the end of
@@ -160,7 +282,13 @@ both upcased for the standard readtable."
                   ;; matching the printed text keeps this form free of SBCL's own symbols.
                   (let ((caught '())
                         (recursive (uiop:find-symbol* :recursive-operate :asdf/operate nil)))
+                    (when force-own
+                      (ignore-errors (require :sb-introspect))
+                      (unless before (setf before (snapshot))))
                     (handler-bind ((warning (lambda (w)
+                                              (let ((redefined (and force-own
+                                                                    (cross-file-redefinition w))))
+                                                (when redefined (push redefined caught)))
                                               (unless (or (typep w 'uiop:compile-warned-warning)
                                                           (and (typep w 'style-warning)
                                                                (not (uiop:string-prefix-p
@@ -168,8 +296,20 @@ both upcased for the standard readtable."
                                                                      (princ-to-string w))))
                                                           (and recursive (typep w recursive)))
                                                 (push w caught)))))
-                      (with-compilation-unit (:override t)
-                        (asdf :load-system name :force (if force-own own nil))))
+                      (let ((muffles (remove nil (list (uiop:find-symbol*
+                                                        :*uninteresting-conditions* :uiop nil)
+                                                       (uiop:find-symbol*
+                                                        :*uninteresting-compiler-conditions*
+                                                        :uiop nil)
+                                                       (uiop:find-symbol*
+                                                        :*uninteresting-loader-conditions*
+                                                        :uiop nil)))))
+                        (progv muffles (if force-own
+                                           (mapcar (lambda (v) (uninteresting (symbol-value v)))
+                                                   muffles)
+                                           (mapcar (function symbol-value) muffles))
+                          (with-compilation-unit (:override t)
+                            (asdf :load-system name :force (if force-own own nil))))))
                     (when caught
                       (error "Loading ~A signalled ~D WARNING~:P that its compilation did not fail on, either when the compilation unit ended or when one of its files was loaded:~{~%  ~A~}"
                              name (length caught) (reverse caught)))))
