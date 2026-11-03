@@ -35,6 +35,25 @@
            (is (null (fs:reparse-tag base))))
       (%cleanup base))))
 
+(test a-root-is-asked-about-as-the-root
+  "/ and, on Windows, a drive root such as C:\\ keep their separator. Without it / became the
+empty name, which lstat cannot find, and C:\\ became C:, drive C's current folder (Copilot's
+review of #1165)."
+  #+win32
+  (let* ((drive (or (uiop:getenv "SystemDrive") "C:"))
+         (root (concatenate 'string drive "\\")))
+    (is (string= root (fs::%entry-name root)) "~S gives ~S" root (fs::%entry-name root))
+    (is (string= (concatenate 'string drive "/") (fs::%entry-name (concatenate 'string drive "/"))))
+    (is (string= drive (fs::%entry-name drive)) "~S, the current folder, stays as it is" drive)
+    (is (null (fs:reparse-kind root)))
+    (is (null (fs:reparse-tag root))))
+  #-win32
+  (progn
+    (is (string= "/" (fs::%entry-name "/")))
+    (is (null (fs:reparse-kind "/")))
+    (is (null (fs:reparse-tag "/"))))
+  (is (string= "" (fs::%entry-name "")) "an empty name stays empty"))
+
 (test a-directory-link-is-a-junction-on-windows-and-a-symlink-elsewhere
   "MAKE-DIRECTORY-LINK makes a junction on Windows and a symbolic link elsewhere. The link is in
 a folder named with brackets and given as a native string, which REPARSE-KIND must not parse."

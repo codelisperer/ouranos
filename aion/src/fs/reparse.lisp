@@ -47,6 +47,19 @@ This only classifies a number, so it gives the same answer on every operating sy
         ((= (logand tag #xFFFF0FFF) #x9000001A) :cloud)
         (t :other)))
 
+(defun %entry-name (path)
+  "PATH's native name without a trailing separator, as %NATIVE gives it, except that a root keeps
+its separator. %NATIVE turns / into the empty string, which lstat cannot find, and on Windows
+turns C:\\ into C:, which names drive C's current folder rather than its root (Copilot's review
+of #1165)."
+  (let* ((name (path:native-name path))
+         (trimmed (string-right-trim (path:separators) name)))
+    (cond ((and (zerop (length trimmed)) (plusp (length name))) (subseq name 0 1))
+          #+win32
+          ((and (= (length trimmed) 2) (char= (char trimmed 1) #\:) (> (length name) 2))
+           (subseq name 0 3))
+          (t trimmed))))
+
 #+win32
 (progn
   (defconstant +find-data-size+ 592
@@ -87,8 +100,13 @@ names with [ ] and non-ASCII characters are passed through as they are.
 Signals REPARSE-KIND-ERROR when Windows cannot answer, for example because PATH does not exist.
 On Linux and macOS there are no reparse points, and this returns NIL for any path that exists."
   #+win32
-  (let* ((native (%native path))
-         (a (%attributes native)))
+  (let* ((native (%entry-name path))
+         ;; Not %ATTRIBUTES, which trims the name again and so turns C:\ back into C:.
+         (a (sb-alien:alien-funcall
+             (sb-alien:extern-alien "GetFileAttributesW"
+                                    (function (sb-alien:unsigned 32)
+                                              (sb-alien:c-string :external-format :utf-16le)))
+             native)))
     (cond ((= a +invalid-file-attributes+)
            (error 'reparse-kind-error :pathname path :code (%last-error)))
           ((not (logtest a +file-attribute-reparse-point+)) nil)
@@ -100,7 +118,7 @@ On Linux and macOS there are no reparse points, and this returns NIL for any pat
 #-win32
 (defun %posix-kind (path)
   "PATH's lstat file type bits, or REPARSE-KIND-ERROR with the errno when lstat fails."
-  (handler-case (logand (sb-posix:stat-mode (sb-posix:lstat (%native path))) #o170000)
+  (handler-case (logand (sb-posix:stat-mode (sb-posix:lstat (%entry-name path))) #o170000)
     (sb-posix:syscall-error (e)
       (error 'reparse-kind-error :pathname path :code (sb-posix:syscall-errno e)))))
 

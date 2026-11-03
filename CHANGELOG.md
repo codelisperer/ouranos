@@ -1500,7 +1500,8 @@ its tag.
   it. `aion/fs:reparse-tag-kind` classifies a tag: `IO_REPARSE_TAG_CLOUD` and `_CLOUD_1` to
   `_CLOUD_F` are `:cloud`. On Linux and macOS a symbolic link is `:symlink` and anything else
   `nil`. Both signal `aion/fs:reparse-kind-error` when the path cannot be read, for example
-  because it does not exist. `link-p` and `delete-tree` are unchanged and still treat every
+  because it does not exist. A root, `/` or a drive root such as `C:\`, is asked about as
+  the root itself. `link-p` and `delete-tree` are unchanged and still treat every
   reparse point, a cloud placeholder included, as a link. `:cloud` is tested only through `reparse-tag-kind` on
   the tags Windows defines, not on a real placeholder; `:symlink` and `:junction` are tested on
   real links.
