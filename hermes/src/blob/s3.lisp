@@ -57,6 +57,12 @@ MAKE-S3-STORE."))
       value
       (error 'blob-configuration-error :missing name)))
 
+(defun %normalize-endpoint (endpoint)
+  "ENDPOINT with surrounding whitespace removed: the one normalisation applied before anything
+checks or stores an endpoint. MAKE-S3-STORE and REINITIALIZE-INSTANCE both call it, so a store
+holds the same value whichever way it got its endpoint (#1151)."
+  (string-trim '(#\Space #\Tab #\Newline #\Return) endpoint))
+
 (defun make-s3-store (&key endpoint region access-key secret-key session-token
                            (secure t secure-p) path-style public-base-url upload-acl)
   "An S3-STORE, defaulting every setting from the environment.
@@ -90,8 +96,7 @@ moved to hermes, and the deployed names were kept rather than renamed. They are 
     ;; used to trim their own copy while the store kept the raw string, so " 127.0.0.1" passed
     ;; the checks and then every request was built from a URL with a space in it (the review of
     ;; #1090). One normalisation, before anything looks at the value.
-    (let* ((endpoint (string-trim '(#\Space #\Tab #\Newline #\Return)
-                                  (%require-setting endpoint "MNEMOSYNE_S3_ENDPOINT")))
+    (let* ((endpoint (%normalize-endpoint (%require-setting endpoint "MNEMOSYNE_S3_ENDPOINT")))
            (path-style (or path-style
                            (let ((v (%setting "MNEMOSYNE_S3_PATH_STYLE")))
                              (and v (string-equal v "true"))))))
@@ -396,6 +401,13 @@ review of #1140). Every slot is snapshotted before CALL-NEXT-METHOD and all of t
                             (declare (ignore c))
                             (%restore-slots s snapshot))))
       (let ((instance (call-next-method)))
+        ;; THE ENDPOINT IS STORED TRIMMED BEFORE IT IS CHECKED, as MAKE-S3-STORE does. This
+        ;; method used to check trimmed copies and leave the slot as given, so
+        ;; (reinitialize-instance store :endpoint " 127.0.0.1:9000 ") passed both checks and every
+        ;; URL was then built with the spaces in it (Copilot's review of #1150, #1151). The
+        ;; local-endpoint approval below reads the slot, so it sees the trimmed value too.
+        (when (and (slot-boundp s 'endpoint) (stringp (s3-endpoint s)))
+          (setf (slot-value s 'endpoint) (%normalize-endpoint (s3-endpoint s))))
         (when (slot-boundp s 'endpoint)
           (%check-endpoint-shape (s3-endpoint s))
           (%check-endpoint-url (s3-endpoint s)))

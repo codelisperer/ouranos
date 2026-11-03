@@ -387,11 +387,14 @@ table, without restarting the quiet period of one already there unchanged."
             (%touch fw name))))))
 
 (defun %root (path)
-  "PATH as a native directory string ending in a separator. A string is used as written, through
-AION/UV:NATIVE-PATH. Parsing it as a Lisp namestring, as UIOP:ENSURE-DIRECTORY-PATHNAME does,
-dropped a backslash on Linux and macOS and took brackets for a wildcard (the hub's review of
-#1074)."
-  (let ((native (uv:native-path (if (stringp path) path (uiop:ensure-directory-pathname path)))))
+  "PATH as a native directory string ending in a separator. A string is used as written, and a
+pathname is given its native name, both through AION/UV:NATIVE-PATH; a separator is added when
+the name does not end in one. Neither goes through UIOP:ENSURE-DIRECTORY-PATHNAME. For a string
+that parses it as a Lisp namestring, which dropped a backslash on Linux and macOS and took brackets
+for a wildcard (the hub's review of #1074). For a pathname whose last folder is in its name, such
+as one parsed from /tmp/Photos [2026] with no trailing separator, it takes that name from
+FILE-NAMESTRING, which escapes the brackets, so another folder was watched (#1112)."
+  (let ((native (uv:native-path path)))
     (if (and (plusp (length native))
              (let ((last (char native (1- (length native)))))
                (or (char= last #\/) (and (uiop:os-windows-p) (char= last #\\)))))

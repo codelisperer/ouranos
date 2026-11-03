@@ -69,11 +69,6 @@ trailing dotted IPv4 part."
               do (setf (aref v i) (ash w -8) (aref v (1+ i)) (logand w #xff)))
         v))))
 
-(defun %port-of (uri)
-  "URI's port, or its scheme's default when the URL gives none: QURI-PORT is NIL then."
-  (or (quri:uri-port uri)
-      (if (string-equal (quri:uri-scheme uri) "https") 443 80)))
-
 (defun parse-address (x)
   "X as an octet vector of 4 or 16 elements: X may already be one, or an IPv4 or IPv6 address
 in text, with or without the brackets a URL puts around IPv6. NIL if X is not an address."
@@ -378,7 +373,7 @@ it was not about."
         (when (and appends-path (or (quri:uri-query uri) (quri:uri-fragment uri)))
           (refuse "The value carries a query or a fragment, and the rest of each request's path is appended to it, so the path would end up inside them."))
         (when (and (plusp (length host)) (char= #\[ (char host 0)))
-          (refuse (format nil "The host ~S is a bracketed IPv6 address, which cannot be connected to: it is looked up as a name and no such name exists. Write the address without brackets, or use a name." host)))
+          (refuse (format nil "The host ~S is a bracketed IPv6 address, which cannot be connected to: it is looked up as a name and no such name exists. Use a name that resolves to the address, or an IPv4 address. Writing the address without brackets is not a fix: an S3 endpoint in hermes/blob refuses that spelling too." host)))
         (when (and (string-equal scheme "http") (not (local-host-p host)))
           (refuse (format nil "The host ~S would receive ~A in the clear, because ~A. Use https, or a host only this machine or this network can reach."
                           host credential carried-in))))
@@ -843,16 +838,6 @@ is read here and the connection closed."
 
 (defparameter *fetch-public-max-body-bytes* (* 10 1024 1024)
   "FETCH-PUBLIC's default body limit: 10 MiB.")
-
-(defun %origin (uri)
-  (list (string-downcase (or (quri:uri-scheme uri) ""))
-        (string-downcase (or (quri:uri-host uri) ""))
-        (%port-of uri)))
-
-(defun %without-credentials (headers)
-  (remove-if (lambda (h) (member (string (car h)) '("authorization" "cookie")
-                                 :test #'string-equal))
-             headers))
 
 (defun %checked-address (url uri resolve address-policy)
   "The address to connect to for URI, after refusing anything FETCH-PUBLIC must not reach."

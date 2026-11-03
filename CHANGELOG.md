@@ -14,6 +14,53 @@ its tag.
 
 ### An app may have to act
 
+- **A redirect that changes origin no longer carries a credential, in a header or in a body**
+  (#1139). dexador follows a redirect to a different host by recursing with the same arguments
+  **and the same headers** — it prepends a new `Host` and keeps the rest — so a credential built
+  for one host was delivered to whatever a `3xx` named. The configuration checks in #1077, #1092
+  and #1106 check the base a request is sent *to*, which is a different thing from where a
+  redirect then leads. `aion/http-client:send-request` now follows the redirects of a request that
+  carries a credential itself, one hop at a time, and drops it when the next hop changes origin.
+  **Which locations are covered**, because stripping headers alone would have left two of them:
+
+  - **the four credential headers this tree sends** — `Authorization`, `Cookie`, `x-api-key`
+    (Anthropic, `praxeon/src/llm.lisp`) and `x-goog-api-key` (Google,
+    `praxeon/src/image-google.lisp`) — are removed on a hop that changes origin. They are one
+    list, `+credential-headers+`, read both to decide the path and to strip;
+  - **a credential in the request body**, such as Facebook's `access_token` in a POST form, which
+    no header list can see and no code can strip: **a body is never sent to another origin,
+    whatever the redirect's status.** If the next hop would carry the body across an origin, it
+    is not followed — the `3xx` is returned and the caller decides. **Any request with a body
+    follows its redirects through this client for that reason**, credential header or not;
+    deciding by headers alone sent Facebook's POST down dexador's own path, where a cross-origin
+    `307` re-sent the token;
+  - **a body dropped with a method change**: `301`, `302` and `303` turn a non-GET into a `GET`,
+    and then the body and its `Content-Type` go with the method, so such a hop is followed with
+    no body. **A request that was already a `GET` keeps its method on those codes, and so keeps
+    its body** — which is why the rule above is about the body the next hop would carry rather
+    than about the status code: a first version refused only `307` and `308`, and a `GET` with a
+    body followed a cross-origin `301` with the body still attached.
+  **A request with a body and no credential header may now get a `3xx` back where it used to be
+  followed**, when the redirect leaves its origin. A request with neither a body nor a credential
+  header is unaffected and still has its redirects followed by dexador.
+
+  **A request already exempt from the proxy under a recorded local approval still follows no
+  redirect at all**, which is #1134's rule; this follows redirects only for requests that rule
+  does not already stop.
+  **A same-origin redirect keeps them**, which is the default an app should expect: an API that
+  renames a path answers `301` and the credential follows it. Origin is scheme, host **and** port,
+  so `https` → `http` on the same host, or a change of port, drops them — those are the two a
+  reader is most likely to assume are safe. This is what browsers do.
+  **Only a request carrying one of those headers changes path.** Everything else is still handed
+  to dexador with its redirects, so there is one behaviour change rather than two, and the
+  redirect cap and the method rules are unchanged: `follow-redirects` still bounds the hops, and
+  `301`, `302` and `303` still turn a non-GET into a `GET` while `307` and `308` keep the method.
+  **An app relying on a cross-origin redirect to carry its credential will see that request fail
+  to authenticate**, and should send it to the final host directly. `fetch-public` has behaved
+  this way since #295, and the widened header list applies there too, so `fetch-public` now drops
+  `x-api-key` and `x-goog-api-key` across an origin change as well; this brings the ordinary
+  client into line with it.
+
 - **Telegram, Facebook and Stripe now check the URL they send a credential to, and refuse to
   build when it is one they may not** (#1106). `make-telegram`'s `:api-base`, `make-facebook`'s
   `:graph-base` and `make-stripe-payments`'s `:api-base` accepted any value; each now signals
@@ -1398,6 +1445,17 @@ its tag.
 
 ### Fixed
 
+- **`reinitialize-instance` on an S3 blob store stores the endpoint trimmed, as `make-s3-store`
+  does** (#1151). It used to check trimmed copies of `:endpoint` and keep the value as given, so
+  `(reinitialize-instance store :endpoint " 127.0.0.1:9000 ")` passed its checks and every URL
+  `hermes/blob` then built had the spaces in it. Both now trim spaces, tabs, carriage returns and
+  newlines. A side effect: reinitializing with a tab-padded endpoint used to be refused as
+  whitespace while `make-s3-store` accepted the same value; both accept it now.
+- **The refusal for a bracketed IPv6 host no longer advises writing the address without
+  brackets** (#1151). `aion/http-client:credential-url-refusal` said to, but a `hermes/blob` S3
+  endpoint refuses the unbracketed form too, so following the advice for `[::1]:9000` produced a
+  second error. It now recommends a name that resolves to the address, or an IPv4 address. Code
+  that matches on the phrase "bracketed IPv6 address" is unaffected; the sentence after it changed.
 - **`hyperion/markdown:render` no longer lets an image inside an image's alt text add attributes
   to the outer `img`** (#1132). An app rendering untrusted markdown **with the default options**
   was affected, so this is a fix to behaviour that shipped, not to the new untrusted mode. 3bmd
@@ -3706,6 +3764,21 @@ its tag.
   takes `:source` and records each copy's install name before the stamp and the file it came
   from, in `ouranos-carry:*carried-origins*`, and `relink-bundle` also matches a load command by
   those.
+- **aion/folder-watch: `watch-folder` given a pathname watches the folder it names when the last
+  folder's name has brackets** (#1112). A pathname with no trailing separator, such as one
+  `uiop:parse-native-namestring` gives for `/tmp/Photos [2026]`, went through
+  `uiop:ensure-directory-pathname`, which escapes `[ ] * ?` in the last name, and on Linux and
+  macOS a backslash too. On Windows the folder watched was `Photos ^[2026]`, so `watch-folder`
+  signalled `aion/uv:file-not-found`, or watched that folder if it existed. A pathname is now
+  given its native name with `aion/uv:native-path`, as a string already was.
+- **`scripts/verify-bundle-macos.sh` now fails a carried dylib that has no install name, as
+  check 1b was meant to** (#1131). It read `otool -D`'s second line with
+  `head -n 2 | tail -n 1`, which returns otool's header line, the file's own path, when there is
+  no second line, and that path is inside the bundle, so the check reported ok. Check 1b is now
+  the script `scripts/check-install-names.sh <dir>`, which `verify-bundle-macos.sh` runs: it
+  prints a line per dylib and exits 1 on a dylib it cannot read or that has no install name. It
+  also accepts the directory with a trailing slash, which before made an install name inside the
+  bundle read as a path outside it.
 - **A macOS desktop bundle relinks a load command that names a carried library through `@rpath`,
   and no longer relinks one that names a different library with the same file name** (#1143).
   `ouranos-carry:relink-bundle` skipped every load command starting with `@`, so a library
@@ -3721,6 +3794,15 @@ its tag.
   failing that by file name. `stamp-install-name` needs `:source` for a library to be matched
   by the file it resolves to.
 
+- **hyperion/kit: two appearance pickers on one page no longer undo each other's choice, and a
+  slow response no longer moves focus** (#1138). While a picker's request is in flight,
+  `appearance-picker` now disables every picker's buttons on the page, not only its own: its
+  form's `hx-disabled-elt` is `.hy-appearance-fields`, the class of each picker's fieldset, where
+  it was `find fieldset`. Before, a press on a second picker during the request sent a second
+  request carrying the old appearance cookie, and whichever response came last overwrote the
+  other choice. `apply-appearance-js` gives focus back to the pressed button when the request
+  ends only when focus is still on the body or nowhere, so a visitor who moved to another
+  control while waiting keeps it.
 - **aion/uv: a path string reaches libuv as written, so a file with a backslash in its name works
   on Linux and macOS** (#1093). Every function that takes a path ran it through `cl:namestring`,
   and on Linux and macOS that drops a backslash, so `a\b.txt` was used as `ab.txt`. The affected
