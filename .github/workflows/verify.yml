@@ -643,14 +643,22 @@ jobs:
   # well, so a representation violation is found before it merges. It skipped them while
   # the repo was private, for the same billing reason as the matrix above.
   release-mode:
-    name: release-mode (linux-x86-64)
+    name: ${{ matrix.label }}
     runs-on: ubuntu-26.04
     # THE LIMIT IS STATED ONCE, as a one-entry matrix, because the job summary prints how close
     # the job came to it (#1146) and `timeout-minutes' can read the matrix context but not the
-    # job's own `env'. The explicit `name' above keeps the matrix value out of the job's name.
+    # job's own `env'.
+    #
+    # THE NAME COMES FROM THE MATRIX TOO, and has to. GitHub appends a job's matrix values to its
+    # name unless the name itself refers to the matrix, so with a literal name this job showed as
+    # `release-mode (linux-x86-64) (120)' -- measured on #1148's first run, against a comment here
+    # that said the literal name would prevent it. The verify job above never had the problem
+    # because its name is already `${{ matrix.platform }}'.
     strategy:
       matrix:
-        timeout: [120]
+        include:
+          - label: release-mode (linux-x86-64)
+            timeout: 120
     timeout-minutes: ${{ matrix.timeout }}
 
     steps:
@@ -821,4 +829,4 @@ jobs:
         env:
           STEPS_JSON: ${{ toJSON(steps) }}
           JOB_TIMEOUT_MINUTES: ${{ matrix.timeout }}
-        run: bash scripts/ci-job-summary.sh "release-mode (linux-x86-64)" verify.log
+        run: bash scripts/ci-job-summary.sh "${{ matrix.label }}" verify.log
