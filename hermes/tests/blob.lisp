@@ -2317,7 +2317,7 @@ BLOB-BACKEND-ERROR."
         (signals b:blob-configuration-error (store :endpoint endpoint)))
       ;; Allowed: a local double, by name or by address, with or without a port.
       (dolist (endpoint '("localhost:9000" "LOCALHOST" "127.0.0.1:9000" "10.1.2.3:9000"
-                          "192.168.1.10" "172.17.0.2:9000" "[::1]:9000" "169.254.1.2"))
+                          "192.168.1.10" "172.17.0.2:9000" "169.254.1.2"))
         (is (not (b::s3-secure-p (store :endpoint endpoint)))
             "~A is local, so plaintext is allowed" endpoint))
       ;; A name that does not resolve is not known to be local.
@@ -2359,14 +2359,14 @@ QURI, which is what dexador parses with, so the check and the request agree."
     ;; reads differently. A bare host:port has no scheme, and QURI reads "localhost:9000" as the
     ;; SCHEME "localhost" with no host, so the endpoint gets a scheme before it is parsed. A bare
     ;; IPv6 address cannot be read as an authority at all and is matched as a literal.
-    (dolist (endpoint '("localhost:9000" "127.0.0.1:9000" "[::1]:9000" "10.1.2.3:9000"
+    (dolist (endpoint '("localhost:9000" "127.0.0.1:9000" "10.1.2.3:9000"
                         "minio:9000"))
       (is-true (b::s3-endpoint (store :endpoint endpoint))
                "control: ~A is still a usable endpoint" endpoint))
     ;; And the plaintext rule still reaches its own verdict on those, which is what would break
     ;; if the host came back NIL or bracketed from the new parser.
     (with-environment-variable ("MNEMOSYNE_S3_SECURE" "false")
-      (dolist (endpoint '("localhost:9000" "127.0.0.1:9000" "[::1]:9000"))
+      (dolist (endpoint '("localhost:9000" "127.0.0.1:9000"))
         (is (not (b::s3-secure-p (store :endpoint endpoint)))
             "control: ~A is still read as local, so plaintext is still allowed" endpoint))
       ;; A bare IPv6 address is NOT allowed, because it is not a working endpoint: the request
@@ -2388,12 +2388,12 @@ which addresses the endpoint the check is about."
     (with-environment-variable ("MNEMOSYNE_S3_SECURE" "false")
       ;; Refused even though every one of these endpoints is local: it is the bucket label in
       ;; front that is unaccounted for, not the endpoint.
-      (dolist (endpoint '("127.0.0.1:9000" "10.1.2.3:9000" "localhost:9000" "[::1]:9000"))
+      (dolist (endpoint '("127.0.0.1:9000" "10.1.2.3:9000" "localhost:9000"))
         (signals b:blob-configuration-error (store :endpoint endpoint))
         (signals b:blob-configuration-error (store :endpoint endpoint :path-style nil)))
       ;; The control: with path-style the same endpoints are allowed, and the URL that gets
       ;; built addresses the endpoint rather than a name derived from the bucket.
-      (dolist (endpoint '("127.0.0.1:9000" "10.1.2.3:9000" "localhost:9000" "[::1]:9000"))
+      (dolist (endpoint '("127.0.0.1:9000" "10.1.2.3:9000" "localhost:9000"))
         (let ((s (store :endpoint endpoint :path-style t)))
           (is (not (b::s3-secure-p s)) "~A with path-style is allowed to speak plaintext" endpoint)
           (is-false (search "bkt." (b::%s3-url s "bkt" "k"))
@@ -2537,16 +2537,20 @@ the ENDPOINT and not the URL the request is built from -- and those are differen
     ;; docstring and CHANGELOG sentence of mine said it did.
     (dolist (endpoint '("http://127.0.0.1:9000" "https://s3.amazonaws.com"))
       (signals b:blob-configuration-error (store :endpoint endpoint)))
-    ;; The rest of a URL has no place in an endpoint either.
+    ;; The rest of a URL has no place in an endpoint either. A BRACKETED IPv6 ADDRESS is refused
+    ;; with them now, by the shared rule rather than by this shape check: a URL built from it
+    ;; cannot be connected to, measured as USOCKET:NS-HOST-NOT-FOUND-ERROR against a listener
+    ;; genuinely accepting on [::1], so it was never a usable endpoint (#1106). It was a control
+    ;; in the list below, asserting the URL it builds, which was true of the string and false
+    ;; about whether a request could be sent.
     (dolist (endpoint '("localhost:9000/bucket" "localhost:9000?x=1" "localhost:9000#f"
-                        "local host:9000" "" "  "))
+                        "local host:9000" "" "  " "[::1]:9000"))
       (signals b:blob-configuration-error (store :endpoint endpoint)))
     ;; The controls: every shape that is a bare host with an optional port still works, and the
     ;; URL built from it still names that host. This is what would break if the refusal above
     ;; were written too widely.
     (dolist (case '(("localhost:9000" . "http://localhost:9000/bkt/k")
                     ("127.0.0.1:9000" . "http://127.0.0.1:9000/bkt/k")
-                    ("[::1]:9000" . "http://[::1]:9000/bkt/k")
                     ("minio:9000" . "http://minio:9000/bkt/k")
                     ("s3.amazonaws.com" . "http://s3.amazonaws.com/bkt/k")))
       (let ((s (store :endpoint (car case) :secure nil :path-style t)))
@@ -2602,7 +2606,13 @@ local, which is the third case below."
                        (funcall original-resolve host))))
            (setf (fdefinition 'dex:request)
                  (lambda (url &rest args)
-                   (push (list url (if (member :proxy args) (list :proxy (getf args :proxy)) :none))
+                   (push (list url
+                               (if (member :proxy args) (list :proxy (getf args :proxy)) :none)
+                               ;; BOTH ARGUMENTS: an approval answers (:PROXY NIL
+                               ;; :MAX-REDIRECTS 0) and the literal rule answers
+                               ;; (:PROXY NIL) alone, so recording only :PROXY cannot
+                               ;; tell which rule granted it (the review of #1140).
+                               (getf args :max-redirects))
                          seen)
                    (error "stopped before sending")))
            (with-environment-variable ("MNEMOSYNE_S3_SECURE" "false")
@@ -2631,6 +2641,9 @@ local, which is the third case below."
       (is (= 3 (length calls)) "all three requests reached dexador: ~S" calls)
       (is (equal '(:proxy nil) (second (first calls)))
           "the plaintext request to the approved NAME is sent with :proxy nil: ~S" (first calls))
+      (is (eql 0 (third (first calls)))
+          "and with :max-redirects 0, which is what tells an approval from the literal rule: ~S"
+          (first calls))
       (is (eq :none (second (second calls)))
           "a plaintext store at a public endpoint keeps the proxy: ~S" (second calls))
       (is (eq :none (second (third calls)))
@@ -2674,4 +2687,172 @@ across a REINITIALIZE-INSTANCE that moves the endpoint somewhere it does not app
                (is-false (hermes/blob::s3-endpoint-approved-local earned)
                          "a reinitialized endpoint drops the old approval: ~S"
                          (hermes/blob::s3-endpoint-approved-local earned)))))
+      (setf (fdefinition 'http:resolve-host) original-resolve))))
+
+(test an-ipv6-endpoint-is-refused-in-either-spelling
+  "#1106, and a capability this store never had. The shape check refused a BARE IPv6 address and
+told the operator to write it with brackets instead; the bracketed form was then accepted, and
+three tests asserted it was a usable endpoint. None of them sent a request. Measured against a
+listener genuinely accepting on [::1]:
+
+  dex:request \"http://[::1]:37753/\"  ->  USOCKET:NS-HOST-NOT-FOUND-ERROR
+
+quri hands usocket the host with its brackets still attached, and no such name exists, so the
+connection is never attempted. The advice produced a store that could not send, which is why
+hermes core has refused a bracketed host for a credential URL since #1077 -- and sharing that
+rule (#1106) is what brought the two call sites into agreement.
+
+BOTH SPELLINGS ARE REFUSED NOW, by different checks: the bare form by %CHECK-ENDPOINT-SHAPE,
+which is about what this setting may look like, and the bracketed form by the shared rule in
+%CHECK-ENDPOINT-URL. The test asserts which reason fired for each, not merely that something
+did."
+  (flet ((refusal (endpoint)
+           (handler-case (progn (b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE"
+                                                 :secret-key "x" :endpoint endpoint)
+                                nil)
+             (b:blob-configuration-error (e) (princ-to-string e)))))
+    (let ((bracketed (refusal "[::1]:9000"))
+          (bare (refusal "::1")))
+      (is-true bracketed "a bracketed IPv6 endpoint is refused")
+      (is-true (and bracketed (search "bracketed IPv6 address" bracketed))
+               "and the reason is the one about brackets: ~A" bracketed)
+      (is-true bare "a bare IPv6 endpoint is refused")
+      (is-true (and bare (search "without brackets" bare))
+               "and names the unbracketed form: ~A" bare)
+      ;; The advice must not send the reader to the other spelling, which is what it used to do.
+      (is-false (and bare (search "write it as [::1]" bare))
+                "the refusal no longer recommends the spelling that cannot connect: ~A" bare)
+      ;; The control: a name and an IPv4 address are still usable endpoints.
+      (dolist (endpoint '("minio.invalid:9000" "127.0.0.1:9000"))
+        (is-false (refusal endpoint) "control: ~A is still accepted" endpoint)))))
+
+(test a-reinitialized-endpoint-is-checked-and-a-refusal-changes-nothing
+  "Copilot's review of #1140. The shape and shared URL checks ran only in MAKE-S3-STORE, and
+REINITIALIZE-INSTANCE does not go through the constructor, so a store built with a good endpoint
+could be moved to a refused one afterwards:
+
+  (reinitialize-instance store :endpoint \"[::1]:9000\")
+
+assigned a bracketed IPv6 endpoint -- which #1106 refuses, because a URL built from it cannot be
+connected to -- with no refusal at all. The SHARED-INITIALIZE method only recomputed locality.
+
+AND A REFUSAL LEAVES THE STORE AS IT WAS, which is #1129's property for the providers and the
+same reasoning here: a caller may handle the error and carry on, and the next request would go
+wherever the slot now points."
+  (let ((original-resolve (fdefinition 'http:resolve-host)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'http:resolve-host)
+                 (lambda (host)
+                   (if (string= host "minio.invalid")
+                       (funcall original-resolve "127.0.0.1")
+                       (funcall original-resolve host))))
+           (with-environment-variable ("MNEMOSYNE_S3_SECURE" "false")
+             (let ((store (b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x"
+                                           :endpoint "minio.invalid:9000" :path-style t)))
+               (is (equal "minio.invalid" (hermes/blob::s3-endpoint-approved-local store))
+                   "it starts approved: ~S" (hermes/blob::s3-endpoint-approved-local store))
+               ;; Each of these is refused by a different check, and all of them used to be
+               ;; accepted by REINITIALIZE-INSTANCE.
+               (dolist (endpoint '("[::1]:9000" "http://minio.invalid:9000" "u:pw@minio.invalid"
+                                   "minio.invalid:9000/bucket" "::1"))
+                 (signals b:blob-configuration-error
+                   (reinitialize-instance store :endpoint endpoint))
+                 (is (equal "minio.invalid:9000" (b::s3-endpoint store))
+                     "~S is refused and the endpoint is unchanged: ~S" endpoint
+                     (b::s3-endpoint store))
+                 (is (equal "minio.invalid" (hermes/blob::s3-endpoint-approved-local store))
+                     "~S is refused and the approval is unchanged: ~S" endpoint
+                     (hermes/blob::s3-endpoint-approved-local store)))
+               ;; A REFUSAL CHANGES NO SLOT, not just the endpoint and the approval. The same
+               ;; call that is refused can carry other initargs, and CALL-NEXT-METHOD assigns
+               ;; them all before the checks run. A secure store reinitialized with :SECURE NIL
+               ;; and a refused endpoint was left PLAINTEXT, at a local name, with no approval --
+               ;; so its signed requests went through HTTP_PROXY in the clear (the hub's review of
+               ;; #1140). The store above is plaintext, so the case needs a secure one.
+               (let ((secure (b:make-s3-store :access-key "AKIAIOSFODNN7EXAMPLE" :secret-key "x"
+                                              :endpoint "minio.invalid:9000" :path-style t
+                                              :secure t)))
+                 (signals b:blob-configuration-error
+                   (reinitialize-instance secure :secure nil :endpoint "u:pw@x"))
+                 (is (eq t (b::s3-secure-p secure))
+                     "a refused reinitialize leaves a secure store secure: ~S"
+                     (b::s3-secure-p secure))
+                 (is (equal "https://minio.invalid:9000/bkt/k" (b::%s3-url secure "bkt" "k"))
+                     "and its requests still go over https: ~S" (b::%s3-url secure "bkt" "k"))
+                 (signals b:blob-configuration-error
+                   (reinitialize-instance secure :path-style nil :endpoint "[::1]:9000"))
+                 (is (eq t (b::s3-path-style-p secure))
+                     "and a refused call leaves the addressing alone too: ~S"
+                     (b::s3-path-style-p secure)))
+               ;; The control: an endpoint the checks accept DOES replace it, so the assertions
+               ;; above are about the refusals and not about the slot having become read-only.
+               (reinitialize-instance store :endpoint "other.invalid:9000")
+               (is (equal "other.invalid:9000" (b::s3-endpoint store))
+                   "control: an acceptable endpoint replaces it: ~S" (b::s3-endpoint store))
+               (is-false (hermes/blob::s3-endpoint-approved-local store)
+                         "control: and its approval is recomputed, not inherited: ~S"
+                         (hermes/blob::s3-endpoint-approved-local store)))))
+      (setf (fdefinition 'http:resolve-host) original-resolve))))
+
+(define-condition %store-subclass-refused (error) ()
+  (:report (lambda (c s) (declare (ignore c)) (format s "the store subclass refused its own initarg"))))
+
+(defclass %picky-store (b:s3-store) ()
+  (:documentation
+   "An S3 store subclass with its own SHARED-INITIALIZE :AFTER method, which runs INSIDE the
+store's :AROUND -- after the slots are assigned and before the verdict is recomputed. Its method
+signals for :X :BAD, which is how a failure arriving from inside CALL-NEXT-METHOD is reproduced
+(Copilot's review of #1149)."))
+
+(defmethod shared-initialize :after ((s %picky-store) slot-names &rest initargs
+                                     &key &allow-other-keys)
+  (declare (ignore slot-names))
+  (when (eq :bad (getf initargs :x))
+    (error '%store-subclass-refused)))
+
+(test a-failure-from-a-store-subclass-keeps-the-approval
+  "Copilot's review of #1149, on #1134's code. The SHARED-INITIALIZE :AROUND method cleared the
+approval before CALL-NEXT-METHOD and recomputed it afterwards, with nothing restoring it in
+between. A subclass :AFTER method runs inside CALL-NEXT-METHOD, so if it signals -- for an initarg
+of its own that has nothing to do with the endpoint -- the recompute never runs. Measured at
+#1134's 7e618520:
+
+  before : endpoint=minio.invalid:9000 secure=NIL approved=\"minio.invalid\"
+  (reinitialize-instance store :x :bad)  -> refused by the subclass
+  after  : endpoint=minio.invalid:9000 secure=NIL approved=NIL
+
+The store is still plaintext and still at the approved local name, but has lost the approval,
+so a caller that handles the error and carries on sends its signed requests through HTTP_PROXY
+in the clear -- the case #1091 exists to prevent.
+
+#1140 closed it without targeting it: every slot is snapshotted before CALL-NEXT-METHOD and put
+back by a handler that covers CALL-NEXT-METHOD as well as the checks, so the approval comes back
+with everything else. This test makes that coverage something that is checked rather than
+something that happens to be true."
+  (let ((original-resolve (fdefinition 'http:resolve-host)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'http:resolve-host)
+                 (lambda (host)
+                   (if (string= host "minio.invalid")
+                       (funcall original-resolve "127.0.0.1")
+                       (funcall original-resolve host))))
+           (let ((store (make-instance '%picky-store :endpoint "minio.invalid:9000" :secure nil
+                                       :path-style t :access-key "AKIAIOSFODNN7EXAMPLE"
+                                       :secret-key "x")))
+             (is (equal "minio.invalid" (hermes/blob::s3-endpoint-approved-local store))
+                 "it starts approved: ~S" (hermes/blob::s3-endpoint-approved-local store))
+             (signals %store-subclass-refused (reinitialize-instance store :x :bad))
+             (is (equal "minio.invalid" (hermes/blob::s3-endpoint-approved-local store))
+                 "and keeps its approval when the subclass's own method signals: ~S"
+                 (hermes/blob::s3-endpoint-approved-local store))
+             (is (equal "minio.invalid:9000" (b::s3-endpoint store))
+                 "with its endpoint unchanged: ~S" (b::s3-endpoint store))
+             ;; The control: an initarg the subclass accepts goes through, so the assertions
+             ;; above are about the refusal and not about the store refusing everything.
+             (reinitialize-instance store :x :fine :endpoint "other.invalid:9000")
+             (is (equal "other.invalid:9000" (b::s3-endpoint store))
+                 "control: an accepted call still moves the endpoint: ~S"
+                 (b::s3-endpoint store))))
       (setf (fdefinition 'http:resolve-host) original-resolve))))

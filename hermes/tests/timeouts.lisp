@@ -400,7 +400,8 @@ value reaches the send at all."
                        (funcall original-resolve host))))
            (setf (fdefinition 'dex:request)
                  (lambda (url &rest args)
-                   (push (list url (if (member :proxy args) (list :proxy (getf args :proxy)) :none))
+                   (push (list url (if (member :proxy args) (list :proxy (getf args :proxy)) :none)
+                               (getf args :max-redirects))
                          seen)
                    (error "stopped before sending")))
            (let ((twilio (hermes::make-twilio :account-sid "ACtest" :auth-token "t"
@@ -429,8 +430,15 @@ value reaches the send at all."
       (is (= 4 (length calls)) "all four sends reached dexador: ~S" calls)
       (is (equal '(:proxy nil) (second (first calls)))
           "twilio's plaintext send to the approved name is not proxied: ~S" (first calls))
+      (is (eql 0 (third (first calls)))
+          "and is given :max-redirects 0, as an approval does and the literal rule does not: ~S"
+          (first calls))
       (is (equal '(:proxy nil) (second (second calls)))
           "and neither is sendgrid's: ~S" (second calls))
+      ;; SendGrid's redirect cap too. My reply on #1140 said both arguments were asserted for all
+      ;; five senders, and this one was missing until the hub's review of that PR found it.
+      (is (eql 0 (third (second calls)))
+          "and sendgrid's is given :max-redirects 0 as well: ~S" (second calls))
       (is (eq :none (second (third calls)))
           "twilio's https send keeps whatever proxy is configured: ~S" (third calls))
       (is (eq :none (second (fourth calls)))
@@ -561,3 +569,219 @@ refused. Either way it must not survive."
     (reinitialize-instance p :endpoint "https://accepted.example/v1" :x :fine)
     (is (equal "https://accepted.example/v1" (hermes::sendgrid-endpoint p))
         "control: a good initarg lets the endpoint move: ~S" (hermes::sendgrid-endpoint p))))
+
+;;;; #1106: every backend that sends a credential to a configured URL runs the same check.
+
+(defun %provider-refusal (make key value)
+  "The refusal text from building a provider with KEY bound to VALUE, or NIL when it was accepted."
+  (handler-case (progn (funcall make key value) nil)
+    (h:configuration-error (e) (h:configuration-error-missing e))))
+
+(defparameter *url-checked-providers*
+  (list (list "Twilio" (lambda (key value) (hermes::make-twilio :account-sid "ACx" :auth-token "t"
+                                                                :from "+15005550006" key value))
+              :api-base "Twilio API-BASE")
+        (list "SendGrid" (lambda (key value) (hermes::make-sendgrid :api-key "SG.x" key value))
+              :endpoint "SendGrid ENDPOINT")
+        (list "Telegram" (lambda (key value) (hermes::make-telegram :token "t" key value))
+              :api-base "Telegram API-BASE")
+        (list "Facebook" (lambda (key value) (hermes::make-facebook :app-id "a" :app-secret "s"
+                                                                    key value))
+              :graph-base "Facebook GRAPH-BASE"))
+  "The hermes-core providers that send a credential to a configured URL, and the initarg that
+carries it. Stripe is the fifth and is tested in hermes/payments/tests, because it is in another
+system; hermes/blob's S3 endpoint is the sixth and is tested in blob.lisp, because it is a bare
+authority rather than a URL and signals its own condition.")
+
+(test every-provider-refuses-a-url-it-cannot-send-a-credential-to
+  "#1106. Twilio's API base and SendGrid's endpoint were checked; Telegram's api-base, Facebook's
+graph-base and Stripe's api-base were not, and hermes/blob kept its own copy of part of the rule.
+Four more call sites each deciding for themselves is the bet that produced the first three holes
+-- a bracketed IPv6 address in the userinfo, a scheme inside the endpoint, and a bucket label in
+front of the host -- each of which was a case another copy's fix had already closed.
+
+EACH CASE ASSERTS WHICH REFUSAL FIRED, not merely that something did. A test that accepts any
+refusal cannot tell the rule from a typo in the value: `evil.example://127.0.0.1' must be refused
+for its SCHEME, because a check that looked for `http' would read the host as 127.0.0.1 and let
+it through, and a test satisfied by any refusal would pass while that hole was open."
+  (dolist (provider *url-checked-providers*)
+    (destructuring-bind (name make key setting) provider
+      (dolist (case (list (cons "http://evil.example/x" "in the clear")
+                          (cons "evil.example://127.0.0.1" "The scheme is")
+                          (cons "https://u:pw@api.example.com" "user name or password")
+                          (cons "https://[::1]/x" "bracketed IPv6 address")
+                          ;; QURI PARSES THIS WITHOUT COMPLAINT, so the refusal is the one about
+                          ;; the scheme rather than a parse failure. Worth asserting as the reason
+                          ;; it actually is: a value that is not a URL at all still reaches the
+                          ;; scheme branch, which is the branch that stops
+                          ;; `evil.example://127.0.0.1' too.
+                          (cons "not a url at all" "The scheme is")
+                          (cons (format nil "https://api.example.com/x~Cy" #\Newline)
+                                "without control characters")))
+        (let ((refusal (%provider-refusal make key (car case))))
+          (is-true refusal "~A refuses ~S" name (car case))
+          (is-true (and refusal (search (cdr case) refusal))
+                   "~A refuses ~S for the right reason, not another: ~A" name (car case) refusal)
+          (is-true (and refusal (search setting refusal))
+                   "~A names the setting in its refusal: ~A" name refusal)))
+      ;; The control: each provider still accepts a URL it may send to, so the refusals above are
+      ;; about the values and not about the provider having become unbuildable.
+      (is-false (%provider-refusal make key "https://api.example.com/v1")
+                "control: ~A accepts an https URL" name)
+      (is-false (%provider-refusal make key "http://127.0.0.1:4010/v1")
+                "control: ~A accepts a local plaintext URL" name))))
+
+(test no-provider-refusal-repeats-the-configured-value
+  "#1106, and the reason the shared rule's refusals are worded as they are: the value may carry a
+password -- that is one of the things refused -- and these reports reach logs and terminals. One
+copy of this rule printed the value in every branch, and its parse-failure branch appended quri's
+error text, which quotes the URI again, so a password appeared twice (the review of #1084). Every
+backend now inherits the wording that does not.
+
+THE HOST AND THE SCHEME ARE ECHOED ON PURPOSE, so this test is about the branches where the value
+is a secret rather than about every branch. `The host \"evil.example\" would receive ...' and
+`The scheme is \"evil.example\"' are the whole use of those refusals: they tell the operator where
+the bytes would have gone, which is the fact that makes the refusal actionable. A first version of
+this test planted the password in the host and in the scheme and asserted it was not echoed, which
+would have been a demand to make those refusals useless.
+
+What must not be echoed is the USERINFO, which is where a password lives, and the whole value in
+the two branches that cannot read it: a value quri will not parse, and a value with a control
+character in it."
+  (dolist (provider *url-checked-providers*)
+    (destructuring-bind (name make key setting) provider
+      (declare (ignore setting))
+      (dolist (value (list "https://user:hunter2@api.example.com"
+                           "http://user:hunter2@127.0.0.1:4010"
+                           (format nil "https://api.example.com/x~Chunter2" #\Newline)
+                           (format nil "https://api.example.com/x~Chunter2" (code-char 127))))
+        (let ((refusal (%provider-refusal make key value)))
+          (is-true refusal "~A refuses ~S" name value)
+          (is-false (and refusal (search "hunter2" refusal))
+                    "~A does not repeat the secret in its refusal: ~A" name refusal)))
+      ;; The control: the refusal for a userinfo value DOES name the host, which is the fact it
+      ;; exists to report, so the assertion above is about the password and not about the refusal
+      ;; having been emptied out.
+      (let ((refusal (%provider-refusal make key "https://user:hunter2@api.example.com")))
+        (is-true (and refusal (search "api.example.com" refusal))
+                 "control: ~A still reports the host the request would reach: ~A"
+                 name refusal)))))
+
+(test every-provider-rechecks-its-url-on-reinitialize
+  "#1106 and #1104. REINITIALIZE-INSTANCE does not call INITIALIZE-INSTANCE, so a check on the
+latter is one a caller can walk around:
+
+  (reinitialize-instance <provider> <key> `http://evil.example/x')
+
+was accepted for SendGrid and Twilio until the review of #1104, and the next send carried the
+credential there in plaintext. Every provider's check is on SHARED-INITIALIZE, so there is no
+second door, and a refusal leaves the previous URL in place (#1129)."
+  (dolist (provider *url-checked-providers*)
+    (destructuring-bind (name make key setting) provider
+      (declare (ignore setting))
+      (let* ((p (funcall make key "https://api.example.com/v1"))
+             (reader (lambda () (slot-value p (if (eq key :api-base) 'hermes::api-base
+                                                  (if (eq key :graph-base) 'hermes::graph-base
+                                                      'hermes::endpoint))))))
+        (signals h:configuration-error
+          (reinitialize-instance p key "http://evil.example/x"))
+        (is (equal "https://api.example.com/v1" (funcall reader))
+            "~A keeps its URL when a reinitialize is refused: ~S" name (funcall reader))
+        ;; The control: an acceptable URL does replace it.
+        (reinitialize-instance p key "https://other.example/v2")
+        (is (equal "https://other.example/v2" (funcall reader))
+            "control: ~A accepts a good URL on reinitialize: ~S" name (funcall reader))))))
+
+(test telegram-and-facebook-bind-their-approval-around-the-send
+  "The review of #1140, and a gap of exactly the shape AGENTS.md warns about: the slot was
+recorded, the binder was called at the send site, and NOTHING TESTED THE CALL. Removing
+CALL-WITH-APPROVED-LOCAL-HOST from telegram.lisp or facebook.lisp passed every suite, because the
+recorded verdict was asserted in one test and the proxy argument in another, and no test joined
+them for these providers. Twilio and SendGrid have had that test since #1091; these did not, and
+Stripe's equivalent is in hermes/payments/tests because it is in another system.
+
+THE ASSERTION IS ON WHAT DEXADOR RECEIVES, which is the only place the two halves meet. It cannot
+be done through the *TELEGRAM-PERFORM* and *FACEBOOK-PERFORM* pivots: those replace the whole
+performing function, so %DEX-ARGS and PROXY-ARGUMENTS never run and the argument under test is
+never computed. This stubs DEX:REQUEST instead and leaves the pivots alone.
+
+Both directions for each: a plaintext base at a host the check approved as local is sent with
+:PROXY NIL, and the same provider at its https default is not."
+  (let ((seen '())
+        (original-request (fdefinition 'dex:request))
+        (original-resolve (fdefinition 'aion/http-client:resolve-host)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'aion/http-client:resolve-host)
+                 (lambda (host)
+                   (if (string= host "provider.invalid")
+                       (funcall original-resolve "127.0.0.1")
+                       (funcall original-resolve host))))
+           (setf (fdefinition 'dex:request)
+                 (lambda (url &rest args)
+                   (push (list url (if (member :proxy args) :no-proxy :proxied)
+                               ;; AND THE REDIRECT CAP: an approval answers
+                               ;; (:PROXY NIL :MAX-REDIRECTS 0) while the literal
+                               ;; rule answers (:PROXY NIL) alone, so recording only
+                               ;; :PROXY cannot tell which rule granted the exemption
+                               ;; (the review of #1140).
+                               (getf args :max-redirects))
+                         seen)
+                   (error "stopped before sending")))
+           ;; Telegram: the token is in the path, so this is the one where a proxy would log it.
+           (dolist (base '("http://provider.invalid:8081" "https://api.telegram.org"))
+             (ignore-errors
+              (h:deliver (hermes::make-telegram :token "t" :api-base base)
+                         ;; A VALID CHAT ID. "@c" is refused by Telegram's own message check --
+                         ;; it wants "@" and 5 to 32 characters -- so the send never reached
+                         ;; dexador and the first version of this test measured two facebook
+                         ;; calls while claiming four.
+                         (h:make-telegram-message :chat "@news_channel" :text "x"))))
+           ;; Facebook: a POST, which carries the access token in the form body.
+           (dolist (base '("http://provider.invalid:8081" "https://graph.facebook.com"))
+             (ignore-errors
+              (h:deliver (hermes::make-facebook :app-id "111" :app-secret "s"
+                                                :page-tokens (list (cons "1234567890" "tok"))
+                                                :graph-base base)
+                         (h:make-facebook-post :page "1234567890" :message "hi")))))
+      (setf (fdefinition 'dex:request) original-request)
+      (setf (fdefinition 'aion/http-client:resolve-host) original-resolve))
+    (let ((calls (reverse seen)))
+      (is (= 4 (length calls)) "all four sends reached dexador: ~S" calls)
+      (dolist (pair '((0 . "telegram") (2 . "facebook")))
+        (let ((local (nth (car pair) calls))
+              (remote (nth (1+ (car pair)) calls)))
+          (is (eq :no-proxy (second local))
+              "~A's plaintext send to the approved host is not proxied: ~S" (cdr pair) local)
+          (is (eql 0 (third local))
+              "~A's approved send is also given :max-redirects 0: ~S" (cdr pair) local)
+          (is (eq :proxied (second remote))
+              "~A's https send keeps whatever proxy is configured: ~S" (cdr pair) remote))))))
+
+(test a-refused-url-leaves-every-other-slot-as-it-was
+  "The hub's review of #1140. The restore put back the URL and the recorded verdict by name, and
+CALL-NEXT-METHOD assigns every initarg in the call before the URL check runs. So a refused
+
+  (reinitialize-instance provider :read-timeout 99 :endpoint `http://evil.example/x')
+
+kept the new read timeout while putting the URL back, and the CHANGELOG said a refusal left the
+provider \"exactly as it was\". For these providers that leaked nothing -- the scheme lives in the
+URL slot, which was restored -- but hermes/blob's copy of the same ordering missed SECURE in the
+same way and was left plaintext with no approval. Every slot is snapshotted now, so the claim is
+true rather than true of the two slots someone remembered."
+  (dolist (case (list (list (hermes::make-sendgrid :api-key "SG.x" :read-timeout 5)
+                            :endpoint #'hermes::sendgrid-read-timeout)
+                      (list (hermes::make-twilio :account-sid "ACx" :auth-token "t"
+                                                 :from "+15005550006" :read-timeout 5)
+                            :api-base #'hermes::twilio-read-timeout)))
+    (destructuring-bind (provider key read-timeout) case
+      (signals h:configuration-error
+        (reinitialize-instance provider :read-timeout 99 key "http://evil.example/x"))
+      (is (eql 5 (funcall read-timeout provider))
+          "~S keeps its read timeout when the same call's URL is refused: ~S"
+          (type-of provider) (funcall read-timeout provider))
+      ;; The control: with an acceptable URL the same call does change the timeout, so the
+      ;; assertion above is about the refusal and not about the slot being unchangeable.
+      (reinitialize-instance provider :read-timeout 99 key "https://accepted.example/v1")
+      (is (eql 99 (funcall read-timeout provider))
+          "control: an accepted call changes it: ~S" (funcall read-timeout provider)))))

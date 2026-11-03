@@ -14,6 +14,56 @@ its tag.
 
 ### An app may have to act
 
+- **Telegram, Facebook and Stripe now check the URL they send a credential to, and refuse to
+  build when it is one they may not** (#1106). `make-telegram`'s `:api-base`, `make-facebook`'s
+  `:graph-base` and `make-stripe-payments`'s `:api-base` accepted any value; each now signals
+  `configuration-error` for a value that is not `http` or `https`, carries a user name or
+  password, has no host, carries a query or fragment, is a bracketed IPv6 address, contains a
+  control character, or is plaintext `http` to a host this machine or network cannot reach by
+  itself. **An app that pointed one of these at a plaintext remote host, or at a URL with
+  credentials in it, will fail when the provider is made** rather than on the first send. The
+  checks run on `shared-initialize`, so `reinitialize-instance` is checked too, and a refusal
+  leaves the provider's previous URL in place.
+  **Telegram's refusal says the token travels in the path**, not in a header, because that is
+  where it goes: every request is `<base>/bot<token>/<method>`, so a mistyped base does not only
+  expose the token to one host, it writes it into any access log along the way.
+  Facebook's `:dialog-base` is **not** checked: no credential is sent to it — it is where a
+  person's browser is sent — so the rule about carrying a credential in the clear has nothing to
+  say about it.
+
+- **`hermes/blob` refuses an IPv6 address as an S3 endpoint, in either spelling** (#1106). The
+  bare form (`::1`) was already refused, with advice to write it bracketed instead; the bracketed
+  form (`[::1]:9000`) was accepted, and three tests asserted it was usable. **None of them sent a
+  request.** Measured against a listener genuinely accepting on `[::1]`:
+
+  ```
+  dex:request "http://[::1]:37753/"  ->  USOCKET:NS-HOST-NOT-FOUND-ERROR
+  ```
+
+  `quri` hands usocket the host with its brackets still attached and no such name exists, so the
+  connection is never attempted. **An app using an IPv6 endpoint was already unable to send**, and
+  now finds out when the store is made instead; use a name that resolves to the address, or an
+  IPv4 address. This is the same rule hermes has applied to a credential URL since #1077, and
+  sharing the rule is what brought the two into agreement.
+
+- **`make-instance 'hermes/blob:s3-store` and `reinitialize-instance` on an S3 store now refuse
+  an endpoint too, not only `make-s3-store`** (#1106). Both signal `blob-configuration-error` for
+  any endpoint the constructor refuses — a bracketed or bare IPv6 address, a scheme, userinfo, a
+  path, a control character, no host. Before this, the checks ran only in `make-s3-store`, so
+  `(reinitialize-instance store :endpoint "[::1]:9000")` was accepted. **A refusal leaves the
+  store exactly as it was, every slot included**: a refused call that also carried `:secure nil`
+  used to leave a secure store plaintext, at a local name, with no approval, so its signed requests
+  went through `HTTP_PROXY` in the clear. `make-instance` still does not read the environment or
+  require credentials; that stays in `make-s3-store`.
+
+- **`hermes/blob` also refuses an S3 endpoint with a control character in it, or with no host**
+  (#1106), both of which it accepted before. `MNEMOSYNE_S3_ENDPOINT` of `":9000"` has no host, and
+  one containing a byte below 32 or 127 — a stray newline or `\x01` from a mangled environment
+  file — is refused without echoing the value, because it may contain a password. Neither was a
+  working endpoint: the first builds a URL with no host to connect to, and the second cannot
+  appear in a URL at all. They come from the shared rule, which hermes has applied to a credential
+  URL since #1104.
+
 - **hermes: `make-sendgrid` now checks its `:endpoint`, and refuses one a request should not carry
   the API key to** (#1092). It was not checked at all before, so
   `(make-sendgrid :endpoint "http://evil.example/v3/mail/send")` sent the key — a `Bearer`
@@ -68,10 +118,12 @@ its tag.
   decision declined to answer because the host was a name.
   **The verdict the configuration check already reached is now carried to the send instead of
   being recomputed there**, so no name is resolved on the send path.
-  `aion/http-client:proxy-arguments` takes `:approved-local` and `make-request` takes
-  `:approved-local`; `hermes/blob`'s `s3-store` records `s3-endpoint-approved-local`, and
-  hermes's Twilio and SendGrid providers record `twilio-api-base-approved-local` and
-  `sendgrid-endpoint-approved-local`.
+  **Six senders record it**, each in a slot with no initarg, recomputed on every initialization:
+  `hermes/blob`'s `s3-store` records `s3-endpoint-approved-local`, and hermes's providers record
+  `twilio-api-base-approved-local`, `sendgrid-endpoint-approved-local`,
+  `telegram-api-base-approved-local`, `facebook-graph-base-approved-local` and
+  `stripe-api-base-approved-local`. The last three arrived with #1106, which brought those
+  backends under the same URL check.
   **The approval is the approved HOST, not a boolean**, and it exempts a request only when it
   equals that request's host. As a boolean it said only that something had been approved, which is
   not a statement about the request being sent: a verdict recorded for one host and read while
@@ -80,17 +132,18 @@ its tag.
   `proxy-arguments`, both exported, so any caller could assert an approval for any host and have a
   plaintext request to a public host sent with no proxy and an `Authorization` header — the same
   door that removing the `s3-store` initarg closed, one layer down. The approval is now an
-  unexported variable bound around the send by the three senders that hold a verdict, and the
-  exported surface cannot express one: `proxy-arguments` no longer takes the keyword, and
-  `make-request` ignores it.
-  **None of the three slots has an initarg, and each is recomputed on every initialization.** The
+  unexported variable bound around the send by the six senders that hold a verdict, and the
+  exported surface cannot express one: neither `proxy-arguments` nor `make-request` accepts the
+  keyword, and passing it to either signals.
+  **None of the six slots has an initarg, and each is recomputed on every initialization.** The
   value is a verdict the framework reached. `s3-store` is exported, so while it had an initarg
   `(make-instance 'hermes/blob:s3-store :endpoint "public.example:80" :secure nil :path-style t
   :endpoint-approved-local "public.example" ...)` sent signed requests to a public host in
   plaintext with no proxy — the leak the slot exists to prevent. Recomputing also means a
   `reinitialize-instance` that moves the endpoint cannot leave the old verdict behind.
-  **A refused `reinitialize-instance` now leaves a provider exactly as it was** (#1129) — both
-  the URL and the recorded verdict are put back. The endpoint and API base checks moved from
+  **A refused `reinitialize-instance` now leaves a provider exactly as it was** (#1129) — every
+  slot is put back, not only the URL and the recorded verdict, because the same call can carry
+  other initargs and they are assigned before the URL is checked. The endpoint and API base checks moved from
   `shared-initialize :after` to `:around`; previously the error was signalled with the refused URL
   already stored, and a caller that handled it and carried on sent the credential there.
   **A subclass that gives the slot its own `:initform` is checked too.** The check reads the
@@ -103,13 +156,18 @@ its tag.
   when its endpoint is local, even though that path does not check locality in order to refuse
   anything. A plaintext store whose endpoint is **not** local records no approval and keeps
   whatever proxy is configured.
-  **An exempted request no longer follows redirects**, and this applies to every request the rule
-  above exempts, including one exempted by an IP address. dexador follows a redirect to a
-  different host by recursing with the same arguments and the same headers, so a `307` from the
-  exempted host to `http://public.example/` was fetched with `:proxy nil` **and with the
-  `Authorization` header built for the exempted host**: the credential left the machine, not
-  merely the proxy being skipped. A `3xx` is now the response for such a request. Nothing else
-  changes about redirects.
+  **A request exempted on a recorded approval no longer follows redirects.** dexador follows a
+  redirect to a different host by recursing with the same arguments and the same headers, so a
+  `307` from the approved host to `http://public.example/` was fetched with `:proxy nil` **and
+  with the `Authorization` header built for the approved host**: the credential left the machine,
+  not merely the proxy being skipped. A `3xx` is now the response for such a request.
+  **A request exempted by an IP address or by `localhost` still follows redirects** with the
+  budget it asked for. That is the rule every caller of this client gets, following a redirect to
+  a local server is documented and tested behaviour, and suppressing it there broke the client's
+  own redirect test. This entry first said the suppression applied to every exempted request,
+  including one exempted by an IP address; that was written before the change was narrowed and
+  was not true of what shipped. The general hazard — dexador carrying headers across a cross-host
+  redirect for any request — is #1139.
   **An app that deliberately proxied plaintext requests to a local store named by DNS will see
   them stop going through the proxy**, which is the same consequence the entry above describes
   for addresses.
@@ -142,8 +200,10 @@ its tag.
   still refused.
 - **hermes/blob: an S3 endpoint must now be a bare host with an optional port** (#1089).
   `MNEMOSYNE_S3_ENDPOINT` is refused when it contains `://`, `/`, `?`, `#`, `@` or whitespace, or
-  is empty. Values such as `localhost:9000`, `127.0.0.1:9000`, `[::1]:9000`, `minio:9000` and
-  `s3.amazonaws.com` are unaffected.
+  is empty. Values such as `localhost:9000`, `127.0.0.1:9000`, `minio:9000` and
+  `s3.amazonaws.com` are unaffected. (`[::1]:9000` was listed here as unaffected, and **#1106
+  refuses it**: a URL built from a bracketed IPv6 address cannot be connected to, so it was never
+  a working endpoint. See that entry.)
   **Two shapes that used to be accepted no longer are, and neither ever worked.** An endpoint
   carrying its own scheme, such as `http://127.0.0.1:9000`, produced the request URL
   `http://http://127.0.0.1:9000/...`, whose host is `http`; it is now refused instead of
@@ -151,7 +211,10 @@ its tag.
   loopback while the request went to `evil.com`, because the check read the endpoint and not the
   URL built from it. A **bare IPv6 address** without brackets, such as `::1`, is also not a
   working endpoint and is now reported as such: the request URL `http://::1/...` has the host `:`
-  and the port 1. Write it with brackets, as `[::1]:9000`.
+  and the port 1. **The advice this entry used to give — write it with brackets, as
+  `[::1]:9000` — was wrong, and #1106 refuses that spelling too**: quri hands usocket the host
+  with its brackets attached and no such name exists, so the connection is never attempted. Use a
+  name that resolves to the address, or an IPv4 address.
 
 - **mnemosyne/conn: a Postgres connect gives up after 10 seconds, and an optional statement
   timeout** (#959). `connect` and `make-pool` take `:connect-timeout`, in seconds, defaulting to
@@ -1348,6 +1411,19 @@ its tag.
     literal `<br/>` into the attribute before.
 
 ### Added
+
+- **`aion/http-client:credential-url-refusal`**, the rule deciding whether a URL is one a
+  framework may send a credential to (#1106). It **returns a refusal sentence rather than
+  signalling**, so each caller signals its own condition: hermes signals `configuration-error`
+  and `hermes/blob` signals `blob-configuration-error`. That is what lets one rule serve both
+  without `hermes/blob` depending on hermes core — it does not, and must not start to — and the
+  move adds no `:depends-on` anywhere, since both already depend on `aion/http-client`. It takes
+  `:setting`, `:example`, `:credential`, `:carried-in` and `:appends-path`, and returns the
+  reason, the parsed URI, and the host it approved as local. It lives beside `local-host-p`,
+  which is the half of the rule that moved there in #1082.
+  **Why one place:** the rule was written twice, and the two copies grew three different holes
+  between them — a bracketed IPv6 address in the userinfo, a scheme inside the endpoint, and a
+  bucket label in front of the host — each a case the other copy's fix had already closed.
 
 
 - **`aion/http-client:local-host-p` and `aion/http-client:url-host` are exported** (#1082).

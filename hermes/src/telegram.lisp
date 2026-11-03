@@ -30,13 +30,27 @@
 2026-08-24). Telegram does not version its URLs and serves every bot the current version, so
 nothing sends this; it is the record of which changelog entries were read.")
 
+(defparameter +telegram-api-base-default+ "https://api.telegram.org"
+  "The Telegram Bot API server.
+
+WRITTEN ONCE, like Twilio's and SendGrid's. A URL that appears twice is a version pin that is
+already half out of date: Twilio's check was broken twice by a second copy of its base, once in a
+refusal message and once in the docstring explaining that hazard (#1092, #1104).")
+
 (defclass telegram (telegram-provider)
   ((token :initarg :token
           :initform (uiop:getenv "TELEGRAM_BOT_TOKEN")
           :reader %telegram-token)
    (api-base :initarg :api-base
-             :initform "https://api.telegram.org"
-             :reader telegram-api-base))
+             :initform +telegram-api-base-default+
+             :reader telegram-api-base)
+   (api-base-approved-local
+    :initform nil :reader telegram-api-base-approved-local
+    :documentation
+    "THE HOST of API-BASE when the check that runs on every initialization resolved it and
+approved it as local, and NIL otherwise, so a plaintext send to it is not handed to a proxy
+(#1091). No initarg: the value is a verdict this code reached, and a caller able to pass it could
+assert that a public host had been approved."))
   (:documentation "The Telegram Bot API as a telegram-provider. TOKEN is the bot's token, a
 string or an AION/SECRET:SECRET, and defaults to $TELEGRAM_BOT_TOKEN; it is kept as a SECRET.
 API-BASE is the server, for a local Bot API server or a test."))
@@ -45,6 +59,38 @@ API-BASE is the server, for a local Bot API server or a test."))
   (let ((token (slot-value p 'token)))
     (when (and (stringp token) (plusp (length token)))
       (setf (slot-value p 'token) (secret:make-secret token)))))
+
+(defun %check-telegram-api-base (base)
+  "Signal CONFIGURATION-ERROR unless BASE is a URL a Telegram request may carry the bot token to
+(#1106). Returns the host approved as local, or NIL.
+
+THE TOKEN IS IN THE PATH, not in a header: every request goes to <base>/bot<token>/<method>. That
+makes this check matter more here than for the providers that send an Authorization header, for
+two reasons. A URL path is recorded by every proxy and server along the way, in logs that are
+routinely kept and shipped, so a mistyped base does not merely expose the token to one host --
+it writes it down. And a reader who has just been told the token travels `in an Authorization
+header' would look in the wrong place for the exposure, which is why CARRIED-IN says where it
+actually goes."
+  (nth-value 1 (%check-credential-url base
+                                      :setting "Telegram API-BASE"
+                                      :example +telegram-api-base-default+
+                                      :credential "the bot token"
+                                      :carried-in "the token is in the path of every request, which any proxy or server along the way may log"
+                                      :appends-path t)))
+
+(defmethod shared-initialize :around ((p telegram) slot-names &rest initargs
+                                      &key &allow-other-keys)
+  "Check the API base on EVERY initialization, and leave the provider untouched if the check
+refuses (#1106).
+
+The ordering is %CALL-WITH-URL-CHECK's; read it there. SHARED-INITIALIZE rather than
+INITIALIZE-INSTANCE because REINITIALIZE-INSTANCE does not call the latter, which is how the same
+check was bypassable for SendGrid and Twilio until the review of #1104. This provider already has
+an INITIALIZE-INSTANCE :AFTER method that wraps the token in a SECRET; that one is left where it
+is, because it is about a value this method does not touch and it must run after assignment."
+  (declare (ignore slot-names initargs))
+  (%call-with-url-check p 'api-base 'api-base-approved-local #'%check-telegram-api-base
+                        (lambda () (call-next-method))))
 
 (defun make-telegram (&rest initargs &key token api-base)
   "A Telegram provider. TOKEN defaults to $TELEGRAM_BOT_TOKEN."
@@ -155,10 +201,17 @@ anything is signalled (see this file's header)."
                             :max-body-bytes +telegram-max-response-bytes+))
          (redact (lambda (text) (%redact text token)))
          (resp (handler-case
-                   (apply #'send-request req
-                          (list (add-header "Content-Type" "application/json")
-                                (ensure-2xx :telegram))
-                          (when *telegram-perform* (list :perform *telegram-perform*)))
+                   ;; THE APPROVED HOST IS BOUND AROUND THE SEND, so a plaintext request to a
+                   ;; host the configuration check approved as local is not handed to a proxy
+                   ;; (#1091). It matters more here than elsewhere: the token is in the path, so
+                   ;; a proxy that saw this request would log it.
+                   (call-with-approved-local-host
+                    (telegram-api-base-approved-local p)
+                    (lambda ()
+                      (apply #'send-request req
+                             (list (add-header "Content-Type" "application/json")
+                                   (ensure-2xx :telegram))
+                             (when *telegram-perform* (list :perform *telegram-perform*)))))
                  (http-error (c)
                    (error (if (http-error-status c)
                               (%telegram-refusal (http-error-status c) (http-error-body c) redact)

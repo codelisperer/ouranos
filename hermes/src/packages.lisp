@@ -39,7 +39,7 @@
                 #:address-category #:parse-address #:resolve-host
                 ;; The one rule for whether a host may be sent requests in the clear, and the
                 ;; host-from-a-URL reading it takes. Both used to be written here (#1082).
-                #:local-host-p #:url-host)
+                #:local-host-p #:url-host #:credential-url-refusal)
 (:documentation
    "Neutral email + SMS delivery -- hermes, the messenger. A PROVIDER delivers a neutral
     EMAIL or SMS via the DELIVER generic (CLOS multiple dispatch on provider + message), so
