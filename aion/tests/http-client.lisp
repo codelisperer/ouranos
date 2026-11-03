@@ -2822,3 +2822,144 @@ every leg, so the Windows leg checks WinHTTP."
               (is (equal "access_token=secret"
                          (and got (aion/test-http:request-body-string (car (last got)))))
                   "control: and the body arrives"))))))))
+
+;;; --- SEND-REQUEST's deadline (#1162) ----------------------------------------------------
+
+(defun %slow-send (server &rest options)
+  "SEND-REQUEST to SERVER's /, a server that sends a byte every 2 seconds, with a 5-second read
+timeout that no single read reaches. OPTIONS go to SEND-REQUEST."
+  (apply #'http:send-request (http:make-request :url (%local server "/") :read-timeout 5)
+         '() options))
+
+(test send-request-stops-at-its-deadline-while-a-call-without-one-is-still-reading
+  "#1162. A server that sends a byte every 2 seconds never trips a 5-second read timeout, and the
+read timer starts again on every read, so without a deadline SEND-REQUEST has no bound on such a
+call. With :DEADLINE 3 it signals REQUEST-DEADLINE-EXCEEDED after about 3 seconds, which a
+handler for FETCH-DEADLINE-EXCEEDED also catches.
+
+THE CONTROL is the same call to the same kind of server with no :DEADLINE, on a second thread: it
+is still reading when the call with a deadline has ended. That is what shows the deadline, and
+not some timeout this client already had, ended the first call."
+  (let ((done nil))
+    (with-server (slow (%slow-handler (lambda () done)))
+      (with-server (other (%slow-handler (lambda () done)))
+        ;; THREAD-LIFETIME: reads OTHER until the cleanup below sets DONE, which ends the handler
+        ;; and closes the connection, so the call returns or fails and the thread ends; the JOIN
+        ;; waits for that.
+        (let ((control (bt:make-thread (lambda () (ignore-errors (%slow-send other)))
+                                       :name "send-request without a deadline")))
+          (unwind-protect
+               (let* ((start (get-internal-real-time))
+                      (c (handler-case (progn (%slow-send slow :deadline 3) nil)
+                           (http:fetch-deadline-exceeded (c) c)))
+                      (seconds (/ (- (get-internal-real-time) start)
+                                  internal-time-units-per-second)))
+                 (is (typep c 'http:request-deadline-exceeded)
+                     "the call signals REQUEST-DEADLINE-EXCEEDED: ~S" c)
+                 (is (< 2.5 seconds 6) "it ended after ~,1F seconds" seconds)
+                 (is (eql 3 (and c (http:fetch-deadline-exceeded-deadline c))))
+                 (is (equal (%local slow "/") (and c (http:fetch-deadline-exceeded-url c)))
+                     "and names the URL it was on")
+                 (is (bt:thread-alive-p control)
+                     "control: the call without a deadline is still reading"))
+            (setf done t)
+            (aion/test-threads:join control)))))))
+
+(defun %send-deadline-timers ()
+  (remove "send-request deadline" (sb-ext:list-all-timers)
+          :key #'sb-ext:timer-name :test-not #'equal))
+
+(test a-send-request-that-ends-before-its-deadline-returns-and-leaves-no-timer
+  "#1162. A call that finishes in time returns its response as it would without a deadline, and
+its timer is unscheduled whether the call returns or signals, so nothing fires later."
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "on time")))
+    (is (null (%send-deadline-timers)) "none before")
+    (let ((r (http:send-request (http:make-request :url (%local s "/") :read-timeout 5) '()
+                                :deadline 30)))
+      (is (= 200 (http:response-status r)))
+      (is (equal "on time" (http:response-body r))))
+    (is (null (%send-deadline-timers)) "none after a call that returned")
+    (signals http:http-error
+      (http:send-request (http:make-request :url "http://does-not-resolve.invalid/") '()
+                         :deadline 30))
+    (is (null (%send-deadline-timers)) "none after a call that signalled")))
+
+(test a-send-request-with-a-deadline-follows-redirects-and-drops-credentials-across-origins
+  "#1162. With a deadline every hop goes over a connection this client opens, so redirects are
+followed by this client's own loop, for every request. A hop that changes origin must still drop
+the credential headers. Two servers on different ports; the second must receive exactly one
+request, without the Authorization header, and with an ordinary header kept. The control is a
+same-origin redirect, which keeps the credential."
+  (with-server (b (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "landed")))
+    (let ((landing (%local b "/landing")))
+      (with-server (a (lambda (path head stream)
+                        (declare (ignore head))
+                        (cond ((string= path "/away")
+                               (%write-response stream 302 `(("Location" . ,landing)) ""))
+                              ((string= path "/same")
+                               (%write-response stream 302 '(("Location" . "/here")) ""))
+                              (t (%write-response stream 200 '() "here")))))
+        (flet ((send (path)
+                 (http:send-request (http:make-request :url (%local a path) :read-timeout 5
+                                                       :headers '(("Authorization" . "Bearer s")
+                                                                  ("X-Trace" . "kept")))
+                                    '() :deadline 30)))
+          (let ((r (send "/away")))
+            (is (equal "landed" (http:response-body r)) "the cross-origin redirect is followed")
+            (let ((got (%received b "/landing")))
+              (is (= 1 (length got)) "the other origin received one request: ~D" (length got))
+              (is (null (and got (aion/test-http:request-header (first got) "Authorization")))
+                  "without the credential")
+              (is (equal "kept" (and got (aion/test-http:request-header (first got) "X-Trace")))
+                  "and with the ordinary header")))
+          (let ((r (send "/same")))
+            (is (equal "here" (http:response-body r)) "control: a same-origin redirect is followed")
+            (let ((got (%received a "/here")))
+              (is (equal "Bearer s"
+                         (and got (aion/test-http:request-header (first got) "Authorization")))
+                  "control: and keeps the credential"))))))))
+
+(test a-send-request-with-a-deadline-is-refused-rather-than-sent-around-a-proxy
+  "#1162. A request with a deadline goes over a connection this client opens directly, so it
+cannot go through the proxy dexador would have used. Sending it around the proxy would be a
+decision the machine's configuration did not make, so it is refused, before anything is sent.
+The control: a plaintext request to a local host is not proxied in the first place (#1091), so
+the same proxy setting does not stop it."
+  (let ((dexador.util:*default-proxy* "http://127.0.0.1:9"))
+    (let ((e (handler-case (progn (http:send-request
+                                   (http:make-request :url "https://api.example.invalid/x")
+                                   '() :deadline 30)
+                                  nil)
+               (http:http-error (e) e))))
+      (is (typep e 'http:http-error) "a request that would be proxied is refused")
+      (is-true (and e (search "proxy" (princ-to-string e)))
+               "and the refusal says why: ~A" e))
+    (with-server (s (lambda (path head stream)
+                      (declare (ignore path head))
+                      (%write-response stream 200 '() "direct")))
+      (is (equal "direct"
+                 (http:response-body
+                  (http:send-request (http:make-request :url (%local s "/") :read-timeout 5) '()
+                                     :deadline 30)))
+          "control: a local plaintext request, which no proxy applies to, is sent"))))
+
+(test a-deadline-is-checked-when-a-substituted-perform-returns
+  "#1162. A PERFORM other than the default opens no socket the watch can wake, so the deadline is
+checked when it returns: a stub that takes 1.5 seconds under :DEADLINE 1 signals
+REQUEST-DEADLINE-EXCEEDED, and the same stub with no deadline returns its response."
+  (flet ((slow-stub (req)
+           (declare (ignore req))
+           (sleep 1.5)
+           (http:make-response :status 200 :body "late")))
+    (signals http:request-deadline-exceeded
+      (http:send-request (http:make-request :url "https://api.example.com/x") '()
+                         :perform #'slow-stub :deadline 1))
+    (is (equal "late"
+               (http:response-body
+                (http:send-request (http:make-request :url "https://api.example.com/x") '()
+                                   :perform #'slow-stub)))
+        "control: without a deadline the same stub's response is returned")))

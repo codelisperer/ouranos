@@ -1490,6 +1490,27 @@ its tag.
 
 ### Added
 
+- **`aion/http-client:send-request` takes an optional `:deadline`, in seconds, for the whole
+  round-trip over every redirect** (#1162). Without it a call is bounded only by the connect
+  timeout and the per-read timeout, and the read timer starts again on every read, so a server
+  that sends a few bytes at a time could hold one call indefinitely. When the deadline passes the
+  socket is shut down and the call signals **`aion/http-client:request-deadline-exceeded`**, a
+  subclass of `fetch-deadline-exceeded`, so an existing handler for that condition catches it, and
+  `fetch-deadline-exceeded-url` and `fetch-deadline-exceeded-deadline` read it. It is
+  `fetch-public`'s deadline (#807) and has the same limits: resolving a host name and opening the
+  TCP connection are not interrupted, only checked when they return. **Without `:deadline`
+  nothing changes.** With it, three things differ, all because the deadline can only shut down a
+  socket this client opened:
+  - each hop goes over a connection this client opens to the host's first resolved address, as
+    `fetch-public` and `open-response-stream` do, rather than through dexador;
+  - redirects are followed by this client's own loop for every request, so a hop that changes
+    origin drops the credential headers and does not carry a body;
+  - **a request that would go through a proxy is refused** with an `http-error`, rather than sent
+    directly around it. dexador takes its proxy from `HTTPS_PROXY` or `HTTP_PROXY`; a plaintext
+    request to a local host is not proxied (#1091) and is unaffected.
+
+  The interceptors run outside the deadline. With a substituted `:perform`, which opens no socket
+  the deadline can reach, the deadline is checked when it returns.
 - **`aion/http-client:credential-url-refusal`**, the rule deciding whether a URL is one a
   framework may send a credential to (#1106). It **returns a refusal sentence rather than
   signalling**, so each caller signals its own condition: hermes signals `configuration-error`

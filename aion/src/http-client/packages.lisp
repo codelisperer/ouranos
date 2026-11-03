@@ -63,6 +63,7 @@
            #:too-many-redirects #:too-many-redirects-url #:too-many-redirects-limit
            #:fetch-deadline-exceeded #:fetch-deadline-exceeded-url
            #:fetch-deadline-exceeded-deadline
+           #:request-deadline-exceeded
            ;; a response read as it arrives, and cancelling it (#984)
            #:open-response-stream #:read-event #:*max-event-octets*
            #:request-cancel #:make-request-cancel #:request-cancel-p
