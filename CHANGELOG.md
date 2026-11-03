@@ -1398,6 +1398,17 @@ its tag.
 
 ### Fixed
 
+- **A `--carry` or `--carry-license` path in a folder whose name has brackets is now carried,
+  and so is a library whose own file name has them** (#1145). `carry-declared-libraries` in
+  `scripts/carry-natives.lisp` gave each path from the command line to `probe-file`, which reads
+  a string as a Lisp namestring, where `[ ] * ?` are wildcards and on Linux and macOS a
+  backslash is an escape. A library in a folder named `lib [x]` stopped the desktop build with
+  a file error about a wild pathname, instead of being carried. The paths are now read as the
+  operating system's names for the files, with `uiop:parse-native-namestring`. The copy in the
+  bundle, its license under `LICENSES/`, and the file `open-carried-libraries` opens when the app
+  starts are named from the file's parts, so a library named `thing[1].dll` keeps that name.
+  A bundle that already built is not affected.
+
 - **`hyperion/markdown:render` no longer lets an image inside an image's alt text add attributes
   to the outer `img`** (#1132). An app rendering untrusted markdown **with the default options**
   was affected, so this is a fix to behaviour that shipped, not to the new untrusted mode. 3bmd

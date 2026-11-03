@@ -102,6 +102,32 @@ the directory above does, as for SQLite, which is public domain and ships none. 
                                    (or (find #\/ (namestring path)) (find #\\ (namestring path)))
                                    (ignore-errors (truename path))))))))
 
+(defun %native-path (path)
+  "PATH as a pathname. A string is read as the operating system's name for a file, with
+UIOP:PARSE-NATIVE-NAMESTRING, never as a Lisp namestring. A Lisp namestring reads [ ] * and ?
+as wildcards, and on Linux and macOS a backslash as an escape, so a --carry path in a folder
+named lib [x] was a wild pathname that PROBE-FILE refused (#1145). A pathname is returned as it
+is."
+  (if (stringp path) (uiop:parse-native-namestring path) path))
+
+(defun %file-name (path)
+  "The operating system's name for the file PATH, without its directory. PATH is a pathname or
+a native string. CL:FILE-NAMESTRING is not used, because SBCL writes a [ in a file name as \\[,
+and given a string it parses it as a Lisp namestring first (#1145)."
+  (let ((native (if (stringp path) path (uiop:native-namestring path))))
+    (subseq native (1+ (or (position-if (lambda (c) (or (char= c #\/)
+                                                       (and (uiop:os-windows-p) (char= c #\\))))
+                                        native :from-end t)
+                           -1)))))
+
+(defun %in-directory (name directory &rest folders)
+  "The pathname of the file NAME, a native file name, in DIRECTORY, inside its subfolders
+FOLDERS when they are given. The parts are put together as pathname components, so no part is
+parsed as a Lisp namestring, where thing[1].dll would be a wild pathname (#1145)."
+  (merge-pathnames (make-pathname :directory (and folders (cons :relative folders))
+                                  :defaults (uiop:parse-native-namestring name))
+                   directory))
+
 (defun %same-file-name-p (a b)
   "True when file names A and B are the same, ignoring case on Windows, where the file
 system does."
@@ -136,12 +162,12 @@ cl-sqlite on a machine where Ouranos's setup installed libsqlite3.dll: the image
 libsqlite3.dll, the app carries its pinned sqlite3.dll, and both are names the definition asks
 for. Unmatched, SBCL would reopen libsqlite3.dll by bare name when the app starts, from
 wherever the user's search path leads."
-  (let ((name (file-namestring truename)))
+  (let ((name (%file-name truename)))
     (loop for (lib . resolved) in open
           when (or (if resolved
                        (equal resolved truename)
                        (let ((path (funcall (%cffi "FOREIGN-LIBRARY-PATHNAME") lib)))
-                         (and path (%same-file-name-p (file-namestring path) name))))
+                         (and path (%same-file-name-p (%file-name path) name))))
                    (member name (%spec-file-names lib) :test #'%same-file-name-p))
             collect lib)))
 
@@ -157,12 +183,18 @@ given to DIRECTORY is not: it missed a directory named licenses/."
                  '("LICENSE" "COPYING" "NOTICE")))
          (dir-name (d) (car (last (pathname-directory d)))))
     (flet ((in (dir)
-             (append (remove-if-not (lambda (f) (licensep (file-namestring f)))
+             (append (remove-if-not (lambda (f) (licensep (%file-name f)))
                                     (uiop:directory-files dir))
                      (remove-if-not (lambda (d) (licensep (dir-name d)))
                                     (uiop:subdirectories dir)))))
       (let ((dir (uiop:pathname-directory-pathname truename)))
         (or (in dir) (in (uiop:pathname-parent-directory-pathname dir)))))))
+
+(defun %without-type (name)
+  "NAME, a native file name, without its last dot and what follows it: libssl.3 for
+libssl.3.dylib, as CL:PATHNAME-NAME gives it, but without parsing NAME as a Lisp namestring."
+  (let ((dot (position #\. name :from-end t)))
+    (if (and dot (plusp dot)) (subseq name 0 dot) name)))
 
 (defun %copy-license (license lib-name bundle report)
   "Copy LICENSE, a file or a directory of notices, to BUNDLE/LICENSES/<lib-name>-<its name>."
@@ -171,16 +203,17 @@ given to DIRECTORY is not: it missed a directory named licenses/."
         (dolist (file (directory (merge-pathnames "**/*.*" license)))
           (unless (uiop:directory-pathname-p file)
             (let ((dst (merge-pathnames (uiop:enough-pathname file license)
-                                        (merge-pathnames (format nil "LICENSES/~A-~A/" lib-name root)
-                                                         bundle))))
+                                        (uiop:ensure-directory-pathname
+                                         (%in-directory (format nil "~A-~A" lib-name root)
+                                                        bundle "LICENSES")))))
               (ensure-directories-exist dst)
               (uiop:copy-file file dst))))
         (format report "~&            + LICENSES/~A-~A/~%" lib-name root))
-      (let ((dst (merge-pathnames (format nil "LICENSES/~A-~A" lib-name (file-namestring license))
-                                  bundle)))
+      (let* ((name (format nil "~A-~A" lib-name (%file-name license)))
+             (dst (%in-directory name bundle "LICENSES")))
         (ensure-directories-exist dst)
         (uiop:copy-file license dst)
-        (format report "~&            + LICENSES/~A~%" (file-namestring dst)))))
+        (format report "~&            + LICENSES/~A~%" name))))
 
 (defvar *relink* t
   "Whether CARRY-DECLARED-LIBRARIES relinks carried Mach-O files to each other on macOS. Only a
@@ -276,7 +309,7 @@ cannot re-sign FILE after its install name changed."
     (let ((id (%install-name file))
           (path (uiop:native-namestring file)))
       (when (and id (plusp (length id)) (char= (char id 0) #\/))
-        (let ((new (concatenate 'string "@executable_path/" (file-namestring file))))
+        (let ((new (concatenate 'string "@executable_path/" (%file-name file))))
           (multiple-value-bind (out code) (%run-tool (list "install_name_tool" "-id" new path))
             (cond
               ((eql code 0)
@@ -331,13 +364,13 @@ given in the same order as NAMES, by the path it resolves to on this machine. OR
 of *CARRIED-ORIGINS* for files in BUNDLE, match a load command that names a carried file's
 original install name, or resolves to the file it was copied from, whatever its file name."
   (loop for name in files
-        for dst = (merge-pathnames name bundle)
+        for dst = (%in-directory name bundle)
         for changed = nil
         do (dolist (dep (%macho-dependencies dst))
              (unless (or (char= (char dep 0) #\@)
                          (uiop:string-prefix-p "/usr/lib/" dep)
                          (uiop:string-prefix-p "/System/" dep))
-               (let* ((dep-true (and (or truenames origins) (ignore-errors (probe-file dep))))
+               (let* ((dep-true (and (or truenames origins) (ignore-errors (probe-file (%native-path dep)))))
                       (origin (or (find dep origins :key #'second :test #'equal)
                                   (and dep-true (find dep-true origins :key #'third
                                                                        :test #'equal))))
@@ -345,9 +378,9 @@ original install name, or resolves to the file it was copied from, whatever its 
                                        (let ((i (position dep-true truenames :test #'equal)))
                                          (and i (nth i names))))
                                   (and origin
-                                       (find (file-namestring (first origin)) names
+                                       (find (%file-name (first origin)) names
                                              :test #'%same-file-name-p))
-                                  (find (file-namestring dep) names :test #'%same-file-name-p))))
+                                  (find (%file-name dep) names :test #'%same-file-name-p))))
                  (when (and target (not (%same-file-name-p target name)))
                    (multiple-value-bind (out code)
                        (%run-tool (list "install_name_tool" "-change" dep
@@ -389,7 +422,7 @@ dependent naming the build machine's path (#1130).
 Signals CARRY-REFUSED as %RELINK-CARRIED does."
   (when (and *relink* (uiop:os-macosx-p))
     (let* ((names (loop for f in (uiop:directory-files bundle)
-                        for name = (file-namestring f)
+                        for name = (%file-name f)
                         when (and (string-equal "dylib" (pathname-type f)) (%macho-p f))
                           collect name))
            (dir (ignore-errors (truename bundle)))
@@ -427,21 +460,23 @@ OPEN-CARRIED-LIBRARIES opens at startup."
            (loop for (tree . carry) in (append (mapcar (lambda (c) (cons nil c)) carries)
                                                (mapcar (lambda (c) (cons t c)) tree-carries))
                  for (path . named) = (if (consp carry) carry (list carry))
-                 for truename = (probe-file path)
-                 for name = (and truename (file-namestring truename))
+                 for truename = (probe-file (%native-path path))
+                 for name = (and truename (%file-name truename))
                  do (cond
                       ((null truename)
-                       (error 'carry-refused :path (pathname path) :reason "the file does not exist"))
-                      ((and (not tree) vendor (probe-file vendor)
-                            (uiop:subpathp truename (truename vendor)))
+                       (error 'carry-refused :path (%native-path path) :reason "the file does not exist"))
+                      ((and (not tree) vendor (probe-file (%native-path vendor))
+                            (uiop:subpathp truename (truename (%native-path vendor))))
                        (error 'carry-refused :path truename
                                              :reason "it is under vendor/, and the bundler already carries the tree's own libraries")))
                     (dolist (l named)
-                      (unless (probe-file l)
-                        (error 'carry-refused :path (pathname l)
+                      (unless (probe-file (%native-path l))
+                        (error 'carry-refused :path (%native-path l)
                                               :reason (format nil "it is named by --carry-license for ~A and does not exist" name))))
                  collect (list truename name
-                               (if named (mapcar #'probe-file named) (%license-files truename))
+                               (if named
+                                   (mapcar (lambda (l) (probe-file (%native-path l))) named)
+                                   (%license-files truename))
                                (%matching-open-libraries truename open)))))
     (loop for (entry . rest) on plan
           for (truename name) = entry
@@ -454,7 +489,7 @@ OPEN-CARRIED-LIBRARIES opens at startup."
                                      :reason "no LICENSE*, COPYING* or NOTICE* file is beside it or in the directory above it, and no --carry-license names one. The bundle carries a library's license text with its code"))
     (let ((opened '()))
       (loop for (truename name licenses libs) in plan
-            for dst = (merge-pathnames name bundle)
+            for dst = (%in-directory name bundle)
             do (ensure-directories-exist dst)
                (uiop:copy-file truename dst)
                (unless (uiop:os-windows-p)
@@ -462,7 +497,7 @@ OPEN-CARRIED-LIBRARIES opens at startup."
                (format report "~&  carry     ~A  <- ~A~%" name (uiop:native-namestring truename))
                (stamp-install-name dst :report report :source truename)
                (dolist (license licenses)
-                 (%copy-license license (pathname-name name) bundle report))
+                 (%copy-license license (%without-type name) bundle report))
                (cond
                  (libs
                   (dolist (lib libs) (funcall (%cffi "CLOSE-FOREIGN-LIBRARY") lib))
@@ -538,7 +573,7 @@ PLATFORM (:macos, :linux or :windows) is for tests; it defaults to this machine'
   catch."
   (unless loaded (return-from tree-sqlite-carry (values nil nil)))
   (let ((own (find-if (lambda (c)
-                        (member (file-namestring (if (consp c) (car c) c)) *sqlite-file-names*
+                        (member (%file-name (if (consp c) (car c) c)) *sqlite-file-names*
                                 :test #'%same-file-name-p))
                       carries)))
     (when own
@@ -585,7 +620,7 @@ with exit code 3 and a message naming the file, because the app cannot run witho
   (let ((dir (runtime-directory))
         (load-lib (%cffi "LOAD-FOREIGN-LIBRARY")))
     (dolist (name names)
-      (let ((path (merge-pathnames name dir)))
+      (let ((path (%in-directory name dir)))
         (handler-case (funcall load-lib path)
           (error (e)
             (format *error-output* "~&This app cannot open ~A, which it carries beside its executable:~%  ~A~%~A~%"
