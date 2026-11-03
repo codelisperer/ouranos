@@ -357,14 +357,23 @@ not about an expression inside it; an `ok` line is about failures, not about cov
   the source is newer than its fasl, and a touch that lands in the same second as the control
   run's build is not newer — so restoring a file and touching it leaves the control's code
   loaded.
-  **A correct file on disk is not evidence that the image loaded it**, and the two failures look
-  nothing alike: the suite either reports the control's failures against code that no longer
-  exists, or reports a pass because the control happened to pass. Delete the fasl
-  (`~/.cache/common-lisp/**/<file>.fasl`) or load with `:force t`, then read the count back. One
-  session hit this five times in a day, and one of those produced a false claim about an API that
-  reached a commit message, a CHANGELOG line and a report to the hub before a compiled suite
-  contradicted it. The rule above has said *clear* since it was written; this says what clear
-  has to mean.
+  **A correct file on disk is not evidence that the image loaded it.** Delete the fasl
+  (`~/.cache/common-lisp/**/<file>.fasl`) or load with `:force t`, then read the count back.
+- **A stale fasl can make a local suite PASS for a tree whose suite fails**, which is the half of
+  this that costs the most. The rule above and the sentence before it describe a stale fasl
+  turning a passing suite red; it does the opposite just as easily, because the code the image
+  holds can be a build in which the suite really did pass. **So a local `Fail: 0` is evidence only
+  when the fasls were deleted first, or the worktree is new enough not to have any yet** — the
+  cache path contains the worktree's own path, so a fresh worktree is cold on its first run and
+  warm after it.
+  The case: #1134 at `77d23085` was reported here as `Fail: 0` across every suite while **all four
+  CI legs failed**, on one check — a test calling `make-request` with a keyword that commit had
+  removed. The local script and the local suite had both loaded a build from before the removal,
+  so both agreed that the constructor accepted it. CI disagreed because CI always builds cold.
+  The same stale build had already produced a false claim about that keyword which reached a
+  commit message, a CHANGELOG line and a report to the hub.
+  The rule above has said *clear* since it was written; these two say what clear has to mean and
+  why a green local run is not a substitute for it.
 - The test harness must be able to see the failure before the failure can be asserted;
   the fixture must not be easier than reality (read the real artefact the generator writes).
 - A fixture that cleans up after itself is **relying** on cleanup; one with a genuinely
