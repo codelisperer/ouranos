@@ -805,8 +805,11 @@ same, swaps nothing, and disables the fieldset holding the buttons until the ans
     (is (every (lambda (b) (equal "submit" (%attr b "type"))) (%all dom "button")))
     (is (= 8 (length (%all (%one form "fieldset") "button")))
         "every button is in the one fieldset")
-    (is (equal "find fieldset" (%attr form "hx-disabled-elt"))
-        "the fieldset, and so every button, is disabled while a request is in flight")))
+    (is (equal ".hy-appearance-fields" (%attr form "hx-disabled-elt"))
+        "every picker's fieldset, and so every button, is disabled while a request is in flight
+(#1138)")
+    (is (equal "hy-appearance-fields" (%attr (%one form "fieldset") "class"))
+        "the selector names the fieldset")))
 
 (test the-appearance-picker-presses-the-current-setting-in-each-group
   "System for a theme or contrast that follows the system, and Flat for the default look."

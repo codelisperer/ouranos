@@ -3769,6 +3769,15 @@ its tag.
   also accepts the directory with a trailing slash, which before made an install name inside the
   bundle read as a path outside it.
 
+- **hyperion/kit: two appearance pickers on one page no longer undo each other's choice, and a
+  slow response no longer moves focus** (#1138). While a picker's request is in flight,
+  `appearance-picker` now disables every picker's buttons on the page, not only its own: its
+  form's `hx-disabled-elt` is `.hy-appearance-fields`, the class of each picker's fieldset, where
+  it was `find fieldset`. Before, a press on a second picker during the request sent a second
+  request carrying the old appearance cookie, and whichever response came last overwrote the
+  other choice. `apply-appearance-js` gives focus back to the pressed button when the request
+  ends only when focus is still on the body or nowhere, so a visitor who moved to another
+  control while waiting keeps it.
 - **aion/uv: a path string reaches libuv as written, so a file with a backslash in its name works
   on Linux and macOS** (#1093). Every function that takes a path ran it through `cl:namestring`,
   and on Linux and macOS that drops a backslash, so `a\b.txt` was used as `ab.txt`. The affected

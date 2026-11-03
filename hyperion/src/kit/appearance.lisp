@@ -109,7 +109,8 @@ the default look. ID is the form's id.
 
 Each button is a submit button named after its setting, so without script the browser posts
 the one pressed, such as theme=dark. With htmx the form posts with hx-post and swaps
-nothing, and its buttons, in a <fieldset>, are disabled until the answer arrives. Include
+nothing, and while its request is in flight every picker's buttons on the page are disabled,
+not only this picker's, until the answer arrives (#1138). Include
 APPLY-APPEARANCE-JS on the page, and answer with APPEARANCE-RESPONSE-HEADERS. LABELS is a
 plist of the visible text, keyed as *DEFAULT-PICKER-LABELS*; a key it leaves out takes the
 default.
@@ -125,14 +126,18 @@ form in *HTML*."
     (:form :id id :class "hy-appearance-picker" :method "post" :action action-href
            :aria-label (%label labels :picker)
            :hx-post action-href :hx-swap "none"
-           ;; The fieldset, and so every button in it, is disabled while a request is in
-           ;; flight, so a press made then visibly does nothing. Without this, htmx keeps only
-           ;; the last press made during a request and drops the others without a sign.
+           ;; Every picker's fieldset, and so every button in it, is disabled while a request
+           ;; is in flight, so a press made then visibly does nothing. Without this, htmx keeps
+           ;; only the last press made during a request and drops the others without a sign.
            ;; Queueing every request does not help: htmx reads the pressed button when it
            ;; sends, not when it queues, so each queued request carries the last button. The
            ;; fieldset is the target because `find button' disables only the first button
-           ;; (#1115's review).
-           :hx-disabled-elt "find fieldset"
+           ;; (#1115's review). Every picker's, not only this one's, because each request
+           ;; carries the appearance cookie as it was when it was sent: with two pickers on a
+           ;; page, two requests in flight together each carried the old cookie, and the later
+           ;; response undid the other picker's choice (#1138). The selector is a plain CSS
+           ;; selector, which htmx resolves across the document.
+           :hx-disabled-elt ".hy-appearance-fields"
       (:fieldset :class "hy-appearance-fields"
         (dolist (setting +settings+)
           (destructuring-bind (key name nil-value var accessor) setting
@@ -215,7 +220,9 @@ APPLY-APPEARANCE-JS applies it to the page. Answer with status 204, since nothin
 attribute on <html> (data-theme, data-contrast, data-look), or removes it when the setting is
 null, so the CSS follows the system again; and it sets aria-pressed on every picker button of
 that setting. It also gives focus back to the picker button that had it once the picker's
-request ends, since disabling the buttons during the request moves focus to the body.
+request ends, since disabling the buttons during the request moves focus to the body, but only
+when focus is still on the body or nowhere, so a slow response does not take focus from a
+control the visitor moved to meanwhile.
 Installed once on the document however many times the page includes it.
 Include it once with (:script (:raw (apply-appearance-js)))."
   (out:js-string
@@ -223,10 +230,11 @@ Include it once with (:script (:raw (apply-appearance-js)))."
      (lambda ()
        (unless (@ window hy-kit-appearance)
          (setf (@ window hy-kit-appearance) t)
-         ;; Disabling the fieldset while a request is in flight takes focus from the pressed
+         ;; Disabling the fieldsets while a request is in flight takes focus from the pressed
          ;; button, and the browser moves it to the body. The focused element inside a picker
-         ;; is kept when its request starts and focused again when the request ends, so a
-         ;; keyboard or screen-reader user keeps their place.
+         ;; is kept when the request starts and focused again when it ends, so a keyboard or
+         ;; screen-reader user keeps their place. Every picker's fieldset is disabled (see
+         ;; the form), so the element kept is the one in any picker, not only the sending one.
          (chain document
                 (add-event-listener
                  "htmx:beforeRequest"
@@ -236,7 +244,8 @@ Include it once with (:script (:raw (apply-appearance-js)))."
                      (when (and (@ form matches)
                                 (chain form (matches ".hy-appearance-picker"))
                                 focused
-                                (chain form (contains focused)))
+                                (@ focused closest)
+                                (chain focused (closest ".hy-appearance-picker")))
                        (setf (@ form hy-focused) focused))))))
          (chain document
                 (add-event-listener
@@ -248,9 +257,16 @@ Include it once with (:script (:raw (apply-appearance-js)))."
                        (setf (@ form hy-focused) nil)
                        ;; htmx enables the fieldset again only after this event, so the focus
                        ;; waits for that.
+                       ;; Only when focus is still on the body or nowhere, where disabling the
+                       ;; fieldset left it: a visitor who moved to another control while the
+                       ;; response was slow keeps it (#1138), as dialog.lisp does for a late
+                       ;; close event.
                        (set-timeout (lambda ()
-                                      (when (@ focused is-connected)
-                                        (chain focused (focus))))
+                                      (let ((now (@ document active-element)))
+                                        (when (and (@ focused is-connected)
+                                                   (or (not now)
+                                                       (eq now (@ document body))))
+                                          (chain focused (focus)))))
                                     0))))))
          (chain document
                 (add-event-listener
