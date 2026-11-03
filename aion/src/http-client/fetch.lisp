@@ -280,9 +280,65 @@ may travel in the clear is the last rule that should exist twice (#1082)."
                  (let ((addresses (ignore-errors (resolve-host host))))
                    (and addresses (every #'%local-address-p addresses) t)))))))
 
+(defvar *approved-local-host* nil
+  "The host a configuration step resolved and approved as LOCAL, bound around a send by the code
+that holds that verdict (#1091).
+
+NOT EXPORTED, AND NOT AN ARGUMENT TO ANYTHING EXPORTED, which is the point of it. It was a
+:APPROVED-LOCAL keyword on MAKE-REQUEST and on PROXY-ARGUMENTS, both exported, so any caller
+could assert an approval for any host:
+
+  (make-request :url \"http://public.example/x\" :approved-local \"public.example\"
+                :headers <an Authorization header>)
+
+got :PROXY NIL and :MAX-REDIRECTS 0 for a public host -- the same door that was closed by taking
+the initarg off hermes/blob's slot, left open one layer down (the re-review of #1134). The
+exported surface can no longer express an approval at all; what a caller builds its own request
+with is the rule for an address or \"localhost\" and nothing else.
+
+Bound with CALL-WITH-APPROVED-LOCAL-HOST, by hermes's providers and hermes/blob's S3 backend.
+Reaching this symbol from outside takes a double-colon, which is the line this codebase draws
+around anything a caller is not meant to use.
+
+A DYNAMIC BINDING IS SAFE HERE BECAUSE OF THE HOST COMPARISON. The binding covers everything the
+send does, including an interceptor that issues a request of its own, but PROXY-ARGUMENTS grants
+nothing unless the URL's host equals this value, so the approval cannot spread to another host.")
+
+(defun call-with-approved-local-host (host thunk)
+  "Call THUNK with HOST bound as the approved local host (#1091). Not exported: see
+*APPROVED-LOCAL-HOST*."
+  (let ((*approved-local-host* host))
+    (funcall thunk)))
+
 (defun proxy-arguments (url)
   "The dexador keyword arguments that say how URL is to be proxied: (:PROXY NIL) for a plaintext
 request to a host this machine reaches by itself, and no arguments otherwise (#1091).
+
+*APPROVED-LOCAL-HOST* IS THE HOST a configuration step resolved and approved as local -- the
+string, not a boolean -- and it grants the exemption only when it equals URL's host. A boolean
+said only that somebody had approved something, which is not a statement about the request being
+sent: a provider
+whose URL had moved on, or a verdict recorded for one host and read while another was in the
+slot, would have exempted a request to a host nothing had approved. Pass it from a recorded
+verdict, not from a resolution made now; see below for why that distinction is the whole point.
+
+AN APPROVED-LOCAL REQUEST ALSO STOPS FOLLOWING REDIRECTS, which is why :MAX-REDIRECTS 0 comes
+back with the exemption in that case. dexador follows a redirect to a DIFFERENT host by recursing
+with the same arguments and the same headers -- it prepends a new Host and keeps the rest
+(src/backend/usocket.lisp, the cross-host branch of its redirect handling) -- so a 307 from the
+approved host to http://public.example/ would be fetched with :PROXY NIL and with the
+Authorization header built for the approved host. That is the credential leaving the machine, not
+only a proxy being skipped. A 3xx is the response for such a request instead (the review of
+#1134).
+
+ONLY FOR AN APPROVED-LOCAL REQUEST, not for one exempted by the literal rule. The literal rule
+has the same hazard in principle, and the same cause, which is dexador carrying headers across a
+cross-host redirect; but it is the rule every caller of this client gets, redirect following to a
+local server is behaviour this client documents and tests, and turning it off here broke
+REDIRECTS-CAN-BE-REFUSED-CAPPED-OR-FOLLOWED, which follows redirects on a test server at
+127.0.0.1. APPROVED-LOCAL is passed only by a configuration step that is about to send a
+credential, and none of those three callers follows redirects, so the restriction costs them
+nothing. The general case is dexador's behaviour rather than this rule's and is filed separately.
 
 EVERY CALLER THAT SENDS A REQUEST MUST USE THIS, including one that calls dexador directly.
 dexador sets *DEFAULT-PROXY* from HTTPS_PROXY or HTTP_PROXY when it loads and honours no
@@ -292,22 +348,41 @@ that was checked. The first version of this lived inside %DEX-ARGS, which meant 
 S3 backend was NOT covered -- it calls dexador directly -- while the CHANGELOG and a comment
 both said it was (the review of #1094).
 
-NO NAME IS RESOLVED HERE. The decision is made for \"localhost\" and for IP literals only, and a
-DNS name keeps whatever proxy is configured. Two reasons. A lookup on this path would be a
-blocking resolution on every plaintext request, which CONNECT-TIMEOUT does not cover. And a name
-that answers private now can answer public at connect time, which would mean skipping a
-configured egress proxy on the strength of a resolution that no longer holds; deciding by name
-belongs at configuration time, where hermes and hermes/blob do it and where a wrong answer is a
-refusal rather than a silently unproxied request."
+NO NAME IS RESOLVED HERE, in either case. Without APPROVED-LOCAL the decision is made for
+\"localhost\" and for IP literals only, and a DNS name keeps whatever proxy is configured. Two
+reasons. A lookup on this path would be a blocking resolution on every plaintext request, which
+CONNECT-TIMEOUT does not cover. And a name that answers private now can answer public at connect
+time, which would mean skipping a configured egress proxy on the strength of a resolution that no
+longer holds.
+
+THAT IS WHY APPROVED-LOCAL IS A RECORDED VERDICT RATHER THAN A LOOKUP. \"This host was approved as
+local when the configuration was built\" is a statement about the past, and it stays true; \"this
+name resolves locally right now\" is a guess about the present, made on the send path, and it is
+the thing the paragraph above refuses to do. A caller that has no configuration step passes
+nothing and gets the literal rule.
+
+Until a caller passed APPROVED-LOCAL the two answers disagreed for the same destination: a
+plaintext store or provider at a NAME that resolves to a loopback address was approved for
+plaintext at configuration time and then still sent its credentials to HTTP_PROXY in the clear,
+because this function would not decide by name. Measured on Linux before the fix, with a name
+/etc/hosts maps to a loopback address:
+
+  <a local name>  local-host-p=T  proxy-arguments=NIL
+  localhost       local-host-p=T  proxy-arguments=(:PROXY NIL)"
   (let* ((uri (ignore-errors (quri:uri url)))
          (scheme (and uri (quri:uri-scheme uri)))
          (host (and uri (url-host url))))
-    (if (and scheme (string-equal scheme "http") host
-             (or (string-equal host "localhost")
-                 (let ((literal (parse-address host)))
-                   (and literal (not (%leading-zero-quad-p host)) (%local-address-p literal)))))
-        (list :proxy nil)
-        '())))
+    (let ((approved (and (stringp *approved-local-host*) host
+                         (string-equal *approved-local-host* host)
+                         (and scheme (string-equal scheme "http")))))
+      (cond (approved (list :proxy nil :max-redirects 0))
+            ((and scheme (string-equal scheme "http") host
+                  (or (string-equal host "localhost")
+                      (let ((literal (parse-address host)))
+                        (and literal (not (%leading-zero-quad-p host))
+                             (%local-address-p literal)))))
+             (list :proxy nil))
+            (t '())))))
 
 (defun resolve-host (host)
   "The addresses HOST resolves to, as octet vectors; NIL when it does not resolve. A host that is

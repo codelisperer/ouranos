@@ -46,20 +46,73 @@ its tag.
   **An app that deliberately proxied plaintext requests to a local host will see them stop going
   through the proxy.** https is unaffected, because a proxied https request is a `CONNECT` tunnel
   and the credentials are inside TLS, and plaintext to a host that is not local is unaffected.
-  **A DNS NAME IS NOT COVERED, AND THAT CASE IS STILL OPEN.** A plaintext store or provider whose
-  host is a name — a Compose service such as `minio:9000`, or any name resolving to a loopback or
-  private address — is approved by the configuration-time check and then **still uses a configured
-  proxy**, so its requests go to that proxy in the clear, with the signed `Authorization` header
-  and any session token. That is **#1091**, which this does not close.
+  **A host that is a DNS name is covered by the change below, for a store or provider whose
+  configuration check approved that host**; this entry described the case as still open, which was
+  true when it was written. It is not covered for a caller that builds its own request, which
+  still gets the rule in this entry: an address or `localhost`, and no name. **There is no
+  exported way to say that a host was approved**, so that sentence is a property of the API rather
+  than only a convention: see the entry below.
   The send-time decision resolves no name on purpose: a lookup there is a blocking resolution
   that `connect-timeout` does not cover, and a name that answers private now can answer public at
   connect time, which would skip a configured egress proxy on the strength of a resolution that
-  no longer holds. The fix is for the configuration-time verdict to be carried to the send rather
-  than recomputed, which is what #1091 proposes. Until it lands, an app that must not send through
-  a proxy should address a local store **by IP address**, which is covered. Clearing the
-  environment variables works only before the image loads dexador, because it reads them once
-  into `dexador:*default-proxy*` when it loads (`defvar`, so unsetting them later changes
-  nothing); setting that variable to `nil` is the runtime equivalent.
+  no longer holds. Clearing the environment variables works only before the image loads dexador,
+  because it reads them once into `dexador:*default-proxy*` when it loads (`defvar`, so unsetting
+  them later changes nothing); setting that variable to `nil` is the runtime equivalent.
+
+- **A plaintext store or provider whose host is a NAME is no longer sent through a proxy either**
+  (#1091, closing it). The change above decided by host spelling, so `127.0.0.1` was covered and
+  a Compose service name such as `minio:9000` was not: it was approved for plaintext by the
+  configuration-time check and then still sent its requests to `HTTP_PROXY` in the clear, with
+  the signed `Authorization` header or the API key and any session token. The two answers
+  disagreed about the same destination — the configuration check said local, and the send-time
+  decision declined to answer because the host was a name.
+  **The verdict the configuration check already reached is now carried to the send instead of
+  being recomputed there**, so no name is resolved on the send path.
+  `aion/http-client:proxy-arguments` takes `:approved-local` and `make-request` takes
+  `:approved-local`; `hermes/blob`'s `s3-store` records `s3-endpoint-approved-local`, and
+  hermes's Twilio and SendGrid providers record `twilio-api-base-approved-local` and
+  `sendgrid-endpoint-approved-local`.
+  **The approval is the approved HOST, not a boolean**, and it exempts a request only when it
+  equals that request's host. As a boolean it said only that something had been approved, which is
+  not a statement about the request being sent: a verdict recorded for one host and read while
+  another was in the slot would have exempted a request to a host nothing had approved.
+  **No exported function takes it.** It was `:approved-local`, a keyword on `make-request` and on
+  `proxy-arguments`, both exported, so any caller could assert an approval for any host and have a
+  plaintext request to a public host sent with no proxy and an `Authorization` header — the same
+  door that removing the `s3-store` initarg closed, one layer down. The approval is now an
+  unexported variable bound around the send by the three senders that hold a verdict, and the
+  exported surface cannot express one: `proxy-arguments` no longer takes the keyword, and
+  `make-request` ignores it.
+  **None of the three slots has an initarg, and each is recomputed on every initialization.** The
+  value is a verdict the framework reached. `s3-store` is exported, so while it had an initarg
+  `(make-instance 'hermes/blob:s3-store :endpoint "public.example:80" :secure nil :path-style t
+  :endpoint-approved-local "public.example" ...)` sent signed requests to a public host in
+  plaintext with no proxy — the leak the slot exists to prevent. Recomputing also means a
+  `reinitialize-instance` that moves the endpoint cannot leave the old verdict behind.
+  **A refused `reinitialize-instance` now leaves a provider exactly as it was** (#1129) — both
+  the URL and the recorded verdict are put back. The endpoint and API base checks moved from
+  `shared-initialize :after` to `:around`; previously the error was signalled with the refused URL
+  already stored, and a caller that handled it and carried on sent the credential there.
+  **A subclass that gives the slot its own `:initform` is checked too.** The check reads the
+  slot's own value, so the URL it judges is the one the object ends up with; working out the value
+  that *would* be in effect missed a subclass default, because on a fresh instance there is no
+  initarg, the slot is not yet bound, and the superclass's constant is not what the slot will
+  hold.
+  **The verdict is about the endpoint, not about how plaintext was chosen.** It is recomputed
+  from the endpoint the store actually has, so a `:secure nil` passed in code is exempted too
+  when its endpoint is local, even though that path does not check locality in order to refuse
+  anything. A plaintext store whose endpoint is **not** local records no approval and keeps
+  whatever proxy is configured.
+  **An exempted request no longer follows redirects**, and this applies to every request the rule
+  above exempts, including one exempted by an IP address. dexador follows a redirect to a
+  different host by recursing with the same arguments and the same headers, so a `307` from the
+  exempted host to `http://public.example/` was fetched with `:proxy nil` **and with the
+  `Authorization` header built for the exempted host**: the credential left the machine, not
+  merely the proxy being skipped. A `3xx` is now the response for such a request. Nothing else
+  changes about redirects.
+  **An app that deliberately proxied plaintext requests to a local store named by DNS will see
+  them stop going through the proxy**, which is the same consequence the entry above describes
+  for addresses.
 - **hermes/blob: an S3 endpoint that carries a user name or password is now refused when the
   store is made** (#1089). `MNEMOSYNE_S3_ENDPOINT` values such as `user:pw@host` or
   `[::1]@host` signal `blob-configuration-error`. An app that put userinfo in that variable has
@@ -1267,6 +1320,33 @@ its tag.
   `contrib-load-failure-p`, `contrib-failure-lines` and `explain-contrib-failure`; from
   `cons/run`, `toolchain-refusal`, which decides whether a target is refused.
 
+### Fixed
+
+- **`hyperion/markdown:render` no longer lets an image inside an image's alt text add attributes
+  to the outer `img`** (#1132). An app rendering untrusted markdown **with the default options**
+  was affected, so this is a fix to behaviour that shipped, not to the new untrusted mode. 3bmd
+  renders an image's alt label to HTML and writes the result into `alt="..."` without escaping
+  it, so a nested element put its own markup inside the attribute, the attribute ended at that
+  markup's first quote, and the rest was read as attributes of the outer `img`. The input
+
+  ```
+  ![![x](onerror=alert(1))](outer.png)
+  ```
+
+  produced `<img src="outer.png" alt="<img src="onerror=alert(1)" alt="x" />" />`, which gives
+  the outer image an `onerror` attribute with the unquoted value `alert(1)`; the relative source
+  passes the URL check, and the outer image's source then fails to load, which runs the handler.
+  An emitted image's alt label is now reduced to text and entities, with any nested image or link
+  contributing the text of its label and never its URL. `%label-text` does the reduction. **What
+  an `alt` value looks like now**, since an attribute cannot hold markup:
+
+  - plain text, and an entity such as `&copy;`, are unchanged;
+  - emphasis, code and any other nested markup become the text inside them, so an alt label
+    written `a *b*` gives `alt="a b"` where it gave `alt="a <em>b</em>"`;
+  - a nested image or link becomes the text of its label, and its URL does not appear;
+  - a hard line break becomes a space, so the words around it stay separate words. It wrote a
+    literal `<br/>` into the attribute before.
+
 ### Added
 
 
@@ -1323,6 +1403,34 @@ its tag.
   posts where it did before. A host app that renders the chat parts in its own page, with its
   routes under a prefix, scoped to one conversation, or with its own `/api/message`, passes its
   route instead of mounting its handler at `/api/message`. `:action` must be a string.
+- **`hyperion/markdown:render` takes `:images` and `:links`, for text the app did not write**
+  (#1119, part one). `(render text :images nil :links :text)` renders each image as its alt text
+  and each link as its text, emitting no `img` element and no `href`. **The defaults are
+  unchanged**, so everything rendering trusted content behaves exactly as before.
+  **Why an app wants this for untrusted text.** An image is fetched as soon as it is rendered,
+  with no click, so a reply holding `![x](https://elsewhere.example/?d=...)` makes the reader's
+  machine send that request and whatever the URL carries with it; in a desktop webview with no
+  Content-Security-Policy nothing stops it. And in a desktop webview, following a link replaces
+  the app's own page with the linked one.
+  Both apply to an explicit link or image and to a reference link, and to relative and `mailto`
+  URLs as well as `http` and `https`. **An autolink needs neither option**: in the safe mode 3bmd
+  never builds one, because the angle brackets are escaped as text before it parses, so
+  `<https://host/>` already reaches the output as text — and the only mode that does build one is
+  `:allow-html t`, which these options refuse.
+  - **`render` now signals `hyperion/markdown:render-option-error` in two new cases**, both of
+    them a request it cannot honour:
+    `:allow-html t` passed together with `:images nil` or `:links :text`, and any value for
+    `:images` other than `t` or `nil`, or for `:links` other than `t` or `:text`. Nothing that
+    passes neither new argument can reach either signal, so no existing call changes. It is a
+    named condition rather than a plain `error` so an app can catch this misuse and nothing
+    else: these are mistakes in the call, not failures to render.
+  - `:allow-html t` with either mode is refused because raw HTML is not parsed into the tree
+    these options filter: an `img` or `href` written directly in the source survives them, so
+    `:images nil` would report no image while the output carried one. The two arguments also
+    describe opposite situations — `:allow-html t` is for content the app wrote, these modes for
+    content it did not.
+  - An unrecognised value is refused because the default is the permissive one, so a typo in a
+    security argument must not read as "render everything".
 
 - **hermes: how long a send waits is now hermes's own setting, `*send-connect-timeout*` and
   `*send-read-timeout*`, both 10 seconds** (#1077). Each provider also takes `:connect-timeout`
