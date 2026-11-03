@@ -75,7 +75,7 @@ jobs:
     #
     # WINDOWS GETS 90 AND THE OTHERS KEEP 60, from 2026-11-03 (#1146). The same thing happened
     # again four weeks after the last raise: #1142's Windows leg was cancelled at 60m23s inside
-    # `Verify the tree', and that pull request changes AGENTS.md and nothing else, so nothing in
+    # `Verify the tree`, and that pull request changes AGENTS.md and nothing else, so nothing in
     # it could make a suite slower. The margins measured that day were
     #
     #   main 19d77df9   59m11s   49s under
@@ -84,14 +84,15 @@ jobs:
     #   #1141 0d8682fa  51m41s   8m19s under
     #
     # so two of five legs were within about a minute and which pull request got cancelled was
-    # a matter of how busy the runners were. Only Windows is raised, because Linux and macOS
-    # are nowhere near their limit and a limit that is never approached is the only kind that
-    # still reports something.
+    # a matter of how busy the runners were. Only Windows is raised: Linux and macOS finish well
+    # under 60 minutes, so the lower limit there still cancels a job that hangs, which is what a
+    # timeout is for.
     #
     # THIS IS THE SECOND RAISE, AND THAT IS THE PART TO NOTICE: 40 -> 60 -> 90, each time after
-    # a cancellation rather than before one. Raising the number hides the growth rather than
-    # measuring it, so #1146 asks for the margin to be reported by the job itself; until that
-    # exists, the figures above are the record of what the margin was when this was last set.
+    # a cancellation rather than before one. Raising the limit stops the cancellations without
+    # telling anyone how close the next one is, so #1146 asks for the job to print how long
+    # `Verify the tree` took and how far that was from the limit. Until it does, the figures
+    # above are the record of what the margin was when this limit was set.
     timeout-minutes: ${{ matrix.os == 'windows-2022' && 90 || 60 }}
 
     # The credential-store tests (hades/credentials, #357) store, read and delete items in the
