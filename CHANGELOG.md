@@ -3786,6 +3786,20 @@ its tag.
   prints a line per dylib and exits 1 on a dylib it cannot read or that has no install name. It
   also accepts the directory with a trailing slash, which before made an install name inside the
   bundle read as a path outside it.
+- **A macOS desktop bundle relinks a load command that names a carried library through `@rpath`,
+  and no longer relinks one that names a different library with the same file name** (#1143).
+  `ouranos-carry:relink-bundle` skipped every load command starting with `@`, so a library
+  that records its dependency as `@rpath/libb.dylib` kept that name, and the bundle has no rpath
+  that finds the carried copy. Each load command is now resolved on the build machine the way
+  dyld would resolve it, from the file the dependent was copied from and the dependent's own
+  rpaths. When it resolves to the source of a carried copy, it is rewritten to
+  `@loader_path/<file name>`. When it resolves to some other file, it is left as it is, even if
+  a carried library has the same file name or the same `@rpath/` install name, and the build
+  prints a line naming it. A library linked against `/b/libb.dylib` is therefore no longer
+  pointed at a carried `libb.dylib` copied from somewhere else. A load command that resolves to
+  no file is matched by the install name recorded in `ouranos-carry:*carried-origins*`, and
+  failing that by file name. `stamp-install-name` needs `:source` for a library to be matched
+  by the file it resolves to.
 
 - **hyperion/kit: two appearance pickers on one page no longer undo each other's choice, and a
   slow response no longer moves focus** (#1138). While a picker's request is in flight,
