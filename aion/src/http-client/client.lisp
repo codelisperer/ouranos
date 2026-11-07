@@ -166,10 +166,23 @@ resolved to (:LOOPBACK, :PRIVATE, :LINK-LOCAL and so on). ADDRESS is that addres
   ((url :initarg :url :reader fetch-deadline-exceeded-url)
    (deadline :initarg :deadline :reader fetch-deadline-exceeded-deadline))
   (:report (lambda (c s)
+             ;; THE URL AS A REQUEST PRINTS IT, with a query value or a password hidden (#844),
+             ;; because a report is what reaches a log. The reader still returns it as given
+             ;; (Copilot's review of #1163).
              (format s "fetch-public: ~A did not finish within its deadline of ~A seconds"
-                     (fetch-deadline-exceeded-url c) (fetch-deadline-exceeded-deadline c))))
+                     (%printable-url (fetch-deadline-exceeded-url c))
+                     (fetch-deadline-exceeded-deadline c))))
   (:documentation "FETCH-PUBLIC did not finish within its DEADLINE (#807). URL is the hop it was
 on. A body cut short by the deadline is never returned as a response."))
+
+(define-condition request-deadline-exceeded (fetch-deadline-exceeded) ()
+  (:report (lambda (c s)
+             (format s "send-request: ~A did not finish within its deadline of ~A seconds"
+                     (%printable-url (fetch-deadline-exceeded-url c))
+                     (fetch-deadline-exceeded-deadline c))))
+  (:documentation "SEND-REQUEST did not finish within its DEADLINE (#1162). URL is the hop it was
+on. A subclass of FETCH-DEADLINE-EXCEEDED, so one handler covers both, and it has the same two
+readers. A body cut short by the deadline is never returned as a response."))
 
 ;;; --- the values -----------------------------------------------------------
 
@@ -672,7 +685,8 @@ the whole reason those two codes exist."
       :get
       method))
 
-(defun %http-following-redirects (req)
+(defun %http-following-redirects (req &key (hops (or (request-follow-redirects req) 0))
+                                           (prepare #'identity))
   "Perform REQ, following redirects one hop at a time and DROPPING THE CREDENTIAL HEADERS on a
 hop that changes origin (#1139).
 
@@ -697,10 +711,9 @@ relies on. Origin is scheme, host and port, compared as %ORIGIN compares them; a
 the three drops the headers. That is what browsers do, and the alternative considered -- refusing
 to follow any redirect for a credential-bearing request -- would have broken an API that answers
 301 for a renamed path while returning a 3xx the caller never asked to handle."
-  (let ((hops (or (request-follow-redirects req) 0))
-        (current req))
+  (let ((current req))
     (loop
-      (let* ((single (copy-request current))
+      (let* ((single (funcall prepare (copy-request current)))
              (from current)
              (budget hops)
              (next nil)
@@ -762,6 +775,56 @@ before the body is read (#1156)."
                   (request-headers hop) headers)
             hop))))))
 
+(defvar *%deadline-hop* nil
+  "Inside a SEND-REQUEST with a deadline, a cons whose car is the URL of the hop in progress.")
+
+(defun %http-under-deadline (req)
+  "Perform REQ, a request SEND-REQUEST is running under a DEADLINE, over connections this client
+opens itself, one hop at a time (#1162).
+
+THE SOCKET HAS TO BE ONE THIS CLIENT OPENED, because the deadline is FETCH-PUBLIC's watch (#807):
+it wakes a read blocked on a socket by shutting the socket down, and it can only do that to a
+socket that was lent to it. dexador opens its own sockets and lends nothing. So each hop is
+pinned to the first address its host resolves to and sent by %REQUEST-PINNED, which lends its
+socket. OPEN-RESPONSE-STREAM does the same for the same reason (#984).
+
+Redirects are followed by %HTTP-FOLLOWING-REDIRECTS, the loop credential-bearing requests already
+use, so a hop that changes origin drops the credential headers and never carries a body, and each
+hop is resolved and pinned again. An approved-local request follows no redirect, as on every
+other path (#1134).
+
+A REQUEST THAT WOULD GO THROUGH A PROXY IS REFUSED. A pinned connection goes straight to the
+address, so it would not go through the proxy dexador would have used, and sending a request
+directly that the machine's configuration routes through a proxy is not this client's decision
+to make. The refusal is an HTTP-ERROR before anything is sent."
+  (flet ((pin (hop)
+           (let* ((url (request-url hop))
+                  (local (proxy-arguments url)))
+             (when (and dexador.util:*default-proxy* (not (member :proxy local)))
+               (error 'http-error
+                      :detail (format nil "~A would be sent through the proxy ~A, and a deadline cannot be kept through a proxy: a request with a deadline goes over a connection this client opens directly, so it is refused rather than sent around the proxy" (%printable-url url) (%printable-url dexador.util:*default-proxy*))))
+             ;; THE HOP'S URL IS RECORDED, so the condition names the hop the deadline found the
+             ;; call on rather than the URL it started from (Copilot's review of #1163).
+             (when *%deadline-hop* (setf (car *%deadline-hop*) url))
+             (let* ((host (quri:uri-host (quri:uri url)))
+                    (address (and host (first (resolve-host host)))))
+               ;; CHECKED BETWEEN RESOLVING AND CONNECTING. Neither can be interrupted, so a
+               ;; deadline that passed while the name was being resolved would otherwise add a
+               ;; whole connect timeout to the wait (Copilot's review of #1163). Any error after
+               ;; the deadline is reported as the deadline, by %CALL-WITH-DEADLINE.
+               (when (%fired-p *%watch*)
+                 (error 'http-error :detail "the deadline passed before the connection was opened"))
+               (unless address
+                 (error 'http-error :detail (format nil "~A does not resolve" host)))
+               (setf (request-connect-address hop) address)
+               hop))))
+    (%http-following-redirects
+     req
+     :hops (if (eql 0 (getf (proxy-arguments (request-url req)) :max-redirects))
+               0
+               (or (request-follow-redirects req) 0))
+     :prepare #'pin)))
+
 (defun %http (req)
   "Perform REQ and return a RESPONSE, following redirects in whichever way is safe for it.
 
@@ -773,6 +836,8 @@ included.
 
 The pinned path (CONNECT-ADDRESS) follows no redirects at all by design -- a redirect's host
 would need an address of its own -- so it is already outside this question."
+  (when (and *%watch* (not (request-connect-address req)))
+    (return-from %http (%http-under-deadline req)))
   (if (and (or (%credential-bearing-p (request-headers req))
                ;; A BODY CAN CARRY A CREDENTIAL THAT NO HEADER LIST CAN SEE. Facebook's POST puts
                ;; access_token in the form and sends no credential header, so deciding by headers
@@ -842,15 +907,64 @@ has no response to hand back, so it signals HTTP-ERROR directly."
                  :phase (%transport-phase e (request-connect-address req)
                                           :pooled (%pooled-p req))))))))
 
-(defun send-request (request interceptors &key (perform #'%http))
+(defun %call-with-deadline (deadline url thunk)
+  "Call THUNK with FETCH-PUBLIC's deadline watch running (#807), and signal
+REQUEST-DEADLINE-EXCEEDED for URL if DEADLINE seconds pass first (#1162). The timer, the watch and
+the rule that any failure after the deadline is the deadline's doing are FETCH-PUBLIC's, in the
+same order."
+  (let* ((watch (%make-watch))
+         ;; THREAD-LIFETIME: a timer made with :THREAD T starts its thread only when it fires.
+         ;; That thread runs %FIRE once, a socket shutdown under the watch's lock, and ends. A
+         ;; call that finishes first unschedules the timer below, and then no thread is made.
+         ;; INTERRUPTS: not needed -- SBCL makes the thread, which runs one shutdown and ends, as
+         ;; for FETCH-PUBLIC's timer. Nothing interrupts it.
+         (timer (sb-ext:make-timer (lambda () (%fire watch))
+                                   :thread t :name "send-request deadline"))
+         (*%watch* watch)
+         (*%deadline-hop* (list url)))
+    (flet ((check ()
+             (when (%fired-p watch)
+               (error 'request-deadline-exceeded :url (car *%deadline-hop*)
+                                                 :deadline deadline))))
+      (sb-ext:schedule-timer timer deadline)
+      (unwind-protect
+           (handler-bind ((error (lambda (e)
+                                   (unless (typep e 'fetch-deadline-exceeded) (check)))))
+             (prog1 (funcall thunk) (check)))
+        ;; The socket is taken from the watch before the timer is unscheduled, so a timer that
+        ;; fires in between finds nothing to shut down.
+        (%take-back-socket)
+        (sb-ext:unschedule-timer timer)))))
+
+(defun send-request (request interceptors &key (perform #'%http) deadline)
   "Run REQUEST through INTERCEPTORS around one HTTP round-trip and return the processed
 RESPONSE. ENTER runs forward, the round-trip is the effect, LEAVE runs in reverse.
 
 PERFORM is the effect, and is a parameter so a caller can substitute one -- which is how this
-is tested without a network, and how a consumer stubs it. The default performs the real call."
+is tested without a network, and how a consumer stubs it. The default performs the real call.
+
+DEADLINE, in seconds, limits the round-trip as a whole, over every redirect (#1162). Without it a
+call is bounded only by the connect timeout and the read timeout, and the read timer starts again
+on every read, so a server that sends a few bytes at a time can hold the call indefinitely. When
+the deadline passes, the socket in use is shut down and the call signals
+REQUEST-DEADLINE-EXCEEDED, a subclass of FETCH-DEADLINE-EXCEEDED. This is FETCH-PUBLIC's deadline
+(#807) and has its limits: it covers the TLS handshake, the request, the headers and the body, and
+it does not interrupt resolving a host name or opening the TCP connection, which are checked when
+they return. The interceptors run outside it.
+
+WITH A DEADLINE THE REQUEST IS SENT OVER CONNECTIONS THIS CLIENT OPENS ITSELF, as FETCH-PUBLIC's
+are, because only such a socket can be shut down when the deadline passes; see
+%HTTP-UNDER-DEADLINE. Every hop's redirect is followed by this client, and a request that would go
+through a proxy is refused. NIL, the default, sets no deadline and changes nothing.
+
+A PERFORM other than the default is run under the deadline too, but only a socket lent to the
+watch can be woken, so for a stub the deadline is checked when PERFORM returns."
   (let* ((entered (reduce (lambda (r ic) (funcall (interceptor-enter ic) r))
                           interceptors :initial-value request))
-         (resp (funcall perform entered)))
+         (resp (if deadline
+                   (%call-with-deadline deadline (request-url entered)
+                                        (lambda () (funcall perform entered)))
+                   (funcall perform entered))))
     (reduce (lambda (r ic) (funcall (interceptor-leave ic) r))
             (reverse interceptors) :initial-value resp)))
 
