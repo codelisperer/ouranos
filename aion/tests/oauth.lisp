@@ -106,7 +106,14 @@ served: :CHALLENGE (named in the 401), :PATH (the path-inserted well-known URL) 
           ((string= bare "/mcp")
            (let* ((auth (th:request-header request "Authorization"))
                   (token (and auth (> (length auth) 7) (subseq auth 7))))
-             (if (and token (equal (gethash token (as-access as)) (%resource as)))
+             ;; A token issued for the resource the metadata claims is accepted too, as a real
+             ;; server that publishes origin-only metadata accepts its own tokens (#1169).
+             ;; NIL is never in the list: an unknown token also looks up NIL, and with the
+             ;; default fixture's NIL claim a made-up token was accepted (Copilot's review of
+             ;; #1176).
+             (if (and token (member (gethash token (as-access as))
+                                    (remove nil (list (%resource as) (as-prm-resource as)))
+                                    :test #'equal))
                  (%json stream 200 (%obj "ok" t))
                  (th:write-response
                   stream 401
@@ -296,6 +303,92 @@ the resource, and a call with the token."
     (signals oauth:metadata-refused (oauth:discover (%broker) (%resource as) :challenge (%challenge-of as))))
   (with-as (as :s256 nil)
     (signals oauth:metadata-refused (oauth:discover (%broker) (%resource as) :challenge (%challenge-of as)))))
+
+(test a-claimed-resource-is-accepted-only-as-a-same-origin-prefix-at-a-slash
+  "#1169. The maintainer's ruling: a claimed resource with the same scheme, host and port as the
+server URL, whose path is a prefix of the server's path at a / boundary, including the empty
+path, is accepted. Any other claim is refused. This is a deliberate departure from RFC 9728
+section 3.3, which requires an exact match."
+  (flet ((covers (claimed resource)
+           (oauth::%resource-covers-p (oauth:canonical-resource claimed)
+                                      (oauth:canonical-resource resource))))
+    (dolist (claimed '("https://host.example/mcp" "https://host.example"
+                       "https://host.example/" "https://HOST.example:443"))
+      (is-true (covers claimed "https://host.example/mcp") "~A covers /mcp" claimed))
+    (is-true (covers "https://host.example/mcp" "https://host.example/mcp?transport=stream")
+             "/mcp covers /mcp?transport=stream: the same path, the query left off")
+    (is-true (covers "https://host.example" "https://host.example/mcp?transport=stream")
+             "and the origin covers it too")
+    (dolist (claimed '("https://host.example/a" "https://host.example/a/b"))
+      (is-true (covers claimed "https://host.example/a/b/c") "~A covers /a/b/c" claimed))
+    (dolist (claimed '("https://host.example/mc"           ; not at a / boundary
+                       "https://host.example/mcp-other"    ; a sibling, not a prefix
+                       "https://host.example/mcp/x"        ; longer than the server URL
+                       "https://host.example:8443"         ; another port
+                       "https://other.example"             ; another host
+                       "http://host.example"               ; another scheme
+                       "https://host.example/?x=1"))       ; a query is not a prefix
+      (is-false (covers claimed "https://host.example/mcp") "~A does not cover /mcp" claimed))))
+
+(net-test origin-only-metadata-is-accepted-and-its-resource-is-used-end-to-end
+  "#1169. A server at /mcp whose 401 names its metadata, and whose metadata claims only the
+origin, as servers built on the MCP TypeScript SDK do. Discovery accepts it, the sign-in sends
+the origin as the RFC 8707 resource and the token set is keyed on it, and ACCESS-TOKEN, which
+rereads the metadata through %FETCH-ISSUERS, still returns the token for /mcp. A refresh sends the
+origin too: the test server refuses a refresh whose resource differs from the one the token was
+issued for, so a refresh that sent /mcp would be refused."
+  (with-as (as :expires-in 0 :rotate t)
+    (setf (as-prm-resource as) (as-base as))
+    (let* ((broker (%broker))
+           (m (oauth:discover broker (%resource as) :challenge (%challenge-of as))))
+      (is (equal (as-base as) (oauth:metadata-resource m))
+          "the metadata's resource is the origin it claimed: ~A" (oauth:metadata-resource m))
+      (%sign-in as broker)
+      (let ((ts (oauth:get-token (oauth:broker-store broker) "u1" "docs")))
+        (is (equal (as-base as) (and ts (oauth:token-set-resource ts)))
+            "the token set is keyed on the origin"))
+      (let ((token (oauth:access-token broker "u1" "docs" (%resource as))))
+        (is (stringp token) "access-token returns a token for /mcp")
+        (is (= 1 (as-refresh-requests as)) "after one refresh, which sent the origin")
+        (is (= 200 (%call-resource as token)) "and the server accepts it")))))
+
+(net-test a-token-set-stored-for-the-full-url-survives-metadata-that-claims-the-origin
+  "#1169, for %FETCH-ISSUERS. Tokens signed in while the metadata claimed /mcp are keyed on /mcp.
+When the server then starts publishing origin-only metadata, ACCESS-TOKEN rereads the metadata,
+and the origin covers /mcp under the same rule discovery uses, so the issuer is still found and
+the token is still returned. With an exact comparison the user would be asked to sign in again."
+  (with-as (as)
+    (let ((broker (%broker :metadata-lifetime 0)))
+      (%sign-in as broker)
+      (is (equal (%resource as)
+                 (oauth:token-set-resource (oauth:get-token (oauth:broker-store broker) "u1" "docs")))
+          "the token set is keyed on /mcp")
+      (setf (as-prm-resource as) (as-base as))
+      (is (stringp (oauth:access-token broker "u1" "docs" (%resource as)))
+          "the token is still returned once the metadata claims only the origin"))))
+
+(net-test the-test-server-refuses-a-token-it-never-issued
+  "Copilot's review of #1176. The test server's /mcp accepts a token issued for /mcp or for the
+claimed resource. With the default fixture the claim is NIL, and an unknown token also looks up
+NIL, so a made-up token was accepted and the end-to-end tests could have passed with a client
+that sent anything. The fixture must refuse it, with a claim and without one."
+  (with-as (as)
+    (is (= 401 (%call-resource as "never-issued")) "no claim: a made-up token is refused"))
+  (with-as (as)
+    (setf (as-prm-resource as) (as-base as))
+    (is (= 401 (%call-resource as "never-issued")) "an origin claim: a made-up token is refused")))
+
+(net-test metadata-claiming-a-path-that-is-not-a-prefix-is-refused
+  "#1169's controls, against the test server: a claim that is not the origin or a prefix of /mcp
+at a / boundary is still refused."
+  (dolist (suffix '("/mc" "/mcp-other" "/mcp/x"))
+    (with-as (as)
+      (setf (as-prm-resource as) (format nil "~A~A" (as-base as) suffix))
+      (signals oauth:metadata-refused
+        (oauth:discover (%broker) (%resource as) :challenge (%challenge-of as)))))
+  (with-as (as :prm-resource "http://127.0.0.1:1")
+    (signals oauth:metadata-refused
+      (oauth:discover (%broker) (%resource as) :challenge (%challenge-of as)))))
 
 (net-test a-url-from-a-server-must-be-https
   (with-as (as :bad-token-endpoint "http://evil.example/token")
