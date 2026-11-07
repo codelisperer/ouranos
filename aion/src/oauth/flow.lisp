@@ -103,6 +103,34 @@ path."
     (format nil "~A://~A~:[:~D~;~*~]~A~@[?~A~]"
             scheme host (%default-port-p scheme port) port path query)))
 
+(defun %resource-covers-p (claimed resource)
+  "True when CLAIMED, a canonical resource URI, may stand for RESOURCE, the canonical URI of the
+server being connected to: it is RESOURCE itself, or it has the same scheme, host and port and
+no query, and its path is a prefix of RESOURCE's path that ends at a / boundary. The empty path
+counts, so https://host covers https://host/mcp; https://host/mc and https://host/mcp-other do
+not cover it, and neither does a longer path or another origin (#1169).
+
+THIS IS A DELIBERATE DEPARTURE FROM RFC 9728 SECTION 3.3, which requires the metadata's
+resource to be identical to the URL the client requested. Servers built on the MCP TypeScript
+SDK publish metadata whose resource is the server's origin alone, because that SDK's client
+accepts exactly this prefix rule (checkResourceAllowed), so such servers never see a refusal
+from it. The maintainer ruled on 2026-11-07 to accept the same rule here. What it allows is
+narrow: the metadata still comes from the server's own origin, and a claim can only widen the
+resource to an ancestor path on that origin, never move it to another one."
+  (or (string= claimed resource)
+      (let ((c (quri:uri claimed))
+            (r (quri:uri resource)))
+        (and (equal (quri:uri-scheme c) (quri:uri-scheme r))
+             (equal (quri:uri-host c) (quri:uri-host r))
+             (eql (quri:uri-port c) (quri:uri-port r))
+             (null (quri:uri-query c))
+             (let ((cp (or (quri:uri-path c) ""))
+                   (rp (or (quri:uri-path r) "")))
+               (or (string= cp "")
+                   (and (< (length cp) (length rp))
+                        (string= cp rp :end2 (length cp))
+                        (char= #\/ (char rp (length cp))))))))))
+
 (defun %check-url (url what)
   "Signal URL-REFUSED unless URL is https, or http on a loopback host. WHAT names it."
   (let* ((uri (and (stringp url) (ignore-errors (quri:uri url))))
@@ -314,6 +342,17 @@ is one (RFC 8414 section 3.1, RFC 9728 section 3.1)."
             scheme (quri:uri-host uri) (%default-port-p scheme port) port suffix path)))
 
 (defun %resource-metadata (broker resource challenge)
+  "The protected-resource metadata for RESOURCE, a canonical URI, and the URL it was read from,
+and as a third value the canonical resource the metadata claims, which is the value a sign-in
+sends as the RFC 8707 resource parameter and keys its token set on.
+
+The claim is accepted when %RESOURCE-COVERS-P allows it: the resource itself, or the same origin
+with a path that is a prefix of RESOURCE's at a / boundary, including the origin alone. THAT IS A
+DELIBERATE DEPARTURE FROM RFC 9728 SECTION 3.3, which requires an exact match when the metadata
+URL came from the 401's resource_metadata parameter. Servers built on the MCP TypeScript SDK
+publish metadata whose resource is only their origin, and that SDK's client accepts it, so this
+client refused servers every other MCP client connects to (#1169). Any other claim is refused
+with METADATA-REFUSED."
   (let* ((from-challenge (cdr (assoc "resource_metadata" challenge :test #'string=)))
          (candidates (if from-challenge
                          (list from-challenge)
@@ -331,11 +370,12 @@ is one (RFC 8414 section 3.1, RFC 9728 section 3.1)."
       (%check-url url "protected resource metadata URL")
       (let ((doc (%get-json broker url)))
         (when doc
-          (let ((claimed (gethash "resource" doc)))
-            (unless (and (stringp claimed) (string= (canonical-resource claimed) resource))
+          (let* ((claimed (gethash "resource" doc))
+                 (canonical (and (stringp claimed) (ignore-errors (canonical-resource claimed)))))
+            (unless (and canonical (%resource-covers-p canonical resource))
               (error 'metadata-refused
                      :detail "the protected resource metadata names a different resource"))
-            (return (values doc url))))))))
+            (return (values doc url canonical))))))))
 
 (defun %as-metadata-urls (issuer)
   (let* ((uri (quri:uri issuer))
@@ -369,8 +409,11 @@ when given, is the only issuer accepted. Returns a METADATA."
   (let* ((resource (canonical-resource resource-url))
          (params (parse-challenge challenge))
          (prm-url nil)
-         (prm (multiple-value-bind (doc url) (%resource-metadata broker resource params)
-                (setf prm-url url)
+         (prm (multiple-value-bind (doc url claimed) (%resource-metadata broker resource params)
+                (setf prm-url url
+                      ;; The claimed resource, which may be an ancestor of the URL on the same
+                      ;; origin (#1169), is what the sign-in sends and keys the tokens on.
+                      resource claimed)
                 doc))
          (issuers (%strings (gethash "authorization_servers" prm)))
          (issuers (if expected-issuer
@@ -623,7 +666,7 @@ and the tokens are stored."
 (defun %usable (token-set resource)
   "TOKEN-SET's access token when it was issued for RESOURCE and has not expired."
   (and token-set
-       (equal (token-set-resource token-set) resource)
+       (%resource-covers-p (token-set-resource token-set) resource)
        (let ((at (token-set-expires-at token-set)))
          (or (null at) (> at (+ (get-universal-time) *expiry-margin*))))
        (secret:reveal (token-set-access token-set))))
@@ -646,7 +689,8 @@ reached, or gave any other answer that was not a token."
      (lambda ()
        (let ((current (get-token store principal connection)))
          (cond
-           ((or (null current) (not (equal (token-set-resource current) resource))) nil)
+           ((or (null current) (not (%resource-covers-p (token-set-resource current) resource)))
+            nil)
            ((let ((usable (%usable current resource)))
               (and usable (not (equal usable rejected))))
             (secret:reveal (token-set-access current)))
@@ -660,7 +704,9 @@ reached, or gave any other answer that was not a token."
                                                (cons "refresh_token"
                                                      (secret:reveal (token-set-refresh current)))
                                                (cons "client_id" (token-set-client-id current))
-                                               (cons "resource" resource)))
+                                               ;; The resource the tokens were issued for, which
+                                               ;; may be the server's origin (#1169).
+                                               (cons "resource" (token-set-resource current))))
                       (http:pinned-connect-unsupported (e) (error e))
                       (oauth-error ()
                         (error 'refresh-failed :detail "the token endpoint could not be reached")))))
@@ -692,15 +738,18 @@ reached, or gave any other answer that was not a token."
 (defun %fetch-issuers (broker token-set)
   "The issuers TOKEN-SET's protected-resource metadata names now, and T; or NIL and NIL when the
 metadata could not be read. Only a 200 with a JSON object body is an answer. A document that
-names another resource is an answer too: it names no issuer for this one."
+names another resource is an answer too: it names no issuer for this one. Whether it names this
+one is %RESOURCE-COVERS-P, the rule discovery uses (#1169)."
   (let ((url (token-set-metadata-url token-set)))
     (handler-case
         (progn
           (%check-url url "protected resource metadata URL")
           (let ((doc (%get-json broker url)))
             (if doc
-                (values (and (equal (canonical-resource (or (gethash "resource" doc) ""))
-                                    (token-set-resource token-set))
+                (values (and (let ((claimed (gethash "resource" doc)))
+                               (and (stringp claimed)
+                                    (%resource-covers-p (canonical-resource claimed)
+                                                        (token-set-resource token-set))))
                              (%strings (gethash "authorization_servers" doc)))
                         t)
                 (values nil nil))))
@@ -763,7 +812,7 @@ cache has expired or the server has refused a token."
   (let* ((resource (canonical-resource resource-url))
          (current (get-token (broker-store broker) principal connection)))
     (cond ((null current) nil)
-          ((not (equal (token-set-resource current) resource)) nil)
+          ((not (%resource-covers-p (token-set-resource current) resource)) nil)
           ((not (member (token-set-issuer current) (%current-issuers broker current)
                         :test #'equal))
            nil)
