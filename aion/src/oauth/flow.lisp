@@ -106,8 +106,8 @@ path."
 (defun %resource-covers-p (claimed resource)
   "True when CLAIMED, a canonical resource URI, may stand for RESOURCE, the canonical URI of the
 server being connected to: it is RESOURCE itself, or it has the same scheme, host and port and
-no query, and its path is a prefix of RESOURCE's path that ends at a / boundary. The empty path
-counts, so https://host covers https://host/mcp; https://host/mc and https://host/mcp-other do
+no query, and its path is RESOURCE's path or a prefix of it that ends at a / boundary. The empty
+path counts, so https://host covers https://host/mcp; https://host/mc and https://host/mcp-other do
 not cover it, and neither does a longer path or another origin (#1169).
 
 THIS IS A DELIBERATE DEPARTURE FROM RFC 9728 SECTION 3.3, which requires the metadata's
@@ -115,8 +115,10 @@ resource to be identical to the URL the client requested. Servers built on the M
 SDK publish metadata whose resource is the server's origin alone, because that SDK's client
 accepts exactly this prefix rule (checkResourceAllowed), so such servers never see a refusal
 from it. The maintainer ruled on 2026-11-07 to accept the same rule here. What it allows is
-narrow: the metadata still comes from the server's own origin, and a claim can only widen the
-resource to an ancestor path on that origin, never move it to another one."
+narrow: the claimed resource must be on the server's own origin, so a claim can only widen the
+resource to an ancestor path there, never move it to another origin. This restricts what the
+metadata CLAIMS, not where it is served: a resource_metadata URL from the 401 may be on another
+https host, and %RESOURCE-METADATA accepts that as before (Copilot's review of #1176)."
   (or (string= claimed resource)
       (let ((c (quri:uri claimed))
             (r (quri:uri resource)))
@@ -127,6 +129,9 @@ resource to an ancestor path on that origin, never move it to another one."
              (let ((cp (or (quri:uri-path c) ""))
                    (rp (or (quri:uri-path r) "")))
                (or (string= cp "")
+                   ;; THE SAME PATH, with the query left off: a claim of /mcp covers a server URL
+                   ;; of /mcp?transport=stream (Copilot's review of #1176).
+                   (string= cp rp)
                    (and (< (length cp) (length rp))
                         (string= cp rp :end2 (length cp))
                         (char= #\/ (char rp (length cp))))))))))

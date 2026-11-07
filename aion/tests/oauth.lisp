@@ -108,8 +108,12 @@ served: :CHALLENGE (named in the 401), :PATH (the path-inserted well-known URL) 
                   (token (and auth (> (length auth) 7) (subseq auth 7))))
              ;; A token issued for the resource the metadata claims is accepted too, as a real
              ;; server that publishes origin-only metadata accepts its own tokens (#1169).
+             ;; NIL is never in the list: an unknown token also looks up NIL, and with the
+             ;; default fixture's NIL claim a made-up token was accepted (Copilot's review of
+             ;; #1176).
              (if (and token (member (gethash token (as-access as))
-                                    (list (%resource as) (as-prm-resource as)) :test #'equal))
+                                    (remove nil (list (%resource as) (as-prm-resource as)))
+                                    :test #'equal))
                  (%json stream 200 (%obj "ok" t))
                  (th:write-response
                   stream 401
@@ -311,6 +315,10 @@ section 3.3, which requires an exact match."
     (dolist (claimed '("https://host.example/mcp" "https://host.example"
                        "https://host.example/" "https://HOST.example:443"))
       (is-true (covers claimed "https://host.example/mcp") "~A covers /mcp" claimed))
+    (is-true (covers "https://host.example/mcp" "https://host.example/mcp?transport=stream")
+             "/mcp covers /mcp?transport=stream: the same path, the query left off")
+    (is-true (covers "https://host.example" "https://host.example/mcp?transport=stream")
+             "and the origin covers it too")
     (dolist (claimed '("https://host.example/a" "https://host.example/a/b"))
       (is-true (covers claimed "https://host.example/a/b/c") "~A covers /a/b/c" claimed))
     (dolist (claimed '("https://host.example/mc"           ; not at a / boundary
@@ -358,6 +366,17 @@ the token is still returned. With an exact comparison the user would be asked to
       (setf (as-prm-resource as) (as-base as))
       (is (stringp (oauth:access-token broker "u1" "docs" (%resource as)))
           "the token is still returned once the metadata claims only the origin"))))
+
+(net-test the-test-server-refuses-a-token-it-never-issued
+  "Copilot's review of #1176. The test server's /mcp accepts a token issued for /mcp or for the
+claimed resource. With the default fixture the claim is NIL, and an unknown token also looks up
+NIL, so a made-up token was accepted and the end-to-end tests could have passed with a client
+that sent anything. The fixture must refuse it, with a claim and without one."
+  (with-as (as)
+    (is (= 401 (%call-resource as "never-issued")) "no claim: a made-up token is refused"))
+  (with-as (as)
+    (setf (as-prm-resource as) (as-base as))
+    (is (= 401 (%call-resource as "never-issued")) "an origin claim: a made-up token is refused")))
 
 (net-test metadata-claiming-a-path-that-is-not-a-prefix-is-refused
   "#1169's controls, against the test server: a claim that is not the origin or a prefix of /mcp
