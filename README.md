@@ -6,7 +6,7 @@
 satellite leaf-libs) under one roof.**
 
 Ouranos is the monorepo home of the [codelisperer](https://github.com/codelisperer)
-ecosystem: a small, cohesive family of **Common Lisp / Coalton** frameworks for
+ecosystem: a small, cohesive family of **Common Lisp / [Coalton](https://coalton-lang.github.io/)** frameworks for
 building real applications — web, data, agentic AI, testing — *without* a JVM or a
 Node toolchain in sight.
 
