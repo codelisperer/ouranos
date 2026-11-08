@@ -1050,6 +1050,8 @@ replaced by _, cut to 64 characters, which every supported provider accepts."
   (if (> (length string) limit) (subseq string 0 limit) string))
 
 (defun grant-tools (agent client &key (tools nil tools-p) (only (error "grant-tools: :only is required: a list of tool names, or :all")) capability confirm
+                                        confirm-after-untrusted
+                                        (requires-user-intent nil requires-user-intent-p)
                                         (untrusted t))
   "Register the tools of CLIENT's server that the app chooses as means of AGENT, and return the
 means names.
@@ -1065,6 +1067,21 @@ T, so a turn decides it through its ON-HOLD policy, and after a refused token it
 again. A tool's readOnlyHint or destructiveHint annotation is untrusted and never decides this;
 the app does.
 
+CONFIRM-AFTER-UNTRUSTED is a list of the server's tool names, or :ALL, to register with :CONFIRM
+:AFTER-UNTRUSTED (#1185, #1186): such a tool runs as usual in a clean turn, and is held for the
+user's confirmation once untrusted content has entered the turn. A tool may not be in both
+CONFIRM and CONFIRM-AFTER-UNTRUSTED.
+
+REQUIRES-USER-INTENT is passed to REGISTER-MEANS for the tools CONFIRM holds (#1186). Left out,
+each of them gets REGISTER-MEANS's default, true, so after untrusted content it is refused rather
+than held. NIL makes every one of them held after untrusted content instead of refused, so the
+app can show the user the held call's :UNTRUSTED warning. T or :ALL is the default written out.
+A list names the held tools that keep requiring user intent; the other held tools get NIL. A
+tool held by CONFIRM-AFTER-UNTRUSTED never requires user intent, which would refuse the call it
+exists to hold, so naming one here signals an error. A name that is not among the tools CONFIRM
+holds signals an error too, and registers nothing, as a misspelling would otherwise leave a tool
+behaving as the app did not intend.
+
 UNTRUSTED, true by default, registers each tool with ACTOR:REGISTER-MEANS's :UNTRUSTED (#827): a
 server's result is content from outside the conversation, which may relay web pages, email or
 documents, so once a granted tool has run in a turn, a means that spends or writes for the user
@@ -1076,6 +1093,14 @@ TOOL-NAME-CONFLICT and registers nothing. Nothing a server sends later changes t
   (unless (or (null confirm) (eq confirm :all)
               (and (listp confirm) (every #'stringp confirm)))
     (error "grant-tools: :confirm must be NIL, :all or a list of tool names, not ~S" confirm))
+  (unless (or (null confirm-after-untrusted) (eq confirm-after-untrusted :all)
+              (and (listp confirm-after-untrusted) (every #'stringp confirm-after-untrusted)))
+    (error "grant-tools: :confirm-after-untrusted must be NIL, :all or a list of tool names, not ~S"
+           confirm-after-untrusted))
+  (unless (or (member requires-user-intent '(nil t :all))
+              (and (listp requires-user-intent) (every #'stringp requires-user-intent)))
+    (error "grant-tools: :requires-user-intent must be NIL, T, :all or a list of tool names, not ~S"
+           requires-user-intent))
   (let* ((connection (client-connection client))
          (tools (if tools-p tools (list-tools client)))
          (chosen (if (eq only :all)
@@ -1096,14 +1121,49 @@ TOOL-NAME-CONFLICT and registers nothing. Nothing a server sends later changes t
                         (set-difference confirm (mapcar #'tool-name chosen) :test #'string=))))
       (when unknown
         (error "grant-tools: :confirm names tools that are not in this grant: ~{~A~^, ~}" unknown)))
+    (let ((unknown (and (listp confirm-after-untrusted)
+                        (set-difference confirm-after-untrusted (mapcar #'tool-name chosen)
+                                        :test #'string=))))
+      (when unknown
+        (error "grant-tools: :confirm-after-untrusted names tools that are not in this grant: ~{~A~^, ~}"
+               unknown)))
+    (flet ((named (key tool) (or (eq key :all)
+                                 (and (listp key) (member (tool-name tool) key :test #'string=)))))
+      (let ((both (loop for tool in chosen
+                        when (and (named confirm tool) (named confirm-after-untrusted tool))
+                          collect (tool-name tool))))
+        (when both
+          (error "grant-tools: these tools are in both :confirm and :confirm-after-untrusted: ~{~A~^, ~}"
+                 both)))
+      ;; REQUIRES-USER-INTENT is about the tools :CONFIRM holds; a name outside them is refused.
+      (when (and (listp requires-user-intent) requires-user-intent)
+        (let ((held (loop for tool in chosen when (named confirm tool) collect (tool-name tool))))
+          (let ((unknown (set-difference requires-user-intent held :test #'string=)))
+            (when unknown
+              (error "grant-tools: :requires-user-intent names tools that :confirm does not hold: ~{~A~^, ~}"
+                     unknown))))))
     (loop for tool in chosen
           for name in names
           do (let* ((tool tool)
                     (name name)
-                    (held (or (eq confirm :all)
-                              (and (listp confirm)
-                                   (member (tool-name tool) confirm :test #'string=)))))
-               (actor:register-means
+                    (always (or (eq confirm :all)
+                                (and (listp confirm)
+                                     (member (tool-name tool) confirm :test #'string=))))
+                    (after (or (eq confirm-after-untrusted :all)
+                               (and (listp confirm-after-untrusted)
+                                    (member (tool-name tool) confirm-after-untrusted
+                                            :test #'string=))))
+                    ;; A tool that may be held is not resent after a refused token either way.
+                    (held (or always after))
+                    (intent (cond ((not always) nil)
+                                  ((not requires-user-intent-p) :default)
+                                  ((member requires-user-intent '(t :all)) t)
+                                  ((null requires-user-intent) nil)
+                                  (t (and (member (tool-name tool) requires-user-intent
+                                                  :test #'string=)
+                                          t)))))
+               (apply
+                #'actor:register-means
                 agent name
                 (%clip (or (tool-description tool) (tool-title tool) (tool-name tool))
                        *max-description-characters*)
@@ -1115,9 +1175,12 @@ TOOL-NAME-CONFLICT and registers nothing. Nothing a server sends later changes t
                                                                  :source (%means-source-plist connection tool))))
                 :schema (tool-input-schema tool)
                 :capability capability
-                :confirm (and held t)
+                :confirm (cond (always t) (after :after-untrusted))
                 :untrusted untrusted
-                :source (%means-source-plist connection tool))
+                :source (%means-source-plist connection tool)
+                ;; Passed only when the app chose, so REGISTER-MEANS's own default applies
+                ;; otherwise.
+                (unless (eq intent :default) (list :requires-user-intent intent)))
                ;; Remember the entry itself, so REVOKE-TOOLS removes this registration and
                ;; nothing the app registered under a name or a :SOURCE that looks the same.
                (push (cons name (gethash name (actor:agent-means agent)))

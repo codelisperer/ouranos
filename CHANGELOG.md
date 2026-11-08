@@ -14,6 +14,9 @@ its tag.
 
 ### An app may have to act
 
+- **`praxeon/actor:register-means` signals an error for a `:confirm` value other than NIL, T, a
+  function or `:after-untrusted`** (#1185). Any other true value used to be taken as T, holding
+  every call. An app passing another symbol, such as `:yes`, should pass T.
 - **`aion/oauth` accepts protected-resource metadata whose `resource` names only the server's
   origin, or another same-origin prefix of the server's path** (#1169). `discover`,
   `start-sign-in` and the functions after them used to signal `metadata-refused` ("the protected
@@ -1524,6 +1527,26 @@ its tag.
     literal `<br/>` into the attribute before.
 
 ### Added
+
+- **A call held for confirmation after untrusted content says what was read, and where from**
+  (#1183). The plist `praxeon/actor:run-turn` passes to an `:on-hold` function, each call in a
+  `held-turn`, and the `:tool-held` and `:tool-decided` events now carry `:untrusted`: NIL when
+  the turn was clean, otherwise `(:scope :turn|:conversation :delegated ... :sources ((:means
+  name :id call-id :scope ...) ...))`. `held-turn-to-json` and `held-turn-from-json` keep it; a
+  held turn stored earlier reads back with NIL. An app that registers a spending means with
+  `:confirm t :requires-user-intent nil`, which holds it after untrusted content instead of
+  refusing it, can now warn the user. `praxeon/docs/confirm.md` has a section on it.
+- **`register-means :confirm :after-untrusted`** runs a call as usual in a clean turn and holds it
+  for the user's confirmation once untrusted content has entered the turn, or the conversation
+  under `:taint-scope :conversation` (#1185). Its `:requires-user-intent` defaults to NIL, and
+  passing true with it signals an error.
+- **`praxeon/mcp:grant-tools` takes `:requires-user-intent` and `:confirm-after-untrusted`**
+  (#1186). `:requires-user-intent` is passed to `register-means` for the tools `:confirm` holds:
+  NIL, T, `:all`, or a list of the held tools that keep requiring user intent; left out, the
+  default is unchanged. `:confirm-after-untrusted` is a list or `:all` of tools to register with
+  `:confirm :after-untrusted`. A name not in the grant, or a tool in both `:confirm` lists,
+  signals an error. An app that set `means-entry-requires-user-intent` on granted entries can use
+  the key instead.
 
 - **`aion/http-client:send-request` takes an optional `:deadline`, in seconds, for the whole
   round-trip over every redirect** (#1162). Without it a call is bounded only by the connect

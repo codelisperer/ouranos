@@ -2612,3 +2612,36 @@ once, not read as no requests and sent again with the requestState up to the cap
         (is-true (%not-run-p (lambda () (%call client "ask"))))
         (is (= 1 (length (%by-method (requests) "tools/call"))) "nothing was sent again")
         (is (null (car got)) "the app was not asked")))))
+
+;;; --- grant-tools passes the untrusted-content choices on (#1186) -----------------------
+
+(test grant-tools-passes-requires-user-intent-and-confirm-after-untrusted
+  "#1186. GRANT-TOOLS took :CONFIRM and not :REQUIRES-USER-INTENT, so every held MCP tool was
+refused after untrusted content, and an app had to set an internal accessor to change that. It
+now passes :REQUIRES-USER-INTENT for the tools :CONFIRM holds, and :CONFIRM-AFTER-UNTRUSTED
+registers tools with :CONFIRM :AFTER-UNTRUSTED (#1185). Left out, the default is unchanged."
+  (flet ((grant (&rest keys)
+           (let ((fake (make-fake :tools (%tools "spend" "send" "look"))))
+             (with-fake (client fake)
+               (let ((agent (actor:make-agent)))
+                 (apply #'mcp:grant-tools agent client :only :all keys)
+                 (lambda (tool)
+                   (let ((e (gethash (format nil "docs__~A" tool) (actor:agent-means agent))))
+                     (list (actor::means-entry-confirm e)
+                           (actor:means-entry-requires-user-intent e)))))))))
+    (let ((e (grant :confirm '("spend"))))
+      (is (equal '(t t) (funcall e "spend")) "left out: held and refused after untrusted"))
+    (let ((e (grant :confirm '("spend" "send") :requires-user-intent nil)))
+      (is (equal '(t nil) (funcall e "spend")) "NIL: held after untrusted instead")
+      (is (equal '(t nil) (funcall e "send"))))
+    (let ((e (grant :confirm '("spend" "send") :requires-user-intent '("send"))))
+      (is (equal '(t nil) (funcall e "spend")) "a list: the held tools not named get NIL")
+      (is (equal '(t t) (funcall e "send")) "and the named ones keep requiring intent"))
+    (let ((e (grant :confirm-after-untrusted '("spend"))))
+      (is (equal '(:after-untrusted nil) (funcall e "spend")) "held only after untrusted")
+      (is (equal '(nil nil) (funcall e "look")) "control: an unnamed tool is untouched"))
+    (signals error (grant :confirm '("spend") :requires-user-intent '("look"))
+      "a name :confirm does not hold is refused")
+    (signals error (grant :confirm '("spend") :confirm-after-untrusted '("spend"))
+      "a tool in both is refused")
+    (signals error (grant :confirm-after-untrusted '("nope")) "an unknown tool is refused")))

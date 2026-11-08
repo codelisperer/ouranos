@@ -885,7 +885,9 @@ text the model reads, so the app decides how a citation looks.
 model, so `make-corpus` takes `:untrusted`, default T. Every passage a retrieve function returns
 carries its corpus's value in `passage-untrusted`, and `passage->ctx-item` copies it to the
 context item (pass `:untrusted` to override it). While an untrusted item is in the prompt, the
-agent refuses a means registered `:requires-user-intent t`, and `register-corpus-search`
+agent refuses a means registered `:requires-user-intent t` (a means held for confirmation can be
+held with a warning instead; see [`confirm.md`](confirm.md), "After untrusted content"), and
+`register-corpus-search`
 registers its means `:untrusted` for such a corpus, so a search refuses those means for the rest
 of the turn. For a corpus of the app's own documents, pass `:untrusted nil` to `make-corpus`.
 
