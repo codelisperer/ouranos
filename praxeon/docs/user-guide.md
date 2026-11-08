@@ -444,6 +444,31 @@ and says it is incomplete:
       text))
 ```
 
+**When a turn runs out of steps.** `:max-steps`, 8 by default, bounds how many times a turn asks
+the model. A turn that uses every step without an answer signals `deliberation-failure` ("no final
+answer within N steps"), and what it read is not turned into an answer. Pass
+`:on-step-limit :wrap-up` to `run-turn`, `run-turn-through` or `continue-turn` to make the last
+step a wrap-up instead (#1182). That step offers the model no tools and asks for the best answer
+from what the turn gathered. `run-turn` returns the answer with a second value, `:wrapped-up`, so
+the app can tell it from an ordinary answer, for example to say it may be incomplete. The
+wrap-up is one of the `:max-steps`, so the limit stays the ceiling, and it emits a `:usage` event
+like any step. A turn that answers before its last step is not affected.
+
+- `:wrap-up` needs `:max-steps` of at least 2, one to gather and one to answer. Any other value,
+  or `:wrap-up` with fewer steps, signals an error before anything is recorded.
+- The instruction goes in the system prompt for that one call only, after any cached prefix. The
+  history gains the answer and nothing else.
+- A model that asks for tools in the wrap-up anyway is not obeyed: the calls are not run or
+  recorded, and the turn signals `deliberation-failure` as it would without the option.
+
+```lisp
+(multiple-value-bind (text mark)
+    (praxeon/actor:run-turn agent "Compare the three reports." :max-steps 6 :on-step-limit :wrap-up)
+  (if (eq mark :wrapped-up)
+      (format nil "~A~%~%(I ran out of steps; this is what I found so far.)" text)
+      text))
+```
+
 ### Embeddings
 
 An embedding provider turns text into a vector (`praxeon/llm:embed`,
