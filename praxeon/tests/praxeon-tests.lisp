@@ -9702,3 +9702,139 @@ lower a value the app recorded on the new agent. NIL, not recorded, is lower tha
     (is (eq :clean (moved :clean nil)) "a new agent that recorded nothing takes the old value")
     (is (eq :delegated (moved nil :delegated)))
     (is (null (moved nil nil)))))
+
+;;; --- a turn can wrap up when its steps run out (#1182) ---------------------------------
+
+(defclass %recording-provider (llm:provider)
+  ((script :initarg :script :accessor %recording-script)
+   (requests :initform '() :accessor %recording-requests))
+  (:documentation "A provider that answers from SCRIPT and records, for each request, the system
+prompt and the tools it was sent, oldest first in %RECORDING-REQUESTS once reversed."))
+
+(defmethod llm:complete ((p %recording-provider) messages
+                         &key system tools max-tokens temperature tool-choice)
+  (declare (ignore messages max-tokens temperature tool-choice))
+  (push (list :system system :tools tools) (%recording-requests p))
+  (pop (%recording-script p)))
+
+(defun %looks (n)
+  "N completions, each asking for the means \"look\", with ids l1, l2, ..."
+  (loop for i from 1 to n
+        collect (llm:make-completion
+                 :text "" :stop-reason :tool-use :input-tokens 10 :output-tokens 2
+                 :tool-calls (list (llm:make-tool-call :id (format nil "l~D" i) :name "look"
+                                                       :arguments (make-hash-table :test #'equal))))))
+
+(defun %looking-agent (script)
+  "An agent whose provider answers from SCRIPT, with a means \"look\" that counts its runs.
+Returns the agent, the provider, and a function answering how many times \"look\" ran."
+  (let* ((runs 0)
+         (provider (make-instance '%recording-provider :script script))
+         (ag (actor:make-agent :name "looker" :system-prompt "You look things up."
+                               :provider provider)))
+    (actor:register-means ag "look" "Look something up."
+                          (lambda (args) (declare (ignore args)) (incf runs) "Found a fact."))
+    (values ag provider (lambda () runs))))
+
+(defun %system-text (system)
+  (if (stringp system)
+      system
+      (format nil "~{~A~^~%~}" (mapcar (lambda (p) (getf p :text)) system))))
+
+(test a-turn-wraps-up-on-its-last-step-and-says-so
+  "#1182. With :ON-STEP-LIMIT :WRAP-UP, the last of MAX-STEPS offers no tools and asks for the
+best answer from what was gathered. RUN-TURN returns that answer with :WRAPPED-UP, the wrap-up
+counted within MAX-STEPS, and a :USAGE event for it. The instruction goes to the system prompt
+for that call only: the history gains the answer and nothing else.
+
+THE CONTROL is the same turn without the option, whose model keeps asking for tools: it runs out
+of steps and signals DELIBERATION-FAILURE, as before."
+  (multiple-value-bind (ag provider runs)
+      (%looking-agent (append (%looks 2)
+                              (list (llm:make-completion :text "Here is what I found."
+                                                         :stop-reason :end
+                                                         :input-tokens 30 :output-tokens 5))))
+    (let ((usage 0) (before nil))
+      (multiple-value-bind (text how)
+          (evt:with-observer ((lambda (e) (when (eq :usage (evt:event-type e)) (incf usage))))
+            (multiple-value-prog1
+                (actor:run-turn ag "What do you know?" :max-steps 3 :on-step-limit :wrap-up)
+              (setf before (length (actor:agent-history ag)))))
+        (is (equal "Here is what I found." text))
+        (is (eq :wrapped-up how) "the answer is marked as a wrap-up")
+        (let ((requests (reverse (%recording-requests provider))))
+          (is (= 3 (length requests)) "three calls, within :max-steps 3")
+          (is-true (and (getf (first requests) :tools) (getf (second requests) :tools))
+                   "the gathering steps were offered tools")
+          (is (null (getf (third requests) :tools)) "the wrap-up was offered none")
+          (is-true (search "used every step" (%system-text (getf (third requests) :system)))
+                   "and was told to answer from what it gathered")
+          (is-false (search "used every step" (%system-text (getf (first requests) :system)))
+                    "the earlier steps were not"))
+        (is (= 2 (funcall runs)) "\"look\" ran on the two gathering steps")
+        (is (= 3 usage) "a :usage event for every step, the wrap-up included")
+        (let ((last-message (car (last (actor:agent-history ag)))))
+          (is (equal "assistant" (getf last-message :role)) "the history ends with the answer")
+          (is-false (search "used every step" (format nil "~S" (actor:agent-history ag)))
+                    "and holds no trace of the instruction"))
+        (is (= before (length (actor:agent-history ag)))))))
+  (let ((ag (%looking-agent (%looks 3))))
+    (signals cnd:deliberation-failure
+      (actor:run-turn ag "What do you know?" :max-steps 3))))
+
+(test a-turn-that-answers-before-its-last-step-is-not-wrapped-up
+  "#1182. :WRAP-UP changes only the last step. A turn that answers on its first step was offered
+tools as usual, and returns its text with no :WRAPPED-UP."
+  (multiple-value-bind (ag provider)
+      (%looking-agent (list (llm:make-completion :text "I already know." :stop-reason :end)))
+    (multiple-value-bind (text how)
+        (actor:run-turn ag "What do you know?" :max-steps 3 :on-step-limit :wrap-up)
+      (is (equal "I already know." text))
+      (is (null how) "no second value")
+      (is-true (getf (first (%recording-requests provider)) :tools) "tools were offered"))))
+
+(test a-wrap-up-that-asks-for-tools-fails-without-running-or-recording-them
+  "#1182. No tools are offered on the wrap-up, but a model can still return a call. It is not run
+and not appended, because the turn has no step left for its result and a call without a result
+would break the next turn. The turn fails as it did without the option."
+  (multiple-value-bind (ag provider runs) (%looking-agent (%looks 2))
+    (declare (ignore provider))
+    (signals cnd:deliberation-failure
+      (actor:run-turn ag "What do you know?" :max-steps 2 :on-step-limit :wrap-up))
+    (is (= 1 (funcall runs)) "only the gathering step's call ran")
+    (is-false (search "l2" (format nil "~S" (actor:agent-history ag)))
+              "the wrap-up's call is not in the history")))
+
+(test on-step-limit-is-checked-before-anything-is-recorded
+  "#1182. :ON-STEP-LIMIT takes NIL or :WRAP-UP, and :WRAP-UP needs at least two steps, one to
+gather and one to answer. A wrong value signals before the user's message is recorded."
+  (let ((ag (%looking-agent '())))
+    (signals error (actor:run-turn ag "Hi" :on-step-limit :summarise))
+    (signals error (actor:run-turn ag "Hi" :max-steps 1 :on-step-limit :wrap-up))
+    (is (null (actor:agent-history ag)) "nothing was recorded")))
+
+(test continue-turn-passes-on-step-limit-to-the-steps-the-held-turn-had-left
+  "#1182. CONTINUE-TURN takes :ON-STEP-LIMIT again, like PERMIT and ON-HOLD. A turn of two steps
+held on its first has one left, which with :WRAP-UP is the wrap-up."
+  (let* ((provider (make-instance
+                    '%recording-provider
+                    :script (list (llm:make-completion
+                                   :text "" :stop-reason :tool-use
+                                   :tool-calls (list (llm:make-tool-call
+                                                      :id "p1" :name "pay"
+                                                      :arguments (make-hash-table :test #'equal))))
+                                  (llm:make-completion :text "Paid, and here is the summary."
+                                                       :stop-reason :end))))
+         (ag (actor:make-agent :name "payer" :provider provider)))
+    (actor:register-means ag "pay" "Pay." (lambda (args) (declare (ignore args)) "Paid.")
+                          :confirm t)
+    (let ((held (nth-value 2 (actor:run-turn ag "Pay for it" :principal "u1" :max-steps 2
+                                                             :on-hold :hold
+                                                             :on-step-limit :wrap-up))))
+      (is-true held "the call was held")
+      (multiple-value-bind (text how)
+          (actor:continue-turn ag held :approve :principal "u1" :on-step-limit :wrap-up)
+        (is (equal "Paid, and here is the summary." text))
+        (is (eq :wrapped-up how) "the remaining step was the wrap-up")
+        (is (null (getf (first (%recording-requests provider)) :tools))
+            "and was offered no tools")))))

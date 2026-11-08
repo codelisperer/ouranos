@@ -770,7 +770,8 @@ held call after it is written under its decision, with its own :TOOL-DECIDED eve
 
 ;;; --- continuing, and moving on ---------------------------------------------------------
 
-(defun continue-turn (agent held decision &key principal permit (on-hold nil on-hold-p) claim)
+(defun continue-turn (agent held decision &key principal permit (on-hold nil on-hold-p) claim
+                                                on-step-limit)
   "Continue the turn HELD ended, with the user's DECISION: :APPROVE or :DECLINE for every held
 call, or an alist of (tool-call-id . decision) with one entry per held call. PRINCIPAL must be
 the one the calls were held for. PERMIT and ON-HOLD are the turn's, given again because
@@ -792,7 +793,12 @@ nothing runs; a recorded approval whose result is missing may have run, so the m
 the outcome is unknown and the call is never run again.
 
 A held turn past its EXPIRES-AT is declined, as \"not run: the user did not confirm in time\". An
-approved call whose means is no longer registered with the same :SOURCE is not run."
+approved call whose means is no longer registered with the same :SOURCE is not run.
+
+ON-STEP-LIMIT is RUN-TURN's, given again (#1182): with :WRAP-UP, the last of the steps the held
+turn had left is the wrap-up."
+  (unless (member on-step-limit '(nil :wrap-up))
+    (error "praxeon/actor: :on-step-limit must be NIL or :wrap-up, not ~S" on-step-limit))
   ;; The agent's privacy, as RUN-TURN has it (#983).
   (%with-agent-privacy (agent)
     (let* ((*principal* principal)
@@ -817,7 +823,12 @@ approved call whose means is no longer registered with the same :SOURCE is not r
           ;; turn does after its last step's calls, rather than asking the model once more.
           (let ((steps (held-turn-steps held)))
             (if (and (integerp steps) (plusp steps))
-                (multiple-value-prog1 (%turn-loop agent steps permit (held-turn-max-tokens held))
+                (multiple-value-prog1 (%turn-loop agent steps permit (held-turn-max-tokens held)
+                                                  ;; Given again, like PERMIT and ON-HOLD (#1182).
+                                                  ;; With one step left, :WRAP-UP makes it the
+                                                  ;; wrap-up; the two-step minimum is about a
+                                                  ;; turn's start, not its remainder.
+                                                  on-step-limit)
                   ;; A continued turn ends here, so the observer is given the history, as after
                   ;; RUN-TURN (#317, step C).
                   (%observe-after-turn agent))

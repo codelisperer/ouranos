@@ -1213,7 +1213,22 @@ rather than NIL, which is the distinction pre-publication issue 401 paid for and
 agent's MAX-TOKENS slot, else `llm:*default-max-tokens*' as it is now (#326)."
   (or max-tokens (agent-max-tokens agent) llm:*default-max-tokens*))
 
-(defun deliberate (agent &key permit max-tokens)
+(defparameter +wrap-up-instruction+
+  "You have used every step this turn allows, so you cannot call any more tools. Answer the user now, as well as you can, from what you have already gathered in this conversation. If it is not enough for a full answer, say what you found and what is still missing."
+  "The instruction added to the system prompt for a turn's wrap-up step (#1182).")
+
+(defun %with-wrap-up (system)
+  "SYSTEM, a system prompt as AGENT-SYSTEM-PARTS gives it, with +WRAP-UP-INSTRUCTION+ after it.
+A list keeps its parts, so a cacheable prefix stays exactly as it was and the instruction comes
+after its boundary (#1182)."
+  (cond ((null system) +wrap-up-instruction+)
+        ((stringp system)
+         (if (zerop (length system))
+             +wrap-up-instruction+
+             (format nil "~A~%~%~A" system +wrap-up-instruction+)))
+        (t (append system (list (llm:text-part +wrap-up-instruction+))))))
+
+(defun deliberate (agent &key permit max-tokens wrap-up)
   "Ask the provider for the agent's next move given its current history,
 advertising the means PERMIT allows as tools. Returns (values COMPLETION
 ESTIMATED-INPUT-TOKENS BREAKDOWN), BREAKDOWN as PROMPT-BREAKDOWN gives it. Signals
@@ -1232,7 +1247,11 @@ and a budget enforced against an estimate nobody compares is how a bound silentl
 stops bounding.
 
 PERMIT is passed to AGENT-TOOL-SPECS, so a means the caller may not use is never described
-to the model at all (#90)."
+to the model at all (#90).
+
+WRAP-UP true makes this the turn's last call when its steps have run out (#1182): no tools are
+offered, and +WRAP-UP-INSTRUCTION+ follows the system prompt, asking for the best answer from
+what was gathered. The history is not changed."
   (unless (agent-provider agent)
     (error 'cnd:deliberation-failure :detail "no provider configured"))
   (multiple-value-bind (messages estimate breakdown) (request-messages agent)
@@ -1242,18 +1261,20 @@ to the model at all (#90)."
                      (lambda (c) (setf (cnd:completion-cancelled-estimated-input c) estimate))))
       (values (llm:complete (agent-provider agent)
                             messages
-                            :system (agent-system-parts agent)
-                            :tools (agent-tool-specs agent :permit permit)
+                            :system (if wrap-up
+                                        (%with-wrap-up (agent-system-parts agent))
+                                        (agent-system-parts agent))
+                            :tools (if wrap-up nil (agent-tool-specs agent :permit permit))
                             :max-tokens (%output-limit agent max-tokens))
               estimate breakdown))))
 
-(defun %deliberate-step (agent permit limit step)
+(defun %deliberate-step (agent permit limit step &optional wrap-up)
   "DELIBERATE for STEP of a turn, with the turn's cancel handle given to the provider and, while
 an observer is bound, each piece of the model's text emitted as a :TEXT-DELTA event (#984)."
   (let ((llm:*cancel* (and *turn-cancel* (turn-cancel-request *turn-cancel*)))
         (llm:*on-text* (and evt:*observer*
                             (lambda (piece) (evt:emit :text-delta :text piece :step step)))))
-    (deliberate agent :permit permit :max-tokens limit)))
+    (deliberate agent :permit permit :max-tokens limit :wrap-up wrap-up)))
 
 (defun %end-cancelled (step &optional stopped)
   "End a cancelled turn at STEP. STOPPED is the COMPLETION-CANCELLED of a model call the cancel
@@ -1418,7 +1439,7 @@ and otherwise what it already was, which an enclosing private turn has made NIL.
   (setf (agent-history agent) (append (agent-history agent) messages)))
 
 (defun run-turn (agent user-input &key (max-steps 8) permit max-tokens principal
-                                       (on-hold nil on-hold-p) held claim cancel)
+                                       (on-hold nil on-hold-p) held claim cancel on-step-limit)
   "Run one full turn: record USER-INPUT, then deliberate and act until the model
 replies with no further tool call. Returns the model's final text. MAX-STEPS
 bounds the deliberate/act cycle so a misbehaving loop stays finite.
@@ -1493,7 +1514,18 @@ counts the provider had reported (usually no output count) and :ESTIMATED-OUTPUT
 model call is not added to the history. NIL keeps the handle of an enclosing turn.
 
 While an observer is bound (PRAXEON/EVENT:WITH-OBSERVER), a provider that streams sends its text
-as it is written, and the turn emits a :TEXT-DELTA event for each piece."
+as it is written, and the turn emits a :TEXT-DELTA event for each piece.
+
+ON-STEP-LIMIT is NIL, the default, or :WRAP-UP (#1182). With NIL, a turn that has used all
+MAX-STEPS without an answer signals DELIBERATION-FAILURE, as before. With :WRAP-UP, the last of
+the MAX-STEPS is a wrap-up instead: the model is offered no tools and asked for the best answer
+from what the turn gathered, and RUN-TURN returns that answer with a second value of :WRAPPED-UP,
+so the caller can tell it from an ordinary answer. The wrap-up counts as a step, so MAX-STEPS
+stays the ceiling, and emits the usual :USAGE event. A turn that answers earlier is unchanged.
+:WRAP-UP needs MAX-STEPS of at least 2; any other value, or :WRAP-UP with fewer steps, signals an
+error before anything is recorded. A wrap-up that asks for tools anyway signals
+DELIBERATION-FAILURE, and its calls are not run or recorded."
+  (%check-on-step-limit on-step-limit max-steps)
   (let* ((*principal* (or principal *principal*))
          (*turn-cancel* (or cancel *turn-cancel*))
          (*on-hold* (cond (on-hold-p on-hold)
@@ -1502,11 +1534,12 @@ as it is written, and the turn emits a :TEXT-DELTA event for each piece."
          (*hold-allowed* on-hold-p))
     (%with-agent-privacy (agent)
       (%settle-unanswered agent held claim)
-      (multiple-value-prog1 (%run-turn agent user-input max-steps permit max-tokens)
+      (multiple-value-prog1 (%run-turn agent user-input max-steps permit max-tokens
+                                       on-step-limit)
         ;; The observer is given the history after every turn (#317, step C).
         (%observe-after-turn agent)))))
 
-(defun %run-turn (agent user-input max-steps permit max-tokens)
+(defun %run-turn (agent user-input max-steps permit max-tokens &optional on-step-limit)
   "RUN-TURN's steps, with *PRINCIPAL* and *ON-HOLD* already bound."
   (let ((message (llm:msg "user" user-input)))
     (%append-history agent message)
@@ -1526,11 +1559,24 @@ as it is written, and the turn emits a :TEXT-DELTA event for each piece."
     ;; :DELEGATED, not :UNTRUSTED, so a coordinator is not marked by it (#949's review).
     (when (and *delegated* (not (eq (agent-conversation-taint agent) :untrusted)))
       (setf (agent-conversation-taint agent) :delegated)))
-  (%turn-loop agent max-steps permit (%output-limit agent max-tokens)))
+  (%turn-loop agent max-steps permit (%output-limit agent max-tokens) on-step-limit))
 
-(defun %turn-loop (agent max-steps permit limit)
+(defun %check-on-step-limit (on-step-limit max-steps)
+  "Signal unless ON-STEP-LIMIT is NIL or :WRAP-UP, or when it is :WRAP-UP with fewer than two
+steps: the wrap-up is the last step, so with one there would be nothing gathered to answer from."
+  (unless (member on-step-limit '(nil :wrap-up))
+    (error "praxeon/actor: :on-step-limit must be NIL or :wrap-up, not ~S" on-step-limit))
+  (when (and (eq on-step-limit :wrap-up) (< max-steps 2))
+    (error "praxeon/actor: :on-step-limit :wrap-up needs at least 2 steps, so that one gathers and one answers; got :max-steps ~S" max-steps)))
+
+(defun %turn-loop (agent max-steps permit limit &optional on-step-limit)
   "Deliberate and act until the model answers, at most MAX-STEPS times. Returns RUN-TURN's
-values. CONTINUE-TURN enters here too, after it has written a held step's results."
+values. CONTINUE-TURN enters here too, after it has written a held step's results.
+
+ON-STEP-LIMIT :WRAP-UP makes the last of the MAX-STEPS a wrap-up (#1182): it offers no tools
+and asks for the best answer from what was gathered, and its answer is returned with a second
+value of :WRAPPED-UP. It is a step like any other, so MAX-STEPS stays the ceiling, and it emits
+the usual :USAGE event. A turn that answers before its last step is not affected."
   (progn
     (dotimes (step max-steps
                    (error 'cnd:deliberation-failure
@@ -1540,7 +1586,9 @@ values. CONTINUE-TURN enters here too, after it has written a held step's result
         (return (%end-cancelled step)))
       (evt:emit :deliberating :step step)
       (multiple-value-bind (completion estimate breakdown)
-          (handler-case (%deliberate-step agent permit limit step)
+          (handler-case (%deliberate-step agent permit limit step
+                                          (and (eq on-step-limit :wrap-up)
+                                               (= step (1- max-steps))))
             (cnd:completion-cancelled (c) (return (%end-cancelled step c))))
         ;; Economic calculation: report what this step cost so the scarce resource
         ;; (the token budget) is visible. :ESTIMATED-INPUT is what the history budget was
@@ -1632,12 +1680,22 @@ values. CONTINUE-TURN enters here too, after it has written a held step's result
                (cnd:abandon-turn ()
                  :report "End the turn with no answer."
                  (return (values nil :abandoned)))))
+            ;; A WRAP-UP THAT ASKS FOR TOOLS ANYWAY is not obeyed: no tools were offered, the
+            ;; turn has no steps left to run them in, and appending the calls would leave them
+            ;; without results in the history. The turn fails as it did before :WRAP-UP existed,
+            ;; and the history is left as it was (#1182).
+            ((and calls (eq on-step-limit :wrap-up) (= step (1- max-steps)))
+             (error 'cnd:deliberation-failure
+                    :detail (format nil "no final answer within ~A steps: the wrap-up step asked for tools"
+                                    max-steps)))
             (t
              (%append-history agent (%assistant-message completion))
              (if (null calls)
                  (progn
                    (evt:emit :answer :text text)
-                   (return text))
+                   (return (if (and (eq on-step-limit :wrap-up) (= step (1- max-steps)))
+                               (values text :wrapped-up)
+                               text)))
                  (multiple-value-bind (message held) (%tool-results-step agent calls permit)
                    (if held
                        ;; A call is held (#531): the step's other results wait in the held
@@ -1755,7 +1813,7 @@ acyclic to stay finite."
 
 (defun run-turn-through (agent input &key (locale "en") chain (max-steps 8) permit
                                           max-tokens principal (on-hold nil on-hold-p) held
-                                          claim)
+                                          claim on-step-limit)
   "Run one turn for AGENT through CHAIN, returning the final TURN (not a string).
 
 CHAIN is a list of stages built with PRAXEON/TURN's ENTER-STAGE / LEAVE-STAGE /
@@ -1791,6 +1849,7 @@ model's part of the turn ended, not what the final reply contains."
         (multiple-value-bind (reply ended held-value)
             (apply #'run-turn agent (turn:turn-input tn)
                    :max-steps max-steps :permit permit :max-tokens max-tokens
+                   :on-step-limit on-step-limit
                    :principal principal :held held :claim claim
                    (when on-hold-p (list :on-hold on-hold)))
           (setf outcome ended held-turn held-value)
