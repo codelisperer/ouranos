@@ -1071,8 +1071,8 @@ the first reference (#946)."
 
 (defun register (agent provider &key on-image (name "generate-image") capability source
                                      (qualities *qualities*) default-quality (default-size :auto)
-                                     resolve-reference (max-references 4)
-                                     (requires-user-intent t))
+                                     resolve-reference (max-references 4) confirm
+                                     (requires-user-intent nil requires-user-intent-p))
   "Register the generate-image means on AGENT, generating with PROVIDER, an IMAGE-PROVIDER.
 Returns NAME.
 
@@ -1113,6 +1113,13 @@ An image spends the user's allowance, so by default the means is registered with
 in the turn is refused as not run, because that content may have asked for it. Pass
 :REQUIRES-USER-INTENT NIL to allow such calls.
 
+CONFIRM is passed to ACTOR:REGISTER-MEANS (#1189): NIL, the default, runs each call as usual; T
+or a function of the arguments returning an estimate plist holds every call for the user's
+confirmation; :AFTER-UNTRUSTED holds a call only once untrusted content has entered the turn
+(#1185). REQUIRES-USER-INTENT then defaults as REGISTER-MEANS's does for that value: true, except
+with :AFTER-UNTRUSTED, where it defaults to NIL, because refusing the call would leave nothing to
+hold. Passing :REQUIRES-USER-INTENT true with :AFTER-UNTRUSTED signals an error.
+
 An app normally calls REGISTER-OPENAI-IMAGE, which registers nothing when there is no key."
   (check-type provider image-provider)
   (unless (or (null resolve-reference) (functionp resolve-reference))
@@ -1132,11 +1139,15 @@ An app normally calls REGISTER-OPENAI-IMAGE, which registers nothing when there 
       (error "REGISTER's :DEFAULT-SIZE must be one of ~{~S~^, ~}, not ~S." *sizes* default-size))
     (%register agent provider on-image name capability source
                qualities default-quality default-size
-               resolve-reference (and resolve-reference max-references) requires-user-intent)))
+               resolve-reference (and resolve-reference max-references)
+               (if requires-user-intent-p
+                   requires-user-intent
+                   (not (eq confirm :after-untrusted)))
+               confirm)))
 
 (defun %register (agent provider on-image name capability source
                   qualities default-quality default-size resolve-reference max-references
-                  requires-user-intent)
+                  requires-user-intent &optional confirm)
   (actor:register-means
    agent name (cond ((null resolve-reference) *description*)
                     ((image-provider-accepts-mask-p provider)
@@ -1179,13 +1190,15 @@ An app normally calls REGISTER-OPENAI-IMAGE, which registers nothing when there 
                (mapcar (lambda (r) (%summary r (funcall on-image r))) results)))))
    :schema (%schema qualities default-size default-quality max-references
                     (image-provider-accepts-mask-p provider))
-   :capability capability :source source :requires-user-intent requires-user-intent))
+   :capability capability :source source :requires-user-intent requires-user-intent
+   :confirm confirm))
 
 (defun register-openai-image (agent &key on-image (api-key nil api-key-p) model base-url
                                          read-timeout (name "generate-image") capability source
                                          (qualities *qualities*) default-quality
                                          (default-size :auto) resolve-reference
-                                         (max-references 4) (requires-user-intent t))
+                                         (max-references 4) confirm
+                                         (requires-user-intent nil requires-user-intent-p))
   "Register the generate-image means on AGENT with OpenAI's Image API, when there is a key.
 Returns NAME, or NIL when there is no key, in which case nothing is registered. This is the way
 to register it: a means without a key could only fail.
@@ -1193,8 +1206,8 @@ to register it: a means without a key could only fail.
 The key is API-KEY when given, NIL included, and otherwise PRAXEON_OPENAI_API_KEY, then the
 deprecated PRAXEON_IMAGE_API_KEY. A given key of NIL or \"\" is no key, and nothing is registered; an
 empty string is logged at warn, because it usually means the app's key setting is blank.
-ON-IMAGE, QUALITIES, DEFAULT-QUALITY, DEFAULT-SIZE, RESOLVE-REFERENCE, MAX-REFERENCES and
-REQUIRES-USER-INTENT are as for REGISTER. MODEL, BASE-URL and READ-TIMEOUT are as for
+ON-IMAGE, QUALITIES, DEFAULT-QUALITY, DEFAULT-SIZE, RESOLVE-REFERENCE, MAX-REFERENCES, CONFIRM
+and REQUIRES-USER-INTENT are as for REGISTER. MODEL, BASE-URL and READ-TIMEOUT are as for
 MAKE-OPENAI-IMAGES."
   (when (and api-key-p (equal api-key ""))
     (log:warn "generate-image not registered: the :api-key given is the empty string"
@@ -1205,10 +1218,14 @@ MAKE-OPENAI-IMAGES."
                       (openai-images-from-env :model model :base-url base-url
                                               :read-timeout read-timeout))))
     (and provider
-         (register agent provider :on-image on-image :name name
-                                  :capability capability :source source
-                                  :qualities qualities :default-quality default-quality
-                                  :default-size default-size
-                                  :resolve-reference resolve-reference
-                                  :max-references max-references
-                                  :requires-user-intent requires-user-intent))))
+         (apply #'register agent provider :on-image on-image :name name
+                                         :capability capability :source source
+                                         :qualities qualities :default-quality default-quality
+                                         :default-size default-size
+                                         :resolve-reference resolve-reference
+                                         :max-references max-references
+                                         :confirm confirm
+                                         ;; Only when given, so REGISTER decides the default
+                                         ;; from CONFIRM in one place (#1189).
+                                         (when requires-user-intent-p
+                                           (list :requires-user-intent requires-user-intent))))))

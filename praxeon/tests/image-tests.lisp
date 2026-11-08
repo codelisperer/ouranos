@@ -1323,3 +1323,30 @@ cap, so the resolver is not asked for the third and no request is made."
     (let ((result (find :tool-result events :key #'evt:event-type)))
       (is (and result (eq :not-run (getf result :outcome))))
       (is (search "not a PNG, JPEG or WebP" (getf result :content)) "~A" (getf result :content)))))
+
+;;; --- the image means takes :confirm (#1189) --------------------------------------------
+
+(test the-image-means-takes-confirm-and-defaults-requires-user-intent-from-it
+  "#1189. REGISTER, REGISTER-OPENAI-IMAGE and REGISTER-GOOGLE-IMAGE take :CONFIRM and pass it to
+REGISTER-MEANS. :REQUIRES-USER-INTENT keeps its default of true for an image, which spends the
+user's allowance, except with :CONFIRM :AFTER-UNTRUSTED, where it defaults to NIL: REGISTER-MEANS
+refuses that combination, so passing :CONFIRM :AFTER-UNTRUSTED alone used to signal. An explicit
+:REQUIRES-USER-INTENT still wins."
+  (flet ((entry (register &rest keys)
+           (let ((ag (actor:make-agent :name "painter" :provider (make-instance 'scripted :script '()))))
+             (apply register ag :api-key "k" :on-image #'identity keys)
+             (let ((e (gethash "generate-image" (actor:agent-means ag))))
+               (list (actor::means-entry-confirm e) (actor:means-entry-requires-user-intent e))))))
+    (dolist (register (list #'praxeon/image:register-openai-image
+                            #'praxeon/image:register-google-image))
+      (is (equal '(nil t) (funcall #'entry register)) "no :confirm: as before")
+      (is (equal '(t t) (funcall #'entry register :confirm t)) ":confirm t")
+      (is (equal '(:after-untrusted nil) (funcall #'entry register :confirm :after-untrusted))
+          ":after-untrusted alone no longer signals, and defaults intent to NIL")
+      (is (equal '(t nil) (funcall #'entry register :confirm t :requires-user-intent nil))
+          "an explicit :requires-user-intent wins")
+      (let ((estimate (lambda (args) (declare (ignore args)) (list :credits 4))))
+        (is (eq estimate (first (funcall #'entry register :confirm estimate)))
+            "an estimate function is passed on"))
+      (signals error (funcall #'entry register :confirm :after-untrusted :requires-user-intent t)
+        "and the contradiction is still refused"))))
