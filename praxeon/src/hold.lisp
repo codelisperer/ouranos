@@ -47,6 +47,56 @@ decided the call. An :ALLOW predicate that signals refuses the call."
                          nil))))
            +not-allowed+))))
 
+(defun %untrusted-description (agent guard step-ids)
+  "What a held call reports about the untrusted content its turn had read when the model decided
+it (#1183), or NIL when the turn was clean. A plist:
+
+  :SCOPE      :TURN when calls in this turn brought the content in, :CONVERSATION when it entered
+              earlier in a conversation under :TAINT-SCOPE :CONVERSATION.
+  :DELEGATED  true when the turn is untrusted only because a coordinating agent delegated a task
+              earlier in the conversation, as the turn guard records it (#948).
+  :SOURCES    one plist per call that brought untrusted content in: (:MEANS name :ID call-id
+              :SCOPE :TURN or :CONVERSATION), oldest first.
+
+STEP-IDS are the ids of the step being decided. Its assistant message, the last of the turn, is
+left out: the model decided those calls before any of them ran. :SOURCES can be empty while the turn is untrusted. That happens when the
+content came from outside this agent's history: the untrusted call that started this delegated
+turn, or a conversation taint recorded without a history to show it."
+  (let ((taint (turn-guard-untrusted guard)))
+    (when taint
+      (let* ((messages (%current-turn-messages agent))
+             (body (rest messages))
+             ;; THE STEP'S OWN MESSAGE IS LEFT OUT WHOLE, by position rather than by matching
+             ;; call ids: ids are the model's, and a step's ids need not differ from an earlier
+             ;; step's.
+             (body (let ((last-message (car (last body))))
+                     (if (and last-message
+                              (equal "assistant" (getf last-message :role))
+                              (equal (sort (copy-list step-ids) #'string<)
+                                     (sort (mapcar (lambda (p) (getf p :id))
+                                                   (%tool-uses (list last-message)))
+                                           #'string<)))
+                         (butlast body)
+                         body)))
+             (turn (loop for p in (%tool-uses body)
+                         when (%untrusted-call-p agent p)
+                           collect (list :means (getf p :name) :id (getf p :id) :scope :turn)))
+             (earlier (and (eq (agent-taint-scope agent) :conversation)
+                           (loop for p in (%tool-uses (ldiff (agent-history agent)
+                                                             (member (first messages)
+                                                                     (agent-history agent)
+                                                                     :test #'eq)))
+                                 when (%untrusted-call-p agent p)
+                                   collect (list :means (getf p :name) :id (getf p :id)
+                                                 :scope :conversation)))))
+        ;; %HISTORY-UNTRUSTED-P has already run for this turn when its guard was made, and
+        ;; recorded what it found, so asking again neither warns nor records anything new.
+        (list :scope (cond (turn :turn)
+                           ((%history-untrusted-p agent (first messages)) :conversation)
+                           (t :turn))
+              :delegated (eq taint :delegated)
+              :sources (append earlier turn))))))
+
 ;;; --- conditions -----------------------------------------------------------------------
 
 (define-condition wrong-principal (cnd:praxeon-error) ()
@@ -77,7 +127,8 @@ the turn cannot go on without it. Nothing is written."))
 text HELD-TURN-TO-JSON gives, next to the agent's history, and gives it to CONTINUE-TURN.
 
 ID identifies it for the app's claim. CALLS is one plist per held call: :ID (the tool-call id),
-:NAME, :SOURCE, :ARGUMENTS and :ESTIMATE. RESULTS are the tool-result parts of the step's other
+:NAME, :SOURCE, :ARGUMENTS, :ESTIMATE and :UNTRUSTED, NIL for a call held in a clean turn and
+otherwise what %UNTRUSTED-DESCRIPTION says about the untrusted content the turn had read (#1183). RESULTS are the tool-result parts of the step's other
 calls, which ran before the hold. ORDER is every call id of the step, in the model's order.
 STEPS is how many steps the turn has left, MAX-TOKENS its output limit. EXPIRES-AT is a
 universal time or NIL; the app sets it, and a held turn past it is declined."
@@ -111,6 +162,7 @@ the held turn's id, NIL for a call decided on the spot."
   (apply #'evt:emit type :id (getf call :id) :held held-id :principal *principal*
          :name (getf call :name)
          :source (getf call :source) :estimate (getf call :estimate)
+         :untrusted (getf call :untrusted)
          :at (get-universal-time) more))
 
 (defvar *call-records* nil
@@ -274,7 +326,9 @@ calls held so far are written as not run."
          ;; step's calls. Taken once, so every call in the step is judged on what the model
          ;; had seen when it asked for them.
          (guard (%turn-guard agent))
-         (after-untrusted (turn-guard-untrusted guard)))
+         (after-untrusted (turn-guard-untrusted guard))
+         ;; #1183: what a held call says about that content, worked out once for the step.
+         (untrusted (%untrusted-description agent guard (mapcar #'llm:tool-call-id calls))))
     (flet ((run (id name args)
              (setf current (cons id (if (%callable-p agent name permit) :running :refused)))
              (let ((entry (and (%callable-p agent name permit)
@@ -303,6 +357,9 @@ calls held so far are written as not run."
                       (args (llm:tool-call-arguments call))
                       (entry (gethash name (agent-means agent)))
                       (confirm (and entry (means-entry-confirm entry)))
+                      ;; #1185: :AFTER-UNTRUSTED holds the call only once untrusted content has
+                      ;; entered the turn, and runs it as usual in a clean turn.
+                      (confirm (if (eq confirm :after-untrusted) (and after-untrusted t) confirm))
                       (refusal (and entry (%callable-p agent name permit)
                                     (%guard-refusal agent guard entry args after-untrusted))))
                  (cond
@@ -313,7 +370,8 @@ calls held so far are written as not run."
                    (t
                     (multiple-value-bind (estimate ok) (%estimate confirm args)
                       (let ((description (list :id id :name name :source (means-entry-source entry)
-                                               :arguments args :estimate estimate)))
+                                               :arguments args :estimate estimate
+                                               :untrusted untrusted)))
                         (flet ((decided (decision &optional text)
                                  ;; The text is noted before the event, so a failing observer
                                  ;; cannot lose the decision.
@@ -335,7 +393,8 @@ calls held so far are written as not run."
                                                         (list :principal *principal*
                                                               :agent (agent-name agent) :name name
                                                               :source (means-entry-source entry)
-                                                              :arguments args :estimate estimate))
+                                                              :arguments args :estimate estimate
+                                                              :untrusted untrusted))
                                                *on-hold*)))
                                (case policy
                                  (:approve
@@ -399,6 +458,31 @@ true, so an estimate's booleans come back as they went."
        (loop for name being the hash-keys of object using (hash-value v)
              append (list (intern (string-upcase name) :keyword) v))))
 
+(defun %untrusted-out (untrusted)
+  "A held call's :UNTRUSTED plist as a JSON object, or null for a clean turn (#1183)."
+  (if (null untrusted)
+      'null
+      (%held-object "scope" (string-downcase (symbol-name (getf untrusted :scope)))
+                    "delegated" (and (getf untrusted :delegated) t)
+                    "sources" (map 'vector
+                                   (lambda (s)
+                                     (%held-object "means" (getf s :means) "id" (getf s :id)
+                                                   "scope" (string-downcase
+                                                            (symbol-name (getf s :scope)))))
+                                   (getf untrusted :sources)))))
+
+(defun %untrusted-in (object)
+  "The :UNTRUSTED plist %UNTRUSTED-OUT wrote as OBJECT. A held turn stored before #1183 has no
+such field, and reads back as NIL."
+  (flet ((scope (name) (if (equal name "conversation") :conversation :turn)))
+    (and (hash-table-p object)
+         (list :scope (scope (gethash "scope" object))
+               :delegated (eq t (gethash "delegated" object))
+               :sources (map 'list (lambda (s) (list :means (gethash "means" s)
+                                                     :id (gethash "id" s)
+                                                     :scope (scope (gethash "scope" s))))
+                             (gethash "sources" object))))))
+
 (defun held-turn-to-json (held)
   "HELD as JSON text, for the app to store next to the agent's history. HELD-TURN-FROM-JSON reads
 it back. Each call's arguments are written as the JSON object the model sent. An estimate's and
@@ -415,7 +499,8 @@ principal must be a string or an integer."
                              (%held-object "id" (getf c :id) "name" (getf c :name)
                                            "source" (%names-out (getf c :source))
                                            "arguments" (%or-null (getf c :arguments))
-                                           "estimate" (%names-out (getf c :estimate))))
+                                           "estimate" (%names-out (getf c :estimate))
+                                           "untrusted" (%untrusted-out (getf c :untrusted))))
                    (held-turn-calls held))
       "results" (map 'vector (lambda (p) (%held-object "id" (getf p :tool-use-id)
                                                        "content" (getf p :content)
@@ -440,7 +525,8 @@ object."
                            (list :id (gethash "id" c) :name (gethash "name" c)
                                  :source (%names-in (gethash "source" c))
                                  :arguments (%from-null (gethash "arguments" c))
-                                 :estimate (%names-in (gethash "estimate" c))))
+                                 :estimate (%names-in (gethash "estimate" c))
+                                 :untrusted (%untrusted-in (gethash "untrusted" c))))
                    (field "calls"))
        :results (map 'list (lambda (r) (llm:tool-result-part (gethash "id" r) (gethash "content" r)
                                                              (gethash "is_error" r)))
