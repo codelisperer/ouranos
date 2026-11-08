@@ -30,6 +30,12 @@ its tag.
   token set whose resource covers the requested URL under the same rule, so tokens stored under
   the full URL before a server switched to origin-only metadata keep working. An app that
   compares `token-set-resource` with the server URL itself should compare with the same rule.
+  **Check tests that store a token under an ancestor of the connection URL.** Before this change,
+  `access-token` returned NIL with no error for a stored token set whose resource was an ancestor
+  of the requested URL, such as one stored under `https://host` and asked for with
+  `https://host/mcp`. A caller that carried on sent its request without a token. It now returns
+  the token, so a test with a fixture shaped like that may have passed only because its requests
+  were unsigned.
 
 - **A redirect that changes origin no longer carries a credential, in a header or in a body**
   (#1139). dexador follows a redirect to a different host by recursing with the same arguments
