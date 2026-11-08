@@ -48,7 +48,7 @@ The calls of the step being decided are not sources: the model asked for them al
 | `:on-hold` | What happens |
 |---|---|
 | NIL (default) | No confirmation is available. The call is not run, and the model is told so. `workflow`, praxeon/web's chat, `studio` and `converse-repl` pass no `:on-hold`, so a held means is never run through them. |
-| a function | It is called on the turn's thread with a plist describing the call (`:principal :agent :name :source :arguments :estimate`) and returns `:approve`, `:decline` or `:hold`. A REPL or a desktop app can ask the user here and wait. |
+| a function | It is called on the turn's thread with a plist describing the call (`:principal :agent :name :source :arguments :estimate :untrusted`) and returns `:approve`, `:decline`, `(:decline "text")` or `:hold`. A REPL or a desktop app can ask the user here and wait. |
 | `:hold` | The turn ends: `run-turn` returns `(values nil :held held-turn)`. A server-rendered app uses this, stores the held turn, and asks the user. |
 
 - **No principal, no hold.** A turn with no principal cannot hold a call, because there is no user to ask. The call is not run, and a blocking function is not called.
@@ -59,6 +59,14 @@ The calls of the step being decided are not sources: the model asked for them al
   - `:hold` does not pass down, and neither does a blocking function's `:hold` answer inside the sub-turn. A sub-agent's hold cannot end the coordinator's turn, so there it counts as no confirmation available.
 - **`run-turn-through`** takes `:on-hold`, `:held` and `:claim`. When the turn holds, its second value is `:held` and its third the held turn.
 
+## Declining with a reason
+
+A blocking `:on-hold` function, and a decision given to `continue-turn`, can decline a call with the app's own reason: `(:decline "text")`, where the text is a non-empty string (#1191). The call is not run, exactly as for `:decline`; the model is told the text instead of "Not run: the user declined.", and the `:tool-decided` event has `:decision :decline` and `:reason` with the text. Use it when the app, not the user, refuses a call, such as one over the app's limit on confirmation requests in a turn, so that the event log shows a refusal rather than an approval of a call that never ran.
+
+The text is what the model reads as the tool's result, so write it for the model, and say that the call was not run. Anything else returned by a policy, such as `(:decline 42)`, counts as no confirmation available.
+
+This extends `:decline` rather than adding a new keyword because the outcome for the call is the same, not run; only the text differs, and an app's existing handling of `:decline` events keeps working.
+
 ## Storing and continuing
 
 - **Storing.** `held-turn-to-json` gives the held turn as JSON text, and `held-turn-from-json` reads it back. Store the text as it is; it never goes through the Lisp reader.
@@ -68,7 +76,7 @@ The calls of the step being decided are not sources: the model asked for them al
   - The conversation itself is the agent's history, which the app keeps as it does now.
   - The app may set `held-turn-expires-at`, a universal time.
 - **Continuing.** `(actor:continue-turn agent held decision :principal p :permit permit :on-hold on-hold :claim claim)` continues the turn.
-  - `decision` is `:approve` or `:decline` for every held call, or an alist `((tool-call-id . decision) ...)` with one entry per held call.
+  - `decision` is `:approve` or `:decline` for every held call, or an alist `((tool-call-id . decision) ...)` with one entry per held call. A decline can carry a reason, `(:decline "text")`, as the whole decision or as one call's; see "Declining with a reason" below.
   - It returns `run-turn`'s values, `(values nil :held held-turn)` again if a later call holds, or `(values nil :already-decided decision)`.
 
 `continue-turn` checks, in order:
@@ -116,7 +124,7 @@ When an approved call fails inside `continue-turn`, it is written as may-have-ru
   - `:principal`, `:agent` and `:conversation`;
   - the means `:name`, its `:source` and the `:estimate`;
   - `:at`, a universal time.
-- `:tool-decided` is emitted when a decision is applied, once per call. It carries the same fields, plus `:decision`, one of `:approve`, `:decline`, `:expired`, `:unanswered`, `:no-confirmation`, `:may-have-run` or `:turn-failed`. For a call decided on the spot, by a blocking function or because the turn has no principal, `:held` is NIL.
+- `:tool-decided` is emitted when a decision is applied, once per call. It carries the same fields, plus `:decision`, one of `:approve`, `:decline`, `:expired`, `:unanswered`, `:no-confirmation`, `:may-have-run` or `:turn-failed`, and `:reason` with the text when a decline gave one (#1191). For a call decided on the spot, by a blocking function or because the turn has no principal, `:held` is NIL.
 
 The held call's `:tool-result` event follows. Its outcome is `:not-run`, or `:unknown` for a call that may have run, unless the call was approved and ran. A result that was not run is sent to the model as an error result. These events let an app keep an audit trail of what its users approved, beside the usage fields of #527.
 

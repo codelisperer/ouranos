@@ -325,16 +325,18 @@ approximation raises the estimate rather than lowering it."
                                          read-timeout (name "generate-image") capability source
                                          (qualities *qualities*) default-quality
                                          (default-size :auto) resolve-reference
-                                         (max-references 4) (requires-user-intent t))
+                                         (max-references 4) confirm
+                                         (requires-user-intent nil requires-user-intent-p))
   "Register the generate-image means on AGENT with Google's Gemini API, when there is a key.
 Returns NAME, or NIL when there is no key, in which case nothing is registered.
 
 The key is API-KEY when given, NIL included, and otherwise PRAXEON_GOOGLE_API_KEY, then
 GEMINI_API_KEY; PRAXEON_IMAGE_API_KEY, the OpenAI provider's, is not read. A given key of NIL or
 \"\" is no key, and an empty string is logged at warn. ON-IMAGE, QUALITIES, DEFAULT-QUALITY,
-DEFAULT-SIZE, RESOLVE-REFERENCE, MAX-REFERENCES and REQUIRES-USER-INTENT are as for REGISTER;
-MAX-REFERENCES may be up to *GOOGLE-MAX-REFERENCES*, and REQUIRES-USER-INTENT defaults to T, as
-it does there, because each image costs money (#827). MODEL, BASE-URL and READ-TIMEOUT are as for
+DEFAULT-SIZE, RESOLVE-REFERENCE, MAX-REFERENCES, CONFIRM and REQUIRES-USER-INTENT are as for
+REGISTER; MAX-REFERENCES may be up to *GOOGLE-MAX-REFERENCES*, and REQUIRES-USER-INTENT defaults
+as it does there: true, because each image costs money (#827), except with CONFIRM
+:AFTER-UNTRUSTED (#1189). MODEL, BASE-URL and READ-TIMEOUT are as for
 MAKE-GOOGLE-IMAGES."
   (when (and api-key-p (equal api-key ""))
     (log:warn "generate-image not registered: the :api-key given is the empty string"
@@ -345,10 +347,14 @@ MAKE-GOOGLE-IMAGES."
                       (google-images-from-env :model model :base-url base-url
                                               :read-timeout read-timeout))))
     (and provider
-         (register agent provider :on-image on-image :name name
-                                  :capability capability :source source
-                                  :qualities qualities :default-quality default-quality
-                                  :default-size default-size
-                                  :resolve-reference resolve-reference
-                                  :max-references max-references
-                                  :requires-user-intent requires-user-intent))))
+         (apply #'register agent provider :on-image on-image :name name
+                                         :capability capability :source source
+                                         :qualities qualities :default-quality default-quality
+                                         :default-size default-size
+                                         :resolve-reference resolve-reference
+                                         :max-references max-references
+                                         :confirm confirm
+                                         ;; Only when given, so REGISTER decides the default
+                                         ;; from CONFIRM in one place (#1189).
+                                         (when requires-user-intent-p
+                                           (list :requires-user-intent requires-user-intent))))))
