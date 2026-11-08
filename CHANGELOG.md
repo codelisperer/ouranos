@@ -14,6 +14,23 @@ its tag.
 
 ### An app may have to act
 
+- **`aion/oauth` accepts protected-resource metadata whose `resource` names only the server's
+  origin, or another same-origin prefix of the server's path** (#1169). `discover`,
+  `start-sign-in` and the functions after them used to signal `metadata-refused` ("the protected
+  resource metadata names a different resource") unless the metadata's `resource` was identical
+  to the server URL, as RFC 9728 section 3.3 requires. They now also accept a `resource` with the
+  same scheme, host and port whose path is a prefix of the server URL's path at a `/` boundary,
+  the empty path included: `https://host` for `https://host/mcp`, but not `https://host/mc`,
+  `https://host/mcp-other`, `https://host/mcp/x` or another origin. **This departs from the RFC
+  on purpose:** servers built on the MCP TypeScript SDK publish origin-only metadata because that
+  SDK's client accepts the same rule. When such a claim is accepted, **the claimed value is sent
+  as the RFC 8707 `resource` parameter, in the authorization request, the code exchange and every
+  refresh, and the token set is stored under it**, so `token-set-resource` and
+  `metadata-resource` return it. `access-token`, `refresh` and the metadata recheck accept a
+  token set whose resource covers the requested URL under the same rule, so tokens stored under
+  the full URL before a server switched to origin-only metadata keep working. An app that
+  compares `token-set-resource` with the server URL itself should compare with the same rule.
+
 - **A redirect that changes origin no longer carries a credential, in a header or in a body**
   (#1139). dexador follows a redirect to a different host by recursing with the same arguments
   **and the same headers** — it prepends a new `Host` and keeps the rest — so a credential built
@@ -1490,6 +1507,35 @@ its tag.
 
 ### Added
 
+- **`aion/http-client:send-request` takes an optional `:deadline`, in seconds, for the whole
+  round-trip over every redirect** (#1162). Without it a call is bounded only by the connect
+  timeout and the per-read timeout, and the read timer starts again on every read, so a server
+  that sends a few bytes at a time could hold one call indefinitely. When the deadline passes the
+  socket is shut down and the call signals **`aion/http-client:request-deadline-exceeded`**, a
+  subclass of `fetch-deadline-exceeded`, so an existing handler for that condition catches it, and
+  `fetch-deadline-exceeded-url` and `fetch-deadline-exceeded-deadline` read it. It is
+  `fetch-public`'s deadline (#807) and has the same limits: resolving a host name and opening the
+  TCP connection are not interrupted, only checked when they return. **Without `:deadline`
+  nothing changes.** With it, three things differ, all because the deadline can only shut down a
+  socket this client opened:
+  - each hop goes over a connection this client opens to the host's first resolved address, as
+    `fetch-public` and `open-response-stream` do, rather than through dexador;
+  - redirects are followed by this client's own loop for every request, so a hop that changes
+    origin drops the credential headers and does not carry a body;
+  - **a request that would go through a proxy is refused** with an `http-error`, rather than sent
+    directly around it. dexador takes its proxy from `HTTPS_PROXY` or `HTTP_PROXY`; a plaintext
+    request to a local host is not proxied (#1091) and is unaffected.
+
+  The interceptors run outside the deadline. With a substituted `:perform`, which opens no socket
+  the deadline can reach, the deadline is checked when it returns. The condition names the hop
+  the call was on, after a redirect too, and the deadline is checked again between resolving a
+  host and connecting to it, so a lookup that outlasts the deadline does not add a connect
+  timeout to the wait.
+- **The reports of `fetch-deadline-exceeded` and `request-deadline-exceeded` print the URL with
+  a query value or a password hidden**, as a request prints it (#844), because a report is what
+  reaches a log (#1162). `fetch-deadline-exceeded-url` still returns the URL as given. Code that
+  matched a whole URL in the report text of `fetch-public`'s deadline condition will no longer
+  find a query value there.
 - **`aion/http-client:credential-url-refusal`**, the rule deciding whether a URL is one a
   framework may send a credential to (#1106). It **returns a refusal sentence rather than
   signalling**, so each caller signals its own condition: hermes signals `configuration-error`

@@ -21,6 +21,17 @@
     authorization response (RFC 9207), and a client that is pre-registered, identified by a
     client ID metadata document, or registered dynamically (RFC 7591).
 
+    ONE DELIBERATE DEPARTURE FROM RFC 9728. Section 3.3 requires the protected resource
+    metadata's resource to be identical to the URL the client requested. This client also
+    accepts a resource with the same scheme, host and port whose path is a prefix of the
+    requested URL's path at a / boundary, the origin alone included, so metadata naming
+    https://host is accepted for https://host/mcp. It then sends that claimed value as the RFC
+    8707 resource parameter and keys the tokens on it. Servers built on the MCP TypeScript SDK
+    publish origin-only metadata, because that SDK's client accepts exactly this rule; refusing
+    them refused servers every other MCP client connects to. The maintainer ruled on 2026-11-07
+    to accept it (#1169). Another origin, a path that is not such a prefix, and a longer path
+    are still refused.
+
     Tokens, registered clients and sign-ins in progress are kept behind the STORE protocol.
     MEMORY-STORE is for tests and for an app that runs as one process; an app with several
     instances implements the protocol over a store they share.
