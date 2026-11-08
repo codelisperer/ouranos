@@ -20,8 +20,26 @@ LangGraph's `interrupt()` re-runs the interrupted node when it resumes, which a 
 - **A function of the arguments**, which holds every call and returns an estimate plist to show the user.
   - An estimate's values may be strings, integers, floats, `T` or NIL.
   - An estimate function that signals, or returns anything else (a ratio included), means the call is not run. It runs on arguments the model wrote.
+- **`:after-untrusted`**, which runs a call as usual while the turn is clean and holds it once untrusted content has entered the turn, or the conversation under `:taint-scope :conversation` (#1185). It suits a cheap, frequent spending means such as image generation, where asking on every call is too much but a call a fetched page may have prompted should be confirmed. A held call has no estimate.
+- Any other value signals an error.
 
-`praxeon/mcp:grant-tools` takes `:confirm`, a list of the server's tool names to hold, or `:all`. Any other value, or a name that is not among the granted tools, signals an error and registers nothing, because a misspelt name would let the tool it meant run without confirmation. A tool's `readOnlyHint` or `destructiveHint` annotation is untrusted and never decides this; the app does.
+`praxeon/mcp:grant-tools` takes `:confirm`, a list of the server's tool names to hold, or `:all`. Any other value, or a name that is not among the granted tools, signals an error and registers nothing, because a misspelt name would let the tool it meant run without confirmation. A tool's `readOnlyHint` or `destructiveHint` annotation is untrusted and never decides this; the app does. `:confirm-after-untrusted` names tools to register with `:confirm :after-untrusted` instead, and a tool may not be in both (#1186).
+
+## After untrusted content: refused or held
+
+Once the turn has read content from outside the conversation, such as a web page, search results or an MCP server's answer, a means registered with `:confirm` is **refused** by default, not held, and the user is never asked. That is because `:confirm` makes `:requires-user-intent` default to true: a means held for confirmation is one that spends or writes, and a page must not be able to ask for it.
+
+To have such a call **held for the user's confirmation** instead, with a warning, pass `:requires-user-intent nil` to `register-means`, or to `grant-tools` for the tools it holds (#1186). `grant-tools` takes NIL, T, `:all`, or a list of the held tools that keep requiring user intent; the held tools a list leaves out get NIL. A means registered `:confirm :after-untrusted` never requires user intent, since that would refuse the call it exists to hold, and asking for both signals an error.
+
+**The warning.** The plist an `:on-hold` function receives, and each call in a held turn, carries `:untrusted` (#1183). It is NIL when the turn was clean when the model decided the call, so the app can tell the two cases apart. Otherwise it says what the turn had read:
+
+| Key | Value |
+|---|---|
+| `:scope` | `:turn` when calls in this turn brought the content in, `:conversation` when it entered earlier in a conversation under `:taint-scope :conversation` |
+| `:delegated` | true when the turn is untrusted only because a coordinating agent delegated a task earlier in the conversation |
+| `:sources` | one `(:means name :id call-id :scope :turn or :conversation)` per call that brought untrusted content in, oldest first |
+
+The calls of the step being decided are not sources: the model asked for them all before any of them ran. `:sources` can be empty while the turn is untrusted, when the content came from outside this agent's history: the untrusted call that started a delegated turn, or a conversation taint recorded without a history to show it. `held-turn-to-json` writes the description and `held-turn-from-json` reads it back; a held turn stored before #1183 reads back with NIL.
 
 ## What a turn does with a held call
 

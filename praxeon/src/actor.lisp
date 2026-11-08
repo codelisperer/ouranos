@@ -33,7 +33,9 @@ ABSENT from the tool table unless something permits it: see AGENT-TOOL-SPECS."
   (source nil)
   ;; CONFIRM (#531): NIL runs the means as usual. T holds every call until the user decides.
   ;; A function of the arguments holds the call too, and returns an estimate plist of what the
-  ;; call will cost, such as (:credits 40), or NIL. See hold.lisp.
+  ;; call will cost, such as (:credits 40), or NIL. :AFTER-UNTRUSTED holds a call only once
+  ;; untrusted content has entered the turn, and runs it as usual otherwise (#1185). See
+  ;; hold.lisp.
   (confirm nil)
   ;; #827. UNTRUSTED: the means brings content from outside the conversation into it (a web
   ;; page, search results), so a call the model decides after it ran may have been steered by
@@ -230,8 +232,13 @@ function of one argument -- the tool arguments -- returning a string), an
 optional argument SCHEMA (a jzon-serializable JSON-schema value), and an optional
 CAPABILITY string a caller must hold to see or use it (#90). SOURCE is NIL or a plist that
 names where the means comes from; the :TOOL-CALL and :TOOL-RESULT events carry it (#527).
-CONFIRM is NIL, T or a function of the arguments returning an estimate plist: a means with one
-is held until the user decides (#531, see RUN-TURN's :ON-HOLD).
+CONFIRM is NIL, T, a function of the arguments returning an estimate plist, or :AFTER-UNTRUSTED.
+With T or a function, every call is held until the user decides (#531, see RUN-TURN's :ON-HOLD).
+With :AFTER-UNTRUSTED, a call runs as usual in a clean turn and is held for the user's decision
+once untrusted content has entered the turn, or the conversation under :TAINT-SCOPE
+:CONVERSATION (#1185): for a cheap, frequent spending means, where asking on every call is too
+much but a call a fetched page may have prompted should be confirmed. A held call carries what
+the turn had read, as :UNTRUSTED (#1183).
 
 The rest guard a turn against instructions written into content the agent reads (#827):
 
@@ -244,7 +251,10 @@ The rest guard a turn against instructions written into content the agent reads 
                         CONFIRM is given, because a means held for the user's confirmation is
                         one that spends or writes, and an app that forgets this key must not
                         leave a page able to ask for it. Pass NIL to have such a means held
-                        for confirmation after untrusted content instead of refused.
+                        for confirmation after untrusted content instead of refused; the held
+                        call's :UNTRUSTED says what was read, so the app can warn the user.
+                        With CONFIRM :AFTER-UNTRUSTED it defaults to NIL, since refusing would
+                        leave nothing to hold, and passing true with it signals an error.
   ALLOW                NIL, or a function of the call's arguments and the agent. A call runs
                         only when it returns true; otherwise, or when it signals, the call is
                         refused as not run.
@@ -252,6 +262,10 @@ The rest guard a turn against instructions written into content the agent reads 
                         one turn. Later calls are refused as not run.
 
 Returns NAME."
+  (unless (or (null confirm) (eq confirm t) (functionp confirm) (eq confirm :after-untrusted))
+    (error "REGISTER-MEANS's :CONFIRM must be NIL, T, a function of the arguments, or :AFTER-UNTRUSTED, not ~S." confirm))
+  (when (and (eq confirm :after-untrusted) requires-user-intent)
+    (error "REGISTER-MEANS's :CONFIRM :AFTER-UNTRUSTED holds a call after untrusted content, and :REQUIRES-USER-INTENT true would refuse it there instead; pass one or the other."))
   (unless (or (null allow) (functionp allow))
     (error "REGISTER-MEANS's :ALLOW must be NIL or a function of the arguments and the agent, not ~S." allow))
   (unless (or (null max-per-turn) (and (integerp max-per-turn) (plusp max-per-turn)))
@@ -262,7 +276,9 @@ Returns NAME."
                           :confirm confirm :untrusted (and untrusted t)
                           :requires-user-intent (if requires-user-intent-p
                                                     (and requires-user-intent t)
-                                                    (and confirm t))
+                                                    (and confirm
+                                                         (not (eq confirm :after-untrusted))
+                                                         t))
                           :allow allow :max-per-turn max-per-turn))
   name)
 
@@ -1450,7 +1466,11 @@ means that needs a principal refuses the call.
 ON-HOLD is what the app does when the model calls a means registered with :CONFIRM (#531):
   NIL         no confirmation is available, and the call is not run. The default.
   a function  called with a plist describing the call (:PRINCIPAL :AGENT :NAME :SOURCE
-              :ARGUMENTS :ESTIMATE), on this thread; it returns :APPROVE, :DECLINE or :HOLD.
+              :ARGUMENTS :ESTIMATE :UNTRUSTED), on this thread; it returns :APPROVE, :DECLINE or
+              :HOLD. :UNTRUSTED is NIL when the turn was clean when the model decided the call,
+              and otherwise a plist saying what it had read, for a warning to the user (#1183):
+              :SCOPE (:TURN or :CONVERSATION), :DELEGATED, and :SOURCES, one (:MEANS :ID :SCOPE)
+              per call that brought the content in. A held call in a HELD-TURN carries the same.
   :HOLD       the turn ends with the call held: RUN-TURN returns NIL, :HELD and a HELD-TURN,
               which the app stores and later passes to CONTINUE-TURN with the user's decision.
 When ON-HOLD is not given, a turn uses the enclosing turn's, so a delegated sub-turn asks the
