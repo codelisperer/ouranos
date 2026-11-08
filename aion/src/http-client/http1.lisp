@@ -263,6 +263,42 @@ an alist form-encoded, as dexador does."
     (list (values (sb-ext:string-to-octets (quri:url-encode-params content) :external-format :utf-8)
                   "application/x-www-form-urlencoded"))))
 
+(defclass %octet-sink (sb-gray:fundamental-binary-output-stream)
+  ((octets :initform (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)
+           :reader %sink-octets))
+  (:documentation "A binary output stream that keeps what is written to it, for building a body."))
+
+(defmethod sb-gray:stream-write-byte ((s %octet-sink) byte)
+  (vector-push-extend byte (%sink-octets s))
+  byte)
+
+(defmethod sb-gray:stream-write-sequence ((s %octet-sink) seq &optional (start 0) end)
+  (loop for i from start below (or end (length seq))
+        do (vector-push-extend (elt seq i) (%sink-octets s)))
+  seq)
+
+(defun %multipart-p (content content-type)
+  "Whether dexador would send CONTENT, an alist, as multipart/form-data: when CONTENT-TYPE begins
+with multipart/, or when there is no CONTENT-TYPE and a field's value is a pathname. This is
+dexador's own rule, in both of its backends (dexador-20260101, src/backend/usocket.lisp lines
+496-501, and src/backend/winhttp.lisp lines 121-125), so a request sends the same body whichever
+way it goes (#1178). The prefix is compared case-sensitively, as dexador compares it. A body of
+octets is never re-encoded, whatever its type: only an alist is (#828)."
+  (and (consp content)
+       (if content-type
+           (and (>= (length content-type) 10) (string= "multipart/" content-type :end2 10))
+           (find-if #'pathnamep content :key #'cdr))))
+
+(defun %multipart-octets (content content-type)
+  "CONTENT, an alist, as a multipart body, and the Content-Type to send with it: CONTENT-TYPE, or
+multipart/form-data, with a boundary of its own. The body is written by dexador's own
+WRITE-MULTIPART-CONTENT, as dexador's WinHTTP backend writes it."
+  (let ((boundary (dexador.util:make-random-string 12))
+        (sink (make-instance '%octet-sink)))
+    (dexador.body:write-multipart-content content boundary sink)
+    (values (coerce (%sink-octets sink) '(simple-array (unsigned-byte 8) (*)))
+            (format nil "~A; boundary=~A" (or content-type "multipart/form-data") boundary))))
+
 (defun %encode-target (string)
   "STRING with every character outside 0x21-0x7E percent-encoded as its UTF-8 octets: a space,
 a TAB, a control character, DEL and anything beyond ASCII. A URL from a server or a redirect can
@@ -295,7 +331,17 @@ request identifies itself as one through dexador did (#985). For the same reason
 string or octet CONTENT without a Content-Type in HEADERS is sent as text/plain, and a request
 with no CONTENT sends Content-Length: 0, except for GET and HEAD, which define no meaning for a
 body."
-  (multiple-value-bind (body default-type) (%content-octets content)
+  (multiple-value-bind (body default-type multipart-type)
+      ;; A MULTIPART ALIST IS SENT AS MULTIPART, as dexador sends it. This used to form-encode
+      ;; every alist and keep the caller's multipart/form-data header, so a server received
+      ;; field=value under a multipart type (#1178). dexador writes a Content-Type with its own
+      ;; boundary in place of the caller's, and so does this.
+      (let ((given (cdr (find "content-type" headers :key (lambda (h) (string (car h)))
+                                                     :test #'string-equal))))
+        (if (%multipart-p content given)
+            (multiple-value-bind (octets type) (%multipart-octets content given)
+              (values octets nil type))
+            (%content-octets content)))
     (let* ((path (let ((p (or (quri:uri-path uri) "")) (q (quri:uri-query uri)))
                    (%encode-target (format nil "~A~@[?~A~]" (if (string= p "") "/" p) q))))
            (port (quri:uri-port uri))
@@ -303,7 +349,8 @@ body."
            (host (if (and port (/= port default-port))
                      (format nil "~A:~D" (quri:uri-host uri) port)
                      (quri:uri-host uri)))
-           (skip '("host" "connection" "accept-encoding" "content-length" "transfer-encoding"))
+           (skip (append '("host" "connection" "accept-encoding" "content-length" "transfer-encoding")
+                         (when multipart-type '("content-type"))))
            ;; Newest first, and reversed when written: the request line comes out first.
            (lines (list (format nil "Host: ~A" (%host-safe host))
                         (format nil "~A ~A HTTP/1.1" (string-upcase (symbol-name method))
@@ -320,10 +367,11 @@ body."
             (unless (and (plusp (length name)) (every #'%token-char-p name))
               (error 'http-error :detail (format nil "not a header name: ~S" name)))
             (push (format nil "~A: ~A" name (%field-safe (princ-to-string (cdr h)) name)) lines))))
-      (when (and body
-                 (not (find "content-type" headers :key (lambda (h) (string (car h)))
-                                                   :test #'string-equal)))
-        (push (format nil "Content-Type: ~A" (or default-type "text/plain")) lines))
+      (cond (multipart-type (push (format nil "Content-Type: ~A" multipart-type) lines))
+            ((and body
+                  (not (find "content-type" headers :key (lambda (h) (string (car h)))
+                                                    :test #'string-equal)))
+             (push (format nil "Content-Type: ~A" (or default-type "text/plain")) lines)))
       (cond (body (push (format nil "Content-Length: ~D" (length body)) lines))
             ((not (member method '(:get :head))) (push "Content-Length: 0" lines)))
       (push "Connection: close" lines)

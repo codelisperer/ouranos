@@ -3044,3 +3044,88 @@ seconds. With :DEADLINE 1 the call must end shortly after the lookup returns."
              (is (< seconds 5) "and the call ended after ~,1F seconds, not after a connect timeout"
                  seconds)))
       (setf (fdefinition 'http::resolve-host) original))))
+
+;;; --- SEND-REQUEST :DEADLINE sends a multipart alist as multipart (#1178) ----------------
+
+(defun %multipart-shape (request)
+  "What a server can check about a multipart REQUEST it received: the Content-Type's type and
+whether it has a boundary, and whether the body holds each field as its own part."
+  (let ((type (aion/test-http:request-header request "Content-Type"))
+        (body (aion/test-http:request-body-string request)))
+    (list :type (and type (subseq type 0 (or (position #\; type) (length type))))
+          :boundary (and type (search "boundary=" type) t)
+          :name-part (and (search "Content-Disposition: form-data; name=\"name\"" body) t)
+          :value (and (search "Ada Lovelace" body) t)
+          :note-part (and (search "Content-Disposition: form-data; name=\"note\"" body) t)
+          :form-encoded (and (search "name=Ada" body) t))))
+
+(test a-multipart-alist-under-a-deadline-arrives-as-multipart
+  "#1178, from Copilot's review of #1177. With :DEADLINE the request goes over this client's own
+connection, whose writer form-encoded every alist and kept the caller's multipart/form-data
+header, so the server received name=Ada+Lovelace under a multipart type. It now makes dexador's
+decision and writes the same multipart body dexador writes.
+
+THE CONTROL is the same request with no deadline, which dexador sends: the server must see the
+same shape from both, field by field, so the two paths cannot drift apart again."
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "ok")))
+    (flet ((send (&rest options)
+             (apply #'http:send-request
+                    (http:make-request :method :post :url (%local s "/upload") :read-timeout 5
+                                       :headers '(("Content-Type" . "multipart/form-data"))
+                                       :content '(("name" . "Ada Lovelace") ("note" . "first")))
+                    '() options)
+             (first (aion/test-http:server-requests s))))
+      (let ((with-deadline (%multipart-shape (send :deadline 30)))
+            (through-dexador (%multipart-shape (send))))
+        (is (equal "multipart/form-data" (getf with-deadline :type))
+            "the type is multipart/form-data: ~S" with-deadline)
+        (is-true (getf with-deadline :boundary) "with a boundary: ~S" with-deadline)
+        (is-true (and (getf with-deadline :name-part) (getf with-deadline :note-part)
+                      (getf with-deadline :value))
+                 "each field arrives as its own part: ~S" with-deadline)
+        (is-false (getf with-deadline :form-encoded) "and the body is not form-encoded: ~S"
+                  with-deadline)
+        (is (equal through-dexador with-deadline)
+            "control: dexador's path delivers the same shape: ~S and ~S"
+            through-dexador with-deadline)))))
+
+(test a-redirect-whose-body-stalls-is-followed-under-a-deadline
+  "#1178, from Copilot's review of #1177. With :DEADLINE and no MAX-BODY-BYTES, the pinned
+connection read a response's whole body before the redirect loop saw its headers. A 302 that
+declares a body and then sends none held the call until the read timeout, and then failed it,
+without the Location ever being requested. Every body under a deadline now comes back as a
+stream, and a followed redirect's body is closed unread.
+
+The 302 declares 100 bytes and sends nothing until the test ends; the read timeout is 4 seconds.
+The call must reach the target and return its body well inside that. The target is on a second
+server because the test server answers one connection at a time, and the first is busy stalling."
+  (let ((done nil))
+    (with-server (target (lambda (path head stream)
+                           (declare (ignore path head))
+                           (%write-response stream 200 '() "the end")))
+      (let ((end (%local target "/end")))
+        (with-server (s (lambda (path head stream)
+                          (declare (ignore path head))
+                          (ignore-errors
+                           (aion/test-http:write-head stream 302 `(("Location" . ,end)
+                                                                   ("Content-Length" . 100)))
+                           (loop until done do (sleep 0.1)))))
+          (unwind-protect
+               (let* ((start (get-internal-real-time))
+                      (r (handler-case
+                             (http:send-request (http:make-request :url (%local s "/")
+                                                                   :read-timeout 4)
+                                                '() :deadline 30)
+                           (http:http-error (e) e)))
+                      (seconds (/ (- (get-internal-real-time) start)
+                                  internal-time-units-per-second)))
+                 ;; Two steps: fiveam's IS evaluates every argument of an AND form, so a
+                 ;; condition in R would reach RESPONSE-BODY.
+                 (is (typep r 'http:response) "the redirect is followed: ~A" r)
+                 (is (equal "the end" (and (typep r 'http:response) (http:response-body r)))
+                     "and its target's body is returned")
+                 (is (< seconds 3) "in ~,1F seconds, without waiting on the 302's body" seconds)
+                 (is (= 1 (length (%received target "/end"))) "and the target was requested once"))
+            (setf done t)))))))
