@@ -1487,8 +1487,10 @@ means that needs a principal refuses the call.
 ON-HOLD is what the app does when the model calls a means registered with :CONFIRM (#531):
   NIL         no confirmation is available, and the call is not run. The default.
   a function  called with a plist describing the call (:PRINCIPAL :AGENT :NAME :SOURCE
-              :ARGUMENTS :ESTIMATE :UNTRUSTED), on this thread; it returns :APPROVE, :DECLINE or
-              :HOLD. :UNTRUSTED is NIL when the turn was clean when the model decided the call,
+              :ARGUMENTS :ESTIMATE :UNTRUSTED), on this thread; it returns :APPROVE, :DECLINE,
+              (:DECLINE text) or :HOLD. (:DECLINE text) declines with the app's own reason: the
+              model is told TEXT instead of the usual sentence, and :TOOL-DECIDED carries it as
+              :REASON (#1191). Any other value counts as no confirmation available. :UNTRUSTED is NIL when the turn was clean when the model decided the call,
               and otherwise a plist saying what it had read, for a warning to the user (#1183):
               :SCOPE (:TURN or :CONVERSATION), :DELEGATED, and :SOURCES, one (:MEANS :ID :SCOPE)
               per call that brought the content in. A held call in a HELD-TURN carries the same.

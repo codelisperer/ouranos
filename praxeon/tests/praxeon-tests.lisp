@@ -9838,3 +9838,91 @@ held on its first has one left, which with :WRAP-UP is the wrap-up."
         (is (eq :wrapped-up how) "the remaining step was the wrap-up")
         (is (null (getf (first (%recording-requests provider)) :tools))
             "and was offered no tools")))))
+
+;;; --- a decline can carry the app's own reason (#1191) ----------------------------------
+
+(defun %paying-agent (&optional (n 1))
+  "An agent whose model asks for the means \"pay\", held for confirmation, N times in one step,
+then answers. Returns the agent and a function answering how many times \"pay\" ran."
+  (let* ((runs 0)
+         (ag (actor:make-agent
+              :name "payer"
+              :provider (make-instance
+                         'scripted
+                         :script (list (llm:make-completion
+                                        :text "" :stop-reason :tool-use
+                                        :tool-calls (loop for i from 1 to n
+                                                          collect (llm:make-tool-call
+                                                                   :id (format nil "p~D" i) :name "pay"
+                                                                   :arguments (make-hash-table :test #'equal))))
+                                       (llm:make-completion :text "Done." :stop-reason :end))))))
+    (actor:register-means ag "pay" "Pay." (lambda (args) (declare (ignore args)) (incf runs) "Paid.")
+                          :confirm t)
+    (values ag (lambda () runs))))
+
+(defun %decided-and-results (thunk)
+  "Run THUNK under an observer. Returns the :TOOL-DECIDED events as (decision reason) lists and
+the :TOOL-RESULT contents, oldest first."
+  (let ((decided '()) (results '()))
+    (evt:with-observer ((lambda (e)
+                          (case (evt:event-type e)
+                            (:tool-decided (push (list (evt:event-get e :decision)
+                                                       (evt:event-get e :reason))
+                                                 decided))
+                            (:tool-result (push (evt:event-get e :content) results)))))
+      (funcall thunk))
+    (values (reverse decided) (reverse results))))
+
+(test a-hold-policy-can-decline-with-its-own-reason
+  "#1191. A blocking :ON-HOLD function may return (:DECLINE text). The call is not run, the model
+is told TEXT, and :TOOL-DECIDED records :DECLINE with TEXT as :REASON, so an app that refuses a
+call itself, here over its own limit, no longer has to approve it and refuse inside the means.
+
+THE CONTROLS: plain :DECLINE still gives the usual sentence and no reason, and a malformed value
+such as (:DECLINE 42) counts as no confirmation available, as any unknown value does."
+  (flet ((turn (policy)
+           (multiple-value-bind (ag runs) (%paying-agent)
+             (multiple-value-bind (decided results)
+                 (%decided-and-results
+                  (lambda () (actor:run-turn ag "Pay" :principal "u1"
+                                                      :on-hold (lambda (call) (declare (ignore call))
+                                                                 policy))))
+               (list decided results (funcall runs))))))
+    (destructuring-bind (decided results runs) (turn '(:decline "Not run: over this turn's limit of 3 confirmations."))
+      (is (equal '((:decline "Not run: over this turn's limit of 3 confirmations.")) decided)
+          "the event records the decline and its reason: ~S" decided)
+      (is (equal '("Not run: over this turn's limit of 3 confirmations.") results)
+          "the model is told the reason: ~S" results)
+      (is (= 0 runs) "and the call did not run"))
+    (destructuring-bind (decided results runs) (turn :decline)
+      (is (equal '((:decline nil)) decided) "control: plain :decline has no reason")
+      (is (equal (list praxeon/actor::+declined+) results) "and the usual sentence")
+      (is (= 0 runs)))
+    (destructuring-bind (decided results runs) (turn '(:decline 42))
+      (is (equal '((:no-confirmation nil)) decided) "control: a malformed decline is no confirmation")
+      (is (equal (list praxeon/actor::+no-confirmation+) results))
+      (is (= 0 runs)))))
+
+(test continue-turn-can-decline-with-a-reason-for-all-calls-or-one
+  "#1191. CONTINUE-TURN takes (:DECLINE text) as the whole decision, or as one call's in the alist,
+with the same effect as a policy's: not run, the model told TEXT, and :REASON on :TOOL-DECIDED."
+  (multiple-value-bind (ag runs) (%paying-agent)
+    (let ((held (nth-value 2 (actor:run-turn ag "Pay" :principal "u1" :on-hold :hold))))
+      (multiple-value-bind (decided results)
+          (%decided-and-results
+           (lambda () (actor:continue-turn ag held '(:decline "Not run: the budget is spent.")
+                                          :principal "u1")))
+        (is (equal '((:decline "Not run: the budget is spent.")) decided) "whole decision: ~S" decided)
+        (is (equal '("Not run: the budget is spent.") results))
+        (is (= 0 (funcall runs))))))
+  (multiple-value-bind (ag runs) (%paying-agent 2)
+    (let ((held (nth-value 2 (actor:run-turn ag "Pay twice" :principal "u1" :on-hold :hold))))
+      (multiple-value-bind (decided results)
+          (%decided-and-results
+           (lambda () (actor:continue-turn ag held '(("p1" . :approve)
+                                                    ("p2" . (:decline "Not run: one is enough.")))
+                                          :principal "u1")))
+        (is (equal '((:approve nil) (:decline "Not run: one is enough.")) decided)
+            "per call: ~S" decided)
+        (is (equal '("Paid." "Not run: one is enough.") results) "per call results: ~S" results)
+        (is (= 1 (funcall runs)) "only the approved call ran")))))
