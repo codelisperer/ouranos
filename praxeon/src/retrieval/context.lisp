@@ -166,9 +166,11 @@ its document are still the ones the context was written for. Returns true when i
 (defun %contextualize-document (corpus contextualizer ledger document-id locale)
   "Write every stale context of DOCUMENT-ID in LOCALE. Returns how many were written."
   (let* ((deriver (contextualizer-id contextualizer))
-         (rows (rc::%document-rows corpus document-id locale
-                                   '(:id :text :section_fingerprint :context :context_deriver
-                                     :context_document_fingerprint :document_fingerprint)))
+         ;; Read under the corpus lock; the model is then called with none held (#1194).
+         (rows (with-corpus-lock (corpus)
+                 (rc::%document-rows corpus document-id locale
+                                     '(:id :text :section_fingerprint :context :context_deriver
+                                       :context_document_fingerprint :document_fingerprint))))
          (texts (mapcar (lambda (r) (param:row-value r :text)) rows))
          (fingerprint (rc::%document-fingerprint texts))
          (document (format nil "~{~A~^~%~%~}" texts))
@@ -177,14 +179,18 @@ its document are still the ones the context was written for. Returns true when i
     ;; same rows, the same way a sync computes it.
     (when (some (lambda (r) (not (equal fingerprint (param:row-value r :document_fingerprint))))
                 rows)
-      (rc::with-db ((corpus-store corpus))
-        (rc::%refresh-document-fingerprint corpus document-id locale)))
+      (with-corpus-lock (corpus)
+        (rc::with-db ((corpus-store corpus))
+          (rc::%refresh-document-fingerprint corpus document-id locale))))
     (dolist (row rows count)
       (unless (and (param:row-value row :context)
                    (equal deriver (param:row-value row :context_deriver))
                    (equal fingerprint (param:row-value row :context_document_fingerprint)))
         (let ((context (%ask contextualizer ledger document (param:row-value row :text))))
-          (when (%write-context corpus row context deriver fingerprint locale)
+          ;; %WRITE-CONTEXT checks the fingerprints, so a chunk a sync changed during the call
+          ;; is not written, and is pending next time.
+          (when (with-corpus-lock (corpus)
+                  (%write-context corpus row context deriver fingerprint locale))
             (incf count)))))))
 
 (defun contextualize-pending (corpus &key ledger)
@@ -205,8 +211,13 @@ afford this signals PRAXEON/CEILING:BUDGET-EXHAUSTED. The contexts written befor
 and the next call carries on from them.
 
 Each context is written with its chunk's BM25 terms, from the context and the text, and makes
-the chunk's embedding stale, so EMBED-PENDING embeds it again. Serialised per corpus with the
-syncs (WITH-CORPUS-LOCK); the model is called outside the database lock."
+the chunk's embedding stale, so EMBED-PENDING embeds it again.
+
+THE MODEL IS CALLED WITH NO CORPUS LOCK HELD (#1194): the pending documents, each document's
+rows, and each context's write are done under the corpus lock, and each chat call between them
+holds neither it nor the database lock, so a sync of the same corpus does not wait for the whole
+run. %WRITE-CONTEXT checks the fingerprints before writing, which makes that safe. One run per
+corpus at a time is kept by WITH-CORPUS-RUN-LOCK, which syncs do not take."
   (let ((contextualizer (corpus-contextualizer corpus)))
     (cond
       ((null contextualizer) (values 0 :no-contextualizer))
@@ -217,8 +228,9 @@ syncs (WITH-CORPUS-LOCK); the model is called outside the database lock."
       ((rc::%backfill-held-p corpus) (values 0 :backfill-not-started))
       (t
        (let ((count 0))
-         (with-corpus-lock (corpus)
-           (dolist (group (%pending-documents corpus (contextualizer-id contextualizer)))
+         (with-corpus-run-lock (corpus)
+           (dolist (group (with-corpus-lock (corpus)
+                            (%pending-documents corpus (contextualizer-id contextualizer))))
              (incf count (%contextualize-document corpus contextualizer ledger
                                                   (first group) (second group)))))
          (when (plusp count)

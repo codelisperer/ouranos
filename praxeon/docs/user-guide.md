@@ -801,8 +801,13 @@ naming the database, when it is absent.
 A sync makes the corpus hold exactly the sections it was given, and removes the rest in its
 scope. Unchanged sections are not touched, so running it at every boot is cheap. It needs no
 embedder. `embed-pending` embeds whatever has no embedding from the current model, which
-includes everything after a model change. Syncs and `embed-pending` on one corpus run one at a
-time, across processes as well (a Postgres advisory lock; on SQLite, SQLite's own write lock).
+includes everything after a model change. Syncs on one corpus run one at a time, across processes
+as well (a Postgres advisory lock; on SQLite, SQLite's own write lock). `embed-pending` and
+`contextualize-pending` take that lock only to read a batch and to write it, and call the
+provider with it released, so a sync of a document does not wait for a rebuild that takes
+minutes (#1194). A chunk a sync changes during the call is not written, and is done on the next
+run. Two runs of `embed-pending` or `contextualize-pending` on one corpus still run one at a time,
+under a second lock that syncs do not take, so they never pay for the same chunks twice.
 
 **On SQLite** the store takes a SQLite connection the same way, and every function above behaves
 the same, with these differences:
