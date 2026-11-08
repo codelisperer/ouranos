@@ -29,6 +29,21 @@
   "Not run: the app does not allow this call here. For a web address, the user must have written it, or a web search must have returned it before anything else was read in this turn. Do not try other addresses to get around this; tell the user.")
 (defparameter +per-turn-limit+ "Not run: this tool may be called at most ~D time~:P in one turn.")
 
+(defun %reasoned-decline-p (decision)
+  "Whether DECISION is a decline with the app's own reason: (:DECLINE text), TEXT a non-empty
+string (#1191). The call is not run, as for :DECLINE, and the model is told TEXT."
+  (and (consp decision) (eq (first decision) :decline)
+       (consp (rest decision)) (stringp (second decision)) (plusp (length (second decision)))
+       (null (cddr decision))))
+
+(defun %declined-p (decision)
+  "Whether DECISION declines the call: :DECLINE, or :DECLINE with a reason."
+  (or (eq decision :decline) (%reasoned-decline-p decision)))
+
+(defun %decline-text (decision)
+  "What the model is told for a call declined by DECISION: its reason, or +DECLINED+."
+  (if (%reasoned-decline-p decision) (second decision) +declined+))
+
 (defun %guard-refusal (agent guard entry args after-untrusted)
   "The text a call to ENTRY with ARGS is refused with by the turn's guard (#827), or NIL when it
 may run. AFTER-UNTRUSTED is whether untrusted content had entered the turn when the model
@@ -158,7 +173,13 @@ estimate plist (a ratio included), means the call is not run."
 
 (defun %held-event (type held-id call &rest more)
   "Emit TYPE for CALL. :ID is the tool-call id, as in :TOOL-CALL and :TOOL-RESULT, and :HELD
-the held turn's id, NIL for a call decided on the spot."
+the held turn's id, NIL for a call decided on the spot. A decline with a reason is emitted as
+:DECISION :DECLINE with the text as :REASON (#1191), so an app's log keeps both."
+  (let ((decision (getf more :decision)))
+    (when (%reasoned-decline-p decision)
+      (setf more (list* :decision :decline :reason (second decision)
+                        (loop for (k v) on more by #'cddr
+                              unless (eq k :decision) append (list k v))))))
   (apply #'evt:emit type :id (getf call :id) :held held-id :principal *principal*
          :name (getf call :name)
          :source (getf call :source) :estimate (getf call :estimate)
@@ -396,13 +417,16 @@ calls held so far are written as not run."
                                                               :arguments args :estimate estimate
                                                               :untrusted untrusted))
                                                *on-hold*)))
-                               (case policy
+                               (case (if (%reasoned-decline-p policy) :decline policy)
                                  (:approve
                                   (decided :approve)
                                   (run id name args))
                                  (:decline
-                                  (decided :decline +declined+)
-                                  (push (%not-run-part agent id name args +declined+) parts))
+                                  ;; :DECLINE, or (:DECLINE text) with the app's own reason for
+                                  ;; the model (#1191). Either way the call is not run.
+                                  (decided policy (%decline-text policy))
+                                  (push (%not-run-part agent id name args (%decline-text policy))
+                                        parts))
                                  (:hold
                                   (if *hold-allowed*
                                       (progn
@@ -646,7 +670,11 @@ state of the history, :PENDING or :ANSWERED."
 ;;; --- writing the results of a held step ------------------------------------------------
 
 (defun %decision-of (decision id)
-  (if (listp decision) (cdr (assoc id decision :test #'equal)) decision))
+  "The decision for the held call ID: DECISION itself when it covers every call, a keyword or a
+decline with a reason (#1191), and otherwise ID's entry in the alist DECISION."
+  (if (or (atom decision) (%reasoned-decline-p decision))
+      decision
+      (cdr (assoc id decision :test #'equal))))
 
 (defun %held-means-current-p (agent call)
   "Whether the means CALL names is still registered with the source it was held with."
@@ -655,16 +683,15 @@ state of the history, :PENDING or :ANSWERED."
 
 (defun %decision-text (decision)
   "What the model is told for a held call that was not run under DECISION."
-  (case decision
-    (:decline +declined+)
-    (:expired +expired+)
-    (t +unanswered+)))
+  (cond ((%declined-p decision) (%decline-text decision))
+        ((eq decision :expired) +expired+)
+        (t +unanswered+)))
 
 (defun %held-part (agent call decision permit recorded)
   "The tool-result part for the held CALL under DECISION. RECORDED is true when the decision was
 recorded by an earlier attempt: an approval then may have run, and nothing runs now."
   (let ((id (getf call :id)) (name (getf call :name)) (args (getf call :arguments)))
-    (case decision
+    (case (if (%reasoned-decline-p decision) :decline decision)
       (:approve
        (cond (recorded
               (%not-run-part agent id name args +may-have-run+ :outcome :unknown :announce nil))
@@ -685,7 +712,7 @@ recorded by an earlier attempt: an approval then may have run, and nothing runs 
                          :outcome outcome :ms ms (when error-p (list :is-error t)))
                   (llm:tool-result-part id kept error-p))))
              (t (%not-run-part agent id name args +unavailable+ :announce nil))))
-      (:decline (%not-run-part agent id name args +declined+ :announce nil))
+      (:decline (%not-run-part agent id name args (%decline-text decision) :announce nil))
       (:expired (%not-run-part agent id name args +expired+ :announce nil))
       (t (%not-run-part agent id name args +unanswered+ :announce nil)))))
 
@@ -763,17 +790,22 @@ held call after it is written under its decision, with its own :TOOL-DECIDED eve
           (held-turn-order held)))))))
 
 (defun %valid-decision-p (decision held)
-  (or (member decision '(:approve :decline))
-      (and (listp decision)
-           (null (set-difference (%held-ids held) (mapcar #'car decision) :test #'equal))
-           (every (lambda (pair) (member (cdr pair) '(:approve :decline))) decision))))
+  (flet ((one-p (d) (or (member d '(:approve :decline)) (%reasoned-decline-p d))))
+    (or (one-p decision)
+        (and (listp decision)
+             (every #'consp decision)
+             (null (set-difference (%held-ids held) (mapcar #'car decision) :test #'equal))
+             (every (lambda (pair) (one-p (cdr pair))) decision)))))
 
 ;;; --- continuing, and moving on ---------------------------------------------------------
 
 (defun continue-turn (agent held decision &key principal permit (on-hold nil on-hold-p) claim
                                                 on-step-limit)
   "Continue the turn HELD ended, with the user's DECISION: :APPROVE or :DECLINE for every held
-call, or an alist of (tool-call-id . decision) with one entry per held call. PRINCIPAL must be
+call, or an alist of (tool-call-id . decision) with one entry per held call. A decline may carry
+the app's own reason, (:DECLINE text), as the whole decision or as one call's (#1191): the call
+is not run, the model is told TEXT, and the :TOOL-DECIDED event has :DECISION :DECLINE and
+:REASON TEXT. PRINCIPAL must be
 the one the calls were held for. PERMIT and ON-HOLD are the turn's, given again because
 functions cannot be stored. Returns RUN-TURN's values, or NIL, :ALREADY-DECIDED and the decision
 recorded first.
