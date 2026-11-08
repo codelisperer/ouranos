@@ -604,7 +604,9 @@ like any other response, while the connection is open, so its body is kept (#527
              (multiple-value-bind (body status headers)
                  (http1-exchange stream (request-method req) uri (request-headers req)
                                  (request-content req) :closer #'close-connection)
-               (if (request-max-body-bytes req)
+               ;; A body is handed back as a stream when the caller caps it, or when a caller
+               ;; must see the headers before deciding to read it at all (#1178).
+               (if (or (request-max-body-bytes req) *%pinned-body-stream*)
                    (progn (setf body-owns-connection t)
                           (values body status headers))
                    (let ((octets (let ((out (make-array 0 :element-type '(unsigned-byte 8)
@@ -823,7 +825,9 @@ is read here and the connection closed."
              (multiple-value-bind (body status headers)
                  (http1-exchange stream (request-method req) uri (request-headers req)
                                  (request-content req) :closer #'close-connection)
-               (if (request-max-body-bytes req)
+               ;; A body is handed back as a stream when the caller caps it, or when a caller
+               ;; must see the headers before deciding to read it at all (#1178).
+               (if (or (request-max-body-bytes req) *%pinned-body-stream*)
                    (progn (setf body-owns-connection t)
                           (values body status headers))
                    (let ((octets (let ((out (make-array 0 :element-type '(unsigned-byte 8)

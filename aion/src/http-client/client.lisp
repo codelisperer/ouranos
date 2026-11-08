@@ -432,6 +432,24 @@ reused that number."
   (%take-back-socket)
   (ignore-errors (close body)))
 
+(defvar *%pinned-body-stream* nil
+  "True while %REQUEST-PINNED must hand back every body as a stream, capped or not, so that the
+caller sees the status and headers before any of the body is read. %HTTP-UNDER-DEADLINE binds it:
+a redirect it follows has its body closed unread, and before #1178 a 302 with a slow body held the
+call, or failed it, before its Location was ever requested.")
+
+(defun %read-to-end (body)
+  "Every octet of BODY, a stream, which is closed here. No limit: for a caller that set none."
+  (unwind-protect
+       (let ((out (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
+             (buffer (make-array 8192 :element-type '(unsigned-byte 8))))
+         (loop for end = (read-sequence buffer body)
+               while (plusp end)
+               do (loop for i below end do (vector-push-extend (aref buffer i) out))
+               while (= end (length buffer)))
+         (coerce out '(simple-array (unsigned-byte 8) (*))))
+    (%close-body body)))
+
 (defun %read-capped (body limit url)
   "BODY as octets, reading at most LIMIT of them. BODY is a stream (closed here) or a vector.
 Signals RESPONSE-TOO-LARGE when there is more than LIMIT."
@@ -818,12 +836,15 @@ to make. The refusal is an HTTP-ERROR before anything is sent."
                  (error 'http-error :detail (format nil "~A does not resolve" host)))
                (setf (request-connect-address hop) address)
                hop))))
-    (%http-following-redirects
-     req
-     :hops (if (eql 0 (getf (proxy-arguments (request-url req)) :max-redirects))
+    ;; EVERY BODY COMES BACK AS A STREAM, so a followed redirect's body is closed unread and
+    ;; the caller's MAX-BODY-BYTES, or none, applies only to the response returned (#1178).
+    (let ((*%pinned-body-stream* t))
+      (%http-following-redirects
+       req
+       :hops (if (eql 0 (getf (proxy-arguments (request-url req)) :max-redirects))
                0
                (or (request-follow-redirects req) 0))
-     :prepare #'pin)))
+       :prepare #'pin))))
 
 (defun %http (req)
   "Perform REQ and return a RESPONSE, following redirects in whichever way is safe for it.
@@ -884,7 +905,9 @@ has no response to hand back, so it signals HTTP-ERROR directly."
                         :detail (format nil "~A declares a body of ~D bytes, over the limit of ~D"
                                         url declared limit))))
              (make-response :status status :headers headers
-                            :bytes (if limit (%read-capped body limit url) (%as-octets body)))))
+                            :bytes (cond (limit (%read-capped body limit url))
+                                         ((streamp body) (%read-to-end body))
+                                         (t (%as-octets body))))))
       (handler-case
           (multiple-value-bind (body status headers)
               (if (request-connect-address req)

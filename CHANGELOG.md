@@ -1475,6 +1475,18 @@ its tag.
 
 ### Fixed
 
+- **`send-request :deadline` sends a multipart alist as multipart, and follows a redirect
+  without reading its body** (#1178). Both affected only requests made with `:deadline`, which
+  go over a connection this client opens itself, and arrived with it in #1162:
+  - an alist with a `Content-Type` beginning `multipart/`, or with no `Content-Type` and a
+    pathname value, was sent form-encoded under the multipart type, so the server received
+    `field=value`. It is now encoded as multipart with a boundary, as dexador encodes it without
+    `:deadline`. The same writer serves `fetch-public` and `open-response-stream`, so a
+    multipart alist sent through those is now encoded correctly too;
+  - with no `max-body-bytes`, a redirect's whole body was read before the redirect was
+    followed, so a `3xx` whose body was slow or never came held the call until the read timeout
+    and failed it without requesting its `Location`. A followed redirect's body is now closed
+    unread, and only the final response's body is read.
 - **`reinitialize-instance` on an S3 blob store stores the endpoint trimmed, as `make-s3-store`
   does** (#1151). It used to check trimmed copies of `:endpoint` and keep the value as given, so
   `(reinitialize-instance store :endpoint " 127.0.0.1:9000 ")` passed its checks and every URL
