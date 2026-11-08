@@ -14,6 +14,15 @@ its tag.
 
 ### An app may have to act
 
+- **A call to a tool the agent does not have is answered as not run, and the turn goes on**
+  (#1196). `praxeon/actor:run-turn` used to let `act` signal `means-failure` ("no such means
+  registered") for such a call, which failed the turn unless the app handled it. Now the model is
+  told `Not run: there is no tool named "x". The tools available are: ...` and can recover within
+  `:max-steps`. The answer is the same for a means the turn's `:permit` does not allow, and lists
+  only the tools that turn offered. **An app that handled `means-failure` for an unknown or
+  unpermitted name, for example with one of `act`'s restarts, no longer sees it** for the first
+  `praxeon/actor:*max-unknown-tool-calls*` (3) such calls in a turn; the next one still signals it,
+  so a model that keeps inventing tools still ends the turn.
 - **`praxeon/actor:register-means` signals an error for a `:confirm` value other than NIL, T, a
   function or `:after-untrusted`** (#1185). Any other true value used to be taken as T, holding
   every call. An app passing another symbol, such as `:yes`, should pass T.
