@@ -3129,3 +3129,45 @@ server because the test server answers one connection at a time, and the first i
                  (is (< seconds 3) "in ~,1F seconds, without waiting on the 302's body" seconds)
                  (is (= 1 (length (%received target "/end"))) "and the target was requested once"))
             (setf done t)))))))
+
+(test a-multipart-content-type-under-a-deadline-is-checked-and-has-one-boundary
+  "Copilot's review of #1180, two defects in the multipart fix for #1178.
+
+THE CALLER'S TYPE IS CHECKED. The generated Content-Type carries the caller's value, and skipping
+the caller's header in the header loop also skipped its CR/LF check, so a type with CR LF in it
+would have injected a header. It signals HTTP-ERROR again, before anything is sent.
+
+THE ADVERTISED BOUNDARY IS THE ONE THE BODY USES. A caller's boundary=old was kept and a second
+appended, so a receiver taking the first value could not find the parts. The caller's boundary
+is replaced and its other parameters kept; the test reads the boundary the server received and
+finds it as the body's delimiter."
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "ok")))
+    (flet ((send (type)
+             (http:send-request
+              (http:make-request :method :post :url (%local s "/upload") :read-timeout 5
+                                 :headers (list (cons "Content-Type" type))
+                                 :content '(("name" . "Ada")))
+              '() :deadline 30)))
+      (signals http:http-error
+        (send (format nil "multipart/form-data~C~CX-Injected: 1" #\Return #\Newline)))
+      ;; The connection is opened before the request is written, so the server records one with
+      ;; an empty head; what matters is that no byte of the request reached it.
+      (is (every (lambda (r) (string= "" (aion/test-http:request-head r)))
+                 (aion/test-http:server-requests s))
+          "and no byte of the request reached the server")
+      (send "multipart/form-data; boundary=old; charset=utf-8")
+      (let* ((r (first (aion/test-http:server-requests s)))
+             (type (aion/test-http:request-header r "Content-Type"))
+             (body (aion/test-http:request-body-string r))
+             (at (search "boundary=" type))
+             (boundary (and at (let ((v (subseq type (+ at 9))))
+                                 (subseq v 0 (or (position #\; v) (length v)))))))
+        (is (= 1 (loop for i = (search "boundary=" type) then (search "boundary=" type :start2 (1+ i))
+                       while i count t))
+            "one boundary is advertised: ~A" type)
+        (is-false (search "boundary=old" type) "and it is not the caller's: ~A" type)
+        (is-true (search "charset=utf-8" type) "the caller's other parameter is kept: ~A" type)
+        (is-true (and boundary (search (format nil "--~A" boundary) body))
+                 "the advertised boundary delimits the body: ~A" type)))))

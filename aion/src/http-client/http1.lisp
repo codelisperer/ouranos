@@ -297,7 +297,23 @@ WRITE-MULTIPART-CONTENT, as dexador's WinHTTP backend writes it."
         (sink (make-instance '%octet-sink)))
     (dexador.body:write-multipart-content content boundary sink)
     (values (coerce (%sink-octets sink) '(simple-array (unsigned-byte 8) (*)))
-            (format nil "~A; boundary=~A" (or content-type "multipart/form-data") boundary))))
+            (format nil "~A; boundary=~A" (%without-boundary (or content-type "multipart/form-data"))
+                    boundary))))
+
+(defun %without-boundary (content-type)
+  "CONTENT-TYPE with any boundary parameter removed and its other parameters kept. The body is
+written with a boundary of its own, so a caller's boundary=old left in place would advertise two,
+and a receiver that takes the first could not find the parts (Copilot's review of #1180)."
+  (let ((parts (mapcar (lambda (p) (string-trim '(#\Space #\Tab) p))
+                       (uiop:split-string content-type :separator ";"))))
+    (format nil "~{~A~^; ~}"
+            (cons (first parts)
+                  (remove-if (lambda (p)
+                               (let ((eq (position #\= p)))
+                                 (and eq (string-equal "boundary"
+                                                       (string-trim '(#\Space #\Tab)
+                                                                    (subseq p 0 eq))))))
+                             (rest parts))))))
 
 (defun %encode-target (string)
   "STRING with every character outside 0x21-0x7E percent-encoded as its UTF-8 octets: a space,
@@ -367,7 +383,12 @@ body."
             (unless (and (plusp (length name)) (every #'%token-char-p name))
               (error 'http-error :detail (format nil "not a header name: ~S" name)))
             (push (format nil "~A: ~A" name (%field-safe (princ-to-string (cdr h)) name)) lines))))
-      (cond (multipart-type (push (format nil "Content-Type: ~A" multipart-type) lines))
+      ;; CHECKED LIKE ANY OTHER FIELD: the generated type carries the caller's Content-Type, and
+      ;; skipping the caller's header in the loop above also skipped its check, so a CR LF in it
+      ;; would have written another header (Copilot's review of #1180).
+      (cond (multipart-type
+             (push (format nil "Content-Type: ~A" (%field-safe multipart-type "Content-Type"))
+                   lines))
             ((and body
                   (not (find "content-type" headers :key (lambda (h) (string (car h)))
                                                     :test #'string-equal)))
