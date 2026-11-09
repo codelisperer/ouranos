@@ -394,10 +394,18 @@ while GENERATION is current, so a line from a process that has since exited is n
                        (log:info "hyperion/sidecar: ready" :name (%name s) :captured t)))))
       (error () nil))))
 
+(defparameter +restart-policy+
+  (aion/retry:make-retry-policy :name "sidecar restart" :base-delay 1 :multiplier 2 :max-delay 30
+                                :jitter :none)
+  "The schedule of a restarting sidecar's launches, as AION/RETRY computes it (#79). No jitter: one
+process restarts at a time, so there is nothing to spread out (the hub's ruling 5 on #79).")
+
 (defun %restart-delay (attempt)
   "Seconds to wait before launch number ATTEMPT, where 1 is the first launch and 2 the first
-restart: 1 s before the first restart, doubling to at most 30 s."
-  (min 30 (expt 2 (max 0 (- attempt 2)))))
+restart: 1 s before the first restart, doubling to at most 30 s. AION/RETRY:RETRY-DELAY of
++RESTART-POLICY+ (#79); attempt 1 is given attempt 2's delay, as before, since RETRY-DELAY starts
+at the first retry."
+  (aion/retry:retry-delay +restart-policy+ (max 2 attempt) 0))
 
 (defun %watch (s process generation)
   "Wait for PROCESS to exit. While GENERATION is current, record its exit code and, for a sidecar

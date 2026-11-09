@@ -1551,6 +1551,13 @@ its tag.
 
 ### Added
 
+- **`praxeon/image:image-request-failed` answers `aion/retry:transience` and
+  `aion/retry:retry-after`** (#79), so an app can run `generate-image` under
+  `aion/retry:with-retry` and have the service's Retry-After honoured. A 429 is `:transient`, a
+  5xx is what `aion/http-client:status-transience` says of its status, and a lost answer is
+  `:unknown`, since the image may already have been made and charged for. praxeon still does not
+  retry an image request by itself. The MCP task-poll backoff and hyperion's sidecar restart
+  schedule now compute their doubling with `aion/retry:retry-delay`; both schedules are unchanged.
 - **`praxeon/llm:*retry*`: model, embedding and rerank requests can be retried under an
   `aion/retry` policy** (#79). NIL by default, which changes nothing. Set to a policy,
   `complete`, `embed`, `embed-batch`, `embed-documents`, `embed-query` and `rerank` retry what it

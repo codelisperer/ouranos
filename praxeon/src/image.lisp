@@ -332,7 +332,23 @@ sent a date.
 
 It is a PROVIDER-REQUEST-FAILED, so a caller outside a turn handles it as before. Inside a turn
 the generate-image means turns it into a TOOL-ERROR-RESULT, so the model can tell the user to try
-again and the turn goes on. Praxeon does not retry the request."))
+again and the turn goes on. Praxeon does not retry the request. It answers AION/RETRY's
+TRANSIENCE and RETRY-AFTER (#79), so an app that wants a retry can run GENERATE-IMAGE under
+AION/RETRY:WITH-RETRY and have the service's Retry-After honoured."))
+
+(defmethod aion/retry:transience ((c image-request-failed))
+  "From KIND (#79): a 429 is :TRANSIENT, since the service refused the request without making
+anything; a 5xx is what AION/HTTP-CLIENT:STATUS-TRANSIENCE says of its status, so a 503 is
+:TRANSIENT and a 500 :UNKNOWN; and no answer at all is :UNKNOWN, since the service may have made
+the image, and charged for it, before the connection was lost."
+  (case (image-request-failed-kind c)
+    (:rate-limited :transient)
+    (:server-error (aion/http-client:status-transience (cnd:provider-request-failed-status c) nil))
+    (:no-answer :unknown)))
+
+(defmethod aion/retry:retry-after ((c image-request-failed))
+  "The seconds the service's Retry-After header asked for, or NIL (#79)."
+  (image-request-failed-retry-after c))
 
 (defun %refusal-text (provider code stage categories)
   (format nil "The ~A image provider refused to create this image under its content policy~@[ (code ~A)~]~@[ at the ~A stage~]~@[; categories: ~{~A~^, ~}~]. No image was made. Tell the user it was refused, and do not retry the same request."
