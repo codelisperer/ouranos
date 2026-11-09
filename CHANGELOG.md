@@ -1487,6 +1487,15 @@ its tag.
 
 ### Fixed
 
+- **A sync no longer waits for `embed-pending` or `contextualize-pending` to finish** (#1194).
+  Both held the corpus lock across every provider call, so `praxeon/retrieval:sync-document` and
+  `sync-corpus` on the same corpus waited for the whole rebuild, which for a few thousand chunks
+  is minutes; on Postgres the lock is an advisory lock, so other processes waited too. They now
+  take the corpus lock only to read each batch and to write it, and call the provider with it
+  released. The writes were already guarded, so a chunk a sync changes during the call is not
+  written and is done on the next run. Two runs on one corpus still run one at a time, under a
+  new lock, `praxeon/retrieval:with-corpus-run-lock`, which syncs do not take, so they do not pay
+  for the same chunks twice. On Postgres it is a second advisory key per corpus.
 - **`send-request :deadline` sends a multipart alist as multipart, and follows a redirect
   without reading its body** (#1178). Both affected only requests made with `:deadline`, which
   go over a connection this client opens itself, and arrived with it in #1162:

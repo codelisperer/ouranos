@@ -32,7 +32,7 @@
    #:chunk-store #:make-chunk-store #:store-connection #:store-table #:store-dimensions
    #:ensure-schema #:check-vector-extension #:*table*
    #:corpus #:make-corpus #:corpus-name #:corpus-store #:corpus-chunker #:corpus-where
-   #:with-corpus-lock #:call-with-corpus-lock
+   #:with-corpus-lock #:call-with-corpus-lock #:with-corpus-run-lock #:call-with-corpus-run-lock
    ;; sync
    #:sync-document #:sync-corpus
    #:sync-report #:sync-report-added #:sync-report-replaced #:sync-report-updated
@@ -84,7 +84,7 @@
    #:chunk-store #:make-chunk-store #:store-connection #:store-table #:store-dimensions
    #:ensure-schema #:check-vector-extension #:*table*
    #:corpus #:make-corpus #:corpus-name #:corpus-store #:corpus-chunker #:corpus-where
-   #:with-corpus-lock #:call-with-corpus-lock
+   #:with-corpus-lock #:call-with-corpus-lock #:with-corpus-run-lock #:call-with-corpus-run-lock
    #:sync-document #:sync-corpus
    #:sync-report #:sync-report-added #:sync-report-replaced #:sync-report-updated
    #:sync-report-unchanged #:sync-report-removed
@@ -147,7 +147,7 @@ argument.")
    #:chunk-store #:make-chunk-store #:store-connection #:store-table #:store-dimensions
    #:ensure-schema #:check-vector-extension #:*table*
    #:corpus #:make-corpus #:corpus-name #:corpus-store #:corpus-chunker #:corpus-where
-   #:with-corpus-lock #:call-with-corpus-lock
+   #:with-corpus-lock #:call-with-corpus-lock #:with-corpus-run-lock #:call-with-corpus-run-lock
    #:sync-document #:sync-corpus
    #:sync-report #:sync-report-added #:sync-report-replaced #:sync-report-updated
    #:sync-report-unchanged #:sync-report-removed
