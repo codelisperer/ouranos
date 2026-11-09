@@ -429,7 +429,8 @@
   ;; aion/windows on Windows starts each sidecar suspended in a kill-on-close job object with no
   ;; console window (#700). Nothing here depends on hyperion, so hyperion can depend on this.
   :depends-on ("aion/log" "aion/secret" (:feature :win32 "aion/windows")
-               "aion/dynamic")   ; unblock-interrupts, first in each sidecar thread (#541)
+               "aion/dynamic"    ; unblock-interrupts, first in each sidecar thread (#541)
+               "aion/retry")     ; the restart schedule is RETRY-DELAY's (#79)
   :components ((:file "src/sidecar"))
   :in-order-to ((test-op (test-op "hyperion/sidecar/tests"))))
 

@@ -213,7 +213,8 @@
   ;; aion/windows on Windows only, for the job object each local server runs in (#599).
   :depends-on ("praxeon" "aion/http-client" "aion/log" "aion/oauth" "com.inuoe.jzon" "cl-base64"
                (:feature :win32 "aion/windows")
-               "aion/dynamic")   ; unblock-interrupts, first in each thread it starts (#541)
+               "aion/dynamic"    ; unblock-interrupts, first in each thread it starts (#541)
+               "aion/retry")     ; a failed task poll's backoff is RETRY-DELAY's (#79)
   :serial t
   :components ((:module "src/mcp"
                 :serial t
@@ -273,7 +274,8 @@
   :license "MIT"
   :depends-on ("praxeon" "aion/http-client" "aion/log" "com.inuoe.jzon"
                "cl-base64"            ; the provider sends each image as base64
-               "aion/random")         ; the multipart boundary of an edit, from the OS generator
+               "aion/random"          ; the multipart boundary of an edit, from the OS generator
+               "aion/retry")          ; IMAGE-REQUEST-FAILED's TRANSIENCE and RETRY-AFTER (#79)
   :serial t
   :components ((:file "src/image")
                (:file "src/image-google")))  ; Google's Gemini API as a second provider (#758)
