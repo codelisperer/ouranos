@@ -14,6 +14,20 @@ its tag.
 
 ### An app may have to act
 
+- **A call to a tool the agent does not have is answered as not run, and the turn goes on**
+  (#1196). `praxeon/actor:run-turn` used to let `act` signal `means-failure` ("no such means
+  registered") for such a call, which failed the turn unless the app handled it. Now the model is
+  told `Not run: there is no tool named "x". The tools available are: ...` and can recover within
+  `:max-steps`. The answer is the same for a means the turn's `:permit` does not allow, and lists
+  only the tools that turn offered. **An app that handled `means-failure` for an unknown or
+  unpermitted name, for example with one of `act`'s restarts, no longer sees it** for the first
+  `praxeon/actor:*max-unknown-tool-calls*` (3) such calls in a turn; the next one still signals it,
+  so a model that keeps inventing tools still ends the turn.
+- **`praxeon/retrieval:embed-pending` and `contextualize-pending` signal an error when called inside
+  `with-corpus-lock`** (#1200). Since #1194 a run takes its own run lock first and the corpus lock
+  second; called inside the corpus lock, it would take them the other way round and could deadlock
+  with a concurrent run, depending on timing. **An app that called either inside
+  `with-corpus-lock` must move the call outside it.** `ingest` already calls them outside.
 - **`praxeon/actor:register-means` signals an error for a `:confirm` value other than NIL, T, a
   function or `:after-untrusted`** (#1185). Any other true value used to be taken as T, holding
   every call. An app passing another symbol, such as `:yes`, should pass T.
@@ -1544,6 +1558,27 @@ its tag.
   which the built-in prompt cannot do. It returns the context itself, or messages to send to the
   provider in place of the built-in prompt. `:version`, a non-empty string, is required with it
   and goes into `contextualizer-id`, so changing it makes every context stale.
+- **`praxeon/image:register`, `register-openai-image` and `register-google-image` take
+  `:confirm`** and pass it to `register-means` (#1189): NIL, T, an estimate function, or
+  `:after-untrusted`. Their `:requires-user-intent` still defaults to T, except with `:confirm
+  :after-untrusted`, where it defaults to NIL, so that value can be passed alone. An app that set
+  the image means' confirm slot after registering can use the key instead.
+- **A hold policy and `continue-turn` can decline a call with the app's own reason,
+  `(:decline "text")`** (#1191). The call is not run, as for `:decline`; the model is told the
+  text instead of "Not run: the user declined.", and the `:tool-decided` event has `:decision
+  :decline` and `:reason` with the text. `continue-turn` takes it as the whole decision or as one
+  call's in the alist. An app that approved a call and refused it inside the means, so that its
+  log recorded an approval for a call that never ran, can return this instead.
+- **`praxeon/actor:run-turn` takes `:on-step-limit :wrap-up`, which makes the last of
+  `:max-steps` a tool-free wrap-up instead of failing** (#1182). Without it a turn that used every
+  step without an answer signalled `deliberation-failure`. With it, the last step offers no tools
+  and asks the model for the best answer from what the turn gathered, and `run-turn` returns that
+  answer with a second value of `:wrapped-up`. The wrap-up counts within `:max-steps` and emits
+  the usual `:usage` event; the instruction is sent in the system prompt for that call only and is
+  not recorded in the history. `run-turn-through` and `continue-turn` take the same key. It needs
+  `:max-steps` of at least 2. A wrap-up that asks for tools anyway is not obeyed and the turn
+  signals `deliberation-failure`. An app that ran the turn with one step fewer and then a second
+  tool-free turn on failure can use this instead.
 - **A call held for confirmation after untrusted content says what was read, and where from**
   (#1183). The plist `praxeon/actor:run-turn` passes to an `:on-hold` function, each call in a
   `held-turn`, and the `:tool-held` and `:tool-decided` events now carry `:untrusted`: NIL when

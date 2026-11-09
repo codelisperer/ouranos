@@ -444,6 +444,40 @@ and says it is incomplete:
       text))
 ```
 
+**When a turn runs out of steps.** `:max-steps`, 8 by default, bounds how many times a turn asks
+the model. A turn that uses every step without an answer signals `deliberation-failure` ("no final
+answer within N steps"), and what it read is not turned into an answer. Pass
+`:on-step-limit :wrap-up` to `run-turn`, `run-turn-through` or `continue-turn` to make the last
+step a wrap-up instead (#1182). That step offers the model no tools and asks for the best answer
+from what the turn gathered. `run-turn` returns the answer with a second value, `:wrapped-up`, so
+the app can tell it from an ordinary answer, for example to say it may be incomplete. The
+wrap-up is one of the `:max-steps`, so the limit stays the ceiling, and it emits a `:usage` event
+like any step. A turn that answers before its last step is not affected.
+
+- `:wrap-up` needs `:max-steps` of at least 2, one to gather and one to answer. Any other value,
+  or `:wrap-up` with fewer steps, signals an error before anything is recorded.
+- The instruction goes in the system prompt for that one call only, after any cached prefix. The
+  history gains the answer and nothing else.
+- A model that asks for tools in the wrap-up anyway is not obeyed: the calls are not run or
+  recorded, and the turn signals `deliberation-failure` as it would without the option.
+
+```lisp
+(multiple-value-bind (text mark)
+    (praxeon/actor:run-turn agent "Compare the three reports." :max-steps 6 :on-step-limit :wrap-up)
+  (if (eq mark :wrapped-up)
+      (format nil "~A~%~%(I ran out of steps; this is what I found so far.)" text)
+      text))
+```
+
+**When the model calls a tool the agent does not have.** Models invent tool names, or call one
+from another agent's set. Such a call is answered as not run, and the turn goes on (#1196): the
+model is told `Not run: there is no tool named "x". The tools available are: ...`, and can try
+again within the turn's `:max-steps`. The same answer is given for a means the turn's `:permit`
+does not allow, and the list holds only the tools the turn offered the model, so the answer cannot
+be used to find out what else is registered. At most `praxeon/actor:*max-unknown-tool-calls*`
+such calls, 3, are answered in one turn; the next signals `means-failure` and the turn fails, as
+every such call did before.
+
 ### Embeddings
 
 An embedding provider turns text into a vector (`praxeon/llm:embed`,
@@ -807,7 +841,9 @@ as well (a Postgres advisory lock; on SQLite, SQLite's own write lock). `embed-p
 provider with it released, so a sync of a document does not wait for a rebuild that takes
 minutes (#1194). A chunk a sync changes during the call is not written, and is done on the next
 run. Two runs of `embed-pending` or `contextualize-pending` on one corpus still run one at a time,
-under a second lock that syncs do not take, so they never pay for the same chunks twice.
+under a second lock that syncs do not take, so they never pay for the same chunks twice. Do not
+call either inside `with-corpus-lock`: that takes the two locks in the opposite order to a run,
+which could deadlock, so it signals an error (#1200).
 
 **On SQLite** the store takes a SQLite connection the same way, and every function above behaves
 the same, with these differences:
