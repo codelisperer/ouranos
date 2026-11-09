@@ -19,6 +19,25 @@
 (defparameter +estimate-failed+ "Not run: the cost of this call could not be estimated.")
 (defparameter +unavailable+ "Not run: the tool is no longer available.")
 (defparameter +no-such-tool+ "Not run: no such tool is available.")
+
+(defparameter *max-unknown-tool-calls* 3
+  "How many calls in one turn may name a tool the turn cannot call, an unknown name or a means the
+caller may not use, and be answered with a not-run result (#1196). The next such call goes to ACT
+as before, which signals MEANS-FAILURE, so a model that keeps inventing tools cannot spend the
+whole turn on them.")
+
+(defun %no-such-tool-text (agent name permit)
+  "What the model is told for a call to NAME, which the turn cannot call (#1196). The same text
+for a name nothing registered and for a means the caller may not use, so the answer cannot be
+used to find out which means exist, as ACT's refusal cannot; and the tools it lists are the ones
+this turn offered the model under PERMIT, never every registered means."
+  (let ((offered (sort (mapcar #'means-entry-name (agent-means-for agent :permit permit))
+                       #'string<))
+        (shown (if (> (length name) 100) (concatenate 'string (subseq name 0 100) "...") name)))
+    (if offered
+        (format nil "Not run: there is no tool named ~S. The tools available are: ~{~A~^, ~}."
+                shown offered)
+        (format nil "Not run: there is no tool named ~S, and no tools are available." shown))))
 (defparameter +turn-ended+ "Not run: the turn ended before this call was run.")
 (defparameter +may-have-run+
   "The tool may have run; its outcome is unknown. Do not call it again before checking with the user.")
@@ -384,6 +403,18 @@ calls held so far are written as not run."
                       (refusal (and entry (%callable-p agent name permit)
                                     (%guard-refusal agent guard entry args after-untrusted))))
                  (cond
+                   ;; #1196: A TOOL THE TURN CANNOT CALL gets a not-run result rather than ending
+                   ;; the turn, up to *MAX-UNKNOWN-TOOL-CALLS* in a turn; past that it goes to ACT,
+                   ;; which signals MEANS-FAILURE as it always has.
+                   ((and (not (%callable-p agent name permit))
+                         (< (turn-guard-unknown-calls guard) *max-unknown-tool-calls*))
+                    (incf (turn-guard-unknown-calls guard))
+                    (push (%not-run-part agent id name args
+                                         (%no-such-tool-text agent name permit))
+                          parts))
+                   ((not (%callable-p agent name permit))
+                    (incf (turn-guard-unknown-calls guard))
+                    (run id name args))
                    (refusal
                     (push (%not-run-part agent id name args refusal) parts))
                    ((null confirm)

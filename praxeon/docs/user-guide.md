@@ -469,6 +469,15 @@ like any step. A turn that answers before its last step is not affected.
       text))
 ```
 
+**When the model calls a tool the agent does not have.** Models invent tool names, or call one
+from another agent's set. Such a call is answered as not run, and the turn goes on (#1196): the
+model is told `Not run: there is no tool named "x". The tools available are: ...`, and can try
+again within the turn's `:max-steps`. The same answer is given for a means the turn's `:permit`
+does not allow, and the list holds only the tools the turn offered the model, so the answer cannot
+be used to find out what else is registered. At most `praxeon/actor:*max-unknown-tool-calls*`
+such calls, 3, are answered in one turn; the next signals `means-failure` and the turn fails, as
+every such call did before.
+
 ### Embeddings
 
 An embedding provider turns text into a vector (`praxeon/llm:embed`,
@@ -826,8 +835,13 @@ naming the database, when it is absent.
 A sync makes the corpus hold exactly the sections it was given, and removes the rest in its
 scope. Unchanged sections are not touched, so running it at every boot is cheap. It needs no
 embedder. `embed-pending` embeds whatever has no embedding from the current model, which
-includes everything after a model change. Syncs and `embed-pending` on one corpus run one at a
-time, across processes as well (a Postgres advisory lock; on SQLite, SQLite's own write lock).
+includes everything after a model change. Syncs on one corpus run one at a time, across processes
+as well (a Postgres advisory lock; on SQLite, SQLite's own write lock). `embed-pending` and
+`contextualize-pending` take that lock only to read a batch and to write it, and call the
+provider with it released, so a sync of a document does not wait for a rebuild that takes
+minutes (#1194). A chunk a sync changes during the call is not written, and is done on the next
+run. Two runs of `embed-pending` or `contextualize-pending` on one corpus still run one at a time,
+under a second lock that syncs do not take, so they never pay for the same chunks twice.
 
 **On SQLite** the store takes a SQLite connection the same way, and every function above behaves
 the same, with these differences:

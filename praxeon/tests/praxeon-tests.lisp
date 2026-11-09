@@ -5599,12 +5599,46 @@ ANSWERS times. Means a and c return their name; b signals an error."
     (is (equal "done" (actor:run-turn ag "again")))))
 
 (test a-call-to-an-unregistered-means-is-answered-as-not-run
-  (let ((ag (%step-agent '(("1" "ghost")))))
-    (signals cnd:means-failure (actor:run-turn ag "go"))
-    (is-true (search "no such tool" (%result-for ag "1")))
+  "Since #1196 the turn goes on: the model is told the call was not run and which tools exist, and
+answers. Before, ACT signalled MEANS-FAILURE and the turn failed."
+  (let ((ag (%step-agent '(("1" "ghost")) :answers 2)))
+    (is (equal "done" (actor:run-turn ag "go")) "the turn goes on")
+    (is (equal "Not run: there is no tool named \"ghost\". The tools available are: a, b, c."
+               (%result-for ag "1")))
     (is-true (%error-for ag "1"))
     (is-true (%every-call-answered-p ag))
     (is (equal "done" (actor:run-turn ag "again")))))
+
+(test the-not-run-answer-lists-only-the-tools-the-turn-offered
+  "#1196. The list in the answer is the turn's own offer, AGENT-MEANS-FOR under its PERMIT, so a
+means the caller may not use is never named there, and the answer cannot be used to discover it.
+With the capability, the same means is listed."
+  (let ((ag (%step-agent '(("1" "ghost")))))
+    (actor:register-means ag "admin" "needs a capability" (lambda (in) (declare (ignore in)) "ran")
+                          :capability "admin")
+    (actor:run-turn ag "go")
+    (is-false (search "admin" (%result-for ag "1")) "not offered, not listed: ~S" (%result-for ag "1")))
+  (let ((ag (%step-agent '(("1" "ghost")))))
+    (actor:register-means ag "admin" "needs a capability" (lambda (in) (declare (ignore in)) "ran")
+                          :capability "admin")
+    (actor:run-turn ag "go" :permit (lambda (capability) (equal capability "admin")))
+    (is-true (search "admin" (%result-for ag "1")) "control: offered, listed: ~S" (%result-for ag "1"))))
+
+(test calls-to-unknown-tools-past-the-limit-fail-the-turn-as-before
+  "#1196. Up to *MAX-UNKNOWN-TOOL-CALLS* calls in a turn that name a tool it cannot call are
+answered as not run. The next one goes to ACT, which signals MEANS-FAILURE, so a model that keeps
+inventing tools cannot spend the whole turn on them. Here the limit is 3 and the model asks for
+four unknown tools in one step: the first three are answered, and the fourth fails the turn."
+  (let ((ag (%step-agent '(("1" "x1") ("2" "x2") ("3" "x3") ("4" "x4")))))
+    (is (= 3 praxeon/actor::*max-unknown-tool-calls*))
+    (signals cnd:means-failure (actor:run-turn ag "go"))
+    (dolist (id '("1" "2" "3"))
+      (is-true (search "Not run: there is no tool named" (%result-for ag id))
+               "call ~A was answered: ~S" id (%result-for ag id)))
+    (is-true (%every-call-answered-p ag) "the history stays well formed"))
+  ;; The control: three are within the limit, and the turn goes on.
+  (let ((ag (%step-agent '(("1" "x1") ("2" "x2") ("3" "x3")))))
+    (is (equal "done" (actor:run-turn ag "go")))))
 
 (test a-failure-after-a-hold-in-the-same-step-wins
   "The step holds s1 and then the means b fails. The failure reaches the caller, no held turn
@@ -5716,16 +5750,22 @@ caller, the first call keeps its result, and the second and third are written as
 
 (test a-call-the-permit-does-not-allow-is-refused-like-an-unknown-means
   "#90: the refusal of a means the permit does not allow looks the same as the refusal of a means
-that is not registered."
-  (let ((ag (%step-agent '(("1" "admin"))))
-        (unknown (%step-agent '(("1" "ghost"))))
+that is not registered. Since #1196 neither fails the turn: both are answered as not run, and the
+model goes on. Both agents call the same name, \"admin\", one where it is registered under a
+capability the turn lacks and one where it is not registered at all, and the model is told exactly
+the same thing, which lists only the tools the turn offered."
+  (let ((ag (%step-agent '(("1" "admin")) :answers 2))
+        (unknown (%step-agent '(("1" "admin"))))
         (events '()))
     (actor:register-means ag "admin" "needs a capability" (lambda (in) (declare (ignore in)) "ran")
                           :capability "admin")
     (evt:with-observer ((lambda (e) (push e events)))
-      (signals cnd:means-failure (actor:run-turn ag "go")))
-    (signals cnd:means-failure (actor:run-turn unknown "go"))
-    (is (equal (%result-for unknown "1") (%result-for ag "1")))
+      (is (equal "done" (actor:run-turn ag "go")) "the turn goes on"))
+    (is (equal "done" (actor:run-turn unknown "go")))
+    (is (equal (%result-for unknown "1") (%result-for ag "1"))
+        "the same text for both: ~S" (%result-for ag "1"))
+    (is-false (search "admin\"." (%result-for ag "1") :start2 (or (search "available" (%result-for ag "1")) 0))
+              "the means the permit does not allow is not listed as available")
     (is-true (%error-for ag "1"))
     (is (eq :not-run (getf (find :tool-result events :key #'evt:event-type) :outcome)))
     (is (equal "done" (actor:run-turn ag "again")))))

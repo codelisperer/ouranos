@@ -1943,3 +1943,129 @@ later chunk could be found nearer than it."
                                 nan corrupt-text)))
             (let ((after (%similar-ranking corpus embedder "which item" 3)))
               (is (equal expected after) "expected ~S, got ~S" expected after)))))))
+
+;;; --- the provider is called outside the corpus lock (#1194) ----------------------------
+
+(defun %thread (name fn)
+  "Start FN on a thread called NAME and return the thread."
+  (sb-thread:make-thread fn :name name))
+
+(defun %finished-within-p (thread seconds)
+  "Whether THREAD ends within SECONDS. Its value is not looked at."
+  (not (eq :timed-out (sb-thread:join-thread thread :default :timed-out :timeout seconds))))
+
+(test a-sync-completes-while-embed-pending-is-calling-the-provider
+  "#1194. EMBED-PENDING used to hold the corpus lock across every provider call, so a sync of any
+document in the corpus waited for the whole rebuild. Now each batch is read and written under the
+lock and the call between holds none. The embedder here pauses inside its call; a sync from
+another thread must finish while it is paused. The guarded write still applies: the chunk the
+sync replaced is not given the old text's vector, and is embedded on the next run."
+  (with-store (store)
+    (let* ((corpus (rt:make-corpus store "policy"))
+           (in-call (sb-thread:make-semaphore))
+           (release (sb-thread:make-semaphore))
+           (embedder (make-instance 'word-embedder
+                                    :before-documents
+                                    (lambda ()
+                                      (sb-thread:signal-semaphore in-call)
+                                      (sb-thread:wait-on-semaphore release :timeout 20)))))
+      (rt:sync-corpus corpus (list (sec "1" "A payout is sent monthly.")))
+      ;; THREAD-LIFETIME: the run returns once RELEASE is signalled below, or after 20 seconds;
+      ;; the JOIN at the end waits for it. The sync returns as soon as it has the corpus lock,
+      ;; and is joined too, before the store is dropped: when the property fails, the sync is
+      ;; still waiting when the test moves on, and a thread left running into a dropped table
+      ;; would end the process before the result is reported. Both catch their own errors.
+      (let ((run (%thread "embed-pending" (lambda () (ignore-errors (rt:embed-pending corpus embedder)))))
+            (sync nil))
+        (unwind-protect
+             (progn
+               (is-true (sb-thread:wait-on-semaphore in-call :timeout 10)
+                        "the provider call started")
+               (setf sync (%thread "sync" (lambda ()
+                                            (ignore-errors
+                                             (rt:sync-document corpus "doc-1"
+                                                               (list (sec "1" "A payout is sent weekly."))))))))
+               (is-true (%finished-within-p sync 5)
+                        "the sync finished while the provider call was still running"))
+          (sb-thread:signal-semaphore release)
+          (sb-thread:join-thread run :default nil :timeout 30)
+          (when sync (sb-thread:join-thread sync :default nil :timeout 30)))
+        (is (= 0 (%column-count store "embedding IS NOT NULL"))
+            "the vector for the replaced text was not written")
+        (is (= 1 (rt:embed-pending corpus (make-instance 'word-embedder)))
+            "the new text is embedded on the next run"))))
+
+(test a-second-embed-pending-run-does-not-call-the-provider-for-the-same-chunks
+  "#1194. The corpus lock also kept two runs from reading the same pending batch and paying for it
+twice. With the provider called outside it, WITH-CORPUS-RUN-LOCK keeps one run per corpus at a
+time, and syncs do not take it. The first run pauses in its call; a second run started then must
+not reach the provider. Once the first finishes, the second finds nothing pending."
+  (with-store (store)
+    (let* ((corpus (rt:make-corpus store "policy"))
+           (in-call (sb-thread:make-semaphore))
+           (release (sb-thread:make-semaphore))
+           (entered 0)
+           (lock (sb-thread:make-mutex))
+           (embedder (make-instance 'word-embedder
+                                    :before-documents
+                                    (lambda ()
+                                      (sb-thread:with-mutex (lock) (incf entered))
+                                      (sb-thread:signal-semaphore in-call)
+                                      (sb-thread:wait-on-semaphore release :timeout 20))))
+           (results (make-array 2 :initial-element nil)))
+      (rt:sync-corpus corpus (list (sec "1" "A payout is sent monthly.")
+                                   (sec "2" "A refund takes a week.")))
+      ;; THREAD-LIFETIME: both runs return once RELEASE is signalled, or after 20 seconds per
+      ;; call; the JOINs below wait for them.
+      (let ((first (%thread "first run" (lambda () (setf (aref results 0)
+                                                         (ignore-errors
+                                                          (rt:embed-pending corpus embedder)))))))
+        (is-true (sb-thread:wait-on-semaphore in-call :timeout 10) "the first run is in its call")
+        (let ((second (%thread "second run" (lambda () (setf (aref results 1)
+                                                             (ignore-errors
+                                                              (rt:embed-pending corpus embedder)))))))
+          (unwind-protect
+               (progn
+                 (sleep 1)
+                 (is (= 1 (sb-thread:with-mutex (lock) entered))
+                     "the second run has not reached the provider"))
+            (sb-thread:signal-semaphore release 4)
+            (sb-thread:join-thread first :default nil :timeout 30)
+            (sb-thread:join-thread second :default nil :timeout 30))
+          (is (= 1 (sb-thread:with-mutex (lock) entered)) "and never did")
+          (is (equal '(2 0) (coerce results 'list))
+              "the first run embedded both chunks and the second found none: ~S" results))))))
+
+(test a-sync-completes-while-contextualize-pending-is-calling-the-model
+  "#1194, for CONTEXTUALIZE-PENDING: it held the corpus lock across every chat call. The model
+here pauses inside its call; a sync from another thread must finish meanwhile."
+  (with-store (store)
+    (let* ((in-call (sb-thread:make-semaphore))
+           (release (sb-thread:make-semaphore))
+           (writer (make-instance 'context-writer
+                                  :answer (lambda (document)
+                                            (declare (ignore document))
+                                            (sb-thread:signal-semaphore in-call)
+                                            (sb-thread:wait-on-semaphore release :timeout 20)
+                                            "  A context.")))
+           (corpus (%contextual store "policy" :writer writer)))
+      (%sync-handbook corpus)
+      ;; THREAD-LIFETIME: the run returns once RELEASE is signalled below, or after 20 seconds
+      ;; per call; the sync as soon as it has the corpus lock. Both are joined before the store
+      ;; is dropped, and catch their own errors, for the reason given in the embedding test.
+      (let ((run (%thread "contextualize-pending"
+                          (lambda () (ignore-errors (rt:contextualize-pending corpus)))))
+            (sync nil))
+        (unwind-protect
+             (progn
+               (is-true (sb-thread:wait-on-semaphore in-call :timeout 10) "the model call started")
+               (setf sync (%thread "sync" (lambda ()
+                                            (ignore-errors
+                                             (rt:sync-document corpus "doc-2"
+                                                               (list (sec "3" "Refund rules, revised."
+                                                                          :document-id "doc-2"))))))))
+               (is-true (%finished-within-p sync 5)
+                        "the sync finished while the model call was still running"))
+          (sb-thread:signal-semaphore release 10)
+          (sb-thread:join-thread run :default nil :timeout 30)
+          (when sync (sb-thread:join-thread sync :default nil :timeout 30))))))

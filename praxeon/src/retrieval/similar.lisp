@@ -66,8 +66,13 @@ This is also the re-embed after a model change: every chunk whose recorded deriv
 pending. A vector is written only if its chunk still holds the text and context that were
 embedded, so a chunk replaced by a sync, or given a new context, in the meantime is embedded
 next time.
-Serialised per corpus with the syncs (WITH-CORPUS-LOCK). The provider is called outside the
-database lock, so searches on the same store can run during the call."
+THE PROVIDER IS CALLED WITH NO CORPUS LOCK HELD (#1194). Each batch is read under the corpus
+lock and written under it, and the call between them holds neither it nor the database lock, so
+a sync of the same corpus, and searches on the same store, run during the call instead of
+waiting for the whole rebuild. The guarded write above is what makes that safe: a chunk a sync
+replaced during the call is not written, and is pending next time. One run per corpus at a time
+is kept by WITH-CORPUS-RUN-LOCK, which syncs do not take, so two runs do not pay for the same
+batch."
   (unless (typep batch-size '(integer 1))
     (error "praxeon/retrieval: :batch-size must be a positive integer, not ~S" batch-size))
   (%check-width corpus embedder)
@@ -76,22 +81,25 @@ database lock, so searches on the same store can run during the call."
          (deriver (deriver-of embedder))
          (last-id nil)
          (count 0))
-    (with-corpus-lock (corpus)
+    (with-corpus-run-lock (corpus)
       (loop
-        (let ((rows (rc::%fetch store
-                                (list :select '(:id :text :context :section_fingerprint)
-                                      :from (list table)
-                                      :where (apply #'corpus-where corpus
-                                                    (%stale-clause deriver)
-                                                    (when last-id (list (list :> :id last-id))))
-                                      :order-by '(:id)
-                                      :limit batch-size))))
+        (let ((rows (with-corpus-lock (corpus)
+                      (rc::%fetch store
+                                  (list :select '(:id :text :context :section_fingerprint)
+                                        :from (list table)
+                                        :where (apply #'corpus-where corpus
+                                                      (%stale-clause deriver)
+                                                      (when last-id (list (list :> :id last-id))))
+                                        :order-by '(:id)
+                                        :limit batch-size)))))
           (when (null rows) (return count))
           (let* ((inputs (mapcar (lambda (r) (rc::%embed-input (param:row-value r :context)
                                                                 (param:row-value r :text)))
                                  rows))
+                 ;; No lock is held here (#1194).
                  (vectors (llm:embed-documents embedder inputs)))
-            (rc::with-db (store)
+            (with-corpus-lock (corpus)
+             (rc::with-db (store)
               (conn:with-transaction ((store-connection store))
                 (loop for row in rows
                       for vector in vectors
@@ -115,7 +123,7 @@ database lock, so searches on the same store can run during the call."
                                                       (if context
                                                           (list := :context context)
                                                           (list :is-null :context)))))
-                      do (when (and (integerp n) (plusp n)) (incf count)))))
+                      do (when (and (integerp n) (plusp n)) (incf count))))))
             (setf last-id (param:row-value (car (last rows)) :id))))))))
 
 (defun ingest (corpus sections embedder &key (batch-size 64) ledger)

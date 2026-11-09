@@ -14,6 +14,15 @@ its tag.
 
 ### An app may have to act
 
+- **A call to a tool the agent does not have is answered as not run, and the turn goes on**
+  (#1196). `praxeon/actor:run-turn` used to let `act` signal `means-failure` ("no such means
+  registered") for such a call, which failed the turn unless the app handled it. Now the model is
+  told `Not run: there is no tool named "x". The tools available are: ...` and can recover within
+  `:max-steps`. The answer is the same for a means the turn's `:permit` does not allow, and lists
+  only the tools that turn offered. **An app that handled `means-failure` for an unknown or
+  unpermitted name, for example with one of `act`'s restarts, no longer sees it** for the first
+  `praxeon/actor:*max-unknown-tool-calls*` (3) such calls in a turn; the next one still signals it,
+  so a model that keeps inventing tools still ends the turn.
 - **`praxeon/actor:register-means` signals an error for a `:confirm` value other than NIL, T, a
   function or `:after-untrusted`** (#1185). Any other true value used to be taken as T, holding
   every call. An app passing another symbol, such as `:yes`, should pass T.
@@ -1478,6 +1487,15 @@ its tag.
 
 ### Fixed
 
+- **A sync no longer waits for `embed-pending` or `contextualize-pending` to finish** (#1194).
+  Both held the corpus lock across every provider call, so `praxeon/retrieval:sync-document` and
+  `sync-corpus` on the same corpus waited for the whole rebuild, which for a few thousand chunks
+  is minutes; on Postgres the lock is an advisory lock, so other processes waited too. They now
+  take the corpus lock only to read each batch and to write it, and call the provider with it
+  released. The writes were already guarded, so a chunk a sync changes during the call is not
+  written and is done on the next run. Two runs on one corpus still run one at a time, under a
+  new lock, `praxeon/retrieval:with-corpus-run-lock`, which syncs do not take, so they do not pay
+  for the same chunks twice. On Postgres it is a second advisory key per corpus.
 - **`send-request :deadline` sends a multipart alist as multipart, and follows a redirect
   without reading its body** (#1178). Both affected only requests made with `:deadline`, which
   go over a connection this client opens itself, and arrived with it in #1162:
