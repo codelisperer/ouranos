@@ -1537,6 +1537,13 @@ its tag.
 
 ### Added
 
+- **`praxeon/retrieval:make-contextualizer` takes `:context-function` and `:version`**
+  (#1195). The function receives the document's text and a plist of where the chunk is:
+  `:document-id`, `:locale`, `:section-id`, `:locator`, `:sub-locator`, `:section-index`,
+  `:chunk-index`, `:position` and `:text`, so identical chunks in one document can be told apart,
+  which the built-in prompt cannot do. It returns the context itself, or messages to send to the
+  provider in place of the built-in prompt. `:version`, a non-empty string, is required with it
+  and goes into `contextualizer-id`, so changing it makes every context stale.
 - **A call held for confirmation after untrusted content says what was read, and where from**
   (#1183). The plist `praxeon/actor:run-turn` passes to an `:on-hold` function, each call in a
   `held-turn`, and the `:tool-held` and `:tool-decided` events now carry `:untrusted`: NIL when

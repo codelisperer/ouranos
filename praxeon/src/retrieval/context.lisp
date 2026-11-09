@@ -36,33 +36,70 @@ so changing the layout makes every context stale.")
 (defclass contextualizer ()
   ((provider :initarg :provider :reader contextualizer-provider)
    (instruction :initarg :instruction :reader contextualizer-instruction)
-   (max-tokens :initarg :max-tokens :reader contextualizer-max-tokens))
+   (max-tokens :initarg :max-tokens :reader contextualizer-max-tokens)
+   ;; #1195: NIL, or the app's function of the document and the chunk's plist, and the version
+   ;; string that stands for it in the contextualizer's id.
+   (context-function :initarg :context-function :initform nil
+                     :reader contextualizer-context-function)
+   (version :initarg :version :initform nil :reader contextualizer-version))
   (:documentation "What writes a chunk's context: a chat PROVIDER, the INSTRUCTION it is given,
-and the MAX-TOKENS of its answer. Built with MAKE-CONTEXTUALIZER and given to MAKE-CORPUS."))
+and the MAX-TOKENS of its answer, or the app's CONTEXT-FUNCTION and its VERSION. Built with
+MAKE-CONTEXTUALIZER and given to MAKE-CORPUS."))
 
-(defun make-contextualizer (provider &key (instruction *context-instruction*) (max-tokens 200))
+(defun make-contextualizer (provider &key (instruction *context-instruction*) (max-tokens 200)
+                                          context-function version)
   "A contextualizer that asks PROVIDER, a PRAXEON/LLM:PROVIDER, for each chunk's context.
 INSTRUCTION is what the model is asked, after the document and the chunk. MAX-TOKENS caps each
-answer; the article's contexts are 50 to 100 tokens."
+answer; the article's contexts are 50 to 100 tokens.
+
+CONTEXT-FUNCTION, when given, replaces the built-in prompt (#1195). It is called with the
+document's text and a plist describing the chunk:
+
+  :DOCUMENT-ID :LOCALE   the document the chunk is in
+  :SECTION-ID            the chunk's section
+  :LOCATOR :SUB-LOCATOR  where the chunk is, as the sync recorded it
+  :SECTION-INDEX :CHUNK-INDEX  the section's place in the document, the chunk's in its section
+  :POSITION              the chunk's place in the document, from 0, in document order
+  :TEXT                  the chunk's text
+
+so two identical chunks in one document can be told apart, which the built-in prompt cannot do.
+It returns either the context, a string, written without calling the model; or a list of
+messages, sent to PROVIDER in place of the built-in ones, whose answer is the context. Anything
+else, or an empty context, signals an error and writes nothing for that chunk.
+
+VERSION is required with CONTEXT-FUNCTION and refused without it: a non-empty string the app
+changes whenever the function's output would change. Its fingerprint goes into CONTEXTUALIZER-ID,
+so changing it makes every context stale, and keeping it keeps every context current. A function
+cannot be fingerprinted, so a changed function under the same VERSION leaves the old contexts
+looking current."
   (unless (typep provider 'llm:provider)
     (error "praxeon/retrieval: a contextualizer needs a PRAXEON/LLM:PROVIDER, not ~S" provider))
   (unless (and (stringp instruction) (plusp (length instruction)))
     (error "praxeon/retrieval: :instruction must be a non-empty string, not ~S" instruction))
   (unless (typep max-tokens '(integer 1))
     (error "praxeon/retrieval: :max-tokens must be a positive integer, not ~S" max-tokens))
+  (unless (or (null context-function) (functionp context-function))
+    (error "praxeon/retrieval: :context-function must be a function, not ~S" context-function))
+  (when (and context-function (not (and (stringp version) (plusp (length version)))))
+    (error "praxeon/retrieval: :context-function needs :version, a non-empty string that changes whenever the function's output would; without it, a changed function would leave every context looking current"))
+  (when (and version (null context-function))
+    (error "praxeon/retrieval: :version is for a :context-function, and none was given"))
   (make-instance 'contextualizer :provider provider :instruction instruction
-                                 :max-tokens max-tokens))
+                                 :max-tokens max-tokens :context-function context-function
+                                 :version version))
 
 (defun contextualizer-id (contextualizer)
   "The id recorded with each context CONTEXTUALIZER writes: the provider's type, its model, the
 message layout, the answer limit and a fingerprint of the instruction, for example
-\"anthropic/claude-haiku-4-5/context/1/200/3f2a9c01b7de\". A context recorded with another id is
-stale."
-  (let ((provider (contextualizer-provider contextualizer)))
-    (format nil "~(~A~)/~A/~A/~D/~A"
+\"anthropic/claude-haiku-4-5/context/1/200/3f2a9c01b7de\". With a CONTEXT-FUNCTION, a fingerprint
+of its VERSION follows, after \"fn-\" (#1195). A context recorded with another id is stale."
+  (let ((provider (contextualizer-provider contextualizer))
+        (version (contextualizer-version contextualizer)))
+    (format nil "~(~A~)/~A/~A/~D/~A~@[/fn-~A~]"
             (type-of provider) (or (llm:model-of provider) "")
             +context-template+ (contextualizer-max-tokens contextualizer)
-            (subseq (section-fingerprint (contextualizer-instruction contextualizer)) 0 12))))
+            (subseq (section-fingerprint (contextualizer-instruction contextualizer)) 0 12)
+            (and version (subseq (section-fingerprint version) 0 12)))))
 
 (defun context-messages (contextualizer document chunk)
   "The messages that ask for CHUNK's context within DOCUMENT: one user message whose first part
@@ -75,26 +112,61 @@ and the instruction."
                         (format nil "Here is the chunk we want to situate within the whole document~%<chunk>~%~A~%</chunk>~%~A"
                                 chunk (contextualizer-instruction contextualizer)))))))
 
-(defun %estimate (contextualizer document chunk)
+(defun %messages-characters (messages)
+  "How many characters of text MESSAGES carry, for an estimate."
+  (loop for m in messages
+        for content = (llm:content m)
+        sum (if (stringp content)
+                (length content)
+                (loop for part in content
+                      for text = (getf part :text)
+                      sum (if (stringp text) (length text) 0)))))
+
+(defun %estimate (contextualizer document chunk &optional messages)
   "The tokens one call is assumed to cost before it runs: the whole prompt, cached part
 included, since the ledger charges a cache read (PRAXEON/CEILING:BUDGET-GUARD), plus the
-longest answer."
-  (+ (ceiling (+ (length document) (length chunk)
-                 (length (contextualizer-instruction contextualizer)) 100)
+longest answer. MESSAGES, when a CONTEXT-FUNCTION gave them, are what is measured instead."
+  (+ (ceiling (if messages
+                  (+ (%messages-characters messages) 100)
+                  (+ (length document) (length chunk)
+                     (length (contextualizer-instruction contextualizer)) 100))
               4)
      (contextualizer-max-tokens contextualizer)))
 
 (defun %ask (contextualizer ledger document chunk)
-  "One context from the model, charged to LEDGER when there is one. Signals
-PRAXEON/CEILING:BUDGET-EXHAUSTED, before calling the model, when LEDGER cannot afford the call."
+  "One context for CHUNK, a plist as MAKE-CONTEXTUALIZER describes, within DOCUMENT. From the
+app's CONTEXT-FUNCTION when there is one: a string it returns is the context, and messages it
+returns are sent to the model (#1195). Otherwise from the built-in prompt. A model call is charged
+to LEDGER when there is one, and signals PRAXEON/CEILING:BUDGET-EXHAUSTED, before calling the
+model, when LEDGER cannot afford it."
+  (let* ((function (contextualizer-context-function contextualizer))
+         (given (and function (funcall function document chunk))))
+    (cond ((null function) (%ask-model contextualizer ledger document (getf chunk :text) nil))
+          ((stringp given)
+           (let ((context (string-trim '(#\Space #\Tab #\Newline #\Return) given)))
+             (when (zerop (length context))
+               (error 'praxeon/conditions:deliberation-failure
+                      :detail "the contextualizer's :context-function returned an empty context"))
+             context))
+          ((and (consp given) (every (lambda (m) (and (consp m) (getf m :role))) given))
+           (%ask-model contextualizer ledger document (getf chunk :text) given))
+          (t (error 'praxeon/conditions:deliberation-failure
+                    :detail (format nil "the contextualizer's :context-function must return a context string or a list of messages, not a ~(~A~)"
+                                    (type-of given)))))))
+
+(defun %ask-model (contextualizer ledger document chunk messages)
+  "One context from the model, for the built-in prompt or for MESSAGES when they are given,
+charged to LEDGER when there is one. Signals PRAXEON/CEILING:BUDGET-EXHAUSTED, before calling the
+model, when LEDGER cannot afford the call."
   (let ((provider (contextualizer-provider contextualizer))
-        (estimate (%estimate contextualizer document chunk)))
+        (estimate (%estimate contextualizer document chunk messages)))
     (when (and ledger (not (ceiling:affordable-p ledger estimate)))
       (error 'ceiling:budget-exhausted
              :principal (ceiling:grant-principal (ceiling:ledger-grant ledger))
              :requested estimate
              :remaining (ceiling:remaining-tokens ledger)))
-    (let ((completion (llm:complete provider (context-messages contextualizer document chunk)
+    (let ((completion (llm:complete provider (or messages
+                                                 (context-messages contextualizer document chunk))
                                     :max-tokens (contextualizer-max-tokens contextualizer))))
       (when ledger
         (ceiling:record-usage ledger
@@ -170,7 +242,9 @@ its document are still the ones the context was written for. Returns true when i
          (rows (with-corpus-lock (corpus)
                  (rc::%document-rows corpus document-id locale
                                      '(:id :text :section_fingerprint :context :context_deriver
-                                       :context_document_fingerprint :document_fingerprint))))
+                                       :context_document_fingerprint :document_fingerprint
+                                       :section_id :locator :sub_locator :section_index
+                                       :chunk_index))))
          (texts (mapcar (lambda (r) (param:row-value r :text)) rows))
          (fingerprint (rc::%document-fingerprint texts))
          (document (format nil "~{~A~^~%~%~}" texts))
@@ -182,16 +256,29 @@ its document are still the ones the context was written for. Returns true when i
       (with-corpus-lock (corpus)
         (rc::with-db ((corpus-store corpus))
           (rc::%refresh-document-fingerprint corpus document-id locale))))
-    (dolist (row rows count)
-      (unless (and (param:row-value row :context)
-                   (equal deriver (param:row-value row :context_deriver))
-                   (equal fingerprint (param:row-value row :context_document_fingerprint)))
-        (let ((context (%ask contextualizer ledger document (param:row-value row :text))))
+    (loop for row in rows
+          for position from 0
+          unless (and (param:row-value row :context)
+                      (equal deriver (param:row-value row :context_deriver))
+                      (equal fingerprint (param:row-value row :context_document_fingerprint)))
+            do
+      (let ((context (%ask contextualizer ledger document
+                           ;; Where the chunk is, so a :CONTEXT-FUNCTION can tell repeated
+                           ;; chunks apart (#1195). POSITION is its place in document order.
+                           (list :document-id document-id :locale locale
+                                 :section-id (param:row-value row :section_id)
+                                 :locator (param:row-value row :locator)
+                                 :sub-locator (param:row-value row :sub_locator)
+                                 :section-index (param:row-value row :section_index)
+                                 :chunk-index (param:row-value row :chunk_index)
+                                 :position position
+                                 :text (param:row-value row :text)))))
           ;; %WRITE-CONTEXT checks the fingerprints, so a chunk a sync changed during the call
           ;; is not written, and is pending next time.
           (when (with-corpus-lock (corpus)
                   (%write-context corpus row context deriver fingerprint locale))
-            (incf count)))))))
+            (incf count)))
+          finally (return count))))
 
 (defun contextualize-pending (corpus &key ledger)
   "Write a context for every chunk of CORPUS that has none from the corpus's contextualizer
