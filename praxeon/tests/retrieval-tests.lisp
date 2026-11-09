@@ -2069,3 +2069,22 @@ here pauses inside its call; a sync from another thread must finish meanwhile."
           (sb-thread:signal-semaphore release 10)
           (sb-thread:join-thread run :default nil :timeout 30)
           (when sync (sb-thread:join-thread sync :default nil :timeout 30))))))
+
+(test a-background-run-inside-the-corpus-lock-is-refused
+  "#1200. A run takes the run lock first and the corpus lock second (#1194). Called inside the
+app's own WITH-CORPUS-LOCK, EMBED-PENDING or CONTEXTUALIZE-PENDING would take them the other way
+round and could deadlock with a concurrent run, depending on timing, so it is refused every time
+with an error, before the provider is called or anything is written.
+
+THE CONTROL is the same calls outside the lock, which run as usual."
+  (with-store (store)
+    (let* ((embedder (make-instance 'word-embedder))
+           (corpus (%contextual store "policy")))
+      (%sync-handbook corpus)
+      (rt:with-corpus-lock (corpus)
+        (signals error (rt:embed-pending corpus embedder))
+        (signals error (rt:contextualize-pending corpus)))
+      (is (null (recorded-calls embedder)) "the provider was not called")
+      (is (= 4 (%column-count store "context IS NULL")) "and nothing was written")
+      (is (= 4 (rt:contextualize-pending corpus)) "control: outside the lock it runs")
+      (is (= 4 (rt:embed-pending corpus embedder)) "control: and so does embedding"))))

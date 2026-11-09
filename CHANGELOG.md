@@ -23,6 +23,11 @@ its tag.
   unpermitted name, for example with one of `act`'s restarts, no longer sees it** for the first
   `praxeon/actor:*max-unknown-tool-calls*` (3) such calls in a turn; the next one still signals it,
   so a model that keeps inventing tools still ends the turn.
+- **`praxeon/retrieval:embed-pending` and `contextualize-pending` signal an error when called inside
+  `with-corpus-lock`** (#1200). Since #1194 a run takes its own run lock first and the corpus lock
+  second; called inside the corpus lock, it would take them the other way round and could deadlock
+  with a concurrent run, depending on timing. **An app that called either inside
+  `with-corpus-lock` must move the call outside it.** `ingest` already calls them outside.
 - **`praxeon/actor:register-means` signals an error for a `:confirm` value other than NIL, T, a
   function or `:after-untrusted`** (#1185). Any other true value used to be taken as T, holding
   every call. An app passing another symbol, such as `:yes`, should pass T.

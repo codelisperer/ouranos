@@ -631,7 +631,20 @@ EMBED-PENDING and CONTEXTUALIZE-PENDING take it for their whole run, and the cor
 around each read and each write, so the provider is called with no corpus lock held and a sync
 does not wait for a rebuild. This lock keeps one run per corpus at a time: a second run waits for
 the first, and then finds the first's chunks done, so nothing is paid for twice. Syncs never take
-it. When both are taken, this one is taken first."
+it. When both are taken, this one is taken first.
+
+THAT ORDER IS ENFORCED (#1200). A thread that already holds CORPUS's ingest lock, such as app code
+calling EMBED-PENDING inside its own WITH-CORPUS-LOCK, would take the two locks the other way
+round, and could wait forever on a concurrent run that holds this lock and waits for the ingest
+lock to write a batch. Whether that happens depends on timing, so it is refused every time
+instead: this signals an error, before taking anything, naming the two locks and the order. The
+check is on the in-process lock, which is what two threads of one process share; on Postgres, two
+processes that took the advisory locks in opposite orders are stopped by Postgres's own deadlock
+detection."
+  (let ((store (corpus-store corpus)))
+    (when (sb-thread:holding-mutex-p (%corpus-lock store corpus))
+      (error "praxeon/retrieval: a background run of corpus ~S (EMBED-PENDING or CONTEXTUALIZE-PENDING) was started while this thread holds the corpus's ingest lock (WITH-CORPUS-LOCK). A run takes its run lock first and the ingest lock second, so starting it inside the ingest lock takes them the other way round and can deadlock with a concurrent run. Call it outside WITH-CORPUS-LOCK."
+             (corpus-name corpus))))
   (let* ((store (corpus-store corpus))
          (key (%advisory-key store corpus "run")))
     (bt:with-recursive-lock-held ((%run-lock store corpus))
