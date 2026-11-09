@@ -55,7 +55,7 @@
    #:deliberation-failure
    #:provider-request-failed #:provider-request-failed-status
    #:provider-request-failed-error-type #:provider-request-failed-error-code
-   #:provider-request-failed-body
+   #:provider-request-failed-body #:provider-request-failed-retry-after #:provider-request-failed-phase
    #:unknown-tool-choice #:unknown-tool-choice-value #:value-shape
    #:completion-cancelled #:completion-cancelled-input-tokens #:completion-cancelled-output-tokens
    #:completion-cancelled-cache-read-tokens #:completion-cancelled-cache-write-tokens
@@ -208,7 +208,7 @@
    #:anthropic #:anthropic-model #:anthropic-api-key
    #:openai-compatible #:model-of
    #:*default-model* #:*default-max-tokens*
-   #:*connect-timeout* #:*read-timeout*
+   #:*connect-timeout* #:*read-timeout* #:*retry*
    ;; environment-driven provider selection
    #:make-provider-from-env #:register-provider-impl #:env-setting
    ;; #758: the #719 mapping of a failed HTTP request, for a module that calls a service itself
