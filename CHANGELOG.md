@@ -1551,6 +1551,13 @@ its tag.
 
 ### Added
 
+- **`praxeon/retrieval:make-contextualizer` takes `:context-function` and `:version`**
+  (#1195). The function receives the document's text and a plist of where the chunk is:
+  `:document-id`, `:locale`, `:section-id`, `:locator`, `:sub-locator`, `:section-index`,
+  `:chunk-index`, `:position` and `:text`, so identical chunks in one document can be told apart,
+  which the built-in prompt cannot do. It returns the context itself, or messages to send to the
+  provider in place of the built-in prompt. `:version`, a non-empty string, is required with it
+  and goes into `contextualizer-id`, so changing it makes every context stale.
 - **`praxeon/image:register`, `register-openai-image` and `register-google-image` take
   `:confirm`** and pass it to `register-means` (#1189): NIL, T, an estimate function, or
   `:after-untrusted`. Their `:requires-user-intent` still defaults to T, except with `:confirm
