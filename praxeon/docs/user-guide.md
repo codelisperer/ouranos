@@ -469,6 +469,15 @@ like any step. A turn that answers before its last step is not affected.
       text))
 ```
 
+**When the model calls a tool the agent does not have.** Models invent tool names, or call one
+from another agent's set. Such a call is answered as not run, and the turn goes on (#1196): the
+model is told `Not run: there is no tool named "x". The tools available are: ...`, and can try
+again within the turn's `:max-steps`. The same answer is given for a means the turn's `:permit`
+does not allow, and the list holds only the tools the turn offered the model, so the answer cannot
+be used to find out what else is registered. At most `praxeon/actor:*max-unknown-tool-calls*`
+such calls, 3, are answered in one turn; the next signals `means-failure` and the turn fails, as
+every such call did before.
+
 ### Embeddings
 
 An embedding provider turns text into a vector (`praxeon/llm:embed`,

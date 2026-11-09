@@ -299,7 +299,9 @@ Returns NAME."
   ;; The agent whose turn this is, so %TAINT-GUARD can record the conversation's taint (#948).
   (agent nil)
   (counts (make-hash-table :test #'equal))
-  (urls '() :type list))
+  (urls '() :type list)
+  ;; How many calls in this turn named a means it could not call (#1196).
+  (unknown-calls 0 :type integer))
 
 (defun %taint-guard (guard)
   "Mark GUARD's turn untrusted, and record that untrusted content has entered its agent's
@@ -413,8 +415,12 @@ longer registered, whose result cannot be judged, or one recorded as untrusted w
   (let ((guard (%make-turn-guard key nil agent)))
     (%taint-guard-from guard (%history-untrusted-p agent))
     (dolist (p (%tool-uses (rest messages)))
-      (when (gethash (getf p :name) (agent-means agent))
-        (incf (gethash (getf p :name) (turn-guard-counts guard) 0)))
+      (if (gethash (getf p :name) (agent-means agent))
+          (incf (gethash (getf p :name) (turn-guard-counts guard) 0))
+          ;; Counted for the #1196 limit. The rebuild has no PERMIT, so a call to a registered
+          ;; means the caller may not use is counted as a call to that means rather than here:
+          ;; after a rebuild, such calls can again be answered up to the limit.
+          (incf (turn-guard-unknown-calls guard)))
       (when (%untrusted-call-p agent p)
         (%taint-guard guard)))
     guard))
