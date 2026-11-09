@@ -403,6 +403,33 @@ default), then rebuild the agent:
 (defparameter *e* (praxeon/elise:make-elise))
 ```
 
+### Retrying a provider that is busy (`praxeon/llm:*retry*`)
+
+A model, embedding or rerank service sometimes answers 429 (too many requests), 503 or, for
+Anthropic, 529 (overloaded). By default praxeon sends each request once and signals
+`praxeon/conditions:provider-request-failed`, which now carries the service's `Retry-After` in
+seconds (`provider-request-failed-retry-after`). To have such requests tried again, set
+`praxeon/llm:*retry*` to an `aion/retry` policy (#79):
+
+```lisp
+(setf praxeon/llm:*retry* (aion/retry:make-retry-policy :name "llm" :max-attempts 4))
+```
+
+Then `complete`, `embed`, `embed-batch`, `embed-documents`, `embed-query` and `rerank` retry a
+failure the policy finds retryable. With the default `:retryable`, that is a 408, 425, 429, 503
+or 529, or a connection that failed before the request was sent. Each retry waits at least the
+service's `Retry-After`. A `Retry-After` longer than the policy's `:max-delay` stops the retrying
+instead of waiting that long. Each retry is logged at info.
+
+- The wait sleeps the calling thread, so do not set it for code that runs on a libuv loop
+  thread; `aion/retry` refuses to start there.
+- A call made inside another retried call is not retried again, so the attempts do not multiply.
+- A streamed completion is retried only while none of its text has reached `*on-text*`, because
+  a second attempt would send the same text again.
+- It is a variable rather than a key on `complete`, because a key on `complete` would oblige every
+  provider's method to accept it, providers outside this tree included. Bind it around a call to
+  retry only that call.
+
 ### The output limit (`:max-tokens`)
 
 Each model call of a turn may generate at most a set number of output tokens. The text, the

@@ -524,3 +524,174 @@ before asking the model again, with a :TURN-ENDED event and no :USAGE event for 
     (actor:cancel-turn cancel)
     (is (equal '(nil :cancelled) (multiple-value-list (actor:run-turn ag "go" :cancel cancel))))
     (is (zerop (length (recording-requests provider))))))
+
+;;; --- retrying a request under *RETRY* (#79) ---------------------------------------------
+
+(def-suite llm-retry :description "praxeon/llm: requests retried under an aion/retry policy (#79)."
+  :in praxeon)
+(in-suite llm-retry)
+
+(defun %failing-then (failures whole &key (status 429) retry-after (content-type "application/json"))
+  "A handler that answers the first FAILURES requests with STATUS, and a Retry-After of
+RETRY-AFTER seconds when given, then every later request with WHOLE. The second value's car
+counts the requests."
+  (let ((count (list 0)))
+    (values
+     (lambda (request stream)
+       (declare (ignore request))
+       (if (< (incf (car count)) (1+ failures))
+           (aion/test-http:write-response
+            stream status (append '(("Content-Type" . "application/json"))
+                                  (when retry-after (list (cons "Retry-After" (princ-to-string retry-after)))))
+            "{\"type\":\"error\",\"error\":{\"type\":\"rate_limit_error\",\"message\":\"slow down\"}}")
+           (aion/test-http:write-response stream 200 (list (cons "Content-Type" content-type)) whole)))
+     count)))
+
+(defmacro %with-recorded-waits ((waits) &body body)
+  "BODY with AION/RETRY's sleep replaced by one that records each wait, newest first, in WAITS."
+  `(let* ((,waits '())
+          (aion/retry::*sleep-function* (lambda (s) (push s ,waits))))
+     ,@body))
+
+(defun %policy (&rest keys)
+  (apply #'aion/retry:make-retry-policy :name "test" :base-delay 0.01 :jitter :none keys))
+
+(test without-a-retry-policy-a-failed-completion-is-one-request
+  "#79: *RETRY* is NIL by default, so nothing changes for an app that sets nothing. A 429 is one
+request, and signals PROVIDER-REQUEST-FAILED, which now carries the server's Retry-After and
+answers AION/RETRY's TRANSIENCE."
+  (multiple-value-bind (handler count) (%failing-then 1 +anthropic-whole+ :retry-after 7)
+    (aion/test-http:with-server (s handler)
+      (let ((c (handler-case (progn (llm:complete (%streaming-anthropic s) (list (llm:msg "user" "hi"))) nil)
+                 (cnd:provider-request-failed (c) c))))
+        (is (= 1 (car count)) "one request")
+        (is (typep c 'cnd:provider-request-failed))
+        (is (eql 429 (and c (cnd:provider-request-failed-status c))))
+        (is (eql 7 (and c (cnd:provider-request-failed-retry-after c))) "the Retry-After is kept")
+        (is (eq :transient (and c (aion/retry:transience c))) "and a 429 is transient")
+        (is (eql 7 (and c (aion/retry:retry-after c))))))))
+
+(test a-completion-is-retried-under-the-policy-and-honours-retry-after
+  "#79: with *RETRY* set, a 429 is retried, after at least the server's Retry-After, and the next
+attempt's answer is returned."
+  (multiple-value-bind (handler count) (%failing-then 2 +anthropic-whole+ :retry-after 2)
+    (aion/test-http:with-server (s handler)
+      (%with-recorded-waits (waits)
+        (let* ((llm:*retry* (%policy :max-attempts 4))
+               (c (llm:complete (%streaming-anthropic s) (list (llm:msg "user" "hi")))))
+          (is (equal "Let me look that up — één moment." (llm:completion-text c)))
+          (is (= 3 (car count)) "two failures, then the answer")
+          (is (= 2 (length waits)) "a wait before each retry: ~S" waits)
+          (is (every (lambda (w) (>= w 2)) waits) "each at least the Retry-After: ~S" waits))))))
+
+(test a-failure-the-policy-does-not-retry-is-one-request
+  "#79: a 400 is not transient, so it is not retried; and a Retry-After longer than the policy's
+MAX-DELAY stops the retrying instead of waiting that long."
+  (multiple-value-bind (handler count) (%failing-then 1 +anthropic-whole+ :status 400)
+    (aion/test-http:with-server (s handler)
+      (let ((llm:*retry* (%policy :max-attempts 4)))
+        (signals cnd:provider-request-failed
+          (llm:complete (%streaming-anthropic s) (list (llm:msg "user" "hi"))))
+        (is (= 1 (car count)) "a 400: one request"))))
+  (multiple-value-bind (handler count) (%failing-then 1 +anthropic-whole+ :retry-after 120)
+    (aion/test-http:with-server (s handler)
+      (%with-recorded-waits (waits)
+        (let ((llm:*retry* (%policy :max-attempts 4 :max-delay 10)))
+          (signals cnd:provider-request-failed
+            (llm:complete (%streaming-anthropic s) (list (llm:msg "user" "hi"))))
+          (is (= 1 (car count)) "a Retry-After past MAX-DELAY: one request")
+          (is (null waits) "and no wait"))))))
+
+(test a-streamed-completion-is-retried-when-it-fails-before-any-text
+  "#79: a stream that is refused with a 429 when it opens has delivered nothing, so it is
+retried like a whole request, and the second attempt's text reaches *ON-TEXT* once."
+  (multiple-value-bind (handler count)
+      (let ((n (list 0)))
+        (values (lambda (request stream)
+                  (if (= 1 (incf (car n)))
+                      (aion/test-http:write-response stream 429 '(("Retry-After" . "1")) "{}")
+                      (funcall (%provider-server +anthropic-whole+ +anthropic-events+) request stream)))
+                n))
+    (aion/test-http:with-server (s handler)
+      (%with-recorded-waits (waits)
+        (let* ((pieces '())
+               (llm:*retry* (%policy :max-attempts 3))
+               (c (let ((llm:*on-text* (lambda (piece) (push piece pieces))))
+                    (llm:complete (%streaming-anthropic s) (list (llm:msg "user" "hi"))))))
+          (is (= 2 (car count)) "refused once, then streamed")
+          (is (equal "Let me look that up — één moment." (llm:completion-text c)))
+          (is (equal '("Let me look " "that up — één moment.") (reverse pieces))
+              "the text reached *ON-TEXT* once: ~S" (reverse pieces))
+          (is (= 1 (length waits)))
+          (is (>= (first waits) 1) "at least the stream's Retry-After of 1: ~S" waits))))))
+
+(test a-streamed-completion-is-not-retried-once-text-has-been-delivered
+  "#79: once some of a stream's text has reached *ON-TEXT*, a second attempt would send the caller
+the same text again, so the retry is given up even under a policy that would retry the failure.
+The policy here retries every PROVIDER-REQUEST-FAILED; the stream delivers text, then an error
+event. One request, and the failure reaches the caller.
+
+THE CONTROL is the same policy against a stream that fails before any text: it is retried."
+  (flet ((server (events)
+           (let ((n (list 0)))
+             (values (lambda (request stream)
+                       (declare (ignore request))
+                       (incf (car n))
+                       (aion/test-http:write-head stream 200 '(("Content-Type" . "text/event-stream")
+                                                               ("Connection" . "close")))
+                       (%sse stream events))
+                     n))))
+    (let ((text-then-error
+            (list (first +anthropic-events+) (second +anthropic-events+) (fourth +anthropic-events+)
+                  (cons "error" "{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\"}}")))
+          (error-first
+            (list (cons "error" "{\"type\":\"error\",\"error\":{\"type\":\"overloaded_error\"}}"))))
+      (dolist (case (list (list text-then-error 1 "text delivered: one request")
+                          (list error-first 3 "control: nothing delivered: retried to the limit")))
+        (multiple-value-bind (handler count) (server (first case))
+          (aion/test-http:with-server (s handler)
+            (%with-recorded-waits (waits)
+              (let ((llm:*retry* (%policy :max-attempts 3
+                                          :retryable (list 'cnd:provider-request-failed))))
+                (signals cnd:provider-request-failed
+                  (let ((llm:*on-text* (lambda (piece) (declare (ignore piece)))))
+                    (llm:complete (%streaming-anthropic s) (list (llm:msg "user" "hi")))))
+                (is (= (second case) (car count)) "~A: ~D" (third case) (car count))))))))))
+
+(defclass %always-503-embedder (llm:embedding-provider)
+  ((counter :initarg :counter :reader %embedder-counter))
+  (:documentation "An embedder that inherits EMBED-DOCUMENTS and EMBED-BATCH's fallbacks, so
+they reach its EMBED, which always fails with a 503."))
+
+(defmethod llm:embedding-dimensions ((p %always-503-embedder)) 4)
+
+(defmethod llm:embed ((p %always-503-embedder) text)
+  (declare (ignore text))
+  (funcall (%embedder-counter p))
+  (error 'cnd:provider-request-failed :status 503 :detail "unavailable"))
+
+(test an-embedding-request-is-retried-once-however-the-calls-nest
+  "#79: EMBED-DOCUMENTS and the calls inside it run under *RETRY*, and a call made inside a
+retried call is not retried again, so a 503 costs one more request, not one per level."
+  (multiple-value-bind (handler count)
+      (%failing-then 1 "{\"data\":[{\"embedding\":[1,0,0,0],\"index\":0}],\"usage\":{\"total_tokens\":1}}"
+                     :status 503)
+    (aion/test-http:with-server (s handler)
+      (%with-recorded-waits (waits)
+        (let* ((llm:*retry* (%policy :max-attempts 4))
+               (p (make-instance 'llm:voyage-embeddings :api-key "k" :dimensions 4
+                                                        :base-url (aion/test-http:server-url s "")))
+               (vectors (llm:embed-documents p '("a"))))
+          (is (= 1 (length vectors)))
+          (is (= 2 (car count)) "one failure, one retry: ~D requests" (car count))
+          (is (= 1 (length waits)))))))
+  ;; NESTING: a provider that inherits the fallbacks reaches EMBED through EMBED-DOCUMENTS and
+  ;; EMBED-BATCH, each of which runs under *RETRY*. With a failure that persists and MAX-ATTEMPTS
+  ;; 2, EMBED is called twice in all; a retry at each of the three levels would make it 8.
+  (let* ((calls 0)
+         (p (make-instance '%always-503-embedder :counter (lambda () (incf calls)))))
+    (%with-recorded-waits (waits)
+      (let ((llm:*retry* (%policy :max-attempts 2)))
+        (signals cnd:provider-request-failed (llm:embed-documents p '("a")))
+        (is (= 2 calls) "a persistent 503 under MAX-ATTEMPTS 2, through three levels: ~D calls"
+            calls)))))

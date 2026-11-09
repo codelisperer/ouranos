@@ -1551,6 +1551,16 @@ its tag.
 
 ### Added
 
+- **`praxeon/llm:*retry*`: model, embedding and rerank requests can be retried under an
+  `aion/retry` policy** (#79). NIL by default, which changes nothing. Set to a policy,
+  `complete`, `embed`, `embed-batch`, `embed-documents`, `embed-query` and `rerank` retry what it
+  finds retryable, by default a 408, 425, 429, 503 or 529 or a connection that failed before the
+  request was sent, and wait at least the service's `Retry-After`. A call inside another retried
+  call is not retried again, and a streamed completion is not retried once any of its text has
+  reached `*on-text*`. **`praxeon/conditions:provider-request-failed` gains
+  `provider-request-failed-retry-after` and `provider-request-failed-phase`**, and answers
+  `aion/retry:transience` and `aion/retry:retry-after`, so an app can also use it with its own
+  `aion/retry:with-retry`. A stream refused when it opens now keeps the service's Retry-After too.
 - **`praxeon/retrieval:make-contextualizer` takes `:context-function` and `:version`**
   (#1195). The function receives the document's text and a plist of where the chunk is:
   `:document-id`, `:locale`, `:section-id`, `:locator`, `:sub-locator`, `:section-index`,

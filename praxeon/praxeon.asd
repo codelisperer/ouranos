@@ -42,6 +42,7 @@
                "aion/interceptor"  ; the typed pipeline a turn is threaded through (pre-publication issue 130)
                "aion/boundary"     ; RUN-TURN-THROUGH checks its CHAIN before it enters Coalton (#110)
                "aion/http-client"  ; the shared outbound client (pre-publication issue 202)
+               "aion/retry"        ; *RETRY* and PROVIDER-REQUEST-FAILED's TRANSIENCE (#79)
                "aion/random"       ; a held turn's id (#531)
                "coalton"
                "alexandria"
@@ -333,6 +334,7 @@
                "aion/signature"       ; the #67 tests mint grant tokens
                "praxeon/web-page" "aion/test-http"  ; the #757 tests serve pages from 127.0.0.1
                "aion/http-client"     ; the #719 tests build an http-error to stand for a refused connection
+               "aion/retry"           ; the #79 tests set a retry policy and record its waits
                "quri"                 ; the #1034 tests read a provider's request URL as the request does
                "fiveam"
                "aion/test-threads"    ; the #531 tests continue a held turn on another thread

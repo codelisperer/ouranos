@@ -59,7 +59,11 @@ it may have run, such as after a timeout."))
   ((status :initarg :status :initform nil :reader provider-request-failed-status)
    (error-type :initarg :error-type :initform nil :reader provider-request-failed-error-type)
    (error-code :initarg :error-code :initform nil :reader provider-request-failed-error-code)
-   (body :initarg :body :initform nil :reader provider-request-failed-body))
+   (body :initarg :body :initform nil :reader provider-request-failed-body)
+   ;; #79: the server's Retry-After, in seconds, and where the request failed, from the
+   ;; AION/HTTP-CLIENT:HTTP-ERROR it was made from, so AION/RETRY can decide about it.
+   (retry-after :initarg :retry-after :initform nil :reader provider-request-failed-retry-after)
+   (phase :initarg :phase :initform nil :reader provider-request-failed-phase))
   (:documentation "A request to a model, embedding or rerank service failed (#719).
 
 STATUS is the HTTP status, or NIL when the request failed before a response arrived.
@@ -67,10 +71,28 @@ ERROR-TYPE and ERROR-CODE are read from the service's error JSON when the body p
 and the value is 1 to 64 letters, digits, underscores, dots or hyphens, otherwise NIL (#727). BODY is the whole response body, where the service explains the failure; read
 it here.
 
+RETRY-AFTER is the seconds the service asked to wait, from its Retry-After header, or NIL. PHASE
+is AION/HTTP-CLIENT's transport phase when the request failed before a status arrived: :CONNECT
+when it was not sent, :RESPONSE when it may have been, or NIL (#79). AION/RETRY's TRANSIENCE and
+RETRY-AFTER read them, so a PRAXEON/LLM:*RETRY* policy retries a 429, 503 or 529, and a failed
+connection, and honours the wait.
+
 The report and DELIBERATION-FAILURE-DETAIL leave the body out and give its length instead,
 because praxeon/llm logs the report of a failed request at warn and a log line never carries a
 payload (docs/logging.md). A service's response body can repeat parts of the request, which
 holds the prompt."))
+
+(defmethod aion/retry:transience ((c provider-request-failed))
+  "As for the HTTP-ERROR the failure was made from (#79): AION/HTTP-CLIENT:STATUS-TRANSIENCE of
+its status and phase, so praxeon and the HTTP client cannot disagree about which failures are
+worth another attempt. A failure in the middle of a stream has neither, and is NIL: some of the
+reply may already have been delivered."
+  (aion/http-client:status-transience (provider-request-failed-status c)
+                                      (provider-request-failed-phase c)))
+
+(defmethod aion/retry:retry-after ((c provider-request-failed))
+  "The seconds the service asked to wait, from its Retry-After header, or NIL (#79)."
+  (provider-request-failed-retry-after c))
 
 (define-condition completion-cancelled (praxeon-error)
   ((input-tokens :initarg :input-tokens :initform nil :reader completion-cancelled-input-tokens)
