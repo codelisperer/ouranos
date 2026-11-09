@@ -447,15 +447,15 @@ jobs:
           # The image may or may not still ship a postgresql formula; install is a no-op
           # when it does. `|| true` on link: a keg-only formula that is already linked
           # exits non-zero and that is not a failure.
-          brew install postgresql@17 >/dev/null
-          brew link --overwrite --force postgresql@17 || true
-          export PATH="$(brew --prefix postgresql@17)/bin:$PATH"
-          echo "$(brew --prefix postgresql@17)/bin" >> "$GITHUB_PATH"
+          brew install postgresql@18 >/dev/null
+          brew link --overwrite --force postgresql@18 || true
+          export PATH="$(brew --prefix postgresql@18)/bin:$PATH"
+          echo "$(brew --prefix postgresql@18)/bin" >> "$GITHUB_PATH"
           # pgvector BEFORE the server starts, so the extension files are in place when it
           # reads its share directory (pre-publication issue 371). Without it, mnemosyne's vector operator and
           # index tests skip with "no pgvector on this host" and macOS covers neither.
           brew install pgvector >/dev/null
-          brew services start postgresql@17
+          brew services start postgresql@18
           # Wait for it rather than sleeping: a fixed sleep is either too short (flaky) or
           # too long (paid on every run).
           for i in $(seq 1 60); do
@@ -468,7 +468,7 @@ jobs:
           # ASSERT THE PROBE, NOT THE INSTALL. `brew install pgvector` exiting 0 and the
           # running server being able to see the extension are different facts: the formula
           # builds against a Postgres installation, and if it picks a different one than
-          # postgresql@17 the files land where this server does not look. The install still
+          # postgresql@18 the files land where this server does not look. The install still
           # succeeds, the tests still skip, and the step still looks fine. This is the same
           # question mnemosyne/tests/param.lisp asks before it decides to skip.
           n=$(psql -h 127.0.0.1 -d postgres -tAc \
@@ -479,6 +479,12 @@ jobs:
             exit 1
           fi
           echo "pgvector is available to this server." 
+          # THE VERSIONS IN THE LOG (#736): the major is pinned to the Linux leg's, 18, and the
+          # minor and pgvector are whatever Homebrew has today, so the log is where a later reader
+          # finds out which ones a run used.
+          psql -h 127.0.0.1 -d postgres -tAc "select version()"
+          psql -h 127.0.0.1 -d postgres -tAc \
+            "select 'pgvector ' || default_version from pg_available_extensions where name = 'vector'"
           createdb -h 127.0.0.1 -O ouranos ouranos_test || true
           echo "MNEMOSYNE_TEST_PG_URL=postgres://ouranos:ouranos@127.0.0.1:5432/ouranos_test?sslmode=disable" >> "$GITHUB_ENV"
 
@@ -499,6 +505,9 @@ jobs:
           Start-Service -Name $svc.Name
           $pgbin = (Get-ChildItem 'C:\Program Files\PostgreSQL\*\bin' | Select-Object -First 1).FullName
           if (-not $pgbin) { throw "PostgreSQL service $($svc.Name) exists but no bin directory was found" }
+          # THE VERSION IN THE LOG (#736): this leg keeps the runner image's PostgreSQL, by the
+          # hub's ruling, so the log is where a later reader finds out which version a run used.
+          & "$pgbin\postgres.exe" --version
           $env:PATH = "$pgbin;$env:PATH"
           echo $pgbin | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
           # The image documents this superuser password; it is a throwaway on a throwaway
