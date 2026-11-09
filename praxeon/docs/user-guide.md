@@ -807,7 +807,9 @@ as well (a Postgres advisory lock; on SQLite, SQLite's own write lock). `embed-p
 provider with it released, so a sync of a document does not wait for a rebuild that takes
 minutes (#1194). A chunk a sync changes during the call is not written, and is done on the next
 run. Two runs of `embed-pending` or `contextualize-pending` on one corpus still run one at a time,
-under a second lock that syncs do not take, so they never pay for the same chunks twice.
+under a second lock that syncs do not take, so they never pay for the same chunks twice. Do not
+call either inside `with-corpus-lock`: that takes the two locks in the opposite order to a run,
+which could deadlock, so it signals an error (#1200).
 
 **On SQLite** the store takes a SQLite connection the same way, and every function above behaves
 the same, with these differences:
