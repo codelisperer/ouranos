@@ -987,6 +987,18 @@ written. The passage a reader or the model sees is still the chunk's own text; t
   kept, and the next run carries on.
 - `contextualize-pending` returns the number written and, as a second value, `:done`,
   `:no-contextualizer`, `:whole` or `:backfill-not-started`.
+- **An app's own prompt, or its own contexts (#1195).** The built-in prompt gives the model the
+  document and the chunk's text only, so two identical chunks in one document get the same
+  question. `make-contextualizer` takes `:context-function`, a function of the document's text
+  and a plist describing the chunk: `:document-id`, `:locale`, `:section-id`, `:locator`,
+  `:sub-locator`, `:section-index`, `:chunk-index`, `:position` (its place in the document, from
+  0) and `:text`. It returns either the context itself, a string, written without calling the
+  model, or a list of messages, sent to the provider in place of the built-in ones. Anything
+  else, or an empty context, signals `deliberation-failure` and writes nothing for that chunk.
+  `:version` is required with it: a string the app changes whenever the function's output would
+  change. It goes into `contextualizer-id`, so a new version makes every context stale. A
+  function cannot be fingerprinted, so a changed function under an unchanged version leaves the
+  old contexts looking current.
 
 **When an `:auto` corpus grows past its limit**, the next `contextualize-pending` has every chunk
 to do, and every chunk is embedded again. That backfill is the one large cost of this design. An

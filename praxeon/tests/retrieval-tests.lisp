@@ -2070,6 +2070,132 @@ here pauses inside its call; a sync from another thread must finish meanwhile."
           (sb-thread:join-thread run :default nil :timeout 30)
           (when sync (sb-thread:join-thread sync :default nil :timeout 30))))))
 
+;;; --- a context function receives where the chunk is (#1195) ----------------------------
+
+(defun %stored-contexts (store)
+  "Each chunk's (section-id context), in section order."
+  (mapcar (lambda (r) (list (param:row-value r :section_id) (param:row-value r :context)))
+          (conn:query (rt:store-connection store)
+                      (format nil "SELECT section_id, context FROM ~A ORDER BY section_id"
+                              (rt:store-table store)))))
+
+(defparameter +repeated+
+  (list (sec "1" "Payout rules.")
+        (sec "2" "See the table below.")
+        (sec "3" "Refund rules.")
+        (sec "4" "See the table below."))
+  "A document whose second and fourth chunks are the same text under different sections.")
+
+(test a-context-function-can-tell-repeated-chunks-apart
+  "#1195. The built-in prompt gives the model the document and the chunk's text only, so two
+identical chunks in one document get the same question. A :CONTEXT-FUNCTION receives where the
+chunk is as well: its section, locator, indexes and position in the document. Here it returns the
+context itself, from the section, so the two repeated chunks get different contexts and the model
+is never called."
+  (with-store (store)
+    (let* ((seen '())
+           (writer (make-instance 'context-writer))
+           (corpus (rt:make-corpus store "policy" :strategy :hybrid
+                                   :contextualizer
+                                   (rt:make-contextualizer
+                                    writer :version "by-section/1"
+                                    :context-function
+                                    (lambda (document chunk)
+                                      (declare (ignore document))
+                                      (push chunk seen)
+                                      (format nil "From section ~A, chunk ~D of the document."
+                                              (getf chunk :section-id) (getf chunk :position)))))))
+      (rt:sync-corpus corpus +repeated+)
+      (is (= 4 (rt:contextualize-pending corpus)))
+      (is (equal '(("1" "From section 1, chunk 0 of the document.")
+                   ("2" "From section 2, chunk 1 of the document.")
+                   ("3" "From section 3, chunk 2 of the document.")
+                   ("4" "From section 4, chunk 3 of the document."))
+                 (%stored-contexts store))
+          "the repeated chunks have different contexts: ~S" (%stored-contexts store))
+      (is (null (writer-calls writer)) "the model was not called")
+      (let ((fourth (find "4" seen :key (lambda (c) (getf c :section-id)) :test #'equal)))
+        (is (equal "See the table below." (getf fourth :text)))
+        (is (equal "§4" (getf fourth :locator)) "the locator is passed")
+        (is (equal "doc-1" (getf fourth :document-id)))
+        (is (equal "en" (getf fourth :locale)))
+        (is (integerp (getf fourth :section-index)) "and the section index")
+        (is (integerp (getf fourth :chunk-index)) "and the chunk index")))))
+
+(test a-context-function-can-return-messages-for-the-model
+  "#1195. A :CONTEXT-FUNCTION may return messages instead of a context. They are sent to the
+contextualizer's provider in place of the built-in prompt, and its answer is the context."
+  (with-store (store)
+    (let* ((writer (make-instance 'context-writer :answer (lambda (document) (declare (ignore document))
+                                                            "  A context from the app's prompt.")))
+           (corpus (rt:make-corpus store "policy" :strategy :hybrid
+                                   :contextualizer
+                                   (rt:make-contextualizer
+                                    writer :version "own-prompt/1"
+                                    :context-function
+                                    (lambda (document chunk)
+                                      (list (llm:msg "user"
+                                                     (list (llm:text-part document)
+                                                           (llm:text-part
+                                                            (format nil "Section ~A: ~A"
+                                                                    (getf chunk :section-id)
+                                                                    (getf chunk :text)))))))))))
+      (rt:sync-corpus corpus (list (sec "1" "Payout rules.")))
+      (is (= 1 (rt:contextualize-pending corpus)))
+      (is (equal '(("1" "A context from the app's prompt.")) (%stored-contexts store)))
+      (is (= 1 (length (writer-calls writer))) "the model was called once")
+      (is (equal "Section 1: Payout rules."
+                 (getf (second (getf (first (writer-calls writer)) :parts)) :text))
+          "with the app's messages"))))
+
+(test a-context-function-needs-a-version-that-goes-into-the-id
+  "#1195. A function cannot be fingerprinted, so :CONTEXT-FUNCTION requires :VERSION, which goes
+into CONTEXTUALIZER-ID. Changing it makes every context stale; keeping it keeps them current.
+Without it, a changed function would leave every context looking current."
+  (let ((writer (make-instance 'context-writer))
+        (fn (lambda (document chunk) (declare (ignore document chunk)) "A context.")))
+    (signals error (rt:make-contextualizer writer :context-function fn))
+    (signals error (rt:make-contextualizer writer :context-function fn :version ""))
+    (signals error (rt:make-contextualizer writer :version "1") "a version with no function")
+    (let ((plain (rt:contextualizer-id (rt:make-contextualizer writer)))
+          (v1 (rt:contextualizer-id (rt:make-contextualizer writer :context-function fn :version "1")))
+          (v1-again (rt:contextualizer-id (rt:make-contextualizer writer :context-function fn :version "1")))
+          (v2 (rt:contextualizer-id (rt:make-contextualizer writer :context-function fn :version "2"))))
+      (is (search "/fn-" v1) "the id names the function's version: ~A" v1)
+      (is-false (search "/fn-" plain) "control: the built-in prompt's id does not")
+      (is (equal v1 v1-again) "the same version, the same id")
+      (is (not (equal v1 v2)) "another version, another id")))
+  (with-store (store)
+    (flet ((corpus (version)
+             (rt:make-corpus store "policy" :strategy :hybrid
+                             :contextualizer
+                             (rt:make-contextualizer
+                              (make-instance 'context-writer) :version version
+                              :context-function (lambda (document chunk)
+                                                  (declare (ignore document))
+                                                  (format nil "v~A ~A" version (getf chunk :section-id)))))))
+      (rt:sync-corpus (corpus "1") (list (sec "1" "Payout rules.")))
+      (is (= 1 (rt:contextualize-pending (corpus "1"))))
+      (is (= 0 (rt:contextualize-pending (corpus "1"))) "the same version: nothing is stale")
+      (is (= 1 (rt:contextualize-pending (corpus "2"))) "a new version: written again")
+      (is (equal '(("1" "v2 1")) (%stored-contexts store))))))
+
+(test a-context-function-that-returns-something-else-writes-nothing
+  "#1195. A :CONTEXT-FUNCTION that returns neither a context string nor messages, or an empty
+context, signals DELIBERATION-FAILURE and writes nothing for that chunk."
+  (dolist (returned (list 42 "   " (list "not a message")))
+    (with-store (store)
+      (let ((corpus (rt:make-corpus store "policy" :strategy :hybrid
+                                    :contextualizer
+                                    (rt:make-contextualizer
+                                     (make-instance 'context-writer) :version "1"
+                                     :context-function (lambda (document chunk)
+                                                         (declare (ignore document chunk))
+                                                         returned)))))
+        (rt:sync-corpus corpus (list (sec "1" "Payout rules.")))
+        (signals cnd:deliberation-failure (rt:contextualize-pending corpus))
+        (is (equal '(("1" nil)) (%stored-contexts store)) "nothing was written for ~S" returned)))))
+
 (test a-background-run-inside-the-corpus-lock-is-refused
   "#1200. A run takes the run lock first and the corpus lock second (#1194). Called inside the
 app's own WITH-CORPUS-LOCK, EMBED-PENDING or CONTEXTUALIZE-PENDING would take them the other way
