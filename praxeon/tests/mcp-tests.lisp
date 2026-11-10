@@ -2645,3 +2645,23 @@ registers tools with :CONFIRM :AFTER-UNTRUSTED (#1185). Left out, the default is
     (signals error (grant :confirm '("spend") :confirm-after-untrusted '("spend"))
       "a tool in both is refused")
     (signals error (grant :confirm-after-untrusted '("nope")) "an unknown tool is refused")))
+
+(test the-task-poll-backoff-is-the-same-schedule-on-retry-delay
+  "#79: %BACKOFF now computes its doubling with AION/RETRY:RETRY-DELAY. The hub's ruling is that
+the move must not change any schedule, so this compares it with the formula it replaced, written
+out here, over intervals from 0 to above the cap and runs of up to 40 failures, with EQL so that
+the type of each value is the same too, not only its size."
+  (flet ((before (interval failures cap)
+           (let ((wait interval))
+             (loop repeat (1- failures)
+                   while (and (plusp wait) (< wait cap))
+                   do (setf wait (* 2 wait)))
+             (max interval (min cap wait)))))
+    (let ((differences '()))
+      (dolist (cap '(60 300))
+        (dolist (interval '(0 1 2 3 5 7 30 60 299 300 400))
+          (loop for failures from 1 to 40
+                unless (eql (before interval failures cap)
+                            (praxeon/mcp::%backoff interval failures cap))
+                  do (push (list interval failures cap) differences))))
+      (is (null differences) "the schedule differs at ~S" differences))))

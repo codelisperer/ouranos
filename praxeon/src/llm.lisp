@@ -363,6 +363,8 @@ identifier, not a value from a provider or a user.")
                              :tool-choice (cond ((null tool-choice) "auto")
                                                 ((keywordp tool-choice) (string-downcase tool-choice))
                                                 (t "forced")))
+    (%complete-with-retry
+     (lambda ()
     (handler-bind
         ((cl:error (lambda (c)
                      ;; :warn, not :error -- a provider failure is often retried or falls
@@ -405,7 +407,7 @@ identifier, not a value from a provider or a user.")
                                   :tool-calls (length (completion-tool-calls completion))
                                   :text-length (length (completion-text completion))
                                   :ms (%ms-since start))
-        completion))))
+        completion))))))
 
 (defun %ms-since (start)
   "Milliseconds since START (an internal-real-time reading), rounded."
@@ -458,9 +460,13 @@ payloads out of log lines, and a response body can repeat the request."
         (multiple-value-bind (type code) (%provider-error-fields body)
           (make-condition 'praxeon/conditions:provider-request-failed
                           :status status :error-type type :error-code code :body body
+                          :retry-after (http:http-error-retry-after e)
+                          :phase (http:http-error-phase e)
                           :detail (format nil "~A: HTTP ~A~@[, ~A~]~@[, code ~A~], a response body of ~D characters"
                                           label status type code (length (or body ""))))))
       (make-condition 'praxeon/conditions:provider-request-failed
+                      ;; No status: a transport failure, whose phase says whether it was sent.
+                      :phase (and (typep e 'http:http-error) (http:http-error-phase e))
                       :detail (format nil "~A: ~A" label
                                       (if (typep e 'http:http-error)
                                           (or (http:http-error-detail e) "no response")
@@ -512,6 +518,52 @@ each, so the octets that arrived are never fewer than the tokens they encode, an
 cannot come out low for them; it comes out about four times high for English text. Tokens the
 provider generated but had not sent when the connection closed are not in it, because nothing
 here can see them.")
+
+(defvar *retry* nil
+  "NIL, the default, or an AION/RETRY:RETRY-POLICY under which COMPLETE, EMBED, EMBED-BATCH,
+EMBED-DOCUMENTS, EMBED-QUERY and RERANK try a request again when it fails in a way the policy
+retries (#79). With MAKE-RETRY-POLICY's default RETRYABLE, that is a 408, 425, 429, 503 or 529, or
+a connection that failed before the request was sent; a service's Retry-After is honoured, and a
+wait longer than the policy's MAX-DELAY stops the retrying instead. Each attempt is logged.
+
+NIL makes no change: one request, as before. An app sets it, or binds it around the calls it
+wants retried, for example
+  (setf praxeon/llm:*retry* (aion/retry:make-retry-policy :max-attempts 4 :name \"llm\"))
+
+The wait sleeps the calling thread, so it must not be used on a libuv loop thread;
+AION/RETRY refuses to start there. A call made inside another retried call is not retried again,
+so the attempts do not multiply. A streamed completion is retried only while none of its text
+has reached *ON-TEXT*: once some has, a second attempt would send the caller the same text
+twice.
+
+This is a variable, not a key on COMPLETE, because a key added to COMPLETE's lambda list would
+oblige every provider's method to accept it, providers written outside this tree included.")
+
+(defvar *%retrying* nil
+  "True inside a call that *RETRY* is already retrying, so a call made inside it is not retried
+again.")
+
+(defun %with-retry (thunk)
+  "THUNK's values, under *RETRY* when it is set and this is not already inside a retried call."
+  (if (and *retry* (not *%retrying*))
+      (let ((*%retrying* t))
+        (aion/retry:call-with-retry *retry* thunk))
+      (funcall thunk)))
+
+(defun %complete-with-retry (thunk)
+  "THUNK, one attempt at a completion, under *RETRY*. While a stream's text is being passed to
+*ON-TEXT*, a retry is given up once any has been: the caller already has it."
+  (if (or (null *retry*) *%retrying* (null *on-text*))
+      (%with-retry thunk)
+      (let* ((delivered nil)
+             (on-text *on-text*)
+             (*on-text* (lambda (piece) (setf delivered t) (funcall on-text piece))))
+        (handler-bind ((aion/retry:retry-scheduled
+                         (lambda (c)
+                           (declare (ignore c))
+                           (when delivered
+                             (invoke-restart 'aion/retry:give-up)))))
+          (%with-retry thunk)))))
 
 (defgeneric supports-streaming-p (provider)
   (:documentation "True when PROVIDER streams a completion when *ON-TEXT* or *CANCEL* is bound.
@@ -608,7 +660,7 @@ PROVIDER-REQUEST-FAILED with their length, never their text."
 each event until the stream ends. A cancel through *CANCEL* signals COMPLETION-CANCELLED from
 TALLY. A failed request, or a status other than 2xx, signals PROVIDER-REQUEST-FAILED as COMPLETE
 does, with a report starting with LABEL. The connection is closed on every exit."
-  (multiple-value-bind (body status)
+  (multiple-value-bind (body status headers)
       (handler-case
           (http:open-response-stream
            (http:make-request :method :post :url url :headers headers :content payload
@@ -623,9 +675,14 @@ does, with a report starting with LABEL. The connection is closed on every exit.
                  (loop (multiple-value-bind (data event) (http:read-event body)
                          (unless data (return))
                          (funcall on-event data event)))
-                 (error (%request-failure label (make-condition 'http:http-error
-                                                                :status status
-                                                                :body (%read-text body)))))
+                 (error (%request-failure label
+                                          (make-condition
+                                           'http:http-error
+                                           :status status :body (%read-text body)
+                                           ;; Kept, so a *RETRY* policy honours it (#79).
+                                           :retry-after (aion/retry:parse-retry-after
+                                                         (http:header-value headers
+                                                                            "retry-after"))))))
            (http:request-cancelled () (%cancelled tally))
            (http:http-error (e) (error (%request-failure label e))))
       (close body))))

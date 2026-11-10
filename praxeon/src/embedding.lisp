@@ -150,20 +150,21 @@ they disagree it is the configuration that is wrong rather than the row."
 
 (defmethod embed :around ((p embedding-provider) text)
   (declare (ignore text))
-  (%check-width p (call-next-method)))
+  ;; Under *RETRY* when an app set one (#79).
+  (%check-width p (%with-retry (lambda () (call-next-method)))))
 
 (defmethod embed-batch :around ((p embedding-provider) texts)
   (declare (ignore texts))
-  (let ((vectors (call-next-method)))
+  (let ((vectors (%with-retry (lambda () (call-next-method)))))
     (dolist (v vectors vectors) (%check-width p v))))
 
 (defmethod embed-query :around ((p embedding-provider) text)
   (declare (ignore text))
-  (%check-width p (call-next-method)))
+  (%check-width p (%with-retry (lambda () (call-next-method)))))
 
 (defmethod embed-documents :around ((p embedding-provider) texts)
   (declare (ignore texts))
-  (let ((vectors (call-next-method)))
+  (let ((vectors (%with-retry (lambda () (call-next-method)))))
     (dolist (v vectors vectors) (%check-width p v))))
 
 (defun check-embedding-dimensions (provider declared &key source)
