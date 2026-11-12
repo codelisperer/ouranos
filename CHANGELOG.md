@@ -1495,8 +1495,13 @@ its tag.
 - **`scripts/setup.sh` adds Quicklisp to `~/.sbclrc` when it installs Quicklisp itself**
   (#1213). Before this, a fresh setup left a plain `sbcl` session without the `ql` package, and a
   developer had to load `~/quicklisp/setup.lisp` and call `ql:add-to-init-file` by hand. Setup
-  prints which init file it wrote. It still leaves `~/.sbclrc` alone when Quicklisp was already
-  installed, and with `--ci` it never writes it. `scripts/setup.ps1` is unchanged.
+  prints which init file it wrote. When Quicklisp was already installed, or with `--ci`, it does
+  not touch `~/.sbclrc`. On a fresh install it appends Quicklisp's standard block to an existing
+  `~/.sbclrc`, unless that file already makes a plain `sbcl` load Quicklisp. If writing the file
+  fails, for example because it is read-only, setup prints a warning and the manual fix and
+  carries on. The doctor (`setup.sh --check`, and the check at the end of every setup) now
+  prints a WARN, not a failure, when a plain `sbcl` does not load Quicklisp. `scripts/setup.ps1`
+  is unchanged.
 - **A sync no longer waits for `embed-pending` or `contextualize-pending` to finish** (#1194).
   Both held the corpus lock across every provider call, so `praxeon/retrieval:sync-document` and
   `sync-corpus` on the same corpus waited for the whole rebuild, which for a few thousand chunks

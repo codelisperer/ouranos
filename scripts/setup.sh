@@ -310,20 +310,56 @@ install_quicklisp() {
   register_quicklisp_in_init_file
 }
 
+# Whether a plain `sbcl`, which reads the developer's own init files, starts with Quicklisp
+# loaded. This asks SBCL rather than searching ~/.sbclrc for a line, because an init file can
+# load Quicklisp in more than one way.
+plain_sbcl_has_quicklisp() {
+  _b=$(sbcl_bin)
+  [ -n "$_b" ] || return 1
+  "$_b" --non-interactive --eval '(format t "~&QL-LOADED ~A~%" (if (find-package "QL") "yes" "no"))' \
+        2>/dev/null | grep -q '^QL-LOADED yes$'
+}
+
+# The manual fix, printed by the step below when it fails and by the doctor.
+quicklisp_init_fix() {
+  printf '       fix: in sbcl, run (load "%s/setup.lisp")\n' "$ql_home"
+  printf '            then (ql:add-to-init-file) and press Enter\n'
+}
+
 # Add Quicklisp's loader to the SBCL init file (~/.sbclrc), so that a plain `sbcl` has the QL
 # package. Before #1213 setup never did this, and nothing reported it: every step here and the
-# bootstrap load setup.lisp explicitly, and the doctor only checks that ~/quicklisp exists.
-# It is called only when this script installed Quicklisp itself. When Quicklisp was already
-# there, the developer has already decided how their init file loads it, and ~/.sbclrc is
-# theirs (scripts/verify-tree.lisp takes the same position). It is skipped on CI, where
-# nothing reads the init file. ql:add-to-init-file waits for Enter before it writes, and
+# bootstrap load setup.lisp explicitly, and the doctor only checked that ~/quicklisp exists.
+#
+# It runs only when this script installed Quicklisp itself, and not on CI, where nothing reads
+# the init file. When Quicklisp was already installed, setup does not touch ~/.sbclrc
+# (scripts/verify-tree.lisp also treats it as the developer's file). A fresh install can still
+# meet an existing ~/.sbclrc the developer wrote: if that file already makes plain sbcl load
+# Quicklisp, nothing is added; otherwise Quicklisp's block is appended to it.
+#
+# A failure here only warns. The init file is a convenience for the REPL and the build does not
+# read it, so a read-only ~/.sbclrc (a home-manager symlink, for example) must not stop the
+# Quicklisp dist and Coalton from installing. The doctor reports the missing loader on every
+# later run. ql:add-to-init-file waits for Enter before it writes, and
 # ql-util:without-prompting answers that.
 register_quicklisp_in_init_file() {
   [ "$ci" -eq 0 ] || return 0
-  _out=$(sbcl --non-interactive --no-userinit --load "$ql_home/setup.lisp" \
-              --eval '(ql-util:without-prompting (format t "~&INIT-FILE ~A~%" (ql:add-to-init-file)))')
-  _init=$(printf '%s\n' "$_out" | sed -n 's/^INIT-FILE //p')
-  note "added Quicklisp to ${_init:-the SBCL init file}, so a plain sbcl loads it"
+  if plain_sbcl_has_quicklisp; then
+    note "the SBCL init file already loads Quicklisp; left unchanged"
+    return 0
+  fi
+  if _out=$(sbcl --non-interactive --no-userinit --load "$ql_home/setup.lisp" \
+                 --eval '(ql-util:without-prompting (format t "~&INIT-FILE ~A~%" (ql:add-to-init-file)))' 2>&1); then
+    _init=$(printf '%s\n' "$_out" | sed -n 's/^INIT-FILE //p')
+  else
+    _init=""
+  fi
+  if [ -n "$_init" ]; then
+    note "added Quicklisp to $_init, so a plain sbcl loads it"
+  else
+    note "WARNING: could not add Quicklisp to the SBCL init file; the build does not need it, a plain sbcl REPL does"
+    quicklisp_init_fix
+  fi
+  return 0
 }
 
 pin_quicklisp_dist() {
@@ -418,6 +454,14 @@ run_doctor() {
   fi
   if [ -f "$ql_home/setup.lisp" ]; then printf '  PASS    Quicklisp at %s\n' "$ql_home"
   else need "Quicklisp" "./scripts/setup.sh"; fi
+  # A WARN, not a gap: the build loads setup.lisp itself, so only the REPL is affected. Setup
+  # writes the init file only on a fresh Quicklisp install (#1213), so this line is what reports
+  # an install whose init-file step failed, on every later run. Not on CI, where nothing reads
+  # the init file.
+  if [ "$ci" -eq 0 ] && [ -f "$ql_home/setup.lisp" ] && ! plain_sbcl_has_quicklisp; then
+    printf '  WARN    a plain sbcl does not load Quicklisp (the build does not need it; the REPL does)\n'
+    quicklisp_init_fix
+  fi
   # Checking the directory EXISTS is not enough: a checkout at the wrong commit is the exact
   # drift coalton.pin exists to catch, and it is invisible until something behaves oddly.
   if [ -d "$coalton_dir/.git" ]; then
