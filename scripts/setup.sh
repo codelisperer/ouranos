@@ -307,6 +307,23 @@ install_quicklisp() {
   verify_sha256 "$scratch/quicklisp.lisp" "${QUICKLISP_LISP_SHA256:-}" "quicklisp.lisp"
   sbcl --non-interactive --no-userinit --load "$scratch/quicklisp.lisp" \
        --eval "(quicklisp-quickstart:install :path \"$ql_home/\")" >/dev/null
+  register_quicklisp_in_init_file
+}
+
+# Add Quicklisp's loader to the SBCL init file (~/.sbclrc), so that a plain `sbcl` has the QL
+# package. Before #1213 setup never did this, and nothing reported it: every step here and the
+# bootstrap load setup.lisp explicitly, and the doctor only checks that ~/quicklisp exists.
+# It is called only when this script installed Quicklisp itself. When Quicklisp was already
+# there, the developer has already decided how their init file loads it, and ~/.sbclrc is
+# theirs (scripts/verify-tree.lisp takes the same position). It is skipped on CI, where
+# nothing reads the init file. ql:add-to-init-file waits for Enter before it writes, and
+# ql-util:without-prompting answers that.
+register_quicklisp_in_init_file() {
+  [ "$ci" -eq 0 ] || return 0
+  _out=$(sbcl --non-interactive --no-userinit --load "$ql_home/setup.lisp" \
+              --eval '(ql-util:without-prompting (format t "~&INIT-FILE ~A~%" (ql:add-to-init-file)))')
+  _init=$(printf '%s\n' "$_out" | sed -n 's/^INIT-FILE //p')
+  note "added Quicklisp to ${_init:-the SBCL init file}, so a plain sbcl loads it"
 }
 
 pin_quicklisp_dist() {
