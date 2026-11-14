@@ -380,8 +380,12 @@ return the desktop's epoch."
     (incf (%subscribers desktop))
     (unless (%timer desktop)
       (let ((epoch (%epoch desktop)))
+        ;; THREAD-LIFETIME: scoped -- %RUN-TIMER returns once no page is connected or
+        ;; STOP-DESKTOP has changed the epoch.
         (setf (%timer desktop)
-              (sb-thread:make-thread (lambda () (%run-timer desktop epoch))
+              (sb-thread:make-thread (lambda ()
+                                       (aion/dynamic:unblock-interrupts)
+                                       (%run-timer desktop epoch))
                                      :name (format nil "desktop-ui timer: ~A"
                                                    (desktop-title desktop))))))
     (%epoch desktop)))

@@ -32,6 +32,9 @@
 ;;; The parent holds the write end of this process's standard input and never writes to it.
 ;;; End of file there means the parent closed it or died, and the child exits. Without this,
 ;;; a child whose parent died before connecting would wait in `accept` with nobody to stop it.
+;; INTERRUPTS: this runs while the child image loads this file, where nothing has an interrupt
+;; deferred, and the child loads no aion system that UNBLOCK-INTERRUPTS could come from.
+;; THREAD-LIFETIME: process -- it ends the child when the parent closes standard input.
 (sb-thread:make-thread
  (lambda ()
    (let ((input (sb-ext:symbol-global-value '*standard-input*)))

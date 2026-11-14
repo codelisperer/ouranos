@@ -630,6 +630,8 @@ with `<end>' added once the server has ended the stream; the reading thread; and
          (let ((text (get-output-stream-string read-so-far)))
            (write-string text read-so-far)
            text)))
+     ;; INTERRUPTS: a test thread, started from the test body, which has no interrupt deferred.
+     ;; THREAD-LIFETIME: scoped -- it reads the child's output until the stream ends.
      (sb-thread:make-thread
       (lambda ()
         (ignore-errors

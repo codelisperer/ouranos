@@ -131,6 +131,8 @@ Windows branch has not been run."
 (test an-endless-loop-is-interrupted
   (%with-runtime (runtime)
     (let* ((reply nil)
+           ;; INTERRUPTS: a test thread, started from the test body, which has no interrupt deferred.
+           ;; THREAD-LIFETIME: scoped -- the test joins it after interrupting the evaluation.
            (thread (sb-thread:make-thread
                     (lambda ()
                       (setf reply (ignore-errors
