@@ -247,7 +247,7 @@ the page uses, changes what another window shows, with no restart and no change 
            (job (ide::item-job entry)))
       (is (sb-thread:wait-on-semaphore *gate* :timeout 20) "the input reached its loop")
       (is (eq :running (jobs:job-status job)))
-      (let ((answer (%post app "/window/repl/action/eval"
+      (let ((answer (%post app "/window/repl/action/cancel"
                            "cancel" (princ-to-string (jobs:job-id job)))))
         (is (search "was cancelled" answer) "answered: ~A" answer)
         (is (search "id=win-repl-entry-1" (remove #\" answer))
@@ -260,7 +260,7 @@ the page uses, changes what another window shows, with no restart and no change 
     (is (equal "3" (getf (%eval app desktop "lisp" "(+ 1 2)") :value)))
     (is (= 2 (length (%transcript desktop "repl"))))
     (is (search "no evaluation with that job id"
-                (%post app "/window/repl/action/eval" "cancel" "0")))))
+                (%post app "/window/repl/action/cancel" "cancel" "0")))))
 
 (test a-coalton-input-is-cancelled-and-the-session-evaluates-again
   "cons/coalton-repl evaluates on its own thread, so this is the job's :ON-STOP at work."
@@ -274,7 +274,7 @@ the page uses, changes what another window shows, with no restart and no change 
                          thereis (repl::session-worker session)
                          do (sleep 0.01))))
       (is-true worker "the Coalton evaluation started, on cons/coalton-repl's own thread")
-      (%post app "/window/repl/action/eval" "cancel" (princ-to-string (jobs:job-id job)))
+      (%post app "/window/repl/action/cancel" "cancel" (princ-to-string (jobs:job-id job)))
       (is (jobs:wait-job job :timeout 20))
       (is (eq :cancelled (getf (ide:inspect-repl-entry entry) :kind))
           "the record: ~S" (ide:inspect-repl-entry entry))
@@ -310,6 +310,26 @@ the page uses, changes what another window shows, with no restart and no change 
       (is (equal "3" (getf (%eval app desktop "lisp" "(+ 1 2)") :value))
           "once the first has ended, the next input is evaluated")
       (is (= 2 (length (%transcript desktop "repl")))))))
+
+(test cancel-is-an-action-of-its-own-on-the-repl-and-agent-windows
+  (%with-ide (app desktop)
+    (is (equal '("eval" "cancel")
+               (mapcar #'car (ui:window-actions (ui:find-window desktop "repl")))))
+    (is (equal '("say" "cancel")
+               (mapcar #'car (ui:window-actions (ui:find-window desktop "agent")))))
+    (%with-gate ()
+      (let ((running (%post app "/window/repl/action/eval" "language" "lisp"
+                            "input" +wait-at-the-gate+)))
+        (is (search "/window/repl/action/cancel" running)
+            "the Cancel button posts to the action cancel: ~A" running))
+      (let* ((job (ide::item-job (first (%transcript desktop "repl"))))
+             (id (princ-to-string (jobs:job-id job))))
+        (is (search "Not evaluated" (%post app "/window/repl/action/eval" "cancel" id))
+            "eval no longer reads the field cancel, so this is a second input and is refused")
+        (is (eq :running (jobs:job-status job)) "and the job is still running")
+        (is (search "was cancelled" (%post app "/window/repl/action/cancel" "cancel" id)))
+        (is (jobs:wait-job job :timeout 20))
+        (is (eq :cancelled (jobs:job-status job)))))))
 
 (test two-repl-windows-keep-separate-transcripts
   (%with-ide (app desktop)
@@ -424,11 +444,13 @@ then answers, so a test can hold a turn in the middle."))
   (let ((provider (make-instance 'gated-provider)))
     (%with-ide (app desktop :provider provider)
       (%recording-changes (calls)
-        (%post app "/window/agent/action/say" "text" "a question never answered")
+        (is (search "/window/agent/action/cancel"
+                    (%post app "/window/agent/action/say" "text" "a question never answered"))
+            "the running turn's Cancel button posts to the action cancel")
         (is (sb-thread:wait-on-semaphore (provider-entered provider) :timeout 20))
         (let* ((turn (first (%transcript desktop "agent")))
                (job (ide::item-job turn))
-               (answer (%post app "/window/agent/action/say"
+               (answer (%post app "/window/agent/action/cancel"
                               "cancel" (princ-to-string (jobs:job-id job)))))
           (is (search "The turn was cancelled." answer) "answered: ~A" answer)
           (is (null (search "hx-post" answer)) "with no Cancel button")
@@ -437,7 +459,7 @@ then answers, so a test can hold a turn in the middle."))
           (is (eq :cancelled (getf (ide:inspect-agent-turn turn) :kind)))
           (is (member "agent" calls :test #'string=) "the agent's window was told"))
         (is (search "no turn with that job id"
-                    (%post app "/window/agent/action/say" "cancel" "0")))))))
+                    (%post app "/window/agent/action/cancel" "cancel" "0")))))))
 
 ;;; --- the clock ---------------------------------------------------------------------------
 

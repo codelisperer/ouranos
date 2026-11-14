@@ -1610,9 +1610,10 @@ its tag.
   SBCL ends the process when a thread runs out of stack, and neither handler runs.
 - **The Ouranos IDE example evaluates REPL input and runs agent turns as background jobs**
   (#1218), in `praxeon/examples/ouranos-ide`. `repl-eval` and `agent-say` answer at once with a
-  running entry that has a Cancel button, and no longer wait for the result. The same actions
-  cancel a job when the form has the field `cancel` holding its job id (`repl-cancel`,
-  `agent-cancel`). Lisp-mode input now has the time limit Coalton input had,
+  running entry that has a Cancel button, and no longer wait for the result. The REPL and agent
+  windows each have a new action `cancel` (`repl-cancel`, `agent-cancel`), which cancels the job
+  whose id is in the form field `cancel`; the Cancel button posts to it, and `repl-eval` and
+  `agent-say` do not read that field. Lisp-mode input now has the time limit Coalton input had,
   `*eval-time-limit*` (20 seconds), and an agent's turn has `*turn-time-limit*` (300). A second
   input to a REPL window whose last input is still running is refused, and so is a second turn
   for an agent whose last turn is still running. `repl-entry` is a class and no longer a

@@ -102,8 +102,8 @@ copied."
   (spin:with-html-string (:div :class "ide-entry" (:pre :class "ou-error" text))))
 
 (defun %cancel-button (window element-id action job)
-  "A button that posts the job's id to WINDOW's ACTION as the form field `cancel', and replaces
-the element ELEMENT-ID with the answer."
+  "A button that posts the job's id to WINDOW's ACTION, `cancel', as the form field `cancel',
+and replaces the element ELEMENT-ID with the answer."
   (spin:with-html-string
     (:button :type "button" :class "ide-cancel"
              :hx-post (format nil "/window/~A/action/~A" (ui:window-id window) action)
@@ -242,7 +242,7 @@ second to return by itself. For the same reason what a Coalton input prints is n
           (:running
            (:div :class "ide-out"
              (:span :class "ide-type" "running ")
-             (:raw (%cancel-button window element-id "eval" (item-job entry)))))
+             (:raw (%cancel-button window element-id "cancel" (item-job entry)))))
           (:value
            (:div :class "ide-out"
              (:code (getf record :value))
@@ -254,8 +254,8 @@ second to return by itself. For the same reason what a Coalton input prints is n
            (:pre :class "ou-error" (getf record :message))))))))
 
 (defun repl-cancel (window parameters)
-  "Cancel the evaluation whose job id is in the form field `cancel', if it belongs to WINDOW,
-and answer with its entry's HTML."
+  "The REPL window's action `cancel'. Cancel the evaluation whose job id is in the form field
+`cancel', if it belongs to WINDOW, and answer with its entry's HTML."
   (let ((entry (%find-by-job window parameters)))
     (cond (entry
            (jobs:cancel-job (item-job entry))
@@ -263,25 +263,20 @@ and answer with its entry's HTML."
           (t (%notice-html "This window has no evaluation with that job id.")))))
 
 (defun repl-eval (window parameters)
-  "The REPL window's action `eval'.
-
-With the form field `cancel', a job id: cancel that evaluation (REPL-CANCEL).
-
-Otherwise the form field `input' is the source and `language' is coalton or lisp. A job is
-started to evaluate it, an entry is added to the window's transcript, and the answer is the
-entry's HTML while it is running. If the window's last input is still running, the new one is
-refused: nothing is started or stored, and the answer says so."
-  (if (%field parameters "cancel")
-      (repl-cancel window parameters)
-      (let ((input (or (%field parameters "input") ""))
-            (language (if (equal "lisp" (%field parameters "language")) :lisp :coalton))
-            (entry nil))
-        (sb-thread:with-mutex (*ide-lock*)
-          (unless (%running-item window)
-            (setf entry (%start-entry window language input))))
-        (if entry
-            (%entry-html window entry)
-            (%notice-html "Not evaluated: this window's last input is still running. Wait for it, or cancel it.")))))
+  "The REPL window's action `eval'. The form field `input' is the source and `language' is
+coalton or lisp. A job is started to evaluate it, an entry is added to the window's
+transcript, and the answer is the entry's HTML while it is running. If the window's last input
+is still running, the new one is refused: nothing is started or stored, and the answer says
+so. A running evaluation is cancelled through the action `cancel' (REPL-CANCEL)."
+  (let ((input (or (%field parameters "input") ""))
+        (language (if (equal "lisp" (%field parameters "language")) :lisp :coalton))
+        (entry nil))
+    (sb-thread:with-mutex (*ide-lock*)
+      (unless (%running-item window)
+        (setf entry (%start-entry window language input))))
+    (if entry
+        (%entry-html window entry)
+        (%notice-html "Not evaluated: this window's last input is still running. Wait for it, or cancel it."))))
 
 (defun render-repl (window)
   "The REPL window's body: the transcript so far, oldest first, then the input form."
@@ -484,11 +479,11 @@ bubble says so and a Cancel button follows it."
         (:raw user)
         (:raw assistant)
         (when (eq (getf record :kind) :running)
-          (:raw (%cancel-button window element-id "say" (item-job turn))))))))
+          (:raw (%cancel-button window element-id "cancel" (item-job turn))))))))
 
 (defun agent-cancel (window parameters)
-  "Cancel the turn whose job id is in the form field `cancel', if it belongs to WINDOW, and
-answer with the turn's HTML."
+  "The agent window's action `cancel'. Cancel the turn whose job id is in the form field
+`cancel', if it belongs to WINDOW, and answer with the turn's HTML."
   (let ((turn (%find-by-job window parameters)))
     (cond (turn
            (jobs:cancel-job (item-job turn))
@@ -496,27 +491,23 @@ answer with the turn's HTML."
           (t (%notice-html "This window has no turn with that job id.")))))
 
 (defun agent-say (window parameters)
-  "The agent window's action `say'.
-
-With the form field `cancel', a job id: cancel that turn (AGENT-CANCEL).
-
-Otherwise a job is started that runs one turn of the agent on the form field `text', the turn
-is added to the window's transcript, and the answer is its HTML while it is running. An error
-in the turn is shown as the agent's answer, so a provider that fails does not break the window.
+  "The agent window's action `say'. A job is started that runs one turn of the agent on the
+form field `text', the turn is added to the window's transcript, and the answer is its HTML
+while it is running. An error in the turn is shown as the agent's answer, so a provider that
+fails does not break the window. A running turn is cancelled through the action `cancel'
+(AGENT-CANCEL).
 
 One turn at a time per agent: while the agent's last turn is still running, a new one is
 refused. Nothing is started or stored, and the answer says so."
-  (if (%field parameters "cancel")
-      (agent-cancel window parameters)
-      (let ((text (or (%field parameters "text") ""))
-            (agent *agent*)
-            (turn nil))
-        (sb-thread:with-mutex (*ide-lock*)
-          (unless (%agent-busy-p agent)
-            (setf turn (%start-turn window agent text))))
-        (if turn
-            (%turn-html window turn)
-            (%notice-html "Not sent: the agent's last turn is still running. Wait for it, or cancel it.")))))
+  (let ((text (or (%field parameters "text") ""))
+        (agent *agent*)
+        (turn nil))
+    (sb-thread:with-mutex (*ide-lock*)
+      (unless (%agent-busy-p agent)
+        (setf turn (%start-turn window agent text))))
+    (if turn
+        (%turn-html window turn)
+        (%notice-html "Not sent: the agent's last turn is still running. Wait for it, or cancel it."))))
 
 (defun render-agent (window)
   "The agent window's body: the conversation so far, oldest first, then the input form."
@@ -549,14 +540,14 @@ connected pages on that schedule; the page does not ask."
   (ensure-database)
   (setf *agent* (%make-agent desktop (or provider (make-instance 'stub-provider :desktop desktop))))
   (ui:open-window desktop "repl" :title "REPL" :render 'render-repl
-                                 :actions '(("eval" . repl-eval))
+                                 :actions '(("eval" . repl-eval) ("cancel" . repl-cancel))
                                  :x 20 :y 20 :width 460 :height 360)
   (ui:open-window desktop "clock" :title "Clock" :render 'render-clock :refresh 1
                                   :x 500 :y 20 :width 240 :height 130)
   (ui:open-window desktop "chart" :title "Chart" :render 'render-chart :refresh 5
                                   :x 500 :y 170 :width 340 :height 230)
   (ui:open-window desktop "agent" :title "Agent" :render 'render-agent
-                                  :actions '(("say" . agent-say))
+                                  :actions '(("say" . agent-say) ("cancel" . agent-cancel))
                                   :x 20 :y 400 :width 460 :height 300)
   (ui:open-inspector desktop :x 860 :y 20 :width 380 :height 460 :target "clock")
   desktop)
