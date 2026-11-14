@@ -330,7 +330,8 @@
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :depends-on ("praxeon/examples/ouranos-ide" "praxeon" "hyperion" "hyperion/desktop-ui"
-               "hyperion/test-ports" "cons/coalton-repl" "mnemosyne" "dexador" "quri" "fiveam")
+               "hyperion/test-ports" "cons/coalton-repl" "mnemosyne" "dexador" "quri" "fiveam"
+               (:require "sb-bsd-sockets"))   ; the test that reads GET /events over a socket
   :components ((:module "examples/ouranos-ide"
                 :components ((:file "tests"))))
   :perform (test-op (o c) (uiop:symbol-call :praxeon/examples/ouranos-ide/tests :run-tests)))

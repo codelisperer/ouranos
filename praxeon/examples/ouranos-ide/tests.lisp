@@ -1,9 +1,9 @@
 ;;;; tests.lisp --- the Ouranos IDE example, driven through its routes (#1218).
 ;;;;
 ;;;; No window and no browser are opened. Most tests call the Clack application directly, with
-;;;; the request body already cached. The last one starts a real server on 127.0.0.1, makes
-;;;; requests with dexador, and stops the server. The agent uses the stub provider throughout,
-;;;; so no model is called and no key is read.
+;;;; the request body already cached. Two start a real server on 127.0.0.1 and stop it: one
+;;;; makes requests with dexador, and the other reads GET /events over a socket of its own.
+;;;; The agent uses the stub provider throughout, so no model is called and no key is read.
 
 (cl:defpackage #:praxeon/examples/ouranos-ide/tests
   (:use #:cl #:fiveam)
@@ -121,13 +121,15 @@ the page uses, changes what another window shows, with no restart and no change 
 
 ;;; --- the clock ---------------------------------------------------------------------------
 
-(test the-clock-shows-the-time-it-reads-and-asks-again-each-second
+(test the-clock-shows-the-time-it-reads-and-has-a-one-second-refresh-interval
   (%with-ide (app desktop)
     (let ((ide::*now* (lambda () (encode-universal-time 59 58 23 31 12 2026 0))))
       (let ((body (%get app "/window/clock/body")))
         (is (search "23:58:59" body))
         (is (search "2026-12-31 UTC" body))))
-    (is (search "every 1s" (%get app "/window/clock")))))
+    (is (= 1 (ui:window-refresh (ui:find-window desktop "clock")))
+        "the desktop's timer pushes the body every second; the page does not ask")
+    (is (null (search "every 1s" (%get app "/window/clock"))))))
 
 ;;; --- the chart ---------------------------------------------------------------------------
 
@@ -237,3 +239,143 @@ on every render and holds no copy."
                  "and so is a POST that names no origin"))
         (srv:stop handler)
         (is (ports:await-released port) "the server stopped")))))
+
+;;; --- the push feed, over HTTP ------------------------------------------------------------
+
+(defun render-note (window)
+  (format nil "<p>note ~A</p>" (ui:window-datum window :text "empty")))
+
+(defun %desktop-threads (desktop)
+  "The names of the live threads named for DESKTOP."
+  (let ((title (ui:desktop-title desktop)))
+    (loop for thread in (sb-thread:list-all-threads)
+          for name = (sb-thread:thread-name thread)
+          when (and name (search "desktop-ui" name) (search title name)) collect name)))
+
+(defun %read-events (port)
+  "Send GET /events to the server on PORT over a socket of its own and read the answer on a
+thread. Returns three values: a function of no arguments that returns the text read so far,
+with `<end>' added once the server has ended the stream; the reading thread; and the socket."
+  (let* ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp))
+         (lock (sb-thread:make-mutex :name "ouranos-ide test events"))
+         (read-so-far (make-string-output-stream))
+         (stream nil))
+    (sb-bsd-sockets:socket-connect socket #(127 0 0 1) port)
+    (setf stream (sb-bsd-sockets:socket-make-stream socket :input t :output t
+                                                           :external-format :utf-8
+                                                           :buffering :none))
+    (format stream "GET /events HTTP/1.1~C~CHost: 127.0.0.1:~D~C~CAccept: text/event-stream~C~C~C~C"
+            #\Return #\Newline port #\Return #\Newline #\Return #\Newline #\Return #\Newline)
+    (finish-output stream)
+    (values
+     (lambda ()
+       (sb-thread:with-mutex (lock)
+         (let ((text (get-output-stream-string read-so-far)))
+           (write-string text read-so-far)
+           text)))
+     (sb-thread:make-thread
+      (lambda ()
+        (ignore-errors
+         (loop for line = (read-line stream nil)
+               while line
+               do (sb-thread:with-mutex (lock)
+                    (write-line (string-right-trim '(#\Return) line) read-so-far))))
+        (sb-thread:with-mutex (lock) (write-string "<end>" read-so-far))
+        :returned)
+      :name "ouranos-ide test events reader")
+     socket)))
+
+(defun %await (text needle &key (start 0) (timeout 10))
+  "Wait until NEEDLE appears in what the function TEXT returns, at or after START. Returns
+its position, or NIL after TIMEOUT seconds."
+  (let ((deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second))))
+    (loop
+      (let ((found (search needle (funcall text) :start2 start)))
+        (when found (return found)))
+      (when (> (get-internal-real-time) deadline) (return nil))
+      (sleep 0.02))))
+
+(test the-page-of-the-ide-has-no-polling-attribute
+  (%with-ide (app desktop)
+    (let ((page (%get app "/")))
+      (is (search "data-window=clock" (remove #\" page)))
+      (is (null (search "hx-trigger=every" (remove #\" page))))
+      (is (null (search "every 1s" page)) "the clock and the inspector do not ask each second")
+      (is (null (search "every 5s" page)) "the chart does not ask every five")
+      (is (search "EventSource" page) "the page opens the event stream instead"))
+    (is (null (search "every" (%get app "/window/clock"))))
+    (is (null (search "every" (%get app "/window/inspector"))))
+    (is (= 1 (getf (ui:inspect-window (ui:find-window desktop "clock")) :refresh))
+        "the clock still has its interval, which the server's timer uses")))
+
+(test start-does-not-log-a-request-that-succeeds
+  ;; HYPERION/LOGGING:WRAP logs a successful request at :info unless the path is a quiet one,
+  ;; and then at :trace. So the question is whether the path is quiet while the app runs.
+  (let* ((quiet-inside :not-called)
+         (app (lambda (env)
+                (setf quiet-inside (hyperion/logging:quiet-path-p (getf env :path-info)))
+                (list 200 '() '("ok"))))
+         (env (list :request-method :get :path-info "/window/clock/body")))
+    (let ((response (funcall (ide::%logged-quietly app) env)))
+      (is (= 200 (first response)))
+      (is (getf (second response) :x-request-id) "the request still gets its id"))
+    (is (eq t (and quiet-inside t)) "under START's wrapper every path is a quiet one")
+    (funcall app env)
+    (is (null quiet-inside) "and without the wrapper this path is not, so it would be logged")
+    (is (null (hyperion/logging:quiet-path-p "/window/clock/body"))
+        "the wrapper changed nothing for other apps in the image")))
+
+(test the-event-stream-pushes-changes-over-http-and-stop-ends-the-timer-and-the-streams
+  (%with-ide (app desktop)
+    (let* ((ide:*desktop* desktop)
+           (port nil)
+           (text nil) (reader nil) (socket nil))
+      (unwind-protect
+           (progn
+             (ports:call-with-port
+              (lambda (candidate) (setf port candidate) (ide:start :port candidate)))
+             (is (null (%desktop-threads desktop)) "no page is connected, so no timer thread")
+             (multiple-value-setq (text reader socket) (%read-events port))
+             (is (%await text "text/event-stream") "the answer is an event stream")
+             (is (%await text ": connected"))
+             (sleep 0.3)
+             (is (equal '("desktop-ui timer: Ouranos IDE") (%desktop-threads desktop))
+                 "one timer thread while a page is connected")
+             ;; A window opened from the REPL, with a page connected.
+             (let ((mark (length (funcall text)))
+                   (note nil))
+               (setf note (ui:open-window desktop "note" :title "Note" :render 'render-note
+                                                         :x 30 :y 40))
+               (is (%await text "data: window note 360x240 left:30px;top:40px" :start mark)
+                   "the page is told about the window without a reload")
+               (is (%await text "data: html win-note-body" :start mark))
+               (is (%await text "data: <p>note empty</p>" :start mark))
+               ;; A change made outside a request, as a job would make it.
+               (setf mark (length (funcall text)))
+               (setf (ui:window-datum note :text) "from a job")
+               (ui:window-changed note)
+               (is (%await text "data: <p>note from a job</p>" :start mark)
+                   "window-changed pushes the new body")
+               ;; A close posted by a page.
+               (setf mark (length (funcall text)))
+               (let ((base (format nil "http://127.0.0.1:~D" port)))
+                 (dex:post (format nil "~A/window/note/event" base) :keep-alive nil
+                           :headers `(("Origin" . ,base)) :content '(("type" . "close"))))
+               (is (%await text "data: remove note" :start mark) "a close removes the window")
+               ;; The clock's refresh interval, with no request and no call.
+               (setf mark (length (funcall text)))
+               (let ((first (%await text "data: html win-clock-body" :start mark)))
+                 (is-true first "the timer pushes the clock's body")
+                 (is (%await text "data: html win-clock-body" :start (if first (1+ first) mark))
+                     "and pushes it again a second later"))))
+        (ide:stop)
+        (when port
+          (is (ports:await-released port) "the port is released"))
+        (is (null (%desktop-threads desktop)) "no thread named for the desktop is left")
+        (is (zerop (ui:desktop-subscribers desktop)) "no stream is being written")
+        (when reader
+          (is (eq :returned (sb-thread:join-thread reader :default :still-reading :timeout 5))
+              "the server ended the page's stream")
+          (is (search "<end>" (funcall text)))
+          (when (sb-thread:thread-alive-p reader) (sb-thread:terminate-thread reader)))
+        (when socket (ignore-errors (sb-bsd-sockets:socket-close socket)))))))

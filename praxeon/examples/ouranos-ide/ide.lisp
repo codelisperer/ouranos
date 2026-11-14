@@ -5,11 +5,14 @@
 ;;;;   repl       a REPL. In Coalton mode an input goes to cons/coalton-repl, whose session keeps
 ;;;;              definitions between inputs. In Lisp mode an input is read and evaluated in
 ;;;;              this package, which is how a window is redefined while the desktop runs.
-;;;;   clock      the time, which the page asks for again every second.
-;;;;   chart      a bar chart of a SQLite query made through mnemosyne.
+;;;;   clock      the time, which the server sends to the page again every second.
+;;;;   chart      a bar chart of a SQLite query made through mnemosyne, sent again every five.
 ;;;;   agent      a praxeon agent. With no provider given it uses STUB-PROVIDER, which answers
 ;;;;              from the image and calls no model.
 ;;;;   inspector  hyperion/desktop-ui's inspector, which shows any window's record.
+;;;;
+;;;; The page does not poll. It opens GET /events once, and hyperion/desktop-ui sends it what
+;;;; changed: a window opened from the REPL with UI:OPEN-WINDOW appears without a reload.
 ;;;;
 ;;;; It lives in praxeon because it needs praxeon, the rightmost framework it uses.
 ;;;;
@@ -28,6 +31,7 @@
   (:use #:cl)
   (:local-nicknames (#:ui #:hyperion/desktop-ui)
                     (#:srv #:hyperion/server)
+                    (#:hlog #:hyperion/logging)
                     (#:desk #:hyperion/desktop)
                     (#:repl #:cons/coalton-repl)
                     (#:be #:mnemosyne/backend)
@@ -155,7 +159,8 @@ coalton or lisp. The entry is added to the window's transcript, and its HTML is 
   "The function the clock reads the time from. A test binds it to a fixed time.")
 
 (defun render-clock (window)
-  "The clock window's body: the time and the date, in UTC."
+  "The clock window's body: the time and the date, in UTC. The window's refresh interval is
+one second, so the desktop's timer sends this to the connected pages every second."
   (declare (ignore window))
   (multiple-value-bind (second minute hour day month year) (decode-universal-time (funcall *now*) 0)
     (spin:with-html-string
@@ -211,7 +216,9 @@ length of each name, unless this image has made one already. Returns its path."
                          :dialect :sqlite))))
 
 (defun render-chart (window)
-  "The chart window's body: one horizontal bar per row of CHART-ROWS, drawn as SVG."
+  "The chart window's body: one horizontal bar per row of CHART-ROWS, drawn as SVG. The
+window's refresh interval is five seconds, so a change in the database shows on the connected
+pages within five seconds."
   (declare (ignore window))
   (let* ((rows (chart-rows))
          (largest (max 1 (reduce #'max rows :key #'cdr :initial-value 0)))
@@ -305,7 +312,10 @@ shown as the agent's answer, so a provider that fails does not break the window.
 (defun build-desktop (&key provider (desktop *desktop*))
   "Put the five windows on DESKTOP, replacing any with the same ids, make the database and
 the agent, and return DESKTOP. PROVIDER is a praxeon/llm:provider for the agent; with none,
-the agent uses STUB-PROVIDER and calls no model."
+the agent uses STUB-PROVIDER and calls no model.
+
+The clock and the chart have a refresh interval. The desktop's timer sends their bodies to the
+connected pages on that schedule; the page does not ask."
   (ensure-database)
   (setf *agent* (%make-agent desktop (or provider (make-instance 'stub-provider :desktop desktop))))
   (ui:open-window desktop "repl" :title "REPL" :render 'render-repl
@@ -331,22 +341,40 @@ are bound around each request, because the page reads them when it is rendered."
 
 (defvar *handler* nil "The running server, or NIL.")
 
+(defun %logged-quietly (app)
+  "APP with hyperion's request logging around it, and every path counted as a quiet one: a
+request that succeeds is logged at :trace, which the default log level does not print, and a
+request that signals an error is still logged with its backtrace. START uses this in place of
+HYPERION/SERVER:START's own logging, which prints a line at :info for every request. The IDE
+is started from a REPL in a terminal, and those lines made the REPL hard to type into. To see
+every request, set the log level to :trace."
+  (let ((logged (hlog:wrap app))
+        (every-path (list (constantly t))))
+    (lambda (env)
+      (let ((hlog:*quiet-paths* every-path))
+        (funcall logged env)))))
+
 (defun start (&key (port *port*) provider)
   "Build the desktop and serve it on 127.0.0.1:PORT. Returns the server's handler. Open
 http://127.0.0.1:PORT/ in a browser to use it. PROVIDER is passed to BUILD-DESKTOP.
 
 The server refuses a request whose Host is not this address, and a POST that did not come
-from its own page, because the REPL window evaluates what it is sent."
+from its own page, because the REPL window evaluates what it is sent.
+
+Requests that succeed are not printed in the terminal; see %LOGGED-QUIETLY."
   (when *handler* (stop))
   (build-desktop :provider provider)
-  (setf *handler* (srv:start (make-app) :server :hunchentoot :port port :host "127.0.0.1"
-                                        :request-guard :same-origin)))
+  (setf *handler* (srv:start (%logged-quietly (make-app))
+                             :server :hunchentoot :port port :host "127.0.0.1"
+                             :request-guard :same-origin :log nil)))
 
 (defun stop ()
-  "Stop the server START started, and delete the chart's database file."
+  "Stop the server START started, end the pages' event streams and the desktop's timer, and
+delete the chart's database file."
   (when *handler*
     (srv:stop *handler*)
     (setf *handler* nil))
+  (ui:stop-desktop *desktop*)
   (delete-database)
   t)
 
@@ -357,4 +385,5 @@ blocks until the window is closed. The tests do not call this, because it opens 
   (unwind-protect
        (desk:run-app (make-app) :title "Ouranos IDE" :width 1280 :height 800
                                 :server :hunchentoot)
+    (ui:stop-desktop *desktop*)
     (delete-database)))

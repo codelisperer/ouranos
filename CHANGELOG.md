@@ -1572,6 +1572,26 @@ its tag.
   function changes the window's next render. Nothing is saved between runs. The example that
   uses it is the system `praxeon/examples/ouranos-ide`. This is experimental and its names may
   change.
+- **`hyperion/desktop-ui` pushes changes to the page over `GET /events`, and the page no longer
+  polls** (#1218). The new route `GET /events` is a Server-Sent Events stream over one
+  `hyperion/feed` per desktop, written through `hyperion/sse`. The page opens it once with
+  `EventSource`. `open-window`, `remove-window`, `dispatch-event` and `window-changed` publish on
+  the feed, so a window opened from a REPL with `open-window` appears on a connected page without
+  a reload, and `window-changed`, which did nothing before, now sends the window's body, its
+  position and the record of any inspector looking at it. Each event carries the HTML, rendered
+  when the event is written, and `event-data` documents the event format. A window's `:refresh`
+  interval is now served by a timer thread on the server, named `desktop-ui timer: TITLE`, which
+  runs only while a page is connected; no `hx-trigger "every ..."` is rendered any more, on a
+  window, on the dock or in the inspector. `:refresh` may be a fraction of a second. The new
+  `stop-desktop` ends the streams and the timer, and an app calls it when its server stops;
+  `desktop-subscribers` counts the open streams. `POST /window/:id/event` now answers 204 for a
+  close and an open, without the `HX-Trigger: ou-dock` header: the page learns the result from
+  the stream. `GET /events` stays open, so the server must run each request on its own thread or
+  on a pool. In `praxeon/examples/ouranos-ide`, `start` no longer prints a log line for each
+  successful request: it passes `:log nil` to `hyperion/server:start` and wraps the app in
+  `hyperion/logging:wrap` with every path treated as a quiet path, so successful requests log at
+  `:trace` and failed ones are still logged. `stop` calls `stop-desktop`. Other apps' logging is
+  unchanged.
 - **`praxeon/image:image-request-failed` answers `aion/retry:transience` and
   `aion/retry:retry-after`** (#79), so an app can run `generate-image` under
   `aion/retry:with-retry` and have the service's Retry-After honoured. A 429 is `:transient`, a
