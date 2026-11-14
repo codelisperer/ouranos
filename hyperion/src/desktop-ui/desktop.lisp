@@ -42,7 +42,8 @@
            #:render-page #:render-window #:render-window-body #:render-dock
            #:inspect-window #:inspect-event #:inspect-desktop
            #:open-inspector #:render-inspector #:inspector-select #:inspector-record
-           #:routes #:make-app #:*css* #:client-js #:*event-history*))
+           #:routes #:make-app #:*css* #:client-js #:*event-history*
+           #:window-changed))
 
 (cl:in-package #:hyperion/desktop-ui)
 
@@ -50,7 +51,8 @@
 (declaim (notinline render-page render-window render-window-body render-dock
                     dispatch-event run-action event-from-parameters
                     inspect-window inspect-event inspect-desktop
-                    render-inspector inspector-select inspector-record))
+                    render-inspector inspector-select inspector-record
+                    window-changed))
 
 ;;; --- the records -------------------------------------------------------------------------
 
@@ -208,6 +210,16 @@ in the window's history, and return the window. Signals UNKNOWN-WINDOW when ther
       (when (> (length (%events window)) *event-history*)
         (setf (%events window) (subseq (%events window) 0 *event-history*)))
       window)))
+
+;;; --- telling the page that something changed (#1218) -------------------------------------
+
+(defun window-changed (window)
+  "Say that WINDOW's body or state changed outside a request from the page, for example when a
+job writes output or the agent finishes a turn. Code that changes a window calls this after the
+change. In the proof of concept it does nothing and the page still polls; the desktop's push
+feed replaces this definition so that the page is told at once."
+  (declare (ignore window))
+  nil)
 
 (defun run-action (window name parameters)
   "Call WINDOW's action NAME with the window and PARAMETERS, the posted form's alist, and
