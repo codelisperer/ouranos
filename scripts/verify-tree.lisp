@@ -196,6 +196,8 @@
     :hyperion/examples/coalton-repl
     ;; The window desktop and the Ouranos IDE example built on it (#1218).
     :hyperion/desktop-ui :praxeon/examples/ouranos-ide
+    ;; The spike of a Coalton language backend for the IDE's editor (#1218).
+    :praxeon/examples/ouranos-ide/runtime
     ;; The mnemosyne example was absent from this list while three hyperion examples were
     ;; in it, so nothing here ever compiled it (#94). It is the example the conformance
     ;; pack ships beside, which makes it the one a reader is most likely to copy.
@@ -219,6 +221,9 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
     ;; The window desktop and the Ouranos IDE example (#1218), registered in the commit that
     ;; adds them. The example's suite makes its own SQLite file and needs no Postgres.
     :hyperion/desktop-ui/tests :praxeon/examples/ouranos-ide/tests
+    ;; The runtime client spike (#1218), registered in the commit that adds it. Its suite
+    ;; starts a child SBCL that loads Coalton's mine/runtime, and kills it.
+    :praxeon/examples/ouranos-ide/runtime/tests
     :hyperion/assets/tests :hyperion/calendar/tests :hermes/blob/tests
     ;; The collection-page components (#981), registered in the commit that adds them.
     :hyperion/kit/tests
