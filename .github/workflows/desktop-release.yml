@@ -290,7 +290,10 @@ jobs:
         if: runner.os == 'Windows'
         shell: bash
         run: |
-          choco install nsis -y --no-progress
+          # Pinned in scripts/versions.env (#736), so the installer is built by the same NSIS on
+          # every release, and a newer one is taken on purpose, through upstream.sexp.
+          . scripts/versions.env
+          choco install nsis --version "$NSIS_VERSION" -y --no-progress
           powershell -NoProfile -ExecutionPolicy Bypass -File ./scripts/build-installer.ps1 \
             "dist/${APP_NAME}-${APP_VERSION}-${{ matrix.platform }}" \
             -Icon hyperion/examples/coalton-repl/assets/lambda.ico -RequireWebView2
