@@ -307,6 +307,34 @@
                 :serial t
                 :components ((:file "chat-rbt")))))
 
+;;; The Ouranos IDE proof of concept (#1218): a desktop of windows in one image, with a
+;;; Coalton REPL, a clock, a chart from SQLite, an agent and an inspector. It is in praxeon
+;;; because it needs praxeon, the rightmost framework it uses. It is an application, so it
+;;; declares its HTTP server; Hunchentoot, because it is pure CL and loads on every platform.
+(defsystem "praxeon/examples/ouranos-ide"
+  :description "Example: the Ouranos IDE proof of concept, a desktop of live windows in one SBCL image (#1218)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("praxeon" "praxeon/chat-ui"          ; the agent and its chat bubbles
+               "hyperion" "hyperion/desktop-ui"     ; the server and the window desktop
+               "hyperion/desktop"                   ; run-app, for the native window
+               "cons/coalton-repl"                  ; the Coalton REPL engine
+               "mnemosyne"                          ; the chart's SQLite query
+               "spinneret" "clack-handler-hunchentoot")
+  :components ((:module "examples/ouranos-ide"
+                :components ((:file "ide"))))
+  :in-order-to ((test-op (test-op "praxeon/examples/ouranos-ide/tests"))))
+
+(defsystem "praxeon/examples/ouranos-ide/tests"
+  :description "The Ouranos IDE example's windows, driven through its routes and over HTTP on 127.0.0.1."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("praxeon/examples/ouranos-ide" "praxeon" "hyperion" "hyperion/desktop-ui"
+               "hyperion/test-ports" "cons/coalton-repl" "mnemosyne" "dexador" "quri" "fiveam")
+  :components ((:module "examples/ouranos-ide"
+                :components ((:file "tests"))))
+  :perform (test-op (o c) (uiop:symbol-call :praxeon/examples/ouranos-ide/tests :run-tests)))
+
 (defsystem "praxeon/elise"
   :description "Elise: a reflective, psychologically-informed conversational actor."
   :author "Bob <eternal.recursion@proton.me>"
