@@ -245,6 +245,38 @@
                (:static-file "tests/mcp-stdio-server.lisp"))
   :perform (test-op (o c) (uiop:symbol-call :praxeon/mcp/tests :run-tests)))
 
+;;; OpenTelemetry spans for every turn, model call and tool call (#1225). Opt-in: an app loads
+;;; it and wraps its turns in WITH-TRACING. It reads the event stream praxeon already emits, and
+;;; sends to a collector through aion/http-client, so it adds no dependency to praxeon's core.
+(defsystem "praxeon/trace"
+  :description "OpenTelemetry spans built from praxeon's event stream, exported in memory or over OTLP/HTTP JSON (#1225)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.1.0"
+  :depends-on ("praxeon"
+               "aion/log"          ; an export failure is logged with a count, never a payload
+               "aion/random"       ; trace and span ids, from the OS generator
+               "aion/dynamic"      ; unblock-interrupts, first in the exporter's thread (#541)
+               "aion/http-client"  ; the POST to the collector, on dexador (pre-publication issue 202)
+               "com.inuoe.jzon"    ; the OTLP JSON encoding
+               "quri"              ; percent-decoding OTEL_EXPORTER_OTLP_HEADERS' values
+               "bordeaux-threads") ; the exporter's thread, lock and condition variable
+  :serial t
+  :components ((:module "src/trace"
+                :serial t
+                :components ((:file "packages")
+                             (:file "attributes")  ; every attribute name, in one place
+                             (:file "tracer")      ; events -> spans
+                             (:file "export"))))   ; in memory, and OTLP/HTTP JSON
+  :in-order-to ((test-op (test-op "praxeon/trace/tests"))))
+
+(defsystem "praxeon/trace/tests"
+  :description "praxeon/trace: span trees from stub-provider turns, content withheld by default, and OTLP export to a stub collector on 127.0.0.1 (#1225)."
+  :depends-on ("praxeon/trace" "praxeon" "aion/log" "aion/test-http" "com.inuoe.jzon"
+               "bordeaux-threads" "fiveam")
+  :components ((:module "tests" :components ((:file "trace-tests"))))
+  :perform (test-op (o c) (symbol-call :praxeon/trace/tests '#:run-tests)))
+
 (defsystem "praxeon/web-search"
   :description "A web-search Means (Tavily-backed) for Praxeon agents."
   :author "Bob <eternal.recursion@proton.me>"
