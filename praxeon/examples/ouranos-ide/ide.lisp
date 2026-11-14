@@ -5,10 +5,11 @@
 ;;;;   repl       a REPL. In Coalton mode an input goes to cons/coalton-repl, whose session keeps
 ;;;;              definitions between inputs. In Lisp mode an input is read and evaluated in
 ;;;;              this package, which is how a window is redefined while the desktop runs.
+;;;;              Each input runs as a background job, which can be cancelled.
 ;;;;   clock      the time, which the page asks for again every second.
 ;;;;   chart      a bar chart of a SQLite query made through mnemosyne.
 ;;;;   agent      a praxeon agent. With no provider given it uses STUB-PROVIDER, which answers
-;;;;              from the image and calls no model.
+;;;;              from the image and calls no model. Each turn runs as a background job.
 ;;;;   inspector  hyperion/desktop-ui's inspector, which shows any window's record.
 ;;;;
 ;;;; It lives in praxeon because it needs praxeon, the rightmost framework it uses.
@@ -29,6 +30,7 @@
   (:local-nicknames (#:ui #:hyperion/desktop-ui)
                     (#:srv #:hyperion/server)
                     (#:desk #:hyperion/desktop)
+                    (#:jobs #:hyperion/desktop-ui/jobs)
                     (#:repl #:cons/coalton-repl)
                     (#:be #:mnemosyne/backend)
                     (#:conn #:mnemosyne/conn)
@@ -39,15 +41,18 @@
                     (#:spin #:spinneret))
   (:export #:*desktop* #:*port* #:make-app #:build-desktop #:start #:stop #:native-window
            #:stub-provider
-           #:render-repl #:repl-eval #:render-clock #:render-chart #:render-agent #:agent-say
-           #:chart-rows #:inspect-repl-entry))
+           #:render-repl #:repl-eval #:repl-cancel #:render-clock #:render-chart
+           #:render-agent #:agent-say #:agent-cancel
+           #:chart-rows #:inspect-repl-entry #:inspect-agent-turn
+           #:*eval-time-limit* #:*turn-time-limit* #:*transcript-limit*))
 
 (cl:in-package #:praxeon/examples/ouranos-ide)
 
 ;;; A window calls these through their symbols, so a DEFUN typed into the REPL window
 ;;; replaces them. NOTINLINE keeps the compiler from fixing a call to the old definition.
-(declaim (notinline render-repl repl-eval render-clock render-chart render-agent agent-say
-                    chart-rows inspect-repl-entry))
+(declaim (notinline render-repl repl-eval repl-cancel render-clock render-chart
+                    render-agent agent-say agent-cancel
+                    chart-rows inspect-repl-entry inspect-agent-turn))
 
 (defvar *desktop* (ui:make-desktop :title "Ouranos IDE")
   "The IDE's desktop. One per image.")
@@ -55,97 +60,242 @@
 (defparameter *port* 27190
   "The port START listens on. Not a common development port.")
 
+;;; --- shared by the REPL and the agent windows --------------------------------------------
+
+(defparameter *transcript-limit* 200
+  "How many REPL entries, or agent turns, a window keeps. The oldest are dropped.")
+
+(defvar *ide-lock* (sb-thread:make-mutex :name "ouranos-ide")
+  "Held while a window's transcript is checked for a running job and a new one is started, so
+two requests that arrive together cannot both start one.")
+
+(defgeneric item-job (item)
+  (:documentation "The job behind ITEM, a REPL entry or an agent's turn."))
+
+(defun %field (parameters name)
+  (cdr (assoc name parameters :test #'string=)))
+
+(defun %dom-id (window &rest parts)
+  "An element id inside WINDOW's body. It starts with the window's own element id, so two
+windows that use the same render function never share an id."
+  (format nil "win-~A~{-~A~}" (ui:window-id window) parts))
+
+(defun %add-to-transcript (window item)
+  "Put ITEM at the front of WINDOW's transcript, which is kept newest first, and cut the
+transcript to *TRANSCRIPT-LIMIT* items. The existing list is extended and cut in place, not
+copied."
+  (let* ((transcript (cons item (ui:window-datum window :transcript)))
+         (last-kept (nthcdr (1- *transcript-limit*) transcript)))
+    (when last-kept (setf (cdr last-kept) nil))
+    (setf (ui:window-datum window :transcript) transcript)
+    item))
+
+(defun %next-number (window)
+  "The next number for an entry or a turn in WINDOW, counting from 1."
+  (setf (ui:window-datum window :count) (1+ (ui:window-datum window :count 0))))
+
+(defun %notice-html (text)
+  (spin:with-html-string (:div :class "ide-entry" (:pre :class "ou-error" text))))
+
+(defun %cancel-button (window element-id action job)
+  "A button that posts the job's id to WINDOW's ACTION as the form field `cancel', and replaces
+the element ELEMENT-ID with the answer."
+  (spin:with-html-string
+    (:button :type "button" :class "ide-cancel"
+             :hx-post (format nil "/window/~A/action/~A" (ui:window-id window) action)
+             :hx-vals (format nil "{\"cancel\": \"~D\"}" (jobs:job-id job))
+             :hx-target (format nil "#~A" element-id) :hx-swap "outerHTML"
+             "Cancel")))
+
+(defun %find-by-job (window parameters)
+  "The item of WINDOW's transcript whose job has the id in the form field `cancel', or NIL.
+Only this window's own jobs are looked at, so one window cannot cancel another's."
+  (let ((id (ignore-errors (parse-integer (or (%field parameters "cancel") "")))))
+    (and id (find id (ui:window-datum window :transcript)
+                  :key (lambda (item) (jobs:job-id (item-job item)))))))
+
+(defun %running-item (window)
+  "The item of WINDOW's transcript whose job is still running, or NIL."
+  (find-if (lambda (item) (jobs:job-running-p (item-job item)))
+           (ui:window-datum window :transcript)))
+
 ;;; --- the REPL window ---------------------------------------------------------------------
+;;;
+;;; An input is evaluated as a job (hyperion/desktop-ui/jobs), not in the request. The request
+;;; adds an entry to the window's transcript and answers at once with the entry as it is then:
+;;; running, with a Cancel button. The entry holds the job and is rendered from it each time,
+;;; so a later render shows the output so far, and then the value, the error, or that it was
+;;; cancelled or ran out of time.
+;;;
+;;; ONE EVALUATION AT A TIME PER WINDOW. An input sent while the window's last one is still
+;;; running is refused: nothing is evaluated, nothing is added to the transcript, and the
+;;; answer says to wait or cancel. It is not queued. cons/coalton-repl answers a second input
+;;; to a busy session the same way.
 
 (defvar *session* (repl:make-session "OURANOS-IDE-REPL")
-  "The Coalton session behind the REPL window. Its package keeps what an input defines.")
+  "The Coalton session behind the REPL windows. Its package keeps what an input defines. Every
+REPL window uses this one session.")
 
 (defparameter *eval-time-limit* 20
-  "Seconds a Coalton evaluation may run before cons/coalton-repl stops it.")
+  "Seconds an evaluation may run, in either language, before it is stopped. NIL for no limit.
+Read when an input is sent.")
 
-(defstruct (repl-entry (:constructor %make-repl-entry))
-  "One input to the REPL window and what came of it. KIND is :value, :definition or :error."
-  language input kind value type message)
+(defclass repl-entry ()
+  ((number :initarg :number :reader repl-entry-number
+           :documentation "1 for the window's first input, 2 for the next. Used in the entry's element id.")
+   (language :initarg :language :reader repl-entry-language
+             :documentation ":COALTON or :LISP.")
+   (input :initarg :input :reader repl-entry-input)
+   (job :initarg :job :reader item-job
+        :documentation "The job evaluating the input. Its function returns a property list with :KIND, :VALUE, :TYPE and :MESSAGE."))
+  (:documentation "One input to a REPL window. What came of it is read from its job."))
 
 (defun inspect-repl-entry (entry)
-  "ENTRY as a property list, for the inspector, a REPL and the tests."
-  (list :language (repl-entry-language entry) :input (repl-entry-input entry)
-        :kind (repl-entry-kind entry) :value (repl-entry-value entry)
-        :type (repl-entry-type entry) :message (repl-entry-message entry)))
+  "ENTRY as a property list, for the inspector, a REPL and the tests. :KIND is :RUNNING while
+the job runs, then :VALUE, :DEFINITION or :ERROR from the evaluation, or :CANCELLED or
+:TIMED-OUT. :OUTPUT is what the input has printed so far. :JOB is the job's id."
+  (let* ((job (item-job entry))
+         (result (jobs:job-result job)))
+    (append
+     (list :number (repl-entry-number entry) :language (repl-entry-language entry)
+           :input (repl-entry-input entry) :job (jobs:job-id job)
+           :output (jobs:job-output job))
+     (ecase (jobs:job-status job)
+       (:running (list :kind :running :value nil :type nil :message nil))
+       (:done (list :kind (getf result :kind) :value (getf result :value)
+                    :type (getf result :type) :message (getf result :message)))
+       (:failed (list :kind :error :value nil :type nil
+                      :message (jobs:job-error-text job)))
+       (:cancelled (list :kind :cancelled :value nil :type nil
+                         :message "The evaluation was cancelled."))
+       (:timed-out (list :kind :timed-out :value nil :type nil
+                         :message (format nil "The evaluation was stopped after ~A second~:P, the time limit."
+                                          (jobs:job-time-limit job))))))))
 
-(defun %coalton-entry (input)
-  "Evaluate INPUT as Coalton in the session and describe the result."
-  (let* ((result (repl:eval-input *session* input :time-limit *eval-time-limit*))
+(defun %coalton-entry (session input)
+  "Evaluate INPUT as Coalton in SESSION and describe the result as a property list. This is
+the function of a Coalton entry's job."
+  (let* ((result (repl:eval-input session input))
          (kind (repl:result-kind result)))
     (if (eq kind :exit-requested)
-        (%make-repl-entry :language :coalton :input input :kind :error
-                          :message "The input asks to end the process, and was not evaluated.")
-        (%make-repl-entry :language :coalton :input input :kind kind
-                          :value (repl:result-value result) :type (repl:result-type result)
-                          :message (repl:result-message result)))))
+        (list :kind :error
+              :message "The input asks to end the process, and was not evaluated.")
+        (list :kind kind :value (repl:result-value result) :type (repl:result-type result)
+              :message (repl:result-message result)))))
 
 (defun %lisp-entry (input)
-  "Read every form of INPUT in this package, evaluate them in order, and describe the last
-value. Output the forms print is put before the value. A form that would end the process is
-refused, by the same test the Coalton engine uses."
-  (let ((*package* (find-package '#:praxeon/examples/ouranos-ide)))
-    (handler-case
-        (let ((forms (with-input-from-string (in input)
-                       (loop for form = (read in nil in)
-                             until (eq form in)
-                             collect form))))
-          (if (repl:process-ending-p forms)
-              (%make-repl-entry :language :lisp :input input :kind :error
-                                :message "The input asks to end the process, and was not evaluated.")
-              (let* ((value nil)
-                     (printed (with-output-to-string (*standard-output*)
-                                (dolist (form forms) (setf value (eval form))))))
-                (%make-repl-entry :language :lisp :input input :kind :value
-                                  :value (format nil "~A~S" printed value)
-                                  :type (princ-to-string (type-of value))))))
-      (error (e)
-        (%make-repl-entry :language :lisp :input input :kind :error
-                          :message (princ-to-string e))))))
+  "Read every form of INPUT in *PACKAGE*, evaluate them in order, and describe the last value
+as a property list. This is the function of a Lisp entry's job, so what the forms print goes
+to the job's output, and an error they signal ends the job as failed. A form that would end
+the process is refused, by the same test the Coalton engine uses."
+  (let ((forms (with-input-from-string (in input)
+                 (loop for form = (read in nil in)
+                       until (eq form in)
+                       collect form))))
+    (if (repl:process-ending-p forms)
+        (list :kind :error
+              :message "The input asks to end the process, and was not evaluated.")
+        (let ((value nil))
+          (dolist (form forms) (setf value (eval form)))
+          (list :kind :value :value (prin1-to-string value)
+                :type (princ-to-string (type-of value)))))))
 
-(defun %entry-html (entry)
-  (spin:with-html-string
-    (:div :class "ide-entry"
-      (:div (:span :class "ide-prompt" (if (eq (repl-entry-language entry) :lisp) "cl>" "λ"))
-            (:code (repl-entry-input entry)))
-      (ecase (repl-entry-kind entry)
-        (:value
-         (:div :class "ide-out"
-           (:code (repl-entry-value entry))
-           (when (repl-entry-type entry)
-             (:span :class "ide-type" " : " (repl-entry-type entry)))))
-        (:definition
-         (:div :class "ide-out" "defined " (:code (repl-entry-message entry))))
-        (:error
-         (:pre :class "ou-error" (repl-entry-message entry)))))))
+(defun %start-entry (window language input)
+  "Start the job that evaluates INPUT and add its entry to WINDOW's transcript.
+
+Coalton: cons/coalton-repl evaluates on a thread of its own, which the job's interrupt does
+not reach, so the job's :ON-STOP calls CANCEL-EVALUATION, and the job's thread is given a
+second to return by itself. For the same reason what a Coalton input prints is not captured."
+  (let* ((session *session*)
+         (job (ecase language
+                (:lisp
+                 (jobs:start-job (lambda () (%lisp-entry input))
+                                 :window window :name "REPL input, Lisp"
+                                 :time-limit *eval-time-limit*
+                                 :bindings (list (cons '*package*
+                                                       (find-package '#:praxeon/examples/ouranos-ide)))))
+                (:coalton
+                 (jobs:start-job (lambda () (%coalton-entry session input))
+                                 :window window :name "REPL input, Coalton"
+                                 :time-limit *eval-time-limit*
+                                 :on-stop (lambda () (repl:cancel-evaluation session))
+                                 :stop-grace 1)))))
+    (%add-to-transcript window (make-instance 'repl-entry :number (%next-number window)
+                                                          :language language :input input
+                                                          :job job))))
+
+(defun %entry-html (window entry)
+  (let* ((record (inspect-repl-entry entry))
+         (element-id (%dom-id window "entry" (getf record :number)))
+         (output (getf record :output)))
+    (spin:with-html-string
+      (:div :class "ide-entry" :id element-id
+        (:div (:span :class "ide-prompt" (if (eq (getf record :language) :lisp) "cl>" "λ"))
+              (:code (getf record :input)))
+        (when (plusp (length output))
+          (:div :class "ide-out" (:code output)))
+        (ecase (getf record :kind)
+          (:running
+           (:div :class "ide-out"
+             (:span :class "ide-type" "running ")
+             (:raw (%cancel-button window element-id "eval" (item-job entry)))))
+          (:value
+           (:div :class "ide-out"
+             (:code (getf record :value))
+             (when (getf record :type)
+               (:span :class "ide-type" " : " (getf record :type)))))
+          (:definition
+           (:div :class "ide-out" "defined " (:code (getf record :message))))
+          ((:error :cancelled :timed-out)
+           (:pre :class "ou-error" (getf record :message))))))))
+
+(defun repl-cancel (window parameters)
+  "Cancel the evaluation whose job id is in the form field `cancel', if it belongs to WINDOW,
+and answer with its entry's HTML."
+  (let ((entry (%find-by-job window parameters)))
+    (cond (entry
+           (jobs:cancel-job (item-job entry))
+           (%entry-html window entry))
+          (t (%notice-html "This window has no evaluation with that job id.")))))
 
 (defun repl-eval (window parameters)
-  "The REPL window's action `eval'. The form field `input' is the source and `language' is
-coalton or lisp. The entry is added to the window's transcript, and its HTML is the answer."
-  (let* ((input (or (cdr (assoc "input" parameters :test #'string=)) ""))
-         (lisp-p (equal "lisp" (cdr (assoc "language" parameters :test #'string=))))
-         (entry (if lisp-p (%lisp-entry input) (%coalton-entry input))))
-    (setf (ui:window-datum window :transcript)
-          (append (ui:window-datum window :transcript) (list entry)))
-    (%entry-html entry)))
+  "The REPL window's action `eval'.
+
+With the form field `cancel', a job id: cancel that evaluation (REPL-CANCEL).
+
+Otherwise the form field `input' is the source and `language' is coalton or lisp. A job is
+started to evaluate it, an entry is added to the window's transcript, and the answer is the
+entry's HTML while it is running. If the window's last input is still running, the new one is
+refused: nothing is started or stored, and the answer says so."
+  (if (%field parameters "cancel")
+      (repl-cancel window parameters)
+      (let ((input (or (%field parameters "input") ""))
+            (language (if (equal "lisp" (%field parameters "language")) :lisp :coalton))
+            (entry nil))
+        (sb-thread:with-mutex (*ide-lock*)
+          (unless (%running-item window)
+            (setf entry (%start-entry window language input))))
+        (if entry
+            (%entry-html window entry)
+            (%notice-html "Not evaluated: this window's last input is still running. Wait for it, or cancel it.")))))
 
 (defun render-repl (window)
-  "The REPL window's body: the transcript so far, then the input form."
-  (let ((base (format nil "/window/~A" (ui:window-id window)))
-        (entries (mapcar #'%entry-html (ui:window-datum window :transcript))))
+  "The REPL window's body: the transcript so far, oldest first, then the input form."
+  (let ((transcript-id (%dom-id window "transcript"))
+        (entries (mapcar (lambda (entry) (%entry-html window entry))
+                         (reverse (ui:window-datum window :transcript)))))
     (spin:with-html-string
-      (:div :id "ide-transcript" (dolist (html entries) (:raw html)))
-      (:form :hx-post (format nil "~A/action/eval" base)
-             :hx-target "#ide-transcript" :hx-swap "beforeend"
+      (:div :id transcript-id (dolist (html entries) (:raw html)))
+      (:form :hx-post (format nil "/window/~A/action/eval" (ui:window-id window))
+             :hx-target (format nil "#~A" transcript-id) :hx-swap "beforeend"
              :hx-on--after-request "this.reset()"
         (:select :name "language"
           (:option :value "coalton" "Coalton")
           (:option :value "lisp" "Lisp"))
+        ;; The id and data-ou-preserve tell the page to keep this element, with what is typed
+        ;; in it, when the window's body is replaced by a push. The transcript is outside it.
         (:textarea :name "input" :rows 3 :spellcheck "false"
+                   :id (%dom-id window "input") :data-ou-preserve "1"
                    :placeholder "(+ 1 2)")
         (:button :type "submit" "Evaluate")))))
 
@@ -265,35 +415,115 @@ was said and names the windows that are open. Used when START is given no provid
                  (getf record :windows) (getf record :shown)))))
     agent))
 
-(defun agent-say (window parameters)
-  "The agent window's action `say': run one turn of the agent on the form field `text', add
-both sides to the window's transcript, and answer with their HTML. An error in the turn is
-shown as the agent's answer, so a provider that fails does not break the window."
-  (let* ((text (or (cdr (assoc "text" parameters :test #'string=)) ""))
-         (reply (handler-case (or (actor:run-turn *agent* text) "")
-                  (error (e) (format nil "The turn failed: ~A" e))))
-         (exchange (list (cons :user text) (cons :assistant reply))))
-    (setf (ui:window-datum window :transcript)
-          (append (ui:window-datum window :transcript) exchange))
-    (%exchange-html exchange)))
+(defparameter *turn-time-limit* 300
+  "Seconds one turn of the agent may run before it is stopped. NIL for no limit. Read when a
+turn is started.")
 
-(defun %exchange-html (messages)
-  "The chat bubbles for MESSAGES, a list of (:user . TEXT) and (:assistant . TEXT)."
-  (format nil "~{~A~}"
-          (loop for (who . text) in messages
-                collect (if (eq who :user)
-                            (chat:user-bubble text)
-                            (chat:assistant-bubble "ide" text)))))
+(defvar *running-turn* nil
+  "NIL, or a cons of an agent and the job running its latest turn.")
+
+(defclass agent-turn ()
+  ((number :initarg :number :reader agent-turn-number)
+   (text :initarg :text :reader agent-turn-text
+         :documentation "What the user said.")
+   (job :initarg :job :reader item-job
+        :documentation "The job running the turn. Its function returns the agent's answer, a string."))
+  (:documentation "One exchange in an agent window. The agent's side is read from its job."))
+
+(defun inspect-agent-turn (turn)
+  "TURN as a property list. :KIND is :RUNNING while the turn's job runs, then :REPLY, :ERROR,
+:CANCELLED or :TIMED-OUT. :REPLY is the text shown as the agent's side. :JOB is the job's id."
+  (let* ((job (item-job turn))
+         (status (jobs:job-status job)))
+    (list :number (agent-turn-number turn) :text (agent-turn-text turn) :job (jobs:job-id job)
+          :kind (ecase status
+                  (:running :running) (:done :reply) (:failed :error)
+                  (:cancelled :cancelled) (:timed-out :timed-out))
+          :reply (ecase status
+                   (:running "Working on it.")
+                   (:done (jobs:job-result job))
+                   (:failed (format nil "The turn failed: ~A" (jobs:job-error-text job)))
+                   (:cancelled "The turn was cancelled.")
+                   (:timed-out (format nil "The turn was stopped after ~A second~:P, the time limit."
+                                       (jobs:job-time-limit job)))))))
+
+(defun %agent-busy-p (agent)
+  (and *running-turn* (eq agent (car *running-turn*))
+       (jobs:job-running-p (cdr *running-turn*))))
+
+(defun %start-turn (window agent text)
+  "Start the job that runs one turn of AGENT on TEXT and add the turn to WINDOW's transcript.
+The job's :ON-STOP calls praxeon's CANCEL-TURN, which closes a streaming model call, and the
+job's thread is given two seconds to end the turn by itself before it is interrupted."
+  (let* ((cancel (actor:make-turn-cancel))
+         (job (jobs:start-job (lambda () (or (actor:run-turn agent text :cancel cancel) ""))
+                              :window window :name "agent turn"
+                              :time-limit *turn-time-limit*
+                              :on-stop (lambda () (actor:cancel-turn cancel))
+                              :stop-grace 2)))
+    (setf *running-turn* (cons agent job))
+    (%add-to-transcript window (make-instance 'agent-turn :number (%next-number window)
+                                                          :text text :job job))))
+
+(defun %turn-html (window turn)
+  "The chat bubbles for TURN: the user's, then the agent's. While the turn runs, the agent's
+bubble says so and a Cancel button follows it."
+  (let* ((record (inspect-agent-turn turn))
+         (element-id (%dom-id window "turn" (getf record :number)))
+         (user (chat:user-bubble (getf record :text)))
+         (assistant (chat:assistant-bubble "ide" (getf record :reply))))
+    (spin:with-html-string
+      (:div :class "ide-turn" :id element-id
+        (:raw user)
+        (:raw assistant)
+        (when (eq (getf record :kind) :running)
+          (:raw (%cancel-button window element-id "say" (item-job turn))))))))
+
+(defun agent-cancel (window parameters)
+  "Cancel the turn whose job id is in the form field `cancel', if it belongs to WINDOW, and
+answer with the turn's HTML."
+  (let ((turn (%find-by-job window parameters)))
+    (cond (turn
+           (jobs:cancel-job (item-job turn))
+           (%turn-html window turn))
+          (t (%notice-html "This window has no turn with that job id.")))))
+
+(defun agent-say (window parameters)
+  "The agent window's action `say'.
+
+With the form field `cancel', a job id: cancel that turn (AGENT-CANCEL).
+
+Otherwise a job is started that runs one turn of the agent on the form field `text', the turn
+is added to the window's transcript, and the answer is its HTML while it is running. An error
+in the turn is shown as the agent's answer, so a provider that fails does not break the window.
+
+One turn at a time per agent: while the agent's last turn is still running, a new one is
+refused. Nothing is started or stored, and the answer says so."
+  (if (%field parameters "cancel")
+      (agent-cancel window parameters)
+      (let ((text (or (%field parameters "text") ""))
+            (agent *agent*)
+            (turn nil))
+        (sb-thread:with-mutex (*ide-lock*)
+          (unless (%agent-busy-p agent)
+            (setf turn (%start-turn window agent text))))
+        (if turn
+            (%turn-html window turn)
+            (%notice-html "Not sent: the agent's last turn is still running. Wait for it, or cancel it.")))))
 
 (defun render-agent (window)
-  "The agent window's body: the conversation so far, then the input form."
-  (let ((bubbles (%exchange-html (ui:window-datum window :transcript))))
+  "The agent window's body: the conversation so far, oldest first, then the input form."
+  (let ((chat-id (%dom-id window "chat"))
+        (turns (mapcar (lambda (turn) (%turn-html window turn))
+                       (reverse (ui:window-datum window :transcript)))))
     (spin:with-html-string
-      (:div :id "ide-chat" (:raw bubbles))
+      (:div :id chat-id (dolist (html turns) (:raw html)))
       (:form :hx-post (format nil "/window/~A/action/say" (ui:window-id window))
-             :hx-target "#ide-chat" :hx-swap "beforeend"
+             :hx-target (format nil "#~A" chat-id) :hx-swap "beforeend"
              :hx-on--after-request "this.reset()"
-        (:input :type "text" :name "text" :placeholder "Ask the agent" :autocomplete "off")
+        ;; Kept across a pushed body, as the REPL's textarea is.
+        (:input :type "text" :name "text" :placeholder "Ask the agent" :autocomplete "off"
+                :id (%dom-id window "input") :data-ou-preserve "1")
         (:button :type "submit" "Send")))))
 
 ;;; --- the desktop and the server ----------------------------------------------------------
