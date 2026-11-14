@@ -852,3 +852,34 @@ list CALLS names. The definition is put back afterwards."
         "three ended jobs are kept, and the one registered last")
     (is (eq (sixth made) (first (jobs:window-jobs w))))
     (is (null (jobs:find-job (jobs:job-id (first made)))))))
+
+;;; --- a job's end reaches a connected page ---------------------------------------------------
+
+(defun body-of-job (window)
+  "A body that shows the status of the job in WINDOW's datum :JOB."
+  (let ((job (ui:window-datum window :job)))
+    (format nil "<p>job ~(~A~)</p>" (if job (jobs:job-status job) "none"))))
+
+(test a-job-that-ends-pushes-its-window-s-body-to-a-connected-page
+  "The window has no refresh interval and nothing else changes it, so the only thing that can
+send the new body is the job's end calling WINDOW-CHANGED, which publishes (:BODY . ID)."
+  (let* ((d (ui:make-desktop :title "Job desktop"))
+         (w (ui:open-window d "jobwin" :title "Job" :render 'body-of-job))
+         (gate (sb-thread:make-semaphore)))
+    (%call-with-events
+     d
+     (lambda (text)
+       (let ((job (jobs:start-job (lambda () (sb-thread:wait-on-semaphore gate) 42) :window w)))
+         (setf (ui:window-datum w :job) job)
+         ;; Let anything start-job published be written before the mark.
+         (sleep 0.3)
+         (let ((mark (length (funcall text))))
+           (is (eq :running (jobs:job-status job)))
+           (is (null (search "<p>job done</p>" (funcall text))) "nothing says done before the end")
+           (sb-thread:signal-semaphore gate)
+           (is (jobs:wait-job job :timeout 10))
+           (is (eq :done (jobs:job-status job)))
+           (is (%await text (format nil "data: html win-jobwin-body~%data: <p>job done</p>~%~%")
+                       :start mark)
+               "the page is sent the body with the finished job, without asking: ~A"
+               (subseq (funcall text) mark))))))))
