@@ -60,4 +60,4 @@ subject Check type constructors before matching predicates
 # opts out is a pin nobody reviews, and the exemption outlives the reasoning.
 
 advisories https://github.com/coalton-lang/coalton/security/advisories
-reviewed   2026-10-15
+reviewed   2026-11-14
