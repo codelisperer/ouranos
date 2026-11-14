@@ -269,19 +269,20 @@ the page uses, changes what another window shows, with no restart and no change 
            "input" "(lisp (-> Integer) () (cl:sleep 60) 1)")
     (let* ((entry (first (%transcript desktop "repl")))
            (job (ide::item-job entry))
-           (session ide::*session*))
-      (is (loop repeat 500
-                thereis (repl::session-worker session)
-                do (sleep 0.01))
-          "the Coalton evaluation started")
+           (session ide::*session*)
+           (worker (loop repeat 1000
+                         thereis (repl::session-worker session)
+                         do (sleep 0.01))))
+      (is-true worker "the Coalton evaluation started, on cons/coalton-repl's own thread")
       (%post app "/window/repl/action/eval" "cancel" (princ-to-string (jobs:job-id job)))
       (is (jobs:wait-job job :timeout 20))
       (is (eq :cancelled (getf (ide:inspect-repl-entry entry) :kind))
           "the record: ~S" (ide:inspect-repl-entry entry))
-      (is (loop repeat 500
-                never (repl::session-worker session)
-                do (sleep 0.01))
-          "the session's own evaluation thread was stopped too"))
+      (is (and worker
+               (loop repeat 1000
+                     thereis (not (sb-thread:thread-alive-p worker))
+                     do (sleep 0.01)))
+          "that thread was stopped too, which the job's interrupt alone does not do"))
     (is (equal "3" (getf (%eval app desktop "coalton" "(+ 1 2)") :value))
         "the session is not left busy")))
 
