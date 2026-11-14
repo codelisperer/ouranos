@@ -2,6 +2,9 @@
 ;;;;
 ;;;; No server and no window are started. The routes are called as a Clack application, with
 ;;;; the request body already cached, the way the Coalton REPL example's tests call theirs.
+;;;; GET /events answers with a streaming body, a function of a writer; the tests of the push
+;;;; feed run that function on a thread with a writer that collects what it is given. The same
+;;;; stream is read over a socket from a real server in praxeon/examples/ouranos-ide/tests.
 
 (cl:defpackage #:hyperion/desktop-ui/tests
   (:use #:cl #:fiveam)
@@ -172,8 +175,9 @@
     (is (search "id=win-one" (remove #\" html)))
     (is (search "left:10px;top:20px;width:200px;height:100px;z-index:1" html))
     (is (search "<p>first definition</p>" html))
-    (is (null (search "every" html)) "no refresh interval, so no polling")
-    (is (search "every 5s" (ui:render-window (ui:find-window d "two"))))))
+    (is (null (search "every" html)) "nothing in the window asks again on a timer")
+    (is (null (search "every" (ui:render-window (ui:find-window d "two"))))
+        "and a refresh interval does not add a polling attribute: the server pushes the body")))
 
 (test redefining-a-render-function-changes-the-next-render
   (let* ((d (%desktop))
@@ -241,15 +245,13 @@ RENDER-WINDOW-BODY must change what the already compiled RENDER-WINDOW returns."
     (multiple-value-bind (status body) (%post app "/window/one/event" "type" "raise")
       (is (= 200 status))
       (is (string= "3" body) "the new z, for the page to apply"))
-    (multiple-value-bind (status body headers) (%post app "/window/one/event" "type" "close")
-      (is (= 200 status))
-      (is (string= "" body) "an empty body, which the page swaps over the window")
-      (is (equal "ou-dock" (getf headers :hx-trigger))))
+    (is (= 204 (%post app "/window/one/event" "type" "close"))
+        "the page learns that it closed from the event stream")
     (is (equal '("two") (getf (ui:inspect-desktop d) :shown)))
     (is (search "ou-hidden" (nth-value 1 (%get app "/dock"))) "the dock offers to open it again")
-    (multiple-value-bind (status body) (%post app "/window/one/event" "type" "open")
-      (is (= 200 status))
-      (is (search "left:111px;top:222px" body) "it comes back where it was"))
+    (is (= 204 (%post app "/window/one/event" "type" "open")))
+    (is (search "left:111px;top:222px" (nth-value 1 (%get app "/window/one")))
+        "it comes back where it was")
     (is (equal '("one" "two") (getf (ui:inspect-desktop d) :shown)))))
 
 (test the-event-route-answers-404-and-400
@@ -292,10 +294,243 @@ RENDER-WINDOW-BODY must change what the already compiled RENDER-WINDOW returns."
       (is (search "<th>x<td>10<" (remove #\Space (remove #\Newline body)))))
     (%post app "/window/one/event" "type" "move" "x" "640" "y" "480")
     (let ((body (nth-value 1 (%post app "/window/inspector/action/record"))))
-      (is (search "640" body) "the next poll shows the move")
+      (is (search "640" body) "the record shows the move")
       (is (search "480" body))
       (is (search "move" body) "and the event that caused it"))
     (is (string= "one" (ui:window-datum (ui:find-window d "inspector") :target)))
     (is (search "INSPECTOR-SELECT"
                 (nth-value 1 (%post app "/window/inspector/action/select" "target" "inspector")))
         "the inspector can inspect itself")))
+
+;;; --- the push feed: GET /events ----------------------------------------------------------
+
+(defun body-count (window)
+  (format nil "<p>count ~D</p>" (ui:window-datum window :count 0)))
+
+(defun %timer-threads (desktop)
+  "The live threads named for DESKTOP's timer."
+  (let ((name (format nil "desktop-ui timer: ~A" (ui:desktop-title desktop))))
+    (remove-if-not (lambda (thread) (equal name (sb-thread:thread-name thread)))
+                   (sb-thread:list-all-threads))))
+
+(defun %call-with-events (desktop function)
+  "Read DESKTOP's GET /events on a thread, the way a server would, and call FUNCTION with a
+function of no arguments that returns everything written to the stream so far. Before
+FUNCTION is called, the stream has written what was published before it connected.
+Afterwards the desktop is stopped, and the reading thread must have ended."
+  (let* ((app (ui:make-app desktop))
+         (response (funcall app (list :request-method :get :path-info "/events")))
+         (lock (sb-thread:make-mutex :name "desktop-ui test events"))
+         (written (make-string-output-stream))
+         (text (lambda ()
+                 (sb-thread:with-mutex (lock)
+                   (let ((so-far (get-output-stream-string written)))
+                     (write-string so-far written)
+                     so-far))))
+         (thread (sb-thread:make-thread
+                  (lambda ()
+                    (funcall (third response)
+                             (lambda (chunk)
+                               (sb-thread:with-mutex (lock) (write-string chunk written))))
+                    :returned)
+                  :name "desktop-ui test events reader")))
+    (unwind-protect
+         (progn
+           (is (= 200 (first response)))
+           (is (search "text/event-stream" (getf (second response) :content-type)))
+           (is (%await text ": connected") "the stream opened")
+           ;; Longer than one emission interval, so what was published earlier is written.
+           (sleep 0.3)
+           (funcall function text))
+      (is-true (ui:stop-desktop desktop) "stop-desktop ended the stream and the timer")
+      (is (eq :returned (sb-thread:join-thread thread :default :still-running :timeout 5))
+          "the function that writes the stream returned")
+      (when (sb-thread:thread-alive-p thread) (sb-thread:terminate-thread thread)))))
+
+(defun %await (text needle &key (start 0) (timeout 5))
+  "Wait until NEEDLE appears in what the function TEXT returns, at or after START. Returns
+its position, or NIL after TIMEOUT seconds."
+  (let ((deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second))))
+    (loop
+      (let ((found (search needle (funcall text) :start2 start)))
+        (when found (return found)))
+      (when (> (get-internal-real-time) deadline) (return nil))
+      (sleep 0.02))))
+
+(defun %count-after (text needle start)
+  "How many times NEEDLE appears in what the function TEXT returns, at or after START."
+  (let ((all (funcall text)))
+    (loop with count = 0
+          for at = (search needle all :start2 start) then (search needle all :start2 (1+ at))
+          while at do (incf count)
+          finally (return count))))
+
+(test the-page-has-no-polling-attribute-and-opens-the-event-stream
+  (let ((d (%desktop)))
+    (ui:open-inspector d :target "one")
+    (let ((page (nth-value 1 (%get (ui:make-app d) "/"))))
+      (is (search "data-window=two" (remove #\" page)) "the window with a refresh interval is there")
+      (is (search "data-window=inspector" (remove #\" page)))
+      (is (null (search "every" page)) "no hx-trigger asks again on a timer")
+      (is (null (search "hx-trigger=ou-dock" (remove #\" page))) "the dock does not fetch itself")
+      (is (search "new EventSource('/events')" page)
+          "the script opens the event stream, with `new': without it the call throws")
+      (is (search "pending[id]" page) "and keeps one request per missing window"))))
+
+(test window-changed-sends-the-body-as-it-is-when-the-event-is-written
+  (let* ((d (ui:make-desktop :title "Changed desktop"))
+         (w (ui:open-window d "one" :title "One" :render 'body-count :data (list :count 1))))
+    (%call-with-events
+     d
+     (lambda (text)
+       (is (search "<p>count 1</p>" (funcall text))
+           "a new stream is sent what was published before it connected")
+       (let ((mark (length (funcall text))))
+         (setf (ui:window-datum w :count) 7)
+         (is (null (ui:window-changed w)))
+         (is (%await text (format nil "data: html win-one-body~%data: <p>count 7</p>~%~%")
+                     :start mark)
+             "the body arrives as one event, with the element to put it in")
+         (is (%await text "data: window one 360x240 left:40px;top:40px" :start mark)
+             "and so does the window's size and position"))))))
+
+(test many-changes-between-two-writes-become-one-event
+  (let* ((d (ui:make-desktop :title "Coalescing desktop"))
+         (w (ui:open-window d "one" :title "One" :render 'body-count)))
+    (%call-with-events
+     d
+     (lambda (text)
+       (let ((mark (length (funcall text))))
+         (dotimes (i 200)
+           (setf (ui:window-datum w :count) (+ 100 i))
+           (ui:window-changed w))
+         (is (%await text "<p>count 299</p>" :start mark) "the last change arrives")
+         (sleep 0.3)
+         (is (<= 1 (%count-after text "data: html win-one-body" mark) 3)
+             "200 changes were written as ~D events" (%count-after text "data: html win-one-body" mark)))))))
+
+(test opening-closing-and-removing-a-window-each-send-an-event
+  (let ((d (%desktop)))
+    (%call-with-events
+     d
+     (lambda (text)
+       (let ((mark (length (funcall text))))
+         (ui:open-window d "late" :title "Late" :render 'body-one :x 70 :y 80)
+         (is (%await text "data: window late 360x240 left:70px;top:80px" :start mark)
+             "a window opened from a REPL is announced to the page")
+         (is (%await text (format nil "data: html ou-dock~%") :start mark) "with the dock"))
+       (let ((mark (length (funcall text))))
+         (ui:dispatch-event d "late" state:close-event)
+         (is (%await text (format nil "data: remove late~%") :start mark) "a close removes it")
+         (is (%await text "ou-hidden" :start mark) "and the dock offers to open it again"))
+       (let ((mark (length (funcall text))))
+         (ui:dispatch-event d "late" state:open-event)
+         (is (%await text "data: window late " :start mark) "an open shows it again"))
+       (let ((mark (length (funcall text))))
+         (ui:dispatch-event d "one" (state:move-event 333 222))
+         (is (%await text "data: window one 200x100 left:333px;top:222px" :start mark)
+             "a move sends the new position"))
+       (let ((mark (length (funcall text))))
+         (ui:remove-window d "late")
+         (is (%await text (format nil "data: remove late~%") :start mark)
+             "a removed window is taken off the page")
+         (let ((dock (%await text (format nil "data: html ou-dock~%") :start mark)))
+           (is-true dock)
+           (is (null (search "Late" (funcall text) :start2 (or dock 0)))
+               "and off the dock")))))))
+
+(test a-window-with-a-refresh-interval-is-pushed-on-that-schedule
+  (let ((d (ui:make-desktop :title "Refresh desktop")))
+    (ui:open-window d "still" :title "Still" :render 'body-one)
+    (ui:open-window d "ticking" :title "Ticking" :render 'body-count :refresh 0.2)
+    (is (null (%timer-threads d)) "no page is connected, so there is no timer thread")
+    (%call-with-events
+     d
+     (lambda (text)
+       (is (= 1 (ui:desktop-subscribers d)))
+       (is (= 1 (length (%timer-threads d))) "one timer thread while a page is connected")
+       (let ((mark (length (funcall text))))
+         (is (%await text "data: html win-ticking-body" :start mark)
+             "the body arrives with no request and no call to window-changed")
+         (let ((first (%await text "data: html win-ticking-body" :start mark)))
+           (is (%await text "data: html win-ticking-body" :start (if first (1+ first) mark))
+               "and again after another interval"))
+         (is (zerop (%count-after text "data: html win-still-body" mark))
+             "a window with no refresh interval is not pushed"))))
+    (is (zerop (ui:desktop-subscribers d)))
+    (is (null (%timer-threads d)) "stop-desktop ended the timer thread")))
+
+(test the-timer-publishes-only-what-is-due
+  (let* ((d (ui:make-desktop :title "Tick desktop"))
+         (due (make-hash-table :test 'equal))
+         (second internal-time-units-per-second)
+         (feed (ui::%feed d)))
+    (ui:open-window d "fast" :render 'body-one :refresh 1)
+    (ui:open-window d "slow" :render 'body-one :refresh 5)
+    (ui:open-window d "never" :render 'body-one)
+    (flet ((published-by (now)
+             (let ((before (hyperion/feed:feed-version-now feed)))
+               (ui::%tick d due now)
+               (- (hyperion/feed:feed-version-now feed) before))))
+      (is (= 0 (published-by 0)) "the first look only notes when each window is due")
+      (is (= 0 (published-by (floor second 2))))
+      (is (= 1 (published-by second)) "the one-second window is due")
+      (is (= 0 (published-by (+ second 1))))
+      (is (= 2 (published-by (* 5 second))) "both are due at five seconds")
+      (ui:dispatch-event d "fast" state:close-event)
+      (is (= 0 (published-by (* 7 second))) "a hidden window is not pushed"))))
+
+(test the-inspector-is-sent-the-record-when-the-window-it-watches-changes
+  (let ((d (%desktop)))
+    (ui:open-inspector d :target "one")
+    (%call-with-events
+     d
+     (lambda (text)
+       (let ((mark (length (funcall text))))
+         (ui:dispatch-event d "one" (state:move-event 640 480))
+         (let ((at (%await text "data: html win-inspector-record" :start mark)))
+           (is-true at "the record is pushed, into the record's own element")
+           (is (%await text "640" :start (or at mark)) "and it shows the move")))
+       (let ((mark (length (funcall text))))
+         (ui:dispatch-event d "two" (state:move-event 5 5))
+         (sleep 0.4)
+         (is (zerop (%count-after text "data: html win-inspector-record" mark))
+             "a change to a window it is not watching sends nothing"))
+       (let ((mark (length (funcall text))))
+         (setf (ui:window-datum (ui:find-window d "one") :count) 99)
+         (ui:window-changed (ui:find-window d "one"))
+         (let ((at (%await text "data: html win-inspector-record" :start mark)))
+           (is-true at "window-changed pushes the record too")
+           (is (%await text "99" :start (or at mark)))))))))
+
+(test event-data-says-what-to-do-about-each-key
+  (let ((d (%desktop)))
+    (is (string= (format nil "html win-one-body~%<p>first definition</p>")
+                 (ui:event-data d '(:body . "one"))))
+    (is (string= "window one 200x100 left:10px;top:20px;width:200px;height:100px;z-index:1"
+                 (ui:event-data d '(:window . "one"))))
+    (is (search "html ou-dock" (ui:event-data d '(:dock))))
+    (is (string= "skip" (ui:event-data d '(:record . "one"))) "window one has no record action")
+    (ui:dispatch-event d "one" state:close-event)
+    (is (string= "remove one" (ui:event-data d '(:window . "one"))) "hidden")
+    (is (string= "skip" (ui:event-data d '(:body . "one"))) "a hidden window's body is not sent")
+    (is (string= "remove absent" (ui:event-data d '(:window . "absent"))) "gone")
+    (ui:open-window d "broken" :render 'body-failing)
+    (is (search "deliberately broken" (ui:event-data d '(:body . "broken")))
+        "an error in a render function is shown in the window, as on the page")
+    (is (null (find #\Return (ui:event-data d '(:dock)))))))
+
+(test a-stopped-desktop-can-be-served-again
+  (let* ((d (ui:make-desktop :title "Again desktop"))
+         (w (ui:open-window d "one" :render 'body-count :refresh 0.2)))
+    (dotimes (round 2)
+      (%call-with-events
+       d
+       (lambda (text)
+         (let ((mark (length (funcall text))))
+           (setf (ui:window-datum w :count) (+ 40 round))
+           (ui:window-changed w)
+           (is (%await text (format nil "<p>count ~D</p>" (+ 40 round)) :start mark)
+               "round ~D: the stream works" round)
+           (is (= 1 (length (%timer-threads d)))))))
+      (is (null (%timer-threads d)) "round ~D: no timer thread is left" round))))

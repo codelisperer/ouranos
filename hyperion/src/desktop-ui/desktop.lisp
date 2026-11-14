@@ -17,6 +17,12 @@
 ;;;; INSPECTING. INSPECT-WINDOW, INSPECT-EVENT and INSPECT-DESKTOP return property lists of
 ;;;; numbers, strings and symbols. The inspector window, a REPL and the tests all read those.
 ;;;;
+;;;; TELLING THE PAGE. The page opens GET /events once, a Server-Sent Events stream over the
+;;;; desktop's hyperion/feed, and changes what it shows when an event arrives. It does not ask
+;;;; again on a timer. OPEN-WINDOW, REMOVE-WINDOW, DISPATCH-EVENT and WINDOW-CHANGED publish on
+;;;; the feed, and a timer thread publishes for each window that has a refresh interval while a
+;;;; page is connected. STOP-DESKTOP ends the streams and the timer.
+;;;;
 ;;;; Not here: saving the layout between runs, and any limit on what a window's code may do.
 
 (cl:defpackage #:hyperion/desktop-ui
@@ -25,10 +31,12 @@
                     (#:router #:hyperion/router)
                     (#:http #:hyperion/http)
                     (#:out #:hyperion/output)
+                    (#:feed #:hyperion/feed)
+                    (#:sse #:hyperion/sse)
                     (#:assets #:hyperion/assets)
                     (#:spin #:spinneret))
   ;; Parenscript matches its own macros by symbol identity, so these are the real ones.
-  (:import-from #:parenscript #:chain #:@ #:create)
+  (:import-from #:parenscript #:chain #:@ #:create #:new #:getprop)
   (:documentation
    "A desktop of floating windows served as one page. MAKE-DESKTOP and OPEN-WINDOW build it,
     MAKE-APP serves it, DISPATCH-EVENT changes a window, and the INSPECT- functions describe
@@ -43,7 +51,8 @@
            #:inspect-window #:inspect-event #:inspect-desktop
            #:open-inspector #:render-inspector #:inspector-select #:inspector-record
            #:routes #:make-app #:*css* #:client-js #:*event-history*
-           #:window-changed))
+           #:window-changed #:stop-desktop #:desktop-subscribers #:event-data
+           #:*events-hz* #:*timer-step*))
 
 (cl:in-package #:hyperion/desktop-ui)
 
@@ -52,7 +61,7 @@
                     dispatch-event run-action event-from-parameters
                     inspect-window inspect-event inspect-desktop
                     render-inspector inspector-select inspector-record
-                    window-changed))
+                    window-changed event-data))
 
 ;;; --- the records -------------------------------------------------------------------------
 
@@ -64,7 +73,15 @@
    (windows :initform '() :accessor %windows
             :documentation "The windows, oldest first.")
    (lock :initform (sb-thread:make-mutex :name "desktop-ui desktop") :reader %lock
-         :documentation "Held for every read or write of a window's state, data and events."))
+         :documentation "Held for every read or write of a window's state, data and events.")
+   (feed :initform (feed:make-feed) :reader %feed
+         :documentation "What changed, for the pages reading GET /events. A key is (KIND . ID); see EVENT-DATA.")
+   (subscribers :initform 0 :accessor %subscribers
+                :documentation "How many GET /events streams are being written now.")
+   (epoch :initform 0 :accessor %epoch
+          :documentation "Raised by STOP-DESKTOP. A stream or a timer that started under an earlier value ends.")
+   (timer :initform nil :accessor %timer
+          :documentation "The thread that publishes for windows with a refresh interval, or NIL. It runs only while a page is connected."))
   (:documentation "A set of windows served as one page."))
 
 (defclass window ()
@@ -78,7 +95,7 @@
    (actions :initarg :actions :initform '() :accessor window-actions
             :documentation "An alist of (NAME . FUNCTION-DESIGNATOR). POST /window/ID/action/NAME calls the function with the window and the form's alist, and answers with the HTML string it returns.")
    (refresh :initarg :refresh :initform nil :accessor window-refresh
-            :documentation "NIL, or the number of seconds between the page's requests for a fresh body.")
+            :documentation "NIL, or the number of seconds between pushes of a fresh body to the connected pages.")
    (desktop :initarg :desktop :reader window-desktop)
    (data :initarg :data :initform '() :accessor %data
          :documentation "The window's own property list. Read and write it with WINDOW-DATUM.")
@@ -131,8 +148,11 @@ should do.
 
 RENDER is called with the window and returns the body's HTML as a string. ACTIONS is an alist
 of (NAME . FUNCTION); see the WINDOW class. Pass symbols for both, so a redefinition is
-picked up. REFRESH is NIL or a number of seconds: the page then asks for the body again that
-often. DATA is the window's initial property list."
+picked up. REFRESH is NIL or a number of seconds: the body is then rendered again and pushed
+to the connected pages that often, by the desktop's timer. DATA is the window's initial
+property list.
+
+A page that is connected shows the new window without a reload."
   (unless (%valid-id-p id)
     (error "A window id is lower-case letters, digits and hyphens, not ~S." id))
   (%with-desktop (desktop)
@@ -144,13 +164,21 @@ often. DATA is the window's initial property list."
       (setf (%windows desktop)
             (append (remove id (%windows desktop) :key #'window-id :test #'string=)
                     (list window)))
+      (%publish desktop :window id)
+      (%publish desktop :body id)
+      (%publish desktop :dock)
+      (%publish-watchers desktop id)
       window)))
 
 (defun remove-window (desktop id)
-  "Take the window ID out of DESKTOP altogether. Closing a window on the page only hides it."
+  "Take the window ID out of DESKTOP altogether. Closing a window on the page only hides it.
+A page that is connected removes it without a reload."
   (%with-desktop (desktop)
     (setf (%windows desktop)
-          (remove id (%windows desktop) :key #'window-id :test #'string=)))
+          (remove id (%windows desktop) :key #'window-id :test #'string=))
+    (%publish desktop :window id)
+    (%publish desktop :dock)
+    (%publish-watchers desktop id))
   desktop)
 
 (defun window-datum (window key &optional default)
@@ -202,24 +230,210 @@ given a z above every window DESKTOP has. Signals BAD-EVENT for anything else."
 
 (defun dispatch-event (desktop id event)
   "Apply EVENT, a hyperion/desktop-ui/state:Win-Event, to the window ID of DESKTOP, record it
-in the window's history, and return the window. Signals UNKNOWN-WINDOW when there is none."
+in the window's history, and return the window. Signals UNKNOWN-WINDOW when there is none.
+The connected pages are told the window's new state, and the dock's when the event closed or
+opened the window."
   (%with-desktop (desktop)
     (let ((window (or (find-window desktop id) (error 'unknown-window :id id))))
       (setf (window-state window) (state:apply-event event (window-state window)))
       (push event (%events window))
       (when (> (length (%events window)) *event-history*)
         (setf (%events window) (subseq (%events window) 0 *event-history*)))
+      (%publish desktop :window id)
+      (when (member (state:event-name event) '("close" "open") :test #'string=)
+        (%publish desktop :dock))
+      (%publish-watchers desktop id)
       window)))
 
 ;;; --- telling the page that something changed (#1218) -------------------------------------
+;;;
+;;; The desktop has one hyperion/feed. A key on it is (KIND . ID) and says what changed; the
+;;; value is not used. The feed keeps one entry per key, so a window that changes a thousand
+;;; times between two emissions is written to a page once. The HTML is rendered when an event
+;;; is written to a page, by EVENT-DATA, and not when the change is published. Publishing is
+;;; therefore cheap enough to do from any thread, nothing is rendered while no page is
+;;; connected, and a page always receives the body as it is at that moment.
+
+(defparameter *events-hz* 20
+  "How many times a second, at most, GET /events writes the changes to one page.")
+
+(defparameter *timer-step* 0.1
+  "Seconds the desktop's timer sleeps between looks at the refresh intervals. A refresh
+interval shorter than this is served at this rate, and STOP-DESKTOP waits about this long for
+the timer.")
+
+(defun %publish (desktop kind &optional id)
+  "Record on DESKTOP's feed that the thing (KIND . ID) changed. Returns NIL."
+  (feed:publish (%feed desktop) (cons kind id) t)
+  nil)
+
+(defun %publish-watchers (desktop id)
+  "Publish the record of every window of DESKTOP that is watching the window ID. A window
+watches another when its own data holds :TARGET with that window's id, and watches the whole
+desktop when :TARGET is the empty string. The inspector is such a window."
+  (%with-desktop (desktop)
+    (dolist (w (%windows desktop))
+      (let ((target (getf (%data w) :target)))
+        (when (and (stringp target) (or (string= target "") (string= target id)))
+          (%publish desktop :record (window-id w)))))))
 
 (defun window-changed (window)
-  "Say that WINDOW's body or state changed outside a request from the page, for example when a
-job writes output or the agent finishes a turn. Code that changes a window calls this after the
-change. In the proof of concept it does nothing and the page still polls; the desktop's push
-feed replaces this definition so that the page is told at once."
-  (declare (ignore window))
-  nil)
+  "Say that WINDOW's body, state or data changed outside a request from the page, for example
+when a job writes output or the agent finishes a turn. Code that changes a window calls this
+after the change. Every connected page is then sent the window's body and position, and the
+record of every inspector looking at the window. It may be called from any thread and as
+often as the caller likes: calls made between two writes to a page become one event. It
+renders nothing itself. Returns NIL."
+  (let ((desktop (window-desktop window))
+        (id (window-id window)))
+    (%publish desktop :body id)
+    (%publish desktop :window id)
+    (%publish-watchers desktop id)
+    nil))
+
+(defun %shown-window (desktop id)
+  "The window ID of DESKTOP when there is one and it is shown, else NIL."
+  (%with-desktop (desktop)
+    (let ((window (find-window desktop id)))
+      (and window (state:state-shown? (window-state window)) window))))
+
+(defun %one-line-safe (text)
+  "TEXT without carriage returns, which Server-Sent Events read as the end of a line."
+  (remove #\Return text))
+
+(defun event-data (desktop key)
+  "The data of the Server-Sent Event that tells a page about KEY, a key of DESKTOP's feed. The
+first line says what to do and the lines after it are HTML:
+
+  html ELEMENT-ID      put the HTML inside the element with that id
+  window ID WxH STYLE  the window ID is shown, with that size and that style attribute; a page
+                       that does not have it fetches /window/ID and adds it
+  remove ID            the window ID is hidden or gone; take its element away
+  skip                 nothing to do, because the window the key names is hidden or gone
+  stop                 STOP-DESKTOP was called at some time; nothing to do
+
+The keys are (:body . ID) for a window's body, (:window . ID) for its state, (:record . ID)
+for the record an inspector shows, (:dock) and (:stop). The HTML is rendered here, when the
+event is written, so it is the window as it is now."
+  (out:with-output-style ()
+    (destructuring-bind (kind . id) key
+      (%one-line-safe
+       (handler-case
+           (ecase kind
+             (:body
+              (let ((window (%shown-window desktop id)))
+                (if window
+                    (format nil "html ~A-body~%~A" (%element-id window) (render-window-body window))
+                    "skip")))
+             (:window
+              (let ((window (%shown-window desktop id)))
+                (if window
+                    (let ((s (window-state window)))
+                      (format nil "window ~A ~Dx~D ~A" id
+                              (state:state-width s) (state:state-height s) (%style window)))
+                    (format nil "remove ~A" id))))
+             (:record
+              (let* ((window (%shown-window desktop id))
+                     (html (and window (run-action window "record" '()))))
+                (if html
+                    (format nil "html ~A-record~%~A" (%element-id window) html)
+                    "skip")))
+             (:dock (format nil "html ou-dock~%~A" (render-dock desktop)))
+             (:stop "stop"))
+         (error () "skip"))))))
+
+;;; The timer. One thread per desktop, alive only while a page is connected.
+
+(defun %tick (desktop due now)
+  "Publish the body of each shown window of DESKTOP whose refresh interval has passed. DUE is
+a table from window id to the time its next push is due, and NOW is the time, both in
+internal time units. A window seen for the first time is due one interval from NOW."
+  (dolist (window (desktop-windows desktop))
+    (let ((refresh (window-refresh window))
+          (id (window-id window)))
+      (when (and (realp refresh) (plusp refresh)
+                 (state:state-shown? (window-state window)))
+        (let ((step (max 1 (round (* refresh internal-time-units-per-second))))
+              (at (gethash id due)))
+          (cond ((null at) (setf (gethash id due) (+ now step)))
+                ((>= now at)
+                 (%publish desktop :body id)
+                 (setf (gethash id due) (+ now step)))))))))
+
+(defun %run-timer (desktop epoch)
+  "The timer thread's function. It ends when no page is connected or STOP-DESKTOP was called."
+  (let ((due (make-hash-table :test 'equal)))
+    (loop
+      (sleep *timer-step*)
+      (when (%with-desktop (desktop)
+              (when (or (/= epoch (%epoch desktop)) (zerop (%subscribers desktop)))
+                (when (eq (%timer desktop) sb-thread:*current-thread*)
+                  (setf (%timer desktop) nil))
+                t))
+        (return))
+      (ignore-errors (%tick desktop due (get-internal-real-time))))))
+
+(defun %connect (desktop)
+  "Count one more page reading DESKTOP's events, start the timer when it is not running, and
+return the desktop's epoch."
+  (%with-desktop (desktop)
+    (incf (%subscribers desktop))
+    (unless (%timer desktop)
+      (let ((epoch (%epoch desktop)))
+        (setf (%timer desktop)
+              (sb-thread:make-thread (lambda () (%run-timer desktop epoch))
+                                     :name (format nil "desktop-ui timer: ~A"
+                                                   (desktop-title desktop))))))
+    (%epoch desktop)))
+
+(defun %disconnect (desktop)
+  (%with-desktop (desktop) (decf (%subscribers desktop))))
+
+(defun desktop-subscribers (desktop)
+  "How many GET /events streams of DESKTOP are being written now."
+  (%with-desktop (desktop) (%subscribers desktop)))
+
+(defun %events-response (desktop)
+  "GET /events: the desktop's changes as Server-Sent Events, through hyperion/sse. A new
+stream is first sent everything published so far, which brings a page that connected a
+moment after it was rendered, or connected again after a break, up to date. The stream ends
+when the page goes away or STOP-DESKTOP is called. A page that went away is found out when a
+write to it fails, and the writer's error then leaves this function as it does any other
+streaming body."
+  (let ((pump (sse:events (feed:subscribe (%feed desktop) :hz *events-hz* :from :start)
+                          :render (lambda (pair) (event-data desktop (car pair))))))
+    (list 200 (copy-list sse:*headers*)
+          (lambda (writer)
+            (let ((epoch (%connect desktop)))
+              (unwind-protect
+                   (catch '%stream-ended
+                     (flet ((write-chunk (chunk)
+                              (unless (= epoch (%epoch desktop))
+                                (throw '%stream-ended nil))
+                              (funcall writer chunk)))
+                       (write-chunk (sse:comment "connected"))
+                       (funcall pump #'write-chunk)))
+                (%disconnect desktop)))))))
+
+(defun stop-desktop (desktop &key (timeout 5))
+  "End every GET /events stream of DESKTOP and stop its timer thread. Call it when the server
+that serves the desktop stops. Waits up to TIMEOUT seconds and returns true when no stream and
+no timer is left. The desktop and its windows are unchanged, and it can be served again."
+  (let ((timer nil)
+        (deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second))))
+    (%with-desktop (desktop)
+      (incf (%epoch desktop))
+      (setf timer (%timer desktop)
+            (%timer desktop) nil))
+    ;; A stream looks at the epoch when it writes, so give each one something to write.
+    (%publish desktop :stop)
+    (when (and timer (not (eq timer sb-thread:*current-thread*)))
+      (sb-thread:join-thread timer :default nil :timeout timeout))
+    (loop until (or (zerop (desktop-subscribers desktop))
+                    (> (get-internal-real-time) deadline))
+          do (sleep 0.02))
+    (and (zerop (desktop-subscribers desktop))
+         (or (null timer) (not (sb-thread:thread-alive-p timer))))))
 
 (defun run-action (window name parameters)
   "Call WINDOW's action NAME with the window and PARAMETERS, the posted form's alist, and
@@ -299,12 +513,21 @@ windows that are shown, and the highest z in use."
   "The page's script, compiled from Parenscript. It listens on the document, so a window the
 server adds later needs no setup. Pressing anywhere in a window raises it; dragging the title
 bar moves it; releasing after a resize reports the new size. Each of those posts one event
-to /window/ID/event. The source uses no comparison operators, so the output has no angle
-bracket and can sit inside a script element."
+to /window/ID/event.
+
+Once the page has loaded, the script opens GET /events with EventSource and does what each
+event's first line says; EVENT-DATA lists them. An event about the position of the window the
+pointer is holding is left out, so a drag or a resize in progress is not undone by it. The
+browser connects again by itself when the stream ends.
+
+The source uses no comparison operators, so the output has no angle bracket and can sit
+inside a script element."
   (out:js-string
    '(funcall
      (lambda ()
-       (let ((drag nil))
+       (let ((drag nil)
+             (held nil)
+             (pending (create)))
          (flet ((window-of (target)
                   (and target (@ target closest) (chain target (closest ".ou-window"))))
                 (post (el body)
@@ -319,6 +542,7 @@ bracket and can sit inside a script element."
                    "pointerdown"
                    (lambda (e)
                      (let ((el (window-of (@ e target))))
+                       (setf held el)
                        (when el
                          (chain (post el "type=raise")
                                 (then (lambda (response) (chain response (text))))
@@ -342,6 +566,7 @@ bracket and can sit inside a script element."
                   (add-event-listener
                    "pointerup"
                    (lambda (e)
+                     (setf held nil)
                      (when drag
                        (post (@ drag el) (+ "type=move&x=" (@ drag el offset-left)
                                             "&y=" (@ drag el offset-top)))
@@ -352,7 +577,54 @@ bracket and can sit inside a script element."
                            (unless (equal size (@ el dataset size))
                              (setf (@ el dataset size) size)
                              (post el (+ "type=resize&width=" (@ el offset-width)
-                                         "&height=" (@ el offset-height))))))))))))))))
+                                         "&height=" (@ el offset-height))))))))))
+           (flet ((element (id) (chain document (get-element-by-id id)))
+                  (process (el)
+                    (when (and el (@ window htmx)) (chain window htmx (process el)))))
+             (flet ((add-window (id)
+                      ;; One request for a window the page does not have, however many
+                      ;; events name it before the answer arrives.
+                      (unless (getprop pending id)
+                        (setf (getprop pending id) t)
+                        (chain window
+                               (fetch (+ "/window/" id))
+                               (then (lambda (response)
+                                       (if (@ response ok) (chain response (text)) "")))
+                               (then (lambda (html)
+                                       (setf (getprop pending id) nil)
+                                       (unless (element (+ "win-" id))
+                                         (let ((desk (element "ou-desktop")))
+                                           (chain desk (insert-adjacent-h-t-m-l "beforeend" html))
+                                           (process (@ desk last-element-child)))))
+                                     (lambda () (setf (getprop pending id) nil)))))))
+               (chain document
+                      (add-event-listener
+                       "DOMContentLoaded"
+                       (lambda ()
+                         (let ((source (new (-event-source "/events"))))
+                           (setf (@ source onmessage)
+                                 (lambda (e)
+                                   (let* ((data (@ e data))
+                                          (cut (chain data (index-of (chain -string (from-char-code 10)))))
+                                          (head (if (= cut -1) data (chain data (slice 0 cut))))
+                                          (html (if (= cut -1) "" (chain data (slice (+ cut 1)))))
+                                          (words (chain head (split " ")))
+                                          (kind (aref words 0))
+                                          (id (aref words 1)))
+                                     (cond ((equal kind "html")
+                                            (let ((el (element id)))
+                                              (when el
+                                                (setf (@ el inner-h-t-m-l) html)
+                                                (process el))))
+                                           ((equal kind "window")
+                                            (let ((el (element (+ "win-" id))))
+                                              (cond ((not el) (add-window id))
+                                                    ((not (equal el held))
+                                                     (setf (@ el style css-text) (aref words 3))
+                                                     (setf (@ el dataset size) (aref words 2))))))
+                                           ((equal kind "remove")
+                                            (let ((el (element (+ "win-" id))))
+                                              (when el (chain el (remove)))))))))))))))))))))
 
 ;;; --- rendering ---------------------------------------------------------------------------
 
@@ -379,13 +651,13 @@ leaves the rest of the desktop working."
           (format nil "This window's render function signalled an error:~%~A" e))))))
 
 (defun render-window (window)
-  "The HTML of WINDOW with its frame: the title bar, the close button and the body. A window
-with a refresh interval asks for its body again that often."
+  "The HTML of WINDOW with its frame: the title bar, the close button and the body. Nothing in
+it asks again on a timer: the page is sent a new body through GET /events. The close button
+posts the event and swaps nothing, because the page removes the window when the event stream
+says it is hidden."
   (let* ((id (window-id window))
          (element (%element-id window))
-         (body-url (format nil "/window/~A/body" id))
          (s (window-state window))
-         (refresh (window-refresh window))
          (body (render-window-body window)))
     (spin:with-html-string
       (:section :class "ou-window" :id element :style (%style window)
@@ -395,20 +667,15 @@ with a refresh interval asks for its body again that often."
           (:span :class "ou-title" (window-title window))
           (:button :class "ou-close" :type "button" :title "Close"
                    :hx-post (format nil "/window/~A/event" id)
-                   :hx-vals "{\"type\": \"close\"}"
-                   :hx-target (format nil "#~A" element) :hx-swap "outerHTML"
+                   :hx-vals "{\"type\": \"close\"}" :hx-swap "none"
                    "x"))
-        (if refresh
-            (:div :class "ou-body" :id (format nil "~A-body" element)
-                  :hx-get body-url :hx-trigger (format nil "every ~Ds" refresh)
-                  :hx-swap "innerHTML"
-              (:raw body))
-            (:div :class "ou-body" :id (format nil "~A-body" element)
-              (:raw body)))))))
+        (:div :class "ou-body" :id (format nil "~A-body" element)
+          (:raw body))))))
 
 (defun render-dock (desktop)
   "The HTML of the dock's contents: the desktop's title and one button per window. The button
-of a hidden window opens it again."
+of a hidden window opens it again: it posts the event and swaps nothing, because the page adds
+the window when the event stream says it is shown."
   (let ((windows (desktop-windows desktop)))
     (spin:with-html-string
       (:span :class "ou-name" (desktop-title desktop))
@@ -417,12 +684,12 @@ of a hidden window opens it again."
             (:button :type "button" :disabled t (window-title w))
             (:button :type "button" :class "ou-hidden"
                      :hx-post (format nil "/window/~A/event" (window-id w))
-                     :hx-vals "{\"type\": \"open\"}"
-                     :hx-target "#ou-desktop" :hx-swap "beforeend"
+                     :hx-vals "{\"type\": \"open\"}" :hx-swap "none"
                      (window-title w)))))))
 
 (defun render-page (desktop)
-  "The whole page: the dock, every shown window, htmx and the script."
+  "The whole page: the dock, every shown window, htmx and the script. The script opens
+GET /events, and the page is changed by what arrives there."
   (let ((dock (render-dock desktop))
         (windows (loop for w in (desktop-windows desktop)
                        when (state:state-shown? (window-state w))
@@ -437,11 +704,9 @@ of a hidden window opens it again."
           (:script :src (assets:url :htmx) :defer t)
           (:style (:raw *css*)))
         (:body
-          ;; A close or an open answers with the HX-Trigger header `ou-dock', which htmx
-          ;; raises on the body, and the dock then fetches itself again.
-          (:div :id "ou-dock" :hx-get "/dock" :hx-trigger "ou-dock from:body"
-                :hx-swap "innerHTML"
-            (:raw dock))
+          ;; The event stream sends the dock's contents again when a window is opened,
+          ;; closed, added or removed.
+          (:div :id "ou-dock" (:raw dock))
           (:main :id "ou-desktop"
             (dolist (html windows) (:raw html)))
           (:script (:raw (client-js))))))))
@@ -458,7 +723,9 @@ of a hidden window opens it again."
 
 (defun inspector-record (window parameters)
   "The inspector's action `record': the record of the window it is looking at, as a table.
-The page asks for it once a second, so a move or a redefinition shows without a reload."
+The connected pages are sent it again when that window changes: on an event, on
+WINDOW-CHANGED, and when it is opened or removed. Looking at the desktop, any window's change
+sends it."
   (declare (ignore parameters))
   (let* ((desktop (window-desktop window))
          (target (find-window desktop (window-datum window :target ""))))
@@ -490,9 +757,7 @@ window's record under it."
             (dolist (w (desktop-windows desktop))
               (:option :value (window-id w) :selected (string= target (window-id w))
                        (window-title w))))))
-      (:div :id record-id :hx-post (format nil "~A/record" base)
-            :hx-trigger "every 1s" :hx-swap "innerHTML"
-        (:raw record)))))
+      (:div :id record-id (:raw record)))))
 
 (defun open-inspector (desktop &key (id "inspector") (title "Inspector") (target "")
                                     (x 420) (y 60) (width 380) (height 420))
@@ -523,25 +788,23 @@ when TARGET is the empty string."
         (%plain 404 "There is no such window."))))
 
 (defun %handle-event (desktop env)
-  "POST /window/:id/event. A close answers with an empty body, which the page swaps over
-the window's element, and an open answers with the window's HTML, which the page appends to
-the desktop; both ask the dock to fetch itself again. A raise answers with the new z as
-text. A move or a resize answers 204."
+  "POST /window/:id/event. A raise answers with the new z as text, which the page applies at
+once. Every other event answers 204: the page learns what a close, an open, a move or a
+resize did from GET /events, as every other connected page does."
   (handler-case
       (let* ((event (event-from-parameters desktop (%parameters env)))
              (window (dispatch-event desktop (or (router:path-param env "id") "") event))
              (name (state:event-name event)))
-        (cond ((string= name "close") (%html "" :hx-trigger "ou-dock"))
-              ((string= name "open") (%html (render-window window) :hx-trigger "ou-dock"))
-              ((string= name "raise")
-               (%plain 200 (format nil "~D" (state:state-z (window-state window)))))
-              (t (list 204 '() '()))))
+        (if (string= name "raise")
+            (%plain 200 (format nil "~D" (state:state-z (window-state window))))
+            (list 204 '() '())))
     (unknown-window () (%plain 404 "There is no such window."))
     (bad-event (c) (%plain 400 (princ-to-string c)))))
 
 (defun routes (desktop)
   "DESKTOP's route table, with the vendored htmx mounted:
   GET  /                          the page
+  GET  /events                    what changed, as Server-Sent Events; the page opens it once
   GET  /dock                      the dock's contents
   GET  /window/:id                one window with its frame
   GET  /window/:id/body           one window's body
@@ -554,6 +817,8 @@ The handlers look the window up on each request, so windows added later are serv
                  :name :desktop)
    (router:route :get "/dock" (lambda (env) (declare (ignore env)) (%html (render-dock desktop)))
                  :name :dock)
+   (router:route :get "/events" (lambda (env) (declare (ignore env)) (%events-response desktop))
+                 :name :events)
    (router:route :get "/window/:id"
                  (lambda (env)
                    (%call-with-window desktop env (lambda (w) (%html (render-window w)))))
@@ -578,7 +843,9 @@ The handlers look the window up on each request, so windows added later are serv
 
 (defun make-app (desktop)
   "DESKTOP as a Clack application. The application declares the HTTP server it wants;
-hyperion/desktop-ui declares none."
+hyperion/desktop-ui declares none. GET /events is a stream that stays open, so the server
+must run each request on a thread of its own or on a pool: Hunchentoot does, and the :uv
+server does when it has workers. Call STOP-DESKTOP when the server stops."
   (let ((table (routes desktop)))
     (lambda (env)
       (out:with-output-style ()
