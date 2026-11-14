@@ -322,20 +322,36 @@ child wrote go into the condition."
         (sb-sys:deadline-timeout ()
           (fail (format nil "no port line within ~A seconds" timeout)))))))
 
+(defun %quicklisp-args ()
+  "Command-line arguments that make the child load the Quicklisp this image loaded, or NIL when
+this image has no Quicklisp. The child needs Quicklisp to find Coalton's own dependencies, and it
+is started with --no-userinit, so it cannot rely on ~/.sbclrc to load it."
+  (let ((package (find-package "QL")))
+    (when package
+      (let ((home (symbol-value (find-symbol "*QUICKLISP-HOME*" package))))
+        (list "--eval"
+              (format nil "(load ~S)"
+                      (sb-ext:native-namestring (merge-pathnames "setup.lisp" home))))))))
+
 (defun start-runtime (&key (program "sbcl") (dynamic-space-mb 4096) (timeout 120))
   "Start a child SBCL running the `mine/runtime` server, connect to it, and return the
 RUNTIME. PROGRAM is found on the search path. TIMEOUT bounds the wait for the child's port
 line; the first start after a Coalton or SBCL change compiles `mine/runtime` and takes
-longer than later ones. The child inherits this process's environment, so it finds systems
-the way this image does. Its standard error is discarded. On any failure the child is killed
+longer than later ones. The child inherits this process's environment, so it finds this
+tree's systems through the same CL_SOURCE_REGISTRY. It does not read ~/.sbclrc: when this image
+has Quicklisp loaded, the child loads the same Quicklisp setup file explicitly (see
+%QUICKLISP-ARGS), so it works on a machine whose ~/.sbclrc does not load Quicklisp, such as a
+CI runner. Its standard error is discarded. On any failure the child is killed
 before the condition leaves this function."
   (let* ((started (get-internal-real-time))
          (process (handler-case
                       (sb-ext:run-program
                        program
-                       (list "--dynamic-space-size" (princ-to-string dynamic-space-mb)
-                             "--noinform" "--non-interactive"
-                             "--load" (sb-ext:native-namestring (%child-file)))
+                       (append
+                        (list "--dynamic-space-size" (princ-to-string dynamic-space-mb)
+                              "--noinform" "--no-userinit" "--non-interactive")
+                        (append (%quicklisp-args)
+                                (list "--load" (sb-ext:native-namestring (%child-file)))))
                        :search t :wait nil
                        :input :stream :output :stream :error nil)
                     (error (e)
