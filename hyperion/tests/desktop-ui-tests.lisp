@@ -380,6 +380,19 @@ its position, or NIL after TIMEOUT seconds."
           "the script opens the event stream, with `new': without it the call throws")
       (is (search "pending[id]" page) "and keeps one request per missing window"))))
 
+(test a-pushed-body-keeps-the-elements-marked-data-ou-preserve
+  (let ((js (ui:client-js)))
+    (is (= 2 (%count-after (constantly js) "querySelectorAll('[id][data-ou-preserve]')" 0))
+        "the script finds the marked elements in the old body and in the new one")
+    (is (search "kept[old.id] = old" js) "it keeps each old node by its id")
+    (is (search "fresh.replaceWith(old)" js) "and puts the old node back in place of the new one")
+    (is (search "focused.focus()" js) "the element that had the focus gets it back")
+    (is (search "focused.setSelectionRange(start, end)" js) "with the same selection")
+    (is (search "replaceBody(el, html)" js) "an html event goes through it")
+    (is (null (search "el.innerHTML = html;" (subseq js (search "onmessage" js))))
+        "and does not set the body itself")
+    (is (zerop (count #\< js)) "the script still has no angle bracket")))
+
 (test window-changed-sends-the-body-as-it-is-when-the-event-is-written
   (let* ((d (ui:make-desktop :title "Changed desktop"))
          (w (ui:open-window d "one" :title "One" :render 'body-count :data (list :count 1))))

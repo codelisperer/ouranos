@@ -36,7 +36,7 @@
                     (#:assets #:hyperion/assets)
                     (#:spin #:spinneret))
   ;; Parenscript matches its own macros by symbol identity, so these are the real ones.
-  (:import-from #:parenscript #:chain #:@ #:create #:new #:getprop)
+  (:import-from #:parenscript #:chain #:@ #:create #:new #:getprop #:try)
   (:documentation
    "A desktop of floating windows served as one page. MAKE-DESKTOP and OPEN-WINDOW build it,
     MAKE-APP serves it, DISPATCH-EVENT changes a window, and the INSPECT- functions describe
@@ -520,6 +520,12 @@ event's first line says; EVENT-DATA lists them. An event about the position of t
 pointer is holding is left out, so a drag or a resize in progress is not undone by it. The
 browser connects again by itself when the stream ends.
 
+When an event replaces a window's body, an element in the old body that has both an id and
+the attribute data-ou-preserve is kept: the same node is put back in place of the new element
+with that id, so its value is kept, and when it had the focus it gets the focus back with the
+same selection. An input field the user is typing into is marked this way, so a push of the
+body while the user types does not lose what was typed.
+
 The source uses no comparison operators, so the output has no angle bracket and can sit
 inside a script element."
   (out:js-string
@@ -580,7 +586,34 @@ inside a script element."
                                          "&height=" (@ el offset-height))))))))))
            (flet ((element (id) (chain document (get-element-by-id id)))
                   (process (el)
-                    (when (and el (@ window htmx)) (chain window htmx (process el)))))
+                    (when (and el (@ window htmx)) (chain window htmx (process el))))
+                  (replace-body (el html)
+                    ;; An element under EL with an id and data-ou-preserve is kept: the same
+                    ;; node goes back in place of the new one with that id, so what is typed
+                    ;; in it, its focus and its caret survive the push.
+                    (let ((kept (create))
+                          (active (@ document active-element))
+                          (focused nil)
+                          (start nil)
+                          (end nil))
+                      (chain el (query-selector-all "[id][data-ou-preserve]")
+                             (for-each (lambda (old)
+                                         (setf (getprop kept (@ old id)) old)
+                                         (when (equal old active)
+                                           (setf focused old)
+                                           (try (setf start (@ old selection-start)
+                                                      end (@ old selection-end))
+                                                (:catch (err) (setf start nil)))))))
+                      (setf (@ el inner-h-t-m-l) html)
+                      (chain el (query-selector-all "[id][data-ou-preserve]")
+                             (for-each (lambda (fresh)
+                                         (let ((old (getprop kept (@ fresh id))))
+                                           (when old (chain fresh (replace-with old)))))))
+                      (when (and focused (@ focused is-connected))
+                        (chain focused (focus))
+                        (unless (equal start nil)
+                          (try (chain focused (set-selection-range start end))
+                               (:catch (err) nil)))))))
              (flet ((add-window (id)
                       ;; One request for a window the page does not have, however many
                       ;; events name it before the answer arrives.
@@ -614,7 +647,7 @@ inside a script element."
                                      (cond ((equal kind "html")
                                             (let ((el (element id)))
                                               (when el
-                                                (setf (@ el inner-h-t-m-l) html)
+                                                (replace-body el html)
                                                 (process el))))
                                            ((equal kind "window")
                                             (let ((el (element (+ "win-" id))))

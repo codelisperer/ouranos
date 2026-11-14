@@ -1621,6 +1621,11 @@ its tag.
   to `*transcript-limit*` (200). Element ids now start with the window's own (`win-repl-transcript`
   where it was `ide-transcript`, `win-agent-chat` where it was `ide-chat`), so two REPL windows
   do not write into each other, and the input fields carry an id and `data-ou-preserve`.
+- **When `GET /events` replaces a window's body, the page keeps every element that has an id
+  and `data-ou-preserve`** (#1218), in `hyperion/desktop-ui`'s `client-js`. The old node is put
+  back in place of the new element with the same id, so its value stays, and when it had the
+  focus it gets the focus back with the same selection. Text being typed into a REPL or agent
+  input is therefore not lost when a job's output pushes the window's body.
 - **`praxeon/image:image-request-failed` answers `aion/retry:transience` and
   `aion/retry:retry-after`** (#79), so an app can run `generate-image` under
   `aion/retry:with-retry` and have the service's Retry-After honoured. A 429 is `:transient`, a
