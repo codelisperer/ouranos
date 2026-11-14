@@ -335,6 +335,29 @@
                 :components ((:file "tests"))))
   :perform (test-op (o c) (uiop:symbol-call :praxeon/examples/ouranos-ide/tests :run-tests)))
 
+;;; A spike for the IDE's code editor (#1218): a client for Coalton's `mine/runtime` server
+;;; running in a child SBCL. The child loads `mine/runtime`; this image does not, so the
+;;; system depends on nothing but SBCL's sockets. child.lisp is what the child loads, and it
+;;; is a static file because this image must not compile it.
+(defsystem "praxeon/examples/ouranos-ide/runtime"
+  :description "Spike: a client for Coalton's mine/runtime evaluation server in a child SBCL (#1218)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ((:require "sb-bsd-sockets"))
+  :components ((:module "examples/ouranos-ide/runtime"
+                :components ((:file "client")
+                             (:static-file "child.lisp"))))
+  :in-order-to ((test-op (test-op "praxeon/examples/ouranos-ide/runtime/tests"))))
+
+(defsystem "praxeon/examples/ouranos-ide/runtime/tests"
+  :description "The runtime client against a real child SBCL: diagnostics, completion, types, interrupt, stop."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("praxeon/examples/ouranos-ide/runtime" "fiveam")
+  :components ((:module "examples/ouranos-ide/runtime"
+                :components ((:file "tests"))))
+  :perform (test-op (o c) (uiop:symbol-call :praxeon/examples/ouranos-ide/runtime/tests :run-tests)))
+
 (defsystem "praxeon/elise"
   :description "Elise: a reflective, psychologically-informed conversational actor."
   :author "Bob <eternal.recursion@proton.me>"
