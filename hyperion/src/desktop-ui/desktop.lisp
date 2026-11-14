@@ -365,15 +365,16 @@ bracket and can sit inside a script element."
             (state:state-width s) (state:state-height s) (state:state-z s))))
 
 (defun render-window-body (window)
-  "The HTML of WINDOW's body: what its render function returns. An error in the render
-function is shown in the window, so a mistake made while redefining one window at a REPL
-leaves the rest of the desktop working."
+  "The HTML of WINDOW's body: what its render function returns. A serious condition in the
+render function is shown in the window, so a mistake made while redefining one window at a
+REPL leaves the rest of the desktop working. That includes running out of stack, which is a
+STORAGE-CONDITION and not an ERROR."
   (handler-case
       (let ((render (window-render window)))
         (if render
             (or (funcall render window) "")
             ""))
-    (error (e)
+    (serious-condition (e)
       (spin:with-html-string
         (:pre :class "ou-error"
           (format nil "This window's render function signalled an error:~%~A" e))))))
