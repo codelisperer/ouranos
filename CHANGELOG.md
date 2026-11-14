@@ -1592,6 +1592,35 @@ its tag.
   `hyperion/logging:wrap` with every path treated as a quiet path, so successful requests log at
   `:trace` and failed ones are still logged. `stop` calls `stop-desktop`. Other apps' logging is
   unchanged.
+- **`hyperion/desktop-ui/jobs`: background jobs for a desktop's windows, with cancel, a time
+  limit and captured output** (#1218). A new package in the `hyperion/desktop-ui` system.
+  `start-job` runs a function on a thread of its own and returns at once. In that thread
+  `*standard-output*` appends to the job's output, and `hyperion/desktop-ui:window-changed` is
+  called for the job's window when it writes (at most once every `*change-interval*` seconds) and
+  when it ends. `cancel-job` records `:cancelled` and interrupts the thread; `:time-limit`
+  records `:timed-out`; a function that signals any `serious-condition`, including running out
+  of stack, ends as `:failed`. `:bindings` passes special bindings such as `*package*` into the
+  thread, and `:on-stop` with `:stop-grace` stops work the function gave to another thread.
+  `job-status`, `job-output`, `job-result`, `job-error-text`, `wait-job`, `inspect-job`,
+  `find-job`, `window-jobs`, `desktop-jobs` and `all-jobs` read jobs; `*output-limit*` and
+  `*job-history*` bound what is kept. The status is the Coalton type `Job-Status` in
+  `hyperion/desktop-ui/job-status`, changed only by `next-status`. `hyperion/desktop-ui` now
+  depends on `aion/dynamic`. `render-window-body` now shows a `serious-condition` from a render
+  function in the window, not only an `error`. Under `sbcl --script` or `--lose-on-corruption`,
+  SBCL ends the process when a thread runs out of stack, and neither handler runs.
+- **The Ouranos IDE example evaluates REPL input and runs agent turns as background jobs**
+  (#1218), in `praxeon/examples/ouranos-ide`. `repl-eval` and `agent-say` answer at once with a
+  running entry that has a Cancel button, and no longer wait for the result. The same actions
+  cancel a job when the form has the field `cancel` holding its job id (`repl-cancel`,
+  `agent-cancel`). Lisp-mode input now has the time limit Coalton input had,
+  `*eval-time-limit*` (20 seconds), and an agent's turn has `*turn-time-limit*` (300). A second
+  input to a REPL window whose last input is still running is refused, and so is a second turn
+  for an agent whose last turn is still running. `repl-entry` is a class and no longer a
+  structure, and `inspect-repl-entry` gained `:number`, `:output` and `:job`, and the kinds
+  `:running`, `:cancelled` and `:timed-out`. A window's transcript is kept newest first and cut
+  to `*transcript-limit*` (200). Element ids now start with the window's own (`win-repl-transcript`
+  where it was `ide-transcript`, `win-agent-chat` where it was `ide-chat`), so two REPL windows
+  do not write into each other, and the input fields carry an id and `data-ou-preserve`.
 - **`praxeon/image:image-request-failed` answers `aion/retry:transience` and
   `aion/retry:retry-after`** (#79), so an app can run `generate-image` under
   `aion/retry:with-retry` and have the service's Retry-After honoured. A 429 is `:transient`, a

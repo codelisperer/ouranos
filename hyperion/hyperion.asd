@@ -323,16 +323,19 @@
   :license "MIT"
   :version "0.0.0"
   ;; hyperion/assets for the vendored htmx the page loads.
-  :depends-on ("hyperion" "hyperion/assets" "coalton" "spinneret" "parenscript")
+  ;; aion/dynamic for unblock-interrupts, which a job's thread calls so it can be cancelled.
+  :depends-on ("hyperion" "hyperion/assets" "aion/dynamic" "coalton" "spinneret" "parenscript")
   :serial t
   :components ((:module "src/desktop-ui"
                 :serial t
                 :components ((:file "state")       ; Coalton: state, events, apply-event
-                             (:file "desktop"))))  ; CL: windows, rendering, routes, inspector
+                             (:file "desktop")     ; CL: windows, rendering, routes, inspector
+                             (:file "job-status")  ; Coalton: a job's status and its transitions
+                             (:file "jobs"))))     ; CL: background jobs for windows
   :in-order-to ((test-op (test-op "hyperion/desktop-ui/tests"))))
 
 (defsystem "hyperion/desktop-ui/tests"
-  :description "Tests for hyperion/desktop-ui: the state function, the window records, the inspector, the routes, and redefinition while running."
+  :description "Tests for hyperion/desktop-ui: the state function, the window records, the inspector, the routes, redefinition while running, and background jobs."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :depends-on ("hyperion/desktop-ui" "hyperion" "spinneret" "fiveam")
