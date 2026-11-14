@@ -1561,6 +1561,17 @@ its tag.
 
 ### Added
 
+- **`hyperion/desktop-ui`: a desktop of floating windows served as one page, as a proof of
+  concept** (#1218). A new aux system; hyperion's core does not load it. `make-desktop` and
+  `open-window` build a desktop of `window` objects, each with a render function, named actions
+  and its own data; `make-app` serves it, with routes under `/window/:id`; the page moves,
+  resizes, raises and closes windows by posting events. The window's state and the events are
+  Coalton types in `hyperion/desktop-ui/state`, changed only by `apply-event`. `inspect-window`,
+  `inspect-event` and `inspect-desktop` return property lists, and `open-inspector` adds a
+  window that shows them. A window names its render function by symbol, so redefining the
+  function changes the window's next render. Nothing is saved between runs. The example that
+  uses it is the system `praxeon/examples/ouranos-ide`. This is experimental and its names may
+  change.
 - **`praxeon/image:image-request-failed` answers `aion/retry:transience` and
   `aion/retry:retry-after`** (#79), so an app can run `generate-image` under
   `aion/retry:with-retry` and have the service's Retry-After honoured. A 429 is `:transient`, a
