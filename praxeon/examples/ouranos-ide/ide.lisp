@@ -1,4 +1,4 @@
-;;;; ide.lisp --- the Ouranos IDE proof of concept: five windows in one SBCL image (#1218).
+;;;; ide.lisp --- the Ouranos IDE proof of concept: six windows in one SBCL image (#1218).
 ;;;;
 ;;;; A desktop (hyperion/desktop-ui) with these windows:
 ;;;;
@@ -11,6 +11,8 @@
 ;;;;   agent      a praxeon agent. With no provider given it uses STUB-PROVIDER, which answers
 ;;;;              from the image and calls no model. Each turn runs as a background job.
 ;;;;   inspector  hyperion/desktop-ui's inspector, which shows any window's record.
+;;;;   editor     a CodeMirror 6 code editor whose text is evaluated by Coalton's mine/runtime
+;;;;              server in a child SBCL, as a background job. See editor.lisp.
 ;;;;
 ;;;; The page does not poll. It opens GET /events once, and hyperion/desktop-ui sends it what
 ;;;; changed: a window opened from the REPL with UI:OPEN-WINDOW appears without a reload.
@@ -42,13 +44,19 @@
                     (#:llm #:praxeon/llm)
                     (#:actor #:praxeon/actor)
                     (#:chat #:praxeon/chat-ui)
+                    (#:rt #:praxeon/examples/ouranos-ide/runtime)
+                    (#:static #:hyperion/static)
                     (#:spin #:spinneret))
   (:export #:*desktop* #:*port* #:make-app #:build-desktop #:start #:stop #:native-window
            #:stub-provider
            #:render-repl #:repl-eval #:repl-cancel #:render-clock #:render-chart
            #:render-agent #:agent-say #:agent-cancel
            #:chart-rows #:inspect-repl-entry #:inspect-agent-turn
-           #:*eval-time-limit* #:*turn-time-limit* #:*transcript-limit*))
+           #:*eval-time-limit* #:*turn-time-limit* #:*transcript-limit*
+           #:render-editor #:editor-eval #:editor-cancel #:inspect-editor-entry
+           #:editor-directory #:editor-bundle-path #:+editor-bundle+ #:+editor-url+
+           #:runtime-ready-p #:stop-runtime #:coalton-runs
+           #:*editor-time-limit* #:*runtime-start-limit*))
 
 (cl:in-package #:praxeon/examples/ouranos-ide)
 
@@ -63,6 +71,12 @@
 
 (defparameter *port* 27190
   "The port START listens on. Not a common development port.")
+
+(defparameter +editor-bundle+ "ouranos-editor.min.js"
+  "The file name of the editor window's script bundle, in EDITOR-DIRECTORY (editor.lisp).")
+
+(defparameter +editor-url+ "/ide/editor/ouranos-editor.min.js"
+  "The path the IDE serves the editor's bundle at. MAKE-APP adds it to the page's scripts.")
 
 ;;; --- shared by the REPL and the agent windows --------------------------------------------
 
@@ -527,11 +541,11 @@ refused. Nothing is started or stored, and the answer says so."
 ;;; --- the desktop and the server ----------------------------------------------------------
 
 (defparameter *css*
-  ".ide-entry{margin-bottom:.6rem;font-family:ui-monospace,Consolas,monospace;font-size:12px}.ide-entry code{white-space:pre-wrap}.ide-prompt{color:#4a72b0;font-weight:600;margin-right:.4rem}.ide-out{margin-left:1.2rem}.ide-type{color:#57606a}.ou-body form{display:flex;gap:.4rem;align-items:flex-start;margin-top:.4rem}.ou-body textarea,.ou-body input[type=text]{flex:1;font:12px ui-monospace,Consolas,monospace}.ide-clock{font:600 34px ui-monospace,Consolas,monospace;margin:.2rem 0}.ide-date,.ide-caption{color:#57606a;margin:0 0 .4rem}.ide-chart text{font:12px ui-monospace,Consolas,monospace}.message{margin:0 0 .5rem;border:1px solid #d5dae2;border-radius:5px}.message-header{padding:.1rem .5rem;background:#7a8699;color:#fff;font-size:12px}.message-header p,.message-body p{margin:0}.message.px-user .message-header{background:#4a72b0}.message-body{padding:.3rem .5rem}"
+  ".ide-entry{margin-bottom:.6rem;font-family:ui-monospace,Consolas,monospace;font-size:12px}.ide-entry code{white-space:pre-wrap}.ide-prompt{color:#4a72b0;font-weight:600;margin-right:.4rem}.ide-out{margin-left:1.2rem}.ide-type{color:#57606a}.ou-body form{display:flex;gap:.4rem;align-items:flex-start;margin-top:.4rem}.ou-body textarea,.ou-body input[type=text]{flex:1;font:12px ui-monospace,Consolas,monospace}.ide-clock{font:600 34px ui-monospace,Consolas,monospace;margin:.2rem 0}.ide-date,.ide-caption{color:#57606a;margin:0 0 .4rem}.ide-chart text{font:12px ui-monospace,Consolas,monospace}.message{margin:0 0 .5rem;border:1px solid #d5dae2;border-radius:5px}.message-header{padding:.1rem .5rem;background:#7a8699;color:#fff;font-size:12px}.message-header p,.message-body p{margin:0}.message.px-user .message-header{background:#4a72b0}.message-body{padding:.3rem .5rem}.ide-editor{height:220px;border:1px solid #d5dae2;border-radius:4px;overflow:hidden}.ide-editor-bar{align-items:center}"
   "The IDE windows' own styles, added to hyperion/desktop-ui's.")
 
 (defun build-desktop (&key provider (desktop *desktop*))
-  "Put the five windows on DESKTOP, replacing any with the same ids, make the database and
+  "Put the six windows on DESKTOP, replacing any with the same ids, make the database and
 the agent, and return DESKTOP. PROVIDER is a praxeon/llm:provider for the agent; with none,
 the agent uses STUB-PROVIDER and calls no model.
 
@@ -550,15 +564,24 @@ connected pages on that schedule; the page does not ask."
                                   :actions '(("say" . agent-say) ("cancel" . agent-cancel))
                                   :x 20 :y 400 :width 460 :height 300)
   (ui:open-inspector desktop :x 860 :y 20 :width 380 :height 460 :target "clock")
+  ;; The editor's runtime is started by its first evaluation, not here.
+  (ui:open-window desktop "editor" :title "Editor" :render 'render-editor
+                                   :actions '(("eval" . editor-eval) ("cancel" . editor-cancel))
+                                   :x 500 :y 420 :width 600 :height 420)
   desktop)
 
 (defun make-app (&optional (desktop *desktop*))
-  "DESKTOP as a Clack application, with the IDE's styles added to the desktop's. The styles
-are bound around each request, because the page reads them when it is rendered."
+  "DESKTOP as a Clack application, with the IDE's styles added to the desktop's and the
+editor's script added to the page's. Both are bound around each request, because the page
+reads them when it is rendered. GET +EDITOR-URL+ answers with the editor's bundle."
   (let ((app (ui:make-app desktop)))
     (lambda (env)
-      (let ((ui:*css* (concatenate 'string ui:*css* *css*)))
-        (funcall app env)))))
+      (if (and (eq :get (getf env :request-method))
+               (equal +editor-url+ (getf env :path-info)))
+          (%serve-bundle env)
+          (let ((ui:*css* (concatenate 'string ui:*css* *css*))
+                (ui:*page-scripts* (append ui:*page-scripts* (list +editor-url+))))
+            (funcall app env))))))
 
 (defvar *handler* nil "The running server, or NIL.")
 
@@ -590,13 +613,14 @@ Requests that succeed are not printed in the terminal; see %LOGGED-QUIETLY."
                              :request-guard :same-origin :log nil)))
 
 (defun stop ()
-  "Stop the server START started, end the pages' event streams and the desktop's timer, and
-delete the chart's database file."
+  "Stop the server START started, end the pages' event streams and the desktop's timer,
+delete the chart's database file, and kill the editor's runtime."
   (when *handler*
     (srv:stop *handler*)
     (setf *handler* nil))
   (ui:stop-desktop *desktop*)
   (delete-database)
+  (stop-runtime)
   t)
 
 (defun native-window (&key provider)
@@ -607,4 +631,5 @@ blocks until the window is closed. The tests do not call this, because it opens 
        (desk:run-app (make-app) :title "Ouranos IDE" :width 1280 :height 800
                                 :server :hunchentoot)
     (ui:stop-desktop *desktop*)
-    (delete-database)))
+    (delete-database)
+    (stop-runtime)))

@@ -333,6 +333,39 @@ in the `CHANGELOG.md` entry for #717.
 - **No new ASDF dependency.** `ironclad` appears against `hyperion/assets/tests` above only
   because the suite hashes the embedded bytes; the shipped system uses no crypto.
 
+## Build-time npm packages of the Ouranos IDE example's editor (not ASDF dependencies)
+
+Added 2026-11-14 (#1218). The code editor window of `praxeon/examples/ouranos-ide` uses
+CodeMirror 6. Its source is `praxeon/examples/ouranos-ide/editor/src/editor.js`, and
+`editor/build.sh` runs `npm ci` and esbuild in that directory to produce one minified bundle,
+`editor/ouranos-editor.min.js`, which is committed. The IDE serves the committed file, so
+running the IDE, its tests and CI need no Node; Node and npm are needed only by whoever runs
+`build.sh` to change the bundle. `node_modules/` is gitignored and nothing is installed
+globally. Versions are exact in `editor/package.json` and locked in `editor/package-lock.json`.
+
+Bundle: 305206 bytes, sha256
+`bc3855b97d561e57ad1b2b469fea70a29b10e888a61f741efeedabe487ce5cc8`, recorded in
+`editor/ouranos-editor.min.js.sha256`. The IDE test suite fails when the committed bundle's
+sha256 differs from that file. `build.sh` produces the same bytes on each run and prints the
+sha256. The licence texts of the bundled packages are in `editor/THIRD-PARTY-LICENSES.txt`.
+
+| Package | Version | Licence | In the bundle |
+|---|---|---|---|
+| `@codemirror/commands` | 6.11.1 | MIT | yes (direct) |
+| `@codemirror/language` | 6.13.1 | MIT | yes (direct) |
+| `@codemirror/legacy-modes` | 6.5.5 | MIT | yes (direct; only the Common Lisp mode) |
+| `@codemirror/state` | 6.7.6 | MIT | yes (direct) |
+| `@codemirror/view` | 6.43.15 | MIT | yes (direct) |
+| `@codemirror/streamparser` | 6.0.0 | MIT | yes (indirect) |
+| `@lezer/common` | 1.5.5 | MIT | yes (indirect) |
+| `@lezer/highlight` | 1.2.5 | MIT | yes (indirect) |
+| `@lezer/lr` | 1.4.12 | MIT | yes (indirect) |
+| `@marijn/find-cluster-break` | 1.0.4 | MIT | yes (indirect) |
+| `crelt` | 1.0.7 | MIT | yes (indirect) |
+| `style-mod` | 4.1.4 | MIT | yes (indirect) |
+| `w3c-keyname` | 2.2.8 | MIT | yes (indirect) |
+| `esbuild` | 0.28.2 | MIT | no (build tool; its `@esbuild/*` platform binary is MIT too) |
+
 ## Regenerating
 
 Hand-verified snapshot: the dependency graph from the `.asd` files, versions from `ql-dist`

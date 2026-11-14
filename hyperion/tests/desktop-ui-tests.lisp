@@ -393,6 +393,27 @@ its position, or NIL after TIMEOUT seconds."
         "and does not set the body itself")
     (is (zerop (count #\< js)) "the script still has no angle bracket")))
 
+(test a-pushed-body-gives-the-focus-back-to-an-element-inside-a-kept-one
+  ;; A code editor is built inside the kept element, and its editable element has the focus.
+  (let ((js (ui:client-js)))
+    (is (search "active && old.contains(active)" js)
+        "the focus counts when it is on the kept element or on one inside it")
+    (is (search "focused = active" js) "and the element that had it gets it back")))
+
+(test page-scripts-are-loaded-after-htmx-in-order
+  (let* ((d (ui:make-desktop :title "Scripts desktop"))
+         (plain (remove #\" (ui:render-page d)))
+         (page (remove #\" (let ((ui:*page-scripts* '("/one.js" "/two.js")))
+                             (ui:render-page d)))))
+    (is (null (search "/one.js" plain)) "none by default")
+    (let ((htmx (search "htmx" page))
+          (one (search "<script src=/one.js" page))
+          (two (search "<script src=/two.js" page)))
+      (is-true (and htmx one two) "each script is on the page")
+      (is (= 3 (%count-after (constantly page) "defer>" 0)) "htmx and both scripts are deferred")
+      (when (and htmx one two)
+        (is (< htmx one two) "after htmx, in the order given")))))
+
 (test window-changed-sends-the-body-as-it-is-when-the-event-is-written
   (let* ((d (ui:make-desktop :title "Changed desktop"))
          (w (ui:open-window d "one" :title "One" :render 'body-count :data (list :count 1))))

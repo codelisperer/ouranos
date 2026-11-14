@@ -21,7 +21,7 @@
   (:use #:cl)
   (:export
    ;; lifecycle
-   #:start-runtime #:runtime-stop #:runtime-alive-p #:runtime-pid #:runtime-port
+   #:start-runtime #:runtime-stop #:runtime-alive-p #:runtime-busy-p #:runtime-pid #:runtime-port
    #:runtime-start-seconds #:runtime-xmath
    #:runtime-start-failed #:start-failure-pid #:runtime-timeout #:runtime-closed
    ;; requests
@@ -83,6 +83,10 @@
   "True while RUNTIME's child process is running."
   (let ((process (runtime-process runtime)))
     (and process (sb-ext:process-alive-p process))))
+
+(defun runtime-busy-p (runtime)
+  "True while a request on RUNTIME's main connection is waiting for its reply."
+  (not (null (runtime-active-id runtime))))
 
 (defun %child-file ()
   (asdf:system-relative-pathname "praxeon/examples/ouranos-ide/runtime"

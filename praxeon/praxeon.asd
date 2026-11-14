@@ -320,9 +320,16 @@
                "hyperion/desktop"                   ; run-app, for the native window
                "cons/coalton-repl"                  ; the Coalton REPL engine
                "mnemosyne"                          ; the chart's SQLite query
+               "praxeon/examples/ouranos-ide/runtime" ; the editor's Coalton runtime client
                "spinneret" "clack-handler-hunchentoot")
+  ;; editor/ holds the editor window's script bundle, which editor/build.sh builds once with
+  ;; npm and esbuild and which is committed, so loading or running this needs no Node.
   :components ((:module "examples/ouranos-ide"
-                :components ((:file "ide"))))
+                :serial t
+                :components ((:file "ide")
+                             (:file "editor")
+                             (:static-file "editor/ouranos-editor.min.js")
+                             (:static-file "editor/ouranos-editor.min.js.sha256"))))
   :in-order-to ((test-op (test-op "praxeon/examples/ouranos-ide/tests"))))
 
 (defsystem "praxeon/examples/ouranos-ide/tests"
@@ -331,6 +338,12 @@
   :license "MIT"
   :depends-on ("praxeon/examples/ouranos-ide" "praxeon" "hyperion" "hyperion/desktop-ui"
                "hyperion/test-ports" "cons/coalton-repl" "mnemosyne" "dexador" "quri" "fiveam"
+               "praxeon/examples/ouranos-ide/runtime" ; the editor tests stop its runtime
+               "ironclad"                     ; the SHA-256 of the committed editor bundle
+               "hyperion/assets"              ; the browser test's page loads the vendored htmx
+               "hyperion/assets/tests"        ; its headless browser helpers
+               "clack-handler-hunchentoot"    ; the browser test's server
+               "spinneret"                    ; it escapes what its server sends back
                (:require "sb-bsd-sockets"))   ; the test that reads GET /events over a socket
   :components ((:module "examples/ouranos-ide"
                 :components ((:file "tests"))))

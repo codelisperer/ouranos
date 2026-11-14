@@ -19,7 +19,12 @@
                     (#:srv #:hyperion/server)
                     (#:ports #:hyperion/test-ports)
                     (#:llm #:praxeon/llm)
-                    (#:repl #:cons/coalton-repl))
+                    (#:repl #:cons/coalton-repl)
+                    (#:rt #:praxeon/examples/ouranos-ide/runtime)
+                    (#:router #:hyperion/router)
+                    (#:assets #:hyperion/assets)
+                    ;; The headless browser helpers of hyperion's asset tests.
+                    (#:smoke #:hyperion/assets/tests))
   (:export #:run-tests))
 
 (cl:in-package #:praxeon/examples/ouranos-ide/tests)
@@ -36,10 +41,11 @@
     (jobs:wait-job job :timeout 20)))
 
 (defmacro %with-ide ((app desktop &key provider) &body body)
-  "BODY with DESKTOP bound to a new desktop holding the five windows and APP to its
+  "BODY with DESKTOP bound to a new desktop holding the six windows and APP to its
 application. PROVIDER, when given, is the agent's provider. The REPL session is new. Afterwards
-every job the desktop's windows started is stopped, and the database file is deleted. SETF and
-not LET for the session, because a job evaluates on a thread of its own."
+every job the desktop's windows started is stopped, the database file is deleted, and the
+editor's runtime is killed if a test started one. SETF and not LET for the session, because a
+job evaluates on a thread of its own."
   (let ((old (gensym "OLD")))
     `(let* ((,old ide::*session*)
             (,desktop (ui:make-desktop :title "Ouranos IDE"))
@@ -51,6 +57,7 @@ not LET for the session, because a job evaluates on a thread of its own."
                    (setf ,app (ide:make-app ,desktop))
                    ,@body)
          (%stop-jobs ,desktop)
+         (ide:stop-runtime)
          (ide::delete-database)
          (ignore-errors (delete-package (repl:session-package-name ide::*session*)))
          (setf ide::*session* ,old)))))
@@ -124,14 +131,16 @@ list CALLS names. The definition is put back afterwards."
 
 ;;; --- the page ----------------------------------------------------------------------------
 
-(test the-page-shows-the-five-windows
+(test the-page-shows-the-six-windows
   (%with-ide (app desktop)
     (multiple-value-bind (body status) (%get app "/")
       (is (= 200 status))
-      (dolist (id '("repl" "clock" "chart" "agent" "inspector"))
+      (dolist (id '("repl" "clock" "chart" "agent" "inspector" "editor"))
         (is (search (format nil "data-window=~A" id) (remove #\" body)) "window ~A is missing" id))
-      (is (search "ide-clock" body) "the IDE's own styles are on the page"))
-    (is (equal '("repl" "clock" "chart" "agent" "inspector")
+      (is (search "ide-clock" body) "the IDE's own styles are on the page")
+      (is (search (format nil "<script src=~A" ide:+editor-url+) (remove #\" body))
+          "the page loads the editor's bundle"))
+    (is (equal '("repl" "clock" "chart" "agent" "inspector" "editor")
                (getf (ui:inspect-desktop desktop) :windows)))))
 
 ;;; --- the REPL window ---------------------------------------------------------------------
@@ -193,7 +202,7 @@ the page uses, changes what another window shows, with no restart and no change 
                   "(defun render-note (window) (declare (ignore window)) \"<p>a new window</p>\") (ui:open-window *desktop* \"note\" :title \"Note\" :render 'render-note)")
         (setf ide:*desktop* old)))
     (is (string= "<p>a new window</p>" (%get app "/window/note/body")))
-    (is (= 6 (length (ui:desktop-windows desktop))))))
+    (is (= 7 (length (ui:desktop-windows desktop))))))
 
 ;;; --- the REPL window: an input runs as a job ----------------------------------------------
 
@@ -534,8 +543,8 @@ on every render and holds no copy."
   (%with-ide (app desktop)
     (ui:dispatch-event desktop "chart" hyperion/desktop-ui/state:close-event)
     (let ((answer (praxeon/actor:act ide::*agent* "list_windows" (make-hash-table :test 'equal))))
-      (is (search "Windows: repl, clock, chart, agent, inspector." answer))
-      (is (search "Shown: repl, clock, agent, inspector." answer)))))
+      (is (search "Windows: repl, clock, chart, agent, inspector, editor." answer))
+      (is (search "Shown: repl, clock, agent, inspector, editor." answer)))))
 
 ;;; --- the inspector -----------------------------------------------------------------------
 
@@ -738,3 +747,268 @@ its position, or NIL after TIMEOUT seconds."
           (is (search "<end>" (funcall text)))
           (when (sb-thread:thread-alive-p reader) (sb-thread:terminate-thread reader)))
         (when socket (ignore-errors (sb-bsd-sockets:socket-close socket)))))))
+
+;;; --- the editor window: the committed bundle ---------------------------------------------
+
+(defun %file-octets (path)
+  "The bytes of the file at PATH. The count READ-SEQUENCE returns is checked against the
+length, so a short read is an error and not a truncated digest."
+  (with-open-file (in path :element-type '(unsigned-byte 8))
+    (let* ((octets (make-array (file-length in) :element-type '(unsigned-byte 8)))
+           (read (read-sequence octets in)))
+      (unless (= read (length octets))
+        (error "Read ~D of ~D bytes of ~A." read (length octets) path))
+      octets)))
+
+(defun %recorded-sha256 ()
+  "The first word of editor/ouranos-editor.min.js.sha256, which build.sh writes."
+  (let ((text (uiop:read-file-string
+               (merge-pathnames "ouranos-editor.min.js.sha256" (ide:editor-directory)))))
+    (subseq text 0 (position-if (lambda (c) (member c '(#\Space #\Tab #\Newline #\Return))) text))))
+
+(test the-committed-editor-bundle-matches-its-recorded-sha256
+  ;; build.sh writes the bundle and its SHA-256 together. A bundle edited by hand, or rebuilt
+  ;; without committing the new SHA-256, or the reverse, fails here.
+  (let ((recorded (%recorded-sha256))
+        (actual (ironclad:byte-array-to-hex-string
+                 (ironclad:digest-sequence :sha256 (%file-octets (ide:editor-bundle-path))))))
+    (is (= 64 (length recorded)) "the record is one SHA-256 in hexadecimal: ~S" recorded)
+    (is (string= recorded actual)
+        "editor/ouranos-editor.min.js has SHA-256 ~A, and editor/ouranos-editor.min.js.sha256 records ~A. Run editor/build.sh and commit both."
+        actual recorded)))
+
+(test the-ide-serves-the-editor-bundle-and-nothing-else-from-its-directory
+  (%with-ide (app desktop)
+    (let ((response (funcall app (list :request-method :get :path-info ide:+editor-url+))))
+      (is (= 200 (first response)))
+      (is (search "javascript" (getf (second response) :content-type)))
+      (is (equal "no-cache" (getf (second response) :cache-control)))
+      (let ((body (third response)))
+        (is (streamp body) "the body is the open file")
+        (when (streamp body)
+          (let* ((expected (%file-octets (ide:editor-bundle-path)))
+                 (served (make-array (length expected) :element-type '(unsigned-byte 8)))
+                 (read (unwind-protect (read-sequence served body) (close body))))
+            (is (= read (length expected)))
+            (is (equalp expected served) "the bytes served are the committed bundle's")))))
+    (dolist (path '("/ide/editor/package.json" "/ide/editor/ouranos-editor.min.js.sha256"
+                    "/ide/editor/src/editor.js" "/ide/editor/../ide.lisp"))
+      (is (= 404 (nth-value 1 (%get app path))) "~A is not served" path))))
+
+;;; --- the editor window: its body and its actions -----------------------------------------
+
+(test the-editor-body-holds-a-kept-editor-element-and-the-evaluate-form
+  (%with-ide (app desktop)
+    (let ((body (remove #\" (%get app "/window/editor/body"))))
+      (is (search "data-ou-editor=1" body) "the element the page builds the editor in")
+      (is (search "id=win-editor-code" body))
+      (is (search "data-ou-preserve=1" body) "kept when the body is pushed")
+      (is (search "data-ou-editor-form=win-editor-form" body) "it names the form that evaluates")
+      (is (search "hx-post=/window/editor/action/eval" body))
+      (is (search "hx-target=#win-editor-results" body))
+      (is (search "type=hidden name=input" body) "the field the page fills with the text")
+      (is (search "type=hidden name=buffer" body))
+      (is (search "Mod-Enter" body)))
+    (is (equal '(("eval" . "PRAXEON/EXAMPLES/OURANOS-IDE::EDITOR-EVAL")
+                 ("cancel" . "PRAXEON/EXAMPLES/OURANOS-IDE::EDITOR-CANCEL"))
+               (getf (ui:inspect-window (ui:find-window desktop "editor")) :actions)))))
+
+(test empty-editor-input-is-refused-without-starting-a-job-or-a-runtime
+  (%with-ide (app desktop)
+    (let ((answer (%post app "/window/editor/action/eval" "language" "coalton"
+                         "input" (format nil "  ~%") "buffer" "")))
+      (is (search "Nothing to evaluate" answer))
+      (is (null (%transcript desktop "editor")))
+      (is (null (jobs:window-jobs (ui:find-window desktop "editor"))))
+      (is-false (ide:runtime-ready-p)))))
+
+(defun %editor-eval (app desktop language input &key (buffer input))
+  "Send INPUT to the editor window, wait for its job, and return the entry's record and the
+request's answer. The first evaluation starts the runtime, so the wait is long."
+  (let* ((answer (%post app "/window/editor/action/eval"
+                        "language" language "input" input "buffer" buffer))
+         (entry (first (%transcript desktop "editor"))))
+    (unless (and entry (jobs:wait-job (ide::item-job entry) :timeout 400))
+      (error "The editor's evaluation of ~S did not end within 400 seconds." input))
+    (values (ide:inspect-editor-entry entry) answer)))
+
+(test the-editor-evaluates-in-the-coalton-runtime-and-a-cancel-stops-it
+  ;; One runtime for the whole test, because starting one takes seconds.
+  (%with-ide (app desktop)
+    (%recording-changes (calls)
+      (let ((record (%editor-eval app desktop "coalton" "(+ 1 2)")))
+        (is (eq :value (getf record :kind)) "~S" record)
+        (is (equal '("3") (getf record :values)))
+        (is (search "Starting the Coalton runtime" (getf record :output))
+            "the first evaluation reports the runtime's start")
+        (is (member "editor" calls :test #'string=)
+            "the job's end tells the editor window, which pushes its body"))
+      (is-true (ide:runtime-ready-p))
+      (is (equal "(+ 1 2)" (ui:window-datum (ui:find-window desktop "editor") :buffer)))
+      ;; A declaration and its definition are compiled together, and stay in the runtime for
+      ;; the next evaluation.
+      (let ((record (%editor-eval app desktop "coalton"
+                                  (format nil "(declare editor-inc (Integer -> Integer))~%(define (editor-inc x) (+ x 1))"))))
+        (is (eq :definition (getf record :kind)) "~S" record)
+        (is (null (search "Starting" (getf record :output))) "the runtime is reused"))
+      (let ((record (%editor-eval app desktop "coalton" "(editor-inc 41)")))
+        (is (equal '("42") (getf record :values)) "~S" record))
+      ;; Definitions and then an expression in one buffer: the value is the expression's.
+      (let ((record (%editor-eval app desktop "coalton"
+                                  (format nil ";; twice~%(declare editor-twice (Integer -> Integer))~%(define (editor-twice x) (* 2 x))~%~%(editor-twice (editor-inc 20))"))))
+        (is (eq :value (getf record :kind)) "~S" record)
+        (is (equal '("42") (getf record :values))))
+      ;; A type error in a definition has a diagnostic at its place in the evaluated text.
+      (let* ((text (format nil "(+ 1 1)~%(declare editor-bad (Integer -> Integer))~%(define (editor-bad x) (+ x \"a\"))"))
+             (at (search "\"a\"" text))
+             (record (%editor-eval app desktop "coalton" text))
+             (diagnostic (first (getf record :diagnostics))))
+        (is (eq :error (getf record :kind)) "~S" record)
+        (is (eql at (getf diagnostic :start)) "~S" diagnostic)
+        (is (eql (+ at 3) (getf diagnostic :end)))
+        (is (search "mismatch" (string-downcase (getf diagnostic :summary)))))
+      ;; Lisp mode evaluates Common Lisp in the runtime's CL-USER, with what it prints.
+      (let ((record (%editor-eval app desktop "lisp" "(progn (princ \"hello\") (values 1 :two))")))
+        (is (equal '("1" ":TWO") (getf record :values)) "~S" record)
+        (is (search "hello" (getf record :printed))))
+      ;; A type error comes back as an error, with the runtime's report of it.
+      (let ((record (%editor-eval app desktop "coalton" "(editor-inc \"a\")")))
+        (is (eq :error (getf record :kind)) "~S" record)
+        (is (search "mismatch" (string-downcase (format nil "~S" record)))))
+      ;; An endless evaluation: a second one is refused while it runs, then a cancel stops it.
+      (let* ((answer (%post app "/window/editor/action/eval" "language" "lisp" "input" "(loop)"))
+             (entry (first (%transcript desktop "editor")))
+             (job (ide::item-job entry)))
+        (is (search "Cancel" answer) "the running entry has a Cancel button")
+        (is (search "Not evaluated" (%post app "/window/editor/action/eval"
+                                           "language" "lisp" "input" "(+ 1 1)"))
+            "a second evaluation is refused while one runs")
+        ;; Let the runtime start the request, so the interrupt reaches it.
+        (loop repeat 100 until (rt:runtime-busy-p ide::*runtime*) do (sleep 0.05))
+        (let ((answer (%post app "/window/editor/action/cancel"
+                             "cancel" (princ-to-string (jobs:job-id job)))))
+          (is (search "cancelled" answer)))
+        (is-true (jobs:wait-job job :timeout 20))
+        (is (eq :cancelled (getf (ide:inspect-editor-entry entry) :kind)))
+        (is-false (jobs:job-thread-alive-p job) "the job's thread ended"))
+      ;; The same runtime answers afterwards, so the interrupt ended the evaluation only.
+      (let* ((runtime ide::*runtime*)
+             (record (%editor-eval app desktop "lisp" "(+ 1 2)")))
+        (is (equal '("3") (getf record :values)) "~S" record)
+        (is (eq runtime ide::*runtime*) "the runtime was not restarted")
+        (ide:stop-runtime)
+        (is-false (rt:runtime-alive-p runtime) "STOP-RUNTIME ended the child")
+        (is-false (ide:runtime-ready-p))))))
+
+(test coalton-text-is-split-into-runs-of-definitions-and-of-other-forms
+  (flet ((runs (text)
+           (mapcar (lambda (run) (list (first run) (subseq text (second run) (third run))))
+                   (ide:coalton-runs text))))
+    (is (null (runs "")))
+    (is (null (runs (format nil "  ; only a comment~%#| and a block |#  "))))
+    (is (equal '((:expressions "(+ 1 2)")) (runs " (+ 1 2) ")))
+    (is (equal '((:definitions "(declare f (Integer -> Integer))
+(define (f x) x)")
+                 (:expressions "(f 1)"))
+               (runs (format nil "(declare f (Integer -> Integer))~%(define (f x) x)~%~%(f 1)"))))
+    (is (equal '((:expressions "(f 1)") (:definitions "(coalton:define-type T (T1))"))
+               (runs "(f 1) (coalton:define-type T (T1))"))
+        "a package prefix and any define- form count as definitions")
+    (is (equal '((:definitions "(define s \"a ) ; ( string\")")
+                 (:expressions "(g #\\( #\\Space)"))
+               (runs (format nil "(define s \"a ) ; ( string\")~%; (define ignored)~%(g #\\( #\\Space)")))
+        "parentheses in strings, comments and character literals do not count")
+    (is (equal '((:expressions "(unclosed (form")) (runs "(unclosed (form"))
+        "an unclosed form runs to the end")))
+
+;;; --- the editor bundle in a headless browser ---------------------------------------------
+;;;
+;;; The tests above check the bundle's bytes and the HTML around it. This one checks that the
+;;; bundle, run by a browser, builds the editor and fills the form. It reuses the headless
+;;; browser helpers of hyperion/assets/tests, which run Chrome or Edge with --dump-dom and no
+;;; window, and SKIPS WHEN NO BROWSER IS FOUND, as those tests do. The page is not the IDE's
+;;; desktop page, because that page keeps GET /events open, and the browser's virtual time
+;;; does not advance while a request is pending. It is the editor window's body on a page of
+;;; its own, with a route that answers the evaluate form with what it was sent.
+
+(defparameter +browser-doc+ (format nil "(defun f (x)~%  \"s\" (+ x 1))")
+  "The editor's starting text in the browser test.")
+
+(defun %editor-test-page (desktop)
+  "A page holding the editor window's body, htmx and the bundle. When it has loaded, its script
+selects (+ x 1), presses Mod-Enter in the editor, then puts the cursor after the last closing
+parenthesis and clicks Evaluate."
+  (let* ((window (ui:find-window desktop "editor"))
+         (from (search "(+ x 1)" +browser-doc+))
+         (to (+ from (length "(+ x 1)"))))
+    (setf (ui:window-datum window :buffer) +browser-doc+)
+    (format nil "<!doctype html>
+<html><head><meta charset=\"utf-8\">
+<script src=\"~A\" defer></script><script src=\"~A\" defer></script></head>
+<body><div id=\"win-editor-body\">~A</div>
+<script>
+window.addEventListener('load', function () {
+  var host = document.getElementById('win-editor-code');
+  var view = window.OuranosEditor.viewOf(host);
+  var mac = /Mac/.test(navigator.platform);
+  view.dispatch({selection: {anchor: ~D, head: ~D}});
+  view.contentDOM.dispatchEvent(new KeyboardEvent('keydown',
+    {key: 'Enter', bubbles: true, cancelable: true, metaKey: mac, ctrlKey: !mac}));
+  setTimeout(function () {
+    view.dispatch({selection: {anchor: view.state.doc.length}});
+    document.querySelector('#win-editor-form button[type=submit]').click();
+  }, 300);
+});
+</script></body></html>"
+            (assets:url :htmx) ide:+editor-url+ (ide:render-editor window) from to)))
+
+(defun %editor-test-app (desktop)
+  (router:to-app
+   (router:router
+    (assets:mount)
+    (router:route :get "/" (lambda (env) (declare (ignore env))
+                             (list 200 '(:content-type "text/html; charset=utf-8")
+                                   (list (%editor-test-page desktop)))))
+    (router:route :get ide:+editor-url+ (lambda (env) (ide::%serve-bundle env)))
+    (router:route :post "/window/editor/action/eval"
+                  (lambda (env)
+                    (let ((fields (http:form-alist (or (http:body-string env) ""))))
+                      (flet ((field (name) (or (cdr (assoc name fields :test #'string=)) "")))
+                        (list 200 '(:content-type "text/html; charset=utf-8")
+                              (list (format nil "<pre class=\"echo\">input=[~A] buffer=[~A]</pre>"
+                                            (spinneret:escape-string (field "input"))
+                                            (spinneret:escape-string (field "buffer"))))))))))))
+
+(test the-bundle-builds-the-editor-in-a-browser-and-fills-the-form
+  (let ((browser (smoke::%smoke-browser)))
+    (if (null browser)
+        (skip "No Chrome or Edge was found; set HYPERION_SMOKE_BROWSER to run this test.")
+        (%with-ide (app desktop)
+          (let* ((port nil)
+                 (handler (ports:call-with-port
+                           (lambda (p)
+                             (prog1 (srv:start (%editor-test-app desktop)
+                                               :server :hunchentoot :port p :host "127.0.0.1"
+                                               :log nil)
+                               (setf port p))))))
+            (unwind-protect
+                 (let ((dom (smoke::%run-browser browser (format nil "http://127.0.0.1:~D/" port))))
+                   (is (search "cm-editor" dom) "the bundle built an editor")
+                   (is (search "id=\"win-editor-code\"" dom))
+                   (is (= 2 (%count "class=\"cm-line" dom)) "one element per line of the text")
+                   (is (search "class=\"ͼ" dom) "the Lisp text is highlighted")
+                   (is (search "cm-matchingBracket" dom)
+                       "the parenthesis matching the one before the cursor is marked")
+                   (is (search "input=[(+ x 1)] buffer=[" dom)
+                       "Mod-Enter sent the selection, and the whole text as the buffer")
+                   (is (search (format nil "input=[~A] buffer=[~A]" +browser-doc+ +browser-doc+) dom)
+                       "Evaluate with nothing selected sent the whole text"))
+              (ignore-errors (srv:stop handler))
+              (is (ports:await-released port))))))))
+
+(defun %count (needle text)
+  "How many times NEEDLE appears in TEXT."
+  (loop with count = 0
+        for at = (search needle text) then (search needle text :start2 (1+ at))
+        while at do (incf count)
+        finally (return count)))

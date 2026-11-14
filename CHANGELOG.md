@@ -1627,6 +1627,29 @@ its tag.
   back in place of the new element with the same id, so its value stays, and when it had the
   focus it gets the focus back with the same selection. Text being typed into a REPL or agent
   input is therefore not lost when a job's output pushes the window's body.
+- **`hyperion/desktop-ui:*page-scripts*`: scripts an app adds to the desktop's page** (#1218). A
+  list of URLs, empty by default. `render-page` adds a deferred `<script src>` for each, after
+  htmx, in order. An app binds it around a request, as it binds `*css*`, and serves the scripts
+  itself. When a pushed body keeps an element marked `data-ou-preserve`, the focus is now given
+  back when it was on an element inside the kept one, such as a code editor's editable element,
+  not only when it was on the kept element itself.
+- **The Ouranos IDE example has a code editor window, evaluated by Coalton's `mine/runtime`**
+  (#1218), in `praxeon/examples/ouranos-ide`. `build-desktop` adds a sixth window, `editor`
+  (`render-editor`, with the actions `eval` and `cancel`: `editor-eval`, `editor-cancel`), so
+  `inspect-desktop` lists six windows. The window holds a CodeMirror 6 editor with Lisp
+  highlighting and bracket matching, from the committed bundle
+  `praxeon/examples/ouranos-ide/editor/ouranos-editor.min.js`, which `make-app` serves at
+  `+editor-url+` (`/ide/editor/ouranos-editor.min.js`) and adds to the page through
+  `*page-scripts*`. Running the IDE needs no Node; `editor/build.sh` rebuilds the bundle with npm
+  and esbuild. The Evaluate button, or Mod-Enter, sends the selection, or the whole buffer, to a
+  child SBCL running `mine/runtime` (the runtime client), as a job with a Cancel button and the
+  time limit `*editor-time-limit*` (60 seconds, plus `*runtime-start-limit*`, 300, while the
+  first evaluation starts the runtime). In Coalton mode a run of definitions is compiled
+  together and other forms are evaluated (`coalton-runs`); Lisp mode evaluates in the child's
+  `CL-USER`. One evaluation runs at a time across all editor windows. `inspect-editor-entry`
+  describes an evaluation. `stop` and the new `stop-runtime` kill the child; `runtime-ready-p`
+  says whether it runs. `praxeon/examples/ouranos-ide` now depends on
+  `praxeon/examples/ouranos-ide/runtime`, whose client gained `runtime-busy-p`.
 - **`praxeon/image:image-request-failed` answers `aion/retry:transience` and
   `aion/retry:retry-after`** (#79), so an app can run `generate-image` under
   `aion/retry:with-retry` and have the service's Retry-After honoured. A 429 is `:transient`, a

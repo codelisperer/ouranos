@@ -50,7 +50,7 @@
            #:render-page #:render-window #:render-window-body #:render-dock
            #:inspect-window #:inspect-event #:inspect-desktop
            #:open-inspector #:render-inspector #:inspector-select #:inspector-record
-           #:routes #:make-app #:*css* #:client-js #:*event-history*
+           #:routes #:make-app #:*css* #:*page-scripts* #:client-js #:*event-history*
            #:window-changed #:stop-desktop #:desktop-subscribers #:event-data
            #:*events-hz* #:*timer-step*))
 
@@ -513,6 +513,12 @@ windows that are shown, and the highest z in use."
   "html,body{height:100%;margin:0}body{background:#1b2230;color:#1c2330;font:14px/1.45 system-ui,sans-serif;overflow:hidden}#ou-dock{position:fixed;left:0;right:0;top:0;height:34px;display:flex;align-items:center;gap:.4rem;padding:0 .6rem;background:#0f141d;color:#c9d1d9;z-index:100000}#ou-dock .ou-name{font-weight:600;margin-right:.6rem}#ou-dock button{font:inherit;padding:.1rem .55rem;border:1px solid #3b4658;border-radius:4px;background:#1b2230;color:#c9d1d9;cursor:pointer}#ou-dock button.ou-hidden{opacity:.55}#ou-desktop{position:absolute;left:0;right:0;top:34px;bottom:0;overflow:hidden}.ou-window{position:absolute;display:flex;flex-direction:column;background:#fff;border:1px solid #3b4658;border-radius:6px;box-shadow:0 6px 22px rgba(0,0,0,.45);overflow:hidden;resize:both;min-width:120px;min-height:60px}.ou-titlebar{flex:none;display:flex;align-items:center;justify-content:space-between;padding:.25rem .5rem;background:#2c3850;color:#fff;cursor:move;user-select:none;touch-action:none}.ou-close{font:inherit;border:none;background:transparent;color:#fff;cursor:pointer;padding:0 .3rem}.ou-body{flex:1;min-height:0;overflow:auto;padding:.6rem}.ou-error{color:#a40e26;white-space:pre-wrap;margin:0}.ou-record{border-collapse:collapse;width:100%}.ou-record th{text-align:left;vertical-align:top;padding:.1rem .6rem .1rem 0;color:#57606a;font-weight:500}.ou-record td{font-family:ui-monospace,Consolas,monospace;font-size:12px;word-break:break-word}"
   "The desktop's stylesheet: the dock along the top, the desktop under it, and the window frame.")
 
+(defparameter *page-scripts* '()
+  "URLs of scripts the page loads after htmx, in this order, each with a deferred script
+element in the page's head. Empty by default. An application binds it around a request, as it
+binds *CSS*, to add a script of its own, such as a code editor. The application serves the
+script itself.")
+
 (defun client-js ()
   "The page's script, compiled from Parenscript. It listens on the document, so a window the
 server adds later needs no setup. Pressing anywhere in a window raises it; dragging the title
@@ -526,9 +532,11 @@ browser connects again by itself when the stream ends.
 
 When an event replaces a window's body, an element in the old body that has both an id and
 the attribute data-ou-preserve is kept: the same node is put back in place of the new element
-with that id, so its value is kept, and when it had the focus it gets the focus back with the
-same selection. An input field the user is typing into is marked this way, so a push of the
-body while the user types does not lose what was typed.
+with that id, so its value is kept, and when it or an element inside it had the focus, that
+element gets the focus back, with the same selection when it is an input field. An input field
+the user is typing into is marked this way, so a push of the body while the user types does not
+lose what was typed. So is the element a code editor is built in, whose own editable element is
+inside it.
 
 The source uses no comparison operators, so the output has no angle bracket and can sit
 inside a script element."
@@ -603,10 +611,12 @@ inside a script element."
                       (chain el (query-selector-all "[id][data-ou-preserve]")
                              (for-each (lambda (old)
                                          (setf (getprop kept (@ old id)) old)
-                                         (when (equal old active)
-                                           (setf focused old)
-                                           (try (setf start (@ old selection-start)
-                                                      end (@ old selection-end))
+                                         ;; The focus may be on an element inside the
+                                         ;; kept one, as in a code editor.
+                                         (when (and active (chain old (contains active)))
+                                           (setf focused active)
+                                           (try (setf start (@ active selection-start)
+                                                      end (@ active selection-end))
                                                 (:catch (err) (setf start nil)))))))
                       (setf (@ el inner-h-t-m-l) html)
                       (chain el (query-selector-all "[id][data-ou-preserve]")
@@ -740,6 +750,8 @@ GET /events, and the page is changed by what arrives there."
           (:meta :name "viewport" :content "width=device-width, initial-scale=1")
           (:title (desktop-title desktop))
           (:script :src (assets:url :htmx) :defer t)
+          (dolist (url *page-scripts*)
+            (:script :src url :defer t))
           (:style (:raw *css*)))
         (:body
           ;; The event stream sends the dock's contents again when a window is opened,
