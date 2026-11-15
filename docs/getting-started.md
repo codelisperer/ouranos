@@ -17,8 +17,8 @@ examples are under [`../praxeon/examples/`](../praxeon/examples) (Elise, ChatRBT
 
 ## 1. Prerequisites
 
-Three Lisp things, and **a script installs all of them** — you do not have to do this by
-hand:
+Three Lisp things and libuv, and **a script installs all of them** — you do not have to do
+this by hand:
 
 ```sh
 ./scripts/setup.sh          # macOS / Linux    (setup.ps1 on Windows)
@@ -34,9 +34,10 @@ refuses until they are there:
 | clone, download, unpack | `git`, `curl`, `tar`, **`bzip2`** | `git`, `curl`, `tar` |
 | **libev** — Woo binds it at *load* time (hyperion) | `libev-dev` | `brew install libev` |
 | **libsqlite3** — cl-sqlite binds it at *load* time (mnemosyne) | `libsqlite3-dev` | ships with macOS |
+| **a C compiler** — setup builds libuv with it (section "libuv" below) | `build-essential` | `xcode-select --install` |
 
-`setup.sh` installs the two libraries for you **when it already has root**; otherwise it
-prints the exact command. They are not optional: they are bound when the system *loads*, so
+`setup.sh` installs the two libraries and the compiler for you **when it already has root**;
+otherwise it prints the exact command. They are not optional: they are bound when the system *loads*, so
 without them `bootstrap.lisp` builds `bin/cons` and the tree still does not work.
 
 `bzip2` catches people out: the SBCL tarball is bz2-compressed and `tar` shells out to the
@@ -85,14 +86,36 @@ binary, `OURANOS_BOOTSTRAP_KEEP_HEAP=1` keeps it — and warns, because the cons
 permanent and otherwise invisible. `sbcl --script scripts/baked-heap.lisp bin/cons` answers the
 question at any time.
 
-**One extra, for libuv.** `aion/uv` (libuv: event loop, async and sync filesystem, timers,
-file watching) and `hyperion/server-uv`, the HTTP server built on it, need libuv, which
-`sbcl --script scripts/build-libuv.lisp` builds with **a C compiler — the one your OS already
-ships**: Xcode Command Line Tools on macOS, your distribution's gcc/clang on Linux, MSVC on
-Windows. Not MSYS2, not cmake, not make. A libuv installed on the system is enough to run code
-from source. An app made with `cons init --template web` serves on `hyperion/server-uv`, and
-`cons bin` copies the tree's own libuv beside the binary it dumps, so building that binary needs
-the one this script builds (#472, #513).
+**libuv, which setup builds.** `hyperion/server-uv`, the default HTTP server, runs on libuv,
+through `aion/uv` (libuv: event loop, async and sync filesystem, timers, file watching). After
+the Lisp prerequisites, `setup.sh` and `setup.ps1` build the pinned libuv into `vendor/libuv`
+with `scripts/build-libuv.lisp`, which takes a few seconds and is skipped when the build there
+is already of the pinned release. That needs **a C compiler — the one your OS already ships**:
+Xcode Command Line Tools on macOS, your distribution's gcc/clang on Linux, the MSVC Build Tools
+on Windows. Not MSYS2, not cmake, not make.
+
+Setup checks for the compiler before it installs anything. When there is none, it says what to
+install and how to run it again, and exits 1. On macOS:
+
+```
+  MISSING a C compiler (setup builds libuv with it; hyperion/server-uv, the default HTTP server, runs on libuv)
+       fix: xcode-select --install     (the Xcode Command Line Tools)
+            then run ./scripts/setup.sh again
+            or, to set up without libuv: ./scripts/setup.sh --without-uv
+```
+
+On Linux the fix line is `sudo apt install build-essential | sudo dnf install gcc | sudo pacman
+-S gcc`, and when setup can get root it installs the compiler itself. On Windows it is the
+`winget` command for the Build Tools (about 2 GB), and the opt-out is `.\scripts\setup.ps1
+-WithoutUv`. With `--without-uv` (`-WithoutUv`) setup neither needs a compiler nor builds libuv,
+and `--check` reports libuv as skipped; `hyperion/server-uv` will not start until libuv is
+built, by running setup again without the flag or with `sbcl --script scripts/build-libuv.lisp`
+from the Ouranos checkout.
+
+A libuv installed on the system is enough to run code from source. An app made with
+`cons init --template web` serves on `hyperion/server-uv`, and `cons bin` copies the tree's own
+libuv beside the binary it dumps, so building that binary needs the one setup builds (#472,
+#513).
 No C toolchain is ever required merely to *load* anything here.
 
 ## 2. Install the frameworks

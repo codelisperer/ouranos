@@ -107,10 +107,11 @@ bin/cons --help                                          # the CLI: init / setup
 ```
 
 **Starting from a bare machine?** `scripts/setup.sh` (or `setup.ps1` on Windows) installs
-all three prerequisites at their pinned versions — **SBCL**, **Quicklisp** with a dated dist
-snapshot, and **Coalton** as a git checkout at the commit in [`coalton.pin`](coalton.pin).
-It is idempotent, needs no sudo on Linux, and `--check` reports what is missing without
-changing anything:
+the three Lisp prerequisites at their pinned versions — **SBCL**, **Quicklisp** with a dated
+dist snapshot, and **Coalton** as a git checkout at the commit in [`coalton.pin`](coalton.pin)
+— and then builds **libuv** from [`libuv.pin`](libuv.pin) into `vendor/libuv`. It is
+idempotent, needs no sudo on Linux for the Lisp parts, and `--check` reports what is missing
+without changing anything:
 
 ```sh
 ./scripts/setup.sh                                       # then run the seed above
@@ -118,27 +119,36 @@ changing anything:
 
 It deliberately does *not* run `bootstrap.lisp` — that stays the caller's step.
 
-**One optional extra prerequisite, for one opt-in system.** `aion/uv` (libuv: event
-loop, async + sync filesystem, timers, file watching) binds a native library, which the
-repo builds from a pinned source tarball rather than taking from your package manager:
+**libuv, and the C compiler it needs.** `hyperion/server-uv`, the default HTTP server, runs on
+libuv, through `aion/uv` (libuv: event loop, async + sync filesystem, timers, file watching).
+The repo builds libuv from a pinned source tarball rather than taking it from your package
+manager, and setup does that build for you (`scripts/build-libuv.lisp`; a few seconds). It needs
+**a C compiler — the one your OS vendor already ships**, and nothing else:
 
-```sh
-sbcl --script scripts/build-libuv.lisp     # fetch (verified against libuv.pin), compile, done
-```
+| | Install | Then |
+|---|---|---|
+| macOS | `xcode-select --install` (the Xcode Command Line Tools) | `./scripts/setup.sh` |
+| Linux | `sudo apt install build-essential` (or `dnf install gcc`, `pacman -S gcc`) | `./scripts/setup.sh` |
+| Windows | the MSVC Build Tools: `winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"` (about 2 GB) | `.\scripts\setup.ps1` |
 
-That needs **a C compiler — the one your OS vendor already ships**, and nothing else:
-Xcode Command Line Tools on macOS, your distribution's gcc/clang on Linux, MSVC on Windows.
+When there is no compiler, setup stops **before installing anything**, prints the line above for
+your platform, and exits 1. On Linux, when setup can get root, it installs the compiler itself,
+as it does libev and libsqlite3. To set up without libuv, pass `--without-uv` (`-WithoutUv` in
+PowerShell): setup then neither needs a compiler nor builds libuv, `--check` reports libuv as
+skipped rather than missing, and `hyperion/server-uv` will not start until libuv is built — by
+running setup again without the flag, or with `sbcl --script scripts/build-libuv.lisp` from
+this checkout.
+
 Explicitly **not** MSYS2/MinGW, even though libuv builds fine under it: requiring a
 Unix-emulation layer is one more thing to acquire before anything works, and no C toolchain
 is ever required to *load* anything here (we bind by hand rather than with a groveller). Not cmake, not make, not autotools: libuv is compiled by a single direct compiler
 invocation driven by the script, which is why the "no make / just / nmake" rule above
-still holds. Everything else in the tree needs only SBCL.
+still holds.
 
-It is deliberately **not** part of `bootstrap.lisp`. Requiring a toolchain to bootstrap
-would put a native dependency on the critical path for people who never touch libuv, and
-ADR-0011 is the cautionary tale: a load-time native dependency (libev, via Woo) made
-every Linux/macOS desktop bundle unrunnable on a clean machine. `aion/uv` therefore loads
-fine without the library present and reports what to run on first use.
+It is deliberately **not** part of `bootstrap.lisp`, which needs only SBCL. ADR-0011 is the
+cautionary tale: a load-time native dependency (libev, via Woo) made every Linux/macOS desktop
+bundle unrunnable on a clean machine. `aion/uv` therefore loads fine without the library present
+and reports what to run on first use.
 
 `bootstrap.lisp` does four things in one pass, identically on every OS: points ASDF at
 the whole tree, builds `bin/cons`, writes a standing ASDF `source-registry.conf.d`

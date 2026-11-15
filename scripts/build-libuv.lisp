@@ -184,11 +184,17 @@
     code))
 
 (defun which (&rest candidates)
-  "First of CANDIDATES that exists on PATH, or NIL."
+  "First of CANDIDATES that exists on PATH, or NIL.
+
+The probe's standard error is discarded. When `where.exe' finds nothing it writes `INFO: Could
+not find files for the given pattern(s).' to standard error, and that line used to appear in
+every Windows build log between the download and the checksum, where it reads like an error
+(#504). Finding nothing is an ordinary answer here, so nothing about it is printed."
   (loop for c in candidates
         when (ignore-errors
-              (zerop (run (if (uiop:os-windows-p) "where" "which") (list c)
-                          :on-error :return :output nil)))
+              (zerop (nth-value 2 (uiop:run-program
+                                   (list (if (uiop:os-windows-p) "where" "which") c)
+                                   :output nil :error-output nil :ignore-error-status t))))
           return c))
 
 (defun sha256-of (file)
@@ -272,10 +278,25 @@
                        "-C" (namestring (merge-pathnames "src/" *vendor*)))))
     srcdir))
 
+(defun xcode-tools-installed-p ()
+  "Whether the Xcode Command Line Tools (or Xcode) are installed. On macOS /usr/bin/cc exists
+even without them: it is a stub that opens the installer dialog and fails. So finding `cc' on
+PATH says nothing there, and `xcode-select -p', which exits non-zero without opening anything
+when no developer directory is set, is asked instead."
+  (ignore-errors
+   (zerop (nth-value 2 (uiop:run-program (list "xcode-select" "-p")
+                                         :output nil :error-output nil
+                                         :ignore-error-status t)))))
+
+(defun no-cc-error ()
+  "The refusal for a Unix machine with no usable C compiler, naming what to install."
+  (if (eq (platform) :macos)
+      (error "No C compiler: the Xcode Command Line Tools are not installed.~%Install them, then run this again:~%  xcode-select --install~%libuv is what hyperion/server-uv, the default HTTP server, runs on.")
+      (error "No C compiler found (looked for cc, gcc, clang).~%Install one, then run this again:~%  sudo apt install build-essential   |  sudo dnf install gcc   |  sudo pacman -S gcc~%libuv is what hyperion/server-uv, the default HTTP server, runs on.")))
+
 (defun compile-with-cc (srcdir sources defines libs output-name)
   "The Unix toolchains: one gcc-style invocation."
-  (let* ((cc (or (which "cc" "gcc" "clang")
-                 (error "No C compiler found (looked for cc, gcc, clang). aion/uv needs one; the rest of the tree does not.")))
+  (let* ((cc (or (which "cc" "gcc" "clang") (no-cc-error)))
          (libdir (merge-pathnames "lib/" *vendor*))
          (output (merge-pathnames output-name libdir))
          (args (append
@@ -299,7 +320,7 @@
 
 (defun no-msvc-error ()
   "The one copy of the refusal, so the early check and the late one cannot drift apart."
-  (error "No MSVC C++ toolchain found.~%Install the Build Tools (about 2 GB, no IDE):~%  winget install --id Microsoft.VisualStudio.2022.BuildTools --override \"--quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended\"~%aion/uv needs it, and so does building a Windows desktop app, whose launcher is compiled with it (#98).~%MSYS2/MinGW is deliberately NOT used here (ECOSYSTEM decisions log)."))
+  (error "No MSVC C++ toolchain found.~%Install the Build Tools (about 2 GB, no IDE):~%  winget install --id Microsoft.VisualStudio.2022.BuildTools --override \"--quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended\"~%libuv is what hyperion/server-uv, the default HTTP server, runs on, and building a Windows desktop app needs MSVC too, for its launcher (#98).~%MSYS2/MinGW is deliberately NOT used here (ECOSYSTEM decisions log)."))
 
 (defun require-toolchain ()
   "Refuse NOW if this machine cannot compile, BEFORE anything is downloaded (pre-publication issue 128).
@@ -317,8 +338,11 @@ immediately. Measured on a machine with Visual Studio made invisible:
 
 Nothing was wrong with the refusal; it simply arrived after the part that made it a waste
 of the user's time. A prerequisite is a thing to check before you begin."
-  (when (and (eq (toolchain) :msvc) (not (find-msvc)))
-    (no-msvc-error)))
+  (ecase (toolchain)
+    (:msvc (unless (find-msvc) (no-msvc-error)))
+    (:cc (unless (and (which "cc" "gcc" "clang")
+                      (or (not (eq (platform) :macos)) (xcode-tools-installed-p)))
+           (no-cc-error)))))
 
 (defun compile-with-msvc (srcdir sources defines libs output-name)
   "MSVC: the same sources and defines, cl.exe's vocabulary, one invocation.

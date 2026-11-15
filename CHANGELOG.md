@@ -20,6 +20,20 @@ its tag.
   bound with `praxeon/event:with-observer` receives it; one that ignores event types it does not
   know, as `praxeon/event` asks, needs no change. **An app test that compares a turn's whole event
   list with a fixed list must add `:turn-started` at the front.**
+- **`scripts/setup.sh` and `scripts/setup.ps1` build libuv, and stop when there is no C compiler**
+  (#504). After SBCL, Quicklisp and Coalton, setup runs `scripts/build-libuv.lisp`, which builds
+  the libuv in `libuv.pin` into `vendor/libuv` for `hyperion/server-uv`, the default HTTP server.
+  It checks for a compiler before installing anything: on macOS the Xcode Command Line Tools
+  (`xcode-select -p`; `/usr/bin/cc` alone does not count), on Linux `cc`, `gcc` or `clang`, on
+  Windows MSVC found through `vswhere` or `OURANOS_MSVC_PATH`. Without one, setup prints what to
+  install (`xcode-select --install`, `build-essential`, or the `winget` command for the MSVC
+  Build Tools), the command to run again, and the opt-out, then exits 1. On Linux with root it
+  installs the compiler itself, as it does libev and libsqlite3. **An app whose CI runs setup on
+  a runner without a compiler must install one or pass `--without-uv` (`-WithoutUv`).** An app
+  whose CI ran `sbcl --script scripts/build-libuv.lisp` after setup can drop that step; leaving
+  it costs nothing, because the build is reused. `--check` (`-Check`) now reports the compiler
+  and a missing or stale `vendor/libuv` as missing, unless `--without-uv` is also given; on
+  Windows MSVC was reported as optional before.
 - **A call to a tool the agent does not have is answered as not run, and the turn goes on**
   (#1196). `praxeon/actor:run-turn` used to let `act` signal `means-failure` ("no such means
   registered") for such a call, which failed the turn unless the app handled it. Now the model is
@@ -1498,6 +1512,14 @@ its tag.
 
 ### Fixed
 
+- **`scripts/build-libuv.lisp` refuses before downloading when a Unix machine has no C compiler**,
+  as it already did on Windows, and on macOS counts the Xcode Command Line Tools as the compiler,
+  so it no longer runs the `/usr/bin/cc` stub, which opens an installer dialog. The libuv
+  build, and the libgit2, mbedTLS and SQLite builds, no longer print
+  `INFO: Could not find files for the given pattern(s).` on Windows when `where.exe` looks for a
+  program that is not there (#504). The `aion/uv` error for a libuv it cannot load names the
+  Ouranos checkout to run setup or `build-libuv.lisp` in, and `cons init --template web` says
+  that the app needs libuv and that setup builds it.
 - **`scripts/setup.sh` adds Quicklisp to `~/.sbclrc` when it installs Quicklisp itself**
   (#1213). Before this, a fresh setup left a plain `sbcl` session without the `ql` package, and a
   developer had to load `~/quicklisp/setup.lisp` and call `ql:add-to-init-file` by hand. Setup
