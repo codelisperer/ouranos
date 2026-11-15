@@ -386,9 +386,15 @@ is a separator. Control: a path continuing with / is inside on every platform."
   #-win32 (is-false (static::%path-inside-p "/srv/public\\outside/page.txt" "/srv/public"))
   #+win32 (is-true (static::%path-inside-p "C:\\srv\\public\\page.txt" "C:\\srv\\public\\")))
 
-(test a-static-file-is-served-on-hunchentoot-with-its-length
+(test a-static-file-is-served-whole-on-the-clack-path
   "#314. A static file's body is an open stream, which no Clack backend takes. Through the
-shim, Hunchentoot sends its bytes with the Content-Length measured from the stream."
+shim, a Clack backend sends the file's bytes. The backend is hyperion/clack-handler-uv on
+START's Clack path (%CLACK-PATH-START, server-tests); it was Hunchentoot until #373.
+
+On Hunchentoot this test also found the Content-Length the shim measured from the stream on
+the wire. server-uv chunks every streamed body and sends no Content-Length, so the wire can
+only show the bytes here. That the shim measures the length is checked without a server, by
+the %ADAPT-STREAM-BODY tests in server-tests."
   (with-static-root (root ("ok.txt" "fine, from disk"))
     (let* ((app (lambda (env)
                   (or (static:file-response root (getf env :path-info) :env env)
@@ -396,19 +402,14 @@ shim, Hunchentoot sends its bytes with the Content-Length measured from the stre
            (port nil)
            (handler (ports:call-with-port
                      (lambda (p)
-                       (prog1 (srv:start app :port p :server :hunchentoot)
+                       (prog1 (%clack-path-start app :port p)
                          (setf port p))))))
       (unwind-protect
            (progn
              (is-true (%srv-await (lambda () (ports:listening-p port))) "backend came up")
              (let ((r (%srv-http-get port "/ok.txt")))
                (is-true (search "200" r) "~S" r)
-               (is-true (search (format nil "Content-Length: 15~C~C" #\Return #\Linefeed) r)
-                        "~S" r)
-               (is (string= "fine, from disk"
-                            (subseq r (+ 4 (search (format nil "~C~C~C~C" #\Return #\Linefeed
-                                                           #\Return #\Linefeed)
-                                                   r)))))))
+               (is (equal "fine, from disk" (%srv-body r)) "~S" r)))
         (ignore-errors (srv:stop handler))))))
 
 (test the-static-handler-logs-its-rules-once-and-serves-through-them

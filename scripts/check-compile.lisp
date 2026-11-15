@@ -40,8 +40,9 @@
 ;;;; aion/windows and its subsystems cannot load on Linux, so editing aion/aion.asd there made
 ;;;; this script fail them. Such a system now gets a SKIPPED line naming its owner and is not
 ;;;; loaded. A system the registry gives to this host, or to no OS, is checked as before, so one
-;;;; that should load here and does not still fails. A package can have one owner only, so
-;;;; hyperion/woo, which also loads on macOS, is skipped there, as the gate skips its suite.
+;;;; that should load here and does not still fails. A package can have one owner only, so a
+;;;; system that loads on two hosts is skipped on the one that does not own it, as the gate
+;;;; skips its suite.
 ;;;;
 ;;;; Exit 0 when every system checked passes, 1 when any fails, 2 when the check cannot run.
 

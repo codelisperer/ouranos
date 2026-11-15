@@ -32,7 +32,7 @@ refuses until they are there:
 | | Linux | macOS |
 |---|---|---|
 | clone, download, unpack | `git`, `curl`, `tar`, **`bzip2`** | `git`, `curl`, `tar` |
-| **libev** — Woo binds it at *load* time (hyperion) | `libev-dev` | `brew install libev` |
+| **libev** — Woo binds it at *load* time; no tree system declares Woo since #373, but `setup.sh` still requires it | `libev-dev` | `brew install libev` |
 | **libsqlite3** — cl-sqlite binds it at *load* time (mnemosyne) | `libsqlite3-dev` | ships with macOS |
 
 `setup.sh` installs the two libraries for you **when it already has root**; otherwise it
@@ -180,8 +180,18 @@ Nothing else depends on the launcher, so bootstrap carries on without it. Set
 ## 3. Create your app
 
 The one-liner is `cons init my-site --template web` (or `--template agent`); a web app
-serves on `hyperion/server-uv` and needs libuv (section 1). It
-works today — `cons` implements `init` / `setup` / `conform` / `env` / `db-repl` / `db-url` / `template check` / `version`. `cons setup` then puts the app on the
+serves on `hyperion/server-uv` and needs libuv (section 1).
+
+**Choosing another server.** Hyperion and praxeon declare no HTTP server, and no system in
+the tree declares Woo or Hunchentoot (#373). To run on Hunchentoot, add
+`"clack-handler-hunchentoot"` to your app's `:depends-on`, after `"hyperion"` (Woo:
+`"clack-handler-woo"`, which needs libev), and select it with `:server :hunchentoot` or
+`HYPERION_SERVER=hunchentoot`. When several servers are loaded and none is selected, `:uv` is
+used first, then Woo, then Hunchentoot. Selecting one through `HYPERION_SERVER` that is not
+loaded signals `hyperion/server:no-server-backend` rather than falling back to another. The
+details are in `hyperion/docs/user-guide.md`, "Choosing a server".
+
+`cons init` works today — `cons` implements `init` / `setup` / `conform` / `env` / `db-repl` / `db-url` / `template check` / `version`. `cons setup` then puts the app on the
 load path with its own drop-in beside Ouranos's; the rest of this section is what that
 does for you:
 

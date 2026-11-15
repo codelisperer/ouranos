@@ -1012,11 +1012,46 @@ question."
 (test the-elise-app-declares-its-own-backend-and-it-is-not-woo
   ;; The other half: moving the choice up must actually leave it somewhere. An app with
   ;; no handler at all fails at DEFAULT-SERVER, which is loud but is not what we want here.
+  ;; Since #373 the backend is the native server; it was clack-handler-hunchentoot before.
   (let ((deps (%asd-deps "praxeon/elise")))
-    (is-true (gethash "clack-handler-hunchentoot" deps)
+    (is-true (gethash "hyperion/server-uv" deps)
              "praxeon/elise no longer declares an HTTP backend -- it will not start")
     (is-false (gethash "clack-handler-woo" deps)
               "praxeon/elise declares Woo, which does not answer SIGTERM (pre-publication issue 218)")))
+
+;;; --- #373: no framework system declares Woo or Hunchentoot -------------------------------
+;;;
+;;; The maintainer's ruling of 2026-11-15: Woo and Hunchentoot leave the dependencies of
+;;; hyperion, praxeon and klio, test and example systems included. An app that wants one adds
+;;; the handler system to its own :depends-on. This walks every system those three .asd files
+;;; define, with %ASD-DEPS (which reads .asd files and loads nothing), so a system that brings
+;;; one back, directly or through another system, fails here.
+
+(defparameter +third-party-servers+
+  '("clack-handler-woo" "clack-handler-hunchentoot" "woo" "hunchentoot")
+  "The systems no framework system may depend on since #373.")
+
+(defun %systems-defined-beside (system)
+  "The names of every system defined in the same .asd file as SYSTEM."
+  (let ((file (asdf:system-source-file (asdf:find-system system))))
+    (loop for name in (asdf:registered-systems)
+          for sys = (asdf:find-system name nil)
+          when (and sys (equal file (asdf:system-source-file sys)))
+            collect name)))
+
+(test no-framework-system-declares-woo-or-hunchentoot
+  (let ((checked 0) (offenders '()))
+    (dolist (file '("hyperion" "praxeon" "klio"))
+      (dolist (name (%systems-defined-beside file))
+        (incf checked)
+        (let* ((deps (%asd-deps name))
+               (found (remove-if-not (lambda (server) (gethash server deps))
+                                     +third-party-servers+)))
+          (when found (push (cons name found) offenders)))))
+    (is (null offenders) "these systems depend on Woo or Hunchentoot (#373): ~S" offenders)
+    ;; Without this the assertion above passes if the walk finds no systems at all.
+    (is (> checked 60) "only ~D systems were walked; the walk has stopped finding them" checked)))
+
 ;;; --- #90: an agent's tools are ASSEMBLED from capabilities ------------------
 ;;;
 ;;; The property: a means the caller may not use is ABSENT from the tool table, not

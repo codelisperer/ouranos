@@ -55,7 +55,9 @@ Hyperion leans into all of it, with a bias toward **full-stack Common Lisp**:
   typeclass dispatch — it is **not** CLOS under the hood; it interoperates with CL
   at the boundary.)
 - **Pluggable backends behind neutral protocols** — the house style across every
-  project in the tree. Here: the web server (Woo / Hunchentoot behind Clack).
+  project in the tree. Here: the web server. The app declares one; `hyperion/server-uv` is
+  the default, and Hunchentoot or Woo behind Clack are the app's own choice (#373; see
+  `docs/user-guide.md`, "Choosing a server").
 
 ## Status
 
@@ -101,7 +103,7 @@ This framework is one of six core frameworks (plus the `hermes` satellite leaf-l
 the [Ouranos monorepo](../README.md); you build the whole tree, not this directory
 alone. Prereqs: **SBCL + Quicklisp + Coalton** — the last a **pinned git checkout**, not a
 Quicklisp system; `scripts/setup.sh` installs all three (see `coalton.pin`),
-plus `libev` (Woo).
+and builds libuv, which `hyperion/server-uv` needs.
 
     git clone https://github.com/codelisperer/ouranos.git
     cd ouranos

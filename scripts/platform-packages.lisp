@@ -80,13 +80,7 @@
       :note "the binding hades/credentials uses for the Secret Service: libsecret's schema,
              attribute table, secret value and password calls, and GError as a condition. It
              loads libsecret-1.so.0 on first use, so it loads where libsecret is missing; its
-             suite needs the library and never talks to D-Bus.")
-     (:system "hyperion/woo"  :status :required :issue "#372"
-      :note "hyperion served by Woo; its suite is the only one that runs a real Woo server.
-             Woo binds libev at load and has no Windows build. It also runs on macOS, but a
-             package here has exactly one owning OS (each-package-is-owned-by-exactly-one-os
-             in cons's platform tests), so it is owned by Linux, whose CI leg runs it, and a
-             macOS gate reports it as not applicable")))
+             suite needs the library and never talks to D-Bus.")))
   "Platform packages by host OS, each with the status that says how to read its absence.
 
 Keyed by the OS that OWNS the package -- the one where it can be compiled at all. Every

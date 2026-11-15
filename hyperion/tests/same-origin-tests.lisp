@@ -199,7 +199,7 @@ name and value; Host included only if listed) and return the status code."
 
 (defmacro %so-with-desktop ((port-var &optional (guard :same-origin)) &body body)
   `(multiple-value-bind (url handler)
-       (hyperion/desktop::%start-embedded (%srv-ok-app) :auto :hunchentoot ,guard)
+       (hyperion/desktop::%start-embedded (%srv-ok-app) :auto :uv ,guard)
      (unwind-protect
           (let ((,port-var (parse-integer url :start (1+ (position #\: url :from-end t))
                                               :junk-allowed t)))
@@ -235,7 +235,7 @@ name and value; Host included only if listed) and return the status code."
             (catch 'run-app-done
               (hyperion/desktop:run-app
                (%srv-ok-app)
-               :server :hunchentoot :shell :webview :launcher sb-ext:*runtime-pathname*
+               :server :uv :shell :webview :launcher sb-ext:*runtime-pathname*
                :on-ready (lambda (url)
                            (let* ((port (parse-integer url :start (1+ (position #\: url :from-end t))
                                                            :junk-allowed t))
@@ -270,7 +270,7 @@ name and value; Host included only if listed) and return the status code."
   "BODY with PORT-VAR bound to a server START ran with START-ARGS on a free loopback port."
   (let ((handler (gensym "HANDLER")))
     `(let* ((,port-var (ports:candidate-port))
-            (,handler (srv:start (%srv-ok-app) :server :hunchentoot :port ,port-var
+            (,handler (srv:start (%srv-ok-app) :server :uv :port ,port-var
                                                :host "127.0.0.1" ,@start-args)))
        (unwind-protect (progn ,@body)
          (ignore-errors (srv:stop ,handler))
@@ -364,7 +364,7 @@ SERVE-ARGS, and torn down afterwards."
   "A platform's health checker sends no Origin and may use another Host; refusing it would take
 a healthy instance out of rotation. Every other path stays guarded."
   (%quietly
-    (%srv-with-serving (session port :server :hunchentoot :signals nil
+    (%srv-with-serving (session port :server :uv :signals nil
                                      :request-guard :same-origin :readiness-path "/health")
       (let ((foreign `(("Host" . ,(format nil "health-checker.internal:~D" port)))))
         (is (= 200 (%so-raw-status port "GET" "/health" foreign))
@@ -381,6 +381,6 @@ a healthy instance out of rotation. Every other path stays guarded."
 (test without-a-readiness-path-the-same-request-is-refused
   "The control for the test above: the same guard and the same request, with no readiness path."
   (%quietly
-    (%srv-with-serving (session port :server :hunchentoot :signals nil :request-guard :same-origin)
+    (%srv-with-serving (session port :server :uv :signals nil :request-guard :same-origin)
       (is (= 403 (%so-raw-status port "GET" "/health"
                                  `(("Host" . ,(format nil "health-checker.internal:~D" port)))))))))
