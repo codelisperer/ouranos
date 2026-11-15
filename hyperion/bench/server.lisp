@@ -4,6 +4,9 @@
 ;;;;     HYPERION_SERVER=woo         sbcl --dynamic-space-size 4096 --script hyperion/bench/server.lisp 8099
 ;;;;     HYPERION_SERVER=uv          sbcl --dynamic-space-size 4096 --script hyperion/bench/server.lisp 8099
 ;;;;
+;;;; The Woo backend needs libev installed separately (macOS: brew install libev; Debian/Ubuntu:
+;;;; sudo apt-get install libev-dev). The tree's setup does not install it.
+;;;;
 ;;;; HYPERION_WORKERS, when set, is the worker count START gives the backend: :worker-num for
 ;;;; Woo, :workers for :uv, and nothing for Hunchentoot, which runs a thread per connection
 ;;;; (#413). Request logging is off on every backend, so a comparison measures the servers and

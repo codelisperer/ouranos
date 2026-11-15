@@ -133,7 +133,7 @@ manager, and setup does that build for you (`scripts/build-libuv.lisp`; a few se
 
 When there is no compiler, setup stops **before installing anything**, prints the line above for
 your platform, and exits 1. On Linux, when setup can get root, it installs the compiler itself,
-as it does libev and libsqlite3. To set up without libuv, pass `--without-uv` (`-WithoutUv` in
+as it does libsqlite3. To set up without libuv, pass `--without-uv` (`-WithoutUv` in
 PowerShell): setup then neither needs a compiler nor builds libuv, `--check` reports libuv as
 skipped rather than missing, and `hyperion/server-uv` will not start until libuv is built — by
 running setup again without the flag, or with `sbcl --script scripts/build-libuv.lisp` from

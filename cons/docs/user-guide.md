@@ -40,8 +40,8 @@ obvious use is pasting the output somewhere.
 
 ## Prerequisites
 
-- **SBCL** + **Quicklisp**. (cons is pure-CL and dependency-light — no Coalton or
-  libev needed.)
+- **SBCL** + **Quicklisp**. (cons is pure-CL and dependency-light — no Coalton
+  needed.)
 
 ## Setup
 

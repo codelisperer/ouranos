@@ -4,6 +4,9 @@
     python3 hyperion/bench/compare.py                      # uv and woo
     python3 hyperion/bench/compare.py uv woo hunchentoot
 
+The Woo backend needs libev installed separately (macOS: brew install libev; Debian/Ubuntu:
+sudo apt-get install libev-dev). The tree's setup does not install it.
+
 The same subject as run.sh (server.lisp) and the same client measurements as load.py, which
 this imports, plus a load generator for throughput, because Python threads cannot drive these
 servers hard enough to measure them.

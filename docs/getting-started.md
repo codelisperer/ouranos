@@ -32,11 +32,10 @@ refuses until they are there:
 | | Linux | macOS |
 |---|---|---|
 | clone, download, unpack | `git`, `curl`, `tar`, **`bzip2`** | `git`, `curl`, `tar` |
-| **libev** — Woo binds it at *load* time; no tree system declares Woo since #373, but `setup.sh` still requires it | `libev-dev` | `brew install libev` |
 | **libsqlite3** — cl-sqlite binds it at *load* time (mnemosyne) | `libsqlite3-dev` | ships with macOS |
 | **a C compiler** — setup builds libuv with it (section "libuv" below) | `build-essential` | `xcode-select --install` |
 
-`setup.sh` installs the two libraries and the compiler for you **when it already has root**;
+`setup.sh` installs libsqlite3 and the compiler for you **when it already has root**;
 otherwise it prints the exact command. They are not optional: they are bound when the system *loads*, so
 without them `bootstrap.lisp` builds `bin/cons` and the tree still does not work.
 
@@ -56,7 +55,7 @@ none of it by [`scripts/verify-clean-machine.sh`](../scripts/verify-clean-machin
 
 `setup.sh` is idempotent; anything already present at the right version is left alone. It
 needs no sudo for SBCL, Quicklisp or Coalton — those all land under your home directory —
-but libev is a system package and does need root. Verify what actually loads with
+but libsqlite3 and the compiler are system packages and do need root. Verify what actually loads with
 `sbcl --script scripts/check-coalton.lisp`, which checks the pin against the checkout
 *and* probes behaviour, because a stale fasl cache can make a correct setup look wrong.
 

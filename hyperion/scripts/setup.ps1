@@ -9,8 +9,7 @@
 #      The monorepo's scripts\setup.ps1 is what clones it.
 # Discovery of the frameworks is NOT this script's job -- run
 # `sbcl --script bootstrap.lisp` at the repo root once (writes the ASDF drop-in).
-# NB: on Windows the web backend is Hunchentoot (Woo/libev are Unix-only), so
-# there is no libev step here. Usage:  pwsh scripts/setup.ps1 [-Test]
+# Usage:  pwsh scripts/setup.ps1 [-Test]
 
 param([switch]$Test)
 $ErrorActionPreference = 'Stop'

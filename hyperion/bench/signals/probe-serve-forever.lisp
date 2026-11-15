@@ -5,6 +5,9 @@
 ;;;; depends on. FIRED here means a supervisor can stop a deployed app cleanly.
 ;;;;
 ;;;; PROBE_BACKEND=woo|hunchentoot|uv
+;;;;
+;;;; The Woo backend needs libev installed separately (macOS: brew install libev; Debian/Ubuntu:
+;;;; sudo apt-get install libev-dev). The tree's setup does not install it.
 
 (require :asdf)
 (require :sb-bsd-sockets)

@@ -8,6 +8,9 @@
 ;;;; Same handler shape as %INSTALL-POSIX-SIGNAL-HANDLERS, same poll-over-SLEEP wait.
 ;;;;
 ;;;; PROBE_BACKEND=none|woo|hunchentoot|uv
+;;;;
+;;;; The Woo backend needs libev installed separately (macOS: brew install libev; Debian/Ubuntu:
+;;;; sudo apt-get install libev-dev). The tree's setup does not install it.
 
 (require :asdf)
 (require :sb-bsd-sockets)

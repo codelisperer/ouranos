@@ -139,7 +139,7 @@ echo "ok   bin/cons exists and runs"
 echo
 # setup.sh builds libuv by default, because hyperion/server-uv, the default HTTP server, runs on
 # it (#504). The stock image has no C compiler; running as root, setup.sh installs one the way
-# it installs libev and libsqlite3, so phase 4 passing is not enough: check the library is there.
+# it installs libsqlite3, so phase 4 passing is not enough: check the library is there.
 echo "=== 8. libuv, which setup.sh builds by default ==="
 [ -f vendor/libuv/lib/libuv.so.1 ] || fail "setup.sh exited 0 but did not build vendor/libuv/lib/libuv.so.1"
 grep -q "^version " vendor/libuv/BUILT-FROM || fail "vendor/libuv has no BUILT-FROM stamp"

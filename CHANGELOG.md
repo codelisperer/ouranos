@@ -14,6 +14,13 @@ its tag.
 
 ### An app may have to act
 
+- **`scripts/setup.sh` no longer installs or requires libev.** It used to install `libev-dev`
+  (`libev-devel`, `libev`, or `brew install libev`), and `--check` reported libev as missing when
+  it was absent. libev was needed only by Woo, and no system in the tree declares Woo since #373.
+  `hyperion/scripts/setup.sh` and `praxeon/scripts/setup.sh` dropped their libev step too. **An
+  app that still uses Woo (`clack-handler-woo`) installs libev itself**: `brew install libev` on
+  macOS, `sudo apt-get install libev-dev` on Debian and Ubuntu. The scripts under
+  `hyperion/bench` that compare against Woo need it installed the same way.
 - **`scripts/setup.sh` and `scripts/setup.ps1` build libuv, and stop when there is no C compiler**
   (#504). After SBCL, Quicklisp and Coalton, setup runs `scripts/build-libuv.lisp`, which builds
   the libuv in `libuv.pin` into `vendor/libuv` for `hyperion/server-uv`, the default HTTP server.
@@ -22,7 +29,7 @@ its tag.
   Windows MSVC found through `vswhere` or `OURANOS_MSVC_PATH`. Without one, setup prints what to
   install (`xcode-select --install`, `build-essential`, or the `winget` command for the MSVC
   Build Tools), the command to run again, and the opt-out, then exits 1. On Linux with root it
-  installs the compiler itself, as it does libev and libsqlite3. **An app whose CI runs setup on
+  installs the compiler itself, as it does libsqlite3. **An app whose CI runs setup on
   a runner without a compiler must install one or pass `--without-uv` (`-WithoutUv`).** An app
   whose CI ran `sbcl --script scripts/build-libuv.lisp` after setup can drop that step; leaving
   it costs nothing, because the build is reused. `--check` (`-Check`) now reports the compiler
