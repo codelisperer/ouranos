@@ -13,11 +13,12 @@
   It does NOT run bootstrap.lisp -- that is the next step, and the caller's choice:
     sbcl --dynamic-space-size 4096 --script bootstrap.lisp
 
-  It also does NOT install a C compiler. -Check REPORTS whether MSVC is present, because
-  aion/uv needs it to build libuv, but that is an OPT-IN extra: the compiler is a ~2 GB
-  install, nothing else in the tree requires one, and a missing one is therefore not a
-  provisioning failure. When it IS needed, it is MSVC and not MSYS2/MinGW -- each platform
-  uses the toolchain its own vendor ships (ECOSYSTEM decisions log).
+  Then it builds libuv from libuv.pin into vendor\libuv (scripts/build-libuv.lisp), because
+  hyperion/server-uv, the default HTTP server, runs on it (#504). That needs the MSVC C++
+  Build Tools, which this script does NOT install: they are a ~2 GB install that needs
+  elevation. Without them setup stops before installing anything, prints the winget command
+  that installs them, and exits 1, unless -WithoutUv is given. It is MSVC and not MSYS2/MinGW
+  -- each platform uses the toolchain its own vendor ships (ECOSYSTEM decisions log).
 
   Idempotent: anything already present at the right version is left alone.
 
@@ -27,13 +28,19 @@
 .PARAMETER CI
   Also export PATH/SBCL_HOME into $GITHUB_PATH / $GITHUB_ENV for later workflow steps.
 
+.PARAMETER WithoutUv
+  Do not build libuv, and do not require MSVC. With -Check, do not report either as missing.
+  hyperion/server-uv will not start until libuv is built.
+
 .EXAMPLE
   .\scripts\setup.ps1 -Check
+.EXAMPLE
+  .\scripts\setup.ps1 -WithoutUv
 .EXAMPLE
   powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1
 #>
 [CmdletBinding()]
-param([switch]$Check, [switch]$CI)
+param([switch]$Check, [switch]$CI, [switch]$WithoutUv)
 
 $ErrorActionPreference = 'Stop'
 # Windows PowerShell 5.1 compatible -- that is what a fresh Windows box has.
@@ -577,10 +584,19 @@ function Install-Sqlite {
   Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
 }
 
-# --- 5. MSVC (reported, never installed) -------------------------------------
-# Only aion/uv needs this, and only to run scripts/build-libuv.lisp. Kept in sync with
-# find-msvc in that script: same vswhere path, same query.
+# --- 5. MSVC (required for libuv, never installed) -----------------------------
+# scripts/build-libuv.lisp compiles libuv with it. Kept in sync with find-msvc in
+# scripts/msvc.lisp: OURANOS_MSVC_PATH first, then the same vswhere path and query. Without
+# the override here, setup refused on a machine where build-libuv.lisp would have found MSVC.
 function Find-Msvc {
+  if ($env:OURANOS_MSVC_PATH) {
+    $p = $env:OURANOS_MSVC_PATH.Trim().Trim('"')
+    if ($p -and (Test-Path (Join-Path $p 'VC\Auxiliary\Build\vcvarsall.bat'))) {
+      return [pscustomobject]@{ Path = $p; Name = "OURANOS_MSVC_PATH ($p)" }
+    }
+    # build-libuv.lisp refuses such a path rather than falling back, so this does too.
+    return $null
+  }
   $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
   if (-not (Test-Path $vswhere)) { return $null }
   # -products * is load-bearing: without it vswhere ignores Build Tools installs and
@@ -600,6 +616,35 @@ function Find-Msvc {
 }
 
 $MsvcInstallHint = 'winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"'
+
+# What to print when MSVC is missing: what to install, the command to run next, and how to
+# set up without libuv. One copy, for the -Check report and for the refusal before installing.
+function Write-MsvcMissing {
+  Write-Host '  MISSING MSVC C++ Build Tools (setup builds libuv with them; hyperion/server-uv, the default HTTP server, runs on libuv)' -ForegroundColor Red
+  Write-Host "       fix: $MsvcInstallHint" -ForegroundColor DarkGray
+  Write-Host '            then run .\scripts\setup.ps1 again' -ForegroundColor DarkGray
+  Write-Host '            or, to set up without libuv: .\scripts\setup.ps1 -WithoutUv' -ForegroundColor DarkGray
+}
+
+# --- 6. libuv (#504) -----------------------------------------------------------
+# The file scripts/build-libuv.lisp writes on Windows, and the release its BUILT-FROM stamp
+# names. build-libuv.lisp rebuilds when the stamp does not name libuv.pin's release (#977).
+$LibuvDll = Join-Path $Root 'vendor\libuv\lib\libuv.dll'
+function Get-PinVersion($file) {
+  if (-not (Test-Path $file)) { return $null }
+  foreach ($line in Get-Content $file) { if ($line -match '^\s*version\s+(\S+)') { return $matches[1] } }
+  return $null
+}
+
+function Build-Libuv {
+  Info 'building libuv from libuv.pin (scripts/build-libuv.lisp)'
+  & sbcl --dynamic-space-size 4096 --script (Join-Path $Here 'build-libuv.lisp')
+  if ($LASTEXITCODE -ne 0) {
+    Die ("building libuv failed (sbcl exit $LASTEXITCODE) -- see the output above.`n" +
+      "       hyperion/server-uv, the default HTTP server, cannot start without it.`n" +
+      "       Fix what it names and run .\scripts\setup.ps1 again, or skip libuv with .\scripts\setup.ps1 -WithoutUv")
+  }
+}
 
 # --- report / act -----------------------------------------------------------
 Info "Ouranos setup on Windows ($Arch) -- pins: SBCL $SbclVersion, QL dist $QlDist, SQLite $SqliteVersion, Coalton $CoaltonRef"
@@ -701,15 +746,24 @@ if ($Check) {
     $script:missing++
   }
 
-  # OPT, not MISSING: this one does not fail provisioning. Everything except aion/uv builds
-  # and runs without a C compiler, which is the whole point of keeping native code off the
-  # load path -- a Windows user typing `quickload` must never hit a C build.
-  $msvc = Find-Msvc
-  if ($msvc) { Pass "MSVC C++ tools -- $($msvc.Name)   (aion/uv only)" }
-  else {
-    Write-Host '  OPT     MSVC C++ tools not found -- needed ONLY to build libuv for aion/uv' -ForegroundColor DarkGray
-    Write-Host "       fix: $MsvcInstallHint" -ForegroundColor DarkGray
-    Write-Host '            then: sbcl --script scripts/build-libuv.lisp' -ForegroundColor DarkGray
+  # MSVC and libuv count as missing unless -WithoutUv: hyperion/server-uv, the default HTTP
+  # server, runs on libuv (#504). They used to be reported as optional, when only aion/uv
+  # needed them. Loading the tree still needs no compiler; only building libuv does.
+  if ($WithoutUv) {
+    Write-Host '  SKIP    libuv and MSVC (-WithoutUv). hyperion/server-uv will not start until libuv is built:' -ForegroundColor DarkGray
+    Write-Host "            .\scripts\setup.ps1   (or: sbcl --script scripts/build-libuv.lisp, from $Root)" -ForegroundColor DarkGray
+  } else {
+    $msvc = Find-Msvc
+    if ($msvc) { Pass "MSVC C++ tools -- $($msvc.Name)   (builds libuv)" }
+    else { Write-MsvcMissing; $script:missing++ }
+    $pinV = Get-PinVersion (Join-Path $Root 'libuv.pin')
+    $builtV = Get-PinVersion (Join-Path $Root 'vendor\libuv\BUILT-FROM')
+    if (-not (Test-Path $LibuvDll)) {
+      Miss 'libuv (hyperion/server-uv, the default HTTP server, runs on it)' '.\scripts\setup.ps1   (builds it into vendor\libuv)'
+    } elseif ($builtV -ne $pinV) {
+      $named = if ($builtV) { $builtV } else { 'nothing' }
+      Miss "libuv in vendor\libuv is not a build of libuv.pin's $pinV (its BUILT-FROM names '$named')" '.\scripts\setup.ps1   (rebuilds it)'
+    } else { Pass "libuv $pinV at $LibuvDll" }
   }
 
   if ($missing -gt 0) { Write-Host 'missing prerequisites (see above).' -ForegroundColor Red; exit 1 }
@@ -718,6 +772,12 @@ if ($Check) {
 }
 
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Die 'git is required (winget install --id Git.Git)' }
+# Before anything is installed, so a machine without MSVC learns it now rather than after the
+# SBCL, Quicklisp and Coalton installs.
+if (-not $WithoutUv -and -not (Find-Msvc)) {
+  Write-MsvcMissing
+  Die 'install the above first, then re-run.'
+}
 
 $v = Get-SbclVersion
 if (-not $v) { Install-Sbcl }
@@ -729,5 +789,6 @@ Set-QlDist
 Install-Coalton
 Install-CoaltonDeps
 Install-Sqlite
+if ($WithoutUv) { Note 'libuv not built (-WithoutUv)' } else { Build-Libuv }
 
 Info "provisioned. Next: sbcl --dynamic-space-size 4096 --script bootstrap.lisp   (from $Root)"
