@@ -12,6 +12,12 @@
 ;;;; later) attach high-quality progress reporting to any client in one line.
 ;;;;
 ;;;; The event vocabulary the actor loop emits:
+;;;;   (:type :turn-started :agent .. :model .. :provider .. :conversation .. :max-steps N)
+;;;;                        -- a turn of AGENT begins, before its first :DELIBERATING; also when
+;;;;                           CONTINUE-TURN resumes a held turn. MODEL is the provider's model
+;;;;                           id (PRAXEON/LLM:MODEL-OF) or NIL, PROVIDER the provider's class
+;;;;                           name in lower case, or NIL when the agent has none. No content
+;;;;                           (praxeon/trace, #1225)
 ;;;;   (:type :deliberating :step N)                       -- about to call the model
 ;;;;   (:type :tool-call    :id .. :name .. :arguments .. :source .. :principal .. :agent ..
 ;;;;                        :conversation ..)

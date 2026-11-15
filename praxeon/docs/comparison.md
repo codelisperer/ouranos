@@ -27,7 +27,7 @@ graph workflows, production tooling) and **[DeepAgents](https://github.com/langc
 | **MCP** | consumes MCP servers' tools over Streamable HTTP (`praxeon/mcp`, #527); resources, prompts and stdio planned | authors MCP servers | consumes MCP tools |
 | **Filesystem for agents** | — | — | pluggable local/sandboxed/remote |
 | **Evals** | **—** | built in | — |
-| **Observability** | `aion/log` structured fields only | tracing/metrics as a product surface | LangSmith-adjacent |
+| **Observability** | `aion/log` structured fields, and OpenTelemetry spans for every turn, model call and tool call (`praxeon/trace`, #1225): token counts, durations and outcomes, no content unless asked for, exported over OTLP/HTTP to any collector | tracing/metrics as a product surface | LangSmith-adjacent |
 | **Cost / rate / auth ceiling** | **per-session cost + call cap, Ed25519-signed grants, metering** (pre-publication issue 172), **capability-scoped tool assembly** (#90); rate limiting still open, and each agent has to opt in to the injection mitigation | — | — |
 | **Streaming to the browser** | polling; SSE blocked on pre-publication issue 117 M2 | streaming | streaming |
 | **Typed core** | **Coalton, Hindley–Milner** | TypeScript types | Python type hints |

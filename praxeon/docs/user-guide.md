@@ -1365,7 +1365,138 @@ sent to Google. The OpenAI provider reads `PRAXEON_OPENAI_API_KEY`, and then
 for: a Google key put there would be sent to OpenAI. It still works, logs a warning once, and
 will be removed in a later release; move its value to `PRAXEON_OPENAI_API_KEY`.
 
-## 15. Run the tests
+## 15. Send traces to a collector (`praxeon/trace`, #1225)
+
+`praxeon/trace` records each turn as OpenTelemetry spans and sends them to a collector, so you
+can see which model calls and tool calls a turn made, in what order, how long each took and how
+many tokens each used. It is opt-in: load the system and wrap the code that runs turns.
+
+```lisp
+(ql:quickload :praxeon/trace)
+
+(defparameter *exporter* (praxeon/trace:make-otlp-exporter-from-env))
+(defparameter *tracer* (praxeon/trace:make-tracer :exporter *exporter*))
+
+(praxeon/trace:with-tracing (*tracer*)
+  (praxeon/actor:run-turn agent "What is on my calendar tomorrow?"))
+
+;; when the app stops, so the last batch is sent
+(praxeon/trace:shutdown-exporter *exporter*)
+```
+
+`with-tracing` adds an observer for the tracer on top of any observer already bound, so a
+progress display keeps working. An app that binds its own observer for every turn can compose
+the tracer's into it with `(praxeon/trace:tracer-observer *tracer* its-observer)` instead.
+
+### What a turn looks like
+
+Each turn is one span tree:
+
+| Span | Kind | What it records |
+|---|---|---|
+| `invoke_agent <agent>` | internal | the agent's name, the model and provider, the conversation id, how the turn ended (`praxeon.turn.outcome`: answered, cancelled, held, abandoned, failed or incomplete), and the `aion/log` correlation id |
+| `chat <model>` | client | one per model call: the step, the input, output and cache token counts the provider reported, and the finish reason |
+| `execute_tool <means>` | internal | one per tool call: the means' name, the call id, the outcome and the duration in milliseconds; status ERROR when the means reported an error |
+
+A sub-agent called through `register-agent-as-means` appears as a child `invoke_agent` span of
+the `execute_tool` span that delegated to it, with its own `chat` and `execute_tool` children.
+
+Attribute names follow the OpenTelemetry GenAI semantic conventions (`gen_ai.operation.name`,
+`gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.tool.name` and the rest). Those
+conventions are still marked as in development, so every name is defined once, in
+`praxeon/src/trace/attributes.lisp`; praxeon's own additions start with `praxeon.`.
+
+**Joining logs and traces.** The turn span records the `aion/log` context fields named in
+`praxeon/trace:*correlation-keys*` (`:request-id`, `:job-id`, `:conversation-id`), as
+`praxeon.log.request_id` and so on. Behind `hyperion/server`, every request has a request id, so
+the log lines of a request and its trace carry the same id.
+
+**The finish reason is worked out from the events**, because no event carries the provider's
+stop reason: a model call followed by tool calls is `tool_calls`, one followed by the answer is
+`stop`, one cut off at the output limit is `length`, and one a cancel stopped is `cancelled`.
+
+**A turn that signals an error** out of `with-tracing` ends with status ERROR, outcome `failed`
+and the condition's type in `error.type`, never its report.
+
+**Threads.** Spans are kept per thread. A turn that runs on another thread, such as each
+parallel step of a `praxeon/workflow`, starts a trace of its own rather than joining its
+caller's.
+
+### No content unless you ask for it
+
+Spans carry names, ids, counts and durations. They do not carry the prompt, a tool call's
+arguments, a tool result or the answer, for the same reason logs do not (`docs/logging.md`):
+traces are shipped to third-party services and kept for a long time. To record content, for
+example while debugging locally, make the tracer with `:capture-content t`. That adds
+`gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, `gen_ai.output.messages` and the task a
+coordinator delegated. A private agent's turn (`make-agent :private t`) binds
+`praxeon/event:*withhold-content*`, and then no content is recorded whatever the tracer says.
+
+### Choosing a collector
+
+`make-otlp-exporter` sends OTLP over HTTP with the JSON encoding, to the full URL of a
+collector's `/v1/traces`. Anything that accepts OTLP/HTTP works: the OpenTelemetry Collector,
+Jaeger (1.35 or later, with OTLP enabled) and Langfuse among them. The default port for OTLP/HTTP
+is 4318.
+
+```lisp
+;; an OpenTelemetry Collector or Jaeger on this machine
+(praxeon/trace:make-otlp-exporter :endpoint "http://localhost:4318/v1/traces")
+
+;; a collector that wants an API key in a header
+(praxeon/trace:make-otlp-exporter
+ :endpoint "https://collector.example.com/v1/traces"
+ :headers '(("authorization" . "Basic <base64 of public-key:secret-key>")))
+```
+
+`make-otlp-exporter-from-env` reads the standard OpenTelemetry variables instead:
+
+```sh
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318      # /v1/traces is added
+# or OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4318/v1/traces, used as given
+OTEL_EXPORTER_OTLP_HEADERS=authorization=Basic%20...    # comma-separated key=value, percent-encoded
+OTEL_SERVICE_NAME=my-app                                # service.name; default praxeon
+```
+
+For Langfuse, the endpoint is the Langfuse host followed by `/api/public/otel/v1/traces`, and the
+header is `Authorization: Basic` with the base64 of `public-key:secret-key`, as Langfuse's
+OpenTelemetry documentation describes.
+
+### What the exporter does with a slow or failing collector
+
+`export-spans` only queues a finished turn's spans; it never waits for the network. A thread of
+the exporter's own, started the first time it is used, sends a batch every `:interval` seconds
+(5 by default) or as soon as `:batch-size` spans (512) are waiting. Each request is limited to
+`:timeout` seconds (10). A batch that fails, because the collector cannot be reached or answers
+with a status other than 2xx, is dropped, not retried, and logged at warn through `aion/log`:
+
+```
+praxeon/trace: export failed spans=5 failed-batches=1 status=500 condition=AION/HTTP-CLIENT::HTTP-ERROR
+```
+
+The line carries counts and the condition's type, never span content. The turn is not delayed
+and does not fail. When `:max-queue` spans (2048) are already waiting, new ones are dropped and
+logged with a count. `otlp-exporter-sent-spans`, `otlp-exporter-failed-batches`,
+`otlp-exporter-failed-spans` and `otlp-exporter-dropped-spans` read the counts.
+`flush-exporter` waits for the queue to be sent, and `shutdown-exporter` sends it and stops the
+thread.
+
+### In the REPL and in tests
+
+`make-tracer` without `:exporter` keeps spans in the image, in a `memory-exporter`:
+
+```lisp
+(let ((tracer (praxeon/trace:make-tracer)))
+  (praxeon/trace:with-tracing (tracer)
+    (praxeon/actor:run-turn agent "hello"))
+  (mapcar #'praxeon/trace:span-name
+          (praxeon/trace:exported-spans (praxeon/trace:tracer-exporter tracer))))
+;; => ("chat claude-..." "invoke_agent elise")
+```
+
+`praxeon/trace:otlp-json` turns a list of spans into the body the exporter would send.
+
+## 16. Run the tests
 
 Network-free (uses a scripted provider, no API key needed):
 

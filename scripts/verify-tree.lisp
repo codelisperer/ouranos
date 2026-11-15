@@ -183,6 +183,8 @@
     :praxeon/chat-ui
     ;; The MCP client and its OAuth sign-in (#527).
     :praxeon/mcp :aion/oauth :hyperion/oauth
+    ;; OpenTelemetry spans from the event stream (#1225).
+    :praxeon/trace
     ;; The job scheduler and its database store (#689).
     :aion/schedule :mnemosyne/jobs
     ;; Test support: one migrated SQLite template per run, a copy per test (#1047). Its
@@ -246,6 +248,9 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
     ;; The MCP client (#527), registered in the commit that adds it. Its MCP servers run on
     ;; 127.0.0.1 in the test image, so it runs on every leg with no network.
     :praxeon/mcp/tests
+    ;; OpenTelemetry spans (#1225), registered in the commit that adds them. Its collector runs
+    ;; on 127.0.0.1 in the test image, so it runs on every leg with no network.
+    :praxeon/trace/tests
     ;; Dev sidecars (#700). It was left out of the pull request's first commit, and its first CI run
     ;; reported the same total as main; registered here so that it runs. Each sidecar is a child SBCL,
     ;; so it needs nothing installed.

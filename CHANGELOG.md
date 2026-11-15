@@ -14,6 +14,12 @@ its tag.
 
 ### An app may have to act
 
+- **Every turn now begins with a `:turn-started` event** (#1225), emitted by
+  `praxeon/actor:run-turn` and `continue-turn` before the first `:deliberating`. It carries
+  `:agent`, `:model`, `:provider`, `:conversation` and `:max-steps`, and no content. An observer
+  bound with `praxeon/event:with-observer` receives it; one that ignores event types it does not
+  know, as `praxeon/event` asks, needs no change. **An app test that compares a turn's whole event
+  list with a fixed list must add `:turn-started` at the front.**
 - **A call to a tool the agent does not have is answered as not run, and the turn goes on**
   (#1196). `praxeon/actor:run-turn` used to let `act` signal `means-failure` ("no such means
   registered") for such a call, which failed the turn unless the app handled it. Now the model is
@@ -1561,6 +1567,22 @@ its tag.
 
 ### Added
 
+- **`praxeon/trace`: OpenTelemetry spans for every turn, model call and tool call** (#1225). A new
+  opt-in system. `praxeon/trace:with-tracing` around code that runs turns records one
+  `invoke_agent` span per turn, a `chat` span per model call (model, token counts, finish reason)
+  and an `execute_tool` span per tool call (means name, outcome, duration); a sub-agent called
+  through `register-agent-as-means` is a child of the tool call that delegated to it. Attribute
+  names follow the OpenTelemetry GenAI semantic conventions and are defined in
+  `praxeon/src/trace/attributes.lisp`. The turn span records the `aion/log` correlation id
+  (`praxeon/trace:*correlation-keys*`, `:request-id` first). Spans carry no prompt, tool argument,
+  tool result or answer unless the tracer is made with `make-tracer :capture-content t`, and
+  `praxeon/event:*withhold-content*` (a private agent) overrides that. Exporters:
+  `make-memory-exporter` for tests and the REPL, and `make-otlp-exporter` /
+  `make-otlp-exporter-from-env`, which send OTLP/HTTP JSON to a collector's `/v1/traces` in
+  batches from a thread of their own. A failed batch is logged at warn with counts, never
+  content, and never delays or fails a turn. `praxeon/docs/user-guide.md` section 15 describes
+  sending traces to an OpenTelemetry Collector, Jaeger or Langfuse; its "Run the tests" section
+  is now 16.
 - **`praxeon/image:image-request-failed` answers `aion/retry:transience` and
   `aion/retry:retry-after`** (#79), so an app can run `generate-image` under
   `aion/retry:with-retry` and have the service's Retry-After honoured. A 429 is `:transient`, a
