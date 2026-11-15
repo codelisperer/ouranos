@@ -194,8 +194,9 @@
     :praxeon/elise :praxeon/chat-rbt
     :hyperion/examples/active-search :hyperion/examples/active-search-db
     :hyperion/examples/coalton-repl
-    ;; The window desktop and the Ouranos IDE example built on it (#1218).
-    :hyperion/desktop-ui :praxeon/examples/ouranos-ide
+    ;; The window desktop the Ouranos IDE example is built on (#1218). The example itself is
+    ;; in +UV-SYSTEMS+, because it is served by hyperion/server-uv.
+    :hyperion/desktop-ui
     ;; The spike of a Coalton language backend for the IDE's editor (#1218).
     :praxeon/examples/ouranos-ide/runtime
     ;; The mnemosyne example was absent from this list while three hyperion examples were
@@ -218,9 +219,9 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
     ;; The desktop Coalton REPL example's answers to (exit), a long evaluation and a cancel
     ;; (#355), registered in the commit that adds the suite.
     :hyperion/examples/coalton-repl/tests
-    ;; The window desktop and the Ouranos IDE example (#1218), registered in the commit that
-    ;; adds them. The example's suite makes its own SQLite file and needs no Postgres.
-    :hyperion/desktop-ui/tests :praxeon/examples/ouranos-ide/tests
+    ;; The window desktop (#1218), registered in the commit that adds it. The Ouranos IDE
+    ;; example's suite is in +UV-TEST-SYSTEMS+, because the example is served by server-uv.
+    :hyperion/desktop-ui/tests
     ;; The runtime client spike (#1218), registered in the commit that adds it. Its suite
     ;; starts a child SBCL that loads Coalton's mine/runtime, and kills it.
     :praxeon/examples/ouranos-ide/runtime/tests
@@ -341,7 +342,11 @@ decision someone made, not an accident -- which is the difference that matters."
     ;; The scheduler's libuv driver (#689).
     :aion/schedule/uv
     ;; Watching a folder for settled files, over aion/uv's watch and timers (#996).
-    :aion/folder-watch)
+    :aion/folder-watch
+    ;; The Ouranos IDE example (#1218). It moved here from +SYSTEMS+ when it changed from
+    ;; Hunchentoot to hyperion/server-uv, which it depends on, so it cannot load without libuv.
+    ;; hyperion/desktop-ui, which it is built on, declares no server and stays in +SYSTEMS+.
+    :praxeon/examples/ouranos-ide)
   "The libuv-backed systems. Absent from +SYSTEMS+ because they need
 scripts/build-libuv.lisp to have run first, so on a machine without it their absence is
 not evidence of anything.")
@@ -350,7 +355,12 @@ not evidence of anything.")
   '(:aion/uv/tests :aion/uv/net/tests :aion/uv/process/tests
     :hyperion/server-uv/tests :hyperion/clack-handler-uv/tests
     :aion/schedule/uv/tests
-    :aion/folder-watch/tests)
+    :aion/folder-watch/tests
+    ;; The Ouranos IDE example's suite (#1218), moved from +TEST-SYSTEMS+ with the example: it
+    ;; starts the IDE on server-uv. It makes its own SQLite file and needs no Postgres. The
+    ;; runtime client's suite, praxeon/examples/ouranos-ide/runtime/tests, needs no libuv and
+    ;; stays there.
+    :praxeon/examples/ouranos-ide/tests)
   "Their suites -- real checks over a real libuv, verified by nothing automatic until CI.")
 
 (defparameter +tls-systems+ '(:aion/tls)

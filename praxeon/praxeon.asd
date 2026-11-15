@@ -310,7 +310,9 @@
 ;;; The Ouranos IDE proof of concept (#1218): a desktop of windows in one image, with a
 ;;; Coalton REPL, a clock, a chart from SQLite, an agent and an inspector. It is in praxeon
 ;;; because it needs praxeon, the rightmost framework it uses. It is an application, so it
-;;; declares its HTTP server; Hunchentoot, because it is pure CL and loads on every platform.
+;;; declares its HTTP server: hyperion/server-uv, hyperion's own, which needs libuv built once
+;;; with scripts/build-libuv.lisp. START gives it a pool of handler threads, because each open
+;;; page holds one for its GET /events stream.
 (defsystem "praxeon/examples/ouranos-ide"
   :description "Example: the Ouranos IDE proof of concept, a desktop of live windows in one SBCL image (#1218)."
   :author "Bob <eternal.recursion@proton.me>"
@@ -321,7 +323,8 @@
                "cons/coalton-repl"                  ; the Coalton REPL engine
                "mnemosyne"                          ; the chart's SQLite query
                "praxeon/examples/ouranos-ide/runtime" ; the editor's Coalton runtime client
-               "spinneret" "clack-handler-hunchentoot")
+               "hyperion/server-uv"                 ; the HTTP server START uses
+               "spinneret")
   ;; editor/ holds the editor window's script bundle, which editor/build.sh builds once with
   ;; npm and esbuild and which is committed, so loading or running this needs no Node.
   :components ((:module "examples/ouranos-ide"
@@ -342,7 +345,8 @@
                "ironclad"                     ; the SHA-256 of the committed editor bundle
                "hyperion/assets"              ; the browser test's page loads the vendored htmx
                "hyperion/assets/tests"        ; its headless browser helpers
-               "clack-handler-hunchentoot"    ; the browser test's server
+               "hyperion/server-uv"           ; the server the tests start
+               "clack-handler-hunchentoot"    ; the event stream test run on a Clack backend too
                "spinneret"                    ; it escapes what its server sends back
                (:require "sb-bsd-sockets"))   ; the test that reads GET /events over a socket
   :components ((:module "examples/ouranos-ide"

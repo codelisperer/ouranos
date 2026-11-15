@@ -1650,6 +1650,17 @@ its tag.
   describes an evaluation. `stop` and the new `stop-runtime` kill the child; `runtime-ready-p`
   says whether it runs. `praxeon/examples/ouranos-ide` now depends on
   `praxeon/examples/ouranos-ide/runtime`, whose client gained `runtime-busy-p`.
+- **The Ouranos IDE example is served by `hyperion/server-uv`** (#1218). The system
+  `praxeon/examples/ouranos-ide` depends on `hyperion/server-uv` in place of
+  `clack-handler-hunchentoot`, so loading it needs libuv: run `sbcl --script
+  scripts/build-libuv.lisp` once from the root of the tree, or install libuv on the system.
+  `start` and `native-window` no longer pass `:server :hunchentoot`; they take a `:server`
+  keyword whose default is `hyperion/server:default-server`, so `HYPERION_SERVER` still chooses
+  the backend, and a `:workers` keyword whose default is the new `*workers*`, 16. Each open page
+  holds one handler thread for its `GET /events` stream, and with hyperion/server's default of 2
+  for `:uv`, two open pages left every other request waiting. `:workers` is not passed to
+  Hunchentoot. `stop` now ends the event streams before it stops the server, so each stream
+  finishes as a complete response instead of failing to write.
 - **`praxeon/image:image-request-failed` answers `aion/retry:transience` and
   `aion/retry:retry-after`** (#79), so an app can run `generate-image` under
   `aion/retry:with-retry` and have the service's Retry-After honoured. A 429 is `:transient`, a

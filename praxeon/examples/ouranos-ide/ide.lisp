@@ -19,6 +19,12 @@
 ;;;;
 ;;;; It lives in praxeon because it needs praxeon, the rightmost framework it uses.
 ;;;;
+;;;; It is served by hyperion/server-uv, hyperion's own HTTP server, which runs on libuv. Build
+;;;; libuv once, from the root of the tree:
+;;;;   sbcl --script scripts/build-libuv.lisp
+;;;; A libuv installed on the system also works. To serve it with another backend, load that
+;;;; backend's Clack handler and pass its name to START, e.g. :server :hunchentoot.
+;;;;
 ;;;; Run it from a REPL:
 ;;;;   (asdf:load-system :praxeon/examples/ouranos-ide)
 ;;;;   (praxeon/examples/ouranos-ide:start)          ; then open http://127.0.0.1:27190/
@@ -47,7 +53,8 @@
                     (#:rt #:praxeon/examples/ouranos-ide/runtime)
                     (#:static #:hyperion/static)
                     (#:spin #:spinneret))
-  (:export #:*desktop* #:*port* #:make-app #:build-desktop #:start #:stop #:native-window
+  (:export #:*desktop* #:*port* #:*workers*
+           #:make-app #:build-desktop #:start #:stop #:native-window
            #:stub-provider
            #:render-repl #:repl-eval #:repl-cancel #:render-clock #:render-chart
            #:render-agent #:agent-say #:agent-cancel
@@ -598,9 +605,29 @@ every request, set the log level to :trace."
       (let ((hlog:*quiet-paths* every-path))
         (funcall logged env)))))
 
-(defun start (&key (port *port*) provider)
+(defparameter *workers* 16
+  "How many threads run the IDE's request handlers when it is served by hyperion/server-uv.
+
+Each page that is open holds one of them for as long as it is open, because its GET /events
+stream is written by the thread that ran it. A POST or GET from any page needs a free one as
+well. hyperion/server's default for :uv is 2, so two open pages would hold both and every
+other request would wait in the pool's queue until a page closed. 16 leaves room for many
+pages and their requests. With more pages open than this, the requests past it wait. The other
+backends are given nothing: Hunchentoot runs each connection on a thread of its own.")
+
+(defun %workers-for (server workers)
+  "WORKERS for SERVER, or NIL for Hunchentoot, which would ignore them with a warning."
+  (if (eq server :hunchentoot) nil workers))
+
+(defun start (&key (port *port*) provider (server (srv:default-server)) (workers *workers*))
   "Build the desktop and serve it on 127.0.0.1:PORT. Returns the server's handler. Open
 http://127.0.0.1:PORT/ in a browser to use it. PROVIDER is passed to BUILD-DESKTOP.
+
+SERVER is the backend, passed to HYPERION/SERVER:START. Its default is
+HYPERION/SERVER:DEFAULT-SERVER, which is hyperion/server-uv when libuv loads, and which the
+environment variable HYPERION_SERVER overrides. The example depends on hyperion/server-uv; to
+use another backend, load its Clack handler and pass its name, e.g. :server :hunchentoot.
+WORKERS is how many handler threads :uv gets; see *WORKERS*.
 
 The server refuses a request whose Host is not this address, and a POST that did not come
 from its own page, because the REPL window evaluates what it is sent.
@@ -609,27 +636,34 @@ Requests that succeed are not printed in the terminal; see %LOGGED-QUIETLY."
   (when *handler* (stop))
   (build-desktop :provider provider)
   (setf *handler* (srv:start (%logged-quietly (make-app))
-                             :server :hunchentoot :port port :host "127.0.0.1"
+                             :server server :port port :host "127.0.0.1"
+                             :workers (%workers-for server workers)
                              :request-guard :same-origin :log nil)))
 
 (defun stop ()
-  "Stop the server START started, end the pages' event streams and the desktop's timer,
-delete the chart's database file, and kill the editor's runtime."
+  "End the pages' event streams and the desktop's timer, stop the server START started,
+delete the chart's database file, and kill the editor's runtime.
+
+The streams are ended first, so each one finishes as a complete response and gives its
+handler thread back before the server stops. Stopping the server first closed their
+connections under them, and on :uv each stream then failed to write and was logged as an
+error."
+  (ui:stop-desktop *desktop*)
   (when *handler*
     (srv:stop *handler*)
     (setf *handler* nil))
-  (ui:stop-desktop *desktop*)
   (delete-database)
   (stop-runtime)
   t)
 
-(defun native-window (&key provider)
+(defun native-window (&key provider (server (srv:default-server)) (workers *workers*))
   "Build the desktop and show it in a native window through hyperion/desktop:run-app, which
-blocks until the window is closed. The tests do not call this, because it opens a window."
+blocks until the window is closed. SERVER and WORKERS are as for START. The tests do not call
+this, because it opens a window."
   (build-desktop :provider provider)
   (unwind-protect
        (desk:run-app (make-app) :title "Ouranos IDE" :width 1280 :height 800
-                                :server :hunchentoot)
+                                :server server :workers (%workers-for server workers))
     (ui:stop-desktop *desktop*)
     (delete-database)
     (stop-runtime)))

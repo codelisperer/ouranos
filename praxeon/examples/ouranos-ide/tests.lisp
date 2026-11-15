@@ -1,8 +1,10 @@
 ;;;; tests.lisp --- the Ouranos IDE example, driven through its routes (#1218).
 ;;;;
 ;;;; No window and no browser are opened. Most tests call the Clack application directly, with
-;;;; the request body already cached. Two start a real server on 127.0.0.1 and stop it: one
-;;;; makes requests with dexador, and the other reads GET /events over a socket of its own.
+;;;; the request body already cached. Some start a real server on 127.0.0.1 and stop it: they
+;;;; make requests with dexador or over a socket of their own, and read GET /events over a
+;;;; socket. The server is hyperion/server-uv, which START uses by default. The event stream
+;;;; test also runs on Hunchentoot, so the desktop's stream is checked on a Clack backend too.
 ;;;; The agent uses the stub provider, or a provider defined here that waits until the test
 ;;;; lets it go on, so no model is called and no key is read.
 ;;;;
@@ -17,6 +19,7 @@
                     (#:jobs #:hyperion/desktop-ui/jobs)
                     (#:http #:hyperion/http)
                     (#:srv #:hyperion/server)
+                    (#:uv #:hyperion/server-uv)
                     (#:ports #:hyperion/test-ports)
                     (#:llm #:praxeon/llm)
                     (#:repl #:cons/coalton-repl)
@@ -561,6 +564,47 @@ on every render and holds no copy."
 
 ;;; --- over HTTP ---------------------------------------------------------------------------
 
+(defun %raw-status (port host method path &key headers body (timeout 10))
+  "Send one request to 127.0.0.1:PORT over a socket of its own, with HOST as its Host header,
+HEADERS (an alist) and BODY (a string), and return the status of the answer, or NIL when no
+status line arrived within TIMEOUT seconds. The answer is read on a thread so that a request
+the server never answers cannot hold up the test, and the socket is closed afterwards."
+  (let* ((socket (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp))
+         (stream nil)
+         (reader nil))
+    (unwind-protect
+         (progn
+           (sb-bsd-sockets:socket-connect socket #(127 0 0 1) port)
+           (setf stream (sb-bsd-sockets:socket-make-stream socket :input t :output t
+                                                                  :external-format :utf-8
+                                                                  :buffering :full))
+           (format stream "~A ~A HTTP/1.1~C~CHost: ~A~C~CConnection: close~C~C"
+                   method path #\Return #\Newline host #\Return #\Newline #\Return #\Newline)
+           (loop for (name . value) in headers
+                 do (format stream "~A: ~A~C~C" name value #\Return #\Newline))
+           (when body
+             (format stream "Content-Length: ~D~C~C"
+                     (length (sb-ext:string-to-octets body :external-format :utf-8))
+                     #\Return #\Newline))
+           (format stream "~C~C" #\Return #\Newline)
+           (when body (write-string body stream))
+           (finish-output stream)
+           (setf reader
+                 ;; INTERRUPTS: a test thread, started from the test body, which has no
+                 ;; interrupt deferred.
+                 ;; THREAD-LIFETIME: scoped -- it reads one line, and the socket is closed below.
+                 (sb-thread:make-thread
+                  (lambda ()
+                    (ignore-errors
+                     (let ((line (read-line stream nil)))
+                       (and line (> (length line) 12)
+                            (parse-integer line :start 9 :end 12 :junk-allowed t)))))
+                  :name "ouranos-ide test request reader"))
+           (sb-thread:join-thread reader :default nil :timeout timeout))
+      (ignore-errors (sb-bsd-sockets:socket-close socket))
+      (when (and reader (sb-thread:thread-alive-p reader))
+        (ignore-errors (sb-thread:join-thread reader :default nil :timeout 2))))))
+
 (defun %status (thunk)
   "The status THUNK's request ended with, whether dexador returned or signalled."
   (handler-case (nth-value 1 (funcall thunk))
@@ -572,11 +616,15 @@ on every render and holds no copy."
            (handler (ports:call-with-port
                      (lambda (candidate)
                        (setf port candidate)
-                       (srv:start app :server :hunchentoot :port candidate :host "127.0.0.1"
+                       (srv:start app :port candidate :host "127.0.0.1"
                                       :request-guard :same-origin :log nil))))
            (base (format nil "http://127.0.0.1:~D" port)))
       (unwind-protect
            (progn
+             (is (uv:server-p handler) "the server is hyperion/server-uv, the default backend")
+             (is (eql 200 (%raw-status port (format nil "127.0.0.1:~D" port) "GET" "/")))
+             (is (eql 403 (%raw-status port (format nil "example.test:~D" port) "GET" "/"))
+                 "a request whose Host is not this server's is refused")
              (multiple-value-bind (body status) (dex:get (format nil "~A/" base) :keep-alive nil)
                (is (= 200 status))
                (is (search "Ouranos IDE" body)))
@@ -630,8 +678,11 @@ with `<end>' added once the server has ended the stream; the reading thread; and
     (setf stream (sb-bsd-sockets:socket-make-stream socket :input t :output t
                                                            :external-format :utf-8
                                                            :buffering :none))
-    (format stream "GET /events HTTP/1.1~C~CHost: 127.0.0.1:~D~C~CAccept: text/event-stream~C~C~C~C"
-            #\Return #\Newline port #\Return #\Newline #\Return #\Newline #\Return #\Newline)
+    ;; Connection: close, so that the server closes the connection when it ends the stream, and
+    ;; the reader sees the end on Hunchentoot, which otherwise keeps it open for a next request.
+    (format stream "GET /events HTTP/1.1~C~CHost: 127.0.0.1:~D~C~CAccept: text/event-stream~C~CConnection: close~C~C~C~C"
+            #\Return #\Newline port #\Return #\Newline #\Return #\Newline #\Return #\Newline
+            #\Return #\Newline)
     (finish-output stream)
     (values
      (lambda ()
@@ -693,7 +744,9 @@ its position, or NIL after TIMEOUT seconds."
     (is (null (hyperion/logging:quiet-path-p "/window/clock/body"))
         "the wrapper changed nothing for other apps in the image")))
 
-(test the-event-stream-pushes-changes-over-http-and-stop-ends-the-timer-and-the-streams
+(defun %check-event-stream (server)
+  "Start the IDE with SERVER, read GET /events over a socket, and check what it pushes and
+that STOP ends the timer and the stream."
   (%with-ide (app desktop)
     (let* ((ide:*desktop* desktop)
            (port nil)
@@ -701,7 +754,9 @@ its position, or NIL after TIMEOUT seconds."
       (unwind-protect
            (progn
              (ports:call-with-port
-              (lambda (candidate) (setf port candidate) (ide:start :port candidate)))
+              (lambda (candidate) (setf port candidate) (ide:start :port candidate :server server)))
+             (is (eq (eq server :uv) (uv:server-p ide::*handler*))
+                 "START used the backend it was given: ~S" server)
              (is (null (%desktop-threads desktop)) "no page is connected, so no timer thread")
              (multiple-value-setq (text reader socket) (%read-events port))
              (is (%await text "text/event-stream") "the answer is an event stream")
@@ -747,6 +802,74 @@ its position, or NIL after TIMEOUT seconds."
           (is (search "<end>" (funcall text)))
           (when (sb-thread:thread-alive-p reader) (sb-thread:terminate-thread reader)))
         (when socket (ignore-errors (sb-bsd-sockets:socket-close socket)))))))
+
+(test the-event-stream-pushes-changes-over-http-and-stop-ends-the-timer-and-the-streams
+  (is (eq :uv (srv:default-server)) "with no HYPERION_SERVER set, START's default is :uv")
+  (%check-event-stream :uv))
+
+(test the-event-stream-also-works-on-hunchentoot
+  ;; hyperion/desktop-ui writes GET /events as a function of a writer. server-uv calls that
+  ;; function itself; on a Clack backend hyperion/server adapts it onto Clack's responder.
+  (%check-event-stream :hunchentoot))
+
+;;; --- open event streams do not hold up other requests --------------------------------------
+;;;
+;;; Each page's GET /events is written by one of server-uv's handler threads for as long as
+;;; the page is open. With too few threads, a few open pages hold all of them and every other
+;;; request waits in the pool's queue. START gives :uv *WORKERS* threads for this reason.
+
+(defun %post-with-streams-open (streams &rest start-args)
+  "Start the IDE with START-ARGS, open STREAMS GET /events streams and wait until the server
+has started writing each one, then post an evaluation from the page's origin. Returns the
+status of the POST's answer, or NIL when none came within two seconds, and as a second value
+how many streams the server was writing when the POST was sent."
+  (%with-ide (app desktop)
+    (let ((ide:*desktop* desktop)
+          (port nil)
+          (readers '()))
+      (unwind-protect
+           (progn
+             (ports:call-with-port
+              (lambda (candidate)
+                (setf port candidate)
+                (apply #'ide:start :port candidate start-args)))
+             (dotimes (i streams)
+               (multiple-value-bind (text reader socket) (%read-events port)
+                 (push (list text reader socket) readers)))
+             ;; A stream the pool has not started yet sends nothing, so wait for the ones that
+             ;; can start, up to a deadline, and count what the server is writing.
+             (loop with deadline = (+ (get-internal-real-time) (* 3 internal-time-units-per-second))
+                   until (or (= streams (ui:desktop-subscribers desktop))
+                             (> (get-internal-real-time) deadline))
+                   do (sleep 0.02))
+             (let ((writing (ui:desktop-subscribers desktop))
+                   (base (format nil "http://127.0.0.1:~D" port)))
+               (values (%raw-status port (format nil "127.0.0.1:~D" port)
+                                    "POST" "/window/repl/action/eval"
+                                    :headers `(("Origin" . ,base)
+                                               ("Content-Type" . "application/x-www-form-urlencoded"))
+                                    :body "language=lisp&input=%28%2B+1+2%29"
+                                    :timeout 2)
+                       writing)))
+        (ide:stop)
+        (loop for (nil reader socket) in readers
+              do (ignore-errors (sb-bsd-sockets:socket-close socket))
+                 (unless (eq :returned (sb-thread:join-thread reader :default nil :timeout 5))
+                   (ignore-errors (sb-thread:terminate-thread reader))))
+        (when port (ports:await-released port))))))
+
+(test a-post-is-answered-while-three-pages-hold-event-streams-open
+  (multiple-value-bind (status writing) (%post-with-streams-open 3)
+    (is (= 3 writing) "the server was writing all three streams")
+    (is (eql 200 status) "the POST was answered within two seconds: ~S" status)))
+
+(test control-with-two-workers-three-open-streams-leave-a-post-unanswered
+  ;; The same requests with hyperion/server's default for :uv, two handler threads. Two of
+  ;; the streams hold both, and the third stream and the POST wait in the queue. Without this
+  ;; control the test above would pass on a server that never runs out of threads.
+  (multiple-value-bind (status writing) (%post-with-streams-open 3 :workers 2)
+    (is (= 2 writing) "two streams were written, and the third waited for a thread")
+    (is (null status) "the POST was not answered within two seconds: ~S" status)))
 
 ;;; --- the editor window: the committed bundle ---------------------------------------------
 
@@ -988,8 +1111,7 @@ window.addEventListener('load', function () {
                  (handler (ports:call-with-port
                            (lambda (p)
                              (prog1 (srv:start (%editor-test-app desktop)
-                                               :server :hunchentoot :port p :host "127.0.0.1"
-                                               :log nil)
+                                               :port p :host "127.0.0.1" :log nil)
                                (setf port p))))))
             (unwind-protect
                  (let ((dom (smoke::%run-browser browser (format nil "http://127.0.0.1:~D/" port))))
