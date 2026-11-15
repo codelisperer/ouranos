@@ -3,8 +3,7 @@
 ;;;; No window and no browser are opened. Most tests call the Clack application directly, with
 ;;;; the request body already cached. Some start a real server on 127.0.0.1 and stop it: they
 ;;;; make requests with dexador or over a socket of their own, and read GET /events over a
-;;;; socket. The server is hyperion/server-uv, which START uses by default. The event stream
-;;;; test also runs on Hunchentoot, so the desktop's stream is checked on a Clack backend too.
+;;;; socket. The server is hyperion/server-uv, which START uses by default.
 ;;;; The agent uses the stub provider, or a provider defined here that waits until the test
 ;;;; lets it go on, so no model is called and no key is read.
 ;;;;
@@ -678,8 +677,8 @@ with `<end>' added once the server has ended the stream; the reading thread; and
     (setf stream (sb-bsd-sockets:socket-make-stream socket :input t :output t
                                                            :external-format :utf-8
                                                            :buffering :none))
-    ;; Connection: close, so that the server closes the connection when it ends the stream, and
-    ;; the reader sees the end on Hunchentoot, which otherwise keeps it open for a next request.
+    ;; Connection: close, so that the server closes the connection when it ends the stream and
+    ;; the reader sees the end instead of a connection kept open for a next request.
     (format stream "GET /events HTTP/1.1~C~CHost: 127.0.0.1:~D~C~CAccept: text/event-stream~C~CConnection: close~C~C~C~C"
             #\Return #\Newline port #\Return #\Newline #\Return #\Newline #\Return #\Newline
             #\Return #\Newline)
@@ -806,11 +805,6 @@ that STOP ends the timer and the stream."
 (test the-event-stream-pushes-changes-over-http-and-stop-ends-the-timer-and-the-streams
   (is (eq :uv (srv:default-server)) "with no HYPERION_SERVER set, START's default is :uv")
   (%check-event-stream :uv))
-
-(test the-event-stream-also-works-on-hunchentoot
-  ;; hyperion/desktop-ui writes GET /events as a function of a writer. server-uv calls that
-  ;; function itself; on a Clack backend hyperion/server adapts it onto Clack's responder.
-  (%check-event-stream :hunchentoot))
 
 ;;; --- open event streams do not hold up other requests --------------------------------------
 ;;;

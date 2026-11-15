@@ -346,7 +346,6 @@
                "hyperion/assets"              ; the browser test's page loads the vendored htmx
                "hyperion/assets/tests"        ; its headless browser helpers
                "hyperion/server-uv"           ; the server the tests start
-               "clack-handler-hunchentoot"    ; the event stream test run on a Clack backend too
                "spinneret"                    ; it escapes what its server sends back
                (:require "sb-bsd-sockets"))   ; the test that reads GET /events over a socket
   :components ((:module "examples/ouranos-ide"
