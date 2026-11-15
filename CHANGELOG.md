@@ -1582,7 +1582,23 @@ its tag.
   batches from a thread of their own. A failed batch is logged at warn with counts, never
   content, and never delays or fails a turn. `praxeon/docs/user-guide.md` section 15 describes
   sending traces to an OpenTelemetry Collector, Jaeger or Langfuse; its "Run the tests" section
-  is now 16.
+  is now 17, after section 16 on `praxeon/eval`.
+- **`praxeon/eval`, an opt-in system that runs an agent against a fixed set of cases, grades
+  each run and fails a build when the results get worse** (#1224). `make-case` and
+  `load-dataset` (an s-expression file of cases) define the cases; each case runs `:repeats`
+  times on a fresh agent and is met when its pass rate reaches `:pass-rate`. The graders are
+  `exact-match`, `contains`, `matches-regex`, `trajectory` (the means the agent called, in order,
+  exactly or as a set, with optional argument checks, read from the `:tool-call` events through
+  an observer) and `rubric`, which asks a judge model for a score and its reasoning; `make-grader`
+  makes your own. The judge is configured as its own role, `PRAXEON_JUDGE_*`, through
+  `make-judge`. `run-eval` returns a report with each case's pass rate and each run's answer,
+  calls, grades, tokens (from the `:usage` events) and duration; `write-report` and
+  `load-report` save and read it as JSON, `summary` prints it, and a saved report given to
+  `run-eval` as `:baseline` marks the cases that regressed. `gate` decides whether a report
+  passes a build, with `:min-pass-rate`, `:max-regressions` and `:max-cases-not-met` (by default
+  every case met and none regressed). The grade type and the aggregation are Coalton, in
+  `praxeon/eval/core`. The example `praxeon/examples/eval` is an order-support agent and a
+  three-case dataset. `praxeon/eval` declares `cl-ppcre`, which dexador already loads.
 - **`praxeon/image:image-request-failed` answers `aion/retry:transience` and
   `aion/retry:retry-after`** (#79), so an app can run `generate-image` under
   `aion/retry:with-retry` and have the service's Retry-After honoured. A 429 is `:transient`, a

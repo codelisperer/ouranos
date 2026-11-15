@@ -1495,8 +1495,156 @@ thread.
 ```
 
 `praxeon/trace:otlp-json` turns a list of spans into the body the exporter would send.
+## 16. Evaluate an agent (`praxeon/eval`, #1224)
 
-## 16. Run the tests
+`praxeon/eval` runs an agent against a fixed set of cases, grades every run, and tells you
+whether the agent got worse than the last report you saved. It is opt-in: load
+`praxeon/eval`, which core `praxeon` does not.
+
+```lisp
+(asdf:load-system "praxeon/eval")
+```
+
+### A case
+
+A case is data: a name, the input (one user message, or a list of messages sent as successive
+turns of one conversation), a function that returns a fresh agent, and the graders. The
+function is called once per run, so runs never share history.
+
+```lisp
+(praxeon/eval:make-case "refund-delivered-order"
+  :input "My order A1 arrived broken. Please refund it."
+  :agent (lambda () (make-support-agent))
+  :repeats 3        ; run it three times
+  :pass-rate 2/3    ; the case is met when at least two of the three runs pass
+  :graders (list (praxeon/eval:trajectory '("lookup-order"
+                                             ("issue-refund" :arguments (("order_id" "A1")))))
+                 (praxeon/eval:contains "25.00")
+                 (praxeon/eval:rubric "The reply confirms the refund and states the amount.")))
+```
+
+A run passes when every grader passes. A case's pass rate is the fraction of its runs that
+passed; the case is met when that rate is at least `:pass-rate` (1 by default, so every run).
+`:max-steps` bounds each turn, as `run-turn`'s argument of that name does.
+
+### Graders
+
+Each grader returns a grade: passed or failed, a score from 0 to 1, and a reason that the
+report prints when the grade failed.
+
+| Grader | Passes when |
+|---|---|
+| `(exact-match text &key ignore-case)` | the answer equals `text`, both trimmed of whitespace |
+| `(contains text &key ignore-case)` | the answer contains `text` |
+| `(matches-regex pattern &key ignore-case)` | the Perl-syntax `pattern` (CL-PPCRE) matches somewhere in the answer; a pattern that does not parse is refused when the grader is made |
+| `(trajectory steps &key (order :in-order))` | the means the agent called match `steps` |
+| `(rubric text &key (threshold 0.7))` | a judge model scores the answer at least `threshold` against `text` |
+| `(make-grader name function)` | your `function` of a run returns a passing grade (`passing-grade`, `failing-grade`) |
+
+**Trajectory.** Each step is a means name, or `(name :arguments check)`, where `check` is a
+list of `(key value)` pairs the call's arguments must hold (keys are argument names, as
+strings) or a function of the arguments hash table. `:order` is `:in-order` (the steps happen
+in this order, with other calls allowed before, between and after them), `:exact` (the calls
+are exactly these steps, in this order) or `:set` (each step matches a different call, in any
+order, and other calls are allowed). The calls are read from the `:tool-call` and
+`:tool-result` events through an observer (`praxeon/event:*observer*`), so the actor loop is
+unchanged, and an observer you already have still receives every event. Only the calls of the
+case's own agent are counted, not those of a sub-agent it delegates to. A private agent's
+arguments are withheld from the event stream, so an argument check on one of its calls fails.
+
+**Rubric.** The judge is a provider of its own, with the role `:judge`, so it is configured
+apart from the agent it grades:
+
+```sh
+PRAXEON_JUDGE_IMPL=anthropic
+PRAXEON_JUDGE_MODEL=claude-opus-5-5
+# PRAXEON_JUDGE_API_KEY=... , PRAXEON_JUDGE_BASE_URL=... ; otherwise PRAXEON_LLM_* as for any role
+```
+
+The judge is asked for a structured answer, a score and its reasoning, through
+`praxeon/llm:generate-structured`. A judge that fails or returns a score outside 0 to 1 gives a
+failing grade that says so; it does not stop the run. To pass a provider yourself, give
+`run-eval` `:judge (praxeon/eval:make-judge :provider p)`.
+
+### A dataset file
+
+`load-dataset` reads cases from an s-expression file. Agents are named in the file and given
+as functions by the caller:
+
+```lisp
+((:name "status-of-shipped-order"
+  :agent "support"
+  :input "Where is my order B2?"
+  :graders ((:trajectory ("lookup-order") :order :exact)
+            (:regex "\\bshipped\\b" :ignore-case t)))
+ (:name "two-turn-question"
+  :agent "support"
+  :input ("Hi, I have a question about order C3." "How much did it cost?")
+  :graders ((:trajectory ("lookup-order") :order :set)
+            (:contains "120.00"))))
+```
+
+```lisp
+(praxeon/eval:load-dataset #p"evals/support.sexp"
+                           :agents (list (cons "support" (lambda () (make-support-agent)))))
+```
+
+The graders in a file are `(:exact text)`, `(:contains text)` and `(:regex pattern)`, each
+with `:ignore-case`; `(:trajectory steps)` with `:order`; and `(:rubric text)` with
+`:threshold`. The file is read with `aion/sexp:read-data`, which accepts plain data only and
+creates no symbol. A malformed case signals `praxeon/eval:invalid-case`, naming the case and
+what is wrong with it.
+
+### Running, reporting and gating
+
+```lisp
+(let ((report (praxeon/eval:run-eval cases :name "support"
+                                           :baseline #p"evals/baseline.json")))
+  (praxeon/eval:summary report)                           ; text, to *standard-output*
+  (praxeon/eval:write-report report #p"evals/latest.json")
+  (multiple-value-bind (ok reasons) (praxeon/eval:gate report :min-pass-rate 0.9)
+    (unless ok
+      (format *error-output* "~{~A~%~}" reasons)
+      (uiop:quit 1))))
+```
+
+The report holds each case's pass rate and whether it was met, and each run's answer, calls,
+grades, input and output tokens (summed from the `:usage` events, so absent when the provider
+reports none) and duration in milliseconds, with the same totals for the whole report. The
+total pass rate is the mean of the cases' pass rates. `write-report` writes it as JSON;
+`load-report` reads a saved report back for use as a baseline (`run-eval` also accepts the path
+directly). The JSON holds the answers and the call arguments, so it holds whatever the inputs
+led the agent to write; keep it where you would keep the agent's transcripts.
+
+With a baseline, each case is marked `regressed` (met in the baseline, not met now), `fixed`,
+`met`, `not met` or `new`, and cases the baseline had that the run did not are listed as
+removed. `gate` returns true or false and, as a second value, one sentence per threshold not
+met:
+
+- `:min-pass-rate` (default 0): the lowest total pass rate allowed;
+- `:max-regressions` (default 0): the most cases allowed to regress from the baseline;
+- `:max-cases-not-met` (default 0): the most cases allowed to miss their own `:pass-rate`.
+
+So by default a build fails when any case misses its required pass rate or any case regressed.
+
+The grade type and the aggregation (pass rates, which cases are met, regressions, the gate's
+decision) are Coalton, in `praxeon/eval/core`; running agents and calling the judge are the CL
+shell.
+
+### The example
+
+`praxeon/examples/eval` is an order-support agent with two means, and `support.sexp` beside it
+is a three-case dataset that uses every grader except `exact-match`:
+
+```lisp
+(asdf:load-system "praxeon/examples/eval")
+(praxeon/examples/eval:run-example)   ; calls the models PRAXEON_LLM_* and PRAXEON_JUDGE_* name
+```
+
+`praxeon/eval/tests` runs the same dataset with stub providers for the agent and the judge,
+and no network.
+
+## 17. Run the tests
 
 Network-free (uses a scripted provider, no API key needed):
 

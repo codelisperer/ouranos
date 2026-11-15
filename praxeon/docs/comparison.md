@@ -26,7 +26,7 @@ graph workflows, production tooling) and **[DeepAgents](https://github.com/langc
 | **Tools** | `Means`, provider-neutral `tool-spec` | `createTool()` with schemas | tools + a **Skills** system |
 | **MCP** | consumes MCP servers' tools over Streamable HTTP (`praxeon/mcp`, #527); resources, prompts and stdio planned | authors MCP servers | consumes MCP tools |
 | **Filesystem for agents** | — | — | pluggable local/sandboxed/remote |
-| **Evals** | **—** | built in | — |
+| **Evals** | `praxeon/eval` (opt-in, #1224): a dataset of cases, each run N times for a pass rate; exact, contains, regex, trajectory (the means called, read from the event stream) and rubric (a judge model on its own `PRAXEON_JUDGE_*` provider) graders; a JSON report with tokens and duration; regressions against a saved baseline report and a `gate` for CI. No hosted dashboard, and no application runs it in CI yet. | built in | — |
 | **Observability** | `aion/log` structured fields, and OpenTelemetry spans for every turn, model call and tool call (`praxeon/trace`, #1225): token counts, durations and outcomes, no content unless asked for, exported over OTLP/HTTP to any collector | tracing/metrics as a product surface | LangSmith-adjacent |
 | **Cost / rate / auth ceiling** | **per-session cost + call cap, Ed25519-signed grants, metering** (pre-publication issue 172), **capability-scoped tool assembly** (#90); rate limiting still open, and each agent has to opt in to the injection mitigation | — | — |
 | **Streaming to the browser** | polling; SSE blocked on pre-publication issue 117 M2 | streaming | streaming |
@@ -79,7 +79,14 @@ capabilities **still should not be pointed at the open internet**. Neither refer
 that either — but neither is about to be deployed as a public endpoint billed to one personal
 API key.
 
-**2. No evals.** The hardest gap to defend rhetorically. Praxeon's own README claims
+**2. Evals: the first version exists (#1224); no application uses it yet.** `praxeon/eval`
+runs an agent against a fixed dataset, grades each run, compares the report with a saved
+baseline and fails a build through `gate` when a case that passed before no longer does. What
+is still missing is an application that keeps a dataset and runs it in its CI, and anything
+past the five graders and the JSON and text reports. The paragraph below is what this item
+said before #1224, kept for the reasoning.
+
+**No evals (before #1224).** The hardest gap to defend rhetorically. Praxeon's own README claims
 *industrial-strength agentic systems*; Mastra ships evaluation as a first-class surface and
 DeepAgents inherits LangSmith's. A framework that cannot answer *did this change make the
 agent better?* is asking to be taken on faith — which is exactly the objection a sceptical

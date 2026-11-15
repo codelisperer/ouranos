@@ -276,6 +276,47 @@
                "bordeaux-threads" "fiveam")
   :components ((:module "tests" :components ((:file "trace-tests"))))
   :perform (test-op (o c) (symbol-call :praxeon/trace/tests '#:run-tests)))
+;;; Evals (#1224): run agents against fixed cases, grade the runs, compare with a baseline and
+;;; decide whether a build passes. Opt-in, outside core. The grade type and the aggregation are
+;;; Coalton (src/eval/core.lisp); running agents and calling the judge are the CL shell.
+(defsystem "praxeon/eval"
+  :description "Run agents against fixed cases, grade them, and fail a build when results get worse (#1224)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  :depends-on ("praxeon"
+               "coalton"           ; core.lisp is Coalton
+               "aion/boundary"     ; the case counts are checked before they enter core.lisp (#110)
+               "aion/sexp"         ; a dataset file is read as plain data (#972)
+               "com.inuoe.jzon"    ; the report is JSON
+               "cl-ppcre")         ; the regular-expression grader; dexador already loads it
+  :serial t
+  :components ((:module "src/eval"
+                :serial t
+                :components ((:file "packages")
+                             (:file "core")
+                             (:file "eval")
+                             (:file "report"))))
+  :in-order-to ((test-op (test-op "praxeon/eval/tests"))))
+
+;;; The example agent and dataset for praxeon/eval (#1224).
+(defsystem "praxeon/examples/eval"
+  :description "An order-support agent and a dataset that grades it with praxeon/eval (#1224)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("praxeon" "praxeon/eval")
+  :components ((:module "examples/eval"
+                :components ((:file "support")
+                             (:static-file "support.sexp")))))
+
+(defsystem "praxeon/eval/tests"
+  :description "praxeon/eval with stub providers for the agent and the judge, so no network (#1224)."
+  :depends-on ("praxeon/eval" "praxeon/examples/eval" "praxeon" "aion/boundary"
+               "aion/sexp"         ; a dataset with code in it is refused with UNSAFE-DATA
+               "com.inuoe.jzon" "fiveam")
+  :components ((:module "tests" :components ((:file "eval-tests"))))
+  :perform (test-op (o c)
+             (uiop:symbol-call :fiveam :run! (uiop:find-symbol* :eval :praxeon/eval/tests))))
 
 (defsystem "praxeon/web-search"
   :description "A web-search Means (Tavily-backed) for Praxeon agents."
