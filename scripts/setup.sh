@@ -228,7 +228,10 @@ install_sbcl() {
 # is a CFFI "Unable to load any of the alternatives" deep inside ASDF, naming a soname
 # rather than a package anyone can install.
 #
-#   libev      -- Woo, praxeon/web's Clack handler on Unix (pre-publication issue 218).
+#   libev      -- Woo. Until #373 hyperion/woo declared clack-handler-woo, which binds libev
+#                 at load time, and praxeon/web did before that (pre-publication issue 218).
+#                 No tree system loads Woo now; an app that adds clack-handler-woo, and the
+#                 scripts under hyperion/bench, still need libev. Setup still requires it.
 #   libsqlite3 -- cl-sqlite, under mnemosyne's default backend.
 #
 # LIBSQLITE3 IS HERE BECAUSE THE CLEAN-MACHINE RUN FOUND IT (pre-publication issue 198), and it is the better
@@ -508,7 +511,7 @@ info "Ouranos setup on $os ($(uname -m)) -- pins: SBCL $SBCL_VERSION, QL dist $Q
 # That second call is the point. `setup.sh' used to exit 0 while leaving the machine
 # unprovisioned -- libev needs root, and when it could not get root it printed a note and
 # returned success. getting-started.md then tells the reader to run bootstrap.lisp, which
-# quickloads praxeon, which declares clack-handler-woo, which binds libev at LOAD time. So
+# quickloaded praxeon, which then declared clack-handler-woo, which binds libev at LOAD time. So
 # the documented sequence was "setup succeeds, the next command fails", and the script had
 # a doctor that knew better sitting right next to the installer that did not ask it (pre-publication issue 198).
 #
@@ -551,18 +554,19 @@ run_doctor() {
     else need "Coalton is at $(echo "$ch" | cut -c1-8), pin says $COALTON_REF" "./scripts/setup.sh"; fi
   else need "Coalton checkout" "./scripts/setup.sh"; fi
   printf '      (deep check -- which Coalton actually LOADS: sbcl --script scripts/check-coalton.lisp)\n'
-  # libev is a LOAD-time dependency of hyperion on Unix (Woo binds it via CFFI), so a
-  # machine without it looks fine until `ql:quickload :hyperion` dies.
+  # libev is a LOAD-time dependency of Woo (it binds libev via CFFI). Until #373 a tree system
+  # declared Woo, so a machine without libev looked fine until a quickload died. No tree
+  # system declares Woo now; the check stays for apps that add clack-handler-woo.
   case "$os" in
     Linux)  if ldconfig -p 2>/dev/null | grep -q 'libev\.so'; then printf '  PASS    libev (Woo)\n'
-            else need "libev (Woo needs it to load hyperion)" "sudo apt install libev-dev  |  dnf install libev-devel"; fi
+            else need "libev (Woo needs it at load time)" "sudo apt install libev-dev  |  dnf install libev-devel"; fi
             # Checked here as well as installed above, because the doctor is what decides
             # whether setup.sh may claim success -- and this is the one the clean-machine
             # run caught the whole sequence lying about (pre-publication issue 198).
             if ldconfig -p 2>/dev/null | grep -q 'libsqlite3\.so'; then printf '  PASS    libsqlite3 (mnemosyne)\n'
             else need "libsqlite3 (cl-sqlite needs it to load mnemosyne)" "sudo apt install libsqlite3-dev  |  dnf install libsqlite3-devel"; fi;;
     Darwin) if brew list libev >/dev/null 2>&1; then printf '  PASS    libev (Woo)\n'
-            else need "libev (Woo needs it to load hyperion)" "brew install libev"; fi
+            else need "libev (Woo needs it at load time)" "brew install libev"; fi
             printf '  PASS    libsqlite3 (ships with macOS)\n';;
   esac
   # libuv, which hyperion/server-uv runs on. Built, not installed, so the check is the file

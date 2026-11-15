@@ -92,7 +92,7 @@ the CLI and as a web app.
 | **Spend / rate / capability ceiling** | `praxeon/ceiling` (pre-publication issue 172) — an Ed25519-signed **grant** carrying principal, capability set, expiry and audience, verified with a **public key only** so the agent host cannot mint one. `budget-guard` refuses a turn *before* the model call rather than discovering the ceiling after paying; `meter` charges the completed turn; usage comes back in-band. This is what lets a consuming app price AI into tiers. |
 | **First real means** | `praxeon/web-search` — Tavily-backed, registered when `TAVILY_API_KEY` is set, compact results to respect the budget. |
 | **Translation** | `praxeon/translate` — one-shot, locale-aware, provider-neutral; Elise converses in the user's locale via a **translator agent** on its own model. |
-| **Standalone binary** | `bin/elise` via `save-lisp-and-die`; Woo's libev FFI survives the dump, verified. |
+| **Standalone binary** | `bin/elise` via `save-lisp-and-die`. It serves on `hyperion/server-uv` since #373 (Hunchentoot before, and Woo before that, whose libev FFI was verified to survive the dump). |
 | **Observational memory** | `praxeon/memory` keeps what an agent has learned about a subject (a person), across sessions: `remember`, `recall`, `recall-similar`, `supersede`, `forget` and `forget-subject`, with an in-memory store, which implements every one of them except `recall-similar`. A correction supersedes the observation it replaces, so `recall :as-of` still answers what was believed before. Every observation must carry a provenance naming the conversation and turn it came from. `praxeon/memory-db` implements the same generics on Postgres, where `recall-similar` ranks by pgvector cosine distance with an HNSW index, and on SQLite, where it ranks in Lisp. `praxeon/distil` asks a model to turn a window of messages into proposed observations, and `apply-distillation` writes them; a proposal to supersede an existing observation is applied only when the app accepts it. `praxeon/observe` runs `distil` over a conversation off the request path, a window at a time, into the conversation's own thread scope, and keeps its progress in the store (#462, step A of #317). |
 | **Build** | A root `cons.lisp` spec driven by `cons <target>` (`check`, `build`, `test`, `elise`, `paper`, `run`, `serve`, `dev`), replacing the removed `Makefile`. |
 
@@ -340,8 +340,11 @@ agents, and a native SSE renderer for threaded backends.
 #### Why the web layer polls instead of streaming SSE
 
 The event contract is transport-neutral **by design**, so the studio *could* push over SSE.
-It doesn't, and the reason is the default server, **Woo** — a single-threaded async (libev)
-server that imposes two rules hit head-on while building the web surface:
+It doesn't, and the reason was the default server at the time, **Woo** — a single-threaded
+async (libev) server that imposes two rules hit head-on while building the web surface. (No
+praxeon system declares Woo or Hunchentoot since #373; `praxeon/elise` serves on
+`hyperion/server-uv`, and an app that wants either adds its Clack handler itself, as described
+in hyperion's user guide, "Choosing a server".)
 
 1. **A handler must never block the event loop.** A blocking SSE drain inside a handler froze
    the *entire* server — every other request, including the page itself, timed out.

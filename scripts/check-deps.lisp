@@ -27,8 +27,8 @@
 ;;;;
 ;;;; STALE IS NOT CHECKED, despite the paragraph above (found while working on #118). There is
 ;;;; no branch for it, and one written naively would fail today on correct rows: the manifest
-;;;; documents `hunchentoot', `woo' and `clack-handler-woo', which no .asd in this tree names
-;;;; in a :depends-on. What does protect the count we cite is the HEADLINE check below, which
+;;;; documents `hunchentoot', `woo', `clack-handler-woo' and `clack-handler-hunchentoot', which
+;;;; no .asd in this tree names in a :depends-on since #373. What does protect the count we cite is the HEADLINE check below, which
 ;;;; compares the Headline's numbers with the tree (#118).
 
 (require :asdf)

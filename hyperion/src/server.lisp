@@ -11,9 +11,11 @@
 ;;;; application's HTTP server: the APP declares the handler it wants, and DEFAULT-SERVER
 ;;;; picks from what is actually in the image.
 ;;;;
-;;;; Neither Woo nor Hunchentoot is a destination. ADR-0011's backend half is a waypoint
-;;;; until the native libuv server (pre-publication issue 117), which will arrive here as one more entry in
-;;;; +BACKENDS+ rather than as a change to any app.
+;;;; The native libuv server (pre-publication issue 117), hyperion/server-uv, is the first entry in
+;;;; +BACKENDS+ and the default (#710). No system in the tree declares Woo or Hunchentoot any
+;;;; more (#373); an app that wants one adds its Clack handler system to its own :depends-on
+;;;; and selects it with :SERVER or HYPERION_SERVER (hyperion/docs/user-guide.md, "Choosing a
+;;;; server").
 
 (in-package #:hyperion/server)
 
@@ -59,18 +61,20 @@ scattered conditionals.")
    (lambda (c stream)
      (let ((requested (no-server-backend-requested c)))
        (if requested
-           (format stream "hyperion/server: HYPERION_SERVER names ~S, whose Clack handler is not loaded.~%"
+           (format stream "hyperion/server: the ~(~A~) backend was asked for (by :server or HYPERION_SERVER), but its system is not loaded.~%"
                    requested)
-           (format stream "hyperion/server: no Clack backend is loaded.~%"))
-       (format stream "~%Hyperion deliberately declares no HTTP server (pre-publication issue 139) -- the application chooses.~%")
-       (format stream "Add ONE of these to your system's :depends-on:~%")
-       (format stream "  \"hyperion/server-uv\"          ; ours -- native, no Clack (needs a built libuv)~%")
-       (format stream "  \"clack-handler-hunchentoot\"   ; pure CL, works on every platform~%")
-       (format stream "  \"clack-handler-woo\"           ; Unix only, and binds libev at load time~%~%")
-       (format stream "For a CLACK backend, depend on the HANDLER system rather than the bare~%")
-       (format stream "server: clackup resolves a backend through clack.handler.<name>, which~%")
-       (format stream "is what the handler systems provide.~%"))))
-  (:documentation "Signalled when no usable Clack backend is present in the image."))
+           (format stream "hyperion/server: no HTTP backend is loaded.~%"))
+       (format stream "~%Hyperion declares no HTTP server (pre-publication issue 139); the application chooses one.~%")
+       (format stream "Add one of these to your system's :depends-on:~%")
+       (format stream "  \"hyperion/server-uv\"          ; the native server and the default (needs a built libuv)~%")
+       (format stream "  \"clack-handler-hunchentoot\"   ; Hunchentoot, through Clack; pure CL, every platform~%")
+       (format stream "  \"clack-handler-woo\"           ; Woo, through Clack; Unix only, binds libev at load time~%~%")
+       (format stream "When more than one is loaded, :uv is chosen first, then Woo, then Hunchentoot;~%")
+       (format stream ":server or HYPERION_SERVER picks another one that is loaded. For Woo or~%")
+       (format stream "Hunchentoot, depend on the Clack HANDLER system, not the bare server: clackup~%")
+       (format stream "finds a backend through clack.handler.<name>, which the handler system provides.~%"))))
+  (:documentation "Signalled when no usable backend is present in the image, or when the one
+asked for is not loaded."))
 
 (defun available-servers ()
   "The backends whose handler package is loaded, in preference order."

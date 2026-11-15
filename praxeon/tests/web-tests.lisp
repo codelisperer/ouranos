@@ -13,11 +13,11 @@
 ;;;; not see absences.
 ;;;;
 ;;;; SEPARATE SYSTEM, NOT AN EXTRA FILE IN `praxeon/tests', because driving a real server
-;;;; needs a real Clack handler, and WHICH HANDLER IS THE APPLICATION'S CHOICE (pre-publication issue 139,
+;;;; needs a real backend, and WHICH BACKEND IS THE APPLICATION'S CHOICE (pre-publication issue 139,
 ;;;; ADR-0011, applied to praxeon/web by pre-publication issue 218). `praxeon/web' must keep declaring none. A
-;;;; test system is an application for this purpose, so it declares hunchentoot -- the
-;;;; backend that answers SIGTERM -- exactly as `praxeon/elise' does, and the core suite
-;;;; stays free of an HTTP server it has no use for.
+;;;; test system is an application for this purpose, so it declares hyperion/server-uv -- a
+;;;; backend that answers SIGTERM -- exactly as `praxeon/elise' does (#373; both declared
+;;;; Hunchentoot before), and the core suite stays free of an HTTP server it has no use for.
 
 (cl:defpackage #:praxeon/web/tests
   (:use #:cl #:fiveam)
@@ -1544,24 +1544,27 @@ it 10 seconds, so the idle limit of 60 seconds passes within a few checks."
   (signals error (web::%resolve-transport :websocket :hunchentoot))
   (signals error (web:make-app :agent (quiet-agent) :transport :auto)))
 
-(defun %worker-threads (client-port)
-  "The live threads Hunchentoot runs the connection from CLIENT-PORT on. It names each one after
-the client's address and port."
-  (remove-if-not (lambda (th)
-                   (search (format nil "worker-127.0.0.1:~D" client-port) (sb-thread:thread-name th)))
-                 (sb-thread:list-all-threads)))
+(defun %read-to-end-within (stream seconds)
+  "Read STREAM until end of file. T when it ended within SECONDS, NIL when it was still open."
+  (handler-case
+      (sb-sys:with-deadline (:seconds seconds)
+        (loop for c = (read-char stream nil nil) while c)
+        t)
+    (sb-sys:deadline-timeout () nil)))
 
-(test hunchentoot-delivers-each-event-while-the-stream-is-open
-  "The first event reaches the browser while the stream is still open: Hunchentoot sends the
+(test the-native-server-delivers-each-event-while-the-stream-is-open
+  "The first event reaches the browser while the stream is still open: the server sends the
 response chunked, and a backend that held the chunks until the body ended would show a page that
-never updates. Ending the session then ends the stream, and the thread the server ran it on."
+never updates. Ending the session then ends the stream, and the server closes the connection.
+This ran on Hunchentoot until #373, and watched Hunchentoot's connection thread end; on :uv the
+stream holds a worker, and the end of the stream is seen as the connection closing."
   (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
     (let* ((sessions (praxeon/web-session:make-session-table))
            (app (%grant-app pub :transport :sse :sessions sessions))
            (session (nth-value 1 (%open app (%grant-token priv))))
            (ticket (nth-value 1 (%ticket app session)))
            (port (free-port))
-           (handler (srv:start app :server :hunchentoot :port port :log nil))
+           (handler (srv:start app :server :uv :port port :log nil))
            (s (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
       (unwind-protect
            (progn
@@ -1586,12 +1589,10 @@ never updates. Ending the session then ends the stream, and the thread the serve
                                   (return)))))
                  (sb-sys:deadline-timeout () nil))
                (is (search "text/event-stream" text) "~S" text)
-               (is (search "id: " text) "no event arrived while the stream was open: ~S" text))
-             (let ((client (nth-value 1 (sb-bsd-sockets:socket-name s))))
-               (is-true (%worker-threads client) "no thread was serving the stream")
+               (is (search "id: " text) "no event arrived while the stream was open: ~S" text)
+               (is-false (%read-to-end-within st 1) "control: the stream ended before its session did")
                (praxeon/web-session:close-session sessions session)
-               (is-true (await (lambda () (null (%worker-threads client)))
-                             :timeout (+ 5 web::*stream-check-seconds*))
+               (is-true (%read-to-end-within st (+ 5 web::*stream-check-seconds*))
                         "the stream went on after its session ended")))
         (ignore-errors (sb-bsd-sockets:socket-close s))
         (ignore-errors (srv:stop handler))))))
