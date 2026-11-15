@@ -164,7 +164,7 @@ deployment fact, so nothing here creates them (#138).
 |---|---|---|
 | `sb-concurrency` | a lock-free queue | `aion/pool`, whose submit path takes no pool mutex, so several server-uv loops do not wait on each other (#466) |
 | `sb-bsd-sockets` | port probing / socket checks; a test server on 127.0.0.1 | `hyperion/desktop` (localhost lifecycle); `praxeon/tests`, whose #678 tests answer the `meta` impl from a local server; `praxeon/examples/ouranos-ide/tests`, which reads the desktop's `GET /events` stream over a socket (#1218) |
-| `sb-posix` | `mkdir` — atomic create-or-fail; `chmod`, `link`, `rename`, `stat`, `umask` | `cons` (`cons/tempdir`), `hyperion/update` (the Linux AppImage strategy and the private staging directory, #251), `praxeon/claude-code` (`umask` and `chmod` for the hook's private archive, #452) and `praxeon/claude-code/tests` (`chmod` for the stand-in programs) — **Unix only** in all of them: `(:feature :unix …)` |
+| `sb-posix` | `mkdir` — atomic create-or-fail; `chmod`, `link`, `rename`, `stat`, `umask` | `cons` (`cons/tempdir`), `hyperion/update` (the Linux AppImage strategy and the private staging directory, #251), `praxeon/claude-code` (`umask` and `chmod` for the hook's private archive, #452), `praxeon/claude-code/tests` (`chmod` for the stand-in programs) and `praxeon/examples/ouranos-ide` (`rename` to put a saved file in place, and `mkdir` for a new folder of a project, #1228) — **Unix only** in all of them: `(:feature :unix …)` |
 
 `sb-posix` is there for exactly one call. A scratch directory must be **created**, never
 chosen-then-written-to, and `mkdir` is the only atomic create-or-fail CL exposes — it refuses
@@ -343,8 +343,8 @@ running the IDE, its tests and CI need no Node; Node and npm are needed only by 
 `build.sh` to change the bundle. `node_modules/` is gitignored and nothing is installed
 globally. Versions are exact in `editor/package.json` and locked in `editor/package-lock.json`.
 
-Bundle: 305206 bytes, sha256
-`bc3855b97d561e57ad1b2b469fea70a29b10e888a61f741efeedabe487ce5cc8`, recorded in
+Bundle: 306768 bytes, sha256
+`2ffada5b106ab250b40f9795d3200912b07a02cd135dfbb9be79d8a68e34a001`, recorded in
 `editor/ouranos-editor.min.js.sha256`. The IDE test suite fails when the committed bundle's
 sha256 differs from that file. `build.sh` produces the same bytes on each run and prints the
 sha256. The licence texts of the bundled packages are in `editor/THIRD-PARTY-LICENSES.txt`.

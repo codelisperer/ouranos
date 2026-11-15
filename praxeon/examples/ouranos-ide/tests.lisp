@@ -24,6 +24,8 @@
                     (#:repl #:cons/coalton-repl)
                     (#:rt #:praxeon/examples/ouranos-ide/runtime)
                     (#:router #:hyperion/router)
+                    (#:proj #:praxeon/examples/ouranos-ide/project)
+                    (#:fs #:aion/fs)
                     (#:assets #:hyperion/assets)
                     ;; The headless browser helpers of hyperion's asset tests.
                     (#:smoke #:hyperion/assets/tests))
@@ -43,7 +45,7 @@
     (jobs:wait-job job :timeout 20)))
 
 (defmacro %with-ide ((app desktop &key provider) &body body)
-  "BODY with DESKTOP bound to a new desktop holding the six windows and APP to its
+  "BODY with DESKTOP bound to a new desktop holding the seven windows and APP to its
 application. PROVIDER, when given, is the agent's provider. The REPL session is new. Afterwards
 every job the desktop's windows started is stopped, the database file is deleted, and the
 editor's runtime is killed if a test started one. SETF and not LET for the session, because a
@@ -133,16 +135,16 @@ list CALLS names. The definition is put back afterwards."
 
 ;;; --- the page ----------------------------------------------------------------------------
 
-(test the-page-shows-the-six-windows
+(test the-page-shows-the-seven-windows
   (%with-ide (app desktop)
     (multiple-value-bind (body status) (%get app "/")
       (is (= 200 status))
-      (dolist (id '("repl" "clock" "chart" "agent" "inspector" "editor"))
+      (dolist (id '("repl" "clock" "chart" "agent" "inspector" "editor" "files"))
         (is (search (format nil "data-window=~A" id) (remove #\" body)) "window ~A is missing" id))
       (is (search "ide-clock" body) "the IDE's own styles are on the page")
       (is (search (format nil "<script src=~A" ide:+editor-url+) (remove #\" body))
           "the page loads the editor's bundle"))
-    (is (equal '("repl" "clock" "chart" "agent" "inspector" "editor")
+    (is (equal '("repl" "clock" "chart" "agent" "inspector" "editor" "files")
                (getf (ui:inspect-desktop desktop) :windows)))))
 
 ;;; --- the REPL window ---------------------------------------------------------------------
@@ -204,7 +206,7 @@ the page uses, changes what another window shows, with no restart and no change 
                   "(defun render-note (window) (declare (ignore window)) \"<p>a new window</p>\") (ui:open-window *desktop* \"note\" :title \"Note\" :render 'render-note)")
         (setf ide:*desktop* old)))
     (is (string= "<p>a new window</p>" (%get app "/window/note/body")))
-    (is (= 7 (length (ui:desktop-windows desktop))))))
+    (is (= 8 (length (ui:desktop-windows desktop))))))
 
 ;;; --- the REPL window: an input runs as a job ----------------------------------------------
 
@@ -545,8 +547,8 @@ on every render and holds no copy."
   (%with-ide (app desktop)
     (ui:dispatch-event desktop "chart" hyperion/desktop-ui/state:close-event)
     (let ((answer (praxeon/actor:act ide::*agent* "list_windows" (make-hash-table :test 'equal))))
-      (is (search "Windows: repl, clock, chart, agent, inspector, editor." answer))
-      (is (search "Shown: repl, clock, agent, inspector, editor." answer)))))
+      (is (search "Windows: repl, clock, chart, agent, inspector, editor, files." answer))
+      (is (search "Shown: repl, clock, agent, inspector, editor, files." answer)))))
 
 ;;; --- the inspector -----------------------------------------------------------------------
 
@@ -927,7 +929,12 @@ length, so a short read is an error and not a truncated digest."
       (is (search "type=hidden name=buffer" body))
       (is (search "Mod-Enter" body)))
     (is (equal '(("eval" . "PRAXEON/EXAMPLES/OURANOS-IDE::EDITOR-EVAL")
-                 ("cancel" . "PRAXEON/EXAMPLES/OURANOS-IDE::EDITOR-CANCEL"))
+                 ("cancel" . "PRAXEON/EXAMPLES/OURANOS-IDE::EDITOR-CANCEL")
+                 ("save" . "PRAXEON/EXAMPLES/OURANOS-IDE::EDITOR-SAVE")
+                 ("close" . "PRAXEON/EXAMPLES/OURANOS-IDE::EDITOR-CLOSE")
+                 ("switch" . "PRAXEON/EXAMPLES/OURANOS-IDE::EDITOR-SWITCH")
+                 ("reload" . "PRAXEON/EXAMPLES/OURANOS-IDE::EDITOR-RELOAD")
+                 ("dismiss" . "PRAXEON/EXAMPLES/OURANOS-IDE::EDITOR-DISMISS"))
                (getf (ui:inspect-window (ui:find-window desktop "editor")) :actions)))))
 
 (test empty-editor-input-is-refused-without-starting-a-job-or-a-runtime
@@ -1128,3 +1135,424 @@ window.addEventListener('load', function () {
         for at = (search needle text) then (search needle text :start2 (1+ at))
         while at do (incf count)
         finally (return count)))
+
+;;; --- the project: confinement, the tree, tabs and saving (#1228) ---------------------------
+;;;
+;;; Each test makes its own folders under a new temporary directory and deletes them after, so
+;;; no test reads another's files. The layout %WITH-PROJECT makes:
+;;;
+;;;   <tmp>/project/           the project's root
+;;;   <tmp>/project/src/a.lisp
+;;;   <tmp>/outside/secret     a file outside the project
+;;;   <tmp>/project/out        a link to <tmp>/outside/, made by the tests that need it
+
+(defun %write-file (pathname text)
+  (with-open-file (out pathname :direction :output :if-exists :supersede
+                                :if-does-not-exist :create :external-format :utf-8)
+    (write-string text out))
+  pathname)
+
+(defun %read-file (pathname)
+  (uiop:read-file-string pathname :external-format :utf-8))
+
+(defmacro %with-project ((project top) &body body)
+  "BODY with TOP bound to a new temporary directory holding project/ and outside/ (see above),
+and PROJECT to project/ opened as a project. TOP is deleted afterwards, without following a
+link out of it."
+  `(let* ((,top (fs:make-temporary-directory "ouranos-ide-project")))
+     (unwind-protect
+          (progn
+            (ensure-directories-exist (merge-pathnames "project/src/" ,top))
+            (ensure-directories-exist (merge-pathnames "outside/" ,top))
+            (%write-file (merge-pathnames "project/src/a.lisp" ,top) "(defun a () 1)")
+            (%write-file (merge-pathnames "outside/secret" ,top) "secret")
+            (let ((,project (proj:open-project (merge-pathnames "project/" ,top))))
+              (declare (ignorable ,project))
+              ,@body))
+       (fs:delete-tree ,top :if-does-not-exist :ignore))))
+
+(defun %in-project (top name)
+  "The native path of NAME in <TOP>/project/, with no trailing separator."
+  (concatenate 'string (uiop:native-namestring (merge-pathnames "project/" top)) name))
+
+(defun %link-outside (top)
+  "Make <TOP>/project/out a link to <TOP>/outside/: a junction on Windows, a symbolic link
+elsewhere."
+  (fs:make-directory-link (%in-project top "out")
+                          (uiop:native-namestring (merge-pathnames "outside/" top))))
+
+(defun %refused-p (thunk)
+  "True when THUNK signals PROJECT:PATH-REFUSED."
+  (handler-case (progn (funcall thunk) nil)
+    (proj:path-refused () t)))
+
+(test a-relative-path-is-split-and-an-absolute-one-refused
+  (is (equal '() (proj:relative-parts "")))
+  (is (equal '("src" "a.lisp") (proj:relative-parts "src/a.lisp")))
+  (is (equal '("src" "a.lisp") (proj:relative-parts "./src//a.lisp/")))
+  (is (equal '(".." "outside") (proj:relative-parts "../outside"))
+      "`..' is kept, for the check on the resolved path")
+  (is (null (proj:relative-parts "/etc/passwd")))
+  (is (search "absolute" (nth-value 1 (proj:relative-parts "/etc/passwd"))))
+  (is (search "NUL" (nth-value 1 (proj:relative-parts (format nil "a~Cb" (code-char 0)))))))
+
+(test inside-root-is-a-prefix-test-on-whole-parts
+  (is-true (proj:inside-root-p "/r/p/" "/r/p/a"))
+  (is-true (proj:inside-root-p "/r/p/" "/r/p/"))
+  (is-true (proj:inside-root-p "/r/p/" "/r/p") "the root itself, without its separator")
+  (is-false (proj:inside-root-p "/r/p/" "/r/pq/a") "a sibling whose name starts with the root's")
+  (is-false (proj:inside-root-p "/r/p/" "/r/"))
+  (is-false (proj:inside-root-p "/r/p/" "/r/o/secret")))
+
+(test a-path-that-resolves-outside-the-project-is-refused
+  (%with-project (project top)
+    (is (pathnamep (proj:resolve project "src/a.lisp")))
+    (is (pathnamep (proj:resolve project "src/../src/a.lisp")) "`..' that stays inside is followed")
+    (is (pathnamep (proj:resolve project "")) "the root itself")
+    (is (%refused-p (lambda () (proj:resolve project "../outside/secret"))) "`..' out of the root")
+    (is (%refused-p (lambda () (proj:resolve project "src/../../outside/secret"))))
+    (is (%refused-p (lambda () (proj:resolve project ".."))))
+    (is (%refused-p (lambda () (proj:resolve project (uiop:native-namestring
+                                                      (merge-pathnames "outside/secret" top)))))
+        "an absolute path, even to a file that exists")
+    (is (%refused-p (lambda () (proj:read-buffer project "../outside/secret"))))
+    (is (%refused-p (lambda () (proj:list-folder project ".."))))
+    (is (%refused-p (lambda () (proj:make-file project "../outside/new"))))
+    (is (null (probe-file (merge-pathnames "outside/new" top))) "nothing was made outside")))
+
+(test a-link-inside-the-project-that-points-outside-it-is-refused
+  (%with-project (project top)
+    (%link-outside top)
+    (is-true (fs:link-p (%in-project top "out")) "the link was made")
+    (is (%refused-p (lambda () (proj:resolve project "out/secret"))) "a file through the link")
+    (is (%refused-p (lambda () (proj:resolve project "out"))) "the link itself")
+    (is (%refused-p (lambda () (proj:read-buffer project "out/secret"))))
+    (is (%refused-p (lambda () (proj:list-folder project "out"))))
+    (is (%refused-p (lambda () (proj:make-file project "out/new"))))
+    (is (%refused-p (lambda () (proj:make-folder project "out/new"))))
+    (is (null (probe-file (merge-pathnames "outside/new" top))) "nothing was made through the link")
+    (is (equal "secret" (%read-file (merge-pathnames "outside/secret" top))))))
+
+#-win32
+(test a-link-that-points-inside-the-project-is-followed
+  ;; On Windows a path through any link is refused (project.lisp), so this is not run there.
+  (%with-project (project top)
+    (fs:make-directory-link (%in-project top "alias")
+                            (uiop:native-namestring (merge-pathnames "project/src/" top)))
+    (is (equal "(defun a () 1)" (proj:read-buffer project "alias/a.lisp")))))
+
+(test the-tree-leaves-out-hidden-files-and-build-output-by-default
+  (let ((entries '(("src" . :directory) (".git" . :directory) ("node_modules" . :directory)
+                   ("README.md" . :file) ("a.fasl" . :file) (".DS_Store" . :file)
+                   ("b.lisp" . :file) ("Docs" . :directory))))
+    (is (equal '(("Docs" . :directory) ("src" . :directory) ("b.lisp" . :file) ("README.md" . :file))
+               (proj:visible-entries entries))
+        "folders first, then files, each sorted ignoring case")
+    (is (= 8 (length (proj:visible-entries entries :show-hidden t))))
+    (is (= 8 (length entries)) "the list given is not changed")
+    (is-false (proj:hidden-entry-p "fasl.lisp" :file) "a name is not mistaken for a type")
+    (is-true (proj:hidden-entry-p "x.FASL" :file))))
+
+(test a-folder-is-listed-from-disk
+  (%with-project (project top)
+    (%write-file (merge-pathnames "project/src/b.fasl" top) "")
+    (ensure-directories-exist (merge-pathnames "project/.git/" top))
+    (is (equal '(("src" . :directory)) (proj:visible-entries (proj:list-folder project ""))))
+    (is (equal '(("a.lisp" . :file)) (proj:visible-entries (proj:list-folder project "src"))))
+    (is (= 2 (length (proj:visible-entries (proj:list-folder project "src") :show-hidden t))))))
+
+(test tabs-open-close-and-switch-as-values
+  (let* ((empty (proj:make-tabs))
+         (one (proj:tabs-open empty :p "a" "A" #(1)))
+         (two (proj:tabs-open one :p "b" "B" #(2)))
+         (three (proj:tabs-open two :p "c" "C" #(3))))
+    (is (null (proj:tabs-buffers empty)) "opening returns a new value and leaves the old one")
+    (is (equal '(1 2 3) (mapcar #'proj:buffer-id (proj:tabs-buffers three))))
+    (is (= 3 (proj:tabs-active three)) "the file opened last is shown")
+    (multiple-value-bind (again buffer) (proj:tabs-open three :p "a" "changed" #(9))
+      (is (= 3 (length (proj:tabs-buffers again))) "a file is not opened twice")
+      (is (= 1 (proj:tabs-active again)) "its tab is shown instead")
+      (is (equal "A" (proj:buffer-text buffer)) "and its buffer is kept as it was"))
+    (is (= 2 (length (proj:tabs-buffers (proj:tabs-open one :q "a" "" #()))))
+        "the same path in another project is another file")
+    (let ((middle (proj:tabs-close (proj:tabs-activate three 2) 2)))
+      (is (equal '(1 3) (mapcar #'proj:buffer-id (proj:tabs-buffers middle))))
+      (is (= 3 (proj:tabs-active middle)) "closing the shown tab shows the one after it"))
+    (is (= 2 (proj:tabs-active (proj:tabs-close three 3))) "or the one before it, at the end")
+    (is (= 3 (proj:tabs-active (proj:tabs-close three 1))) "closing another tab keeps the shown one")
+    (is (null (proj:tabs-active (proj:tabs-close one 1))) "no tab left: the scratch buffer")
+    (is (null (proj:tabs-active (proj:tabs-activate three nil))))
+    (is (= 3 (proj:tabs-active (proj:tabs-activate three 42))) "an unknown id changes nothing")
+    (is (= 4 (proj:tabs-next-id (proj:tabs-close three 3))) "ids are not reused")
+    (let ((b (proj:tabs-find three 2)))
+      (multiple-value-bind (saved new) (proj:tabs-replace three b :text "B2" :stamp #(4))
+        (is (equal "B2" (proj:buffer-text (proj:tabs-find saved 2))))
+        (is (= 0 (proj:buffer-generation new)) "a save keeps the editor")
+        (is (equal "B" (proj:buffer-text (proj:tabs-find three 2))) "the old value is unchanged"))
+      (is (= 1 (proj:buffer-generation
+                (nth-value 1 (proj:tabs-replace three b :text "B3" :reloaded t))))
+          "a reload gives a new editor"))))
+
+(test a-save-and-a-close-decide-from-the-buffer
+  (let ((buffer (nth-value 1 (proj:tabs-open (proj:make-tabs) :p "a" "text" #(1 2)))))
+    (is (eq :write (proj:save-decision buffer #(1 2) nil)))
+    (is (eq :conflict (proj:save-decision buffer #(1 2 3) nil)))
+    (is (eq :conflict (proj:save-decision buffer :missing nil)) "a file deleted on disk")
+    (is (eq :write (proj:save-decision buffer #(1 2 3) t)) "the user agreed to overwrite")
+    (is-false (proj:buffer-modified-p buffer "text"))
+    (is (eq :close (proj:close-decision buffer "text" nil)))
+    (is (eq :ask (proj:close-decision buffer "text, changed" nil)))
+    (is (eq :close (proj:close-decision buffer "text, changed" t)))))
+
+(defun %folder-names (folder)
+  "The names of the files in FOLDER, sorted, hidden ones included."
+  (sort (mapcar #'file-namestring (uiop:directory-files folder)) #'string<))
+
+(test a-save-that-fails-while-writing-leaves-the-file-and-no-partial-file
+  (%with-project (project top)
+    (let ((file (merge-pathnames "project/src/a.lisp" top))
+          (folder (merge-pathnames "project/src/" top)))
+      (is (equal '("a.lisp") (%folder-names folder)))
+      (signals simple-error
+        (proj:atomic-write-file file (lambda (out)
+                                       (write-string "(defun a () 2" out)
+                                       (finish-output out)
+                                       (error "The disk is full."))))
+      (is (equal "(defun a () 1)" (%read-file file)) "the file is as it was")
+      (is (equal '("a.lisp") (%folder-names folder)) "the temporary file was deleted")
+      (proj:atomic-write-file file (lambda (out) (write-string "(defun a () 3)" out)))
+      (is (equal "(defun a () 3)" (%read-file file)))
+      (is (equal '("a.lisp") (%folder-names folder)) "a successful write leaves no temporary file"))))
+
+(test a-save-asks-when-the-file-changed-on-disk-since-it-was-opened
+  (%with-project (project top)
+    (let ((file (merge-pathnames "project/src/a.lisp" top)))
+      (multiple-value-bind (text stamp) (proj:read-buffer project "src/a.lisp")
+        (let ((buffer (nth-value 1 (proj:tabs-open (proj:make-tabs) project "src/a.lisp" text stamp))))
+          (%write-file file "(defun a () :changed-by-someone-else)")
+          (is (eq :conflict (proj:save-buffer buffer "(defun a () :mine)")))
+          (is (equal "(defun a () :changed-by-someone-else)" (%read-file file)) "nothing was written")
+          (multiple-value-bind (outcome new-stamp) (proj:save-buffer buffer "(defun a () :mine)" :overwrite t)
+            (is (eq :saved outcome))
+            (is (equalp new-stamp (proj:file-stamp project "src/a.lisp"))))
+          (is (equal "(defun a () :mine)" (%read-file file)))
+          (delete-file file)
+          (is (eq :conflict (proj:save-buffer buffer "again")) "a file deleted on disk is a change too")
+          (is (null (probe-file file))))))))
+
+(defun %open-project-in (app top)
+  (%post app "/window/files/action/open-project"
+         "folder" (uiop:native-namestring (merge-pathnames "project/" top))))
+
+(defun %editor-buffers (desktop)
+  (proj:tabs-buffers (ui:window-datum (ui:find-window desktop "editor") :tabs (proj:make-tabs))))
+
+(test the-files-window-opens-a-folder-and-shows-its-tree
+  (%with-ide (app desktop)
+    (%with-project (project top)
+      (ensure-directories-exist (merge-pathnames "project/node_modules/x/" top))
+      (ensure-directories-exist (merge-pathnames "project/.git/" top))
+      (%write-file (merge-pathnames "project/src/a.fasl" top) "")
+      (is (search "No folder is open" (%get app "/window/files/body")))
+      (is (search "Opened project" (%open-project-in app top)))
+      (let ((body (%get app "/window/files/body")))
+        (is (search "src/" body))
+        (is (null (search "a.lisp" body)) "a folder starts collapsed")
+        (is (null (search ".git" body)))
+        (is (null (search "node_modules" body))))
+      (%post app "/window/files/action/toggle" "path" "src")
+      (let ((body (%get app "/window/files/body")))
+        (is (search "a.lisp" body) "an expanded folder shows its files")
+        (is (null (search "a.fasl" body))))
+      (%post app "/window/files/action/hidden")
+      (let ((body (%get app "/window/files/body")))
+        (is (search ".git" body))
+        (is (search "node_modules" body))
+        (is (search "a.fasl" body)))
+      (%post app "/window/files/action/toggle" "path" "src")
+      (is (null (search "a.lisp" (%get app "/window/files/body"))) "and collapses again")
+      (is (search "is not an existing folder"
+                  (%post app "/window/files/action/open-project"
+                         "folder" (uiop:native-namestring (merge-pathnames "nothing-here/" top))))))))
+
+(test a-file-opens-in-a-tab-of-the-editor-and-saves-to-disk
+  (%with-ide (app desktop)
+    (%with-project (project top)
+      (%open-project-in app top)
+      (is (equal "" (%post app "/window/files/action/open" "path" "src/a.lisp")))
+      (%post app "/window/files/action/open" "path" "src/a.lisp")
+      (let ((buffers (%editor-buffers desktop)))
+        (is (= 1 (length buffers)) "opening a file twice keeps one tab")
+        (let* ((buffer (first buffers))
+               (id (princ-to-string (proj:buffer-id buffer)))
+               (body (remove #\" (%get app "/window/editor/body"))))
+          (is (search "id=win-editor-tab-1" body) "the tab")
+          (is (search "id=win-editor-buf-1-g-0" body) "the element its editor is built in")
+          (is (search "data-ou-editor-doc=(defun a () 1)" body) "with the file's text")
+          (is (search "data-ou-editor-buffer=1" body))
+          (is (search "data-ou-editor-save=win-editor-save" body))
+          (is (search "data-ou-editor-scope=win-editor-panes" body) "the evaluate form serves every tab")
+          (let ((answer (%post app "/window/editor/action/save" "tab" id "content" "(defun a () 2)")))
+            (is (search "data-ou-saved=win-editor-buf-1-g-0" (remove #\" answer))
+                "the page is told it saved: ~A" answer))
+          (is (equal "(defun a () 2)" (%read-file (merge-pathnames "project/src/a.lisp" top))))
+          (is (equal "(defun a () 2)" (proj:buffer-text (first (%editor-buffers desktop)))))
+          (is (search "scratch buffer is not a file"
+                      (%post app "/window/editor/action/save" "tab" "" "content" "x"))))))))
+
+(test saving-a-file-changed-on-disk-asks-and-overwrites-only-when-told
+  (%with-ide (app desktop)
+    (%with-project (project top)
+      (let ((file (merge-pathnames "project/src/a.lisp" top)))
+        (%open-project-in app top)
+        (%post app "/window/files/action/open" "path" "src/a.lisp")
+        (%write-file file "(defun a () :theirs)")
+        (let ((answer (%post app "/window/editor/action/save" "tab" "1" "content" "(defun a () :mine)")))
+          (is (search "changed on disk" answer))
+          (is (null (search "data-ou-saved" answer)))
+          (is (search "overwrite:" answer) "an overwrite button: ~A" answer)
+          (is (search "/window/editor/action/reload" answer)))
+        (is (equal "(defun a () :theirs)" (%read-file file)))
+        (is (search "data-ou-saved"
+                    (%post app "/window/editor/action/save" "tab" "1" "content" "(defun a () :mine)"
+                           "overwrite" "1")))
+        (is (equal "(defun a () :mine)" (%read-file file)))
+        (%write-file file "(defun a () :theirs-again)")
+        (is (search "Reloaded" (%post app "/window/editor/action/reload" "tab" "1")))
+        (let ((buffer (first (%editor-buffers desktop))))
+          (is (equal "(defun a () :theirs-again)" (proj:buffer-text buffer)))
+          (is (= 1 (proj:buffer-generation buffer)))
+          (is (search "id=win-editor-buf-1-g-1" (remove #\" (%get app "/window/editor/body")))
+              "a reloaded file gets a new editor element"))))))
+
+(test closing-a-tab-with-unsaved-changes-asks-first
+  (%with-ide (app desktop)
+    (%with-project (project top)
+      (%open-project-in app top)
+      (%post app "/window/files/action/open" "path" "src/a.lisp")
+      (let ((answer (%post app "/window/editor/action/close" "tab" "1" "content" "(defun a () :edited)")))
+        (is (search "changes that were not saved" answer))
+        (is (search "confirm" answer)))
+      (is (= 1 (length (%editor-buffers desktop))) "the tab is still open")
+      (is (equal "" (%post app "/window/editor/action/close" "tab" "1" "confirm" "1")))
+      (is (null (%editor-buffers desktop)))
+      (%post app "/window/files/action/open" "path" "src/a.lisp")
+      (is (equal "" (%post app "/window/editor/action/close" "tab" "2" "content" "(defun a () 1)"))
+          "a tab without changes closes at once")
+      (is (null (%editor-buffers desktop)))
+      (is (equal "(defun a () 1)" (%read-file (merge-pathnames "project/src/a.lisp" top)))))))
+
+(test switching-tabs-shows-one-pane-at-a-time
+  (%with-ide (app desktop)
+    (%with-project (project top)
+      (%write-file (merge-pathnames "project/b.lisp" top) "b")
+      (%open-project-in app top)
+      (%post app "/window/files/action/open" "path" "src/a.lisp")
+      (%post app "/window/files/action/open" "path" "b.lisp")
+      (flet ((shown ()
+               (proj:tabs-active (ui:window-datum (ui:find-window desktop "editor") :tabs)))
+             (hidden-count ()
+               (%count "class=ide-pane hidden" (remove #\" (%get app "/window/editor/body")))))
+        (is (= 2 (shown)))
+        (is (= 2 (hidden-count)) "the scratch pane and a.lisp's are hidden")
+        (%post app "/window/editor/action/switch" "tab" "1")
+        (is (= 1 (shown)))
+        (%post app "/window/editor/action/switch" "tab" "")
+        (is (null (shown)) "the scratch buffer")
+        (is (= 2 (hidden-count)))))))
+
+(test new-files-and-folders-are-made-inside-the-project-only
+  (%with-ide (app desktop)
+    (%with-project (project top)
+      (%open-project-in app top)
+      (is (search "Made the folder" (%post app "/window/files/action/new-folder" "name" "lib")))
+      (is (uiop:directory-exists-p (merge-pathnames "project/lib/" top)))
+      (is (search "Made lib/new.lisp" (%post app "/window/files/action/new-file" "name" "lib/new.lisp")))
+      (is (equal "" (%read-file (merge-pathnames "project/lib/new.lisp" top))))
+      (is (equal "lib/new.lisp" (proj:buffer-path (first (%editor-buffers desktop))))
+          "a new file is opened in the editor")
+      (is (search "already exists" (%post app "/window/files/action/new-file" "name" "lib/new.lisp")))
+      (is (search "outside the project" (%post app "/window/files/action/new-file" "name" "../escape.lisp")))
+      (is (null (probe-file (merge-pathnames "escape.lisp" top))))
+      (is (search "absolute" (%post app "/window/files/action/new-folder" "name" "/tmp/x"))))))
+
+;;; The tabs in a browser: the modified mark, Mod-S, and the text a close sends. As in the
+;;; editor's browser test above, the page is the editor window's body alone, and the routes
+;;; answer a save and a close with what they were sent.
+
+(defun %tabs-test-page (desktop)
+  (format nil "<!doctype html>
+<html><head><meta charset=\"utf-8\">
+<script src=\"~A\" defer></script><script src=\"~A\" defer></script></head>
+<body><div id=\"win-editor-body\">~A</div><pre id=\"steps\"></pre>
+<script>
+window.addEventListener('load', function () {
+  var steps = document.getElementById('steps');
+  var host = document.getElementById('win-editor-buf-1-g-0');
+  var tab = document.getElementById('win-editor-tab-1');
+  var view = window.OuranosEditor.viewOf(host);
+  var mac = /Mac/.test(navigator.platform);
+  steps.textContent += 'start:' + tab.hasAttribute('data-ou-modified') + ' ';
+  view.dispatch({changes: {from: view.state.doc.length, insert: ' ;edited'}});
+  steps.textContent += 'typed:' + tab.hasAttribute('data-ou-modified') + ' ';
+  view.contentDOM.dispatchEvent(new KeyboardEvent('keydown',
+    {key: 's', bubbles: true, cancelable: true, metaKey: mac, ctrlKey: !mac}));
+  setTimeout(function () {
+    steps.textContent += 'saved:' + tab.hasAttribute('data-ou-modified') + ' ';
+    // The close's answer replaces the save's in the status line, so the save's is copied.
+    steps.textContent += '[' + document.getElementById('win-editor-status').textContent + '] ';
+    view.dispatch({changes: {from: 0, insert: ';more '}});
+    document.querySelector('#win-editor-tab-1 .ide-tab-close').click();
+  }, 300);
+});
+</script></body></html>"
+          (assets:url :htmx) ide:+editor-url+ (ide:render-editor (ui:find-window desktop "editor"))))
+
+(defun %tabs-test-app (desktop)
+  (flet ((echo (name)
+           (lambda (env)
+             (let ((fields (http:form-alist (or (http:body-string env) ""))))
+               (flet ((field (n) (or (cdr (assoc n fields :test #'string=)) "")))
+                 (list 200 '(:content-type "text/html; charset=utf-8")
+                       (list (format nil "<pre class=\"echo\"~A>~A tab=[~A] content=[~A]</pre>"
+                                     (if (string= name "save")
+                                         " data-ou-saved=\"win-editor-buf-1-g-0\"" "")
+                                     name
+                                     (spinneret:escape-string (field "tab"))
+                                     (spinneret:escape-string (field "content"))))))))))
+    (router:to-app
+     (router:router
+      (assets:mount)
+      (router:route :get "/" (lambda (env) (declare (ignore env))
+                               (list 200 '(:content-type "text/html; charset=utf-8")
+                                     (list (%tabs-test-page desktop)))))
+      (router:route :get ide:+editor-url+ (lambda (env) (ide::%serve-bundle env)))
+      (router:route :post "/window/editor/action/save" (echo "save"))
+      (router:route :post "/window/editor/action/close" (echo "close"))))))
+
+(test the-bundle-marks-a-modified-tab-saves-with-mod-s-and-sends-the-text-on-close
+  (let ((browser (smoke::%smoke-browser)))
+    (if (null browser)
+        (skip "No Chrome or Edge was found; set HYPERION_SMOKE_BROWSER to run this test.")
+        (%with-ide (app desktop)
+          (%with-project (project top)
+            (ide:open-file (ui:find-window desktop "editor") project "src/a.lisp")
+            (let* ((port nil)
+                   (handler (ports:call-with-port
+                             (lambda (p)
+                               (prog1 (srv:start (%tabs-test-app desktop)
+                                                 :server :hunchentoot :port p :host "127.0.0.1"
+                                                 :log nil)
+                                 (setf port p))))))
+              (unwind-protect
+                   (let* ((dom (smoke::%run-browser browser (format nil "http://127.0.0.1:~D/" port)))
+                          (at (search "id=\"steps\"" dom))
+                          (steps (and at (subseq dom at (min (length dom) (+ at 80))))))
+                     (is (search "start:false typed:true saved:false" dom)
+                         "the mark follows the text and clears after the save's answer: ~A" steps)
+                     (is (search "save tab=[1] content=[(defun a () 1) ;edited]" dom)
+                         "Mod-S sent the tab's id and its text")
+                     (is (search "close tab=[1] content=[;more (defun a () 1) ;edited]" dom)
+                         "the close button sent the text the editor holds"))
+                (ignore-errors (srv:stop handler))
+                (is (ports:await-released port)))))))))

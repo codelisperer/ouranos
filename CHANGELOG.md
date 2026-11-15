@@ -1661,6 +1661,24 @@ its tag.
   for `:uv`, two open pages left every other request waiting. `:workers` is not passed to
   Hunchentoot. `stop` now ends the event streams before it stops the server, so each stream
   finishes as a complete response instead of failing to write.
+- **The Ouranos IDE example opens a project folder, shows its file tree, and edits and saves its
+  files in tabs** (#1228), in `praxeon/examples/ouranos-ide`. `build-desktop` adds a seventh
+  window, `files` (`render-files`), so `inspect-desktop` lists seven windows. It opens a folder
+  as the project, shows its tree with folders that expand and collapse, and leaves out names
+  starting with a dot (`.git`), `node_modules` and compiled Lisp files until "Show hidden" is
+  pressed. A file clicked in the tree opens in a tab of the `editor` window, which gains the
+  actions `save`, `close`, `switch`, `reload` and `dismiss` (`editor-save`, `editor-close`,
+  `editor-switch`, `editor-reload`, `editor-dismiss`); the scratch buffer stays as the first
+  tab. Save (the button, or Mod-S) writes a temporary file in the same folder and renames it
+  over the file. When the file changed on disk since it was opened or last saved, nothing is
+  written and the window asks whether to overwrite it, reload it or keep editing. Closing a tab
+  with unsaved changes asks first. New file and New folder make entries inside the project. The
+  new package `praxeon/examples/ouranos-ide/project` holds the file access: every path is
+  relative to the project's folder and is refused (`path-refused`) when it resolves outside it
+  through `..` or a symbolic link, checked on the resolved path; on Windows a path through any
+  link is refused, because SBCL's `truename` does not follow a junction. The editor bundle was
+  rebuilt for the tabs (same npm packages); the system now depends on `aion/fs` and, on Unix,
+  `sb-posix`.
 - **`praxeon/image:image-request-failed` answers `aion/retry:transience` and
   `aion/retry:retry-after`** (#79), so an app can run `generate-image` under
   `aion/retry:with-retry` and have the service's Retry-After honoured. A 429 is `:transient`, a

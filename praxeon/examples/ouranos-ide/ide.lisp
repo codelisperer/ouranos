@@ -1,4 +1,4 @@
-;;;; ide.lisp --- the Ouranos IDE proof of concept: six windows in one SBCL image (#1218).
+;;;; ide.lisp --- the Ouranos IDE proof of concept: seven windows in one SBCL image (#1218).
 ;;;;
 ;;;; A desktop (hyperion/desktop-ui) with these windows:
 ;;;;
@@ -12,7 +12,10 @@
 ;;;;              from the image and calls no model. Each turn runs as a background job.
 ;;;;   inspector  hyperion/desktop-ui's inspector, which shows any window's record.
 ;;;;   editor     a CodeMirror 6 code editor whose text is evaluated by Coalton's mine/runtime
-;;;;              server in a child SBCL, as a background job. See editor.lisp.
+;;;;              server in a child SBCL, as a background job. See editor.lisp. It has a tab
+;;;;              per open file of the project, which saves to the file. See files.lisp.
+;;;;   files      the project: a folder opened from the window, shown as a tree whose files
+;;;;              open in the editor's tabs. See files.lisp and project.lisp.
 ;;;;
 ;;;; The page does not poll. It opens GET /events once, and hyperion/desktop-ui sends it what
 ;;;; changed: a window opened from the REPL with UI:OPEN-WINDOW appears without a reload.
@@ -51,6 +54,7 @@
                     (#:actor #:praxeon/actor)
                     (#:chat #:praxeon/chat-ui)
                     (#:rt #:praxeon/examples/ouranos-ide/runtime)
+                    (#:proj #:praxeon/examples/ouranos-ide/project)
                     (#:static #:hyperion/static)
                     (#:spin #:spinneret))
   (:export #:*desktop* #:*port* #:*workers*
@@ -63,7 +67,10 @@
            #:render-editor #:editor-eval #:editor-cancel #:inspect-editor-entry
            #:editor-directory #:editor-bundle-path #:+editor-bundle+ #:+editor-url+
            #:runtime-ready-p #:stop-runtime #:coalton-runs
-           #:*editor-time-limit* #:*runtime-start-limit*))
+           #:*editor-time-limit* #:*runtime-start-limit*
+           #:render-files #:open-file #:files-open-project #:files-toggle #:files-open
+           #:files-new-file #:files-new-folder #:files-show-hidden
+           #:editor-save #:editor-close #:editor-switch #:editor-reload #:editor-dismiss))
 
 (cl:in-package #:praxeon/examples/ouranos-ide)
 
@@ -548,11 +555,11 @@ refused. Nothing is started or stored, and the answer says so."
 ;;; --- the desktop and the server ----------------------------------------------------------
 
 (defparameter *css*
-  ".ide-entry{margin-bottom:.6rem;font-family:ui-monospace,Consolas,monospace;font-size:12px}.ide-entry code{white-space:pre-wrap}.ide-prompt{color:#4a72b0;font-weight:600;margin-right:.4rem}.ide-out{margin-left:1.2rem}.ide-type{color:#57606a}.ou-body form{display:flex;gap:.4rem;align-items:flex-start;margin-top:.4rem}.ou-body textarea,.ou-body input[type=text]{flex:1;font:12px ui-monospace,Consolas,monospace}.ide-clock{font:600 34px ui-monospace,Consolas,monospace;margin:.2rem 0}.ide-date,.ide-caption{color:#57606a;margin:0 0 .4rem}.ide-chart text{font:12px ui-monospace,Consolas,monospace}.message{margin:0 0 .5rem;border:1px solid #d5dae2;border-radius:5px}.message-header{padding:.1rem .5rem;background:#7a8699;color:#fff;font-size:12px}.message-header p,.message-body p{margin:0}.message.px-user .message-header{background:#4a72b0}.message-body{padding:.3rem .5rem}.ide-editor{height:220px;border:1px solid #d5dae2;border-radius:4px;overflow:hidden}.ide-editor-bar{align-items:center}"
+  ".ide-entry{margin-bottom:.6rem;font-family:ui-monospace,Consolas,monospace;font-size:12px}.ide-entry code{white-space:pre-wrap}.ide-prompt{color:#4a72b0;font-weight:600;margin-right:.4rem}.ide-out{margin-left:1.2rem}.ide-type{color:#57606a}.ou-body form{display:flex;gap:.4rem;align-items:flex-start;margin-top:.4rem}.ou-body textarea,.ou-body input[type=text]{flex:1;font:12px ui-monospace,Consolas,monospace}.ide-clock{font:600 34px ui-monospace,Consolas,monospace;margin:.2rem 0}.ide-date,.ide-caption{color:#57606a;margin:0 0 .4rem}.ide-chart text{font:12px ui-monospace,Consolas,monospace}.message{margin:0 0 .5rem;border:1px solid #d5dae2;border-radius:5px}.message-header{padding:.1rem .5rem;background:#7a8699;color:#fff;font-size:12px}.message-header p,.message-body p{margin:0}.message.px-user .message-header{background:#4a72b0}.message-body{padding:.3rem .5rem}.ide-editor{height:220px;border:1px solid #d5dae2;border-radius:4px;overflow:hidden}.ide-editor-bar{align-items:center}.ide-tabs{display:flex;flex-wrap:wrap;gap:.2rem;align-items:center;margin-bottom:.3rem}.ide-tab{display:inline-flex;border:1px solid #d5dae2;border-radius:4px 4px 0 0;background:#eef1f5}.ide-tab[data-ou-active]{background:#fff;border-bottom-color:#fff;font-weight:600}.ide-tab button{font:12px ui-monospace,Consolas,monospace;border:none;background:transparent;padding:.1rem .4rem;cursor:pointer}.ide-tab[data-ou-modified]>button:first-child::after{content:' \\25CF';color:#a40e26}.ide-save{margin-left:auto}.ide-status{min-height:1.2em;font-size:12px;margin:.3rem 0}.ide-status button{font-size:12px;margin-left:.4rem}.ide-tree{list-style:none;margin:0;padding-left:.9rem;font:12px ui-monospace,Consolas,monospace}.ou-body>.ide-tree{padding-left:0}.ide-tree button{font:inherit;border:none;background:transparent;padding:0 .2rem;cursor:pointer;text-align:left}.ide-tree button:hover{background:#eef1f5}.ide-tree-dir{color:#2c3850;font-weight:600}.ide-files-bar{display:flex;gap:.4rem;align-items:center;margin:.3rem 0}"
   "The IDE windows' own styles, added to hyperion/desktop-ui's.")
 
 (defun build-desktop (&key provider (desktop *desktop*))
-  "Put the six windows on DESKTOP, replacing any with the same ids, make the database and
+  "Put the seven windows on DESKTOP, replacing any with the same ids, make the database and
 the agent, and return DESKTOP. PROVIDER is a praxeon/llm:provider for the agent; with none,
 the agent uses STUB-PROVIDER and calls no model.
 
@@ -573,8 +580,20 @@ connected pages on that schedule; the page does not ask."
   (ui:open-inspector desktop :x 860 :y 20 :width 380 :height 460 :target "clock")
   ;; The editor's runtime is started by its first evaluation, not here.
   (ui:open-window desktop "editor" :title "Editor" :render 'render-editor
-                                   :actions '(("eval" . editor-eval) ("cancel" . editor-cancel))
+                                   :actions '(("eval" . editor-eval) ("cancel" . editor-cancel)
+                                              ("save" . editor-save) ("close" . editor-close)
+                                              ("switch" . editor-switch) ("reload" . editor-reload)
+                                              ("dismiss" . editor-dismiss))
                                    :x 500 :y 420 :width 600 :height 420)
+  ;; No folder is open until one is opened from the window. It opens files in "editor".
+  (ui:open-window desktop "files" :title "Files" :render 'render-files
+                                  :actions '(("open-project" . files-open-project)
+                                             ("toggle" . files-toggle) ("open" . files-open)
+                                             ("hidden" . files-show-hidden)
+                                             ("new-file" . files-new-file)
+                                             ("new-folder" . files-new-folder))
+                                  :data '(:editor "editor")
+                                  :x 1120 :y 500 :width 300 :height 420)
   desktop)
 
 (defun make-app (&optional (desktop *desktop*))

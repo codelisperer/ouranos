@@ -417,8 +417,11 @@ input is refused the same way."
         (language (if (equal "lisp" (%field parameters "language")) :lisp :coalton))
         (entry nil)
         (busy nil))
-    (setf (ui:window-datum window :buffer) (or (%field parameters "buffer") input)
-          (ui:window-datum window :language) language)
+    ;; The scratch buffer's text is kept for a page loaded later. A file's text is not: its tab
+    ;; (files.lisp) holds what was read or saved, and the page sends `tab' with its id.
+    (when (string= "" (or (%field parameters "tab") ""))
+      (setf (ui:window-datum window :buffer) (or (%field parameters "buffer") input)))
+    (setf (ui:window-datum window :language) language)
     (when (plusp (length (string-trim '(#\Space #\Tab #\Newline #\Return) input)))
       (sb-thread:with-mutex (*ide-lock*)
         (if (%editor-busy-p)
@@ -429,23 +432,32 @@ input is refused the same way."
           (t (%notice-html "Nothing to evaluate: the buffer is empty.")))))
 
 (defun render-editor (window)
-  "The editor window's body: the element the page builds the editor in, the form that
-evaluates, and the results, newest first.
+  "The editor window's body: the tab bar (files.lisp), one pane per tab holding the element the
+page builds that tab's editor in, the form that evaluates, the status line, and the results,
+newest first.
 
-The editor's element is marked data-ou-preserve, so a pushed body keeps it, and the editor in
-it. Its data-ou-editor-doc is the buffer as it was at the last evaluation, which is the text a
-newly loaded page starts with. The form's hidden fields are filled by the page's script just
-before it is sent."
-  (let ((results-id (%dom-id window "results"))
-        (form-id (%dom-id window "form"))
-        (language (ui:window-datum window :language :coalton))
-        (entries (mapcar (lambda (entry) (%editor-entry-html window entry))
-                         (ui:window-datum window :transcript))))
+The first tab is the scratch buffer. Its element is marked data-ou-preserve, so a pushed body
+keeps it, and the editor in it. Its data-ou-editor-doc is the buffer as it was at the last
+evaluation, which is the text a newly loaded page starts with. Each open file has a pane of its
+own after it; only the active tab's pane is shown. The form's hidden fields are filled by the
+page's script just before it is sent, from the editor of the pane that is shown."
+  (let* ((results-id (%dom-id window "results"))
+         (form-id (%dom-id window "form"))
+         (panes-id (%dom-id window "panes"))
+         (language (ui:window-datum window :language :coalton))
+         (scratch-shown (null (proj:tabs-active (%editor-tabs window))))
+         (entries (mapcar (lambda (entry) (%editor-entry-html window entry))
+                          (ui:window-datum window :transcript))))
     (spin:with-html-string
-      (:div :class "ide-editor" :id (%dom-id window "code")
-            :data-ou-preserve "1" :data-ou-editor "1" :data-ou-editor-form form-id
-            :data-ou-editor-doc (ui:window-datum window :buffer ""))
-      (:form :id form-id :class "ide-editor-bar"
+      (:raw (%tab-bar-html window panes-id))
+      (:div :class "ide-panes" :id panes-id
+        (:div :class "ide-pane" :hidden (not scratch-shown)
+          (:div :class "ide-editor" :id (%dom-id window "code")
+                :data-ou-preserve "1" :data-ou-editor "1" :data-ou-editor-form form-id
+                :data-ou-editor-save (%dom-id window "save")
+                :data-ou-editor-doc (ui:window-datum window :buffer "")))
+        (:raw (%file-panes-html window form-id)))
+      (:form :id form-id :class "ide-editor-bar" :data-ou-editor-scope panes-id
              :hx-post (format nil "/window/~A/action/eval" (ui:window-id window))
              :hx-target (format nil "#~A" results-id) :hx-swap "afterbegin"
         (:select :name "language"
@@ -453,6 +465,10 @@ before it is sent."
           (:option :value "lisp" :selected (eq language :lisp) "Lisp"))
         (:input :type "hidden" :name "input")
         (:input :type "hidden" :name "buffer")
+        (:input :type "hidden" :name "tab")
         (:button :type "submit" "Evaluate")
-        (:span :class "ide-type" "Mod-Enter evaluates the selection, or the whole buffer."))
+        (:span :class "ide-type" "Mod-Enter evaluates the selection, or the whole buffer. Mod-S saves the file shown."))
+      ;; Kept across a pushed body, so a question about a save or a close stays until it is
+      ;; answered.
+      (:div :class "ide-status" :id (%dom-id window "status") :data-ou-preserve "1")
       (:div :id results-id (dolist (html entries) (:raw html))))))
