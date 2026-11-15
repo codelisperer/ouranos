@@ -18,7 +18,9 @@
 ;;;; *CLOSE-TIMEOUT-MS* for the peer's; the TCP connection is closed when it arrives or when
 ;;;; the time runs out. A frame that breaks a rule is answered with a close frame carrying the
 ;;;; code the parser named (1002, 1007 or 1009) and the connection is closed without waiting.
-;;;; ON-CLOSE is called exactly once, whichever way the connection ended.
+;;;; ON-CLOSE is called exactly once, whichever way the connection ended. A draining STOP of
+;;;; the server starts the close handshake on every open WebSocket with code 1001 (going
+;;;; away), and waits for those connections to close as it waits for requests in flight.
 ;;;;
 ;;;; Out of scope: extensions, permessage-deflate among them. A client that offers one is
 ;;;; answered without Sec-WebSocket-Extensions, which RFC 6455 section 9.1 allows, and a frame
@@ -246,11 +248,18 @@ without a close frame from the peer."
               (log:error "server-uv/websocket: ON-CLOSE signalled"
                          :condition (log:condition-type e)))))))))
 
+(defun %on-drain (ws)
+  "The server is stopping with a drain: start the close handshake with 1001 (going away), so
+the peer hears why and a draining STOP is not left waiting for its timeout. Does nothing once a
+close frame has been sent."
+  (close-websocket ws :code ws:+going-away+ :reason "server going away"))
+
 (defun %open (ws u)
   "The first event: the 101 has been written and the connection is ours."
   (setf (websocket-upgraded ws) u
         (srv:upgraded-on-data u) (lambda (u chunk) (declare (ignore u)) (%on-data ws chunk))
-        (srv:upgraded-on-close u) (lambda (u) (declare (ignore u)) (%on-close ws)))
+        (srv:upgraded-on-close u) (lambda (u) (declare (ignore u)) (%on-close ws))
+        (srv:upgraded-on-drain u) (lambda (u) (declare (ignore u)) (%on-drain ws)))
   (%call ws (websocket-on-open ws)))
 
 ;;; --- the handshake ----------------------------------------------------------
@@ -314,7 +323,8 @@ Callbacks, each given the WEBSOCKET first:
   ON-MESSAGE (message)           a string for a text message, an octet vector for a binary one
   ON-PONG    (payload)           the peer answered a PING
   ON-CLOSE   (code reason)       once, when the connection has closed; CODE is 1006 when it
-                                 ended without a close frame
+                                 ended without a close frame; after a draining STOP sent
+                                 1001, the code the peer answered with, normally 1001
 An error in a callback is logged and closes the connection with 1011.
 
 MAX-MESSAGE-OCTETS bounds a message after its fragments are put together; over it, the

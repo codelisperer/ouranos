@@ -1608,7 +1608,10 @@ its tag.
   `close-websocket` may be called from any thread. Client frames must be masked (else `1002`), text
   must be valid UTF-8 (else `1007`), and a message over `*max-message-octets*` (1 MiB, or
   `:max-message-octets`) is refused with `1009` from its frame header. A close the server starts
-  waits `*close-timeout-ms*` (5000) for the peer's answer. The default origin check,
+  waits `*close-timeout-ms*` (5000) for the peer's answer. A draining `stop` (`:drain-timeout`)
+  sends each open WebSocket a close frame with `1001` (going away) before it waits for open
+  connections, and waits for the close handshake, so the client sees `1001` rather than `1006`.
+  The default origin check,
   `same-origin-p`, refuses a browser page on another host with `403`; pass `:check-origin`
   to change it. Subprotocols are chosen with `:protocols` or `:select-protocol`. No extensions:
   permessage-deflate is not offered. The frame parser and handshake are the pure system
@@ -1616,7 +1619,8 @@ its tag.
 - **`hyperion/server-uv` can hand a connection to another protocol after a `101`** (#376). A
   response whose body is `make-upgrade` takes the connection over; its `on-open` gets an
   `upgraded`, with `upgraded-write`, `upgraded-wait-writable`, `upgraded-close`,
-  `upgraded-after` and the setf-able `upgraded-on-data` and `upgraded-on-close`, and the
+  `upgraded-after` and the setf-able `upgraded-on-data`, `upgraded-on-close` and
+  `upgraded-on-drain` (called once when a draining `stop` begins), and the
   settings `*upgraded-read-high-water-octets*` and `*upgraded-write-high-water-octets*`. The
   `101` head comes from the new `hyperion/http1:encode-switching-protocols`.
 - **`clack-handler-uv` supplies `:clack.io`, so `websocket-driver` runs on `:server :uv`**

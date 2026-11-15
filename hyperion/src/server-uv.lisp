@@ -69,6 +69,7 @@
            #:upgrade #:upgrade-p #:make-upgrade
            #:upgraded #:upgraded-p #:upgraded-write #:upgraded-wait-writable #:upgraded-close
            #:upgraded-after #:upgraded-open-p #:upgraded-on-data #:upgraded-on-close
+           #:upgraded-on-drain
            #:upgraded-data
            #:upgraded-closed #:upgraded-closed-reason
            #:*upgraded-read-high-water-octets* #:*upgraded-write-high-water-octets*))
@@ -1057,6 +1058,12 @@ connection."
   ;; The application's handlers, set from ON-OPEN or any later event.
   (on-data nil)
   (on-close nil)
+  ;; Called once, as an event, when a draining STOP begins, so the layer on this connection
+  ;; can tell its peer the server is going away (a WebSocket sends close code 1001). NIL means
+  ;; the connection is left open until the drain timeout, as a stream is. DRAIN-POSTED makes
+  ;; the event happen once.
+  (on-drain nil)
+  (drain-posted nil)
   ;; Anything the layer built on this connection wants to keep with it.
   (data nil))
 
@@ -1889,6 +1896,16 @@ any sender waiting to write, and delivers the close event, once."
                         (let ((f (upgraded-on-close u)))
                           (when f (funcall f u)))))))
 
+(defun %upgraded-drain (u)
+  "A draining STOP has begun. LOOP THREAD ONLY. Queue U's drain event, once. The event reads
+UPGRADED-ON-DRAIN when it runs, so a handler set by ON-OPEN, which is queued before it, is the
+one called."
+  (unless (or (upgraded-drain-posted u) (upgraded-closed u))
+    (setf (upgraded-drain-posted u) t)
+    (%upgraded-post u (lambda ()
+                        (let ((f (upgraded-on-drain u)))
+                          (when f (funcall f u)))))))
+
 (defun %take-over (conn state status headers upgrade)
   "Answer with 101 and hand CONN to UPGRADE's ON-OPEN. LOOP THREAD ONLY. Returns :UPGRADED, or
 NIL after a 500 when the response cannot take the connection over."
@@ -2342,16 +2359,21 @@ already received."
   (or (conn-state-in-flight state)
       (conn-state-streaming state)
       ;; A connection taken over after a 101 (#376) is open on the application's terms; a
-      ;; draining STOP waits for it as it waits for a stream, then closes it.
+      ;; draining STOP tells it the server is going away (%UPGRADED-DRAIN) and waits for it to
+      ;; close, as it waits for a stream, then closes whatever is left.
       (conn-state-upgraded state)
       (plusp (fill-pointer (conn-state-buffer state)))))
 
 (defun %close-idle (shard)
-  "Close every connection of SHARD that is not busy, and return how many are still open.
-ON SHARD'S LOOP THREAD. An idle keep-alive connection has nothing to wait for, and while
+  "Close every connection of SHARD that is not busy, queue the drain event of every connection
+taken over after a 101, and return how many are still open. ON SHARD'S LOOP THREAD. An idle keep-alive connection has nothing to wait for, and while
 draining no new request should start on it."
   (let ((idle '()))
-    (maphash (lambda (conn state) (unless (%busy-p state) (push (cons conn state) idle)))
+    (maphash (lambda (conn state)
+               (let ((u (conn-state-upgraded state)))
+                 ;; Each check reaches a connection taken over since the last one, too.
+                 (when u (%upgraded-drain u)))
+               (unless (%busy-p state) (push (cons conn state) idle)))
              (shard-live shard))
     (loop for (conn . state) in idle do (%finish conn state))
     (hash-table-count (shard-live shard))))
@@ -2420,8 +2442,10 @@ it stopped waiting."
 
 With DRAIN-TIMEOUT, a number of seconds above zero, STOP drains first (#388): it stops
 accepting, closes idle connections, and waits up to DRAIN-TIMEOUT seconds for requests in
-flight and streamed responses to finish, each closing its connection as it does. Whatever is
-still open then is closed. With the default, 0, it closes everything at once, as it always has.
+flight, streamed responses and connections taken over after a 101 to finish, each closing its
+connection as it does; a taken-over connection is first told through UPGRADED-ON-DRAIN, which
+is how a WebSocket sends close code 1001. Whatever is still open then is closed. With the
+default, 0, it closes everything at once, as it always has.
 SERVE-FOREVER passes a timeout on SIGTERM; a grace period before that, still accepting, is
 SERVE-FOREVER's (see hyperion/server).
 

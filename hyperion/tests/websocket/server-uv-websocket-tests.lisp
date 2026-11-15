@@ -572,3 +572,41 @@ answered with, or :NONE, and whether it then closed the connection."
         (is (= 1000 (close-code-of (read-frame c))))
         (is-true (eof-p c))
         (is-true (wait-until (lambda () (find-entry log :close))))))))
+
+(test a-draining-stop-sends-1001-and-waits-for-the-close-handshake
+  ;; A draining STOP sends each open WebSocket a close frame with 1001 (going away) before it
+  ;; waits. The client answers, the server closes TCP, ON-CLOSE sees 1001, and STOP returns
+  ;; well before its 5 s drain timeout. Without the 1001, the client would read no frame until
+  ;; STOP closed the connection at the timeout, and ON-CLOSE would see 1006.
+  (let* ((log (make-log*))
+         (s (srv:start (echo-app log) :port 0 :workers 2))
+         (stopper nil))
+    (unwind-protect
+         (with-client (c (srv:server-port s))
+           (is (= 101 (status-of (client-head c))))
+           (is-true (wait-until (lambda () (find-entry log :open))))
+           ;; INTERRUPTS: a test thread that calls STOP once and exits; nothing interrupts it.
+           ;; THREAD-LIFETIME: joined below, with a timeout, before the test ends.
+           (let ((start (get-internal-real-time)))
+             (setf stopper (sb-thread:make-thread
+                            (lambda () (srv:stop s :drain-timeout 5))
+                            :name "websocket test draining stop"))
+             (let ((f (read-frame c)))
+               (is (eql ws:+close+ (first f)))
+               (is (eql 1001 (and f (close-code-of f))))
+               (is (< (/ (- (get-internal-real-time) start) internal-time-units-per-second) 3)
+                   "the close frame came at the start of the drain, not at its timeout"))
+             (send-frame c ws:+close+ (close-payload 1001))
+             (is-true (eof-p c))
+             ;; The client closes its side, as a client does after the close handshake. Until
+             ;; it does, server-uv keeps the half-closed connection open for
+             ;; *KEEP-ALIVE-TIMEOUT-MS*, and the drain would wait for that.
+             (client-close c)
+             (is-true (wait-until (lambda () (find-entry log :close))))
+             (is (eql 1001 (second (find-entry log :close))))
+             (sb-thread:join-thread stopper :default nil :timeout +io-timeout+)
+             (is (< (/ (- (get-internal-real-time) start) internal-time-units-per-second) 4)
+                 "STOP returned once the WebSocket had closed, before the drain timeout")))
+      (when (and stopper (sb-thread:thread-alive-p stopper))
+        (sb-thread:join-thread stopper :default nil :timeout +io-timeout+))
+      (srv:stop s))))
