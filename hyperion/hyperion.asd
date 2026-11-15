@@ -169,6 +169,37 @@
                              (:file "encoder-tests"))))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/http1/tests :run-tests)))
 
+;;; --- websocket: the WebSocket protocol, pure and dependency-free (#376) -------
+;;;
+;;; Its own system and depending on nothing, for the reason hyperion/http1 is: the code that
+;;; reads frames from a stranger stays inside every run of scripts/verify-tree.lisp, which
+;;; leaves the libuv systems out unless OURANOS_WITH_UV=1. The connection side is
+;;; hyperion/server-uv/websocket.
+
+(defsystem "hyperion/websocket"
+  :description "The WebSocket protocol (RFC 6455) as pure functions: frames, messages, the handshake."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :serial t
+  :components ((:module "src/websocket"
+                :serial t
+                :components ((:file "packages")
+                             (:file "frame")
+                             (:file "handshake"))))
+  :in-order-to ((test-op (test-op "hyperion/websocket/tests"))))
+
+(defsystem "hyperion/websocket/tests"
+  :description "Test suite for hyperion/websocket: RFC 6455's examples and adversarial frames."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  ;; ironclad and cl-base64 are the comparison for the SHA-1 and base64 written in
+  ;; hyperion/websocket; both are already in the tree (docs/dependencies.md).
+  :depends-on ("hyperion/websocket" "fiveam" "ironclad" "cl-base64")
+  :serial t
+  :components ((:module "tests/websocket"
+                :components ((:file "websocket-tests"))))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/websocket/tests :run-tests)))
+
 ;;; --- server-uv: the native HTTP server, on aion/uv ------------------------
 ;;;
 ;;; NOT :depends-on "hyperion", and that is the point rather than an oversight. This system
@@ -222,12 +253,36 @@
   :components ((:file "src/server-uv"))
   :in-order-to ((test-op (test-op "hyperion/server-uv/tests"))))
 
+;;; WebSockets on server-uv (#376): the frames are parsed by hyperion/websocket, the connection
+;;; is server-uv's after a 101. A system of its own so server-uv does not depend on the
+;;; WebSocket code, and an application that does not use WebSockets does not load it.
+(defsystem "hyperion/server-uv/websocket"
+  :description "WebSockets (RFC 6455) on hyperion/server-uv (#376)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion/server-uv" "hyperion/websocket" "aion/log")
+  :serial t
+  :components ((:file "src/server-uv-websocket"))
+  :in-order-to ((test-op (test-op "hyperion/server-uv/websocket/tests"))))
+
+(defsystem "hyperion/server-uv/websocket/tests"
+  :description "WebSockets on server-uv over real sockets, with a minimal client written in the suite (#376)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion/server-uv/websocket" "hyperion/server-uv" "hyperion/websocket"
+               "hyperion/test-ports" "aion/pool" "fiveam" (:require "sb-bsd-sockets"))
+  :serial t
+  :components ((:module "tests/websocket"
+                :components ((:file "server-uv-websocket-tests"))))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/server-uv/websocket/tests :run-tests)))
+
 (defsystem "hyperion/clack-handler-uv"
   :description "A Clack handler for hyperion/server-uv: (clack:clackup app :server :uv) (#373, ADR-0020)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :depends-on ("hyperion/server-uv" "bordeaux-threads"
-               "aion/dynamic") ; the delayed-response thread inherits the request's bindings (#158)
+               "aion/dynamic" ; the delayed-response thread inherits the request's bindings (#158)
+               "clack-socket") ; the protocol the :CLACK.IO socket implements, for websocket-driver (#376)
   :serial t
   :components ((:file "src/clack-handler-uv"))
   :in-order-to ((test-op (test-op "hyperion/clack-handler-uv/tests"))))
@@ -241,9 +296,14 @@
   ;; those three were already in the tree. aion/uv for uv-error, which tells a taken port
   ;; from other listen failures (#519).
   :depends-on ("hyperion/clack-handler-uv" "hyperion/server-uv" "aion/uv" "clack" "dexador"
-               "usocket" "fiveam")
+               "usocket" "fiveam"
+               ;; websocket-driver's server, run on :uv through the :CLACK.IO socket, and the
+               ;; minimal WebSocket client of server-uv's WebSocket suite (#376). Test-only:
+               ;; no system an app loads depends on websocket-driver.
+               "websocket-driver-server" "hyperion/server-uv/websocket/tests")
   :serial t
-  :components ((:file "tests/clack-handler-uv-tests"))
+  :components ((:file "tests/clack-handler-uv-tests")
+               (:file "tests/clack-handler-uv-websocket-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/clack-handler-uv/tests :run-tests)))
 
 (defsystem "hyperion/server-uv/tests"

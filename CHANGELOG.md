@@ -1599,6 +1599,31 @@ its tag.
   every case met and none regressed). The grade type and the aggregation are Coalton, in
   `praxeon/eval/core`. The example `praxeon/examples/eval` is an order-support agent and a
   three-case dataset. `praxeon/eval` declares `cl-ppcre`, which dexador already loads.
+- **WebSockets on `hyperion/server-uv`** (#376). The new system `hyperion/server-uv/websocket`
+  gives a handler `websocket-response`, which checks the opening handshake and returns either a
+  `101` that takes the connection over or the `400`, `403` or `426` the request earned. Callbacks
+  `:on-open`, `:on-message` (a string for text, an octet vector for binary), `:on-pong` and
+  `:on-close` (called once, with code `1006` when the peer sent no close frame) run on the
+  server's workers, one at a time per connection; `send-text`, `send-binary`, `ping` and
+  `close-websocket` may be called from any thread. Client frames must be masked (else `1002`), text
+  must be valid UTF-8 (else `1007`), and a message over `*max-message-octets*` (1 MiB, or
+  `:max-message-octets`) is refused with `1009` from its frame header. A close the server starts
+  waits `*close-timeout-ms*` (5000) for the peer's answer. The default origin check,
+  `same-origin-p`, refuses a browser page on another host with `403`; pass `:check-origin`
+  to change it. Subprotocols are chosen with `:protocols` or `:select-protocol`. No extensions:
+  permessage-deflate is not offered. The frame parser and handshake are the pure system
+  `hyperion/websocket`.
+- **`hyperion/server-uv` can hand a connection to another protocol after a `101`** (#376). A
+  response whose body is `make-upgrade` takes the connection over; its `on-open` gets an
+  `upgraded`, with `upgraded-write`, `upgraded-wait-writable`, `upgraded-close`,
+  `upgraded-after` and the setf-able `upgraded-on-data` and `upgraded-on-close`, and the
+  settings `*upgraded-read-high-water-octets*` and `*upgraded-write-high-water-octets*`. The
+  `101` head comes from the new `hyperion/http1:encode-switching-protocols`.
+- **`clack-handler-uv` supplies `:clack.io`, so `websocket-driver` runs on `:server :uv`**
+  (#376). The env of every request carries a socket implementing the `clack-socket` protocol. A
+  delayed response that returns without calling its responder, after writing to the socket or
+  setting its read callback as `wsd:start-connection` does, now takes the connection over. A
+  peer that disconnects without a close frame is not reported to websocket-driver, as on Woo.
 - **`praxeon/image:image-request-failed` answers `aion/retry:transience` and
   `aion/retry:retry-after`** (#79), so an app can run `generate-image` under
   `aion/retry:with-retry` and have the service's Retry-After honoured. A 429 is `:transient`, a

@@ -14,7 +14,9 @@
 (defpackage #:hyperion/clack-handler-uv/tests
   (:use #:cl #:fiveam)
   (:local-nicknames (#:uvh #:clack.handler.uv)
-                    (#:srv #:hyperion/server-uv))
+                    (#:srv #:hyperion/server-uv)
+                    ;; the minimal WebSocket client, for the websocket-driver tests (#376)
+                    (#:wsc #:hyperion/server-uv/websocket/tests))
   (:export #:run-tests))
 
 (in-package #:hyperion/clack-handler-uv/tests)
