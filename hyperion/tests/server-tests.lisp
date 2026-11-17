@@ -533,13 +533,17 @@ invisible to a connect probe, so CHECK-PORT cannot see it and only the bind can 
 
 (test a-listener-already-on-the-port-is-never-taken-for-our-server
   ;; Another program LISTENING on the port, with SO_REUSEADDR, before START binds it, and the
-  ;; preflight off so that only the bind and the readiness check decide. Each platform's
-  ;; outcome is asserted as measured on #188, not a weaker "either" (Linux here; macOS by
-  ;; Ouranos Claude (macOS); Windows by Ouranos Claude (Windows)):
-  ;;   Linux, macOS  the backend's bind fails: PORT-IN-USE.
-  ;;   Windows       both sockets bind and listen, sharing the port with no error; the
-  ;;                 readiness nonce never comes back from the other listener, so START
-  ;;                 gives up with SERVER-START-TIMEOUT. Before #188 it reported success.
+  ;; preflight off so that only the bind and the readiness check decide. The backend's bind
+  ;; fails, and START signals PORT-IN-USE, on every platform.
+  ;;
+  ;; ON WINDOWS THIS USED TO BE SERVER-START-TIMEOUT. #188 measured it with Hunchentoot, whose
+  ;; listening socket sets SO_REUSEADDR. Windows lets a second socket bind a port another socket
+  ;; holds when the second one sets SO_REUSEADDR, so both listened on the port, the readiness
+  ;; nonce never came back from the other listener, and START gave up. Since #373 this test
+  ;; runs on hyperion/clack-handler-uv, which binds with libuv. libuv does not set SO_REUSEADDR
+  ;; on Windows (src/win/tcp.c, above uv__tcp_try_bind, in the release libuv.pin names), so its
+  ;; bind fails with WSAEADDRINUSE as it does on Linux and macOS. Measured on Windows 11 for
+  ;; #1245, and on the Windows leg of run 43737827642.
   (let ((squatter (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
     (setf (sb-bsd-sockets:sockopt-reuse-address squatter) t)
     (sb-bsd-sockets:socket-bind squatter #(127 0 0 1) 0)
@@ -553,9 +557,7 @@ invisible to a connect probe, so CHECK-PORT cannot see it and only the bind can 
                            :started)
                        (srv:port-in-use (c) c)
                        (srv:server-start-timeout (c) c)))))
-           #-win32 (is (typep c 'srv:port-in-use) "expected PORT-IN-USE, got ~S" c)
-           #+win32 (is (typep c 'srv:server-start-timeout)
-                       "expected SERVER-START-TIMEOUT on a shared port, got ~S" c))
+           (is (typep c 'srv:port-in-use) "expected PORT-IN-USE, got ~S" c))
       (sb-bsd-sockets:socket-close squatter))))
 
 (test start-returns-once-the-port-is-listening-and-stop-once-it-is-released
