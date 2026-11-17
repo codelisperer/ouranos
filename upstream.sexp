@@ -48,6 +48,14 @@
  :where ((:env "scripts/versions.env" "SBCL_VERSION"))
  :upstream (:github-tag "sbcl/sbcl" "sbcl-"))
 
+;; The SBCL release Ouranos builds its own binaries from (#1251). It can differ from SBCL_VERSION
+;; above until setup installs these builds instead of the SourceForge binary. sbcl.pin also pins
+;; the commit the tag points to, and scripts/build-sbcl.sh refuses any other commit.
+(:name "SBCL (Ouranos build source)" :category :toolchain
+ :where ((:field "sbcl.pin" "version")
+         (:text "sbcl.pin" "tag     sbcl-" nil))
+ :upstream (:github-tag "sbcl/sbcl" "sbcl-"))
+
 (:name "Coalton" :category :toolchain
  :where ((:field "coalton.pin" "sha"))
  :upstream (:github-commit "coalton-lang/coalton"))
@@ -276,7 +284,8 @@
  :where ((:text ".github/workflows/verify.yml" "uses: actions/checkout@" nil)
          (:text ".github/workflows/desktop-release.yml" "uses: actions/checkout@" nil)
          (:text ".github/workflows/windows-arm64-probe.yml" "uses: actions/checkout@" nil)
-         (:text ".github/workflows/upstream.yml" "uses: actions/checkout@" nil))
+         (:text ".github/workflows/upstream.yml" "uses: actions/checkout@" nil)
+         (:text ".github/workflows/sbcl-build.yml" "uses: actions/checkout@" nil))
  :upstream (:github-release "actions/checkout"))
 
 (:name "actions/cache" :category :ci
@@ -288,23 +297,27 @@
 
 (:name "actions/upload-artifact" :category :ci
  :where ((:text ".github/workflows/desktop-release.yml" "uses: actions/upload-artifact@" nil)
-         (:text ".github/workflows/windows-arm64-probe.yml" "uses: actions/upload-artifact@" nil))
+         (:text ".github/workflows/windows-arm64-probe.yml" "uses: actions/upload-artifact@" nil)
+         (:text ".github/workflows/sbcl-build.yml" "uses: actions/upload-artifact@" nil))
  :upstream (:github-release "actions/upload-artifact"))
 
 (:name "actions/download-artifact" :category :ci
- :where ((:text ".github/workflows/desktop-release.yml" "uses: actions/download-artifact@" nil))
+ :where ((:text ".github/workflows/desktop-release.yml" "uses: actions/download-artifact@" nil)
+         (:text ".github/workflows/sbcl-build.yml" "uses: actions/download-artifact@" nil))
  :upstream (:github-release "actions/download-artifact"))
 
 (:name "Linux runner image" :category :ci
  :where ((:text ".github/workflows/verify.yml" "- os: ubuntu-" nil)
          (:text ".github/workflows/verify.yml" "runs-on: ubuntu-" nil)
-         (:text ".github/workflows/upstream.yml" "runs-on: ubuntu-" nil))
+         (:text ".github/workflows/upstream.yml" "runs-on: ubuntu-" nil)
+         (:text ".github/workflows/sbcl-build.yml" "runs-on: ubuntu-" nil))
  :upstream (:manual "https://github.com/actions/runner-images")
  :reviewed "2026-10-24")
 
 (:name "Linux desktop build image" :category :ci
  :where ((:text ".github/workflows/desktop-release.yml" "- os: ubuntu-" nil)
-         (:text ".github/workflows/desktop-release.yml" "runs-on: ubuntu-" nil))
+         (:text ".github/workflows/desktop-release.yml" "runs-on: ubuntu-" nil)
+         (:text ".github/workflows/sbcl-build.yml" "- os: ubuntu-" nil))
  :upstream (:manual "https://github.com/actions/runner-images")
  :reviewed "2026-10-24"
  :held (:reason "a Linux bundle needs at least the glibc of its build image; ubuntu-26.04 has glibc 2.43 and Ubuntu 24.04 desktops have 2.39, so the maintainer kept the desktop build on ubuntu-24.04 while verify.yml tests on ubuntu-26.04"
