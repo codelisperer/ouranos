@@ -56,6 +56,14 @@
          (:text "sbcl.pin" "tag     sbcl-" nil))
  :upstream (:github-tag "sbcl/sbcl" "sbcl-"))
 
+;; The zstd release whose libzstd.a is linked into Ouranos's SBCL builds on macOS and Windows
+;; (#1251, ruling of 2026-11-17). The version is written twice in sbcl.pin, once on its own line
+;; and once in the URL, and both must agree.
+(:name "zstd (static, in Ouranos's SBCL builds)" :category :native
+ :where ((:field "sbcl.pin" "zstd-version")
+         (:text "sbcl.pin" "zstd/releases/download/v" "/"))
+ :upstream (:github-release "facebook/zstd"))
+
 (:name "Coalton" :category :toolchain
  :where ((:field "coalton.pin" "sha"))
  :upstream (:github-commit "coalton-lang/coalton"))
@@ -340,12 +348,14 @@
         :issue 766))
 
 (:name "macOS runner image" :category :ci
- :where ((:text ".github/workflows/verify.yml" "- os: macos-" nil))
+ :where ((:text ".github/workflows/verify.yml" "- os: macos-" nil)
+         (:text ".github/workflows/sbcl-build.yml" "runs-on: macos-" nil))
  :upstream (:manual "https://github.com/actions/runner-images")
  :reviewed "2026-10-18")
 
 (:name "macOS desktop build image" :category :ci
- :where ((:text ".github/workflows/desktop-release.yml" "- os: macos-" nil))
+ :where ((:text ".github/workflows/desktop-release.yml" "- os: macos-" nil)
+         (:text ".github/workflows/sbcl-build.yml" "- os: macos-" nil))
  :upstream (:manual "https://github.com/actions/runner-images")
  :reviewed "2026-10-18"
  :held (:reason "the macOS app needs the macOS of its build image or later, because Homebrew's sbcl and libzstd in the bundle target it; the maintainer chose macos-15 so the app runs on macOS 15, while verify.yml tests on macos-26"
