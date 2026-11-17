@@ -1545,12 +1545,18 @@ it 10 seconds, so the idle limit of 60 seconds passes within a few checks."
   (signals error (web:make-app :agent (quiet-agent) :transport :auto)))
 
 (defun %read-to-end-within (stream seconds)
-  "Read STREAM until end of file. T when it ended within SECONDS, NIL when it was still open."
+  "Read STREAM until end of file. T when it ended within SECONDS, NIL when it was still open.
+
+SB-EXT:WITH-TIMEOUT, NOT SB-SYS:WITH-DEADLINE. On Windows a deadline does not interrupt a read
+that is blocked on a socket stream: measured on Windows 11 for #1245, a read under a deadline of
+1 second on a stream the server kept open went on for 119 seconds, until the server ended the
+stream, and then reported end of file, so this returned T for a stream that was still open.
+WITH-TIMEOUT interrupts the thread, and ended the same read at 1.01 seconds."
   (handler-case
-      (sb-sys:with-deadline (:seconds seconds)
+      (sb-ext:with-timeout seconds
         (loop for c = (read-char stream nil nil) while c)
         t)
-    (sb-sys:deadline-timeout () nil)))
+    (sb-ext:timeout () nil)))
 
 (test the-native-server-delivers-each-event-while-the-stream-is-open
   "The first event reaches the browser while the stream is still open: the server sends the
@@ -1579,7 +1585,8 @@ stream holds a worker, and the end of the stream is seen as the connection closi
                        #\Return #\Linefeed)
                (finish-output st)
                (handler-case
-                   (sb-sys:with-deadline (:seconds 10)
+                   ;; WITH-TIMEOUT, as in %READ-TO-END-WITHIN, so this ends on Windows too.
+                   (sb-ext:with-timeout 10
                      ;; Read until the first event's id line and the blank line after it.
                      (loop for c = (read-char st nil nil)
                            while c
@@ -1587,7 +1594,7 @@ stream holds a worker, and the end of the stream is seen as the connection closi
                               (let ((id (search "id: " text)))
                                 (when (and id (search (format nil "~%~%") text :start2 id))
                                   (return)))))
-                 (sb-sys:deadline-timeout () nil))
+                 (sb-ext:timeout () nil))
                (is (search "text/event-stream" text) "~S" text)
                (is (search "id: " text) "no event arrived while the stream was open: ~S" text)
                (is-false (%read-to-end-within st 1) "control: the stream ended before its session did")

@@ -26,8 +26,8 @@ A framework never depends on one to its **right** (ASDF errors on cycles). Aux
 systems (e.g. `praxeon/web → hyperion`) may reach right; **core** systems may not.
 Combined apps/examples live in the **highest** framework they need.
 **Satellites sit outside this line** — they depend leftward into it and nothing in the
-line depends on them. `hermes` (integrations) and `hades` attach at `aion`; `klio` (the
-git-backed content engine) attaches at `hyperion`.
+line depends on them. `hermes` (integrations), `hades` and `dokimasia` (browser acceptance
+tests) attach at `aion`; `klio` (the git-backed content engine) attaches at `hyperion`.
 
 ## Build / run — no external build tools
 

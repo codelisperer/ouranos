@@ -319,3 +319,31 @@ never comes. Asserted exactly, including the empty trailer section -- a single C
 would leave the message unterminated in a way no single response reveals."
   (is (string= (concatenate 'string "0" +crlf+ +crlf+)
                (coalton:coalton h1:last-chunk))))
+
+;;; --- 101 Switching Protocols (#376) --------------------------------------------
+
+(test a-switching-protocols-head
+  (let ((r (h1:encode-switching-protocols-flat
+            (list "Upgrade" "websocket" "Sec-WebSocket-Accept" "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+                  "Connection" "keep-alive" "Content-Length" "5"))))
+    (is-true (h1:encode-ok? r) "~A" (h1:encode-reason r))
+    (is-true (search (concatenate 'string "HTTP/1.1 101 Switching Protocols" +crlf+) (text-of r)))
+    (is-true (has-line r "Upgrade: websocket"))
+    (is-true (has-line r "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo="))
+    (is-true (has-line r "Connection: Upgrade"))
+    (is-false (search "keep-alive" (text-of r)) "a caller's Connection header is dropped")
+    (is-false (search "Content-Length" (text-of r)) "a 101 has no body to frame")
+    (let ((s (text-of r)))
+      (is (string= (concatenate 'string +crlf+ +crlf+) (subseq s (- (length s) 4)))))))
+
+(test a-switching-protocols-head-without-upgrade-is-refused
+  (let ((r (h1:encode-switching-protocols-flat (list "Sec-WebSocket-Accept" "x"))))
+    (is-false (h1:encode-ok? r))
+    (is (search "Upgrade" (h1:encode-reason r))))
+  (is-true (h1:encode-ok? (h1:encode-switching-protocols-flat (list "upgrade" "websocket")))
+           "the name is compared without case"))
+
+(test a-switching-protocols-head-refuses-response-splitting
+  (let ((r (h1:encode-switching-protocols-flat
+            (list "Upgrade" "websocket" "X-Echo" (format nil "a~C~CSet-Cookie: x=1" #\Return #\Newline)))))
+    (is-false (h1:encode-ok? r))))

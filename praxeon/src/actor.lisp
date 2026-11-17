@@ -1584,7 +1584,18 @@ values. CONTINUE-TURN enters here too, after it has written a held step's result
 ON-STEP-LIMIT :WRAP-UP makes the last of the MAX-STEPS a wrap-up (#1182): it offers no tools
 and asks for the best answer from what was gathered, and its answer is returned with a second
 value of :WRAPPED-UP. It is a step like any other, so MAX-STEPS stays the ceiling, and it emits
-the usual :USAGE event. A turn that answers before its last step is not affected."
+the usual :USAGE event. A turn that answers before its last step is not affected.
+
+It first emits :TURN-STARTED with the agent's name, the model and provider it will call, its
+conversation id and MAX-STEPS, so an observer can tell where a turn begins and which model its
+steps use (praxeon/trace, #1225). A held turn that CONTINUE-TURN resumes emits it again."
+  (let ((provider (agent-provider agent)))
+    (evt:emit :turn-started :agent (agent-name agent)
+                            :model (and provider (llm:model-of provider))
+                            :provider (and provider
+                                           (string-downcase (class-name (class-of provider))))
+                            :conversation (agent-conversation agent)
+                            :max-steps max-steps))
   (progn
     (dotimes (step max-steps
                    (error 'cnd:deliberation-failure
