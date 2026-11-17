@@ -512,4 +512,8 @@ reason."
         (format t "  (skipped .env.example aggregation: ~A)~%" e)))
     (format t "Done. Next: cd ~A && cons ~A~%" name
             (if (eq (target-kind-name kind) :web) "serve" "build"))
+    ;; A web app serves on hyperion/server-uv, which cannot start without libuv (#504). Said
+    ;; here because `cons serve' is the next command, and it is where a missing libuv shows.
+    (when (eq (target-kind-name kind) :web)
+      (format t "It serves on hyperion/server-uv, which needs libuv. The Ouranos checkout's scripts/setup.sh (setup.ps1 on Windows) builds it unless it was run with --without-uv; README.md says more.~%"))
     root))
