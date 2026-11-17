@@ -151,7 +151,7 @@ afterwards, would break that site while passing every inheritance test."
 ;;; question about the code, which the author can answer and a reviewer can check.
 
 (defparameter +spawn-sweep-roots+
-  '("aion" "cons" "mnemosyne" "elenchon" "hyperion" "praxeon" "hermes" "klio" "hades")
+  '("aion" "cons" "mnemosyne" "elenchon" "hyperion" "praxeon" "hermes" "klio" "hades" "dokimasia")
   "The trees walked. Named rather than discovered, so adding a framework to the repo without
 adding it here is visible in this list rather than silently unswept.")
 
