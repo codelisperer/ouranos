@@ -34,6 +34,21 @@ its tag.
   it costs nothing, because the build is reused. `--check` (`-Check`) now reports the compiler
   and a missing or stale `vendor/libuv` as missing, unless `--without-uv` is also given; on
   Windows MSVC was reported as optional before.
+- **On Windows without the MSVC Build Tools, `scripts/setup.ps1` downloads a prebuilt
+  `libuv.dll` instead of stopping, once one is pinned** (#1247). The new `libuv-prebuilt.pin`
+  names, for x64 and arm64, the URL and SHA-256 of a `libuv.dll` built from `libuv.pin`'s release
+  by `.github/workflows/libuv-prebuilt.yml` and attached to this repository's release
+  `libuv-v<version>` as `libuv-<version>-windows-<arch>.dll`. setup checks the download against
+  the pinned SHA-256 and the architecture in its PE header, deletes it and stops if either does
+  not match, and otherwise installs it as `vendor/libuv/lib/libuv.dll` with a
+  `vendor/libuv/BUILT-FROM` that adds `prebuilt <url>` and `prebuilt-sha256 <hex>` lines after the
+  usual `version` and `sha256` lines. With the Build Tools, setup builds from source as before;
+  `-WithoutUv` still skips libuv. **Until the first DLL is published, the pin holds `none` and
+  setup still stops without MSVC**, saying that no prebuilt DLL is pinned. `-Check` accepts a
+  pinned prebuilt in place of MSVC, says whether `vendor/libuv` was built or downloaded, and
+  reports a downloaded DLL whose checksum no longer matches its stamp. `scripts/build-libuv.lisp`
+  and the bundler treat a stamp with those extra lines as current, so a downloaded DLL is reused
+  and carried like a built one.
 - **A call to a tool the agent does not have is answered as not run, and the turn goes on**
   (#1196). `praxeon/actor:run-turn` used to let `act` signal `means-failure` ("no such means
   registered") for such a call, which failed the turn unless the app handled it. Now the model is

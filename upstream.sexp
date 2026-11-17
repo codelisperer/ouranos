@@ -77,7 +77,11 @@
 
 (:name "libuv" :category :native
  :where ((:field "libuv.pin" "version")
-         (:text "libuv.pin" "url     https://dist.libuv.org/dist/v" "/"))
+         (:text "libuv.pin" "url     https://dist.libuv.org/dist/v" "/")
+         ;; The prebuilt Windows DLL setup.ps1 downloads without MSVC is built from libuv.pin's
+         ;; release, so its pin moves with libuv.pin (#1247).
+         (:field "libuv-prebuilt.pin" "version")
+         (:text "libuv-prebuilt.pin" "/releases/download/libuv-v" "/"))
  :upstream (:github-release "libuv/libuv"))
 
 (:name "mbedTLS" :category :native
@@ -276,6 +280,7 @@
  :where ((:text ".github/workflows/verify.yml" "uses: actions/checkout@" nil)
          (:text ".github/workflows/desktop-release.yml" "uses: actions/checkout@" nil)
          (:text ".github/workflows/windows-arm64-probe.yml" "uses: actions/checkout@" nil)
+         (:text ".github/workflows/libuv-prebuilt.yml" "uses: actions/checkout@" nil)
          (:text ".github/workflows/upstream.yml" "uses: actions/checkout@" nil))
  :upstream (:github-release "actions/checkout"))
 
@@ -283,22 +288,26 @@
  :where ((:text ".github/workflows/verify.yml" "uses: actions/cache@" nil)
          (:text ".github/workflows/desktop-release.yml" "uses: actions/cache@" nil)
          (:text ".github/workflows/windows-arm64-probe.yml" "uses: actions/cache@" nil)
+         (:text ".github/workflows/libuv-prebuilt.yml" "uses: actions/cache@" nil)
          (:text ".github/workflows/upstream.yml" "uses: actions/cache@" nil))
  :upstream (:github-release "actions/cache"))
 
 (:name "actions/upload-artifact" :category :ci
  :where ((:text ".github/workflows/desktop-release.yml" "uses: actions/upload-artifact@" nil)
-         (:text ".github/workflows/windows-arm64-probe.yml" "uses: actions/upload-artifact@" nil))
+         (:text ".github/workflows/windows-arm64-probe.yml" "uses: actions/upload-artifact@" nil)
+         (:text ".github/workflows/libuv-prebuilt.yml" "uses: actions/upload-artifact@" nil))
  :upstream (:github-release "actions/upload-artifact"))
 
 (:name "actions/download-artifact" :category :ci
- :where ((:text ".github/workflows/desktop-release.yml" "uses: actions/download-artifact@" nil))
+ :where ((:text ".github/workflows/desktop-release.yml" "uses: actions/download-artifact@" nil)
+         (:text ".github/workflows/libuv-prebuilt.yml" "uses: actions/download-artifact@" nil))
  :upstream (:github-release "actions/download-artifact"))
 
 (:name "Linux runner image" :category :ci
  :where ((:text ".github/workflows/verify.yml" "- os: ubuntu-" nil)
          (:text ".github/workflows/verify.yml" "runs-on: ubuntu-" nil)
-         (:text ".github/workflows/upstream.yml" "runs-on: ubuntu-" nil))
+         (:text ".github/workflows/upstream.yml" "runs-on: ubuntu-" nil)
+         (:text ".github/workflows/libuv-prebuilt.yml" "runs-on: ubuntu-" nil))
  :upstream (:manual "https://github.com/actions/runner-images")
  :reviewed "2026-10-24")
 
@@ -324,12 +333,14 @@
 
 (:name "Windows runner image" :category :ci
  :where ((:text ".github/workflows/verify.yml" "- os: windows-" nil)
-         (:text ".github/workflows/desktop-release.yml" "- os: windows-" nil))
+         (:text ".github/workflows/desktop-release.yml" "- os: windows-" nil)
+         (:text ".github/workflows/libuv-prebuilt.yml" "runs-on: windows-" nil))
  :upstream (:manual "https://github.com/actions/runner-images")
  :reviewed "2026-10-17")
 
 (:name "Windows on Arm runner image" :category :ci
- :where ((:text ".github/workflows/windows-arm64-probe.yml" "runs-on: windows-" nil))
+ :where ((:text ".github/workflows/windows-arm64-probe.yml" "runs-on: windows-" nil)
+         (:text ".github/workflows/libuv-prebuilt.yml" "- os: windows-" nil))
  ;; Listed in actions/runner-images as "Windows 11 Arm64 ... windows-11-arm" (read 2026-10-23).
  ;; actions/partner-runner-images, which listed it before, is archived.
  :upstream (:manual "https://github.com/actions/runner-images")

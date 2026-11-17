@@ -1,0 +1,42 @@
+# The prebuilt Windows libuv.dll that scripts/setup.ps1 downloads when the MSVC C++ Build Tools
+# are not installed (#1247). With the Build Tools, setup builds libuv from libuv.pin instead, and
+# this file is not read.
+#
+# libuv publishes no Windows binaries, so this repository builds them: the workflow
+# .github/workflows/libuv-prebuilt.yml compiles libuv at libuv.pin's version with
+# scripts/build-libuv.lisp on a Windows runner and attaches the DLL and its SHA-256 to the
+# release libuv-v<version> of this repository. The DLL is the same file build-libuv.lisp produces
+# on a Windows machine: /MT, so it needs no Visual C++ redistributable.
+#
+# `version' must equal libuv.pin's. scripts/check-upstream.lisp fails the gate when the two
+# differ, so moving libuv.pin means moving this pin in the same commit. setup.ps1 also refuses a
+# prebuilt whose version is not libuv.pin's.
+#
+# An architecture is pinned when its `-sha256' line holds 64 hex digits. `none' means no DLL has
+# been published for it yet; setup.ps1 then says so and asks for the Build Tools, as it did
+# before this file existed.
+#
+# To publish a DLL and fill this pin (the maintainer's step):
+#   1. gh workflow run libuv-prebuilt.yml -f publish=true
+#      (builds x64 and arm64, then creates the release libuv-v<version> and uploads
+#      libuv-<version>-windows-<arch>.dll and libuv-<version>-windows-<arch>.dll.sha256)
+#   2. gh release download libuv-v<version> -p '*.sha256' -D /tmp/libuv-sha
+#      cat /tmp/libuv-sha/*.sha256
+#   3. copy each hex digest into the matching `-sha256' line below and commit.
+# The upload never replaces an asset that already exists, so a pinned checksum cannot change
+# under its URL. Running step 1 again adds only the architectures the release does not have yet
+# (arm64, if it failed the first time). To publish a different build of the same version, delete
+# the release and its tag first, then fill the pin again.
+
+version 1.53.0
+
+x64-url      https://github.com/codelisperer/ouranos/releases/download/libuv-v1.53.0/libuv-1.53.0-windows-x64.dll
+x64-sha256   none
+
+arm64-url    https://github.com/codelisperer/ouranos/releases/download/libuv-v1.53.0/libuv-1.53.0-windows-arm64.dll
+arm64-sha256 none
+
+# The advisories are libuv's own, as in libuv.pin: a prebuilt DLL carries whatever a release of
+# libuv carries, and a fix arrives by moving libuv.pin and publishing a new DLL.
+advisories https://github.com/libuv/libuv/security/advisories
+reviewed   2026-11-15

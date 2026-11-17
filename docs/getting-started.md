@@ -107,7 +107,19 @@ install and how to run it again, and exits 1. On macOS:
 On Linux the fix line is `sudo apt install build-essential | sudo dnf install gcc | sudo pacman
 -S gcc`, and when setup can get root it installs the compiler itself. On Windows it is the
 `winget` command for the Build Tools (about 2 GB), and the opt-out is `.\scripts\setup.ps1
--WithoutUv`. With `--without-uv` (`-WithoutUv`) setup neither needs a compiler nor builds libuv,
+-WithoutUv`.
+
+**On Windows, setup can download libuv instead of building it.** When the MSVC Build Tools are
+not installed, `setup.ps1` looks in [`libuv-prebuilt.pin`](../libuv-prebuilt.pin) for a
+`libuv.dll` pinned for your architecture (x64 or arm64). That DLL is built from `libuv.pin`'s
+release by this repository's `.github/workflows/libuv-prebuilt.yml` and attached to the release
+`libuv-v<version>`. setup downloads it, refuses it and deletes it if its SHA-256 or the
+architecture in its header does not match the pin, and otherwise installs it as
+`vendor\libuv\lib\libuv.dll`, the same place a build puts it. `vendor\libuv\BUILT-FROM` then
+records the version and the line `prebuilt <url>`, and `-Check` reports the library as
+`(prebuilt, downloaded from ...)`. When no DLL is pinned for your architecture (the pin says
+`none`, as it does until the first one is published), setup prints that reason and the Build
+Tools message above, and stops. With the Build Tools installed, setup always builds from source. With `--without-uv` (`-WithoutUv`) setup neither needs a compiler nor builds libuv,
 and `--check` reports libuv as skipped; `hyperion/server-uv` will not start until libuv is
 built, by running setup again without the flag or with `sbcl --script scripts/build-libuv.lisp`
 from the Ouranos checkout.
