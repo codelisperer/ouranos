@@ -213,7 +213,7 @@ this page and the tree, stated rather than left to be discovered.
 
 | Framework | Where it is | Checks (linux) |
 |---|---|---|
-| **hyperion** | **alpha** — HTMX + Spinneret, i18n (incl. RTL), sessions, channels, static caching, typed interceptors, a native libuv HTTP server (the default when libuv loads; `HYPERION_SERVER` chooses another; WebSockets, TLS termination and the name Okeanos *(in progress)*), and a native-webview desktop app that builds and installs on three OSes | 5768 |
+| **hyperion** | **alpha** — HTMX + Spinneret, i18n (incl. RTL), sessions, channels, static caching, typed interceptors, a native libuv HTTP server (the default when libuv loads; `HYPERION_SERVER` chooses another; WebSockets, TLS termination and the name Okeanos *(in progress)*), and a native-webview desktop app that builds and installs on three OSes | 6360 |
 | **aion** | **mixed** — `aion/log`, `aion/csv`, `aion/random`, `aion/signature` and the opt-in `aion/uv` (libuv) are real; the Coalton-first collections core *(in progress)* | 3500 |
 | **cons** | **alpha** — the bootstrap seed and the per-project task runner work; the full `build/test/serve/run` CLI *(in progress)* | 1134 |
 | **mnemosyne** | **alpha** — DDL-as-data, a CL-DBI shell over the typed backend, exercised against **both SQLite and a real Postgres**. Six design questions still open | 1566 |
@@ -222,9 +222,9 @@ this page and the tree, stated rather than left to be discovered.
 | **elenchon** | **design only** — the typed CEG ADT and five ADRs exist; the reasoning engine *(in progress)* | 46 |
 | **klio** | **alpha** — a content tree loaded from Markdown files with front matter and published all at once, served live through a hyperion site or exported to static files; collections, controlled vocabularies, tags, pagination, RSS and Atom feeds, drafts and scheduled pages, a search index, HTML comments removed on load, and reload on change in development. Telling a production server to reload *(in progress)* | 565 |
 | **hades** | **alpha** — a charter ADR and four facades: `hades/single-instance`, a lock that keeps a second copy of an app off the same data directory; `hades/credentials`, over the macOS Keychain, Windows Credential Manager and the Linux Secret Service; `hades/notify`, a notice that works before an app has a window; and `hades/open`, which opens a file, folder or URL with no shell. The service facade is blocked on `aion/windows/service`, which does not exist yet | 345 |
-| **checkers** | **not a framework** — the gate's own guard scripts (`check-pins`, `check-asd-collisions` and the rest), tested against trees built to break them. A row of its own because the total is the sum of the rows, and a suite that runs in the gate but is excluded from the table would make the two disagree | 817 |
+| **checkers** | **not a framework** — the gate's own guard scripts (`check-pins`, `check-asd-collisions` and the rest), tested against trees built to break them. A row of its own because the total is the sum of the rows, and a suite that runs in the gate but is excluded from the table would make the two disagree | 821 |
 
-Counts above are from the Linux CI leg at `2b6ee5c`; each suite runs in its own image. Nothing here is
+Counts above are from the Linux CI leg at `1003883`; each suite runs in its own image. Nothing here is
 API-stable; expect breakage. See [`ECOSYSTEM.md`](ECOSYSTEM.md), the
 [Roadmap board](https://github.com/orgs/codelisperer/projects/1) (filter
 `label:pkg:<framework>`), and [`docs/wiki/`](docs/wiki/Home.md) for the design narrative.
