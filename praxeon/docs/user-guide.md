@@ -36,15 +36,15 @@ drop-in, not a `local-projects` symlink. It does not install Coalton: the monore
 ## Prerequisites
 
 - **SBCL** + **Quicklisp**.
-- **`libev`** — the C library Woo (the web server) builds on. **Required**, because
-  `praxeon/elise` depends on `praxeon/web`, so even the CLI loads Woo. Install it
-  before first load: macOS `brew install libev`; Debian/Ubuntu
-  `sudo apt-get install libev-dev`. (Symptom if missing: `quickload :praxeon/elise`
-  or `cons dev` fails loading Woo.)
+- **libuv**, for the web server. `praxeon/elise` serves on `hyperion/server-uv`, which
+  needs the libuv the Ouranos tree builds (`sbcl --script scripts/build-libuv.lisp`;
+  `scripts/setup.sh` runs it). No praxeon system declares Woo or Hunchentoot since #373, so
+  `libev` is not needed unless your app adds `clack-handler-woo` itself.
 - **Coalton** — a local git checkout at `~/common-lisp/coalton/` (ASDF finds it
   on its default source-registry). Praxeon's typed core is written in Coalton.
 - Dependencies (pulled by Quicklisp): `alexandria`, `dexador`, `com.inuoe.jzon`,
-  `fiveam`, plus the web layer's `clack`, `woo`, `quri`, `spinneret`.
+  `fiveam`, plus the web layer's `clack`, `quri`, `spinneret`. The HTTP server is the app's
+  choice: `praxeon/elise` declares `hyperion/server-uv`.
 - An **LLM provider**: an Anthropic API key with credits, an OpenRouter key, a key for
   Meta's Model API, or a local Ollama/LM Studio endpoint.
 - **Optional**: a **Tavily** API key (`TAVILY_API_KEY`) to give agents web search.
@@ -151,7 +151,7 @@ progress — served by `praxeon/web`. The same agent, the same provider config
 (`.env`), just a different surface. From a REPL:
 
 ```lisp
-(ql:quickload :praxeon/elise)   ; first web load pulls Clack/Woo/Spinneret
+(ql:quickload :praxeon/elise)   ; first web load pulls Clack, Spinneret and hyperion/server-uv
 
 (defparameter *h* (praxeon/elise:start-web))   ; non-blocking; returns the handler
 ```
@@ -177,10 +177,14 @@ Notes:
   image; quitting the REPL stops it.
 - **Port**: pass `:port` (e.g. `(praxeon/elise:start-web :port 9000)`); default 8080.
   (Port 5000 is a bad default on macOS — the AirPlay Receiver squats on it.)
-- **Server backend** is configurable via Clack — **Woo** on Unix/macOS, **Hunchentoot**
-  on Windows (Woo doesn't build there), or force one with `PRAXEON_WEB_SERVER=hunchentoot`.
-- **Live progress uses HTMX polling, not SSE** — an intentional choice driven by
-  Woo's async model; see [`docs/wiki/Framework-Praxeon.md`](../../docs/wiki/Framework-Praxeon.md)
+- **Server backend** is chosen by `hyperion/server`: `praxeon/elise` declares
+  `hyperion/server-uv`, so it runs on `:uv`. To run on Hunchentoot or Woo, add
+  `clack-handler-hunchentoot` or `clack-handler-woo` to your own system's `:depends-on` and
+  set `HYPERION_SERVER=hunchentoot` (or `woo`); see hyperion's user guide, "Choosing a
+  server", for the order used when several are loaded and what happens when the one asked
+  for is not.
+- **Live progress uses HTMX polling by default, not SSE** — an intentional choice first
+  driven by Woo's async model; see [`docs/wiki/Framework-Praxeon.md`](../../docs/wiki/Framework-Praxeon.md)
 (the Studio / live-image section) for the rationale.
 - **REST endpoint** — the same `POST /api/message` answers JSON for a program:
   ```sh
@@ -273,8 +277,8 @@ thunk that starts the server around a persistent agent. `watch` then:
 The crucial property: **the agent lives in the builder's closure, *outside* the
 server**, so rebuilding the server never touches the conversation. *State ≠
 server.* (Caveats: `file-write-date` has 1-second resolution, so two saves within
-the same second may wait for the next poll; and run one server per image — Woo's
-libev doesn't like two at once.)
+the same second may wait for the next poll; and if your app runs on Woo, run one server per
+image, because Woo's libev does not allow two at once.)
 
 #### Finer control (any app, or single-`defun` swaps)
 

@@ -93,8 +93,10 @@ compilation by default). So start non-blocking, recompile one defun, bump the ep
 Pass `:agent` an agent you keep in a global so `stop`+`start-web` preserves history
 (otherwise `start-web` builds a fresh one — that wipes the conversation). Elise's
 `start-web` passes the responder *by name* (`(lambda (a m) (respond a m))`), so
-recompiling `respond` is live too (see the capture gotcha below). Run **one** Woo
-server per image — starting a second concurrently crashes libev.
+recompiling `respond` is live too (see the capture gotcha below). If your app runs
+on Woo (it adds `clack-handler-woo` itself; no praxeon system declares it since #373), run
+**one** Woo server per image — starting a second concurrently crashes libev, and
+`hyperion/server:start` refuses it.
 
 What does **not** hot-swap — needs `(praxeon/web:stop *h*)` then `start` again
 (instant, same image):

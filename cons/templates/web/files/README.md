@@ -16,9 +16,17 @@ Tools on macOS, gcc or clang on Linux, the MSVC Build Tools on Windows -- and se
 to install when there is none. If the tree was set up with `--without-uv` (`-WithoutUv`), run
 setup again without it, or build only libuv with `sbcl --script scripts/build-libuv.lisp`
 from the Ouranos checkout. Running from source (`cons build`, `cons dev`, `cons serve`) also
-works with a libuv installed on the system, but `cons bin` needs the one the tree built. To use another server,
-replace `hyperion/server-uv` in `{{name}}.asd` with `clack-handler-hunchentoot`, which needs
-nothing installed.
+works with a libuv installed on the system, but `cons bin` needs the one the tree built.
+
+To use another server, add its Clack handler system to `{{name}}.asd`:
+`clack-handler-hunchentoot` (pure Lisp, needs nothing installed) or `clack-handler-woo` (needs
+libev). Ouranos itself declares neither. Keep it after `hyperion` in `:depends-on`, so that
+Hunchentoot is built without SSL. If you keep `hyperion/server-uv` as well, `:uv` is still
+chosen first; select the other with `:server :hunchentoot` (or `:woo`) or the environment
+variable `HYPERION_SERVER=hunchentoot`. Remove `hyperion/server-uv` to run without libuv. A
+server named in `HYPERION_SERVER` that is not loaded stops the app with
+`hyperion/server:no-server-backend`; it does not fall back to another. See "Choosing a
+server" in Ouranos's `hyperion/docs/user-guide.md`.
 
 `cons bin` copies the native libraries the tree builds into `bin/`, beside `bin/{{name}}`, for
 each one the app loads: libuv, mbedTLS (for TLS) and libgit2 (for `aion/libgit`). Each library's

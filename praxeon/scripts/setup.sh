@@ -44,32 +44,6 @@ QL_HOME="${QUICKLISP_HOME:-$HOME/quicklisp}"
 
 info "SBCL $(sbcl --version | awk '{print $2}')  |  Quicklisp at $QL_HOME"
 
-# libev: Woo (the web server) builds on it, and praxeon/elise depends on
-# praxeon/web -- so WITHOUT libev even a plain (ql:quickload :praxeon/elise) fails.
-# Best-effort detection across macOS (Homebrew) and Linux; warn (don't die) since
-# the check can miss a valid install.
-have_libev() {
-  ls /opt/homebrew/lib/libev.* /opt/homebrew/opt/libev/lib/libev.* \
-     /usr/local/lib/libev.* /usr/lib/*/libev.so* /usr/lib/libev.so* \
-     >/dev/null 2>&1 && return 0
-  command -v brew >/dev/null 2>&1 && brew list libev >/dev/null 2>&1 && return 0
-  return 1
-}
-if have_libev; then
-  info "libev present (Woo's event loop)."
-elif command -v brew >/dev/null 2>&1; then
-  info "libev not found -- installing with Homebrew (Woo needs it) ..."
-  # Non-fatal: under 'set -e' a failed install would abort setup before the
-  # warning below, contradicting the best-effort intent.
-  brew install libev || warn "'brew install libev' failed -- install it manually; 'make dev' may fail to load Woo."
-  have_libev || warn "libev still not detected after 'brew install libev' -- 'make dev' may fail to load Woo."
-else
-  warn "libev not found -- Woo needs it, and praxeon/elise loads Woo. Install it:"
-  warn "    macOS:         brew install libev"
-  warn "    Debian/Ubuntu: sudo apt-get install libev-dev"
-  warn "  Without it, (ql:quickload :praxeon/elise) and 'make dev' fail to load Woo."
-fi
-
 # --- 1. Coalton (local checkout; Praxeon's typed core needs it) --------------
 # Coalton: checked here, never cloned. scripts/coalton-pin.sh at the monorepo root stops with
 # what to run when the checkout is missing or not at the commit coalton.pin names (#751).

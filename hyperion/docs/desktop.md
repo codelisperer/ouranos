@@ -33,7 +33,7 @@ a *remote* Hyperion backend (the GitHub-Desktop model) — see Backends below.
 ```
   ┌─────────────────────────── one dumped SBCL image ───────────────────────────┐
   │  bin/<app>                                                                   │
-  │    ├─ Hyperion / Woo|Hunchentoot  → serves HTMX on 127.0.0.1:<free port>     │
+  │    ├─ Hyperion / server-uv        → serves HTMX on 127.0.0.1:<free port>     │
   │    └─ uiop:launch-program ─────────────────────────────────────────────┐    │
   └────────────────────────────────────────────────────────────────────────┼────┘
                                                                             │ argv: url title w h

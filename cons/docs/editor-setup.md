@@ -3,7 +3,7 @@
 Get Claude plus the Common Lisp dev stack working in VS Code, Emacs, or Neovim.
 This mirrors the shared setup across the `cons` / `hyperion` / `aion` / `praxeon` /
 `elenchon` ecosystem.
-(cons is pure-CL and dependency-light — no Coalton/libev, so setup is lighter.)
+(cons is pure-CL and dependency-light — no Coalton, so setup is lighter.)
 
 ## VS Code (primary)
 

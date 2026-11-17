@@ -14,6 +14,44 @@ its tag.
 
 ### An app may have to act
 
+- **`scripts/setup.sh` no longer installs or requires libev.** It used to install `libev-dev`
+  (`libev-devel`, `libev`, or `brew install libev`), and `--check` reported libev as missing when
+  it was absent. libev was needed only by Woo, and no system in the tree declares Woo since #373.
+  `hyperion/scripts/setup.sh` and `praxeon/scripts/setup.sh` dropped their libev step too. **An
+  app that still uses Woo (`clack-handler-woo`) installs libev itself**: `brew install libev` on
+  macOS, `sudo apt-get install libev-dev` on Debian and Ubuntu. The scripts under
+  `hyperion/bench` that compare against Woo need it installed the same way.
+- **`scripts/setup.sh` and `scripts/setup.ps1` build libuv, and stop when there is no C compiler**
+  (#504). After SBCL, Quicklisp and Coalton, setup runs `scripts/build-libuv.lisp`, which builds
+  the libuv in `libuv.pin` into `vendor/libuv` for `hyperion/server-uv`, the default HTTP server.
+  It checks for a compiler before installing anything: on macOS the Xcode Command Line Tools
+  (`xcode-select -p`; `/usr/bin/cc` alone does not count), on Linux `cc`, `gcc` or `clang`, on
+  Windows MSVC found through `vswhere` or `OURANOS_MSVC_PATH`. Without one, setup prints what to
+  install (`xcode-select --install`, `build-essential`, or the `winget` command for the MSVC
+  Build Tools), the command to run again, and the opt-out, then exits 1. On Linux with root it
+  installs the compiler itself, as it does libsqlite3. **An app whose CI runs setup on
+  a runner without a compiler must install one or pass `--without-uv` (`-WithoutUv`).** An app
+  whose CI ran `sbcl --script scripts/build-libuv.lisp` after setup can drop that step; leaving
+  it costs nothing, because the build is reused. `--check` (`-Check`) now reports the compiler
+  and a missing or stale `vendor/libuv` as missing, unless `--without-uv` is also given; on
+  Windows MSVC was reported as optional before.
+- **No system in the tree declares Woo, Hunchentoot or their Clack handlers any more** (#373,
+  step 5; ADR-0020 point 5). These systems stopped loading `clack-handler-hunchentoot`, and now
+  declare `hyperion/server-uv` where they serve requests: `praxeon/elise`,
+  `hyperion/examples/active-search`, `hyperion/examples/active-search-db`, and the suites
+  `hyperion/tests`, `hyperion/assets/tests`, `hyperion/sidecar/tests` and `praxeon/web/tests`.
+  `hyperion/examples/coalton-repl` dropped `clack-handler-hunchentoot` and keeps
+  `hyperion/server-uv`. `hyperion/woo` and `hyperion/woo/tests`, which declared
+  `clack-handler-woo` on Unix, are removed. The backend-selection tests moved to a new suite,
+  `hyperion/backends/tests`, which loads no server. **An app that got Hunchentoot or Woo through
+  one of these systems now gets no Clack handler from the tree: it adds
+  `clack-handler-hunchentoot` (after `hyperion` in its `:depends-on`, so that Hunchentoot is
+  still built without SSL) or `clack-handler-woo` to its own `:depends-on`, and selects it with
+  `:server` or `HYPERION_SERVER`.** An app that declares `hyperion/server-uv` needs libuv at run
+  time. When several servers are loaded, `hyperion/server:default-server` still takes `:uv`,
+  then Woo, then Hunchentoot, and `HYPERION_SERVER` naming one that is not loaded still signals
+  `hyperion/server:no-server-backend`, whose message now lists all three systems an app can add
+  and states that order. See `hyperion/docs/user-guide.md`, "Choosing a server".
 - **aion/http-client: on Windows, `:read-timeout` ends a request up to 4 seconds late** (#537).
   A request sent with `send-request` without `:deadline`, and whose `make-request` has no
   `:connect-address`, goes through dexador to WinHTTP. WinHTTP checks its receive timeout every 4
@@ -38,7 +76,7 @@ its tag.
   Windows MSVC found through `vswhere` or `OURANOS_MSVC_PATH`. Without one, setup prints what to
   install (`xcode-select --install`, `build-essential`, or the `winget` command for the MSVC
   Build Tools), the command to run again, and the opt-out, then exits 1. On Linux with root it
-  installs the compiler itself, as it does libev and libsqlite3. **An app whose CI runs setup on
+  installs the compiler itself, as it does libsqlite3. **An app whose CI runs setup on
   a runner without a compiler must install one or pass `--without-uv` (`-WithoutUv`).** An app
   whose CI ran `sbcl --script scripts/build-libuv.lisp` after setup can drop that step; leaving
   it costs nothing, because the build is reused. `--check` (`-Check`) now reports the compiler

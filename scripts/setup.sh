@@ -228,8 +228,12 @@ install_sbcl() {
 # is a CFFI "Unable to load any of the alternatives" deep inside ASDF, naming a soname
 # rather than a package anyone can install.
 #
-#   libev      -- Woo, praxeon/web's Clack handler on Unix (pre-publication issue 218).
 #   libsqlite3 -- cl-sqlite, under mnemosyne's default backend.
+#
+# Setup does not install or check libev. Woo binds it at load time, and until #373
+# hyperion/woo declared clack-handler-woo (and praxeon/web before that, pre-publication
+# issue 218). No tree system loads Woo now. An app that adds clack-handler-woo, and the
+# scripts under hyperion/bench, install libev themselves.
 #
 # LIBSQLITE3 IS HERE BECAUSE THE CLEAN-MACHINE RUN FOUND IT (pre-publication issue 198), and it is the better
 # illustration of why this list exists. On a stock ubuntu:24.04 the documented sequence
@@ -238,7 +242,7 @@ install_sbcl() {
 # optimisation and deliberately non-fatal, so it printed "warm step exited 1 -- continuing"
 # and carried on. Nothing in the sequence a reader is told to run said the tree was broken.
 #
-# macOS needs neither: brew's Woo pulls libev, and libsqlite3 ships with the OS.
+# macOS needs nothing here: libsqlite3 ships with the OS.
 
 as_root=""
 root_ready=""
@@ -275,21 +279,11 @@ ensure_lib() {
       else note "install $_apt yourself ($_why): apt $_apt | dnf $_dnf | pacman $_pac"
       fi
       ;;
-    Darwin)
-      case "$_apt" in
-        libev-dev)
-          brew list libev >/dev/null 2>&1 && { note "libev present"; return 0; }
-          info "installing libev (Woo)"
-          brew install libev
-          ;;
-        *) : ;;   # libsqlite3 ships with macOS
-      esac
-      ;;
+    Darwin) : ;;   # libsqlite3 ships with macOS
   esac
 }
 
 install_system_libs() {
-  ensure_lib 'libev\.so'      libev-dev     libev-devel     libev    "Woo needs it to load hyperion"
   ensure_lib 'libsqlite3\.so' libsqlite3-dev libsqlite3-devel sqlite3 "cl-sqlite needs it to load mnemosyne"
 }
 
@@ -506,9 +500,10 @@ info "Ouranos setup on $os ($(uname -m)) -- pins: SBCL $SBCL_VERSION, QL dist $Q
 # the END of an install to verify that the install actually worked.
 #
 # That second call is the point. `setup.sh' used to exit 0 while leaving the machine
-# unprovisioned -- libev needs root, and when it could not get root it printed a note and
-# returned success. getting-started.md then tells the reader to run bootstrap.lisp, which
-# quickloads praxeon, which declares clack-handler-woo, which binds libev at LOAD time. So
+# unprovisioned -- libev, which setup installed then, needed root, and when it could not get
+# root it printed a note and returned success. getting-started.md then told the reader to run
+# bootstrap.lisp, which quickloaded praxeon, which then declared clack-handler-woo, which binds
+# libev at LOAD time. So
 # the documented sequence was "setup succeeds, the next command fails", and the script had
 # a doctor that knew better sitting right next to the installer that did not ask it (pre-publication issue 198).
 #
@@ -551,19 +546,13 @@ run_doctor() {
     else need "Coalton is at $(echo "$ch" | cut -c1-8), pin says $COALTON_REF" "./scripts/setup.sh"; fi
   else need "Coalton checkout" "./scripts/setup.sh"; fi
   printf '      (deep check -- which Coalton actually LOADS: sbcl --script scripts/check-coalton.lisp)\n'
-  # libev is a LOAD-time dependency of hyperion on Unix (Woo binds it via CFFI), so a
-  # machine without it looks fine until `ql:quickload :hyperion` dies.
   case "$os" in
-    Linux)  if ldconfig -p 2>/dev/null | grep -q 'libev\.so'; then printf '  PASS    libev (Woo)\n'
-            else need "libev (Woo needs it to load hyperion)" "sudo apt install libev-dev  |  dnf install libev-devel"; fi
-            # Checked here as well as installed above, because the doctor is what decides
+    Linux)  # Checked here as well as installed above, because the doctor is what decides
             # whether setup.sh may claim success -- and this is the one the clean-machine
             # run caught the whole sequence lying about (pre-publication issue 198).
             if ldconfig -p 2>/dev/null | grep -q 'libsqlite3\.so'; then printf '  PASS    libsqlite3 (mnemosyne)\n'
             else need "libsqlite3 (cl-sqlite needs it to load mnemosyne)" "sudo apt install libsqlite3-dev  |  dnf install libsqlite3-devel"; fi;;
-    Darwin) if brew list libev >/dev/null 2>&1; then printf '  PASS    libev (Woo)\n'
-            else need "libev (Woo needs it to load hyperion)" "brew install libev"; fi
-            printf '  PASS    libsqlite3 (ships with macOS)\n';;
+    Darwin) printf '  PASS    libsqlite3 (ships with macOS)\n';;
   esac
   # libuv, which hyperion/server-uv runs on. Built, not installed, so the check is the file
   # build-libuv.lisp writes and the release its BUILT-FROM stamp names.
@@ -601,7 +590,7 @@ have tar  || need "tar"  "apt install tar"
 if [ "$os" = "Linux" ] && ! have bzip2; then need "bzip2 (to unpack the SBCL tarball)" "apt install bzip2"; fi
 # The compiler is checked here, with the other tools, so that a machine without one learns it
 # before setup has installed anything. On Linux with root setup installs one itself below, as
-# it does libev and libsqlite3, so it is only missing when root is not available.
+# it does libsqlite3, so it is only missing when root is not available.
 if [ "$with_uv" -eq 1 ] && ! have_c_compiler; then
   if [ "$os" = "Linux" ] && ensure_root; then :
   else need_c_compiler; fi

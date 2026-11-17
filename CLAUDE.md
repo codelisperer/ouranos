@@ -37,7 +37,7 @@ sbcl --dynamic-space-size 4096 --script bootstrap.lisp   # → bin/cons  (identi
 bin/cons build|test|serve|run …                          # from one root spec — INTENDED, in progress
 ```
 
-Today: `scripts/setup.sh` provisions a bare machine (SBCL, Quicklisp, Coalton, libev), then
+Today: `scripts/setup.sh` provisions a bare machine (SBCL, Quicklisp, Coalton, libuv), then
 the seed (`bootstrap.lisp` → `bin/cons`) builds the tree; it also writes an ASDF `(:tree)`
 source-registry drop-in so every REPL finds the tree with no symlinking. Verify the
 provisioning step on an operating system that has none of it with

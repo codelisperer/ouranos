@@ -6,6 +6,9 @@
 ;;;; request completes, whether new connections are still answered, and when the process exits.
 ;;;;
 ;;;; PROBE_BACKEND=woo|hunchentoot|uv   PROBE_SLOW=seconds (default 3)
+;;;;
+;;;; The Woo backend needs libev installed separately (macOS: brew install libev; Debian/Ubuntu:
+;;;; sudo apt-get install libev-dev). The tree's setup does not install it.
 
 (require :asdf)
 (require :sb-bsd-sockets)

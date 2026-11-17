@@ -99,7 +99,7 @@ the exact class of defect it exists to catch. **The gate must do the compiling.*
 ### Platform-guarded dependencies
 
 `install-deps.lisp` asks for the set **applicable to the platform it is running on**, and
-the Windows leg is why. `praxeon/web` declares
+the Windows leg is why. `praxeon/web` used to declare
 
 ```lisp
 (:feature (:not :windows) "clack-handler-woo")
@@ -108,7 +108,9 @@ the Windows leg is why. `praxeon/web` declares
 
 because Woo binds libev through CFFI at load time and libev does not build on Windows. The
 tree was already right; the enumeration was flattening the guard away, so the installer
-asked Quicklisp for a system that cannot exist on that platform and the leg went red.
+asked Quicklisp for a system that cannot exist on that platform and the leg went red. No tree system
+declares Woo or Hunchentoot since #373, but the installer still honours feature guards for
+any dependency that has one.
 
 A drift report wants the opposite — both names belong in `docs/dependencies.md`, whatever
 platform you happen to run `check-deps.lisp` on — so the guard is *returned* rather than

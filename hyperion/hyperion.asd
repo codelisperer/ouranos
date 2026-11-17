@@ -7,28 +7,27 @@
 
 ;;; --- Hunchentoot without SSL, on every platform (#249, #115, #337) ----------------------
 ;;;
+;;; No system in this tree depends on Hunchentoot any more (#373): the tree's suites and
+;;; examples serve on hyperion/server-uv. An APP may still add clack-handler-hunchentoot to
+;;; its own :depends-on and select it (hyperion/docs/user-guide.md, "Choosing a server"), and
+;;; this form decides how that Hunchentoot is built.
+;;;
 ;;; Hunchentoot is built without its SSL support, so it does not load cl+ssl and OpenSSL. A
 ;;; desktop bundle that loaded OpenSSL at build time reopens it by path at startup, and quits
 ;;; before `main' on any machine without that copy: on Windows, which ships no OpenSSL (#249),
-;;; and on a Mac without Homebrew, measured on #332. Nothing in this tree serves HTTPS through
-;;; Hunchentoot -- no SSL acceptor and no certificate options anywhere (#337) -- and TLS
-;;; belongs in front of the app (#125), so only that unused half is dropped. HTTPS requests
-;;; the application makes are unaffected by this: they go through aion/http-client, which on
-;;; macOS and Linux still loads cl+ssl itself when an app uses it.
-;;;
-;;; This was Windows-only until #337, so every macOS and Linux app carried OpenSSL through
-;;; Hunchentoot. An app that does want Hunchentoot's SSL acceptor removes the feature before
-;;; hunchentoot.asd is read.
+;;; and on a Mac without Homebrew, measured on #332. TLS belongs in front of the app (#125), so
+;;; only that unused half is dropped. HTTPS requests the application makes are unaffected by
+;;; this: they go through aion/http-client, which on macOS and Linux still loads cl+ssl itself
+;;; when an app uses it. An app that does want Hunchentoot's SSL acceptor removes the feature
+;;; before hunchentoot.asd is read.
 ;;;
 ;;; WHY HERE. `:hunchentoot-no-ssl' has to be on *FEATURES* before hunchentoot.asd is read,
 ;;; because that file decides at read time whether Hunchentoot depends on cl+ssl, and its
-;;; sources test the feature with reader conditionals. ASDF reads this file before it resolves
-;;; the :DEPENDS-ON of any system defined below, and resolving `clack-handler-hunchentoot' is
-;;; what reads hunchentoot.asd. So the tree, the gate (every child image loads systems through
-;;; ASDF) and the desktop build (which loads the app's system) all see the feature. The same
-;;; form is at the top of praxeon/praxeon.asd, the other file whose systems depend on
-;;; clack-handler-hunchentoot. An application outside the tree that depends on
-;;; clack-handler-hunchentoot must list "hyperion" before it, or push the feature itself.
+;;; sources test the feature with reader conditionals. ASDF reads this file when it first
+;;; resolves "hyperion", so an app that lists "hyperion" (or a system that depends on it)
+;;; before clack-handler-hunchentoot in its :depends-on gets the feature. An app that lists
+;;; the handler first pushes the feature itself. The same form is at the top of
+;;; praxeon/praxeon.asd, for an app whose first dependency is a praxeon system.
 (pushnew :hunchentoot-no-ssl *features*)
 
 (defsystem "hyperion"
@@ -66,18 +65,18 @@
   ;; "libev.so.4"`. ADR-0011 decided against that a week before pre-publication issue 139 and was never
   ;; implemented at this level.
   ;;
-  ;; The fix is not to swap in a different permanent third-party server. A framework does
-  ;; not get to choose the application's HTTP server, so the APP declares the backend it
-  ;; wants -- exactly like every other opt-in capability in this tree -- and
-  ;; hyperion/server:default-server picks from what the image actually loaded. When the
-  ;; native libuv server lands (pre-publication issue 117) it arrives as one more choice rather than as surgery
-  ;; on this file.
+  ;; A framework does not get to choose the application's HTTP server, so the APP declares
+  ;; the backend it wants, and hyperion/server:default-server picks from what the image
+  ;; actually loaded. The native server, hyperion/server-uv, is the default and the one the
+  ;; tree's own suites and examples use (#710, #373). Core still does not depend on it,
+  ;; because it needs a built libuv and core must load without a C toolchain.
   ;;
-  ;; Apps: depend on the CLACK HANDLER system, not the bare server. `clackup` resolves
-  ;; :woo / :hunchentoot through clack.handler.<name>, which lives in the handler system
-  ;; (each pulls its server transitively); depending on the raw server leaves Clack to
-  ;; lazy-load the handler at runtime, which fails with "... is unknown handler" wherever
-  ;; that system was never fetched.
+  ;; An app that wants Woo or Hunchentoot instead adds the CLACK HANDLER system to its own
+  ;; :depends-on (clack-handler-woo, clack-handler-hunchentoot), not the bare server:
+  ;; `clackup` resolves :woo / :hunchentoot through clack.handler.<name>, which lives in the
+  ;; handler system, and depending on the raw server leaves Clack to lazy-load the handler
+  ;; at runtime, which fails with "... is unknown handler" wherever that system was never
+  ;; fetched. hyperion/docs/user-guide.md, "Choosing a server", says how to select it.
   :serial t
   :components ((:module "src"
                 :serial t
@@ -212,34 +211,6 @@
 ;;;
 ;;; Native: needs a built vendor/libuv (scripts/build-libuv.lisp), so it is opt-in and sits
 ;;; in verify-tree's +UV-SYSTEMS+ rather than +SYSTEMS+ -- see the commentary there.
-
-;;; Hyperion served by Woo (#372). Hyperion declares no HTTP backend (pre-publication issue 139), so no
-;;; suite in the tree ran a real Woo server, and a 429 that Woo could not write reached every
-;;; client as an empty 500 without a test noticing. This system exists for its suite,
-;;; hyperion/woo/tests, which serves real requests through Woo; it loads Woo's Clack handler
-;;; beside hyperion and has nothing of its own. It is not for an app: an app that wants Woo
-;;; declares clack-handler-woo itself, and ADR-0020 (#377) plans to remove Woo from every
-;;; :depends-on in the tree, this one included. Woo binds libev when it loads and does not run on Windows, so the
-;;; system is registered in scripts/platform-packages.lisp, owned by Linux, rather than in
-;;; verify-tree's host-neutral lists.
-(defsystem "hyperion/woo"
-  :description "Woo's Clack handler beside hyperion, for hyperion/woo/tests only (Unix only); an app declares clack-handler-woo itself."
-  :author "Bob <eternal.recursion@proton.me>"
-  :license "MIT"
-  ;; Guarded on :OS-WINDOWS, as scripts/install-deps.lisp explains: Woo cannot load there, and
-  ;; the Windows CI leg installs only the dependencies that apply to it.
-  :depends-on ("hyperion" (:feature (:not :os-windows) "clack-handler-woo"))
-  :in-order-to ((test-op (test-op "hyperion/woo/tests"))))
-
-(defsystem "hyperion/woo/tests"
-  :description "Responses served through a real Woo server, read back over a TCP socket (#372)."
-  :author "Bob <eternal.recursion@proton.me>"
-  :license "MIT"
-  :depends-on ("hyperion/woo" "hyperion" "hyperion/http1" "hyperion/test-ports" "fiveam"
-               (:require "sb-bsd-sockets"))
-  :components ((:module "tests"
-                :components ((:file "woo-tests"))))
-  :perform (test-op (o c) (symbol-call :hyperion/woo/tests '#:run-tests)))
 
 (defsystem "hyperion/server-uv"
   :description "A native HTTP/1.1 server for Ring handlers, on aion/uv (no Clack)."
@@ -496,8 +467,10 @@
 
 (defsystem "hyperion/sidecar/tests"
   :description "Tests for hyperion/sidecar. Each sidecar is a child SBCL started with --eval."
+  ;; hyperion/server-uv: the dev-server tests serve on :uv (#373), so this suite needs a built
+  ;; libuv and runs in verify-tree's uv axis.
   :depends-on ("hyperion/sidecar" "hyperion" "hyperion/test-ports" "aion/secret" "aion/log" "log4cl" "fiveam"
-               "clack-handler-hunchentoot"
+               "hyperion/server-uv"
                ;; On Windows, for WIN32-ERROR, which the no-job test signals.
                (:feature :win32 "aion/windows"))
   :components ((:file "tests/sidecar-tests"))
@@ -518,12 +491,12 @@
   :license "MIT"
   ;; ironclad is a TEST-time dependency only -- it is what lets the suite prove the
   ;; embedded bytes hash to the pinned sha256. hyperion/assets itself ships no crypto.
-  ;; clack-handler-hunchentoot likewise: pre-publication issue 148's regression test serves the assets over a
-  ;; real socket, because the bug was invisible to every in-image check. Hunchentoot
-  ;; rather than Woo so the suite needs no libev (ADR-0011, and pre-publication issue 139 left the backend to
-  ;; the consumer -- here the consumer is the test).
+  ;; hyperion/server-uv likewise: pre-publication issue 148's regression test serves the assets over a
+  ;; real socket, because the bug was invisible to every in-image check. It used to be
+  ;; Hunchentoot; the tree's suites serve on :uv since #373, so this suite needs a built libuv
+  ;; and runs in verify-tree's uv axis.
   :depends-on ("hyperion/assets" "hyperion"   ; assets-tests.lisp calls router: and server:
-               "hyperion/test-ports" "fiveam" "ironclad" "clack-handler-hunchentoot"
+               "hyperion/test-ports" "fiveam" "ironclad" "hyperion/server-uv"
                ;; kit-browser-tests runs hyperion/kit's dialogs in the smoke page's browser (#981).
                "hyperion/kit" "hyperion/list" "spinneret"
                (:require "sb-bsd-sockets"))
@@ -758,10 +731,11 @@
   :description "Example: Bulma + HTMX + Alpine + Parenscript, server-rendered (no Node)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
-  ;; The app declares its own HTTP backend (pre-publication issue 139). Hunchentoot: pure CL, identical on all
-  ;; three platforms, and indistinguishable from Woo on this workload once Content-Length
-  ;; is set (ADR-0011 measured it). An example that cannot be run on Windows is not one.
-  :depends-on ("hyperion" "hyperion/assets" "spinneret" "clack-handler-hunchentoot")
+  ;; The app declares its own HTTP backend (pre-publication issue 139): the native server, which
+  ;; runs on all three platforms and is what `cons init --template web' scaffolds (#373). It
+  ;; used to be Hunchentoot; an app that wants a Clack server instead adds its handler system
+  ;; (hyperion/docs/user-guide.md, "Choosing a server").
+  :depends-on ("hyperion" "hyperion/assets" "spinneret" "hyperion/server-uv")
   :serial t
   :components ((:module "examples/active-search"
                 :serial t
@@ -774,7 +748,7 @@
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :depends-on ("hyperion" "hyperion/assets" "mnemosyne" "spinneret"
-               "clack-handler-hunchentoot")
+               "hyperion/server-uv")                  ; its server, as in active-search (#373)
   :serial t
   :components ((:module "examples/active-search-db"
                 :serial t
@@ -791,10 +765,10 @@
   ;; Not Woo: Woo binds libev at LOAD time, so a desktop bundle built against it died before
   ;; `main` on any machine without libev (pre-publication issue 139, ADR-0011). The desktop
   ;; window runs on :uv (#472, ADR-0017), whose libuv the bundle carries and the
-  ;; desktop-release dry runs check is the one loaded. The web modes (`start', `serve') keep
-  ;; Hunchentoot, which is pure CL.
+  ;; desktop-release dry runs check is the one loaded. The web modes (`start', `serve') use
+  ;; :uv too since #373; they used to use Hunchentoot.
   :depends-on ("hyperion" "hyperion/desktop" "hyperion/assets" "cons/coalton-repl"
-               "spinneret" "lass" "clack-handler-hunchentoot" "hyperion/server-uv")
+               "spinneret" "lass" "hyperion/server-uv")
   :serial t
   :components ((:module "examples/coalton-repl"
                 :serial t
@@ -836,7 +810,15 @@
                ;; that actually starts a server picks its own, and server-tests starts real
                ;; ones. Without this the suite dies on NO-SERVER-BACKEND -- correctly, since
                ;; refusing to start beats answering on a server nobody chose.
-               "clack-handler-hunchentoot"
+               ;;
+               ;; The native server (#373). It used to be clack-handler-hunchentoot; no system
+               ;; in the tree declares a third-party Clack handler now. The tests of START's
+               ;; Clack path (#159, #502) run that path through hyperion/clack-handler-uv,
+               ;; which is a Clack handler like any other (see %WITH-CLACK-PATH in
+               ;; server-tests.lisp). So this suite needs a built libuv and runs in
+               ;; verify-tree's uv axis. The tests that need hyperion/server-uv NOT loaded
+               ;; are in hyperion/backends/tests.
+               "hyperion/server-uv" "hyperion/clack-handler-uv"
                ;; same-origin-tests starts a real embedded desktop server to show RUN-APP
                ;; installs the CSRF defence by default (#293). Pure CL, no webview.
                "hyperion/desktop")
@@ -858,7 +840,6 @@
                              ;; rather than keeping a second copy of them (pre-publication issue 336). The port
                              ;; helpers are in hyperion/test-ports (#159).
                              (:file "dev-serve-tests")
-                             (:file "backend-tests")
                              (:file "session-tests")
                              (:file "csrf-tests")
                              ;; AFTER csrf-tests (its suite and %QUIETLY) and server-tests
@@ -882,3 +863,19 @@
                              (:file "page-meta-tests")  ; after i18n-tests, whose %ATTR-P it uses
                              (:file "appearance-tests"))))
   :perform (test-op (op c) (uiop:symbol-call :hyperion/tests :run-tests)))
+
+;;; Which HTTP backend START chooses (pre-publication issue 139, #710, #373). Its own system, and on
+;;; purpose without any server in its image: hyperion/tests loads hyperion/server-uv, so the
+;;; questions "what happens when hyperion/server-uv is not loaded" and "is a Clack handler
+;;; offered when only its package is there" can only be asked here. It declares no Clack handler
+;;; either. A handler is stood in for by a package of the name hyperion/server looks for, which
+;;; is the whole of what the selection reads. Needs no libuv, so it runs in verify-tree's base
+;;; axis.
+(defsystem "hyperion/backends/tests"
+  :description "Which HTTP backend hyperion/server chooses, in an image that loads no server."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion" "fiveam")
+  :components ((:module "tests"
+                :components ((:file "backend-tests"))))
+  :perform (test-op (op c) (uiop:symbol-call :hyperion/backends/tests :run-tests)))
