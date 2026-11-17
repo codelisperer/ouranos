@@ -1388,6 +1388,20 @@ elsewhere."
                   (%post app "/window/files/action/open-project"
                          "folder" (uiop:native-namestring (merge-pathnames "nothing-here/" top))))))))
 
+(test a-message-is-one-line-whatever-its-length
+  "#1242: with *PRINT-PRETTY* on, Spinneret fills text at its fill column, so a refusal that named a
+long path came back with a line break in it, wherever the path's length put one. A message is
+rendered on one line. Control: the same span rendered by Spinneret with *PRINT-PRETTY* on does
+break."
+  (let* ((text (format nil "The path ~S was refused: it is not an existing folder."
+                       (make-string 120 :initial-element #\a)))
+         (html (let ((*print-pretty* t)) (ide::%message-html text :error t))))
+    (is (null (find #\Newline html)) "the message broke across lines: ~S" html)
+    (is (search "it is not an existing folder" html))
+    (is (find #\Newline (let ((*print-pretty* t))
+                          (spinneret:with-html-string (:span :class "ou-error" text))))
+        "control: Spinneret with *PRINT-PRETTY* on breaks this text")))
+
 (test a-file-opens-in-a-tab-of-the-editor-and-saves-to-disk
   (%with-ide (app desktop)
     (%with-project (project top)

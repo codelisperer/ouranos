@@ -53,7 +53,12 @@
                 collect (format nil "~A: ~A" (%json-string name) (%json-string value)))))
 
 (defun %message-html (text &key error)
-  (spin:with-html-string (:span :class (if error "ou-error" "ide-type") text)))
+  "TEXT in a span, on one line. *PRINT-PRETTY* is off here because with it on Spinneret fills text
+at its fill column, so where a message broke depended on how long the path in it was. A test that
+looked for \"is not an existing folder\" failed on one CI run because the break fell inside that
+phrase (#1242)."
+  (let ((*print-pretty* nil))
+    (spin:with-html-string (:span :class (if error "ou-error" "ide-type") text))))
 
 (defun %refusal-html (condition)
   "The answer for an error a file operation signalled. A PATH-REFUSED is reported as it is; any
