@@ -199,6 +199,13 @@ its first did not: praxeon hand-rolled dexador partly because this client could 
 a read timeout, and an LLM call without one can hang for as long as a provider is willing to
 hold the socket. NIL leaves dexador's own default in place.
 
+ON WINDOWS A READ TIMEOUT ENDS A REQUEST UP TO 4 SECONDS LATE, unless the request has a
+CONNECT-ADDRESS or SEND-REQUEST is given a DEADLINE. Such a request goes through dexador to WinHTTP,
+which checks its receive timeout every 4 seconds, so the request fails at the first multiple of 4
+seconds after the timeout: a READ-TIMEOUT of 1 ends it at about 4 seconds (#537, measured on Windows
+11). A server that answers within that time is answered normally. A caller that needs a tighter
+bound passes SEND-REQUEST a DEADLINE, which this client enforces itself.
+
 For fetching a URL a user supplied (#295; FETCH-PUBLIC builds on all four):
 
 FOLLOW-REDIRECTS  the most redirects to follow. NIL follows none, and a 3xx is the response.
