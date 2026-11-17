@@ -155,7 +155,8 @@
     (loop
       (multiple-value-bind (data n) (sb-bsd-sockets:socket-receive socket chunk nil)
         (declare (ignore data))
-        (when (or (null n) (zerop n)) (return nil))
+        ;; A count the chunk cannot hold is a failed receive (Windows; see %READ-LOOP).
+        (unless (and (integerp n) (<= 1 n (length chunk))) (return nil))
         (loop for i below n do (vector-push-extend (aref chunk i) buf))
         (let ((end (search #(13 10 13 10) buf)))
           (when end (return (map 'string #'code-char (subseq buf 0 end)))))))))
@@ -184,7 +185,7 @@
       (loop
         (multiple-value-bind (data n) (sb-bsd-sockets:socket-receive client chunk nil)
           (declare (ignore data))
-          (when (or (null n) (zerop n)) (return))
+          (unless (and (integerp n) (<= 1 n (length chunk))) (return))
           (loop for i below n do (vector-push-extend (aref chunk i) buf)))
         (loop
           (let ((octets (coerce buf '(simple-array (unsigned-byte 8) (*)))))

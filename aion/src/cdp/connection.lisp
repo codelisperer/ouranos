@@ -199,6 +199,13 @@ it to its page's events."
           (declare (ignore data))
           (when (or (null n) (zerop n))
             (fail "the browser closed the connection"))
+          ;; On Windows, SBCL's socket-receive can return recv's -1 read as an unsigned 32-bit
+          ;; count, 4294967295, instead of signalling, when the socket is shut down while the
+          ;; reader waits on it. Without this check the buffer below grew to that size and the
+          ;; heap ran out on the Windows CI leg (#1028). Any count the chunk cannot hold means
+          ;; the receive failed.
+          (unless (and (integerp n) (<= 1 n (length chunk)))
+            (fail (format nil "the connection to the browser ended (receive returned ~S)" n)))
           (when (> (+ fill n) (length buf))
             (let ((bigger (make-array (max (* 2 (length buf)) (+ fill n))
                                       :element-type '(unsigned-byte 8))))
