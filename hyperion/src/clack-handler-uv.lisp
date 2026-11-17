@@ -30,6 +30,19 @@
 ;;;; app's writes need the loop. :WORKERS, or :WORKER-NUM as Woo's handler calls it (default
 ;;;; *DEFAULT-WORKERS*), sets the pool size; a streamed response holds one worker until it ends.
 ;;;;
+;;;; THE SOCKET, :CLACK.IO (#376). Every env carries a socket implementing Clack's socket
+;;;; protocol (the clack-socket system), which is what websocket-driver's server writes its
+;;;; handshake and frames to. Such an app returns a delayed response that never calls the
+;;;; responder: its function starts the WebSocket on the socket and returns. When the
+;;;; function returns having written to the socket or set its read callback, the response
+;;;; becomes a 101 that takes the connection over (server-uv's MAKE-UPGRADE), with the head
+;;;; the app wrote itself. Until the connection is taken over, writes are kept in order and
+;;;; written when it is. The socket is asynchronous: writes never block, and their callbacks,
+;;;; and each read handed to the read callback, run one at a time as the connection's events
+;;;; (see server-uv's section on taking over a connection). Writing is safe from any thread.
+;;;; A peer that disconnects without a close frame is not reported to websocket-driver, as it
+;;;; is not on Woo either: Clack's socket protocol has no way to say it.
+;;;;
 ;;;; :DEBUG is accepted and ignored: an error in the app is always a 500, as server-uv answers.
 
 (cl:defpackage #:clack.handler.uv
@@ -84,8 +97,9 @@ open, so an app with many long streams (server-sent events) wants more.")
         (t (let ((colon (position #\: host-header :from-end t)))
              (if colon (subseq host-header 0 colon) host-header)))))
 
-(defun %clack-env (env address port)
-  "The Clack env for server-uv's ENV, on a server listening at ADDRESS and PORT."
+(defun %clack-env (env address port &optional socket)
+  "The Clack env for server-uv's ENV, on a server listening at ADDRESS and PORT, with SOCKET
+as :CLACK.IO."
   (let ((raw-path (getf env :path-info))
         (query (getf env :query-string)))
     (list :request-method (getf env :request-method)
@@ -103,7 +117,97 @@ open, so an app with many long streams (server-sent events) wants more.")
           :content-length (getf env :content-length)
           :headers (getf env :headers)
           :raw-body (getf env :raw-body)
-          :clack.streaming t)))
+          :clack.streaming t
+          :clack.io socket)))
+
+;;; --- the socket, for websocket-driver (#376) -------------------------------
+
+(defstruct (uv-socket (:constructor %make-uv-socket) (:copier nil))
+  "The :CLACK.IO of one request. See the file header."
+  (lock (sb-thread:make-mutex :name "clack-handler-uv socket"))
+  ;; The connection once taken over, else NIL.
+  (upgraded nil)
+  ;; Writes made before then, newest first, each (OCTETS . CALLBACK).
+  (pending '())
+  ;; What WRITE-SEQUENCE-TO-SOCKET-BUFFER has collected for the next flush.
+  (buffer (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
+  ;; The app has written to the socket or set its read callback, so it wants the connection.
+  (claimed nil)
+  ;; CLOSE-SOCKET was called before the connection was taken over.
+  (close-requested nil)
+  (read-callback nil))
+
+(defun %octets (data)
+  (coerce data '(simple-array (unsigned-byte 8) (*))))
+
+(defun %socket-write (socket octets callback)
+  "Write OCTETS on SOCKET, or keep them until it is taken over. CALLBACK, a function of no
+arguments, runs as a connection event once they are written."
+  (let ((on-written (and callback (lambda () (funcall callback)))))
+    (sb-thread:with-mutex ((uv-socket-lock socket))
+      (setf (uv-socket-claimed socket) t)
+      (let ((u (uv-socket-upgraded socket)))
+        (if u
+            (suv:upgraded-write u octets :on-written on-written)
+            (push (cons octets on-written) (uv-socket-pending socket))))))
+  (values))
+
+(defun %socket-attach (socket u)
+  "The connection has been taken over as U: write what was kept, in order, and hand reads to
+the read callback. The first event of the connection."
+  (sb-thread:with-mutex ((uv-socket-lock socket))
+    (setf (uv-socket-upgraded socket) u
+          (suv:upgraded-on-data u) (lambda (u chunk)
+                                     (declare (ignore u))
+                                     (let ((cb (uv-socket-read-callback socket)))
+                                       (when cb (funcall cb chunk)))))
+    (loop for (octets . on-written) in (reverse (uv-socket-pending socket))
+          do (suv:upgraded-write u octets :on-written on-written))
+    (setf (uv-socket-pending socket) '())
+    (when (uv-socket-close-requested socket)
+      (suv:upgraded-close u))))
+
+(defmethod clack.socket:read-callback ((socket uv-socket))
+  (uv-socket-read-callback socket))
+
+(defmethod (setf clack.socket:read-callback) (callback (socket uv-socket))
+  (setf (uv-socket-claimed socket) t
+        (uv-socket-read-callback socket) callback))
+
+(defmethod clack.socket:write-sequence-to-socket ((socket uv-socket) data &key callback)
+  (%socket-write socket (%octets data) callback))
+
+(defmethod clack.socket:write-sequence-to-socket-buffer ((socket uv-socket) data)
+  (sb-thread:with-mutex ((uv-socket-lock socket))
+    (setf (uv-socket-claimed socket) t)
+    (loop for octet across data do (vector-push-extend octet (uv-socket-buffer socket))))
+  (values))
+
+(defmethod clack.socket:write-byte-to-socket-buffer ((socket uv-socket) byte)
+  (sb-thread:with-mutex ((uv-socket-lock socket))
+    (setf (uv-socket-claimed socket) t)
+    (vector-push-extend byte (uv-socket-buffer socket)))
+  (values))
+
+(defmethod clack.socket:flush-socket-buffer ((socket uv-socket) &key callback)
+  (let ((octets (sb-thread:with-mutex ((uv-socket-lock socket))
+                  (prog1 (%octets (uv-socket-buffer socket))
+                    (setf (fill-pointer (uv-socket-buffer socket)) 0)))))
+    (%socket-write socket octets callback)))
+
+(defmethod clack.socket:close-socket ((socket uv-socket))
+  (sb-thread:with-mutex ((uv-socket-lock socket))
+    (let ((u (uv-socket-upgraded socket)))
+      (if u
+          (suv:upgraded-close u)
+          (setf (uv-socket-close-requested socket) t))))
+  (values))
+
+(defmethod clack.socket:socket-async-p ((socket uv-socket))
+  t)
+
+(defmethod clack.socket:socket-stream ((socket uv-socket))
+  (error "clack-handler-uv: the socket is asynchronous and has no stream"))
 
 ;;; --- responses -------------------------------------------------------------
 
@@ -119,7 +223,7 @@ open, so an app with many long streams (server-sent events) wants more.")
 
 (defstruct (delayed (:constructor %make-delayed))
   (head-ready (bt:make-semaphore))
-  head                                  ; (:whole response), (:stream status headers) or (:error e)
+  head                                  ; (:whole response), (:stream status headers), (:error e) or (:upgrade)
   (writer-ready (bt:make-semaphore))
   uv-writer
   (done (bt:make-semaphore))
@@ -147,8 +251,10 @@ open, so an app with many long streams (server-sent events) wants more.")
            (bt:wait-on-semaphore (delayed-writer-ready d))
            (%clack-writer d)))))
 
-(defun %delayed (fn)
-  "Run FN, a delayed Clack response, and return the response server-uv writes."
+(defun %delayed (fn socket)
+  "Run FN, a delayed Clack response, and return the response server-uv writes. When FN
+returns without responding after claiming SOCKET, the response takes the connection over
+(#376)."
   (let ((d (%make-delayed)))
     ;; The app's delayed function continues this request, so it runs with the bindings
     ;; registered for inheritance visible here, such as the request's correlation id (#158).
@@ -156,7 +262,14 @@ open, so an app with many long streams (server-sent events) wants more.")
      (dyn:inheriting
       (lambda ()
        (dyn:unblock-interrupts)
-       (handler-case (funcall fn (%responder d))
+       (handler-case
+           (progn
+             (funcall fn (%responder d))
+             ;; Returned without a response, having started a protocol of its own on the
+             ;; socket (websocket-driver's START-CONNECTION does this): take the connection.
+             (when (and (null (delayed-head d)) (uv-socket-claimed socket))
+               (setf (delayed-head d) (list :upgrade))
+               (bt:signal-semaphore (delayed-head-ready d))))
          (error (e)
            ;; Before the head: the handler signals it, and server-uv answers 500. After it:
            ;; the stream ends without its last chunk, which is how a client learns it failed.
@@ -171,6 +284,9 @@ open, so an app with many long streams (server-sent events) wants more.")
       (ecase kind
         (:error (error (first more)))
         (:whole (%whole (first more)))
+        ;; The app wrote its own 101 head to the socket, so server-uv writes none.
+        (:upgrade (list 101 '() (suv:make-upgrade (lambda (u) (%socket-attach socket u))
+                                                  :write-head nil)))
         (:stream
          (destructuring-bind (status headers) more
            (list status (%headers headers)
@@ -183,9 +299,10 @@ open, so an app with many long streams (server-sent events) wants more.")
 (defun %adapt (app address port-box)
   "APP, a Clack app, as a server-uv handler."
   (lambda (env)
-    (let ((response (funcall app (%clack-env env address (car port-box)))))
+    (let* ((socket (%make-uv-socket))
+           (response (funcall app (%clack-env env address (car port-box) socket))))
       (if (functionp response)
-          (%delayed response)
+          (%delayed response socket)
           (%whole response)))))
 
 ;;; --- run and stop ----------------------------------------------------------

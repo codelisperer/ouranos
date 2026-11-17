@@ -175,6 +175,8 @@
     ;; break here silently un-redacts a password in three frameworks at once.
     :aion/secret :aion/secret/types
     :hyperion/http1
+    ;; The WebSocket protocol (#376): pure, and here for the reason hyperion/http1 is.
+    :hyperion/websocket
     :praxeon/translate :praxeon/web :praxeon/web-search :praxeon/memory-db :praxeon/results-db
     :praxeon/retrieval
     ;; The chat widget's parts, which praxeon/web's page and its embed panel share (#67). It
@@ -300,6 +302,8 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
     ;; aion/uv* is excluded from this checker for needing a C toolchain, and the most
     ;; security-critical code in the tree must not sit outside it. See ADR-0015.
     :hyperion/http1/tests
+    ;; The WebSocket frame parser and handshake (#376), for the same reason.
+    :hyperion/websocket/tests
     ;; The contacts example's changeset path (#94). Its test system existed with an empty
     ;; component list and no :perform -- declared, loadable, and asserting nothing. Named
     ;; under its parent so its checks land in mnemosyne's README row (pre-publication issue 357).
@@ -338,6 +342,8 @@ decision someone made, not an accident -- which is the difference that matters."
     :hyperion/server-uv
     ;; Its Clack handler (#373, ADR-0020), here for the same reason: it starts server-uv.
     :hyperion/clack-handler-uv
+    ;; WebSockets on server-uv (#376).
+    :hyperion/server-uv/websocket
     ;; The scheduler's libuv driver (#689).
     :aion/schedule/uv
     ;; Watching a folder for settled files, over aion/uv's watch and timers (#996).
@@ -349,6 +355,7 @@ not evidence of anything.")
 (defparameter +uv-test-systems+
   '(:aion/uv/tests :aion/uv/net/tests :aion/uv/process/tests
     :hyperion/server-uv/tests :hyperion/clack-handler-uv/tests
+    :hyperion/server-uv/websocket/tests
     :aion/schedule/uv/tests
     :aion/folder-watch/tests)
   "Their suites -- real checks over a real libuv, verified by nothing automatic until CI.")
@@ -548,7 +555,7 @@ the section reports and why."
   "The uv axis is off. One cause only: the caller did not ask for it."
   (format t "  off     ~a axis~34tthis host CAN answer these; the caller declined~%" name)
   (dolist (s '(:aion/uv :aion/uv/net :aion/uv/process :hyperion/server-uv
-               :hyperion/clack-handler-uv))
+               :hyperion/clack-handler-uv :hyperion/server-uv/websocket))
     (format t "          ~(~a~)~%" s))
   (format t "          OURANOS_WITH_UV is unset. Set it to 1 to include them (needs scripts/build-libuv.lisp to have run).~%")
   (format t "          Their checks are NOT in the total below, and no figure here says how many.~%"))

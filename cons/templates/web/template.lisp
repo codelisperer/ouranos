@@ -4,8 +4,9 @@
 ;;;; (pre-publication issue 139), so an app that names none compiles and then fails at SRV:START with
 ;;;; NO-SERVER-BACKEND. hyperion/server-uv, the native server on libuv, because desktop apps
 ;;;; run on it on every platform (ADR-0017, #472), and a scaffolded app should start on the
-;;;; server it will ship on. It needs a built libuv: the tree's scripts/build-libuv.lisp, or a
-;;;; system libuv. The generated README says so. Woo and Hunchentoot remain an app's choice.
+;;;; server it will ship on. It needs a built libuv: the tree's scripts/setup.sh and setup.ps1
+;;;; build it (#504), scripts/build-libuv.lisp builds only it, or a system libuv will do. The
+;;;; generated README says so. Woo and Hunchentoot remain an app's choice.
 ;;;; aion/uv is named too, because the app's START asks hyperion/server:DEFAULT-SERVER, which
 ;;;; skips :uv with a reason when libuv does not load, and logs that reason with aion/log (#711).
 

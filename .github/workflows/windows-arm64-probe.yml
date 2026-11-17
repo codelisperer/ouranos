@@ -196,12 +196,14 @@ jobs:
       # -- 3. Does setup.ps1 pick the right SBCL, and does the arm64 MSI install? ---------
       # Two checklist items at once: predicted failure 1 in action (which arch does
       # setup.ps1 CHOOSE on this host?) and "SBCL arm64 MSI installs and runs at the
-      # pinned version".
+      # pinned version". -WithoutUv because setup.ps1 now refuses before installing SBCL when
+      # it finds no MSVC (#504), and finding MSVC on this host is predicted failure 2, measured
+      # in step 1; the libuv build is measured on its own in step 6.
       - name: 3. Provision the Lisp toolchain (scripts/setup.ps1)
         continue-on-error: true
         shell: pwsh
         run: |
-          ./scripts/setup.ps1 -CI
+          ./scripts/setup.ps1 -CI -WithoutUv
           '--- what did we actually get? ---'
           $v = (sbcl --version 2>&1 | Out-String).Trim()
           $v

@@ -33,11 +33,22 @@
 (defun stamp-state (vendor-dir version sha256)
   "Whether the library in VENDOR-DIR was built from VERSION with SHA256, as a keyword:
 :CURRENT when its stamp names them; :STALE when it names something else; :MISSING when there is
-no stamp, as for a build made before the stamp existed. Only :CURRENT may be reused."
+no stamp, as for a build made before the stamp existed. Only :CURRENT may be reused.
+
+The stamp is :CURRENT when it begins with the version and sha256 lines STAMP-TEXT writes. Lines
+after those two record where the library came from and do not change the answer: setup.ps1, when
+it downloads the prebuilt Windows libuv.dll instead of building it, adds `prebuilt URL' and
+`prebuilt-sha256 HEX' (#1247). That DLL was built from the same tarball, so its stamp names the
+same version and sha256, and build-libuv.lisp reuses it rather than asking for MSVC."
   (let ((path (probe-file (stamp-path vendor-dir))))
-    (cond ((null path) :missing)
-          ((string= (uiop:read-file-string path) (stamp-text version sha256)) :current)
-          (t :stale))))
+    (if (null path)
+        :missing
+        (let ((text (uiop:read-file-string path))
+              (head (stamp-text version sha256)))
+          (if (and (>= (length text) (length head))
+                   (string= head text :end2 (length head)))
+              :current
+              :stale)))))
 
 (defun stamp-matches-p (vendor-dir version sha256)
   "Whether VENDOR-DIR's stamp names VERSION and SHA256."
