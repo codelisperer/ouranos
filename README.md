@@ -2,7 +2,7 @@
 
 [![verify](https://github.com/codelisperer/ouranos/actions/workflows/verify.yml/badge.svg)](https://github.com/codelisperer/ouranos/actions/workflows/verify.yml)
 
-**A metaframework for full-stack Common Lisp — six co-evolving core frameworks (plus three
+**A metaframework for full-stack Common Lisp — six co-evolving core frameworks (plus four
 satellite leaf-libs) under one roof.**
 
 Ouranos is the monorepo home of the [codelisperer](https://github.com/codelisperer)
@@ -78,17 +78,19 @@ right):
 | [`hyperion/`](hyperion) | **Hyperion** | full-stack, HTMX-first web framework (live image, Parenscript, i18n, typed interceptors) |
 | [`praxeon/`](praxeon) | **Praxeon** | praxeological framework for agentic AI (provider-neutral LLMs, actors/means/ends, an MCP client, retrieval for RAG, image generation, web search and page reading; OpenTelemetry tracing and agent evaluations *(in progress)*) |
 
-Plus three **satellite leaf-libs**, outside the linear core DAG:
+Plus four **satellite leaf-libs**, outside the linear core DAG:
 
 | Dir | Framework | Role |
 |---|---|---|
 | [`hermes/`](hermes) | **hermes** | external integrations — neutral email + SMS (SendGrid/Twilio + a dev transport, signature-verified inbound SMS), a content-addressed blob store, and payments behind a neutral protocol (Stripe backend) |
 | [`klio/`](klio) | **Klio** | git-backed content engine — markdown in version control, rendered live by hyperion; sits between a static generator and a database-backed app; reloading a production server *(in progress)* |
 | [`hades/`](hades) | **Hades** | the OS ergonomics layer over aion's raw bindings — portable facades only where every OS has a real counterpart, platform-scoped packages elsewhere ([charter](hades/docs/adr/0001-charter.md)): a single-instance lock, a credential store over the operating system's own, a notice that works before an app has a window, and opening a file, folder or URL; an OS service facade *(in progress)* |
+| `dokimasia/` | **Dokimasia** | acceptance testing for any app that runs in a browser — test cases written as data, run against a local or deployed app through a headless Chrome or Edge, with console, network and accessibility checks and screenshots on every step; add-ons for hyperion apps and elenchon decision tables *(in progress, [#1028](https://github.com/codelisperer/ouranos/issues/1028))* |
 
-All three are **leaves**: nothing in the core DAG depends on them, and apps consume them
-directly. hermes and hades depend only on `aion` plus external libs; klio depends on
-`hyperion`, because it renders through it.
+All four are **leaves**: nothing in the core DAG depends on them, and apps consume them
+directly. hermes, hades and dokimasia depend only on `aion` plus external libs; klio
+depends on `hyperion`, because it renders through it. Dokimasia's optional add-ons for
+hyperion and elenchon depend on those frameworks; its core does not.
 
 **Daidalos**, the Ouranos IDE *(in progress)*, is built on these frameworks: a desktop of
 live windows in one page (a Coalton REPL, a CodeMirror editor that evaluates in a separate
