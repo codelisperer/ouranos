@@ -1365,7 +1365,286 @@ sent to Google. The OpenAI provider reads `PRAXEON_OPENAI_API_KEY`, and then
 for: a Google key put there would be sent to OpenAI. It still works, logs a warning once, and
 will be removed in a later release; move its value to `PRAXEON_OPENAI_API_KEY`.
 
-## 15. Run the tests
+## 15. Send traces to a collector (`praxeon/trace`, #1225)
+
+`praxeon/trace` records each turn as OpenTelemetry spans and sends them to a collector, so you
+can see which model calls and tool calls a turn made, in what order, how long each took and how
+many tokens each used. It is opt-in: load the system and wrap the code that runs turns.
+
+```lisp
+(ql:quickload :praxeon/trace)
+
+(defparameter *exporter* (praxeon/trace:make-otlp-exporter-from-env))
+(defparameter *tracer* (praxeon/trace:make-tracer :exporter *exporter*))
+
+(praxeon/trace:with-tracing (*tracer*)
+  (praxeon/actor:run-turn agent "What is on my calendar tomorrow?"))
+
+;; when the app stops, so the last batch is sent
+(praxeon/trace:shutdown-exporter *exporter*)
+```
+
+`with-tracing` adds an observer for the tracer on top of any observer already bound, so a
+progress display keeps working. An app that binds its own observer for every turn can compose
+the tracer's into it with `(praxeon/trace:tracer-observer *tracer* its-observer)` instead.
+
+### What a turn looks like
+
+Each turn is one span tree:
+
+| Span | Kind | What it records |
+|---|---|---|
+| `invoke_agent <agent>` | internal | the agent's name, the model and provider, the conversation id, how the turn ended (`praxeon.turn.outcome`: answered, cancelled, held, abandoned, failed or incomplete), and the `aion/log` correlation id |
+| `chat <model>` | client | one per model call: the step, the input, output and cache token counts the provider reported, and the finish reason |
+| `execute_tool <means>` | internal | one per tool call: the means' name, the call id, the outcome and the duration in milliseconds; status ERROR when the means reported an error |
+
+A sub-agent called through `register-agent-as-means` appears as a child `invoke_agent` span of
+the `execute_tool` span that delegated to it, with its own `chat` and `execute_tool` children.
+
+Attribute names follow the OpenTelemetry GenAI semantic conventions (`gen_ai.operation.name`,
+`gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.tool.name` and the rest). Those
+conventions are still marked as in development, so every name is defined once, in
+`praxeon/src/trace/attributes.lisp`; praxeon's own additions start with `praxeon.`.
+
+**Joining logs and traces.** The turn span records the `aion/log` context fields named in
+`praxeon/trace:*correlation-keys*` (`:request-id`, `:job-id`, `:conversation-id`), as
+`praxeon.log.request_id` and so on. Behind `hyperion/server`, every request has a request id, so
+the log lines of a request and its trace carry the same id.
+
+**The finish reason is worked out from the events**, because no event carries the provider's
+stop reason: a model call followed by tool calls is `tool_calls`, one followed by the answer is
+`stop`, one cut off at the output limit is `length`, and one a cancel stopped is `cancelled`.
+
+**A turn that signals an error** out of `with-tracing` ends with status ERROR, outcome `failed`
+and the condition's type in `error.type`, never its report.
+
+**Threads.** Spans are kept per thread. A turn that runs on another thread, such as each
+parallel step of a `praxeon/workflow`, starts a trace of its own rather than joining its
+caller's.
+
+### No content unless you ask for it
+
+Spans carry names, ids, counts and durations. They do not carry the prompt, a tool call's
+arguments, a tool result or the answer, for the same reason logs do not (`docs/logging.md`):
+traces are shipped to third-party services and kept for a long time. To record content, for
+example while debugging locally, make the tracer with `:capture-content t`. That adds
+`gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, `gen_ai.output.messages` and the task a
+coordinator delegated. A private agent's turn (`make-agent :private t`) binds
+`praxeon/event:*withhold-content*`, and then no content is recorded whatever the tracer says.
+
+### Choosing a collector
+
+`make-otlp-exporter` sends OTLP over HTTP with the JSON encoding, to the full URL of a
+collector's `/v1/traces`. Anything that accepts OTLP/HTTP works: the OpenTelemetry Collector,
+Jaeger (1.35 or later, with OTLP enabled) and Langfuse among them. The default port for OTLP/HTTP
+is 4318.
+
+```lisp
+;; an OpenTelemetry Collector or Jaeger on this machine
+(praxeon/trace:make-otlp-exporter :endpoint "http://localhost:4318/v1/traces")
+
+;; a collector that wants an API key in a header
+(praxeon/trace:make-otlp-exporter
+ :endpoint "https://collector.example.com/v1/traces"
+ :headers '(("authorization" . "Basic <base64 of public-key:secret-key>")))
+```
+
+`make-otlp-exporter-from-env` reads the standard OpenTelemetry variables instead:
+
+```sh
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318      # /v1/traces is added
+# or OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4318/v1/traces, used as given
+OTEL_EXPORTER_OTLP_HEADERS=authorization=Basic%20...    # comma-separated key=value, percent-encoded
+OTEL_SERVICE_NAME=my-app                                # service.name; default praxeon
+```
+
+For Langfuse, the endpoint is the Langfuse host followed by `/api/public/otel/v1/traces`, and the
+header is `Authorization: Basic` with the base64 of `public-key:secret-key`, as Langfuse's
+OpenTelemetry documentation describes.
+
+### What the exporter does with a slow or failing collector
+
+`export-spans` only queues a finished turn's spans; it never waits for the network. A thread of
+the exporter's own, started the first time it is used, sends a batch every `:interval` seconds
+(5 by default) or as soon as `:batch-size` spans (512) are waiting. Each request is limited to
+`:timeout` seconds (10). A batch that fails, because the collector cannot be reached or answers
+with a status other than 2xx, is dropped, not retried, and logged at warn through `aion/log`:
+
+```
+praxeon/trace: export failed spans=5 failed-batches=1 status=500 condition=AION/HTTP-CLIENT::HTTP-ERROR
+```
+
+The line carries counts and the condition's type, never span content. The turn is not delayed
+and does not fail. When `:max-queue` spans (2048) are already waiting, new ones are dropped and
+logged with a count. `otlp-exporter-sent-spans`, `otlp-exporter-failed-batches`,
+`otlp-exporter-failed-spans` and `otlp-exporter-dropped-spans` read the counts.
+`flush-exporter` waits for the queue to be sent, and `shutdown-exporter` sends it and stops the
+thread.
+
+### In the REPL and in tests
+
+`make-tracer` without `:exporter` keeps spans in the image, in a `memory-exporter`:
+
+```lisp
+(let ((tracer (praxeon/trace:make-tracer)))
+  (praxeon/trace:with-tracing (tracer)
+    (praxeon/actor:run-turn agent "hello"))
+  (mapcar #'praxeon/trace:span-name
+          (praxeon/trace:exported-spans (praxeon/trace:tracer-exporter tracer))))
+;; => ("chat claude-..." "invoke_agent elise")
+```
+
+`praxeon/trace:otlp-json` turns a list of spans into the body the exporter would send.
+## 16. Evaluate an agent (`praxeon/eval`, #1224)
+
+`praxeon/eval` runs an agent against a fixed set of cases, grades every run, and tells you
+whether the agent got worse than the last report you saved. It is opt-in: load
+`praxeon/eval`, which core `praxeon` does not.
+
+```lisp
+(asdf:load-system "praxeon/eval")
+```
+
+### A case
+
+A case is data: a name, the input (one user message, or a list of messages sent as successive
+turns of one conversation), a function that returns a fresh agent, and the graders. The
+function is called once per run, so runs never share history.
+
+```lisp
+(praxeon/eval:make-case "refund-delivered-order"
+  :input "My order A1 arrived broken. Please refund it."
+  :agent (lambda () (make-support-agent))
+  :repeats 3        ; run it three times
+  :pass-rate 2/3    ; the case is met when at least two of the three runs pass
+  :graders (list (praxeon/eval:trajectory '("lookup-order"
+                                             ("issue-refund" :arguments (("order_id" "A1")))))
+                 (praxeon/eval:contains "25.00")
+                 (praxeon/eval:rubric "The reply confirms the refund and states the amount.")))
+```
+
+A run passes when every grader passes. A case's pass rate is the fraction of its runs that
+passed; the case is met when that rate is at least `:pass-rate` (1 by default, so every run).
+`:max-steps` bounds each turn, as `run-turn`'s argument of that name does.
+
+### Graders
+
+Each grader returns a grade: passed or failed, a score from 0 to 1, and a reason that the
+report prints when the grade failed.
+
+| Grader | Passes when |
+|---|---|
+| `(exact-match text &key ignore-case)` | the answer equals `text`, both trimmed of whitespace |
+| `(contains text &key ignore-case)` | the answer contains `text` |
+| `(matches-regex pattern &key ignore-case)` | the Perl-syntax `pattern` (CL-PPCRE) matches somewhere in the answer; a pattern that does not parse is refused when the grader is made |
+| `(trajectory steps &key (order :in-order))` | the means the agent called match `steps` |
+| `(rubric text &key (threshold 0.7))` | a judge model scores the answer at least `threshold` against `text` |
+| `(make-grader name function)` | your `function` of a run returns a passing grade (`passing-grade`, `failing-grade`) |
+
+**Trajectory.** Each step is a means name, or `(name :arguments check)`, where `check` is a
+list of `(key value)` pairs the call's arguments must hold (keys are argument names, as
+strings) or a function of the arguments hash table. `:order` is `:in-order` (the steps happen
+in this order, with other calls allowed before, between and after them), `:exact` (the calls
+are exactly these steps, in this order) or `:set` (each step matches a different call, in any
+order, and other calls are allowed). The calls are read from the `:tool-call` and
+`:tool-result` events through an observer (`praxeon/event:*observer*`), so the actor loop is
+unchanged, and an observer you already have still receives every event. Only the calls of the
+case's own agent are counted, not those of a sub-agent it delegates to. A private agent's
+arguments are withheld from the event stream, so an argument check on one of its calls fails.
+
+**Rubric.** The judge is a provider of its own, with the role `:judge`, so it is configured
+apart from the agent it grades:
+
+```sh
+PRAXEON_JUDGE_IMPL=anthropic
+PRAXEON_JUDGE_MODEL=claude-opus-5-5
+# PRAXEON_JUDGE_API_KEY=... , PRAXEON_JUDGE_BASE_URL=... ; otherwise PRAXEON_LLM_* as for any role
+```
+
+The judge is asked for a structured answer, a score and its reasoning, through
+`praxeon/llm:generate-structured`. A judge that fails or returns a score outside 0 to 1 gives a
+failing grade that says so; it does not stop the run. To pass a provider yourself, give
+`run-eval` `:judge (praxeon/eval:make-judge :provider p)`.
+
+### A dataset file
+
+`load-dataset` reads cases from an s-expression file. Agents are named in the file and given
+as functions by the caller:
+
+```lisp
+((:name "status-of-shipped-order"
+  :agent "support"
+  :input "Where is my order B2?"
+  :graders ((:trajectory ("lookup-order") :order :exact)
+            (:regex "\\bshipped\\b" :ignore-case t)))
+ (:name "two-turn-question"
+  :agent "support"
+  :input ("Hi, I have a question about order C3." "How much did it cost?")
+  :graders ((:trajectory ("lookup-order") :order :set)
+            (:contains "120.00"))))
+```
+
+```lisp
+(praxeon/eval:load-dataset #p"evals/support.sexp"
+                           :agents (list (cons "support" (lambda () (make-support-agent)))))
+```
+
+The graders in a file are `(:exact text)`, `(:contains text)` and `(:regex pattern)`, each
+with `:ignore-case`; `(:trajectory steps)` with `:order`; and `(:rubric text)` with
+`:threshold`. The file is read with `aion/sexp:read-data`, which accepts plain data only and
+creates no symbol. A malformed case signals `praxeon/eval:invalid-case`, naming the case and
+what is wrong with it.
+
+### Running, reporting and gating
+
+```lisp
+(let ((report (praxeon/eval:run-eval cases :name "support"
+                                           :baseline #p"evals/baseline.json")))
+  (praxeon/eval:summary report)                           ; text, to *standard-output*
+  (praxeon/eval:write-report report #p"evals/latest.json")
+  (multiple-value-bind (ok reasons) (praxeon/eval:gate report :min-pass-rate 0.9)
+    (unless ok
+      (format *error-output* "~{~A~%~}" reasons)
+      (uiop:quit 1))))
+```
+
+The report holds each case's pass rate and whether it was met, and each run's answer, calls,
+grades, input and output tokens (summed from the `:usage` events, so absent when the provider
+reports none) and duration in milliseconds, with the same totals for the whole report. The
+total pass rate is the mean of the cases' pass rates. `write-report` writes it as JSON;
+`load-report` reads a saved report back for use as a baseline (`run-eval` also accepts the path
+directly). The JSON holds the answers and the call arguments, so it holds whatever the inputs
+led the agent to write; keep it where you would keep the agent's transcripts.
+
+With a baseline, each case is marked `regressed` (met in the baseline, not met now), `fixed`,
+`met`, `not met` or `new`, and cases the baseline had that the run did not are listed as
+removed. `gate` returns true or false and, as a second value, one sentence per threshold not
+met:
+
+- `:min-pass-rate` (default 0): the lowest total pass rate allowed;
+- `:max-regressions` (default 0): the most cases allowed to regress from the baseline;
+- `:max-cases-not-met` (default 0): the most cases allowed to miss their own `:pass-rate`.
+
+So by default a build fails when any case misses its required pass rate or any case regressed.
+
+The grade type and the aggregation (pass rates, which cases are met, regressions, the gate's
+decision) are Coalton, in `praxeon/eval/core`; running agents and calling the judge are the CL
+shell.
+
+### The example
+
+`praxeon/examples/eval` is an order-support agent with two means, and `support.sexp` beside it
+is a three-case dataset that uses every grader except `exact-match`:
+
+```lisp
+(asdf:load-system "praxeon/examples/eval")
+(praxeon/examples/eval:run-example)   ; calls the models PRAXEON_LLM_* and PRAXEON_JUDGE_* name
+```
+
+`praxeon/eval/tests` runs the same dataset with stub providers for the agent and the judge,
+and no network.
+
+## 17. Run the tests
 
 Network-free (uses a scripted provider, no API key needed):
 

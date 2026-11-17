@@ -409,8 +409,8 @@ their results."
 ;;; Progress events -- the client<->framework contract (network-free)
 ;;; --------------------------------------------------------------------------
 (test observer-receives-turn-events
-  "run-turn emits :deliberating/:tool-call/:tool-result/:answer, in order and
-with payloads, to a bound observer."
+  "run-turn emits :turn-started/:deliberating/:tool-call/:tool-result/:answer, in order and
+with payloads, to a bound observer. :TURN-STARTED was added for praxeon/trace (#1225)."
   (let* ((call (llm:make-tool-call :id "t1" :name "add"
                                    :arguments (%args "a" 2 "b" 3)))
          (script (list (llm:make-completion :tool-calls (list call)
@@ -425,7 +425,7 @@ with payloads, to a bound observer."
     (evt:with-observer ((lambda (e) (push e events)))
       (actor:run-turn ag "add 2 and 3"))
     (setf events (nreverse events))
-    (is (equal '(:deliberating :tool-call :tool-result :deliberating :answer)
+    (is (equal '(:turn-started :deliberating :tool-call :tool-result :deliberating :answer)
                (mapcar #'evt:event-type events)))
     (let ((tc (find :tool-call events :key #'evt:event-type)))
       (is (string= "add" (evt:event-get tc :name)))

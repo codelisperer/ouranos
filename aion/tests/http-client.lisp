@@ -3171,3 +3171,48 @@ finds it as the body's delimiter."
         (is-true (search "charset=utf-8" type) "the caller's other parameter is kept: ~A" type)
         (is-true (and boundary (search (format nil "--~A" boundary) body))
                  "the advertised boundary delimits the body: ~A" type)))))
+
+;;; --- a read timeout on dexador's path (#537) ------------------------------------------------
+
+(defun %late-answer (path head stream)
+  "A handler that waits 6 seconds and then answers 200."
+  (declare (ignore path head))
+  (sleep 6)
+  (%write-response stream 200 '() "late"))
+
+(defun %timed-send (request)
+  "Send REQUEST and return two values: the HTTP-ERROR it signalled, or :ANSWERED when it returned
+a response, and the seconds it took. An outer limit of 20 seconds turns a hang into a result."
+  (let* ((start (get-internal-real-time))
+         (outcome (handler-case
+                      (sb-ext:with-timeout 20
+                        (progn (http:send-request request '()) :answered))
+                    (http:http-error (e) e)
+                    (sb-ext:timeout () :hung))))
+    (values outcome (/ (- (get-internal-real-time) start) internal-time-units-per-second))))
+
+(test a-read-timeout-ends-a-request-the-server-answers-too-late
+  "#537: a request with :READ-TIMEOUT 1, sent through dexador (no CONNECT-ADDRESS and no DEADLINE),
+to a server that waits 6 seconds before writing anything. It must fail as a :RESPONSE failure
+before the server answers. It is sent once with a connect timeout and once without, because
+dexador's WinHTTP backend sets WinHTTP's timeouts only when it has a connect timeout; without one
+it uses its own default of 10 seconds.
+
+ON WINDOWS THE BOUND IS THE READ TIMEOUT PLUS 4 SECONDS. WinHTTP checks its receive timeout every
+4 seconds, so a request fails at the first multiple of 4 seconds after the timeout: measured on
+Windows 11, a timeout from 0.25 to 3 seconds ended the request at 4 seconds, 4 to 6 seconds at 8,
+and 8 seconds at 12, each over one connection. On the Windows leg of #530 the server answered at 3
+seconds, before that, and the request succeeded. Elsewhere the bound is the read timeout itself."
+  (with-server (s #'%late-answer)
+    (dolist (connect '(2 nil))
+      (multiple-value-bind (outcome seconds)
+          (%timed-send (http:make-request :url (%local s "/") :connect-timeout connect
+                                          :read-timeout 1))
+        (is (typep outcome 'http:http-error)
+            "with connect timeout ~A: the request failed rather than ~S after ~,2F s"
+            connect outcome seconds)
+        (is (< seconds #+os-windows 5.5 #-os-windows 2.5)
+            "with connect timeout ~A: it failed within its bound, not after ~,2F s"
+            connect seconds)
+        (is (eq :response (and (typep outcome 'http:http-error) (http:http-error-phase outcome)))
+            "with connect timeout ~A: after the request was sent: ~A" connect outcome)))))

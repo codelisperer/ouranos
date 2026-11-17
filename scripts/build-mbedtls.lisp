@@ -203,7 +203,7 @@ killed everything.")
     (if (> (length text) 160) (concatenate 'string (subseq text 0 160) " ...") text)))
 
 (defun %run-bounded (command &key directory capture (timeout *command-timeout*)
-                                  ignore-error-status)
+                                  ignore-error-status (error-output :interactive))
   "Run COMMAND -- a list, or a string that cmd.exe runs -- and return (values OUTPUT CODE).
 OUTPUT is its standard output as a string when CAPTURE is true, trailing whitespace removed,
 and NIL otherwise, when the output goes straight to ours. Signals if it exits non-zero, unless
@@ -217,7 +217,7 @@ cmd.exe; a child it started may outlive it, but the build has already failed by 
     (let ((process (uiop:launch-program command :directory directory :input nil
                                                 :output (if capture out :interactive)
                                                 :if-output-exists :supersede
-                                                :error-output :interactive))
+                                                :error-output error-output))
           (deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second))))
       (loop while (uiop:process-alive-p process)
             do (when (> (get-internal-real-time) deadline)
@@ -241,7 +241,10 @@ there is no sh on a stock Windows, which is the same split build-libuv.lisp make
                   (%run-bounded (if (uiop:os-windows-p)
                                     (list "where" c)
                                     (list "sh" "-c" (format nil "command -v ~A" c)))
-                                :capture t :ignore-error-status t :timeout 30))))
+                                :capture t :ignore-error-status t :timeout 30
+                                ;; Discarded: where.exe reports finding nothing on standard
+                                ;; error, and in a build log that line reads like an error (#504).
+                                :error-output nil))))
       (when (and found (plusp (length found))) (return c)))))
 
 (defun run (program args &key (timeout *command-timeout*))

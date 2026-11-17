@@ -33,6 +33,28 @@ reused any library that existed, so a 1.52.1 build stayed after the pin moved to
                  (uiop:read-file-string (ouranos-built-from:stamp-path dir)))
         "the format build-sqlite.lisp wrote before the stamp was shared, so existing stamps stay valid")))
 
+(test a-prebuilt-stamp-is-current-when-its-first-two-lines-name-the-pin
+  "#1247: setup.ps1 writes the stamp of a downloaded prebuilt libuv.dll as the version and
+tarball sha256 lines, then `prebuilt URL' and `prebuilt-sha256 HEX'. Those extra lines do not
+change the answer, so build-libuv.lisp reuses the DLL instead of asking for MSVC. A prebuilt
+stamp naming another version is still :STALE, and so is a stamp whose first line is not the
+version line, which is the control that the comparison is a prefix and not a search."
+  (let ((dir (%fresh-tree))
+        (sha "cb0d6dd2128d5a95bd242c6cc982a24fe608fa93da57b6b4ec763b0018c53e64"))
+    (flet ((stamp (text)
+             (with-open-file (out (ouranos-built-from:stamp-path dir) :direction :output
+                                                                     :if-exists :supersede)
+               (write-string text out))))
+      (stamp (format nil "version 1.53.0~%sha256 ~A~%prebuilt https://example.invalid/libuv.dll~%prebuilt-sha256 ~A~%"
+                     sha (make-string 64 :initial-element #\a)))
+      (is (eq :current (ouranos-built-from:stamp-state dir "1.53.0" sha)))
+      (is (equal "1.53.0" (ouranos-built-from:stamp-version dir)))
+      (stamp (format nil "version 1.52.1~%sha256 ~A~%prebuilt https://example.invalid/libuv.dll~%" sha))
+      (is (eq :stale (ouranos-built-from:stamp-state dir "1.53.0" sha)) "another version")
+      (stamp (format nil "prebuilt https://example.invalid/libuv.dll~%version 1.53.0~%sha256 ~A~%" sha))
+      (is (eq :stale (ouranos-built-from:stamp-state dir "1.53.0" sha))
+          "the version and sha256 lines must come first"))))
+
 (test the-build-scripts-and-the-carry-read-the-one-stamp-format
   "#977: build-libuv.lisp, build-sqlite.lisp and carry-natives.lisp load built-from.lisp and keep
 no copy of the format of their own, so the writers and the reader cannot disagree."

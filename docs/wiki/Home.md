@@ -100,7 +100,7 @@ cycles, so the rule is not aspirational — it's mechanical.
 | **Praxeon** | Praxeological framework for agentic AI — actors / means / ends, provider-neutral LLMs, workflow | [Framework Praxeon](Framework-Praxeon.md) |
 
 Auxiliary systems inside a framework *may* reach rightward (`praxeon/web → hyperion`,
-`hyperion/testing → elenchon`) as long as the system-level graph stays acyclic. It's the
+`dokimasia/elenchon → elenchon`) as long as the system-level graph stays acyclic. It's the
 **core** systems that are bound by the line. Apps and examples that combine frameworks live
 in the **highest** framework they need.
 

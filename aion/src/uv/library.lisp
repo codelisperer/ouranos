@@ -47,8 +47,13 @@ close it by.")
        (format stream "  ~A~%" place))
      (when (libuv-not-found-reason c)
        (format stream "~%Last error: ~A~%" (libuv-not-found-reason c)))
-     (format stream "~%Build the pinned libuv (needs only a C compiler):~%")
-     (format stream "  sbcl --script scripts/build-libuv.lisp~%~%")
+     ;; The commands run from the Ouranos checkout, not from an app's directory, so the
+     ;; report names that directory when it can find it (#504).
+     (let ((root (%tree-root)))
+       (format stream "~%Build the pinned libuv (needs a C compiler)~@[ in the Ouranos checkout at ~A~]:~%"
+               (and root (string-right-trim "/\\" (uiop:native-namestring root))))
+       (format stream "  ./scripts/setup.sh          (setup.ps1 on Windows; builds it as part of setup)~%")
+       (format stream "  sbcl --script scripts/build-libuv.lisp   (builds only libuv)~%~%"))
      (format stream "Or point AION_UV_LIBRARY at an existing one.~%")))
   (:documentation "Signalled on first use when no libuv could be loaded."))
 
@@ -79,11 +84,15 @@ in the directory the running executable lives in."
       (mapcar (lambda (name) (namestring (merge-pathnames name dir)))
               *library-names*))))
 
+(defun %tree-root ()
+  "The Ouranos checkout aion was loaded from (the directory holding aion/), or NIL."
+  (ignore-errors
+   (uiop:pathname-parent-directory-pathname
+    (asdf:system-source-directory :aion))))
+
 (defun %vendored-candidates ()
   "The paths scripts/build-libuv.lisp would have written to, if aion is loadable."
-  (let ((root (ignore-errors
-               (uiop:pathname-parent-directory-pathname
-                (asdf:system-source-directory :aion)))))
+  (let ((root (%tree-root)))
     (when root
       (mapcar (lambda (name)
                 (namestring (merge-pathnames (concatenate 'string "vendor/libuv/lib/" name)
