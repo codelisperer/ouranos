@@ -209,7 +209,9 @@ because nothing here can choose a restart; the reply then arrives as an error."
 
 (defun %request (runtime name arguments timeout)
   "Send (NAME id . ARGUMENTS) on RUNTIME's main connection and return the REPLY. One request
-at a time: the server answers a connection's requests in order."
+at a time: the server answers a connection's requests in order. TIMEOUT is kept with
+SB-EXT:WITH-TIMEOUT, as in %READ-PORT, because on Windows a deadline does not interrupt a read
+blocked on the socket (#1220)."
   (sb-thread:with-mutex ((runtime-lock runtime))
     (let ((stream (runtime-stream runtime))
           (id (%next-id runtime)))
@@ -218,10 +220,10 @@ at a time: the server answers a connection's requests in order."
       (setf (runtime-active-id runtime) id)
       (unwind-protect
            (handler-case
-               (sb-sys:with-deadline (:seconds timeout)
+               (sb-ext:with-timeout timeout
                  (%write-frame stream (list* name id arguments))
                  (%collect stream id name))
-             (sb-sys:deadline-timeout ()
+             (sb-ext:timeout ()
                (error 'runtime-timeout :request name :seconds timeout))
              (stream-error ()
                (error 'runtime-closed :request name)))
@@ -288,10 +290,11 @@ connection, as `mine` does it, because the main connection is busy with the requ
         (unwind-protect
              (let ((id (%next-id runtime)))
                (handler-case
-                   (sb-sys:with-deadline (:seconds timeout)
+                   ;; WITH-TIMEOUT, as in %REQUEST, so the timeout holds on Windows (#1220).
+                   (sb-ext:with-timeout timeout
                      (%write-frame stream (list :interrupt-request id target))
                      (eq :ok (reply-status (%collect stream id :interrupt-request))))
-                 (sb-sys:deadline-timeout ()
+                 (sb-ext:timeout ()
                    (error 'runtime-timeout :request :interrupt-request :seconds timeout))))
           (ignore-errors (close stream :abort t))
           (ignore-errors (sb-bsd-sockets:socket-close socket)))))))
@@ -301,7 +304,13 @@ connection, as `mine` does it, because the main connection is busy with the requ
 (defun %read-port (process timeout)
   "Two values: the port the child printed, and the xmath word from its READY line. Signals
 RUNTIME-START-FAILED when the child exits or TIMEOUT seconds pass first. The last lines the
-child wrote go into the condition."
+child wrote go into the condition.
+
+The wait is SB-EXT:WITH-TIMEOUT, not SB-SYS:WITH-DEADLINE. On Windows a deadline does not
+interrupt a read that is blocked on the child's output pipe: measured on Windows 11 for #1220, a
+read under a deadline of 0.5 seconds waited 4.03 seconds, until the child wrote its line, so a
+child that never printed a port was waited for as long as it took to print one. WITH-TIMEOUT
+interrupts the thread, and ended the same read at 0.50 seconds."
   (let ((output (sb-ext:process-output process))
         (recent '())
         (xmath nil))
@@ -310,7 +319,7 @@ child wrote go into the condition."
                     :reason reason
                     :output (format nil "~{~A~^~%~}" (reverse (subseq recent 0 (min 15 (length recent))))))))
       (handler-case
-          (sb-sys:with-deadline (:seconds timeout)
+          (sb-ext:with-timeout timeout
             (loop
               (let ((line (read-line output nil nil)))
                 (cond ((null line)
@@ -323,7 +332,7 @@ child wrote go into the condition."
                       ((eql 0 (search "OURANOS-RUNTIME-READY xmath=" line))
                        (setf xmath (subseq line (length "OURANOS-RUNTIME-READY xmath="))))
                       (t (push line recent))))))
-        (sb-sys:deadline-timeout ()
+        (sb-ext:timeout ()
           (fail (format nil "no port line within ~A seconds" timeout)))))))
 
 (defun %quicklisp-args ()

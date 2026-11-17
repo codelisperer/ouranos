@@ -1108,7 +1108,11 @@ window.addEventListener('load', function () {
                                                :port p :host "127.0.0.1" :log nil)
                                (setf port p))))))
             (unwind-protect
-                 (let ((dom (smoke::%run-browser browser (format nil "http://127.0.0.1:~D/" port))))
+                 ;; --dump-dom's output has CRLF line endings on Windows, and the text this test
+                 ;; looks for has a line break in it, so CRLF is read as LF first (#1220). The
+                 ;; form posts the text with LF on every platform.
+                 (let ((dom (%lf-line-endings
+                             (smoke::%run-browser browser (format nil "http://127.0.0.1:~D/" port)))))
                    (is (search "cm-editor" dom) "the bundle built an editor")
                    (is (search "id=\"win-editor-code\"" dom))
                    (is (= 2 (%count "class=\"cm-line" dom)) "one element per line of the text")
@@ -1121,6 +1125,15 @@ window.addEventListener('load', function () {
                        "Evaluate with nothing selected sent the whole text"))
               (ignore-errors (srv:stop handler))
               (is (ports:await-released port))))))))
+
+(defun %lf-line-endings (text)
+  "TEXT with every CR that comes before an LF removed."
+  (with-output-to-string (out)
+    (loop for i from 0 below (length text)
+          for c = (char text i)
+          unless (and (char= c #\Return) (< (1+ i) (length text))
+                      (char= (char text (1+ i)) #\Linefeed))
+            do (write-char c out))))
 
 (defun %count (needle text)
   "How many times NEEDLE appears in TEXT."

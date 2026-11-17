@@ -159,6 +159,22 @@ Windows branch has not been run."
         (let ((after (rt:runtime-eval runtime "(+ 1 2)" :package "CL-USER" :coalton nil)))
           (is (search "\"3\"" (rt:reply-value after))))))))
 
+(test an-evaluation-past-its-timeout-signals-runtime-timeout-in-time
+  "#1220: RUNTIME-EVAL's :TIMEOUT holds on every platform. The evaluation sleeps for 30 seconds
+and the timeout is 1 second. On Windows the request used to wait under SB-SYS:WITH-DEADLINE,
+which does not interrupt a read blocked on a socket there, so it would have waited the whole 30
+seconds for the reply instead of signalling RUNTIME-TIMEOUT."
+  (%with-runtime (runtime)
+    (let* ((start (get-internal-real-time))
+           (c (handler-case
+                  (progn (rt:runtime-eval runtime "(sleep 30)" :package "CL-USER" :coalton nil
+                                                               :timeout 1)
+                         nil)
+                (rt:runtime-timeout (c) c)))
+           (seconds (/ (- (get-internal-real-time) start) (float internal-time-units-per-second))))
+      (is (typep c 'rt:runtime-timeout) "the evaluation was not timed out: ~S" c)
+      (is (< seconds 5) "it was timed out after ~,2F seconds, not about 1" seconds))))
+
 ;;; --- the child process -------------------------------------------------------------------
 
 (test stopping-leaves-no-child-process
