@@ -58,6 +58,8 @@
    ;; the response encoder (commit 2)
    #:Encode-Result #:Encoded #:Refused
    #:encode-head #:encode-head-flat #:encode-error #:encode-interim #:reason-phrase
+   ;; the head of a 101 that hands the connection to another protocol (#376)
+   #:encode-switching-protocols #:encode-switching-protocols-flat
    #:encode-ok? #:encode-text #:encode-reason
    ;; chunked framing, for a streamed body whose length is not known up front (M2)
    #:encode-head-chunked #:encode-head-chunked-flat #:encode-chunk-header #:last-chunk
