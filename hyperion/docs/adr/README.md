@@ -59,3 +59,4 @@ here as accepted, unedited).
 | [0018](0018-desktop-native-menus-and-tray.md) | Desktop native menus: declared by the app, rendered by the launcher | Proposed |
 | [0019](0019-csrf-and-the-pre-authentication-fork.md) | CSRF: one mechanism, central on both sides, and a session before sign-in | Proposed |
 | [0020](0020-clack-interface-and-native-server-default.md) | Keep Clack as the application interface; ship hyperion's own server as the default and as a Clack handler | Accepted |
+| [0021](0021-browser-driver-and-uat-harness.md) | A browser driver in aion, and a data-driven acceptance-test harness in hyperion | Proposed |
