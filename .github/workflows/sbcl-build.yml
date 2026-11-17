@@ -1,0 +1,310 @@
+# sbcl-build.yml --- build SBCL from the source sbcl.pin names, test it, and publish it as a
+# release of this repository (#1251).
+#
+# SourceForge refuses SBCL downloads to some locations (#1216), and the maintainer decided on
+# 2026-11-15 that Ouranos builds its own SBCL binaries from source instead. The source is the
+# fork codelisperer/sbcl, at the tag and commit in sbcl.pin.
+#
+# Jobs:
+#   - build: one leg per platform. Each runs scripts/build-sbcl.sh, which clones the pinned
+#     commit, builds SBCL twice (the second build compiled by the first), checks what the build
+#     says about itself, runs SBCL's own test suite and packages the result as
+#       sbcl-<version>-ouranos.<release>-<arch>-<os>-binary.tar.bz2 (+ .sha256, + -build.txt)
+#     Linux x86-64 only so far; macOS arm64 and Windows x86-64 come next (#1251).
+#   - gate-linux: installs the Linux build and runs this tree's gate against it, the same
+#     sequence of scripts as the Linux leg of verify.yml (see the note on that job).
+#   - publish: attaches every built file to the release sbcl-v<version>-ouranos.<release>.
+#
+# Triggers:
+#   - workflow_dispatch: builds, tests and gates, and keeps the files as a workflow artifact.
+#     With publish=true it also creates the release at the dispatched commit.
+#   - a pushed tag sbcl-v*: the same, and publishes. The tag must be
+#     sbcl-v<version>-ouranos.<release> from sbcl.pin, or the publish job fails.
+#   - a pull request that changes sbcl.pin, scripts/build-sbcl.sh or this file: builds, tests
+#     and gates, and never publishes.
+# Nothing publishes unless every build leg that ran and the gate passed.
+#
+# An asset already in the release is never replaced, so a checksum that has been pinned keeps
+# naming the same file. A different build of the same version takes the next `release' number
+# in sbcl.pin, and so a new tag.
+
+name: SBCL build
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Create the release sbcl-v<version>-ouranos.<release> and upload the builds"
+        required: false
+        type: boolean
+        default: false
+  push:
+    tags: ["sbcl-v*"]
+  # A pull request that changes the build runs it: build, tests and gate, never the publish job.
+  # This is also the only way to run a new version of this file before it is on main, because
+  # workflow_dispatch runs only workflows that main already has.
+  pull_request:
+    paths:
+      - sbcl.pin
+      - scripts/build-sbcl.sh
+      - .github/workflows/sbcl-build.yml
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    name: build ${{ matrix.platform }}
+    timeout-minutes: 150
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Built on ubuntu-24.04, not verify.yml's ubuntu-26.04, for the reason
+          # desktop-release.yml gives: a Linux binary needs at least the glibc of the image it
+          # was built on, and Ubuntu 24.04 has 2.39 where 26.04 has 2.43 (#766).
+          # build-sbcl.sh prints the newest glibc symbol the runtime uses.
+          - os: ubuntu-24.04
+            platform: x86-64-linux
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # The host Lisp compiles only the first build, so the distribution's SBCL is enough
+      # (comment on #1251, 2026-11-16). libzstd-dev is for --with-sb-core-compression.
+      # Bounded waits, for the reasons in scripts/ci-apt-install.sh (#507).
+      - name: Install the host SBCL and libzstd-dev (Linux)
+        if: runner.os == 'Linux'
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          apt_opts=(-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30 -o DPkg::Lock::Timeout=120)
+          for attempt in 1 2 3; do
+            if timeout 300 sudo apt-get "${apt_opts[@]}" update --error-on=any &&
+               timeout 300 sudo apt-get "${apt_opts[@]}" install -y --download-only sbcl libzstd-dev; then
+              break
+            fi
+            [ "$attempt" -lt 3 ] || { echo "::error::apt-get could not download sbcl and libzstd-dev in 3 attempts"; exit 1; }
+            sleep 20
+          done
+          sudo apt-get "${apt_opts[@]}" install -y --no-download sbcl libzstd-dev
+          sbcl --version
+
+      - name: Build, check, test and package SBCL
+        shell: bash
+        run: |
+          ./scripts/build-sbcl.sh \
+            --xc-host "sbcl --disable-debugger --no-sysinit --no-userinit" \
+            --work "$RUNNER_TEMP/sbcl-build" \
+            --out dist/sbcl
+
+      - name: Keep the build and test logs when the build fails
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: sbcl-logs-${{ matrix.platform }}
+          path: |
+            ${{ runner.temp }}/sbcl-build/build.log
+            ${{ runner.temp }}/sbcl-build/tests.log
+          if-no-files-found: ignore
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: sbcl-${{ matrix.platform }}
+          path: dist/sbcl/
+          if-no-files-found: error
+
+  # THE GATE, AGAINST THE SBCL JUST BUILT. This is the Linux leg of verify.yml with its caches
+  # left out, so it builds cold, and with its SBCL taken from the build job. It calls the same
+  # scripts in the same order. It is a copy rather than a call of verify.yml because verify.yml's
+  # matrix always runs all three platforms, and there is no SBCL to give the macOS and Windows
+  # legs yet. When verify.yml's Linux leg changes, this job changes with it.
+  gate-linux:
+    name: gate on x86-64-linux
+    needs: build
+    runs-on: ubuntu-26.04
+    timeout-minutes: 90
+    env:
+      OURANOS_TEST_REAL_CREDENTIAL_STORE: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: sbcl-x86-64-linux
+          path: incoming
+
+      # Installed where setup.sh would install it (~/.local), from the tarball the publish job
+      # would upload. SBCL_VERSION is then set to the built version in this runner's copy of
+      # scripts/versions.env, so that setup.sh finds a matching SBCL and installs nothing. That
+      # edit is never committed: until #1251's setup step, the tree's pin stays upstream's binary.
+      - name: Install the SBCL that was built
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd incoming && sha256sum -c ./*.sha256)
+          tarball=$(ls incoming/sbcl-*-x86-64-linux-binary.tar.bz2)
+          version=$(awk '$1 == "version" {print $2; exit}' sbcl.pin)
+          mkdir -p "$RUNNER_TEMP/sbcl-unpack"
+          tar -xjf "$tarball" -C "$RUNNER_TEMP/sbcl-unpack"
+          (cd "$RUNNER_TEMP/sbcl-unpack/sbcl-$version-x86-64-linux" && INSTALL_ROOT="$HOME/.local" sh install.sh >/dev/null)
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "SBCL_HOME=$HOME/.local/lib/sbcl" >> "$GITHUB_ENV"
+          sed -i "s/^SBCL_VERSION=.*/SBCL_VERSION=$version/" scripts/versions.env
+          grep '^SBCL_VERSION=' scripts/versions.env
+
+      # Every later step must be running OUR build. A runner image can carry its own SBCL, and
+      # a gate that passed on that one would say nothing about this build.
+      - name: Check that sbcl is the build under test
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(awk '$1 == "version" {print $2; exit}' sbcl.pin)
+          echo "sbcl is $(command -v sbcl)"
+          [ "$(command -v sbcl)" = "$HOME/.local/bin/sbcl" ] || { echo "::error::sbcl on PATH is not the build under test"; exit 1; }
+          [ "$(sbcl --version)" = "SBCL $version" ] || { echo "::error::sbcl --version says $(sbcl --version)"; exit 1; }
+          sbcl --noinform --non-interactive --no-sysinit --no-userinit \
+            --eval '(unless (member :sb-core-compression *features*) (format t "~&no :sb-core-compression: not the build under test~%") (sb-ext:exit :code 1))' \
+            --eval '(format t "~&default heap ~D MB~%" (floor (sb-ext:dynamic-space-size) 1048576))'
+
+      - name: Provision the Lisp toolchain
+        shell: bash
+        run: ./scripts/setup.sh --ci
+
+      - name: Verify the toolchain
+        shell: bash
+        run: |
+          sbcl --version
+          ./scripts/setup.sh --check
+
+      - name: Bootstrap the tree
+        env:
+          OURANOS_NO_WARM: "1"
+          OURANOS_BOOTSTRAP_LOCAL: "1"
+        run: sbcl --dynamic-space-size 4096 --script bootstrap.lisp
+
+      - name: Use this tree through CL_SOURCE_REGISTRY (tree-local)
+        run: echo "CL_SOURCE_REGISTRY=$GITHUB_WORKSPACE//:" >> "$GITHUB_ENV"
+
+      - name: Install external dependencies (third-party only)
+        run: sbcl --dynamic-space-size 4096 --script scripts/install-deps.lisp
+
+      - name: Check the Coalton pin
+        run: sbcl --dynamic-space-size 4096 --script scripts/check-coalton.lisp
+
+      - name: Build the pinned libuv
+        run: sbcl --dynamic-space-size 4096 --script scripts/build-libuv.lisp
+
+      - name: Build the pinned mbedTLS
+        run: sbcl --dynamic-space-size 4096 --script scripts/build-mbedtls.lisp
+
+      - name: Build the pinned libgit2
+        run: sbcl --dynamic-space-size 4096 --script scripts/build-libgit2.lisp
+
+      - name: Linux packages -- launcher build tools and the keyring, with bounded waits
+        timeout-minutes: 15
+        shell: bash
+        run: ./scripts/ci-apt-install.sh
+
+      - name: Build the native webview launcher
+        shell: bash
+        run: ./hyperion/hyperion-view/build.sh
+
+      - name: Postgres -- the repo's own script
+        shell: bash
+        run: |
+          ./scripts/test-postgres.sh up
+          echo "MNEMOSYNE_TEST_PG_URL=$(./scripts/test-postgres.sh url)" >> "$GITHUB_ENV"
+
+      - name: Verify the tree
+        shell: bash
+        env:
+          OURANOS_WITH_UV: "1"
+          OURANOS_WITH_TLS: "1"
+          OURANOS_WITH_LIBGIT: "1"
+        run: |
+          set -o pipefail
+          scripts/with-secret-service.sh sbcl --dynamic-space-size 4096 --script scripts/verify-tree.lisp \
+            2>&1 | tee verify.log
+
+      - name: Stop Postgres
+        if: always()
+        shell: bash
+        run: ./scripts/test-postgres.sh down || true
+
+  publish:
+    name: publish the release
+    needs: [build, gate-linux]
+    if: github.ref_type == 'tag' || inputs.publish
+    runs-on: ubuntu-26.04
+    # Creating a release and uploading assets with the built-in token needs write access to
+    # this repository's contents, granted to this job only.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v7
+        with:
+          path: incoming
+          pattern: sbcl-*-linux
+          merge-multiple: true
+
+      - name: Check the files against their checksums and sbcl.pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(awk '$1 == "version" {print $2; exit}' sbcl.pin)
+          release=$(awk '$1 == "release" {print $2; exit}' sbcl.pin)
+          [ -n "$version" ] && [ -n "$release" ] || { echo "::error::sbcl.pin needs version and release lines"; exit 1; }
+          tag="sbcl-v${version}-ouranos.${release}"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "$tag" ]; then
+            echo "::error::the tag ${GITHUB_REF_NAME} does not match sbcl.pin; push ${tag} instead"
+            exit 1
+          fi
+          cd incoming
+          ls -l
+          for f in sbcl-*-binary.tar.bz2; do
+            case "$f" in
+              "sbcl-${version}-ouranos.${release}-"*) ;;
+              *) echo "::error::${f} is not a build of sbcl.pin's version and release"; exit 1;;
+            esac
+            [ -f "${f}.sha256" ] || { echo "::error::${f} has no .sha256 file"; exit 1; }
+          done
+          sha256sum -c ./*.sha256
+          echo "TAG=${tag}" >> "$GITHUB_ENV"
+          echo "SBCL_VERSION=${version}" >> "$GITHUB_ENV"
+          echo "OURANOS_RELEASE=${release}" >> "$GITHUB_ENV"
+
+      - name: Create the release and upload the builds
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          commit=$(awk '$1 == "commit" {print $2; exit}' sbcl.pin)
+          notes=$(printf '%s\n' \
+            "SBCL ${SBCL_VERSION}, Ouranos build ${OURANOS_RELEASE}, built from codelisperer/sbcl at commit ${commit} by .github/workflows/sbcl-build.yml from ${GITHUB_REPOSITORY}@${GITHUB_SHA}." \
+            "" \
+            "Each platform's -build.txt file records the build options, the host Lisp, the C compiler, the libraries the runtime needs and the SBCL test result. Each .sha256 file is in sha256sum's format." \
+            "" \
+            "The tarballs have the layout of SBCL's own binary releases: unpack one and run install.sh.")
+          # --latest=false: this repository's "Latest release" is the framework's.
+          gh release view "$TAG" >/dev/null 2>&1 ||
+            gh release create "$TAG" --latest=false --target "$GITHUB_SHA" \
+              --title "SBCL ${SBCL_VERSION} (Ouranos build ${OURANOS_RELEASE})" --notes "$notes"
+          # An asset that already exists is kept, never replaced, so a checksum already pinned
+          # never changes under its URL. A tarball and its .sha256 and -build.txt go together:
+          # when any of them is in the release already, all three are left as they are.
+          existing=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+          for tarball in incoming/sbcl-*-binary.tar.bz2; do
+            name=$(basename "$tarball")
+            build_txt="${name%-binary.tar.bz2}-build.txt"
+            if printf '%s\n' "$existing" | grep -qxF -e "$name" -e "${name}.sha256" -e "$build_txt"; then
+              echo "::notice::${TAG} already has ${name}; kept it, and did not upload this run's build"
+              continue
+            fi
+            gh release upload "$TAG" "$tarball" "${tarball}.sha256" "incoming/${build_txt}"
+          done
+          gh release view "$TAG" --json assets --jq '.assets[].name'
