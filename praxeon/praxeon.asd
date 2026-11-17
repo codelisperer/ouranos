@@ -8,28 +8,14 @@
 
 ;;; --- Hunchentoot without SSL, on every platform (#249, #115, #337) ----------------------
 ;;;
-;;; Hunchentoot is built without its SSL support, so it does not load cl+ssl and OpenSSL. A
-;;; desktop bundle that loaded OpenSSL at build time reopens it by path at startup, and quits
-;;; before `main' on any machine without that copy: on Windows, which ships no OpenSSL (#249),
-;;; and on a Mac without Homebrew, measured on #332. Nothing in this tree serves HTTPS through
-;;; Hunchentoot -- no SSL acceptor and no certificate options anywhere (#337) -- and TLS
-;;; belongs in front of the app (#125), so only that unused half is dropped. HTTPS requests
-;;; the application makes are unaffected by this: they go through aion/http-client, which on
-;;; macOS and Linux still loads cl+ssl itself when an app uses it.
-;;;
-;;; This was Windows-only until #337, so every macOS and Linux app carried OpenSSL through
-;;; Hunchentoot. An app that does want Hunchentoot's SSL acceptor removes the feature before
-;;; hunchentoot.asd is read.
-;;;
-;;; WHY HERE. `:hunchentoot-no-ssl' has to be on *FEATURES* before hunchentoot.asd is read,
-;;; because that file decides at read time whether Hunchentoot depends on cl+ssl, and its
-;;; sources test the feature with reader conditionals. ASDF reads this file before it resolves
-;;; the :DEPENDS-ON of any system defined below, and resolving `clack-handler-hunchentoot' is
-;;; what reads hunchentoot.asd. So the tree, the gate (every child image loads systems through
-;;; ASDF) and the desktop build (which loads the app's system) all see the feature. The same
-;;; form is at the top of hyperion/hyperion.asd, the other file whose systems depend on
-;;; clack-handler-hunchentoot. An application outside the tree that depends on
-;;; clack-handler-hunchentoot must list "hyperion" before it, or push the feature itself.
+;;; No praxeon system depends on Hunchentoot any more (#373). An app may still add
+;;; clack-handler-hunchentoot to its own :depends-on, and this form makes that Hunchentoot one
+;;; built without its SSL support, so it does not load cl+ssl and OpenSSL: a desktop bundle
+;;; that loaded OpenSSL at build time quits before `main' on a machine without that copy (#249,
+;;; #332). The full explanation is at the top of hyperion/hyperion.asd, which pushes the same
+;;; feature. It is repeated here for an app whose first dependency is a praxeon system, because
+;;; the feature has to be on *FEATURES* before hunchentoot.asd is read, and ASDF reads this file
+;;; first in that case.
 (pushnew :hunchentoot-no-ssl *features*)
 
 (defsystem "praxeon"
@@ -392,10 +378,10 @@
                "praxeon/translate"          ; lets Elise converse in the user's locale
                ;; THE APP declares its HTTP backend, not the framework (pre-publication issue 139/pre-publication issue 218). Elise
                ;; is a real deployable with `bin/elise --server', so it is the layer where
-               ;; this choice belongs. Hunchentoot rather than Woo because a supervisor
-               ;; must be able to stop it: Woo does not answer SIGTERM (measured -- see
-               ;; praxeon/web above and hyperion/docs/signals-and-shutdown.md).
-               "clack-handler-hunchentoot")
+               ;; this choice belongs. The native server, which answers SIGTERM (#373; it was
+               ;; Hunchentoot before). Not Woo, which does not answer SIGTERM (measured -- see
+               ;; praxeon/web below and hyperion/docs/signals-and-shutdown.md).
+               "hyperion/server-uv")
   :serial t
   :components ((:module "examples/elise"
                 :serial t
@@ -437,11 +423,12 @@
              (uiop:symbol-call :fiveam :run! (uiop:find-symbol* :praxeon :praxeon/tests))))
 
 ;;; praxeon/web's OWN suite, and the reason it is a separate system rather than another file
-;;; in praxeon/tests: driving a real server needs a real Clack handler, and which handler is
-;;; the APPLICATION's choice -- praxeon/web must keep declaring none (pre-publication issue 139/ADR-0011, pre-publication issue 218).
-;;; A test system is an application for that purpose, so this one declares hunchentoot (the
-;;; backend that answers SIGTERM, as praxeon/elise does) and the core suite stays free of an
-;;; HTTP server it has no use for.
+;;; in praxeon/tests: driving a real server needs a real backend, and which backend is the
+;;; APPLICATION's choice -- praxeon/web must keep declaring none (pre-publication issue 139/ADR-0011, pre-publication issue 218).
+;;; A test system is an application for that purpose, so this one declares hyperion/server-uv,
+;;; the native server, as praxeon/elise does (#373; both declared Hunchentoot before), and the
+;;; core suite stays free of an HTTP server it has no use for. It needs a built libuv, so it
+;;; runs in verify-tree's uv axis.
 ;;;
 ;;; IT EXISTS BECAUSE praxeon/web EXPORTED A SURFACE AND NOTHING LOADED IT (pre-publication issue 151). The two
 ;;; existing tests that mention it read its .asd rather than loading the system, so they pass
@@ -452,7 +439,7 @@
   :depends-on ("praxeon/web" "praxeon" "hyperion"   ; web-tests.lisp calls actor: and server:
                "praxeon/chat-ui" "hyperion/assets"  ; the bubble and embed tests (#67)
                "hyperion/assets/tests" "hyperion/test-ports"  ; the embed test's headless browser
-               "clack-handler-hunchentoot" "fiveam" "aion/test-threads" "aion/log"
+               "hyperion/server-uv" "fiveam" "aion/test-threads" "aion/log"
                "aion/signature" "com.inuoe.jzon")  ; the #67 tests mint grants and read JSON
   :serial t
   :components ((:module "tests"
@@ -472,7 +459,7 @@
                "spinneret" "parenscript")
   :components ((:file "src/chat-ui")))
 
-;;; A Clack-based web + REST surface for Praxeon agents (HTMX UI). The server backend is
+;;; A web + REST surface for Praxeon agents (HTMX UI). The server backend is
 ;;; the APPLICATION's choice and is declared by the application -- this system deliberately
 ;;; declares none (pre-publication issue 139/ADR-0011, applied here by pre-publication issue 218). See the :depends-on comment below.
 (defsystem "praxeon/web"
@@ -486,10 +473,9 @@
                "praxeon/chat-ui"             ; the page's parts, shared with the embed panel
                "spinneret" "com.inuoe.jzon"  ; still used directly by the chat UI
                "parenscript"                 ; the page's stream client (#67)
-               ;; The HTTP backend is the APP's choice, not hyperion's (pre-publication issue 139) -- and it is
-               ;; declared as the CLACK HANDLER system, not the bare server, because that
-               ;; is what `clackup` resolves :woo / :hunchentoot through. Depending on the
-               ;; raw server (as this did) left Clack to lazy-load the handler at runtime.
+               ;; The HTTP backend is the APP's choice, not hyperion's (pre-publication issue 139): the
+               ;; native hyperion/server-uv, or a Clack handler system the app adds itself
+               ;; (hyperion/docs/user-guide.md, "Choosing a server").
                ;; NO HTTP BACKEND HERE, deliberately -- the same decision hyperion took
                ;; at pre-publication issue 139 / ADR-0011, which this system was simply missed by. See the long
                ;; comment in hyperion.asd: a FRAMEWORK does not get to choose the

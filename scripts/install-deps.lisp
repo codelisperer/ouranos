@@ -40,10 +40,11 @@
 
 (let* ((list-only (member "--list" (uiop:command-line-arguments) :test #'string=))
        (all (tree-deps:external-dependencies))
-       ;; APPLICABLE-ONLY, and the Windows CI leg is why. praxeon/web declares
+       ;; APPLICABLE-ONLY, and the Windows CI leg is why. praxeon/web declared
        ;; `(:feature (:not :windows) "clack-handler-woo")` because Woo binds libev, which
-       ;; does not build on Windows -- so asking Quicklisp for it there is asking for a
-       ;; system that cannot exist on the platform. The tree was already right; the
+       ;; does not build on Windows -- so asking Quicklisp for it there was asking for a
+       ;; system that cannot exist on the platform. No tree system declares Woo since #373;
+       ;; the guard handling stays for any feature-guarded dependency. The tree was already right; the
        ;; enumeration was flattening the guard away.
        (externals (tree-deps:external-dependencies :applicable-only t))
        (not-here (remove-if (lambda (n) (member n externals :test #'string=)) all))

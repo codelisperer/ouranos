@@ -169,7 +169,7 @@ system in no platform package has no owner, which is what lets check-compile che
   (is (eq :windows (%pf system-owner "aion/windows/com/tests")))
   (is (eq :windows (%pf system-owner "AION/WINDOWS/REGISTRY")) "case is ignored, as in ASDF")
   (is (eq :darwin (%pf system-owner "aion/darwin/tests")))
-  (is (eq :linux (%pf system-owner "hyperion/woo/tests")))
+  (is (eq :linux (%pf system-owner "aion/libsecret/tests")))
   (is (null (%pf system-owner "aion/windowsx")))
   (is (null (%pf system-owner "aion")))
   (is (null (%pf system-owner "aion/fs")))

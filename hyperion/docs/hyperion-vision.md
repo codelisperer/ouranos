@@ -12,7 +12,8 @@ the Praxeon session from which Hyperion was originally spun out of
 > generic components + industrial HTMX wiring, **never** domain components;
 > Parenscript for all JS (no Node); a CSS DSL; REPL-driven hot-reload as the
 > signature feature; typed HTMX vocabulary in **Coalton**, rendering/extensibility
-> in **CLOS + Spinneret**; pluggable server backends (Woo/Hunchentoot). Roadmap
+> in **CLOS + Spinneret**; pluggable server backends (Woo/Hunchentoot then; the native
+> `hyperion/server-uv` now, with Woo and Hunchentoot an app's own choice, #373). Roadmap
 > items: editor integration, a Studio (Ceramic desktop or web), AI artifact
 > generation, project-gen delegated to `cons`.
 

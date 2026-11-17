@@ -96,7 +96,7 @@
            (let* ((port nil)
                   (h (ports:call-with-port
                       (lambda (p)
-                        (prog1 (apply #'srv:start (%srv-ok-app) :port p :server :hunchentoot
+                        (prog1 (apply #'srv:start (%srv-ok-app) :port p :server :uv
                                       :log nil start-args)
                           (setf port p))))))
              (unwind-protect (%srv-http-get port "/")
