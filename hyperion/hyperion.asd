@@ -374,6 +374,34 @@
   :components ((:file "tests/calendar-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/calendar/tests :run-tests)))
 
+;;; A desktop of floating windows on one page: the proof of concept for #1218. Coalton holds
+;;; a window's state and the events that change it; the CL shell holds the windows, serves
+;;; them and describes them to the inspector. It declares no HTTP server, as hyperion does not.
+(defsystem "hyperion/desktop-ui"
+  :description "A desktop of floating windows served as one page: movable, stackable, closable windows that are live objects in the image, with an inspector (#1218, proof of concept)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; hyperion/assets for the vendored htmx the page loads.
+  ;; aion/dynamic for unblock-interrupts, which a job's thread calls so it can be cancelled.
+  :depends-on ("hyperion" "hyperion/assets" "aion/dynamic" "coalton" "spinneret" "parenscript")
+  :serial t
+  :components ((:module "src/desktop-ui"
+                :serial t
+                :components ((:file "state")       ; Coalton: state, events, apply-event
+                             (:file "desktop")     ; CL: windows, rendering, routes, inspector
+                             (:file "job-status")  ; Coalton: a job's status and its transitions
+                             (:file "jobs"))))     ; CL: background jobs for windows
+  :in-order-to ((test-op (test-op "hyperion/desktop-ui/tests"))))
+
+(defsystem "hyperion/desktop-ui/tests"
+  :description "Tests for hyperion/desktop-ui: the state function, the window records, the inspector, the routes, redefinition while running, and background jobs."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion/desktop-ui" "hyperion" "spinneret" "fiveam")
+  :components ((:file "tests/desktop-ui-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/desktop-ui/tests :run-tests)))
+
 (defsystem "hyperion/kit"
   :description "Generic collection-page components: page header, breadcrumbs, empty state, segmented control, toggle group, dialogs, the destructive confirm, the undo notice, the list toolbar, the properties panel, the appearance picker (#981), and the dock panel (#67)."
   :author "Bob <eternal.recursion@proton.me>"

@@ -1,0 +1,2 @@
+# npm installs here only when build.sh runs. The built bundle is committed; this is not.
+node_modules/
