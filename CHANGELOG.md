@@ -14,6 +14,14 @@ its tag.
 
 ### An app may have to act
 
+- **`hyperion/websocket` is now `aion/websocket`** (#1028). The pure WebSocket system from #376
+  moved to aion, with its package: the system `hyperion/websocket` and its suite
+  `hyperion/websocket/tests` are now `aion/websocket` and `aion/websocket/tests`, the package
+  `hyperion/websocket` is `aion/websocket`, and the files are under `aion/src/websocket/`. No
+  release shipped the old name and none is kept. An app that loads or names `hyperion/websocket`
+  changes the name; `hyperion/server-uv/websocket` and its `websocket-response` are unchanged. It
+  moved because the browser driver `aion/cdp` is a WebSocket client, and aion cannot depend on
+  hyperion (dokimasia ADR-0001).
 - **aion/http-client: on Windows, `:read-timeout` ends a request up to 4 seconds late** (#537).
   A request sent with `send-request` without `:deadline`, and whose `make-request` has no
   `:connect-address`, goes through dexador to WinHTTP. WinHTTP checks its receive timeout every 4
@@ -1614,6 +1622,14 @@ its tag.
 
 ### Added
 
+- **`aion/websocket` has the client's half of the opening handshake** (#1028). `client-key`
+  turns 16 random octets from the caller into a `Sec-WebSocket-Key`. `client-request-head` writes
+  the opening request, and signals an error for a host, path, origin or protocol that contains CR
+  or LF. `parse-response-head` reads the server's answer incrementally, as `:incomplete`, `:head`
+  (the status, the headers, and the index where the first frame begins) or `:error`, and refuses
+  a head longer than `max-response-head-octets` (16384). `check-server-handshake` checks the
+  `101`, `Upgrade`, `Connection` and `Sec-WebSocket-Accept`, and refuses an extension or a
+  subprotocol the client did not offer. The system still depends on nothing.
 - **`praxeon/trace`: OpenTelemetry spans for every turn, model call and tool call** (#1225). A new
   opt-in system. `praxeon/trace:with-tracing` around code that runs turns records one
   `invoke_agent` span per turn, a `chat` span per model call (model, token counts, finish reason)

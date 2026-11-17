@@ -935,6 +935,39 @@
                 :components ((:file "random-tests"))))
   :perform (test-op (o c) (uiop:symbol-call :aion/random/tests :run-tests)))
 
+;;; --- websocket: the WebSocket protocol, pure and dependency-free (#376, #1028) ---
+;;;
+;;; Moved from hyperion in #1028, because the browser driver aion/cdp is a WebSocket client
+;;; and aion cannot depend on hyperion (dokimasia ADR-0001). It depends on nothing, so the code
+;;; that reads frames from a stranger stays inside every run of scripts/verify-tree.lisp, which
+;;; leaves the libuv systems out unless OURANOS_WITH_UV=1. The server's connection side is
+;;; hyperion/server-uv/websocket; the client's is aion/cdp.
+
+(defsystem "aion/websocket"
+  :description "The WebSocket protocol (RFC 6455) as pure functions: frames, messages, both halves of the handshake."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  :serial t
+  :components ((:module "src/websocket"
+                :serial t
+                :components ((:file "packages")
+                             (:file "frame")
+                             (:file "handshake"))))
+  :in-order-to ((test-op (test-op "aion/websocket/tests"))))
+
+(defsystem "aion/websocket/tests"
+  :description "Test suite for aion/websocket: RFC 6455's examples, adversarial frames, both halves of the handshake."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  ;; ironclad and cl-base64 are the comparison for the SHA-1 and base64 written in
+  ;; aion/websocket; both are already in the tree (docs/dependencies.md).
+  :depends-on ("aion/websocket" "fiveam" "ironclad" "cl-base64")
+  :serial t
+  :components ((:module "tests/websocket"
+                :components ((:file "websocket-tests"))))
+  :perform (test-op (o c) (uiop:symbol-call :aion/websocket/tests :run-tests)))
+
 (defsystem "aion/dynamic"
   :description "Dynamic bindings that should survive a thread boundary (#158)."
   :author "Bob <eternal.recursion@proton.me>"
