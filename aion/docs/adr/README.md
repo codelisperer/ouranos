@@ -39,8 +39,8 @@ An ADR here is for a decision **Aion owns and nothing else records.**
 | [0004](0004-darwin-platform-binding.md) | The macOS platform binding: aion/darwin, over CoreFoundation and Security | Provisional |
 
 The placement of `aion/websocket` and `aion/cdp`, the browser driver, is decided in
-[hyperion ADR-0021](../../../hyperion/docs/adr/0021-browser-driver-and-uat-harness.md),
-because the same record defines the hyperion harness that uses them.
+[dokimasia ADR-0001](../../../dokimasia/docs/adr/0001-browser-driver-and-acceptance-harness.md),
+because the same record defines the dokimasia harness that runs on them.
 
 **Start with [0002](0002-libuv-integration-strategy.md)** for the whole libuv picture — it
 is the umbrella, and it cross-references everything else (the five founding decisions in

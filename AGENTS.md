@@ -9,8 +9,8 @@ history behind every rule below: [`docs/evidence-catalogue.md`](docs/evidence-ca
 ## Dependency DAG
 
 `aion → cons → mnemosyne → elenchon → hyperion → praxeon`, plus the satellites `hermes`,
-`hades` and `klio`. **A satellite depends leftward into the line and nothing in the line
-depends on it** — that is the whole rule. `hermes` and `hades` attach at `aion`; `klio`
+`hades`, `klio` and `dokimasia`. **A satellite depends leftward into the line and nothing in the line
+depends on it** — that is the whole rule. `hermes`, `hades` and `dokimasia` attach at `aion`; `klio`
 attaches at `hyperion`, which is allowed for the same reason and was the case that forced
 this sentence to be widened from "depend only on `aion`". A framework never depends on one
 to its right; aux systems may reach right if acyclic. Combined examples live in the highest
