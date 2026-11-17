@@ -1,9 +1,9 @@
 ;;;; server-uv-websocket.lisp --- WebSockets on hyperion/server-uv (#376).
 ;;;;
 ;;;; A handler answers a WebSocket handshake by returning WEBSOCKET-RESPONSE. It checks the
-;;;; request with hyperion/websocket's CHECK-HANDSHAKE and either refuses it with the status
+;;;; request with aion/websocket's CHECK-HANDSHAKE and either refuses it with the status
 ;;;; RFC 6455 asks for, or returns a 101 whose body takes the connection over (server-uv's
-;;;; MAKE-UPGRADE). From then on the frames are parsed here, with hyperion/websocket's pure
+;;;; MAKE-UPGRADE). From then on the frames are parsed here, with aion/websocket's pure
 ;;;; parser, and the application hears about whole messages.
 ;;;;
 ;;;; WHERE THE CALLBACKS RUN. Every callback runs as one of the connection's events (see the
@@ -29,7 +29,7 @@
 (cl:defpackage #:hyperion/server-uv/websocket
   (:use #:cl)
   (:local-nicknames (#:srv #:hyperion/server-uv)
-                    (#:ws #:hyperion/websocket)
+                    (#:ws #:aion/websocket)
                     (#:log #:aion/log))
   (:documentation
    "WebSockets (RFC 6455) on hyperion/server-uv.
@@ -307,7 +307,7 @@ the user's cookies."
                                     (max-message-octets *max-message-octets*))
   "Answer ENV, a WebSocket opening handshake, with a response triple for server-uv.
 
-The handshake is checked first (hyperion/websocket's CHECK-HANDSHAKE); a request that fails
+The handshake is checked first (aion/websocket's CHECK-HANDSHAKE); a request that fails
 gets 400, or 426 with the version or protocol the server speaks. CHECK-ORIGIN, a function of
 the Origin header (or NIL) and ENV, then decides whether the page that opened the socket may;
 when it says no the answer is 403. The default is SAME-ORIGIN-P; pass (constantly t) to accept

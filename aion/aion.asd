@@ -935,6 +935,77 @@
                 :components ((:file "random-tests"))))
   :perform (test-op (o c) (uiop:symbol-call :aion/random/tests :run-tests)))
 
+;;; --- websocket: the WebSocket protocol, pure and dependency-free (#376, #1028) ---
+;;;
+;;; Moved from hyperion in #1028, because the browser driver aion/cdp is a WebSocket client
+;;; and aion cannot depend on hyperion (dokimasia ADR-0001). It depends on nothing, so the code
+;;; that reads frames from a stranger stays inside every run of scripts/verify-tree.lisp, which
+;;; leaves the libuv systems out unless OURANOS_WITH_UV=1. The server's connection side is
+;;; hyperion/server-uv/websocket; the client's is aion/cdp.
+
+(defsystem "aion/websocket"
+  :description "The WebSocket protocol (RFC 6455) as pure functions: frames, messages, both halves of the handshake."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  :serial t
+  :components ((:module "src/websocket"
+                :serial t
+                :components ((:file "packages")
+                             (:file "frame")
+                             (:file "handshake"))))
+  :in-order-to ((test-op (test-op "aion/websocket/tests"))))
+
+(defsystem "aion/websocket/tests"
+  :description "Test suite for aion/websocket: RFC 6455's examples, adversarial frames, both halves of the handshake."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  ;; ironclad and cl-base64 are the comparison for the SHA-1 and base64 written in
+  ;; aion/websocket; both are already in the tree (docs/dependencies.md).
+  :depends-on ("aion/websocket" "fiveam" "ironclad" "cl-base64")
+  :serial t
+  :components ((:module "tests/websocket"
+                :components ((:file "websocket-tests"))))
+  :perform (test-op (o c) (uiop:symbol-call :aion/websocket/tests :run-tests)))
+
+;;; --- cdp: a Chrome DevTools Protocol client, the browser driver (#1028) -----------
+;;;
+;;; dokimasia ADR-0001, decision 1. Opt-in: nothing in aion core loads it. Headless only; see
+;;; the package documentation. Every dependency is already in the tree. Its own tests use a
+;;; CDP server written in the suite, and a real browser when one is found: a missing browser
+;;; skips those checks, and fails them when OURANOS_REQUIRE_BROWSER=1, as CI sets.
+
+(defsystem "aion/cdp"
+  :description "A Chrome DevTools Protocol client: find, launch or attach to a headless Chrome or Edge, and drive its pages."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  :depends-on ("aion/websocket" "aion/random" "aion/dynamic" "aion/log" "aion/fs"
+               "com.inuoe.jzon" (:require :sb-bsd-sockets)
+               (:feature :win32 "aion/windows"))
+  :serial t
+  :components ((:module "src/cdp"
+                :serial t
+                :components ((:file "packages")
+                             (:file "conditions")
+                             (:file "launch")
+                             (:file "connection")
+                             (:file "browser"))))
+  :in-order-to ((test-op (test-op "aion/cdp/tests"))))
+
+(defsystem "aion/cdp/tests"
+  :description "Test suite for aion/cdp: the command line, a CDP server written in the suite, and a real headless browser when one is found."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("aion/cdp" "aion/websocket" "aion/fs" "fiveam" "com.inuoe.jzon"
+               (:require :sb-bsd-sockets) (:feature :win32 "aion/windows"))
+  :serial t
+  :components ((:module "tests/cdp"
+                :serial t
+                :components ((:file "cdp-tests")
+                             (:file "browser-tests"))))
+  :perform (test-op (o c) (uiop:symbol-call :aion/cdp/tests :run-tests)))
+
 (defsystem "aion/dynamic"
   :description "Dynamic bindings that should survive a thread boundary (#158)."
   :author "Bob <eternal.recursion@proton.me>"
