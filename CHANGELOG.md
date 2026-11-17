@@ -14,6 +14,16 @@ its tag.
 
 ### An app may have to act
 
+- **aion/http-client: on Windows, `:read-timeout` ends a request up to 4 seconds late** (#537).
+  A request sent with `send-request` without `:deadline`, and whose `make-request` has no
+  `:connect-address`, goes through dexador to WinHTTP. WinHTTP checks its receive timeout every 4
+  seconds, so the request fails at the first multiple of 4 seconds after the timeout: a
+  `:read-timeout` of 1 ends it at about 4 seconds, measured on Windows 11. A server that answers
+  within that time is answered normally. Nothing changed in the client; this is how it has always
+  behaved, and the new test `a-read-timeout-ends-a-request-the-server-answers-too-late` now checks
+  the bound on every CI leg. **An app on Windows that needs a request to end close to its read
+  timeout passes `send-request` a `:deadline`**, which the client enforces itself.
+  `praxeon/mcp` has enforced a deadline of its own since #530.
 - **Every turn now begins with a `:turn-started` event** (#1225), emitted by
   `praxeon/actor:run-turn` and `continue-turn` before the first `:deliberating`. It carries
   `:agent`, `:model`, `:provider`, `:conversation` and `:max-steps`, and no content. An observer
