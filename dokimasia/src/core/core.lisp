@@ -73,8 +73,9 @@ that says so, so a misspelt kind cannot pass."
   (define (make-row-results labels kinds reasons durations)
     "The results of a row's steps, given in four lists of the same length, in the order the steps
 ran: each step's LABEL, its KIND (\"passed\", \"failed\" or \"not-run\"), its REASON (empty when
-it passed) and its duration in milliseconds. The shell checks the lengths; here the shortest
-list decides."
+it passed) and its duration in milliseconds. The shell's %ROW-REPORT builds all four from one
+list of steps, so their lengths match. Given lists of different lengths, the shortest decides and
+the extra elements of the others are dropped."
     (RowResults (%zip-steps labels kinds reasons durations)))
 
   (declare %steps (RowResults -> (List StepResult)))
