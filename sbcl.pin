@@ -38,6 +38,16 @@ release 1
 # sbcl-2.6.10, read with `git ls-remote --tags' on 2026-11-15 by the maintainer (#1251). A
 # git commit identifies its tree, so no separate checksum of the source is pinned.
 
+# zstd, for --with-sb-core-compression. On macOS and Windows the runtime is linked with a
+# libzstd.a that scripts/build-sbcl.sh builds from this release, so a user's machine needs no
+# libzstd (ouranos-pm's ruling on #1251, 2026-11-17). On Linux the runtime links the system's
+# libzstd.so.1, which every Debian and Ubuntu system has. zstd is offered under BSD or GPLv2;
+# Ouranos uses it under the BSD licence. The SHA-256 is the one in zstd's own
+# zstd-1.5.7.tar.gz.sha256 release asset, and it matched the tarball downloaded on 2026-11-17.
+zstd-version 1.5.7
+zstd-url     https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz
+zstd-sha256  eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
+
 # --- staying current -------------------------------------------------------
 #
 # SBCL has no security advisory feed. It lists every change in a release, fixes for security
