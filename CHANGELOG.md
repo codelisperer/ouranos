@@ -31,6 +31,51 @@ its tag.
   then Woo, then Hunchentoot, and `HYPERION_SERVER` naming one that is not loaded still signals
   `hyperion/server:no-server-backend`, whose message now lists all three systems an app can add
   and states that order. See `hyperion/docs/user-guide.md`, "Choosing a server".
+- **aion/http-client: on Windows, `:read-timeout` ends a request up to 4 seconds late** (#537).
+  A request sent with `send-request` without `:deadline`, and whose `make-request` has no
+  `:connect-address`, goes through dexador to WinHTTP. WinHTTP checks its receive timeout every 4
+  seconds, so the request fails at the first multiple of 4 seconds after the timeout: a
+  `:read-timeout` of 1 ends it at about 4 seconds, measured on Windows 11. A server that answers
+  within that time is answered normally. Nothing changed in the client; this is how it has always
+  behaved, and the new test `a-read-timeout-ends-a-request-the-server-answers-too-late` now checks
+  the bound on every CI leg. **An app on Windows that needs a request to end close to its read
+  timeout passes `send-request` a `:deadline`**, which the client enforces itself.
+  `praxeon/mcp` has enforced a deadline of its own since #530.
+- **Every turn now begins with a `:turn-started` event** (#1225), emitted by
+  `praxeon/actor:run-turn` and `continue-turn` before the first `:deliberating`. It carries
+  `:agent`, `:model`, `:provider`, `:conversation` and `:max-steps`, and no content. An observer
+  bound with `praxeon/event:with-observer` receives it; one that ignores event types it does not
+  know, as `praxeon/event` asks, needs no change. **An app test that compares a turn's whole event
+  list with a fixed list must add `:turn-started` at the front.**
+- **`scripts/setup.sh` and `scripts/setup.ps1` build libuv, and stop when there is no C compiler**
+  (#504). After SBCL, Quicklisp and Coalton, setup runs `scripts/build-libuv.lisp`, which builds
+  the libuv in `libuv.pin` into `vendor/libuv` for `hyperion/server-uv`, the default HTTP server.
+  It checks for a compiler before installing anything: on macOS the Xcode Command Line Tools
+  (`xcode-select -p`; `/usr/bin/cc` alone does not count), on Linux `cc`, `gcc` or `clang`, on
+  Windows MSVC found through `vswhere` or `OURANOS_MSVC_PATH`. Without one, setup prints what to
+  install (`xcode-select --install`, `build-essential`, or the `winget` command for the MSVC
+  Build Tools), the command to run again, and the opt-out, then exits 1. On Linux with root it
+  installs the compiler itself, as it does libev and libsqlite3. **An app whose CI runs setup on
+  a runner without a compiler must install one or pass `--without-uv` (`-WithoutUv`).** An app
+  whose CI ran `sbcl --script scripts/build-libuv.lisp` after setup can drop that step; leaving
+  it costs nothing, because the build is reused. `--check` (`-Check`) now reports the compiler
+  and a missing or stale `vendor/libuv` as missing, unless `--without-uv` is also given; on
+  Windows MSVC was reported as optional before.
+- **On Windows without the MSVC Build Tools, `scripts/setup.ps1` downloads a prebuilt
+  `libuv.dll` instead of stopping, once one is pinned** (#1247). The new `libuv-prebuilt.pin`
+  names, for x64 and arm64, the URL and SHA-256 of a `libuv.dll` built from `libuv.pin`'s release
+  by `.github/workflows/libuv-prebuilt.yml` and attached to this repository's release
+  `libuv-v<version>` as `libuv-<version>-windows-<arch>.dll`. setup checks the download against
+  the pinned SHA-256 and the architecture in its PE header, deletes it and stops if either does
+  not match, and otherwise installs it as `vendor/libuv/lib/libuv.dll` with a
+  `vendor/libuv/BUILT-FROM` that adds `prebuilt <url>` and `prebuilt-sha256 <hex>` lines after the
+  usual `version` and `sha256` lines. With the Build Tools, setup builds from source as before;
+  `-WithoutUv` still skips libuv. **Until the first DLL is published, the pin holds `none` and
+  setup still stops without MSVC**, saying that no prebuilt DLL is pinned. `-Check` accepts a
+  pinned prebuilt in place of MSVC, says whether `vendor/libuv` was built or downloaded, and
+  reports a downloaded DLL whose checksum no longer matches its stamp. `scripts/build-libuv.lisp`
+  and the bundler treat a stamp with those extra lines as current, so a downloaded DLL is reused
+  and carried like a built one.
 - **A call to a tool the agent does not have is answered as not run, and the turn goes on**
   (#1196). `praxeon/actor:run-turn` used to let `act` signal `means-failure` ("no such means
   registered") for such a call, which failed the turn unless the app handled it. Now the model is
@@ -1509,6 +1554,14 @@ its tag.
 
 ### Fixed
 
+- **`scripts/build-libuv.lisp` refuses before downloading when a Unix machine has no C compiler**,
+  as it already did on Windows, and on macOS counts the Xcode Command Line Tools as the compiler,
+  so it no longer runs the `/usr/bin/cc` stub, which opens an installer dialog. The libuv
+  build, and the libgit2, mbedTLS and SQLite builds, no longer print
+  `INFO: Could not find files for the given pattern(s).` on Windows when `where.exe` looks for a
+  program that is not there (#504). The `aion/uv` error for a libuv it cannot load names the
+  Ouranos checkout to run setup or `build-libuv.lisp` in, and `cons init --template web` says
+  that the app needs libuv and that setup builds it.
 - **`scripts/setup.sh` adds Quicklisp to `~/.sbclrc` when it installs Quicklisp itself**
   (#1213). Before this, a fresh setup left a plain `sbcl` session without the `ql` package, and a
   developer had to load `~/quicklisp/setup.lisp` and call `ql:add-to-init-file` by hand. Setup
@@ -1578,6 +1631,67 @@ its tag.
 
 ### Added
 
+- **`praxeon/trace`: OpenTelemetry spans for every turn, model call and tool call** (#1225). A new
+  opt-in system. `praxeon/trace:with-tracing` around code that runs turns records one
+  `invoke_agent` span per turn, a `chat` span per model call (model, token counts, finish reason)
+  and an `execute_tool` span per tool call (means name, outcome, duration); a sub-agent called
+  through `register-agent-as-means` is a child of the tool call that delegated to it. Attribute
+  names follow the OpenTelemetry GenAI semantic conventions and are defined in
+  `praxeon/src/trace/attributes.lisp`. The turn span records the `aion/log` correlation id
+  (`praxeon/trace:*correlation-keys*`, `:request-id` first). Spans carry no prompt, tool argument,
+  tool result or answer unless the tracer is made with `make-tracer :capture-content t`, and
+  `praxeon/event:*withhold-content*` (a private agent) overrides that. Exporters:
+  `make-memory-exporter` for tests and the REPL, and `make-otlp-exporter` /
+  `make-otlp-exporter-from-env`, which send OTLP/HTTP JSON to a collector's `/v1/traces` in
+  batches from a thread of their own. A failed batch is logged at warn with counts, never
+  content, and never delays or fails a turn. `praxeon/docs/user-guide.md` section 15 describes
+  sending traces to an OpenTelemetry Collector, Jaeger or Langfuse; its "Run the tests" section
+  is now 17, after section 16 on `praxeon/eval`.
+- **`praxeon/eval`, an opt-in system that runs an agent against a fixed set of cases, grades
+  each run and fails a build when the results get worse** (#1224). `make-case` and
+  `load-dataset` (an s-expression file of cases) define the cases; each case runs `:repeats`
+  times on a fresh agent and is met when its pass rate reaches `:pass-rate`. The graders are
+  `exact-match`, `contains`, `matches-regex`, `trajectory` (the means the agent called, in order,
+  exactly or as a set, with optional argument checks, read from the `:tool-call` events through
+  an observer) and `rubric`, which asks a judge model for a score and its reasoning; `make-grader`
+  makes your own. The judge is configured as its own role, `PRAXEON_JUDGE_*`, through
+  `make-judge`. `run-eval` returns a report with each case's pass rate and each run's answer,
+  calls, grades, tokens (from the `:usage` events) and duration; `write-report` and
+  `load-report` save and read it as JSON, `summary` prints it, and a saved report given to
+  `run-eval` as `:baseline` marks the cases that regressed. `gate` decides whether a report
+  passes a build, with `:min-pass-rate`, `:max-regressions` and `:max-cases-not-met` (by default
+  every case met and none regressed). The grade type and the aggregation are Coalton, in
+  `praxeon/eval/core`. The example `praxeon/examples/eval` is an order-support agent and a
+  three-case dataset. `praxeon/eval` declares `cl-ppcre`, which dexador already loads.
+- **WebSockets on `hyperion/server-uv`** (#376). The new system `hyperion/server-uv/websocket`
+  gives a handler `websocket-response`, which checks the opening handshake and returns either a
+  `101` that takes the connection over or the `400`, `403` or `426` the request earned. Callbacks
+  `:on-open`, `:on-message` (a string for text, an octet vector for binary), `:on-pong` and
+  `:on-close` (called once, with code `1006` when the peer sent no close frame) run on the
+  server's workers, one at a time per connection; `send-text`, `send-binary`, `ping` and
+  `close-websocket` may be called from any thread. Client frames must be masked (else `1002`), text
+  must be valid UTF-8 (else `1007`), and a message over `*max-message-octets*` (1 MiB, or
+  `:max-message-octets`) is refused with `1009` from its frame header. A close the server starts
+  waits `*close-timeout-ms*` (5000) for the peer's answer. A draining `stop` (`:drain-timeout`)
+  sends each open WebSocket a close frame with `1001` (going away) before it waits for open
+  connections, and waits for the close handshake, so the client sees `1001` rather than `1006`.
+  The default origin check,
+  `same-origin-p`, refuses a browser page on another host with `403`; pass `:check-origin`
+  to change it. Subprotocols are chosen with `:protocols` or `:select-protocol`. No extensions:
+  permessage-deflate is not offered. The frame parser and handshake are the pure system
+  `hyperion/websocket`.
+- **`hyperion/server-uv` can hand a connection to another protocol after a `101`** (#376). A
+  response whose body is `make-upgrade` takes the connection over; its `on-open` gets an
+  `upgraded`, with `upgraded-write`, `upgraded-wait-writable`, `upgraded-close`,
+  `upgraded-after` and the setf-able `upgraded-on-data`, `upgraded-on-close` and
+  `upgraded-on-drain` (called once when a draining `stop` begins), and the
+  settings `*upgraded-read-high-water-octets*` and `*upgraded-write-high-water-octets*`. The
+  `101` head comes from the new `hyperion/http1:encode-switching-protocols`.
+- **`clack-handler-uv` supplies `:clack.io`, so `websocket-driver` runs on `:server :uv`**
+  (#376). The env of every request carries a socket implementing the `clack-socket` protocol. A
+  delayed response that returns without calling its responder, after writing to the socket or
+  setting its read callback as `wsd:start-connection` does, now takes the connection over. A
+  peer that disconnects without a close frame is not reported to websocket-driver, as on Woo.
 - **`praxeon/image:image-request-failed` answers `aion/retry:transience` and
   `aion/retry:retry-after`** (#79), so an app can run `generate-image` under
   `aion/retry:with-retry` and have the service's Retry-After honoured. A 429 is `:transient`, a

@@ -231,6 +231,79 @@
                (:static-file "tests/mcp-stdio-server.lisp"))
   :perform (test-op (o c) (uiop:symbol-call :praxeon/mcp/tests :run-tests)))
 
+;;; OpenTelemetry spans for every turn, model call and tool call (#1225). Opt-in: an app loads
+;;; it and wraps its turns in WITH-TRACING. It reads the event stream praxeon already emits, and
+;;; sends to a collector through aion/http-client, so it adds no dependency to praxeon's core.
+(defsystem "praxeon/trace"
+  :description "OpenTelemetry spans built from praxeon's event stream, exported in memory or over OTLP/HTTP JSON (#1225)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.1.0"
+  :depends-on ("praxeon"
+               "aion/log"          ; an export failure is logged with a count, never a payload
+               "aion/random"       ; trace and span ids, from the OS generator
+               "aion/dynamic"      ; unblock-interrupts, first in the exporter's thread (#541)
+               "aion/http-client"  ; the POST to the collector, on dexador (pre-publication issue 202)
+               "com.inuoe.jzon"    ; the OTLP JSON encoding
+               "quri"              ; percent-decoding OTEL_EXPORTER_OTLP_HEADERS' values
+               "bordeaux-threads") ; the exporter's thread, lock and condition variable
+  :serial t
+  :components ((:module "src/trace"
+                :serial t
+                :components ((:file "packages")
+                             (:file "attributes")  ; every attribute name, in one place
+                             (:file "tracer")      ; events -> spans
+                             (:file "export"))))   ; in memory, and OTLP/HTTP JSON
+  :in-order-to ((test-op (test-op "praxeon/trace/tests"))))
+
+(defsystem "praxeon/trace/tests"
+  :description "praxeon/trace: span trees from stub-provider turns, content withheld by default, and OTLP export to a stub collector on 127.0.0.1 (#1225)."
+  :depends-on ("praxeon/trace" "praxeon" "aion/log" "aion/test-http" "com.inuoe.jzon"
+               "bordeaux-threads" "fiveam")
+  :components ((:module "tests" :components ((:file "trace-tests"))))
+  :perform (test-op (o c) (symbol-call :praxeon/trace/tests '#:run-tests)))
+;;; Evals (#1224): run agents against fixed cases, grade the runs, compare with a baseline and
+;;; decide whether a build passes. Opt-in, outside core. The grade type and the aggregation are
+;;; Coalton (src/eval/core.lisp); running agents and calling the judge are the CL shell.
+(defsystem "praxeon/eval"
+  :description "Run agents against fixed cases, grade them, and fail a build when results get worse (#1224)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  :depends-on ("praxeon"
+               "coalton"           ; core.lisp is Coalton
+               "aion/boundary"     ; the case counts are checked before they enter core.lisp (#110)
+               "aion/sexp"         ; a dataset file is read as plain data (#972)
+               "com.inuoe.jzon"    ; the report is JSON
+               "cl-ppcre")         ; the regular-expression grader; dexador already loads it
+  :serial t
+  :components ((:module "src/eval"
+                :serial t
+                :components ((:file "packages")
+                             (:file "core")
+                             (:file "eval")
+                             (:file "report"))))
+  :in-order-to ((test-op (test-op "praxeon/eval/tests"))))
+
+;;; The example agent and dataset for praxeon/eval (#1224).
+(defsystem "praxeon/examples/eval"
+  :description "An order-support agent and a dataset that grades it with praxeon/eval (#1224)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("praxeon" "praxeon/eval")
+  :components ((:module "examples/eval"
+                :components ((:file "support")
+                             (:static-file "support.sexp")))))
+
+(defsystem "praxeon/eval/tests"
+  :description "praxeon/eval with stub providers for the agent and the judge, so no network (#1224)."
+  :depends-on ("praxeon/eval" "praxeon/examples/eval" "praxeon" "aion/boundary"
+               "aion/sexp"         ; a dataset with code in it is refused with UNSAFE-DATA
+               "com.inuoe.jzon" "fiveam")
+  :components ((:module "tests" :components ((:file "eval-tests"))))
+  :perform (test-op (o c)
+             (uiop:symbol-call :fiveam :run! (uiop:find-symbol* :eval :praxeon/eval/tests))))
+
 (defsystem "praxeon/web-search"
   :description "A web-search Means (Tavily-backed) for Praxeon agents."
   :author "Bob <eternal.recursion@proton.me>"

@@ -13,10 +13,14 @@
   It does NOT run bootstrap.lisp -- that is the next step, and the caller's choice:
     sbcl --dynamic-space-size 4096 --script bootstrap.lisp
 
-  It also does NOT install a C compiler. -Check REPORTS whether MSVC is present, because
-  aion/uv needs it to build libuv, but that is an OPT-IN extra: the compiler is a ~2 GB
-  install, nothing else in the tree requires one, and a missing one is therefore not a
-  provisioning failure. When it IS needed, it is MSVC and not MSYS2/MinGW -- each platform
+  Then it puts libuv into vendor\libuv, because hyperion/server-uv, the default HTTP server,
+  runs on it (#504). With the MSVC C++ Build Tools installed, it builds libuv from libuv.pin
+  (scripts/build-libuv.lisp). This script does NOT install the Build Tools: they are a ~2 GB
+  install that needs elevation. Without them it downloads the prebuilt libuv.dll that
+  libuv-prebuilt.pin names for this architecture, checks its SHA-256 and installs it in the
+  same layout the build produces (#1247). When no DLL is pinned for this architecture yet,
+  setup stops before installing anything, prints the winget command for the Build Tools, and
+  exits 1. -WithoutUv skips libuv altogether. It is MSVC and not MSYS2/MinGW -- each platform
   uses the toolchain its own vendor ships (ECOSYSTEM decisions log).
 
   Idempotent: anything already present at the right version is left alone.
@@ -27,13 +31,20 @@
 .PARAMETER CI
   Also export PATH/SBCL_HOME into $GITHUB_PATH / $GITHUB_ENV for later workflow steps.
 
+.PARAMETER WithoutUv
+  Do not build or download libuv, and do not require MSVC. With -Check, do not report either
+  as missing.
+  hyperion/server-uv will not start until libuv is built.
+
 .EXAMPLE
   .\scripts\setup.ps1 -Check
+.EXAMPLE
+  .\scripts\setup.ps1 -WithoutUv
 .EXAMPLE
   powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\setup.ps1
 #>
 [CmdletBinding()]
-param([switch]$Check, [switch]$CI)
+param([switch]$Check, [switch]$CI, [switch]$WithoutUv)
 
 $ErrorActionPreference = 'Stop'
 # Windows PowerShell 5.1 compatible -- that is what a fresh Windows box has.
@@ -117,7 +128,8 @@ function Get-SbclVersion {
 # with the opaque 1620. curl ships with Windows 10+ and follows mirror redirects.
 #
 # FOR FILES VERIFIED AGAINST A PIN ONLY. Every caller checks what this fetched against a
-# SHA-256 in versions.env before using it: the SBCL MSI, quicklisp.lisp and the SQLite zip.
+# SHA-256 pin before using it: the SBCL MSI, quicklisp.lisp and the SQLite zip against
+# versions.env, the prebuilt libuv.dll against libuv-prebuilt.pin.
 # That is what makes --ssl-revoke-best-effort below safe, so a download with no pin must not
 # go through this function.
 function Get-Url {
@@ -577,10 +589,19 @@ function Install-Sqlite {
   Remove-Item -Recurse -Force $stage -ErrorAction SilentlyContinue
 }
 
-# --- 5. MSVC (reported, never installed) -------------------------------------
-# Only aion/uv needs this, and only to run scripts/build-libuv.lisp. Kept in sync with
-# find-msvc in that script: same vswhere path, same query.
+# --- 5. MSVC (required for libuv, never installed) -----------------------------
+# scripts/build-libuv.lisp compiles libuv with it. Kept in sync with find-msvc in
+# scripts/msvc.lisp: OURANOS_MSVC_PATH first, then the same vswhere path and query. Without
+# the override here, setup refused on a machine where build-libuv.lisp would have found MSVC.
 function Find-Msvc {
+  if ($env:OURANOS_MSVC_PATH) {
+    $p = $env:OURANOS_MSVC_PATH.Trim().Trim('"')
+    if ($p -and (Test-Path (Join-Path $p 'VC\Auxiliary\Build\vcvarsall.bat'))) {
+      return [pscustomobject]@{ Path = $p; Name = "OURANOS_MSVC_PATH ($p)" }
+    }
+    # build-libuv.lisp refuses such a path rather than falling back, so this does too.
+    return $null
+  }
   $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
   if (-not (Test-Path $vswhere)) { return $null }
   # -products * is load-bearing: without it vswhere ignores Build Tools installs and
@@ -600,6 +621,146 @@ function Find-Msvc {
 }
 
 $MsvcInstallHint = 'winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"'
+
+# What to print when MSVC is missing: what to install, the command to run next, and how to
+# set up without libuv. One copy, for the -Check report and for the refusal before installing.
+function Write-MsvcMissing {
+  Write-Host '  MISSING MSVC C++ Build Tools (setup builds libuv with them; hyperion/server-uv, the default HTTP server, runs on libuv)' -ForegroundColor Red
+  Write-Host "       fix: $MsvcInstallHint" -ForegroundColor DarkGray
+  Write-Host '            then run .\scripts\setup.ps1 again' -ForegroundColor DarkGray
+  Write-Host '            or, to set up without libuv: .\scripts\setup.ps1 -WithoutUv' -ForegroundColor DarkGray
+}
+
+# --- 6. libuv (#504) -----------------------------------------------------------
+# The file scripts/build-libuv.lisp writes on Windows, and the release its BUILT-FROM stamp
+# names. build-libuv.lisp rebuilds when the stamp does not name libuv.pin's release (#977).
+$LibuvVendor = [IO.Path]::Combine($Root, 'vendor', 'libuv')
+$LibuvDll = [IO.Path]::Combine($LibuvVendor, 'lib', 'libuv.dll')
+function Get-PinVersion($file) {
+  if (-not (Test-Path $file)) { return $null }
+  foreach ($line in Get-Content $file) { if ($line -match '^\s*version\s+(\S+)') { return $matches[1] } }
+  return $null
+}
+
+# A pin file's `name value' lines as a hashtable, first occurrence of each name; blank lines and
+# # comments skipped. $null when the file does not exist.
+function Get-PinFields($file) {
+  if (-not (Test-Path -LiteralPath $file)) { return $null }
+  $fields = @{}
+  foreach ($line in Get-Content -LiteralPath $file) {
+    if ($line -match '^\s*#' -or $line -notmatch '^\s*(\S+)\s+(\S+)') { continue }
+    if (-not $fields.ContainsKey($matches[1])) { $fields[$matches[1]] = $matches[2] }
+  }
+  return $fields
+}
+
+# --- 6a. the prebuilt libuv.dll, for a machine without MSVC (#1247) -----------------
+# libuv-prebuilt.pin names, per architecture, the URL and SHA-256 of a libuv.dll built by
+# .github/workflows/libuv-prebuilt.yml from libuv.pin's release. This returns what it says for
+# ARCH (x64 or arm64): Status 'Pinned' with the URL, the DLL's SHA-256, the version and
+# libuv.pin's tarball SHA-256 (which the stamp records); or Status 'NotPinned' with a Reason that
+# says why there is nothing to download.
+function Get-LibuvPrebuilt {
+  param([Parameter(Mandatory)][string]$PinFile, [Parameter(Mandatory)][string]$LibuvPinFile,
+        [Parameter(Mandatory)][ValidateSet('x64', 'arm64')][string]$Arch)
+  function NotPinned($why) { [pscustomobject]@{ Status = 'NotPinned'; Reason = $why; Arch = $Arch } }
+  $pin = Get-PinFields $PinFile
+  if ($null -eq $pin) { return NotPinned "$(Split-Path -Leaf $PinFile) does not exist" }
+  $source = Get-PinFields $LibuvPinFile
+  if ($null -eq $source -or -not $source['version'] -or -not $source['sha256']) {
+    return NotPinned "$(Split-Path -Leaf $LibuvPinFile) does not name a version and a sha256"
+  }
+  if ($pin['version'] -ne $source['version']) {
+    return NotPinned ("libuv-prebuilt.pin names libuv $($pin['version']) and libuv.pin names " +
+      "$($source['version']), so the pinned DLL is not a build of the pinned release")
+  }
+  $url = $pin["$Arch-url"]
+  $sha = $pin["$Arch-sha256"]
+  if (-not $sha -or $sha -notmatch '^[0-9a-fA-F]{64}$') {
+    return NotPinned ("libuv-prebuilt.pin has no DLL pinned for windows-$Arch yet " +
+      "(its $Arch-sha256 line is '$sha'; a DLL is pinned once the maintainer publishes one)")
+  }
+  if (-not $url) { return NotPinned "libuv-prebuilt.pin has a $Arch-sha256 line and no $Arch-url line" }
+  return [pscustomobject]@{
+    Status = 'Pinned'; Arch = $Arch; Version = $pin['version']; Url = $url
+    Sha256 = $sha.ToLower(); SourceSha256 = $source['sha256'].ToLower()
+  }
+}
+
+# The first two lines of vendor\libuv\BUILT-FROM for a library of VERSION built from the tarball
+# whose SHA-256 is SOURCESHA, exactly as scripts/built-from.lisp writes them (LF). A stamp that
+# begins with them is current; lines after them only record where the library came from.
+function Get-LibuvStampHead($version, $sourceSha) { "version $version`nsha256 $($sourceSha.ToLower())`n" }
+
+function Test-LibuvStampCurrent($vendor, $version, $sourceSha) {
+  $stamp = Join-Path $vendor 'BUILT-FROM'
+  if (-not (Test-Path -LiteralPath $stamp)) { return $false }
+  $text = [IO.File]::ReadAllText($stamp)
+  return $text.StartsWith((Get-LibuvStampHead $version $sourceSha), [StringComparison]::Ordinal)
+}
+
+# Download the DLL PREBUILT describes (from Get-LibuvPrebuilt), check it, and install it as
+# VENDOR\lib\libuv.dll with VENDOR\BUILT-FROM, the layout scripts/build-libuv.lisp produces, so
+# aion/uv, -Check and the bundler find it where they find a build. Nothing is replaced until the
+# download has passed both checks; a file that fails one is deleted.
+function Install-LibuvPrebuilt {
+  param([Parameter(Mandatory)]$Prebuilt, [Parameter(Mandatory)][string]$Vendor)
+  $lib = Join-Path $Vendor 'lib'
+  $dll = Join-Path $lib 'libuv.dll'
+  $stamp = Join-Path $Vendor 'BUILT-FROM'
+  if ((Test-Path -LiteralPath $dll) -and (Test-LibuvStampCurrent $Vendor $Prebuilt.Version $Prebuilt.SourceSha256)) {
+    Note "libuv $($Prebuilt.Version) already in $Vendor (its BUILT-FROM names libuv.pin's release)"
+    return
+  }
+  Info "downloading the prebuilt libuv $($Prebuilt.Version) for windows-$($Prebuilt.Arch) (no MSVC Build Tools; pinned in libuv-prebuilt.pin)"
+  New-Item -ItemType Directory -Force -Path $lib | Out-Null
+  $tmp = "$dll.download"
+  Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+  try { [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12 } catch { }
+  # Get-Url is for pinned downloads only; this one is checked against libuv-prebuilt.pin below.
+  Get-Url -Url $Prebuilt.Url -OutFile $tmp
+  $got = Get-Sha256Hex $tmp
+  if ($got -ne $Prebuilt.Sha256) {
+    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    Die ("prebuilt libuv.dll checksum mismatch for $($Prebuilt.Url)`n" +
+      "       expected $($Prebuilt.Sha256)   (libuv-prebuilt.pin, $($Prebuilt.Arch)-sha256)`n" +
+      "       got      $got`n" +
+      "       The downloaded file was deleted and nothing was installed. Either the release asset is not the one pinned, or the pin is wrong.")
+  }
+  # The architecture is read from the PE header as well: the checksum proves the file is the one
+  # pinned, and this proves the pin is for this machine.
+  $wantMachine = if ($Prebuilt.Arch -eq 'arm64') { 0xAA64 } else { 0x8664 }
+  $machine = Get-PeMachine $tmp
+  if ($machine -ne $wantMachine) {
+    Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue
+    Die ("the prebuilt libuv.dll pinned for windows-$($Prebuilt.Arch) is built for $(Get-PeMachineName $machine), not $(Get-PeMachineName $wantMachine).`n" +
+      "       The downloaded file was deleted and nothing was installed. libuv-prebuilt.pin's $($Prebuilt.Arch) lines name the wrong file.")
+  }
+  # The old stamp goes before the library is replaced, as in build-libuv.lisp (#1001): a failure
+  # in between must not leave a stamp saying the library is current.
+  Remove-Item -LiteralPath $stamp -Force -ErrorAction SilentlyContinue
+  Move-Item -LiteralPath $tmp -Destination $dll -Force
+  $text = (Get-LibuvStampHead $Prebuilt.Version $Prebuilt.SourceSha256) +
+    "prebuilt $($Prebuilt.Url)`nprebuilt-sha256 $got`n"
+  [IO.File]::WriteAllText($stamp, $text, (New-Object Text.UTF8Encoding($false)))
+  Note "sha256 $got matches libuv-prebuilt.pin's $($Prebuilt.Arch)-sha256"
+  Note "libuv.dll -> $dll"
+}
+
+function Get-ThisLibuvPrebuilt {
+  Get-LibuvPrebuilt -PinFile (Join-Path $Root 'libuv-prebuilt.pin') -LibuvPinFile (Join-Path $Root 'libuv.pin') `
+    -Arch $(if ($Arch -eq 'arm64') { 'arm64' } else { 'x64' })
+}
+
+function Build-Libuv {
+  Info 'building libuv from libuv.pin (scripts/build-libuv.lisp)'
+  & sbcl --dynamic-space-size 4096 --script (Join-Path $Here 'build-libuv.lisp')
+  if ($LASTEXITCODE -ne 0) {
+    Die ("building libuv failed (sbcl exit $LASTEXITCODE) -- see the output above.`n" +
+      "       hyperion/server-uv, the default HTTP server, cannot start without it.`n" +
+      "       Fix what it names and run .\scripts\setup.ps1 again, or skip libuv with .\scripts\setup.ps1 -WithoutUv")
+  }
+}
 
 # --- report / act -----------------------------------------------------------
 Info "Ouranos setup on Windows ($Arch) -- pins: SBCL $SbclVersion, QL dist $QlDist, SQLite $SqliteVersion, Coalton $CoaltonRef"
@@ -701,15 +862,43 @@ if ($Check) {
     $script:missing++
   }
 
-  # OPT, not MISSING: this one does not fail provisioning. Everything except aion/uv builds
-  # and runs without a C compiler, which is the whole point of keeping native code off the
-  # load path -- a Windows user typing `quickload` must never hit a C build.
-  $msvc = Find-Msvc
-  if ($msvc) { Pass "MSVC C++ tools -- $($msvc.Name)   (aion/uv only)" }
-  else {
-    Write-Host '  OPT     MSVC C++ tools not found -- needed ONLY to build libuv for aion/uv' -ForegroundColor DarkGray
-    Write-Host "       fix: $MsvcInstallHint" -ForegroundColor DarkGray
-    Write-Host '            then: sbcl --script scripts/build-libuv.lisp' -ForegroundColor DarkGray
+  # MSVC and libuv count as missing unless -WithoutUv: hyperion/server-uv, the default HTTP
+  # server, runs on libuv (#504). They used to be reported as optional, when only aion/uv
+  # needed them. Loading the tree still needs no compiler; only building libuv does.
+  if ($WithoutUv) {
+    Write-Host '  SKIP    libuv and MSVC (-WithoutUv). hyperion/server-uv will not start until libuv is built:' -ForegroundColor DarkGray
+    Write-Host "            .\scripts\setup.ps1   (or: sbcl --script scripts/build-libuv.lisp, from $Root)" -ForegroundColor DarkGray
+  } else {
+    # Either MSVC or a pinned prebuilt DLL is enough (#1247): setup builds with the first and
+    # downloads the second.
+    $msvc = Find-Msvc
+    if ($msvc) { Pass "MSVC C++ tools -- $($msvc.Name)   (builds libuv)" }
+    else {
+      $prebuilt = Get-ThisLibuvPrebuilt
+      if ($prebuilt.Status -eq 'Pinned') {
+        Write-Host "  note    no MSVC C++ Build Tools; setup downloads the prebuilt libuv $($prebuilt.Version) for windows-$($prebuilt.Arch) that libuv-prebuilt.pin names" -ForegroundColor DarkGray
+      } else {
+        Write-Host "  note    no prebuilt libuv.dll to download instead: $($prebuilt.Reason)" -ForegroundColor DarkGray
+        Write-MsvcMissing; $script:missing++
+      }
+    }
+    $pinV = Get-PinVersion (Join-Path $Root 'libuv.pin')
+    $stampFile = Join-Path $LibuvVendor 'BUILT-FROM'
+    $builtV = Get-PinVersion $stampFile
+    $stampFields = Get-PinFields $stampFile
+    if (-not (Test-Path $LibuvDll)) {
+      Miss 'libuv (hyperion/server-uv, the default HTTP server, runs on it)' '.\scripts\setup.ps1   (builds or downloads it into vendor\libuv)'
+    } elseif ($builtV -ne $pinV) {
+      $named = if ($builtV) { $builtV } else { 'nothing' }
+      Miss "libuv in vendor\libuv is not a build of libuv.pin's $pinV (its BUILT-FROM names '$named')" '.\scripts\setup.ps1   (builds or downloads it again)'
+    } elseif ($stampFields -and $stampFields['prebuilt-sha256']) {
+      # A downloaded DLL's stamp records its checksum, so -Check can tell when the file was
+      # replaced after setup installed it.
+      $have = Get-Sha256Hex $LibuvDll
+      if ($have -ne $stampFields['prebuilt-sha256'].ToLower()) {
+        Miss "libuv.dll in vendor\libuv is not the prebuilt DLL its BUILT-FROM records (sha256 $have, recorded $($stampFields['prebuilt-sha256']))" 'delete vendor\libuv, then .\scripts\setup.ps1'
+      } else { Pass "libuv $pinV at $LibuvDll (prebuilt, downloaded from $($stampFields['prebuilt']))" }
+    } else { Pass "libuv $pinV at $LibuvDll (built from source)" }
   }
 
   if ($missing -gt 0) { Write-Host 'missing prerequisites (see above).' -ForegroundColor Red; exit 1 }
@@ -718,6 +907,19 @@ if ($Check) {
 }
 
 if (-not (Get-Command git -ErrorAction SilentlyContinue)) { Die 'git is required (winget install --id Git.Git)' }
+# Before anything is installed, so a machine without MSVC learns it now rather than after the
+# SBCL, Quicklisp and Coalton installs. Without MSVC, a prebuilt DLL pinned for this
+# architecture is downloaded instead (#1247); only when there is none does setup stop.
+$UvSource = if ($WithoutUv) { 'none' } elseif (Find-Msvc) { 'build' } else { 'prebuilt' }
+if ($UvSource -eq 'prebuilt') {
+  $prebuilt = Get-ThisLibuvPrebuilt
+  if ($prebuilt.Status -ne 'Pinned') {
+    Write-Host "  no prebuilt libuv.dll to download instead: $($prebuilt.Reason)" -ForegroundColor Yellow
+    Write-MsvcMissing
+    Die 'install the above first, then re-run.'
+  }
+  Note "no MSVC C++ Build Tools: setup will download the prebuilt libuv $($prebuilt.Version) for windows-$($prebuilt.Arch) that libuv-prebuilt.pin names"
+}
 
 $v = Get-SbclVersion
 if (-not $v) { Install-Sbcl }
@@ -729,5 +931,10 @@ Set-QlDist
 Install-Coalton
 Install-CoaltonDeps
 Install-Sqlite
+switch ($UvSource) {
+  'none' { Note 'libuv not built (-WithoutUv)' }
+  'build' { Build-Libuv }
+  'prebuilt' { Install-LibuvPrebuilt -Prebuilt $prebuilt -Vendor $LibuvVendor }
+}
 
 Info "provisioned. Next: sbcl --dynamic-space-size 4096 --script bootstrap.lisp   (from $Root)"

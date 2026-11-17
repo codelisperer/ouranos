@@ -10,9 +10,13 @@ TODO: one-line description.
     cons         # list all targets
 
 The app serves on `hyperion/server-uv`, Ouranos's own HTTP server, which runs on libuv.
-Build libuv once in the Ouranos tree (`sbcl --script scripts/build-libuv.lisp` from its
-root). Running from source (`cons build`, `cons dev`, `cons serve`) also works with a libuv
-installed on the system, but `cons bin` needs the one the tree built.
+The Ouranos tree's setup builds libuv: `./scripts/setup.sh` (`.\scripts\setup.ps1` on
+Windows), run from the Ouranos checkout. That needs a C compiler -- the Xcode Command Line
+Tools on macOS, gcc or clang on Linux, the MSVC Build Tools on Windows -- and setup says what
+to install when there is none. If the tree was set up with `--without-uv` (`-WithoutUv`), run
+setup again without it, or build only libuv with `sbcl --script scripts/build-libuv.lisp`
+from the Ouranos checkout. Running from source (`cons build`, `cons dev`, `cons serve`) also
+works with a libuv installed on the system, but `cons bin` needs the one the tree built.
 
 To use another server, add its Clack handler system to `{{name}}.asd`:
 `clack-handler-hunchentoot` (pure Lisp, needs nothing installed) or `clack-handler-woo` (needs

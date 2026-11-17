@@ -103,14 +103,14 @@ limit, so a hung command fails naming itself rather than at CI's job limit.")
     (if (> (length text) 160) (concatenate 'string (subseq text 0 160) " ...") text)))
 
 (defun %run-bounded (command &key directory capture (timeout *command-timeout*)
-                                  ignore-error-status)
+                                  ignore-error-status (error-output :interactive))
   "Run COMMAND, a list or a string cmd.exe runs, and return (values OUTPUT CODE). Signals on a
 non-zero exit unless IGNORE-ERROR-STATUS, and after TIMEOUT seconds, having stopped it."
   (uiop:with-temporary-file (:pathname out :type "txt")
     (let ((process (uiop:launch-program command :directory directory :input nil
                                                 :output (if capture out :interactive)
                                                 :if-output-exists :supersede
-                                                :error-output :interactive))
+                                                :error-output error-output))
           (deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second))))
       (loop while (uiop:process-alive-p process)
             do (when (> (get-internal-real-time) deadline)
@@ -133,7 +133,10 @@ non-zero exit unless IGNORE-ERROR-STATUS, and after TIMEOUT seconds, having stop
                   (%run-bounded (if (uiop:os-windows-p)
                                     (list "where" c)
                                     (list "sh" "-c" (format nil "command -v ~A" c)))
-                                :capture t :ignore-error-status t :timeout 30))))
+                                :capture t :ignore-error-status t :timeout 30
+                                ;; Discarded: where.exe reports finding nothing on standard
+                                ;; error, and in a build log that line reads like an error (#504).
+                                :error-output nil))))
       (when (and found (plusp (length found))) (return c)))))
 
 (defun run (program args &key (timeout *command-timeout*))
