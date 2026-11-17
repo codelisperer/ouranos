@@ -380,6 +380,80 @@
                 :serial t
                 :components ((:file "chat-rbt")))))
 
+;;; The Ouranos IDE proof of concept (#1218): a desktop of windows in one image, with a
+;;; Coalton REPL, a clock, a chart from SQLite, an agent and an inspector. It is in praxeon
+;;; because it needs praxeon, the rightmost framework it uses. It is an application, so it
+;;; declares its HTTP server: hyperion/server-uv, hyperion's own, which needs libuv built once
+;;; with scripts/build-libuv.lisp. START gives it a pool of handler threads, because each open
+;;; page holds one for its GET /events stream.
+(defsystem "praxeon/examples/ouranos-ide"
+  :description "Example: the Ouranos IDE proof of concept, a desktop of live windows in one SBCL image (#1218)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("praxeon" "praxeon/chat-ui"          ; the agent and its chat bubbles
+               "hyperion" "hyperion/desktop-ui"     ; the server and the window desktop
+               "hyperion/desktop"                   ; run-app, for the native window
+               "cons/coalton-repl"                  ; the Coalton REPL engine
+               "mnemosyne"                          ; the chart's SQLite query
+               "praxeon/examples/ouranos-ide/runtime" ; the editor's Coalton runtime client
+               "hyperion/server-uv"                 ; the HTTP server START uses
+               "aion/fs"                            ; LINK-P, for a project's paths on Windows (#1228)
+               "spinneret"
+               ;; rename(2) and mkdir for a project's files (#1228)
+               (:feature :unix (:require "sb-posix")))
+  ;; editor/ holds the editor window's script bundle, which editor/build.sh builds once with
+  ;; npm and esbuild and which is committed, so loading or running this needs no Node.
+  :components ((:module "examples/ouranos-ide"
+                :serial t
+                :components ((:file "project")      ; a project folder's files (#1228)
+                             (:file "ide")
+                             (:file "editor")
+                             (:file "files")        ; the files window and the editor's tabs
+                             (:static-file "editor/ouranos-editor.min.js")
+                             (:static-file "editor/ouranos-editor.min.js.sha256"))))
+  :in-order-to ((test-op (test-op "praxeon/examples/ouranos-ide/tests"))))
+
+(defsystem "praxeon/examples/ouranos-ide/tests"
+  :description "The Ouranos IDE example's windows, driven through its routes and over HTTP on 127.0.0.1."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("praxeon/examples/ouranos-ide" "praxeon" "hyperion" "hyperion/desktop-ui"
+               "hyperion/test-ports" "cons/coalton-repl" "mnemosyne" "dexador" "quri" "fiveam"
+               "praxeon/examples/ouranos-ide/runtime" ; the editor tests stop its runtime
+               "ironclad"                     ; the SHA-256 of the committed editor bundle
+               "hyperion/assets"              ; the browser test's page loads the vendored htmx
+               "hyperion/assets/tests"        ; its headless browser helpers
+               "hyperion/server-uv"           ; the server the tests start
+               "spinneret"                    ; it escapes what its server sends back
+               "aion/fs"                      ; temporary folders and links for the project tests
+               (:require "sb-bsd-sockets"))   ; the test that reads GET /events over a socket
+  :components ((:module "examples/ouranos-ide"
+                :components ((:file "tests"))))
+  :perform (test-op (o c) (uiop:symbol-call :praxeon/examples/ouranos-ide/tests :run-tests)))
+
+;;; A spike for the IDE's code editor (#1218): a client for Coalton's `mine/runtime` server
+;;; running in a child SBCL. The child loads `mine/runtime`; this image does not, so the
+;;; system depends on nothing but SBCL's sockets. child.lisp is what the child loads, and it
+;;; is a static file because this image must not compile it.
+(defsystem "praxeon/examples/ouranos-ide/runtime"
+  :description "Spike: a client for Coalton's mine/runtime evaluation server in a child SBCL (#1218)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ((:require "sb-bsd-sockets"))
+  :components ((:module "examples/ouranos-ide/runtime"
+                :components ((:file "client")
+                             (:static-file "child.lisp"))))
+  :in-order-to ((test-op (test-op "praxeon/examples/ouranos-ide/runtime/tests"))))
+
+(defsystem "praxeon/examples/ouranos-ide/runtime/tests"
+  :description "The runtime client against a real child SBCL: diagnostics, completion, types, interrupt, stop."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("praxeon/examples/ouranos-ide/runtime" "fiveam")
+  :components ((:module "examples/ouranos-ide/runtime"
+                :components ((:file "tests"))))
+  :perform (test-op (o c) (uiop:symbol-call :praxeon/examples/ouranos-ide/runtime/tests :run-tests)))
+
 (defsystem "praxeon/elise"
   :description "Elise: a reflective, psychologically-informed conversational actor."
   :author "Bob <eternal.recursion@proton.me>"
