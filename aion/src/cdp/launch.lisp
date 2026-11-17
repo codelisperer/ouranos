@@ -100,8 +100,8 @@ switches. Returns ARGUMENTS."
                               (and (>= (length name) (length prefix))
                                    (string= prefix name :end2 (length prefix))))
                             +refused-switches+))
-        (error "The browser argument ~S is refused: aion/cdp sets the headless mode, the ~
-debugging connection and the profile itself, and no argument may change them." argument)))))
+        (error "The browser argument ~S is refused: aion/cdp sets the headless mode, the debugging connection and the profile itself, and no argument may change them."
+               argument)))))
 
 (defun fixed-browser-switches ()
   "The switches every start of Chrome or Edge in this tree passes, whatever starts it: no

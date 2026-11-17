@@ -998,7 +998,7 @@
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :depends-on ("aion/cdp" "aion/websocket" "aion/fs" "fiveam" "com.inuoe.jzon"
-               (:require :sb-bsd-sockets))
+               (:require :sb-bsd-sockets) (:feature :win32 "aion/windows"))
   :serial t
   :components ((:module "tests/cdp"
                 :serial t
