@@ -13,8 +13,8 @@
 ;;;;
 ;;;; SKIPS, NOT FAILURES, WHEN NO BROWSER IS FOUND. The gate runs on machines with no browser,
 ;;;; and the GitHub runners for all three operating systems have Chrome installed, so CI is
-;;;; where this runs. HYPERION_SMOKE_BROWSER names a browser executable to use instead of the
-;;;; search below.
+;;;; where this runs. The browser is aion/cdp's FIND-BROWSER (#1028): OURANOS_BROWSER, or the
+;;;; older HYPERION_SMOKE_BROWSER, names one to use instead of its search.
 
 (in-package #:hyperion/assets/tests)
 
@@ -27,29 +27,6 @@ not the server's speed.")
 
 (defparameter +smoke-timeout+ 90
   "Seconds of real time the browser may take before the test kills it and fails.")
-
-(defun %on-path (name)
-  "The first file called NAME in a directory on PATH, or NIL."
-  (dolist (dir (uiop:split-string (or (uiop:getenv "PATH") "")
-                                  :separator (if (uiop:os-windows-p) ";" ":")))
-    (let ((p (and (plusp (length dir))
-                  (probe-file (concatenate 'string (string-right-trim "/\\" dir) "/" name)))))
-      (when p (return p)))))
-
-(defun %smoke-browser ()
-  "The browser executable to run, as a native namestring, or NIL when there is none."
-  (let ((override (uiop:getenv "HYPERION_SMOKE_BROWSER")))
-    (if (and override (plusp (length override)))
-        override
-        (let ((found (or (some #'%on-path '("google-chrome" "google-chrome-stable" "chromium"
-                                            "chromium-browser" "microsoft-edge"))
-                         (some #'probe-file
-                               '(#+darwin "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"
-                                 #+darwin "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"
-                                 #+win32 "C:/Program Files/Google/Chrome/Application/chrome.exe"
-                                 #+win32 "C:/Program Files (x86)/Google/Chrome/Application/chrome.exe"
-                                 #+win32 "C:/Program Files (x86)/Microsoft/Edge/Application/msedge.exe")))))
-          (and found (uiop:native-namestring found))))))
 
 (defvar *smoke-polls* (list 0)
   "How many times the page's poll has reached the server, in the car, for ATOMIC-INCF.")
@@ -129,15 +106,19 @@ if (window.htmx) { document.getElementById(\"ver\").textContent = \"htmx-\" + ht
     (unwind-protect
          (let ((process (sb-ext:run-program
                          browser
-                         ;; --use-mock-keychain and --password-store=basic: on macOS, headless
-                         ;; Chrome otherwise waits on the keychain and never exits (CI, #724).
-                         (list "--headless" "--disable-gpu" "--no-sandbox" "--no-first-run"
-                               "--no-default-browser-check" "--use-mock-keychain"
-                               "--password-store=basic" "--disable-background-networking"
-                               "--disable-component-update" "--disable-extensions"
-                               (format nil "--user-data-dir=~A" (uiop:native-namestring profile))
-                               (format nil "--virtual-time-budget=~D" +smoke-budget+)
-                               "--dump-dom" url)
+                         ;; FIXED-BROWSER-SWITCHES is aion/cdp's list of the switches every
+                         ;; browser start in the tree passes (#1028): no first-run page, and no
+                         ;; credential store, which on macOS otherwise made headless Chrome wait
+                         ;; on the Keychain and never exit (CI, #724). --password-store=basic is
+                         ;; kept on every platform here, as before; aion/cdp adds it on Linux.
+                         (append
+                          (list "--headless" "--disable-gpu" "--no-sandbox"
+                                "--password-store=basic" "--disable-background-networking"
+                                "--disable-component-update" "--disable-extensions"
+                                (format nil "--user-data-dir=~A" (uiop:native-namestring profile))
+                                (format nil "--virtual-time-budget=~D" +smoke-budget+))
+                          (aion/cdp:fixed-browser-switches)
+                          (list "--dump-dom" url))
                          :search t :wait nil :input nil :error nil
                          :output (uiop:native-namestring out) :if-output-exists :supersede)))
            ;; Done when the browser exits or when the dump is complete. On the macOS CI
@@ -183,9 +164,9 @@ if (window.htmx) { document.getElementById(\"ver\").textContent = \"htmx-\" + ht
     (and close (subseq dom (1+ open-end) close))))
 
 (test the-vendored-htmx-swaps-in-a-real-browser
-  (let ((browser (%smoke-browser)))
+  (let ((browser (aion/cdp:find-browser)))
     (if (null browser)
-        (skip "No Chrome or Edge found; set HYPERION_SMOKE_BROWSER to run the htmx smoke page")
+        (skip "No Chrome or Edge found; set OURANOS_BROWSER to run the htmx smoke page")
         (progn
           (setf *smoke-polls* (list 0))
           (%with-smoke-server (port)

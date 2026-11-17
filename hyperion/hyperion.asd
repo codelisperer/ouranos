@@ -495,6 +495,8 @@
                "hyperion/test-ports" "fiveam" "ironclad" "clack-handler-hunchentoot"
                ;; kit-browser-tests runs hyperion/kit's dialogs in the smoke page's browser (#981).
                "hyperion/kit" "hyperion/list" "spinneret"
+               ;; The browser the smoke pages run in is found by aion/cdp's FIND-BROWSER (#1028).
+               "aion/cdp"
                (:require "sb-bsd-sockets"))
   :serial t
   :components ((:file "tests/assets-tests")

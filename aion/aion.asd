@@ -968,6 +968,44 @@
                 :components ((:file "websocket-tests"))))
   :perform (test-op (o c) (uiop:symbol-call :aion/websocket/tests :run-tests)))
 
+;;; --- cdp: a Chrome DevTools Protocol client, the browser driver (#1028) -----------
+;;;
+;;; dokimasia ADR-0001, decision 1. Opt-in: nothing in aion core loads it. Headless only; see
+;;; the package documentation. Every dependency is already in the tree. Its own tests use a
+;;; CDP server written in the suite, and a real browser when one is found: a missing browser
+;;; skips those checks, and fails them when OURANOS_REQUIRE_BROWSER=1, as CI sets.
+
+(defsystem "aion/cdp"
+  :description "A Chrome DevTools Protocol client: find, launch or attach to a headless Chrome or Edge, and drive its pages."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  :depends-on ("aion/websocket" "aion/random" "aion/dynamic" "aion/log" "aion/fs"
+               "com.inuoe.jzon" (:require :sb-bsd-sockets)
+               (:feature :win32 "aion/windows"))
+  :serial t
+  :components ((:module "src/cdp"
+                :serial t
+                :components ((:file "packages")
+                             (:file "conditions")
+                             (:file "launch")
+                             (:file "connection")
+                             (:file "browser"))))
+  :in-order-to ((test-op (test-op "aion/cdp/tests"))))
+
+(defsystem "aion/cdp/tests"
+  :description "Test suite for aion/cdp: the command line, a CDP server written in the suite, and a real headless browser when one is found."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("aion/cdp" "aion/websocket" "aion/fs" "fiveam" "com.inuoe.jzon"
+               (:require :sb-bsd-sockets))
+  :serial t
+  :components ((:module "tests/cdp"
+                :serial t
+                :components ((:file "cdp-tests")
+                             (:file "browser-tests"))))
+  :perform (test-op (o c) (uiop:symbol-call :aion/cdp/tests :run-tests)))
+
 (defsystem "aion/dynamic"
   :description "Dynamic bindings that should survive a thread boundary (#158)."
   :author "Bob <eternal.recursion@proton.me>"

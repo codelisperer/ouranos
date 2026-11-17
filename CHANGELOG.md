@@ -1622,6 +1622,36 @@ its tag.
 
 ### Added
 
+- **`aion/cdp`, a Chrome DevTools Protocol client** (#1028, dokimasia ADR-0001), opt-in.
+  `find-browser` names the browser: `OURANOS_BROWSER`, then `HYPERION_SMOKE_BROWSER`, then PATH
+  and the usual install locations. `launch-browser` starts Chrome or Edge headless
+  (`--headless=new`) with a fresh profile in a temporary directory, and connects through
+  `--remote-debugging-port=0` and the `DevToolsActivePort` file. It signals an error, before
+  starting anything, for an extra argument that sets the headless mode, the remote-debugging
+  port or pipe, the profile, or the password store; `browser-command-line` gives the exact
+  command line. `fixed-browser-switches` is the list of switches every browser start in the tree
+  passes: `--no-first-run`, `--no-default-browser-check`, `--use-mock-keychain` on macOS and
+  `--password-store=basic` on Linux, so the browser never opens a Keychain or keyring dialog. On
+  Windows the browser runs in a kill-on-close job object, and on Linux under
+  `setpriv --pdeathsig KILL` when setpriv is installed. `close-browser` asks the browser to close,
+  kills it after five seconds, and deletes its profile; `with-browser` does it in an
+  `unwind-protect`. `attach-browser` connects to a running browser's `ws://` endpoint on a
+  loopback address only. `new-page`, `close-page`, `navigate` (waits for the load event of the
+  new document), `evaluate` (awaits a promise), `wait-for` (`:expression` or `:selector`),
+  `query`, `text-of`, `attribute-of`, `click`, `type-text`, `set-viewport`,
+  `emulate-color-scheme`, `screenshot` (PNG octets, `:full-page`), and `send` for any other
+  method, with `json-object` and `json-get`. Each page keeps its console messages, exceptions,
+  log entries and network events in order; `drain-events` returns and clears them, and
+  `page-events-dropped` counts what was dropped past `*max-buffered-events*` (10000).
+  Conditions: `browser-not-found`, `browser-exited`, `cdp-error` (with `evaluation-error` and
+  `element-not-found`), `cdp-timeout`, `target-crashed`, `connection-closed`. Its real-browser
+  tests are skipped without a browser and fail when `OURANOS_REQUIRE_BROWSER=1`, which CI now
+  sets on every leg. No new external dependency.
+- **The browser smoke tests find their browser with `aion/cdp:find-browser`** (#1028). The htmx,
+  kit and notice smoke pages in `hyperion/assets/tests` and the embed hand-off in
+  `praxeon/web/tests` read `OURANOS_BROWSER` first; `HYPERION_SMOKE_BROWSER` still works. Their
+  browser is started with `aion/cdp:fixed-browser-switches` too. The private
+  `hyperion/assets/tests::%smoke-browser` is gone.
 - **`aion/websocket` has the client's half of the opening handshake** (#1028). `client-key`
   turns 16 random octets from the caller into a `Sec-WebSocket-Key`. `client-request-head` writes
   the opening request, and signals an error for a host, path, origin or protocol that contains CR

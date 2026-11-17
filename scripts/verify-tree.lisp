@@ -177,6 +177,9 @@
     :hyperion/http1
     ;; The WebSocket protocol (#376): pure, and here for the reason hyperion/http1 is.
     :aion/websocket
+    ;; The browser driver (#1028, dokimasia ADR-0001). Its suite runs a CDP server written in
+    ;; the suite on every machine, and a real headless browser where one is found.
+    :aion/cdp
     :praxeon/translate :praxeon/web :praxeon/web-search :praxeon/memory-db :praxeon/results-db
     :praxeon/retrieval
     ;; The chat widget's parts, which praxeon/web's page and its embed panel share (#67). It
@@ -304,6 +307,9 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
     :hyperion/http1/tests
     ;; The WebSocket frame parser and handshake (#376), for the same reason.
     :aion/websocket/tests
+    ;; The browser driver (#1028): the command line it refuses to widen, the connection
+    ;; against a CDP server in the suite, and a headless browser when one is found.
+    :aion/cdp/tests
     ;; The contacts example's changeset path (#94). Its test system existed with an empty
     ;; component list and no :perform -- declared, loadable, and asserting nothing. Named
     ;; under its parent so its checks land in mnemosyne's README row (pre-publication issue 357).
