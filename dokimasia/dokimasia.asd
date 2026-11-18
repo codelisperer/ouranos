@@ -2,8 +2,8 @@
 ;;;;
 ;;;; A satellite attached at aion (dokimasia ADR-0001, #1028). The core systems depend only on
 ;;;; aion and external libraries, and nothing in the dependency line depends on them. The aux
-;;;; systems that know one framework (dokimasia/hyperion, dokimasia/mnemosyne) come in a later
-;;;; step and may reach right.
+;;;; systems that know one framework may reach right: dokimasia/mnemosyne is here, and
+;;;; dokimasia/hyperion comes in a later step.
 
 (defsystem "dokimasia/core"
   :description "The typed core of dokimasia: step results and how they combine into a row's verdict (#1028)."
@@ -67,3 +67,28 @@
                              (:file "browser-tests"))))
   :perform (test-op (o c)
              (uiop:symbol-call :dokimasia/tests :run-tests)))
+
+(defsystem "dokimasia/mnemosyne"
+  :description "Stored-data probes for dokimasia's :expect-stored step that read the app's database through mnemosyne (#1028)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  :depends-on ("dokimasia" "mnemosyne")
+  :serial t
+  :components ((:module "src/mnemosyne"
+                :serial t
+                :components ((:file "packages")
+                             (:file "probes"))))
+  :in-order-to ((test-op (test-op "dokimasia/mnemosyne/tests"))))
+
+(defsystem "dokimasia/mnemosyne/tests"
+  :description "dokimasia/mnemosyne's tests: its probes against a SQLite database, with no browser."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("dokimasia/mnemosyne" "dokimasia" "mnemosyne" "fiveam")
+  :serial t
+  :components ((:module "tests/mnemosyne"
+                :serial t
+                :components ((:file "tests"))))
+  :perform (test-op (o c)
+             (uiop:symbol-call :dokimasia/mnemosyne/tests :run-tests)))
