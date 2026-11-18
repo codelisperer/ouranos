@@ -27,7 +27,10 @@ steps, the checks after every step, the report and the run). The user guide is
 (`vendor/`, pinned in `vendor/ASSETS.pin`) in the page once for each colour scheme. Step b3's
 first part is `dokimasia/mnemosyne` (`src/mnemosyne/`): `define-row-probe` and
 `define-query-probe`, stored-data probes that read the app's database through mnemosyne. Its
-tests use a SQLite file and no browser. `dokimasia/hyperion` has not landed.
+tests use a SQLite file and no browser. Its second part is `dokimasia/hyperion` (`src/hyperion/`):
+`hyperion-target`, which starts a hyperion app on a free port with a scratch SQLite database,
+waits for htmx in its settle check, and can sign a user in with a session made in the app's
+store. Its tests run a small hyperion app written in the suite, on hunchentoot.
 
 ## Design facts
 

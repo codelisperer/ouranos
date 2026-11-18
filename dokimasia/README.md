@@ -6,9 +6,9 @@ in a headless Chrome or Edge, against an app it starts or one already deployed, 
 report. Each case and row is one FiveAM test. The design is
 [ADR-0001](docs/adr/0001-browser-driver-and-acceptance-harness.md); the work is #1028.
 
-What exists today is the harness itself, its accessibility checks with axe-core, and ready-made
-stored-data probes for apps that use mnemosyne (steps b1, b2 and the first part of b3 of #1028).
-The add-on for hyperion apps is still to come.
+What exists today is the harness itself, its accessibility checks with axe-core, ready-made
+stored-data probes for apps that use mnemosyne, and a target for hyperion apps (steps b1 to b3 of
+#1028).
 
 ## A first suite
 
@@ -83,7 +83,9 @@ the wrong arguments, is refused with `invalid-definition` when the case is defin
 
 After `:visit`, `:fill`, `:click` and `:select`, the runner waits for the page to settle: no
 request in flight for `*quiet-period*` seconds, within `*settle-timeout*`. A target class can
-specialise `target-settle` to add its own condition.
+specialise `target-settle` to add its own condition. A target class can also specialise `target-prepare-page`, called on each row's new
+page before its first step, and `target-sign-in`, which signs a case's user in without the suite's
+`:sign-in` steps; `dokimasia/hyperion` (below) does all three.
 
 ## The checks made after every step
 
@@ -183,6 +185,54 @@ called when the step runs, so it can name a database that exists only once the a
 `:dialect` defaults to `mnemosyne/query:*dialect*`. A table, column or dialect mnemosyne refuses is
 refused with `invalid-definition` when the probe is defined. Both kinds are local probes. Against a
 URL target they run only when it was made with `:local-probes t`; otherwise pass `:http` as well.
+
+## Hyperion apps
+
+The aux system `dokimasia/hyperion` starts a hyperion app for the run:
+
+```lisp
+(asdf:load-system :dokimasia/hyperion)
+
+(dokimasia/hyperion:hyperion-target
+  :setup #'my-app:migrate                 ; (lambda (backend) …): create the tables
+  :seed (lambda (backend users) …)        ; store the users a case signs in as
+  :app #'my-app:make-app                  ; (lambda (backend) …) → the Ring handler
+  :teardown #'my-app:close-database       ; optional: close what :app opened
+  :users (list (list :name :admin :email "admin@example.com" :password "…")))
+```
+
+Before the first case it makes a new SQLite file in a temporary directory, calls `:setup`, then
+`:seed`, then `:app` with that database's mnemosyne backend, and starts the handler with
+`hyperion/server` on a free port of 127.0.0.1. `:server` names the backend (`:uv`, `:hunchentoot`,
+…); by default hyperion picks one. After the run, or when starting fails part way, it stops the
+server, calls `:teardown` and deletes the directory.
+
+**Settling.** After an action the runner also waits until htmx has no request in flight and no
+swap still settling. A listener installed in every page before the page's own scripts counts
+htmx's requests and swaps; on a page without htmx only the network check applies.
+
+**Signing in.** By default a case signs in through the suite's `:sign-in` steps, as with any
+target. For cases that do not test signing in, `:sign-in :session` adds a session for the user to
+the app's store and sets its cookie, which is faster:
+
+```lisp
+(dokimasia/hyperion:hyperion-target …
+  :sign-in :session
+  :session-store (lambda () my-app:*sessions*)          ; the store the app gave wrap-session
+  :session-data (lambda (user backend)                  ; the session's data for USER
+                  (list (cons :user-id (my-app:user-id-by-email backend (getf user :email))))))
+```
+
+`:cookie-name` is the name the app gave `wrap-session`, `hyperion-session` by default. The report
+shows the sign-in as one step, "sign-in: a session for admin in the app's store".
+
+**Probes.** Local probes run against this target. `dokimasia/hyperion:current-database` returns the
+running target's database, for a probe's `:source`:
+
+```lisp
+(dokimasia/mnemosyne:define-row-probe :account-stored
+  :source #'dokimasia/hyperion:current-database :table :accounts :match '(:email :plan))
+```
 
 ## The report
 
