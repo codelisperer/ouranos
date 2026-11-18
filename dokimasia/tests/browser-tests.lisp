@@ -14,7 +14,7 @@
 
 (defun app-target (&key (favicon t))
   "A process target that starts and stops a fresh test app with Alice signed up. FAVICON NIL
-starts it without a /favicon.ico."
+starts it without a /favicon.ico, and :SLOW with one answered after 1.5 seconds."
   (d:process-target :start (lambda ()
                              (setf *app* (start-app :users (list +alice+) :favicon favicon))
                              (app-base-url *app*))
@@ -127,6 +127,14 @@ starts it without a /favicon.ico."
 
 (d:define-suite bt-icon-own-missing :cases (bt-icon-own-missing)
   :target (app-target :favicon nil))
+
+;;; A page replaced while the browser's /favicon.ico request for it is unanswered: the browser
+;;; sends no event that ends that request, so the settle check must not wait for it.
+
+(d:define-case bt-replaced
+  :steps ((:visit "/replaced") (:expect-text "#title" "No icon" :timeout 5)))
+
+(d:define-suite bt-replaced :cases (bt-replaced) :target (app-target :favicon :slow))
 
 ;;; --- a target whose store the test image cannot see ---------------------------------------
 
@@ -309,6 +317,13 @@ OURANOS_REQUIRE_BROWSER=1."
   "ROW's console entries about a request for /favicon.ico."
   (remove-if-not (lambda (c) (search "favicon.ico" (or (gethash "why" c) (gethash "message" c) "")))
                  (coerce (gethash "console" row) 'list)))
+
+(test a-request-of-a-replaced-page-does-not-hold-the-settle-check
+  ;; The CI failure of train 64: a form's response navigated twice, and the settle check waited
+  ;; ten seconds for the first page's /favicon.ico request, which the browser never ends.
+  (when (browser-available-p)
+    (multiple-value-bind (passed-p row) (run-one :bt-replaced)
+      (is-true passed-p "~A" (gethash "reason" row)))))
 
 (test the-browser-s-own-favicon-request-fails-no-step-when-the-page-links-no-icon
   (when (browser-available-p)

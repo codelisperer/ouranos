@@ -1,7 +1,9 @@
 ;;;; watch.lisp --- what the page did while a row ran (#1028, dokimasia ADR-0001, point 2).
 ;;;;
 ;;;; The page's events, which aion/cdp keeps in order, are read after and during every step. From
-;;;; them this file keeps the requests in flight, which the settle check waits on; the requests
+;;;; them this file keeps the requests in flight, which the settle check waits on (a request of a
+;;;; document that a navigation replaced is dropped, because the browser sends no event that ends
+;;;; it); the requests
 ;;;; made to each URL during the step, which catch a fetch, poll or resubmit loop; same-origin
 ;;;; responses of 500 or more; and console errors, uncaught exceptions and log errors, which
 ;;;; include Content-Security-Policy violations. Each of the last three fails the step it
@@ -104,9 +106,29 @@ like any other. When the page cannot be read, the request is checked too."
          (setf (row-last-activity row) (get-internal-real-time))
          (when (and id url (not (member type +unwatched-request-types+ :test #'equal))
                     (not (uiop:string-prefix-p "data:" url)))
-           (setf (gethash id (row-in-flight row)) url))
+           ;; The frame and loader say which document made it; see Page.frameNavigated below.
+           (setf (gethash id (row-in-flight row))
+                 (list url (cdp:json-get params "frameId") (cdp:json-get params "loaderId"))))
          (when url
            (incf (gethash (%without-fragment url) (row-step-requests row) 0)))))
+      ((string= method "Page.frameNavigated")
+       ;; A request made by the document this navigation replaced gets no loadingFinished or
+       ;; loadingFailed once the document is gone. Measured with the browser's own /favicon.ico
+       ;; request for a page replaced while it was unanswered: it stayed in flight, and the settle
+       ;; check waited its full timeout (train 64, #1028). Such a request cannot change the page
+       ;; that now shows, so it is no longer waited for.
+       (let ((frame (cdp:json-get params "frame" "id"))
+             (loader (cdp:json-get params "frame" "loaderId"))
+             (gone '()))
+         (when (and frame loader)
+           (maphash (lambda (id entry)
+                      (destructuring-bind (url request-frame request-loader) entry
+                        (declare (ignore url))
+                        (when (and (equal request-frame frame) request-loader
+                                   (not (equal request-loader loader)))
+                          (push id gone))))
+                    (row-in-flight row))
+           (dolist (id gone) (remhash id (row-in-flight row))))))
       ((member method '("Network.loadingFinished" "Network.loadingFailed") :test #'string=)
        (setf (row-last-activity row) (get-internal-real-time))
        (remhash (cdp:json-get params "requestId") (row-in-flight row))
@@ -185,7 +207,7 @@ like any other. When the page cannot be read, the request is checked too."
           (return nil))
         (when (> now deadline)
           (let ((urls '()))
-            (maphash (lambda (k v) (declare (ignore k)) (push v urls)) (row-in-flight row))
+            (maphash (lambda (k v) (declare (ignore k)) (push (first v) urls)) (row-in-flight row))
             (return (format nil "the page did not settle within ~A seconds: ~D request~:P still in flight~@[, such as ~{~A~^, ~}~]"
                             timeout (length urls) (subseq urls 0 (min 3 (length urls)))))))
         (sleep 0.05)))))

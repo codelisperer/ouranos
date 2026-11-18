@@ -1545,6 +1545,12 @@ its tag.
 
 ### Fixed
 
+- **dokimasia's settle check no longer waits for a request of a page that a navigation replaced**
+  (#1028). The browser sends no `Network.loadingFinished` or `Network.loadingFailed` for such a
+  request, so a page replaced while its own `/favicon.ico` request was unanswered, as happens when
+  a form's response redirects, failed the step with "the page did not settle within 10 seconds:
+  1 request still in flight, such as .../favicon.ico". On `Page.frameNavigated`, the requests that
+  the frame's earlier documents made are no longer counted as in flight.
 - **dokimasia no longer fails every step against an app that has no `/favicon.ico`** (#1028).
   The browser asks for `/favicon.ico` by itself for a page that links no icon, and the 404 it got
   was logged as a network error, which failed the step. That log error is now listed in the
