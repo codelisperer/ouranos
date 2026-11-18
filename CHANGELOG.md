@@ -1671,6 +1671,22 @@ its tag.
   backend, a pool, or a function that returns one when the step runs. Both are local probes, so
   against a `url-target` the step is reported as not run unless the target was made with
   `:local-probes t` or the probe is also given an `:http` form.
+- **`dokimasia/hyperion`: a dokimasia target for a hyperion app** (#1028, dokimasia ADR-0001),
+  an aux system. `hyperion-target` makes a scratch SQLite database in a new temporary directory,
+  calls `:setup` and `:seed` with its mnemosyne backend (and the target's `:users`), calls `:app`
+  with it to get the Ring handler, and starts that with `hyperion/server` on a free port
+  (`:server` picks the backend). After the run it stops the server, calls `:teardown` and deletes
+  the database, also when starting failed part way. Its settle check also waits until htmx has no
+  request in flight and no swap still settling, through a listener installed in every page.
+  With `:sign-in :session`, a case's user is signed in by adding a session to the app's store
+  (`:session-store`, with data from `:session-data`) and setting its cookie, instead of through
+  the suite's `:sign-in` steps; `:form`, the default, uses the steps. `current-database` gives a
+  probe's `:source` the running target's database, and local probes run against it.
+- **dokimasia: a target can prepare each page and sign a user in itself** (#1028). The generic
+  functions `target-prepare-page`, called on each row's new page before its first step, and
+  `target-sign-in`, which returns how it signed the user in or NIL to have the suite's `:sign-in`
+  steps run, are exported for targets defined outside dokimasia, as are `row-target` and
+  `row-user`. Both do nothing for the core's own targets.
 - **dokimasia's `url-target` takes `:local-probes`** (#1028). With `:local-probes t`, a probe's
   `:local` form runs against an app already running at a URL, such as a local or staging app,
   including one not written in Lisp, whose database the test machine can reach;

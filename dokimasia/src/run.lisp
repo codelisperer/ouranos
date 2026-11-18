@@ -61,7 +61,8 @@ first viewport and scheme."
           (setf (row-page row) page)
           (unwind-protect
                (let ((*row* row) (*run* ctx))
-                 (handler-case (%reset-page page base-url ctx)
+                 (handler-case (progn (%reset-page page base-url ctx)
+                                      (target-prepare-page target page))
                    (error (c)
                      (record "clearing the browser's state" "failed" (%clip (princ-to-string c) 400) 0)
                      (return-from steps)))
@@ -71,17 +72,29 @@ first viewport and scheme."
                        (record (format nil "signing in as ~A" user-name) "failed"
                                (format nil "the target has no user named ~A" user-name) 0)
                        (return-from steps))
-                     (unless (suite-sign-in suite)
-                       (record (format nil "signing in as ~A" user-name) "failed"
-                               (format nil "the case signs in as ~A, and the suite ~A has no :SIGN-IN steps"
-                                       user-name (suite-name suite))
-                               0)
-                       (return-from steps))
                      (setf (row-user row) user)
-                     (dolist (step (suite-sign-in suite))
-                       (multiple-value-bind (kind reason ms) (%run-step step)
-                         (unless (record (format nil "sign-in: ~A" (step-label step)) kind reason ms)
-                           (return-from steps))))))
+                     ;; The target may sign the user in itself, such as dokimasia/hyperion with
+                     ;; a session made in the app's store; otherwise the suite's steps do it.
+                     (let* ((start (get-internal-real-time))
+                            (how (handler-case (target-sign-in target page user)
+                                   (error (c)
+                                     (record (format nil "signing in as ~A" user-name) "failed"
+                                             (%clip (princ-to-string c) 400) (%elapsed-ms start))
+                                     (return-from steps)))))
+                       (cond
+                         (how
+                          (record (format nil "sign-in: ~A" how) "passed" "" (%elapsed-ms start)))
+                         ((null (suite-sign-in suite))
+                          (record (format nil "signing in as ~A" user-name) "failed"
+                                  (format nil "the case signs in as ~A, and the suite ~A has no :SIGN-IN steps"
+                                          user-name (suite-name suite))
+                                  0)
+                          (return-from steps))
+                         (t
+                          (dolist (step (suite-sign-in suite))
+                            (multiple-value-bind (kind reason ms) (%run-step step)
+                              (unless (record (format nil "sign-in: ~A" (step-label step)) kind reason ms)
+                                (return-from steps)))))))))
                  (dolist (step (dcase-steps dcase))
                    (incf (run-context-step-number ctx))
                    (multiple-value-bind (kind reason ms) (%run-step step)

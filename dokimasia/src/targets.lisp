@@ -34,6 +34,19 @@ checks the store TARGET uses. True for a process target, and for a URL target ma
 store.")
   (:method ((target target)) nil))
 
+(defgeneric target-prepare-page (target page)
+  (:documentation "Prepare PAGE, a new page for one row, before the row's first step or sign-in
+navigates it: for example, install a script with Page.addScriptToEvaluateOnNewDocument that a
+settle check of the target reads. The method for TARGET does nothing.")
+  (:method ((target target) page) (declare (ignore page)) nil))
+
+(defgeneric target-sign-in (target page user)
+  (:documentation "Sign USER, one of TARGET's users, in to the app in PAGE without the suite's
+:SIGN-IN steps, or return NIL to have the runner run those steps. A method that signs the user in
+returns a string saying how, which the report shows as the sign-in step's label, and signals an
+error when it cannot. The method for TARGET returns NIL.")
+  (:method ((target target) page user) (declare (ignore page user)) nil))
+
 (defgeneric target-settle (target page timeout)
   (:documentation "Wait until PAGE has settled after an action, for at most TIMEOUT seconds.
 Return NIL when it has, or a string saying why it has not. The method for TARGET waits until no
