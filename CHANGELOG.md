@@ -1687,6 +1687,31 @@ its tag.
   `OURANOS_DOKIMASIA_EXAMPLE_OUT` names a directory, the desktop run leaves its report and
   screenshots there, and CI uploads them as the workflow artifact `dokimasia-example-<platform>`.
 
+- **hyperion's `active-search-db` example takes its database as an argument, and has a form that
+  adds a contact** (#1282). `hyperion/examples/active-search-db:make-app` and `ensure-db` take an
+  optional mnemosyne backend; without one they use the SQLite file beside the example, as
+  before. The page has an "Add a contact" form that posts to `/contacts`. The posted fields go
+  through `mnemosyne/changeset`: `cast` takes name, email and role, `validate-required` and
+  `validate-format` check them, and `insert!` writes the row, stamped by `mnemosyne/id:touch!`.
+  The new exported function `add-contact` does this, and the seed rows now go through it too. A
+  contact that fails validation, such as one with an empty name or a malformed email, is not
+  written, and the form comes back with the error under the field. `make-app` now wraps the app
+  in `hyperion/session:wrap-session` and `hyperion/csrf:wrap-csrf`, so every POST to it, the
+  search box's `/search` included, needs the session's CSRF token: the `:form` tag adds it to the
+  form, and the page's `<body>` sends it to every htmx request as an `hx-headers` value. A POST
+  without it is answered 403.
+
+- **dokimasia's worked example checks stored data through `dokimasia/mnemosyne`** (#1282). The
+  suite `active-search-db` in `dokimasia/examples/active-search` runs against
+  `hyperion/examples/active-search-db` on the target's scratch SQLite database, which its setup
+  migrates and seeds with `ensure-db`; `db-app-target` makes the target and `run-db-acceptance`
+  runs the suite. The case `add-contact` fills in and submits the add form, CSRF token included,
+  for each row of `dokimasia/examples/active-search/rows/add.csv`, and checks the stored row with
+  the probe `:stored-contact`. The case `invalid-contact` posts each row of `rows/invalid.csv`,
+  which fail validation, checks the error the form shows, and checks with the probe
+  `:no-contact-with-email` that no row was written. Both run in the gate on every leg, with no
+  Postgres.
+
 - **`aion/uv/process:spawn` takes `:inherit-fds`, and a file descriptor for `:stdin`,
   `:stdout` or `:stderr`** (#1028). `:inherit-fds` is a list of this process's descriptors that
   the child receives as its descriptors 3, 4 and so on, in order; a descriptor given for a

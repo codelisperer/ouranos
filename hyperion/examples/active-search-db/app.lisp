@@ -7,6 +7,18 @@
 ;;;; **data-driven query** (LIKE across name/email/role) and swaps the server-rendered rows
 ;;;; in. The UI (Bulma + HTMX + Alpine + a Parenscript keyboard shortcut) is unchanged from
 ;;;; active-search; only %search + the seed/migrate startup are new.
+;;;;
+;;;; It also writes. An "Add a contact" form posts to /contacts, and the posted fields go
+;;;; through mnemosyne's changeset: CAST takes only the permitted fields, VALIDATE-REQUIRED and
+;;;; VALIDATE-FORMAT check them, and INSERT! writes the row, stamped by TOUCH!. A field that
+;;;; fails validation re-renders the form with the error beside it, and no row is written. The
+;;;; seed rows go through the same function. The POST passes hyperion's CSRF check: the page
+;;;; runs inside WRAP-SESSION and WRAP-CSRF, the :FORM tag adds the token field, and the body
+;;;; carries the token as an hx-headers value for the search box's htmx POST.
+;;;;
+;;;; MAKE-APP and ENSURE-DB take the mnemosyne backend as an optional argument, so a test can
+;;;; run the app on a database of its own. Without one they use the SQLite file beside this
+;;;; example.
 
 (cl:defpackage #:hyperion/examples/active-search-db
   (:use #:cl)
@@ -18,6 +30,9 @@
                     (#:spin    #:spinneret)
                     (#:assets  #:hyperion/assets)
                     (#:router  #:hyperion/router)
+                    (#:session #:hyperion/session)
+                    (#:csrf    #:hyperion/csrf)
+                    (#:cs      #:mnemosyne/changeset)
                     (#:be      #:mnemosyne/backend)
                     (#:conn    #:mnemosyne/conn)
                     (#:migrate #:mnemosyne/migrate)
@@ -25,7 +40,7 @@
                     (#:schema  #:mnemosyne/schema)
                     (#:id      #:mnemosyne/id))
   (:import-from #:parenscript #:chain #:@)
-  (:export #:make-app #:start #:stop #:dev #:serve #:main #:ensure-db #:*port*))
+  (:export #:make-app #:start #:stop #:dev #:serve #:main #:ensure-db #:add-contact #:*port*))
 
 (cl:in-package #:hyperion/examples/active-search-db)
 
@@ -40,7 +55,9 @@ this example exercises that -- the layout an app actually wants (db files in the
 gitignored directory) works with no app-side guard."
   (namestring (asdf:system-relative-pathname
                :hyperion "examples/active-search-db/data/active-search.db")))
-(defun backend () (be:make-sqlite (db-path)))
+(defun backend ()
+  "The backend MAKE-APP and ENSURE-DB use when they are not given one: the SQLite file at DB-PATH."
+  (be:make-sqlite (db-path)))
 
 (schema:defschema contact (:table "contacts")
   (:_id   :string  :primary t)
@@ -84,9 +101,39 @@ gitignored directory) works with no app-side guard."
             :n)
       0))
 
-(defun ensure-db ()
-  "Bring the database up: apply pending migrations (idempotent), then seed if the table is
-empty. Each seed row is stamped by mnemosyne/id:touch! (a v6 _id + monotonic vid).
+(defun %email-p (s)
+  "True when S has one @ with text on each side and no whitespace. A loose check on purpose: it
+catches a typing mistake, and only sending mail to the address proves it works."
+  (let ((at (position #\@ s)))
+    (and at (plusp at) (< at (1- (length s)))
+         (= at (position #\@ s :from-end t))
+         (notany (lambda (c) (member c '(#\Space #\Tab #\Newline #\Return))) s))))
+
+(defun contact-changeset (params)
+  "The changeset for a new contact from PARAMS, the posted fields as a plist, an alist or a hash
+table. Only name, email and role are taken from PARAMS. Name and email are required, and the
+email has to look like an address."
+  (let ((c (cs:cast 'contact params '(:name :email :role))))
+    (cs:validate-format (cs:validate-required c '(:name :email)) :email #'%email-p
+                        :message "is not an email address")))
+
+(defun add-contact (c params &key (who "web"))
+  "Validate PARAMS as a new contact and insert it on the connection C, stamped by TOUCH! as made
+by WHO. Returns the changeset. When it is invalid, nothing is written and its errors say why."
+  (let ((changes (contact-changeset params)))
+    (when (cs:changeset-valid-p changes)
+      (let ((e (make-hash-table)))
+        (loop for (k v) on (cs:apply-changes changes) by #'cddr do (setf (gethash k e) v))
+        (id:touch! e who)
+        ;; Cast again with the stamps, so _id and vid reach the row only through the changeset.
+        (cs:insert! (cs:cast 'contact e '(:_id :vid :name :email :role)) c :dialect :sqlite)))
+    changes))
+
+(defun ensure-db (&optional (backend (backend)))
+  "Bring the database at BACKEND up, by default the SQLite file beside this example: apply
+pending migrations (idempotent), then seed if the table is empty. Each seed row goes through
+ADD-CONTACT, so it is validated and stamped by mnemosyne/id:touch! (a v6 _id + monotonic vid)
+the same way a posted contact is.
 
 Returns (values applied-migration-ids seeded-names) -- what this run actually DID, which is
 the difference between a usable first run and a silent one. An idempotent seed creates what
@@ -97,19 +144,16 @@ can sign in. The entry points below announce them.
 Called by every ENTRY POINT, never by MAKE-APP. Keeping DB bring-up out of the app factory
 is what lets a test suite build the app without a database -- and stops a second entry point
 (the hot-reload one) from quietly serving pages against an empty schema."
-  (conn:with-connection (c (backend))
-    (let ((applied (migrate:migrate (backend) c *migrations*))
+  (conn:with-connection (c backend)
+    (let ((applied (migrate:migrate backend c *migrations*))
           (seeded '()))
       (when (zerop (%row-count c))
         (dolist (row *seed*)
           (destructuring-bind (name email role) row
-            (let ((e (make-hash-table)))
-              (setf (gethash :name e) name (gethash :email e) email (gethash :role e) role)
-              (id:touch! e "seed")
-              (query:run c (list :insert-into "contacts"
-                                 :values (list (list :_id (gethash :_id e) :vid (gethash :vid e)
-                                                     :name name :email email :role role)))
-                         :dialect :sqlite)
+            (let ((changes (add-contact c (list :name name :email email :role role)
+                                        :who "seed")))
+              (unless (cs:changeset-valid-p changes)
+                (error 'cs:changeset-invalid :changeset changes))
               (push name seeded)))))
       (values applied (nreverse seeded)))))
 
@@ -124,9 +168,10 @@ print them where the operator will see them, not only into a log."
     (format t "~&[db] up to date~%"))
   (finish-output))
 
-(defun %search (q)
-  "Rows (plists) matching Q via a LIKE across name/email/role; all rows if Q is blank."
-  (conn:with-connection (c (backend))
+(defun %search (backend q)
+  "Rows (plists) of BACKEND's contacts matching Q via a LIKE across name/email/role; all rows if
+Q is blank."
+  (conn:with-connection (c backend)
     (query:fetch c
                  (if (or (null q) (string= q ""))
                      '(:select (:name :email :role) :from ("contacts") :order-by (:name))
@@ -166,7 +211,39 @@ print them where the operator will see them, not only into a log."
                      (let ((box (chain document (get-element-by-id "q"))))
                        (when box (chain box (focus)))))))))))))
 
-(defun %page ()
+(defun %field (id name label value error)
+  "One labelled input of the add form, with ERROR, when there is one, under it."
+  (spin:with-html
+    (:div :class "field"
+     (:label :class "label" :for id label)
+     (:div :class "control"
+      (:input :id id :name name :type "text" :value (or value "")
+              :class (if error "input is-danger" "input")))
+     (when error
+       (:p :id (format nil "~A-error" id) :class "help is-danger"
+           (format nil "~@(~A~) ~A" name error))))))
+
+(defun %add-form (&optional changes)
+  "The add-a-contact form. CHANGES is the changeset of a post that failed validation: the form
+then shows the values that were posted and each field's error. The :FORM tag adds the CSRF
+token field. A post that succeeds is answered with an empty form, and the contacts-changed
+event tells the table to reload."
+  (let ((errors (and changes (cs:changeset-errors changes))))
+    (flet ((value (field) (and changes (cs:get-change changes field)))
+           (error-of (field) (cdr (assoc field errors))))
+      (spin:with-html-string
+        (:form :id "add-contact" :class "box mt-5" :method "post" :action "/contacts"
+               :hx-post "/contacts" :hx-target "this" :hx-swap "outerHTML"
+         (:h2 :class "title is-5" "Add a contact")
+         (%field "new-name" "name" "Name" (value :name) (error-of :name))
+         ;; type="text", not "email": the browser's own check would stop a malformed address
+         ;; before it was posted, and the changeset's validation is what this form shows.
+         (%field "new-email" "email" "Email" (value :email) (error-of :email))
+         (%field "new-role" "role" "Role" (value :role) (error-of :role))
+         (:button :id "add-contact-submit" :type "submit" :class "button is-link"
+                  "Add contact"))))))
+
+(defun %page (backend)
   (spin:with-html-string
     (:doctype)
     (:html :lang "en"
@@ -180,7 +257,9 @@ print them where the operator will see them, not only into a log."
       (:link :rel "stylesheet" :href (assets:url :bulma))
       (:script :src (assets:url :htmx) :defer t)
       (:script :src (assets:url :alpine) :defer t))
-     (:body
+     ;; The CSRF token as an htmx request header, inherited by every htmx request on the page:
+     ;; the search box's POST is not inside a form, so the :FORM tag cannot give it a field.
+     (:body :hx-headers (csrf:token-headers)
       (:section :class "section"
        (:div :class "container"
         (:h1 :class "title" "Contacts")
@@ -201,39 +280,67 @@ print them where the operator will see them, not only into a log."
              :x-text "q.length ? ('Filtering: ' + q) : 'Showing all contacts.'"))
         (:table :class "table is-fullwidth is-hoverable mt-4"
          (:thead (:tr (:th "Name") (:th "Email") (:th "Role")))
-         (:tbody :id "results" (:raw (%rows (%search nil)))))))
+         ;; Reloads itself, with the current query, when a contact has been added.
+         (:tbody :id "results" :hx-post "/search" :hx-include "#q"
+                 :hx-trigger "contacts-changed from:body"
+                 (:raw (%rows (%search backend nil)))))
+        (:raw (%add-form))))
       (:script (:raw (%app-js)))))))
 
 ;;; --- the Clack app ---------------------------------------------------------
-(defun %handle-search (env)
-  (let ((q (http:form-param (http:body-string env) "q")))
-    (list 200 '(:content-type "text/html; charset=utf-8") (list (%rows (%search q))))))
+(defparameter +html+ '(:content-type "text/html; charset=utf-8"))
 
-(defun %handle-home ()
+(defun %handle-search (backend)
+  (lambda (env)
+    (let ((q (http:form-param (http:body-string env) "q")))
+      (list 200 +html+ (list (%rows (%search backend q)))))))
+
+(defun %handle-home (backend)
   (lambda (env)
     (declare (ignore env))
-    (list 200 '(:content-type "text/html; charset=utf-8") (list (%page)))))
+    (list 200 +html+ (list (%page backend)))))
 
-(defun %routes ()
+(defun %handle-add (backend)
+  "POST /contacts: add the posted contact through ADD-CONTACT. Answers 200 with the form either
+way, because htmx does not swap a 4xx response in: an empty form and a contacts-changed event
+when the row was written, or the form with its errors when it was not."
+  (lambda (env)
+    (let ((changes (conn:with-connection (c backend)
+                     (add-contact c (http:form-alist (http:body-string env))))))
+      (if (cs:changeset-valid-p changes)
+          (list 200 (append (list :hx-trigger "contacts-changed") +html+) (list (%add-form)))
+          (list 200 +html+ (list (%add-form changes)))))))
+
+(defun %routes (backend)
   "This app's route table -- DATA. The vendored assets arrive as a MOUNT, so this app
 never names their paths. There is no dev wiring here: hyperion/dev:serve wraps the app in
 DEV:WRAP-DEV, which serves the reload endpoints, injects the poller, and registers both
 paths as QUIET so the polling does not bury the developer's own output (pre-publication issue 132)."
   (router:router
    (assets:mount)
-   (router:route :get "/" (%handle-home) :name :home)
-   (router:route :post "/search" #'%handle-search :name :search)))
+   (router:route :get "/" (%handle-home backend) :name :home)
+   (router:route :post "/search" (%handle-search backend) :name :search)
+   (router:route :post "/contacts" (%handle-add backend) :name :add-contact)))
 
-(defun make-app ()
-  "The route table above as a Clack handler, wrapped in this app's output style.
+(defun make-app (&optional (backend (backend)))
+  "The route table above as a Clack handler over the database at BACKEND, by default the SQLite
+file beside this example, wrapped in this app's output style, CSRF check and sessions.
+
+WRAP-CSRF goes inside WRAP-SESSION because it reads the session, and it refuses a POST without
+the session's token before the routes see it. Sessions are kept in memory, so a restart signs
+every browser out of its token and the next page load mints a new one.
 
 Touches NO database: bring-up belongs to the entry points (START / DEV / SERVE), so a test
 suite can build this app and exercise routing without a DB, and no entry point can forget
 to migrate by going around it."
-  (let ((routes (%routes)))
-    (lambda (env)
-      (out:with-output-style ()
-        (router:dispatch routes env)))))
+  (let ((routes (%routes backend)))
+    (session:wrap-session
+     (csrf:wrap-csrf
+      (lambda (env)
+        (out:with-output-style ()
+          (router:dispatch routes env))))
+     (session:make-memory-store)
+     :secure :auto)))
 
 ;;; --- lifecycle -------------------------------------------------------------
 (defparameter *port* 8080)

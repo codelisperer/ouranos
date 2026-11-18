@@ -124,24 +124,27 @@
 ;;; app, run through dokimasia/hyperion. It reaches right to hyperion's examples, as the aux
 ;;; system it uses does to hyperion.
 (defsystem "dokimasia/examples/active-search"
-  :description "A worked example of dokimasia: acceptance tests, as data, for hyperion's active-search example app (#1028)."
+  :description "A worked example of dokimasia: acceptance tests, as data, for hyperion's active-search example app and its SQLite-backed twin, whose stored rows are checked through dokimasia/mnemosyne (#1028)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :version "0.0.0"
-  :depends-on ("dokimasia" "dokimasia/hyperion" "hyperion/examples/active-search")
+  :depends-on ("dokimasia" "dokimasia/hyperion" "dokimasia/mnemosyne"
+               "hyperion/examples/active-search" "hyperion/examples/active-search-db")
   :serial t
   :components ((:module "examples/active-search"
                 :serial t
                 :components ((:file "acceptance")
-                             (:static-file "rows/search.csv"))))
+                             (:static-file "rows/search.csv")
+                             (:static-file "rows/add.csv")
+                             (:static-file "rows/invalid.csv"))))
   :in-order-to ((test-op (test-op "dokimasia/examples/active-search/tests"))))
 
 (defsystem "dokimasia/examples/active-search/tests"
-  :description "The worked example's tests: its suite run against the app in a real headless browser, at desktop and phone width, and a control that fails."
+  :description "The worked example's tests: its suites run against the apps in a real headless browser, at desktop and phone width, with stored rows checked in the database, and controls that fail."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :depends-on ("dokimasia/examples/active-search" "dokimasia" "aion/cdp" "aion/fs"
-               "com.inuoe.jzon" "fiveam")
+               "hyperion/examples/active-search-db" "mnemosyne" "com.inuoe.jzon" "fiveam")
   :serial t
   :components ((:module "examples/active-search"
                 :serial t

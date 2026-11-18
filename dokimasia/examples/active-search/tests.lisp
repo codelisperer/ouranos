@@ -1,6 +1,7 @@
 ;;;; tests.lisp --- the worked example's tests (#1028, step 4): the active-search acceptance suite
 ;;;; run against hyperion/examples/active-search in a real headless browser, at desktop width and
-;;;; at phone width, plus a control that has to fail.
+;;;; at phone width, plus a control that has to fail. Then the stored-data suite (#1282) against
+;;;; hyperion/examples/active-search-db, with its own control that has to fail at the stored check.
 ;;;;
 ;;;; When OURANOS_DOKIMASIA_EXAMPLE_OUT names a directory, the desktop run writes its report and
 ;;;; screenshots there and leaves them, so CI can upload them as a workflow artifact. Otherwise each
@@ -11,7 +12,10 @@
   (:local-nicknames (#:d #:dokimasia)
                     (#:ex #:dokimasia/examples/active-search)
                     (#:cdp #:aion/cdp)
-                    (#:jzon #:com.inuoe.jzon))
+                    (#:jzon #:com.inuoe.jzon)
+                    (#:app-db #:hyperion/examples/active-search-db)
+                    (#:be #:mnemosyne/backend)
+                    (#:conn #:mnemosyne/conn))
   (:export #:run-tests))
 
 (in-package #:dokimasia/examples/active-search/tests)
@@ -133,3 +137,79 @@ given, or else a new temporary directory that is deleted afterwards."
          (is (equal "failed" (verdict rows "example-control/wrong-first")))
          (is (eql 3 (gethash "decided-at-step" (gethash "example-control/wrong-first" rows)))
              "the row failed somewhere other than its check of the first result"))))))
+
+;;; --- stored data (#1282) ----------------------------------------------------------------------
+
+(test the-db-example-writes-each-valid-contact-and-no-invalid-one
+  (when (browser-available-p)
+    (call-with-out
+     (lambda (out)
+       (multiple-value-bind (passed report) (ex:run-db-acceptance :out out :explain nil)
+         (let ((rows (report-rows out))
+               (text (uiop:read-file-string report)))
+           (is-true passed "the run failed:~%~A" text)
+           (is (= 4 (hash-table-count rows)) "two add rows and two invalid rows: ~A" text)
+           (dolist (key '("add-contact/with-role" "add-contact/without-role"
+                          "invalid-contact/blank-name" "invalid-contact/malformed-email"))
+             (is (equal "passed" (verdict rows key)) "the row ~A: ~A" key text))))))))
+
+;; The control: a contact the form really adds, checked against a role it was not given. The row
+;; has to fail at the stored check (step 7) and nowhere earlier; if it passed, the probe would be
+;; passing whatever the database held.
+(d:define-case example-db-control
+  :rows ((:id "wrong-role" :name "Edsger Dijkstra" :email "ewd@utexas.edu" :role "Structured Programming"
+          :stored-role "Compilers"))
+  :steps ((:visit "/")
+          (:fill "#new-name" (:input :name))
+          (:fill "#new-email" (:input :email))
+          (:fill "#new-role" (:input :role))
+          (:click "#add-contact-submit")
+          (:expect-text "#results" (:input :name))
+          (:expect-stored :stored-contact (:input :name) (:input :email) (:input :stored-role))))
+
+(d:define-suite example-db-control :cases (example-db-control))
+
+(test a-row-that-expects-a-different-stored-value-fails-at-the-stored-check
+  (when (browser-available-p)
+    (call-with-out
+     (lambda (out)
+       (let ((passed (d:run :example-db-control :target (ex:db-app-target) :out out :explain nil))
+             (rows (report-rows out)))
+         (is-false passed "a row expecting the role Compilers passed")
+         (is (equal "failed" (verdict rows "example-db-control/wrong-role")))
+         (let ((row (gethash "example-db-control/wrong-role" rows)))
+           (is (eql 7 (gethash "decided-at-step" row))
+               "the row failed somewhere other than its stored check")
+           ;; The probe found the row by name and says which column differs.
+           (is (search "role = \"Structured Programming\"" (gethash "reason" row))
+               "the reason does not give the stored role: ~S" (gethash "reason" row))))))))
+
+;; The CSRF check, without a browser: a POST of a valid contact that does not carry the session's
+;; token is refused before the routes see it, and no row is written. The rows above are the other
+;; direction: the form the page renders carries the token, and its POST is accepted.
+(defun %post-env (path body file)
+  "A POST env for PATH with the urlencoded BODY, read from FILE, and no session cookie."
+  (let ((octets (sb-ext:string-to-octets body :external-format :utf-8)))
+    (with-open-file (out file :direction :output :element-type '(unsigned-byte 8)
+                              :if-exists :supersede)
+      (write-sequence octets out))
+    (list :request-method :post :path-info path :server-name "127.0.0.1" :url-scheme "http"
+          :headers (make-hash-table :test #'equal)
+          :content-type "application/x-www-form-urlencoded" :content-length (length octets)
+          :raw-body (open file :element-type '(unsigned-byte 8)))))
+
+(test the-db-example-refuses-a-post-without-its-csrf-token
+  (let ((dir (aion/fs:make-temporary-directory "dokimasia-example-csrf")))
+    (unwind-protect
+         (let* ((backend (be:make-sqlite (namestring (merge-pathnames "contacts.db" dir))))
+                (env (%post-env "/contacts" "name=Mallory&email=mallory%40example.com&role=Forger"
+                                (merge-pathnames "body" dir))))
+           (app-db:ensure-db backend)
+           (let ((response (unwind-protect (funcall (app-db:make-app backend) env)
+                             (close (getf env :raw-body)))))
+             (is (eql 403 (first response)) "the POST was answered ~S" (first response)))
+           (is (null (conn:with-connection (c backend)
+                       (conn:query c "SELECT name FROM contacts WHERE email = ?"
+                                   "mallory@example.com")))
+               "a refused POST wrote a row"))
+      (aion/fs:delete-tree dir))))
