@@ -6,8 +6,8 @@ in a headless Chrome or Edge, against an app it starts or one already deployed, 
 report. Each case and row is one FiveAM test. The design is
 [ADR-0001](docs/adr/0001-browser-driver-and-acceptance-harness.md); the work is #1028.
 
-What exists today is the harness itself (step b1 of #1028). Accessibility checks with axe-core
-and the add-ons for hyperion and mnemosyne apps are still to come.
+What exists today is the harness itself and its accessibility checks with axe-core (steps b1
+and b2 of #1028). The add-ons for hyperion and mnemosyne apps are still to come.
 
 ## A first suite
 
@@ -32,7 +32,8 @@ and the add-ons for hyperion and mnemosyne apps are still to come.
           (:select "#plan" (:input :plan))
           (:click "button[type=submit]")
           (:expect-screen (:input :screen))  ; each row names the screen it expects
-          (:screenshot "after-sign-up")))
+          (:screenshot "after-sign-up")
+          (:audit)))                          ; axe-core, in each colour scheme
 
 (d:define-suite smoke
   :cases :all
@@ -73,6 +74,7 @@ weak-password,weak@example.com,1,free,sign-up
 | `(:expect-stored probe value…)` | Asks the probe whether the app stored what it should (below). |
 | `(:expect-scroll-kept action :pane selector :scroll n)` | Runs ACTION and fails if the scroll position of PANE, or of the window, moved. |
 | `(:screenshot name)` | Writes one PNG per viewport and colour scheme, grown to the page's full height. |
+| `(:audit)` | Runs axe-core in the page once for each colour scheme and fails on a violation at or above `:serious` (below). |
 
 The steps that wait take `:timeout` in seconds; otherwise they wait `*step-timeout*` (10).
 A value is a string, a number, `(:input key)` or `(:user key)`. A step of an unknown kind, or with
@@ -95,6 +97,27 @@ Each of these fails the step it happened in, with the reason in the report:
 
 A row stops at its first failed step. Before each row the runner opens a new page and clears
 cookies and the app origin's storage, so no row sees another's session.
+
+## Accessibility
+
+`(:audit)` loads axe-core into the page and runs it once for each colour scheme of the run, so
+contrast is checked on the colours the page actually shows in each scheme. The step fails when a
+rule finds a violation at or above its impact level, and the reason names each one:
+
+```
+FAILED   sign-up new-user [ACCT-1]: step 8 (:audit): axe-core 4.14.0 found 1 violation at serious or above: dark: color-contrast (serious, 3 elements, first at .hint): Elements must meet minimum color contrast ratio thresholds
+```
+
+| Option | Default | |
+|---|---|---|
+| `:impact` | `*audit-impact*`, `:serious` | The lowest impact that fails the step: `:minor`, `:moderate`, `:serious` or `:critical`. |
+| `:ignore` | none | axe-core rule ids to turn off, such as `("region")`. An id axe-core does not know fails the step. |
+| `:timeout` | `*audit-timeout*`, 30 | Seconds axe-core may take, for each colour scheme. |
+
+axe-core 4.14.0 is vendored unmodified in `vendor/axe.min.js`, under its own licence, MPL-2.0
+(`vendor/axe.LICENSE`, and `vendor/axe.LICENSE-3RD-PARTY.txt` for the code it bundles). It is
+pinned by version and sha256 in `vendor/ASSETS.pin` and compiled into the image, so a run needs
+no network for it.
 
 ## Targets
 

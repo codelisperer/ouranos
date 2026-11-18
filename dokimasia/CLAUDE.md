@@ -23,7 +23,9 @@ The design is [ADR-0001](docs/adr/0001-browser-driver-and-acceptance-harness.md)
 work is tracked on #1028 (label `pkg:dokimasia`). Step b1 is the harness against a URL or a
 started app: `dokimasia/core` (the verdict, in Coalton) and `dokimasia` (definitions, targets,
 steps, the checks after every step, the report and the run). The user guide is
-[`README.md`](README.md). Accessibility checks (b2) and the aux systems (b3) have not landed.
+[`README.md`](README.md). Step b2 adds the `:audit` step, which runs the vendored axe-core
+(`vendor/`, pinned in `vendor/ASSETS.pin`) in the page once for each colour scheme. The aux
+systems (b3) have not landed.
 
 ## Design facts
 

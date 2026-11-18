@@ -84,7 +84,7 @@ of KEY, or (:USER key) for the signed-in user's value of KEY."
 
 (defparameter +step-kinds+
   '(:visit :fill :click :select :wait-for :expect-screen :expect-text :expect-stored
-    :expect-scroll-kept :screenshot)
+    :expect-scroll-kept :screenshot :audit)
   "The kinds of step a case can have.")
 
 (defparameter +action-kinds+ '(:visit :fill :click :select)
@@ -161,7 +161,16 @@ takes. Returns STEP."
            (unless (and (stringp name) (plusp (length name))
                         (every (lambda (c) (or (alphanumericp c) (find c "-_."))) name))
              (%invalid "the step ~S needs a name of letters, digits, -, _ and . for its file" step)))
-         (%check-options step (rest args) '())))))
+         (%check-options step (rest args) '()))
+        (:audit
+         (%check-options step args '(:impact :ignore :timeout))
+         (let ((impact (getf args :impact)) (ignore (getf args :ignore)))
+           (unless (or (null impact) (member impact '(:minor :moderate :serious :critical)))
+             (%invalid "the step ~S has the :IMPACT ~S; it is one of :minor, :moderate, :serious and :critical"
+                       step impact))
+           (unless (and (listp ignore) (every (lambda (x) (and (stringp x) (plusp (length x)))) ignore))
+             (%invalid "the step ~S has the :IGNORE ~S; it is a list of axe-core rule ids, such as (\"region\")"
+                       step ignore)))))))
   step)
 
 (defun %unpackaged (form)

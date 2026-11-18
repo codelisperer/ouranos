@@ -91,6 +91,14 @@
   (format nil "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>~A</title><style>body{font-family:sans-serif;margin:2em} @media (prefers-color-scheme: dark){body{background:#111;color:#eee}}</style></head><body>~A<script>~A</script></body></html>"
           title body script))
 
+(defun %a11y-page (title body &optional (style ""))
+  "A page for the :audit tests: it has a language, a title and the viewport line, so the only
+violations axe-core finds are the ones BODY and STYLE put there."
+  (format nil "<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>~A</title><style>~A</style></head><body>~A</body></html>"
+          title style body))
+
+(defparameter +a11y-ok+ "<main><h1 id=\"title\">Accessible</h1><p>Plain text in the main landmark.</p></main>")
+
 (defun %redirect (stream location &rest headers)
   (%respond stream 303 :headers (cons (format nil "Location: ~A" location) headers)))
 
@@ -158,6 +166,19 @@
                               (format nil "<div id=\"list\" style=\"height:200px;overflow:auto\">~{<p>item ~D</p>~}</div><button id=\"more\">More</button><button id=\"top\">Top</button>"
                                       (loop for i from 1 to 60 collect i))
                               "document.getElementById('more').onclick = () => { const l = document.getElementById('list'); for (let i = 0; i < 5; i++) { const p = document.createElement('p'); p.textContent = 'more'; l.appendChild(p); } }; document.getElementById('top').onclick = () => { document.getElementById('list').scrollTop = 0; };")))
+      ;; The :audit tests. /a11y-ok has no violation. /a11y-moderate has only moderate ones (no
+      ;; landmark, no h1). /a11y-image has an image without alt text, which axe-core rates
+      ;; critical. /a11y-dark has enough contrast in the light scheme and too little in the dark.
+      ((string= path "/a11y-ok") (%respond stream 200 :body (%a11y-page "OK" +a11y-ok+)))
+      ((string= path "/a11y-moderate")
+       (%respond stream 200 :body (%a11y-page "Moderate" "<p id=\"title\">Text outside any landmark.</p>")))
+      ((string= path "/a11y-image")
+       (%respond stream 200
+                 :body (%a11y-page "Image" "<main><h1 id=\"title\">Image</h1><img src=\"data:image/gif;base64,R0lGODlhAQABAIAAAP///wAAACwAAAAAAQABAAACAkQBADs=\" width=\"20\" height=\"20\"></main>")))
+      ((string= path "/a11y-dark")
+       (%respond stream 200
+                 :body (%a11y-page "Dark" +a11y-ok+
+                                   "body{background:#fff;color:#000} @media (prefers-color-scheme: dark){body{background:#222;color:#333}}")))
       (t (%respond stream 404 :body (%page "Not found" "<h1>Not found</h1>"))))))
 
 (defun %serve-connection (app socket)

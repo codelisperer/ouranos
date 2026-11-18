@@ -275,7 +275,8 @@ it fails."
       (:expect-text (%expect-text args) nil)
       (:expect-stored (%expect-stored args))
       (:expect-scroll-kept (%expect-scroll-kept args) nil)
-      (:screenshot (%screenshot args) nil))))
+      (:screenshot (%screenshot args) nil)
+      (:audit (%audit args) nil))))
 
 (defun %run-step (step)
   "Run STEP and the checks made after every step, in the current row. Returns the outcome kind,
