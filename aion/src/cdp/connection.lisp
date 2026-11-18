@@ -319,6 +319,17 @@ it to its page's events."
               (t (return nil))))))
   #+win32 (progn fd buffer nil))
 
+(defun %append-octets (message chunk start end)
+  "Append CHUNK's octets from START to END to MESSAGE, an adjustable vector with a fill pointer,
+in one copy, growing it at least to double its size when it is full."
+  (let* ((at (fill-pointer message))
+         (needed (+ at (- end start))))
+    (when (> needed (array-dimension message 0))
+      (setf message (adjust-array message (max needed (* 2 (array-dimension message 0))))))
+    (setf (fill-pointer message) needed)
+    (replace message chunk :start1 at :start2 start :end2 end)
+    message))
+
 (defun %pipe-read-loop (connection)
   "The reader thread's body for a pipe connection: NUL-ended messages until the browser's end
 closes. Closes the descriptor it reads when it ends."
@@ -339,8 +350,7 @@ closes. Closes the descriptor it reads when it ends."
                           (when (> (+ (fill-pointer message) (- end start)) *max-message-octets*)
                             (fail (format nil "the browser sent a message longer than ~D octets"
                                           *max-message-octets*)))
-                          (loop for i from start below end
-                                do (vector-push-extend (aref chunk i) message))
+                          (%append-octets message chunk start end)
                           (unless nul (return))
                           (let ((parsed (handler-case
                                             (jzon:parse (sb-ext:octets-to-string
