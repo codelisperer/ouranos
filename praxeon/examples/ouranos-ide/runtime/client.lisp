@@ -394,6 +394,41 @@ before the condition leaves this function."
       (unless ok
         (runtime-stop runtime)))))
 
+#+win32
+(progn
+  (defconstant +synchronize+ #x00100000
+    "The access right that lets WaitForSingleObject wait on a process handle.")
+
+  (defun %open-for-waiting (pid)
+    "A handle of our own on the process PID that can be waited on, or NIL when it cannot be
+opened. SB-EXT's own handle cannot be used for this: SBCL clears it when PROCESS-WAIT returns."
+    (let ((handle (sb-alien:alien-funcall
+                   (sb-alien:extern-alien "OpenProcess"
+                                          (function (sb-alien:unsigned #.sb-vm:n-machine-word-bits)
+                                                    (sb-alien:unsigned 32) sb-alien:int
+                                                    (sb-alien:unsigned 32)))
+                   +synchronize+ 0 pid)))
+      (and (plusp handle) handle)))
+
+  (defun %wait-and-close (handle milliseconds)
+    "Wait up to MILLISECONDS for the process HANDLE names to end, then close HANDLE.
+
+SB-EXT:PROCESS-WAIT does not wait for this on Windows: right after SB-EXT:PROCESS-KILL the status
+is already :EXITED and PROCESS-WAIT returns at once (measured on Windows 11 for #1242), while
+TerminateProcess ends the process asynchronously. On a CI runner the killed child was still listed
+by tasklist after RUNTIME-STOP returned."
+    (unwind-protect
+         (sb-alien:alien-funcall
+          (sb-alien:extern-alien "WaitForSingleObject"
+                                 (function (sb-alien:unsigned 32)
+                                           (sb-alien:unsigned #.sb-vm:n-machine-word-bits)
+                                           (sb-alien:unsigned 32)))
+          handle milliseconds)
+      (sb-alien:alien-funcall
+       (sb-alien:extern-alien "CloseHandle"
+                              (function sb-alien:int (sb-alien:unsigned #.sb-vm:n-machine-word-bits)))
+       handle))))
+
 (defun runtime-stop (runtime)
   "Kill RUNTIME's child and wait until the operating system has removed it. Safe to call
 twice. Returns the pid the child had. The child is killed, not asked to quit, because it may
@@ -407,8 +442,12 @@ be in the middle of an evaluation that would never read the request."
     (when socket (ignore-errors (sb-bsd-sockets:socket-close socket)))
     (when process
       (let ((pid (sb-ext:process-pid process)))
-        (when (sb-ext:process-alive-p process)
-          (ignore-errors (sb-ext:process-kill process 9)))
-        (sb-ext:process-wait process)
+        ;; On Windows the handle to wait on is opened before the kill (see %WAIT-AND-CLOSE).
+        (let ((waiter #+win32 (ignore-errors (%open-for-waiting pid)) #-win32 nil))
+          (declare (ignorable waiter))
+          (when (sb-ext:process-alive-p process)
+            (ignore-errors (sb-ext:process-kill process 9)))
+          (sb-ext:process-wait process)
+          #+win32 (when waiter (%wait-and-close waiter 10000)))
         (ignore-errors (sb-ext:process-close process))
         pid))))

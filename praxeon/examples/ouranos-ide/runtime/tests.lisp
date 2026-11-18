@@ -19,8 +19,9 @@
 
 (defun %process-exists-p (pid)
   "True when the operating system still lists a process with PID. A killed child that nobody
-waited for is still listed, so this is false only once the child is gone entirely. The
-Windows branch has not been run."
+waited for is still listed, so this is false only once the child is gone entirely. On Windows
+tasklist lists a killed process until Windows has finished ending it, which RUNTIME-STOP waits
+for (#1242)."
   #+unix
   (zerop (nth-value 2 (uiop:run-program (list "ps" "-p" (princ-to-string pid))
                                         :ignore-error-status t :output nil :error-output nil)))
