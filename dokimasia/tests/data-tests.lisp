@@ -110,6 +110,14 @@
   (is (equal "https://example.com" (d:target-base-url (d:url-target "https://example.com/")))
       "a trailing slash is dropped"))
 
+(test a-url-target-runs-local-probes-only-when-the-caller-says-so
+  (is (null (d:target-runs-local-probes-p (d:url-target "https://example.com")))
+      "by default the test image is not assumed to see a deployed app's store")
+  (is (eq t (d:target-runs-local-probes-p (d:url-target "https://example.com" :local-probes t))))
+  (is (eq t (d:target-runs-local-probes-p (d:url-target "https://example.com" :local-probes :yes)))
+      "any true value is stored as T")
+  (is (eq t (d:target-runs-local-probes-p (d:process-target :start (lambda () "http://x"))))))
+
 ;;; --- rows ----------------------------------------------------------------------------------
 
 (defun write-file (path text)
