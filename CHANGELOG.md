@@ -1545,6 +1545,13 @@ its tag.
 
 ### Fixed
 
+- **An `aion/cdp` command or event wait that times out signals `cdp-timeout`.** It could instead
+  signal a `simple-error`, "The current thread is not holding" the `aion/cdp state` mutex,
+  because `sb-thread:condition-wait` returns without the mutex when it times out and the wait
+  loop then waited again or released it. This affected `send`, `evaluate`, `navigate`, the other
+  commands, and `new-page`'s connection handshake. The waits now go through `%wait-on`, which
+  takes the mutex back (#1028).
+
 - **`scripts/build-libuv.lisp` refuses before downloading when a Unix machine has no C compiler**,
   as it already did on Windows, and on macOS counts the Xcode Command Line Tools as the compiler,
   so it no longer runs the `/usr/bin/cc` stub, which opens an installer dialog. The libuv

@@ -60,6 +60,17 @@ A string key reads an object, an integer key an array. JSON null reads as NIL."
 (defun %remaining (deadline)
   (/ (- deadline (get-internal-real-time)) internal-time-units-per-second))
 
+(defun %wait-on (connection seconds)
+  "Wait up to SECONDS on CONNECTION's queue, holding its state lock before and after.
+SB-THREAD:CONDITION-WAIT returns NIL without the lock when it times out, so a loop that waits
+again, or a WITH-MUTEX that releases on the way out, would act on a lock it no longer holds and
+signal \"The current thread is not holding\" (seen on the Linux CI legs). This takes the lock
+back in that case. Returns true when woken, NIL when the time ran out."
+  (let ((lock (connection-lock connection)))
+    (or (sb-thread:condition-wait (connection-queue connection) lock :timeout seconds)
+        (progn (unless (sb-thread:holding-mutex-p lock) (sb-thread:grab-mutex lock))
+               nil))))
+
 (defun %send-octets (connection octets)
   "Write all of OCTETS to CONNECTION's socket, under its write lock."
   (sb-thread:with-mutex ((connection-write-lock connection))
@@ -292,9 +303,7 @@ handshake for PATH within TIMEOUT seconds. Returns the open CONNECTION."
                (loop while (eq (connection-state connection) :handshake)
                      do (let ((left (%remaining deadline)))
                           (when (<= left 0) (return))
-                          (sb-thread:condition-wait (connection-queue connection)
-                                                    (connection-lock connection)
-                                                    :timeout left)))))
+                          (%wait-on connection left)))))
            (case (connection-state connection)
              (:open (setf ok t) connection)
              (:handshake (error 'cdp-timeout :what "The WebSocket handshake with the browser"
@@ -341,7 +350,7 @@ result object, or signals CDP-ERROR, CDP-TIMEOUT or CONNECTION-CLOSED."
                  (unless (eq (connection-state connection) :open) (return))
                  (let ((left (%remaining deadline)))
                    (when (<= left 0) (return))
-                   (sb-thread:condition-wait (connection-queue connection) lock :timeout left))))
+                   (%wait-on connection left))))
              (cond ((hash-table-p answer)
                     (let ((err (json-get answer "error")))
                       (if err
