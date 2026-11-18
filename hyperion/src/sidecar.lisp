@@ -625,10 +625,10 @@ stale. Runs on the supervisor thread. Returns how it ended, or NIL when there wa
                   (if (and next (<= (car next) (get-internal-real-time)))
                       (return (cdr (pop (sidecar-set-queue set))))
                       (aion/dynamic:timed-wait (sidecar-set-changed set) (sidecar-set-lock set)
-                                   (if next
-                                       (max 0.01 (/ (- (car next) (get-internal-real-time))
-                                                    internal-time-units-per-second))
-                                       1))))))))
+                                               (if next
+                                                   (max 0.01 (/ (- (car next) (get-internal-real-time))
+                                                                internal-time-units-per-second))
+                                                   1))))))))
       (handler-case (funcall thunk)
         (error (e) (log:warn "hyperion/sidecar: supervisor step failed" :error (type-of e)))))))
 
