@@ -119,3 +119,32 @@
                 :components ((:file "tests"))))
   :perform (test-op (o c)
              (uiop:symbol-call :dokimasia/hyperion/tests :run-tests)))
+
+;;; The worked example (#1028, step 4): an acceptance suite for hyperion's active-search example
+;;; app, run through dokimasia/hyperion. It reaches right to hyperion's examples, as the aux
+;;; system it uses does to hyperion.
+(defsystem "dokimasia/examples/active-search"
+  :description "A worked example of dokimasia: acceptance tests, as data, for hyperion's active-search example app (#1028)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  :depends-on ("dokimasia" "dokimasia/hyperion" "hyperion/examples/active-search")
+  :serial t
+  :components ((:module "examples/active-search"
+                :serial t
+                :components ((:file "acceptance")
+                             (:static-file "rows/search.csv"))))
+  :in-order-to ((test-op (test-op "dokimasia/examples/active-search/tests"))))
+
+(defsystem "dokimasia/examples/active-search/tests"
+  :description "The worked example's tests: its suite run against the app in a real headless browser, at desktop and phone width, and a control that fails."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("dokimasia/examples/active-search" "dokimasia" "aion/cdp" "aion/fs"
+               "com.inuoe.jzon" "fiveam")
+  :serial t
+  :components ((:module "examples/active-search"
+                :serial t
+                :components ((:file "tests"))))
+  :perform (test-op (o c)
+             (uiop:symbol-call :dokimasia/examples/active-search/tests :run-tests)))

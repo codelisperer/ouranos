@@ -1560,6 +1560,10 @@ its tag.
 
 ### Fixed
 
+- **dokimasia's `:screenshot` step works in a suite that sets no `:mask` or `:mask-text`**
+  (#1028). An empty list reached the page as `null`, and every screenshot in such a suite failed
+  with `TypeError: sels is not iterable`. Suites that set `:mask` were not affected.
+
 - **dokimasia's settle check no longer waits for a request of a page that a navigation replaced**
   (#1028). The browser sends no `Network.loadingFinished` or `Network.loadingFailed` for such a
   request, so a page replaced while its own `/favicon.ico` request was unanswered, as happens when
@@ -1669,6 +1673,19 @@ its tag.
     literal `<br/>` into the attribute before.
 
 ### Added
+
+- **dokimasia's worked example: acceptance tests for hyperion's active-search app, written as
+  data** (#1028, step 4). The system `dokimasia/examples/active-search` defines the screen
+  `contacts`, the case `search-contacts`, the case `contacts-page` and the suite
+  `active-search`. `search-contacts` runs once per row of
+  `dokimasia/examples/active-search/rows/search.csv`, typing a query and checking the first result
+  and the Alpine echo. `contacts-page` takes a screenshot and runs the axe-core audit. `app-target`
+  starts the app through `dokimasia/hyperion`, and `run-acceptance` runs the suite, by default at
+  desktop and phone width in the light scheme. The audit in the dark scheme is pending #1281,
+  because hyperion's dark colours for links and grey text fail it, and its test is skipped until
+  then. The tests run in the gate on every leg. When
+  `OURANOS_DOKIMASIA_EXAMPLE_OUT` names a directory, the desktop run leaves its report and
+  screenshots there, and CI uploads them as the workflow artifact `dokimasia-example-<platform>`.
 
 - **`aion/uv/process:spawn` takes `:inherit-fds`, and a file descriptor for `:stdin`,
   `:stdout` or `:stderr`** (#1028). `:inherit-fds` is a list of this process's descriptors that

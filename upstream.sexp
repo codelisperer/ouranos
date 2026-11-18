@@ -299,7 +299,8 @@
  :upstream (:github-release "actions/cache"))
 
 (:name "actions/upload-artifact" :category :ci
- :where ((:text ".github/workflows/desktop-release.yml" "uses: actions/upload-artifact@" nil)
+ :where ((:text ".github/workflows/verify.yml" "uses: actions/upload-artifact@" nil)
+         (:text ".github/workflows/desktop-release.yml" "uses: actions/upload-artifact@" nil)
          (:text ".github/workflows/windows-arm64-probe.yml" "uses: actions/upload-artifact@" nil)
          (:text ".github/workflows/libuv-prebuilt.yml" "uses: actions/upload-artifact@" nil))
  :upstream (:github-release "actions/upload-artifact"))
