@@ -32,13 +32,21 @@
                "com.inuoe.jzon"    ; report.json
                "fiveam")           ; each case and row is one FiveAM test
   :serial t
-  :components ((:module "src"
+  ;; The vendored axe-core comes before the source that embeds it, so a new axe.min.js
+  ;; recompiles src/audit.lisp rather than leaving the old text in its fasl.
+  :components ((:module "vendor"
+                :components ((:static-file "ASSETS.pin")
+                             (:static-file "axe.min.js")
+                             (:static-file "axe.LICENSE")
+                             (:static-file "axe.LICENSE-3RD-PARTY.txt")))
+               (:module "src"
                 :serial t
                 :components ((:file "packages")
                              (:file "definitions")
                              (:file "targets")
                              (:file "watch")
                              (:file "steps")
+                             (:file "audit")
                              (:file "report")
                              (:file "run"))))
   :in-order-to ((test-op (test-op "dokimasia/tests"))))
@@ -48,7 +56,8 @@
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :depends-on ("dokimasia" "dokimasia/core" "aion/cdp" "aion/secret" "aion/dynamic"
-               "com.inuoe.jzon" "fiveam" (:require :sb-bsd-sockets))
+               "com.inuoe.jzon" "fiveam" (:require :sb-bsd-sockets)
+               "ironclad")         ; the hash of the axe-core compiled into the image
   :serial t
   :components ((:module "tests"
                 :serial t

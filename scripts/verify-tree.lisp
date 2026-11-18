@@ -781,7 +781,7 @@ surfaces -- it just is not confused with a failing test."
 
 (defparameter +checkers+
   '(("check-pins.lisp" ("--report") nil
-     "every pin declares an advisory source and a review date")
+     "every pin declares an advisory source and a review date, and every vendored asset's file hashes to its pin")
     ("check-coalton.lisp" () t
      "the Coalton that LOADS is the pinned one")
     ("check-assets.lisp" () nil

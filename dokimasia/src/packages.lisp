@@ -27,7 +27,7 @@
    #:target-settle
    ;; running
    #:run #:*default-out* #:+viewports+
-   #:*settle-timeout* #:*step-timeout* #:*quiet-period*
+   #:*settle-timeout* #:*step-timeout* #:*quiet-period* #:*audit-impact* #:*audit-timeout*
    ;; for a settle check or a probe written outside this package
    #:row-page #:row-base-url #:*row*))
 

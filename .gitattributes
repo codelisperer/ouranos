@@ -35,3 +35,9 @@
 *.zip   binary
 *.woff  binary
 *.woff2 binary
+
+# Vendored third-party files are kept byte-for-byte as upstream published them, because their
+# pins record a sha256 of those bytes. Git must not convert their line endings.
+dokimasia/vendor/axe.min.js                 -text
+dokimasia/vendor/axe.LICENSE                -text
+dokimasia/vendor/axe.LICENSE-3RD-PARTY.txt  -text

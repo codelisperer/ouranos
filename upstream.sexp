@@ -131,6 +131,12 @@
          (:text "hyperion/src/assets.lisp" "(%asset :key :bulma :version \"" "\""))
  :upstream (:npm "bulma"))
 
+(:name "axe-core" :category :asset
+ :where ((:field "dokimasia/vendor/ASSETS.pin" "axe-core"))
+ :upstream (:npm "axe-core")
+ :held (:reason "4.14.1 was published on 2026-11-16, one day before this was vendored; the hub kept 4.14.0 (2026-10-05) so that a bad publish has time to be found and pulled. 4.14.1 can be taken after 2026-12-01"
+        :issue 1028))
+
 ;;; --- external APIs -----------------------------------------------------------------------
 
 (:name "Anthropic API version" :category :api

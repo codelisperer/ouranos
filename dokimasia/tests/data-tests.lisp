@@ -63,7 +63,8 @@
                               (:expect-screen :home :timeout 3) (:expect-screen (:input :screen))
                               (:expect-text "h1" "Hello") (:expect-stored :probe (:input :email) "x")
                               (:expect-scroll-kept (:click "#more") :pane "#list" :scroll 10)
-                              (:screenshot "home-page")))))
+                              (:screenshot "home-page")
+                              (:audit) (:audit :impact :moderate :ignore ("region") :timeout 20)))))
 
 (test a-malformed-step-is-refused-when-the-case-is-defined
   (refused ("not a step") (d::%define-case :t-bad :steps '((:hover "#x"))))
@@ -74,6 +75,9 @@
   (refused ("positive number") (d::%define-case :t-bad :steps '((:wait-for "#x" :timeout 0))))
   (refused ("action step") (d::%define-case :t-bad :steps '((:expect-scroll-kept (:expect-text "a" "b")))))
   (refused ("for its file") (d::%define-case :t-bad :steps '((:screenshot "../escape"))))
+  (refused (":IMPACT") (d::%define-case :t-bad :steps '((:audit :impact :high))))
+  (refused (":IGNORE") (d::%define-case :t-bad :steps '((:audit :ignore "region"))))
+  (refused ("accepts") (d::%define-case :t-bad :steps '((:audit :rules ("region")))))
   (refused ("no steps") (d::%define-case :t-bad :steps '()))
   (refused (":ROWS") (d::%define-case :t-bad :steps '((:visit "/")) :rows '((:a))))
   (is (null (d:find-case :t-bad)) "a refused case is not stored"))
@@ -164,6 +168,29 @@
   (is (equal "null" (d::%js nil)))
   (is (equal "\"a\\\"b\"" (d::%js "a\"b")))
   (is (equal "[\"#a\",\"#b\"]" (d::%js '("#a" "#b")))))
+
+;;; --- the vendored axe-core -----------------------------------------------------------------
+
+(defun %pinned-axe-sha256 ()
+  "The sha256 dokimasia/vendor/ASSETS.pin gives for axe-core."
+  (with-open-file (in (asdf:system-relative-pathname "dokimasia" "vendor/ASSETS.pin"))
+    (loop for line = (read-line in nil) while line
+          for words = (remove "" (uiop:split-string line :separator '(#\Space #\Tab)) :test #'string=)
+          when (and (equal (first words) "axe-core") (equal (third words) "sha256"))
+            return (fourth words))))
+
+(test the-axe-core-compiled-into-the-image-is-the-pinned-one
+  "The text the :audit step injects is the file ASSETS.pin pins. scripts/check-pins.lisp checks the
+file on disk; this checks what the fasl holds, which a stale build can make differ."
+  (let ((pinned (%pinned-axe-sha256))
+        (embedded (string-downcase
+                   (ironclad:byte-array-to-hex-string
+                    (ironclad:digest-sequence
+                     :sha256 (sb-ext:string-to-octets d::+axe-source+ :external-format :utf-8))))))
+    (is (= 64 (length pinned)) "the pin was read: ~S" pinned)
+    (is (equal pinned embedded))
+    (is (search "axe v4.14.0" d::+axe-source+ :end2 40)
+        "the file is the 4.14.0 release: ~S" (subseq d::+axe-source+ 0 40))))
 
 ;;; --- the report ---------------------------------------------------------------------------
 
