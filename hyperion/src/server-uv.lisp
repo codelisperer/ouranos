@@ -1853,9 +1853,9 @@ and signals UPGRADED-CLOSED."
                      do (let ((left (/ (- deadline (get-internal-real-time))
                                        internal-time-units-per-second)))
                           (when (<= left 0) (return t))
-                          (sb-thread:condition-wait (upgraded-written upgraded)
-                                                    (upgraded-lock upgraded)
-                                                    :timeout left))
+                          (aion/dynamic:timed-wait (upgraded-written upgraded)
+                                                   (upgraded-lock upgraded)
+                                                   left))
                      finally (return nil)))))
       (when timed-out
         (upgraded-close upgraded)

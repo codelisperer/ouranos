@@ -245,7 +245,7 @@ removing anything. Signals CDP-TIMEOUT, TARGET-CRASHED or CONNECTION-CLOSED."
           (error 'connection-closed :reason (connection-close-reason connection)))
         (let ((left (%remaining deadline)))
           (when (<= left 0) (error 'cdp-timeout :what what :seconds timeout))
-          (sb-thread:condition-wait (connection-queue connection) lock :timeout left))))))
+          (%wait-on connection left))))))
 
 ;;; --- commands -------------------------------------------------------------------------------
 
