@@ -122,7 +122,8 @@ no network for it.
 
 ## Targets
 
-- `(d:url-target base-url :users …)`: an app that is already running.
+- `(d:url-target base-url :users … :local-probes nil)`: an app that is already running. Set
+  `:local-probes t` when the test image can reach the store that app uses (see "Probes").
 - `(d:process-target :start fn :stop fn :users …)`: START starts the app and returns its base URL;
   STOP runs after the run, however it ended.
 
@@ -138,8 +139,18 @@ passwords in `aion/secret` values; they are revealed only when typed into the pa
 ```
 
 Each form returns true, or NIL and a reason. `:local` runs only against a target that can see the
-app's store (a process target). When the target can run neither form, the step is **not run**, with
-that reason; it is never reported as passed.
+app's store: a process target, or a URL target made with `:local-probes t`. When the target can run
+neither form, the step is **not run**, with that reason; it is never reported as passed.
+
+`:local-probes t` is for an app at a local or staging URL whose database the test machine can
+connect to, which includes an app not written in Lisp:
+
+```lisp
+(d:url-target "http://localhost:3000" :local-probes t)
+```
+
+dokimasia cannot check this. It is your statement that the store your probes read is the one the
+app at that URL uses. If it is not, the probes pass or fail on another store's data.
 
 ### Probes that read a mnemosyne database
 
@@ -170,8 +181,8 @@ the probe account-stored: accounts has no row with email = "new@example.com" and
 and passes when the query returns a row (or none, with `:absent t`). A function given as `:source` is
 called when the step runs, so it can name a database that exists only once the app has started.
 `:dialect` defaults to `mnemosyne/query:*dialect*`. A table, column or dialect mnemosyne refuses is
-refused with `invalid-definition` when the probe is defined. Both kinds are local probes; pass
-`:http` as well to run the step against a deployed URL.
+refused with `invalid-definition` when the probe is defined. Both kinds are local probes. Against a
+URL target they run only when it was made with `:local-probes t`; otherwise pass `:http` as well.
 
 ## The report
 

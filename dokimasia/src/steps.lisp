@@ -177,8 +177,8 @@ as false."
                (apply (probe-http probe) (row-page *row*) (row-base-url *row*) values))
               (t (return-from %expect-stored
                    (values :not-run
-                           (format nil "the probe ~A has no HTTP form, and its local form cannot see the store of a ~(~A~)"
-                                   (probe-name probe) (type-of target))))))
+                           (format nil "the probe ~A has no HTTP form, and its local form cannot see the store of a ~(~A~)~:[~;; a url-target made with :LOCAL-PROBES T runs it, when the test image can reach the app's store~]"
+                                   (probe-name probe) (type-of target) (typep target 'url-target))))))
       (unless ok
         (%fail "the probe ~A: ~A" (probe-name probe)
                (or why "the stored data is not as expected"))))
