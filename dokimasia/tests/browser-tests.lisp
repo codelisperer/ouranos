@@ -1,0 +1,219 @@
+;;;; browser-tests.lisp --- dokimasia runs in a real headless browser against the test app (#1028).
+;;;;
+;;;; Each test runs a whole suite through DOKIMASIA:RUN and reads its report. Without a browser
+;;;; these tests are skipped, or fail when OURANOS_REQUIRE_BROWSER=1, which CI sets. The last test
+;;;; names a browser that does not exist, so it starts no browser and runs everywhere.
+
+(in-package #:dokimasia/tests)
+
+(in-suite dokimasia)
+
+(defvar *app* nil "The test app of the run in progress.")
+
+(defparameter +alice+ '(:email "alice@example.com" :password "pw-alice" :plan "pro"))
+
+(defun app-target ()
+  "A process target that starts and stops a fresh test app with Alice signed up."
+  (d:process-target :start (lambda () (setf *app* (start-app :users (list +alice+)))
+                             (app-base-url *app*))
+                    :stop (lambda () (stop-app *app*))
+                    :users (list (list :name :alice :email "alice@example.com"
+                                       :password (secret:make-secret "pw-alice")))))
+
+(d:define-screen bt-home :path "/home" :present "#welcome")
+(d:define-screen bt-login :path "/login" :present "#login")
+
+(d:define-probe :bt-user-stored
+  :local (lambda (email plan)
+           (let ((user (app-user *app* email)))
+             (cond ((null user) (values nil (format nil "no user ~A is stored" email)))
+                   ((equal (getf user :plan) plan) t)
+                   (t (values nil (format nil "~A is stored with the plan ~A, not ~A"
+                                          email (getf user :plan) plan)))))))
+
+(d:define-probe :bt-local-only
+  :local (lambda (&rest values) (declare (ignore values)) t))
+
+;;; --- the cases a passing run is made of ---------------------------------------------------
+
+(d:define-case bt-signup
+  :requirement "SIGNUP-1"
+  :rows ((:id "free-user" :email "free@example.com" :password "pw-1" :plan "free")
+         (:id "pro-user" :email "pro@example.com" :password "pw-2" :plan "pro"))
+  :steps ((:visit "/signup")
+          (:fill "#email" (:input :email))
+          (:fill "#password" (:input :password))
+          (:select "#plan" (:input :plan))
+          (:click "#submit")
+          (:expect-screen bt-home)
+          (:expect-text "#welcome" (:input :email))
+          (:expect-stored :bt-user-stored (:input :email) (:input :plan))
+          (:screenshot "home")))
+
+(d:define-case bt-signed-in
+  :user :alice
+  :steps ((:expect-text "#welcome" "alice@example.com")))
+
+(d:define-case bt-signin-rows
+  :rows (:file "rows/signin.csv")
+  :steps ((:visit "/login")
+          (:fill "#email" (:input :email))
+          (:fill "#password" (:input :password))
+          (:click "#submit")
+          (:expect-screen (:input :screen))))
+
+(d:define-case bt-scroll-kept
+  :steps ((:visit "/pane")
+          (:expect-scroll-kept (:click "#more") :pane "#list" :scroll 300)))
+
+(d:define-case bt-known-console
+  :steps ((:visit "/known-console")
+          (:expect-text "#title" "Known")))
+
+(d:define-suite bt-passing
+  :cases (bt-signup bt-signed-in bt-signin-rows bt-scroll-kept bt-known-console)
+  :target (app-target)
+  :sign-in ((:visit "/login")
+            (:fill "#email" (:user :email))
+            (:fill "#password" (:user :password))
+            (:click "#submit")
+            (:expect-screen bt-home))
+  :ignore-console ("known noise")
+  :mask ("#clock")
+  :mask-text ("Generated at \\d+"))
+
+;;; --- the cases a failing run is made of ---------------------------------------------------
+
+(d:define-case bt-f-console :steps ((:visit "/console-error") (:expect-text "#title" "Console")))
+(d:define-case bt-f-loop :steps ((:visit "/loop")))
+(d:define-case bt-f-server-error :steps ((:visit "/server-error")))
+(d:define-case bt-f-screen
+  :steps ((:visit "/home") (:expect-screen bt-home :timeout 1) (:click "#never-reached")))
+(d:define-case bt-f-scroll
+  :steps ((:visit "/pane") (:expect-scroll-kept (:click "#top") :pane "#list" :scroll 300)))
+(d:define-case bt-f-missing
+  :steps ((:visit "/signup") (:click "#no-such-button")))
+
+(d:define-suite bt-failing
+  :cases (bt-f-console bt-f-loop bt-f-server-error bt-f-screen bt-f-scroll bt-f-missing)
+  :target (app-target)
+  :max-requests-per-url 10)
+
+;;; --- a target whose store the test image cannot see ---------------------------------------
+
+(d:define-case bt-n-local-probe
+  :steps ((:visit "/signup") (:expect-stored :bt-local-only "anything")))
+
+(d:define-suite bt-not-run :cases (bt-n-local-probe))
+
+;;; --- helpers --------------------------------------------------------------------------------
+
+(defun browser-available-p ()
+  "True when a browser can be run. Otherwise skips the test, or fails it when
+OURANOS_REQUIRE_BROWSER=1."
+  (cond ((cdp:find-browser) t)
+        ((equal (uiop:getenv "OURANOS_REQUIRE_BROWSER") "1")
+         (fail "no Chrome or Edge was found, and OURANOS_REQUIRE_BROWSER=1") nil)
+        (t (skip "no Chrome or Edge was found; set OURANOS_BROWSER to run the browser tests") nil)))
+
+(defun read-text (path)
+  (uiop:read-file-string path :external-format :utf-8))
+
+(defun report-rows (out)
+  "The rows of the report.json in OUT, keyed by \"case/row\"."
+  (let ((rows (make-hash-table :test 'equal)))
+    (loop for r across (gethash "rows" (jzon:parse (read-text (merge-pathnames "report.json" out))))
+          do (setf (gethash (format nil "~A/~A" (gethash "case" r) (gethash "row" r)) rows) r))
+    rows))
+
+(defun png-p (path)
+  (with-open-file (in path :element-type '(unsigned-byte 8))
+    (let ((head (make-array 4 :element-type '(unsigned-byte 8))))
+      (and (= 4 (read-sequence head in)) (equalp head #(137 80 78 71))))))
+
+;;; --- the tests ----------------------------------------------------------------------------
+
+(test a-suite-runs-each-case-and-row-in-the-browser-and-writes-its-report
+  (when (browser-available-p)
+    (with-temporary-directory (out "dokimasia-pass")
+      (multiple-value-bind (passed-p report)
+          (d:run :bt-passing :out out :viewports '(:desktop :phone) :schemes '(:light :dark)
+                             :explain nil)
+        (let* ((text (read-text report))
+               (lines (uiop:split-string text :separator (string #\Newline)))
+               (rows (report-rows out)))
+          (is-true passed-p "the run failed:~%~A" text)
+          (is (search "7 rows: 7 passed, 0 failed, 0 not run." (second lines)) "~A" text)
+          (is (equal "PASSED   bt-signup free-user [SIGNUP-1]" (fourth lines)))
+          (is (= 7 (hash-table-count rows)))
+          (is (equal "passed" (gethash "verdict" (gethash "bt-signin-rows/wrong-password" rows)))
+              "the row's own expected screen, from the CSV file, was the sign-in page")
+          (is (= 6 (length (gethash "steps" (gethash "bt-signed-in/row-1" rows))))
+              "the suite's five sign-in steps ran before the case's one")
+          (let ((console (gethash "console" (gethash "bt-known-console/row-1" rows))))
+            (is (= 1 (length console)))
+            (is (eq t (gethash "ignored" (aref console 0)))))
+          (let ((files (gethash "artifacts" (gethash "bt-signup/pro-user" rows))))
+            (is (= 4 (length files)) "one screenshot per viewport and scheme: ~S" files)
+            (is (every (lambda (f) (and (probe-file f) (png-p f))) files))
+            (is (some (lambda (f) (search "09-home-phone-dark.png" f)) files) "~S" files)))
+        (is (null (app-user *app* "nobody@example.com")))
+        (is (equal "pro" (getf (app-user *app* "pro@example.com") :plan)))))))
+
+(defun reason-of (rows key)
+  (or (gethash "reason" (gethash key rows) nil) ""))
+
+(test each-check-made-after-a-step-fails-the-step-with-its-reason
+  (when (browser-available-p)
+    (with-temporary-directory (out "dokimasia-fail")
+      (multiple-value-bind (passed-p report) (d:run :bt-failing :out out :explain nil)
+        (let ((rows (report-rows out))
+              (lines (uiop:split-string (read-text report) :separator (string #\Newline))))
+          (is-false passed-p)
+          (is (search "6 rows: 0 passed, 6 failed, 0 not run." (second lines)))
+          (maphash (lambda (k r) (is (equal "failed" (gethash "verdict" r)) "~A" k)) rows)
+          (is (search "console error: boom from the page" (reason-of rows "bt-f-console/row-1")))
+          (is (search "/api/ping in one step; the limit is 10" (reason-of rows "bt-f-loop/row-1"))
+              "~A" (reason-of rows "bt-f-loop/row-1"))
+          (is (search "had the status 500" (reason-of rows "bt-f-server-error/row-1"))
+              "~A" (reason-of rows "bt-f-server-error/row-1"))
+          (let ((screen (gethash "bt-f-screen/row-1" rows)))
+            (is (= 2 (gethash "decided-at-step" screen)))
+            (is (search "is not the screen bt-home" (reason-of rows "bt-f-screen/row-1")))
+            (is (= 2 (length (gethash "steps" screen))) "the steps after a failure are not run"))
+          (is (search "moved from 300 to 0" (reason-of rows "bt-f-scroll/row-1"))
+              "~A" (reason-of rows "bt-f-scroll/row-1"))
+          (is (search "nothing matched #no-such-button" (reason-of rows "bt-f-missing/row-1"))
+              "~A" (reason-of rows "bt-f-missing/row-1")))))))
+
+(test a-local-probe-against-a-url-target-is-not-run-rather-than-passed
+  (when (browser-available-p)
+    (let ((app (start-app)))
+      (unwind-protect
+           (with-temporary-directory (out "dokimasia-not-run")
+             (let ((*app* app))
+               (multiple-value-bind (passed-p report)
+                   (d:run :bt-not-run :target (d:url-target (app-base-url app)) :out out
+                                      :explain nil)
+                 (let ((text (read-text report)))
+                   (is-true passed-p "no step failed")
+                   (is (search "1 row: 0 passed, 0 failed, 1 not run." text) "~A" text)
+                   (is (search "NOT RUN  bt-n-local-probe row-1: step 2" text) "~A" text)
+                   (is (search "cannot see the store of a url-target" text) "~A" text)))))
+        (stop-app app)))))
+
+(test a-browser-that-cannot-start-fails-every-row-with-the-reason
+  (let ((app (start-app)))
+    (unwind-protect
+         (with-temporary-directory (out "dokimasia-no-start")
+           (with-env ("OURANOS_BROWSER" "/nonexistent/dokimasia-test-browser")
+             (multiple-value-bind (passed-p report)
+                 (d:run :bt-not-run :target (d:url-target (app-base-url app)) :out out
+                                    :explain nil)
+               (let ((text (read-text report)))
+                 (is-false passed-p)
+                 (is (search "FAILED   bt-n-local-probe row-1: step 1 starting the target and the browser"
+                             text)
+                     "~A" text)
+                 (is (search "dokimasia-test-browser" text) "~A" text)))))
+      (stop-app app))))
