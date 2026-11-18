@@ -14,6 +14,19 @@ its tag.
 
 ### An app may have to act
 
+- **`aion/cdp:launch-browser` reaches the browser over a pipe by default on Linux and macOS**
+  (#1028, step (c) of dokimasia ADR-0001). Its `:transport` argument is now `:pipe` or `:port`.
+  `:pipe` starts the browser with `--remote-debugging-pipe` through `aion/uv/process`, and opens
+  no debugging port, so no other local process can connect to the browser while it runs. `:port`
+  is the old behaviour: `--remote-debugging-port=0`, read back from `DevToolsActivePort`. **On
+  Windows the default stays `:port`**, and `:pipe` signals an error there, until the second part
+  of step (c) lands. The pipe needs libuv: on Linux or macOS without it, `launch-browser` signals
+  an error that names `scripts/build-libuv.lisp` and `:transport :port`, and does not fall back to
+  the port by itself. An app that runs `aion/cdp` or dokimasia on a machine without libuv builds
+  it or passes `:transport :port`. `browser-command-line` takes the same `:transport` argument.
+  `aion/cdp` now depends on `aion/uv`, `aion/uv/process` and the SBCL contrib `sb-posix` on Linux
+  and macOS.
+
 - **`hyperion/websocket` is now `aion/websocket`** (#1028). The pure WebSocket system from #376
   moved to aion, with its package: the system `hyperion/websocket` and its suite
   `hyperion/websocket/tests` are now `aion/websocket` and `aion/websocket/tests`, the package
@@ -1655,6 +1668,11 @@ its tag.
 
 ### Added
 
+- **`aion/uv/process:spawn` takes `:inherit-fds`, and a file descriptor for `:stdin`,
+  `:stdout` or `:stderr`** (#1028). `:inherit-fds` is a list of this process's descriptors that
+  the child receives as its descriptors 3, 4 and so on, in order; a descriptor given for a
+  standard stream becomes that stream in the child, such as a file opened for appending its
+  standard error. The caller keeps its own copies and closes them.
 - **`dokimasia`, acceptance tests for an app in a browser, written as data** (#1028, dokimasia
   ADR-0001), a new satellite. `define-screen`, `define-case` (steps, plus rows inline or from a
   CSV or s-expression file through `:rows (:file "…")`), `define-suite` and `define-probe` define

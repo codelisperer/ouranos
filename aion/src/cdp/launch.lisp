@@ -1,9 +1,15 @@
 ;;;; launch.lisp --- finding a browser, its command line, and its process (#1028).
 ;;;;
-;;;; The browser is started headless, with a fresh profile in a temporary directory, and with
-;;;; --remote-debugging-port=0 so the operating system picks a free port. The browser writes the
-;;;; port and its WebSocket path into DevToolsActivePort in the profile, and LAUNCH-BROWSER reads
-;;;; them from there. Two runs on one machine cannot race for a port this way.
+;;;; The browser is started headless, with a fresh profile in a temporary directory, and is
+;;;; reached in one of two ways (dokimasia ADR-0001, step (c)):
+;;;;
+;;;; - :PIPE, the default on Linux and macOS: --remote-debugging-pipe. The browser is started
+;;;;   through aion/uv/process with two pipes as its descriptors 3 and 4, and no debugging port
+;;;;   is opened, so no other local process can reach it. On Windows this transport is the
+;;;;   second part of step (c), and :PORT stays the default there until it lands.
+;;;; - :PORT: --remote-debugging-port=0, so the operating system picks a free port. The browser
+;;;;   writes the port and its WebSocket path into DevToolsActivePort in the profile, and
+;;;;   LAUNCH-BROWSER reads them from there. Two runs on one machine cannot race for a port.
 ;;;;
 ;;;; The process cannot outlive a crashed image: on Windows it runs in a kill-on-close job
 ;;;; object, and on Linux it is started through `setpriv --pdeathsig KILL' when setpriv is
@@ -110,9 +116,14 @@ credential-store dialog on the machine it runs on. BROWSER-COMMAND-LINE uses it,
 tests that run a browser themselves, so a switch added here reaches every launch site."
   (append (list "--no-first-run" "--no-default-browser-check") +keychain-switches+))
 
-(defun browser-command-line (executable profile &key arguments)
+(defparameter +default-transport+ #-win32 :pipe #+win32 :port
+  "The transport LAUNCH-BROWSER uses when it is given none: :PIPE on Linux and macOS, and :PORT on
+Windows until the pipe transport is done there (#1028, step (c)).")
+
+(defun browser-command-line (executable profile &key arguments (transport +default-transport+))
   "The command line LAUNCH-BROWSER runs, as a list of strings starting with EXECUTABLE. It
-includes FIXED-BROWSER-SWITCHES, so the browser opens no credential-store dialog.
+includes FIXED-BROWSER-SWITCHES, so the browser opens no credential-store dialog. TRANSPORT is
+:PIPE for --remote-debugging-pipe or :PORT for --remote-debugging-port=0.
 
 PROFILE is the profile directory, as a native name. ARGUMENTS are the caller's extra arguments,
 checked by CHECK-BROWSER-ARGUMENTS. They come before the switches this function sets, because
@@ -121,7 +132,9 @@ when Chromium is given a switch twice the last one counts."
   (append (list executable)
           arguments
           (list "--headless=new"
-                "--remote-debugging-port=0"
+                (ecase transport
+                  (:pipe "--remote-debugging-pipe")
+                  (:port "--remote-debugging-port=0"))
                 (concatenate 'string "--user-data-dir=" profile))
           (fixed-browser-switches)
           (list "about:blank")))
@@ -156,17 +169,94 @@ STDERR-FILE. Returns the platform's process object."
                         :wait nil :input nil :output nil
                         :error stderr-file :if-error-exists :append)))
 
+#-win32
+(defstruct (piped-process (:constructor %make-piped-process (process loop)))
+  "A browser started for the pipe transport: its aion/uv/process PROCESS, and the event LOOP,
+with its own thread, that started it and reports its exit."
+  process loop)
+
+#-win32
+(defun %pipe-pair ()
+  "A new pipe, as its read and write descriptors, both closed on exec, so a process this image
+starts later does not inherit them. The browser gets its ends through uv_spawn, which makes the
+copy it hands the child without that flag."
+  (multiple-value-bind (read write) (sb-posix:pipe)
+    (dolist (fd (list read write))
+      (sb-posix:fcntl fd sb-posix:f-setfd 1))   ; FD_CLOEXEC is 1 on Linux and macOS
+    (values read write)))
+
+#-win32
+(defun %spawn-piped (command-line stderr-file)
+  "Start COMMAND-LINE, which has --remote-debugging-pipe, with standard input and output
+discarded, standard error appended to STDERR-FILE, and two new pipes as its descriptors 3 and 4.
+Returns a PIPED-PROCESS, the descriptor to write commands to, and the one to read answers from.
+On Linux the browser is started through setpriv, as %SPAWN does; setpriv execs the browser, which
+keeps the descriptors. The kernel sends --pdeathsig's signal when the thread that started the
+process ends, and that thread is the loop thread here, so the browser is killed if the loop
+thread stops while it runs, as well as when this process exits. %RELEASE stops the loop thread
+only after the browser has exited."
+  (let* ((setpriv (%setpriv))
+         (line (if setpriv
+                   (list* setpriv "--pdeathsig" "KILL" "--" command-line)
+                   command-line))
+         (loop (handler-case (uv:make-loop)
+                 (aion/uv/ffi:libuv-not-found (c)
+                   (error "aion/cdp's pipe transport starts the browser through libuv, which was not found. Build it with scripts/build-libuv.lisp, or pass :TRANSPORT :PORT to LAUNCH-BROWSER.~%~A"
+                          c))))
+         (fds '()) (spawned nil))
+    (unwind-protect
+         (multiple-value-bind (child-read our-write) (%pipe-pair)
+           (push child-read fds) (push our-write fds)
+           (multiple-value-bind (our-read child-write) (%pipe-pair)
+             (push our-read fds) (push child-write fds)
+             (let ((stderr (sb-posix:open (uiop:native-namestring stderr-file)
+                                          (logior sb-posix:o-wronly sb-posix:o-creat
+                                                  sb-posix:o-append)
+                                          #o600))
+                   (future (uv:make-future)))
+               (push stderr fds)
+               (sb-posix:fcntl stderr sb-posix:f-setfd 1)
+               (uv:start-loop-thread loop :name "aion/cdp browser process")
+               (uv:submit loop
+                          (lambda ()
+                            (handler-case
+                                (uv:fulfill future
+                                            (proc:spawn loop (first line)
+                                                        :arguments (rest line)
+                                                        :stdin :ignore :stdout :ignore
+                                                        :stderr stderr
+                                                        :inherit-fds (list child-read child-write)))
+                              (error (e) (uv:fail-future future e)))))
+               (let ((process (uv:await future :timeout 30)))
+                 (setf spawned (%make-piped-process process loop)
+                       fds (list child-read child-write stderr))
+                 (values spawned our-write our-read)))))
+      ;; The child's ends and the stderr file are the child's now, or nobody's.
+      (dolist (fd fds) (ignore-errors (sb-posix:close fd)))
+      (unless spawned (%release-loop loop)))))
+
+#-win32
+(defun %release-loop (loop)
+  (ignore-errors (uv:stop-loop-thread loop))
+  (ignore-errors (uv:close-loop loop)))
+
 (defun %pid (p)
   #+win32 (aion/windows:job-process-pid p)
-  #-win32 (sb-ext:process-pid p))
+  #-win32 (if (piped-process-p p)
+              (proc:process-pid (piped-process-process p))
+              (sb-ext:process-pid p)))
 
 (defun %alive-p (p)
   #+win32 (aion/windows:job-process-alive-p p)
-  #-win32 (sb-ext:process-alive-p p))
+  #-win32 (if (piped-process-p p)
+              (proc:process-running-p (piped-process-process p))
+              (sb-ext:process-alive-p p)))
 
 (defun %exit-code (p)
   #+win32 (aion/windows:job-process-exit-code p)
-  #-win32 (and (not (sb-ext:process-alive-p p)) (sb-ext:process-exit-code p)))
+  #-win32 (cond ((%alive-p p) nil)
+                ((piped-process-p p) (proc:exit-status (piped-process-process p)))
+                (t (sb-ext:process-exit-code p))))
 
 (defun %wait-for-exit (p seconds)
   "Wait up to SECONDS for P to exit. Returns whether it has."
@@ -174,7 +264,7 @@ STDERR-FILE. Returns the platform's process object."
   #-win32
   (let ((deadline (+ (get-internal-real-time)
                      (round (* seconds internal-time-units-per-second)))))
-    (loop (unless (sb-ext:process-alive-p p) (return t))
+    (loop (unless (%alive-p p) (return t))
           (when (> (get-internal-real-time) deadline) (return nil))
           (sleep 0.05))))
 
@@ -182,14 +272,22 @@ STDERR-FILE. Returns the platform's process object."
   "End P now, and release what holds it."
   #+win32 (progn (ignore-errors (aion/windows:job-process-terminate p))
                  (aion/windows:job-process-close p))
-  #-win32 (progn (when (sb-ext:process-alive-p p) (ignore-errors (sb-ext:process-kill p 9)))
+  #-win32 (progn (when (%alive-p p)
+                   (if (piped-process-p p)
+                       (let ((process (piped-process-process p)))
+                         (ignore-errors
+                          (uv:submit (piped-process-loop p)
+                                     (lambda () (ignore-errors (proc:kill process :kill))))))
+                       (ignore-errors (sb-ext:process-kill p 9))))
                  (%wait-for-exit p 5)
-                 (sb-ext:process-close p)))
+                 (%release p)))
 
 (defun %release (p)
   "Release what holds P, which has exited."
   #+win32 (aion/windows:job-process-close p)
-  #-win32 (sb-ext:process-close p))
+  #-win32 (if (piped-process-p p)
+              (%release-loop (piped-process-loop p))
+              (sb-ext:process-close p)))
 
 (defun %file-tail (path &optional (octets 2000))
   "The last OCTETS octets of the file at PATH, as text, or an empty string."
