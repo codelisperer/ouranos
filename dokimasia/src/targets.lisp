@@ -29,8 +29,9 @@ ends, and only when TARGET-START returned.")
 
 (defgeneric target-runs-local-probes-p (target)
   (:documentation "Whether a probe's LOCAL form, which reads the app's store from the test image,
-checks the store TARGET uses. True only when the harness started the app in a way that makes it
-so.")
+checks the store TARGET uses. True for a process target, and for a URL target made with
+:LOCAL-PROBES T, which is the caller's statement that the test image can reach the deployed app's
+store.")
   (:method ((target target)) nil))
 
 (defgeneric target-settle (target page timeout)
@@ -58,16 +59,24 @@ network one."))
 ;;; --- a deployed app ------------------------------------------------------------------------
 
 (defclass url-target (target)
-  ((base-url :initarg :base-url :reader target-base-url))
+  ((base-url :initarg :base-url :reader target-base-url)
+   (local-probes :initarg :local-probes :initform nil :reader %url-local-probes))
   (:documentation "An app already running at a base URL, such as staging after a deploy."))
 
-(defun url-target (base-url &key users)
+(defun url-target (base-url &key users local-probes)
   "A target for the app at BASE-URL. USERS are the users a case can sign in as; keep their
-passwords in AION/SECRET:SECRET values. A probe's LOCAL form does not run against this target,
-because the test image cannot see the deployed app's store."
-  (make-instance 'url-target :base-url (%check-base-url base-url) :users (%check-users users)))
+passwords in AION/SECRET:SECRET values.
+
+A probe's LOCAL form runs against this target only when LOCAL-PROBES is true. Set it when the test
+image can reach the store the app at BASE-URL uses, for example a local or staging app whose
+database the test machine can connect to. dokimasia cannot check this: it is the caller's
+statement, and a local form pointed at another store passes or fails on that store's data."
+  (make-instance 'url-target :base-url (%check-base-url base-url) :users (%check-users users)
+                             :local-probes (and local-probes t)))
 
 (defmethod target-start ((target url-target)) (target-base-url target))
+
+(defmethod target-runs-local-probes-p ((target url-target)) (%url-local-probes target))
 
 ;;; --- an app the harness starts -------------------------------------------------------------
 

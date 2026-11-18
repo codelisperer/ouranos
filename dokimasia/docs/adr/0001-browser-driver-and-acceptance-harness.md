@@ -224,6 +224,11 @@ the probe and runs it in the test image. It has no database code of its own.
 - Against a `url-target`, a step whose probe has no HTTP form is reported as **not run**,
   with that reason, and never as passed. The report counts not-run steps separately, so a
   smaller check is not mistaken for a passing one.
+- Amended 2026-11-18 (#1028): a `url-target` made with `:local-probes t` runs a probe's local
+  form. The caller sets it to say that the test image can reach the store the app at that
+  URL uses, such as a local or staging app whose database the test machine can connect to.
+  dokimasia cannot check this claim. The default is NIL, so the rule above holds unless the
+  caller says otherwise.
 
 **Screenshots.**
 - Viewports are `:desktop` (1280×800) and `:phone` (390×844, mobile, scale factor 2), and
