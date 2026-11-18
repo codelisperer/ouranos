@@ -310,6 +310,19 @@
     (is (equal "Fake/1.0" (cdp:json-get (cdp:send browser "Browser.getVersion") "product"))
         "the connection still works after a timeout")))
 
+(test a-timed-out-wait-still-holds-the-state-lock
+  "SB-THREAD:CONDITION-WAIT gives up the lock when it times out. %WAIT-ON must take it back, or the
+caller's next wait or its WITH-MUTEX acts on a lock it does not hold."
+  (let* ((connection (cdp::%make-connection nil "test"))
+         (lock (cdp::connection-lock connection)))
+    (sb-thread:with-mutex (lock)
+      (let ((results (loop repeat 50
+                           collect (list (cdp::%wait-on connection 0.0001)
+                                         (sb-thread:holding-mutex-p lock)))))
+        (is (every #'null (mapcar #'first results)) "nothing woke it, so each wait timed out")
+        (is (every #'second results) "the lock is held after every timed-out wait")))
+    (is (not (sb-thread:holding-mutex-p lock)) "WITH-MUTEX released it on the way out")))
+
 (test events-reach-their-page-in-order-and-drain
   (with-fake (fake browser)
     (let ((page (cdp:new-page browser :timeout 5)))
