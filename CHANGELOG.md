@@ -14,6 +14,19 @@ its tag.
 
 ### An app may have to act
 
+- **`aion/cdp:launch-browser` reaches the browser over a pipe by default on Linux and macOS**
+  (#1028, step (c) of dokimasia ADR-0001). Its `:transport` argument is now `:pipe` or `:port`.
+  `:pipe` starts the browser with `--remote-debugging-pipe` through `aion/uv/process`, and opens
+  no debugging port, so no other local process can connect to the browser while it runs. `:port`
+  is the old behaviour: `--remote-debugging-port=0`, read back from `DevToolsActivePort`. **On
+  Windows the default stays `:port`**, and `:pipe` signals an error there, until the second part
+  of step (c) lands. The pipe needs libuv: on Linux or macOS without it, `launch-browser` signals
+  an error that names `scripts/build-libuv.lisp` and `:transport :port`, and does not fall back to
+  the port by itself. An app that runs `aion/cdp` or dokimasia on a machine without libuv builds
+  it or passes `:transport :port`. `browser-command-line` takes the same `:transport` argument.
+  `aion/cdp` now depends on `aion/uv`, `aion/uv/process` and the SBCL contrib `sb-posix` on Linux
+  and macOS.
+
 - **`hyperion/websocket` is now `aion/websocket`** (#1028). The pure WebSocket system from #376
   moved to aion, with its package: the system `hyperion/websocket` and its suite
   `hyperion/websocket/tests` are now `aion/websocket` and `aion/websocket/tests`, the package
@@ -1545,6 +1558,20 @@ its tag.
 
 ### Fixed
 
+- **dokimasia's settle check no longer waits for a request of a page that a navigation replaced**
+  (#1028). The browser sends no `Network.loadingFinished` or `Network.loadingFailed` for such a
+  request, so a page replaced while its own `/favicon.ico` request was unanswered, as happens when
+  a form's response redirects, failed the step with "the page did not settle within 10 seconds:
+  1 request still in flight, such as .../favicon.ico". On `Page.frameNavigated`, the requests that
+  the frame's earlier documents made are no longer counted as in flight.
+- **dokimasia no longer fails every step against an app that has no `/favicon.ico`** (#1028).
+  The browser asks for `/favicon.ico` by itself for a page that links no icon, and the 404 it got
+  was logged as a network error, which failed the step. That log error is now listed in the
+  report with `"ignored": true` and fails nothing. Nothing in the request's events says the
+  browser made it, so dokimasia reads the page: when the page has a `<link rel="icon">`, a
+  missing `/favicon.ico` or any other missing icon still fails the step. A response of 500 or
+  more for `/favicon.ico` also still fails it.
+
 - **`hyperion/server-uv`'s `upgraded-wait-writable` signals `upgraded-closed` when its timeout
   runs out.** It could instead signal a `simple-error`, "The current thread is not holding" the
   connection's mutex, the same defect as in `aion/cdp` below. It now waits through
@@ -1641,6 +1668,11 @@ its tag.
 
 ### Added
 
+- **`aion/uv/process:spawn` takes `:inherit-fds`, and a file descriptor for `:stdin`,
+  `:stdout` or `:stderr`** (#1028). `:inherit-fds` is a list of this process's descriptors that
+  the child receives as its descriptors 3, 4 and so on, in order; a descriptor given for a
+  standard stream becomes that stream in the child, such as a file opened for appending its
+  standard error. The caller keeps its own copies and closes them.
 - **`dokimasia`, acceptance tests for an app in a browser, written as data** (#1028, dokimasia
   ADR-0001), a new satellite. `define-screen`, `define-case` (steps, plus rows inline or from a
   CSV or s-expression file through `:rows (:file "…")`), `define-suite` and `define-probe` define
@@ -1671,6 +1703,22 @@ its tag.
   backend, a pool, or a function that returns one when the step runs. Both are local probes, so
   against a `url-target` the step is reported as not run unless the target was made with
   `:local-probes t` or the probe is also given an `:http` form.
+- **`dokimasia/hyperion`: a dokimasia target for a hyperion app** (#1028, dokimasia ADR-0001),
+  an aux system. `hyperion-target` makes a scratch SQLite database in a new temporary directory,
+  calls `:setup` and `:seed` with its mnemosyne backend (and the target's `:users`), calls `:app`
+  with it to get the Ring handler, and starts that with `hyperion/server` on a free port
+  (`:server` picks the backend). After the run it stops the server, calls `:teardown` and deletes
+  the database, also when starting failed part way. Its settle check also waits until htmx has no
+  request in flight and no swap still settling, through a listener installed in every page.
+  With `:sign-in :session`, a case's user is signed in by adding a session to the app's store
+  (`:session-store`, with data from `:session-data`) and setting its cookie, instead of through
+  the suite's `:sign-in` steps; `:form`, the default, uses the steps. `current-database` gives a
+  probe's `:source` the running target's database, and local probes run against it.
+- **dokimasia: a target can prepare each page and sign a user in itself** (#1028). The generic
+  functions `target-prepare-page`, called on each row's new page before its first step, and
+  `target-sign-in`, which returns how it signed the user in or NIL to have the suite's `:sign-in`
+  steps run, are exported for targets defined outside dokimasia, as are `row-target` and
+  `row-user`. Both do nothing for the core's own targets.
 - **dokimasia's `url-target` takes `:local-probes`** (#1028). With `:local-probes t`, a probe's
   `:local` form runs against an app already running at a URL, such as a local or staging app,
   including one not written in Lisp, whose database the test machine can reach;

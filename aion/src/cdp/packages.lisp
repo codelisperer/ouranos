@@ -13,7 +13,9 @@
   (:use #:cl)
   (:local-nicknames (#:ws #:aion/websocket)
                     (#:jzon #:com.inuoe.jzon)
-                    (#:log #:aion/log))
+                    (#:log #:aion/log)
+                    #-win32 (#:uv #:aion/uv)
+                    #-win32 (#:proc #:aion/uv/process))
   (:documentation
    "A client for the Chrome DevTools Protocol, for Chrome and Edge.
 

@@ -24,12 +24,12 @@
    ;; targets
    #:target #:url-target #:process-target
    #:target-start #:target-stop #:target-base-url #:target-users #:target-runs-local-probes-p
-   #:target-settle
+   #:target-settle #:target-prepare-page #:target-sign-in
    ;; running
    #:run #:*default-out* #:+viewports+
    #:*settle-timeout* #:*step-timeout* #:*quiet-period* #:*audit-impact* #:*audit-timeout*
    ;; for a settle check or a probe written outside this package
-   #:row-page #:row-base-url #:*row*))
+   #:row-page #:row-base-url #:row-target #:row-user #:*row*))
 
 (cl:defpackage #:dokimasia/generated
   (:use)

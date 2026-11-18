@@ -2,8 +2,8 @@
 ;;;;
 ;;;; A satellite attached at aion (dokimasia ADR-0001, #1028). The core systems depend only on
 ;;;; aion and external libraries, and nothing in the dependency line depends on them. The aux
-;;;; systems that know one framework may reach right: dokimasia/mnemosyne is here, and
-;;;; dokimasia/hyperion comes in a later step.
+;;;; systems that know one framework may reach right: dokimasia/mnemosyne and
+;;;; dokimasia/hyperion.
 
 (defsystem "dokimasia/core"
   :description "The typed core of dokimasia: step results and how they combine into a row's verdict (#1028)."
@@ -92,3 +92,30 @@
                 :components ((:file "tests"))))
   :perform (test-op (o c)
              (uiop:symbol-call :dokimasia/mnemosyne/tests :run-tests)))
+
+(defsystem "dokimasia/hyperion"
+  :description "A dokimasia target for a hyperion app: started on a free port with a scratch SQLite database and seeded users, a settle check that waits for htmx, and sign-in through a session in the app's store (#1028)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  :depends-on ("dokimasia" "aion/cdp" "aion/fs" "hyperion" "hyperion/test-ports" "mnemosyne")
+  :serial t
+  :components ((:module "src/hyperion"
+                :serial t
+                :components ((:file "packages")
+                             (:file "target"))))
+  :in-order-to ((test-op (test-op "dokimasia/hyperion/tests"))))
+
+(defsystem "dokimasia/hyperion/tests"
+  :description "dokimasia/hyperion's tests: a small hyperion app started by the target, run in a real headless browser where one is found."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("dokimasia/hyperion" "dokimasia/mnemosyne" "dokimasia" "aion/cdp" "aion/fs" "hyperion"
+               "hyperion/assets" "hyperion/test-ports" "mnemosyne" "com.inuoe.jzon" "fiveam"
+               "clack-handler-hunchentoot") ; the server the test app runs on, as hyperion's tests use
+  :serial t
+  :components ((:module "tests/hyperion"
+                :serial t
+                :components ((:file "tests"))))
+  :perform (test-op (o c)
+             (uiop:symbol-call :dokimasia/hyperion/tests :run-tests)))

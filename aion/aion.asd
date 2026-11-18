@@ -294,7 +294,8 @@
 
 (defsystem "aion/uv/process/tests"
   :description "Tests for aion/uv/process. Requires a built libuv (scripts/build-libuv.lisp)."
-  :depends-on ("aion/uv/process" "aion/uv" "aion/uv/net" "fiveam")  ; uv-process.lisp calls both
+  :depends-on ("aion/uv/process" "aion/uv" "aion/uv/net" "fiveam"  ; uv-process.lisp calls both
+               (:feature (:not :win32) (:require :sb-posix)))  ; pipes for the INHERIT-FDS test
   :serial t
   :components ((:module "tests"
                 :serial t
@@ -982,7 +983,11 @@
   :version "0.0.0"
   :depends-on ("aion/websocket" "aion/random" "aion/dynamic" "aion/log" "aion/fs"
                "com.inuoe.jzon" (:require :sb-bsd-sockets)
-               (:feature :win32 "aion/windows"))
+               (:feature :win32 "aion/windows")
+               ;; The pipe transport (#1028, step (c)) starts the browser through libuv, which is
+               ;; loaded on first use, so aion/cdp still loads on a machine without it.
+               (:feature (:not :win32) "aion/uv") (:feature (:not :win32) "aion/uv/process")
+               (:feature (:not :win32) (:require :sb-posix)))
   :serial t
   :components ((:module "src/cdp"
                 :serial t
@@ -998,7 +1003,8 @@
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :depends-on ("aion/cdp" "aion/websocket" "aion/fs" "fiveam" "com.inuoe.jzon"
-               (:require :sb-bsd-sockets) (:feature :win32 "aion/windows"))
+               (:require :sb-bsd-sockets) (:feature :win32 "aion/windows")
+               (:feature (:not :win32) "aion/uv"))  ; to skip the browser checks without libuv
   :serial t
   :components ((:module "tests/cdp"
                 :serial t
