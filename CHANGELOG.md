@@ -1669,8 +1669,14 @@ its tag.
   other columns' stored values in the rows that match the first column. `define-query-probe`
   runs a mnemosyne query built from the step's values by a function. `:source` is a mnemosyne
   backend, a pool, or a function that returns one when the step runs. Both are local probes, so
-  against a `url-target` the step is reported as not run unless the probe is also given an
-  `:http` form.
+  against a `url-target` the step is reported as not run unless the target was made with
+  `:local-probes t` or the probe is also given an `:http` form.
+- **dokimasia's `url-target` takes `:local-probes`** (#1028). With `:local-probes t`, a probe's
+  `:local` form runs against an app already running at a URL, such as a local or staging app,
+  including one not written in Lisp, whose database the test machine can reach;
+  `target-runs-local-probes-p` returns it. The default is NIL, and then such a step is reported
+  as not run, as before, with a reason that names `:local-probes t`. dokimasia cannot check
+  that the store is the app's: setting it is the caller's statement.
 - **`scripts/check-pins.lisp` checks the bytes of every vendored asset** (#1028). Each asset
   block of an `ASSETS.pin` file must name its `file`, and that file must hash to the sha256 or
   sha384 on the asset's first line; a missing file, a missing `file` line or a different hash
