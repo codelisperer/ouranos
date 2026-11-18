@@ -93,7 +93,10 @@ Each of these fails the step it happened in, with the reason in the report:
 
 - a console error, a failed `console.assert`, an uncaught exception, or a log entry at error level,
   which includes Content-Security-Policy violations, unless the suite lists it in
-  `:ignore-console` (matched as a substring);
+  `:ignore-console` (matched as a substring). The log error for the browser's own request for
+  `/favicon.ico` is not counted when the page links no icon, because the page did not ask for it;
+  the report lists it with `"ignored": true`. A page that links an icon that is missing, including
+  one at `/favicon.ico`, still fails;
 - a response with status 500 or more from the app's own origin;
 - more than `:max-requests-per-url` (20) requests to one URL during one step, which catches a fetch,
   poll or resubmit loop.

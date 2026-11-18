@@ -1545,6 +1545,14 @@ its tag.
 
 ### Fixed
 
+- **dokimasia no longer fails every step against an app that has no `/favicon.ico`** (#1028).
+  The browser asks for `/favicon.ico` by itself for a page that links no icon, and the 404 it got
+  was logged as a network error, which failed the step. That log error is now listed in the
+  report with `"ignored": true` and fails nothing. Nothing in the request's events says the
+  browser made it, so dokimasia reads the page: when the page has a `<link rel="icon">`, a
+  missing `/favicon.ico` or any other missing icon still fails the step. A response of 500 or
+  more for `/favicon.ico` also still fails it.
+
 - **`hyperion/server-uv`'s `upgraded-wait-writable` signals `upgraded-closed` when its timeout
   runs out.** It could instead signal a `simple-error`, "The current thread is not holding" the
   connection's mutex, the same defect as in `aion/cdp` below. It now waits through

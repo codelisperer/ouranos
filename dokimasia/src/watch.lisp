@@ -5,7 +5,8 @@
 ;;;; made to each URL during the step, which catch a fetch, poll or resubmit loop; same-origin
 ;;;; responses of 500 or more; and console errors, uncaught exceptions and log errors, which
 ;;;; include Content-Security-Policy violations. Each of the last three fails the step it
-;;;; happened in, unless the suite lists a console message as known.
+;;;; happened in, unless the suite lists a console message as known, or the log error is about the
+;;;; request for /favicon.ico that the browser makes by itself for a page that links no icon.
 
 (in-package #:dokimasia)
 
@@ -74,6 +75,24 @@
     (unless ignored
       (push (format nil "~A: ~A" kind message) (row-step-problems row)))))
 
+(defparameter +page-links-an-icon+
+  "document.querySelector('link[rel~=\"icon\" i]') ? 'linked' : 'none'"
+  "An expression that is \"none\" when the page has no <link rel=\"icon\">.")
+
+(defun %browser-favicon-request-p (row url)
+  "True when URL is the request for /favicon.ico at the target's origin that the browser makes by
+itself, which it does only for a page that links no icon. Nothing in the request's events tells it
+apart from a request the page made (both have the initiator type \"other\"), so this reads the
+page: when the page links an icon, a request for /favicon.ico came from the page and is checked
+like any other. When the page cannot be read, the request is checked too."
+  (and (stringp url)
+       (row-origin row)
+       (string-equal (subseq url 0 (or (position-if (lambda (c) (member c '(#\? #\#))) url)
+                                       (length url)))
+                     (format nil "~A/favicon.ico" (row-origin row)))
+       (row-page row)
+       (equal "none" (ignore-errors (cdp:evaluate (row-page row) +page-links-an-icon+ :timeout 2)))))
+
 (defun %handle-event (row event)
   (let ((method (cdp:event-method event))
         (params (cdp:event-params event)))
@@ -114,9 +133,16 @@
                              "")))
       ((string= method "Log.entryAdded")
        (when (equal (cdp:json-get params "entry" "level") "error")
-         (%console-finding row (format nil "log error (~A)"
-                                       (or (cdp:json-get params "entry" "source") "unknown"))
-                           (or (cdp:json-get params "entry" "text") "")))))))
+         (let ((kind (format nil "log error (~A)"
+                             (or (cdp:json-get params "entry" "source") "unknown")))
+               (text (or (cdp:json-get params "entry" "text") "")))
+           (if (and (equal (cdp:json-get params "entry" "source") "network")
+                    (%browser-favicon-request-p row (cdp:json-get params "entry" "url")))
+               ;; Kept in the report, but it fails no step: the app did not ask for it.
+               (push (list :kind kind :message text :ignored t
+                           :why "the browser's own request for /favicon.ico; the page links no icon")
+                     (row-console row))
+               (%console-finding row kind text))))))))
 
 (defun %pump (row)
   "Read ROW's page's events since the last call into ROW."
