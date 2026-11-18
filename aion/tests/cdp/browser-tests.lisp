@@ -119,11 +119,10 @@ DevToolsActivePort while it ran, and the product the browser reported."
                  t)
             (cdp:browser-version browser))))
 
-(test the-default-transport-is-the-pipe-on-linux-and-macos-and-opens-no-port
+(test the-default-transport-is-the-pipe-and-opens-no-port
   (let ((exe (%browser-or-skip)))
     (when exe
-      (is (eq #-win32 :pipe #+win32 :port aion/cdp::+default-transport+))
-      #-win32
+      (is (eq :pipe aion/cdp::+default-transport+))
       (multiple-value-bind (port-file product) (%launch-and-ask exe :pipe)
         (is (null port-file) "a browser on the pipe writes no DevToolsActivePort")
         (is (stringp product))))))
@@ -139,7 +138,7 @@ DevToolsActivePort while it ran, and the product the browser reported."
   ;; A program that exits at once, standing in for a browser that crashes on start.
   (let ((exe #+win32 (or (ignore-errors (aion/windows:find-executable "whoami")) "C:/Windows/System32/whoami.exe")
              #-win32 (or (probe-file "/usr/bin/false") (probe-file "/bin/false"))))
-    (dolist (transport '(#-win32 :pipe :port))
+    (dolist (transport '(:pipe :port))
       (signals cdp:browser-exited
         (cdp:launch-browser :executable (uiop:native-namestring exe) :timeout 20
                             :transport transport)))))

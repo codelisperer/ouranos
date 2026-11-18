@@ -14,16 +14,18 @@ its tag.
 
 ### An app may have to act
 
-- **`aion/cdp:launch-browser` reaches the browser over a pipe by default on Linux and macOS**
-  (#1028, step (c) of dokimasia ADR-0001). Its `:transport` argument is now `:pipe` or `:port`.
-  `:pipe` starts the browser with `--remote-debugging-pipe` through `aion/uv/process`, and opens
-  no debugging port, so no other local process can connect to the browser while it runs. `:port`
-  is the old behaviour: `--remote-debugging-port=0`, read back from `DevToolsActivePort`. **On
-  Windows the default stays `:port`**, and `:pipe` signals an error there, until the second part
-  of step (c) lands. The pipe needs libuv: on Linux or macOS without it, `launch-browser` signals
-  an error that names `scripts/build-libuv.lisp` and `:transport :port`, and does not fall back to
-  the port by itself. An app that runs `aion/cdp` or dokimasia on a machine without libuv builds
-  it or passes `:transport :port`. `browser-command-line` takes the same `:transport` argument.
+- **`aion/cdp:launch-browser` reaches the browser over a pipe by default on Linux, macOS and
+  Windows** (#1028, step (c) of dokimasia ADR-0001). Its `:transport` argument is now `:pipe` or
+  `:port`. `:pipe` starts the browser with `--remote-debugging-pipe` and opens no debugging port,
+  so no other local process can connect to the browser while it runs. On Linux and macOS the
+  browser is started through `aion/uv/process`. On Windows it is started by
+  `aion/windows:spawn-in-job`, in its kill-on-close job as before, with the two pipes passed as
+  its C runtime descriptors 3 and 4. `:port` is the old behaviour: `--remote-debugging-port=0`,
+  read back from `DevToolsActivePort`. On Linux and macOS the pipe needs libuv: without it,
+  `launch-browser` signals an error that names `scripts/build-libuv.lisp` and `:transport :port`,
+  and does not fall back to the port by itself. An app that runs `aion/cdp` or dokimasia on Linux
+  or macOS without libuv builds it or passes `:transport :port`. On Windows the pipe needs no
+  libuv. `browser-command-line` takes the same `:transport` argument.
   `aion/cdp` now depends on `aion/uv`, `aion/uv/process` and the SBCL contrib `sb-posix` on Linux
   and macOS.
 
@@ -1673,6 +1675,12 @@ its tag.
   the child receives as its descriptors 3, 4 and so on, in order; a descriptor given for a
   standard stream becomes that stream in the child, such as a file opened for appending its
   standard error. The caller keeps its own copies and closes them.
+- **`aion/windows:spawn-in-job` takes `:inherit-handles`** (#1028). It is a list of raw handles,
+  such as pipe ends from `sb-unix:unix-pipe`, that the process gets as its C runtime descriptors
+  3, 4 and so on, in order. They are passed in `STARTUPINFO`'s `lpReserved2`, the way the
+  Microsoft C runtime passes descriptors to a child, so a program built with that runtime finds
+  them with `_get_osfhandle`, and they are added to the list of handles the process inherits.
+  Each is inheritable only during the call. The caller keeps its own copies and closes them.
 - **`dokimasia`, acceptance tests for an app in a browser, written as data** (#1028, dokimasia
   ADR-0001), a new satellite. `define-screen`, `define-case` (steps, plus rows inline or from a
   CSV or s-expression file through `:rows (:file "…")`), `define-suite` and `define-probe` define
