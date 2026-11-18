@@ -329,7 +329,9 @@ caller's next wait or its WITH-MUTEX acts on a lock it does not hold."
       (let ((results (loop repeat 50
                            collect (list (cdp::%wait-on connection 0.0001)
                                          (sb-thread:holding-mutex-p lock)))))
-        (is (every #'null (mapcar #'first results)) "nothing woke it, so each wait timed out")
+        ;; CONDITION-WAIT may return true without a notify (a spurious wakeup), so a single wait
+        ;; returning true is not a defect. What has to hold is that waits time out at all.
+        (is (some #'null (mapcar #'first results)) "nothing woke it, so the waits timed out")
         (is (every #'second results) "the lock is held after every timed-out wait")))
     (is (not (sb-thread:holding-mutex-p lock)) "WITH-MUTEX released it on the way out")))
 
