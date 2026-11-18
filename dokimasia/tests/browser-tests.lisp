@@ -106,6 +106,21 @@
 
 (d:define-suite bt-not-run :cases (bt-n-local-probe))
 
+;;; --- the :audit step -------------------------------------------------------------------------
+
+(d:define-case bt-a-ok :steps ((:visit "/a11y-ok") (:audit :impact :minor)))
+(d:define-case bt-a-moderate :steps ((:visit "/a11y-moderate") (:audit)))
+(d:define-case bt-a-moderate-strict :steps ((:visit "/a11y-moderate") (:audit :impact :moderate)))
+(d:define-case bt-a-image :steps ((:visit "/a11y-image") (:audit)))
+(d:define-case bt-a-image-ignored :steps ((:visit "/a11y-image") (:audit :ignore ("image-alt"))))
+(d:define-case bt-a-dark :steps ((:visit "/a11y-dark") (:audit)))
+(d:define-case bt-a-unknown-rule :steps ((:visit "/a11y-ok") (:audit :ignore ("no-such-rule"))))
+
+(d:define-suite bt-audit
+  :cases (bt-a-ok bt-a-moderate bt-a-moderate-strict bt-a-image bt-a-image-ignored bt-a-dark
+          bt-a-unknown-rule)
+  :target (app-target))
+
 ;;; --- helpers --------------------------------------------------------------------------------
 
 (defun browser-available-p ()
@@ -201,6 +216,41 @@ OURANOS_REQUIRE_BROWSER=1."
                    (is (search "NOT RUN  bt-n-local-probe row-1: step 2" text) "~A" text)
                    (is (search "cannot see the store of a url-target" text) "~A" text)))))
         (stop-app app)))))
+
+(test the-audit-step-fails-on-violations-at-or-above-its-impact-in-each-colour-scheme
+  (when (browser-available-p)
+    (with-temporary-directory (out "dokimasia-audit")
+      (multiple-value-bind (passed-p report)
+          (d:run :bt-audit :out out :viewports '(:desktop) :schemes '(:light :dark) :explain nil)
+        (let ((rows (report-rows out))
+              (text (read-text report)))
+          (flet ((verdict (key) (gethash "verdict" (gethash key rows)))
+                 (reason (key) (reason-of rows key)))
+            (is-false passed-p)
+            (is (search "7 rows: 3 passed, 4 failed, 0 not run." text) "~A" text)
+            (is (equal "passed" (verdict "bt-a-ok/row-1"))
+                "a page with no violation passes even at :minor: ~A" (reason "bt-a-ok/row-1"))
+            (is (equal "passed" (verdict "bt-a-moderate/row-1"))
+                "moderate violations pass at the default, :serious: ~A" (reason "bt-a-moderate/row-1"))
+            (is (equal "failed" (verdict "bt-a-moderate-strict/row-1")))
+            (is (search "region (moderate" (reason "bt-a-moderate-strict/row-1"))
+                "~A" (reason "bt-a-moderate-strict/row-1"))
+            (is (equal "failed" (verdict "bt-a-image/row-1")))
+            (is (search "image-alt (critical, 1 element, first at img)" (reason "bt-a-image/row-1"))
+                "~A" (reason "bt-a-image/row-1"))
+            (is (search "axe-core 4.14.0 found 2 violations" (reason "bt-a-image/row-1"))
+                "one for each colour scheme: ~A" (reason "bt-a-image/row-1"))
+            (is (equal "passed" (verdict "bt-a-image-ignored/row-1"))
+                "a rule in :ignore is not run: ~A" (reason "bt-a-image-ignored/row-1"))
+            (let ((dark (reason "bt-a-dark/row-1")))
+              (is (equal "failed" (verdict "bt-a-dark/row-1")))
+              (is (search "dark: color-contrast (serious" dark) "~A" dark)
+              (is (not (search "light:" dark)) "the light scheme has enough contrast: ~A" dark))
+            (is (equal "failed" (verdict "bt-a-unknown-rule/row-1"))
+                "a rule id axe-core does not know is not ignored silently: ~A"
+                (reason "bt-a-unknown-rule/row-1"))
+            (is (search "no-such-rule" (reason "bt-a-unknown-rule/row-1"))
+                "~A" (reason "bt-a-unknown-rule/row-1"))))))))
 
 (test a-browser-that-cannot-start-fails-every-row-with-the-reason
   (let ((app (start-app)))

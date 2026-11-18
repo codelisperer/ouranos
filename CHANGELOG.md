@@ -1557,6 +1557,13 @@ its tag.
   commands, and `new-page`'s connection handshake. The waits now go through `%wait-on`, which
   takes the mutex back (#1028).
 
+- **hyperion/server: `start`'s readiness check no longer reads stale octets after a failed
+  receive on Windows** (#1259). SBCL on Windows can return a count of 4294967295, recv's -1, from
+  `sb-bsd-sockets:socket-receive` instead of signalling. The check read that as data and added up
+  to 1024 octets left over from its previous receive to the reply in which it looks for its
+  nonce. A count that is not between 1 and the buffer's length now ends the read. Nothing an app
+  calls changes.
+
 - **`scripts/build-libuv.lisp` refuses before downloading when a Unix machine has no C compiler**,
   as it already did on Windows, and on macOS counts the Xcode Command Line Tools as the compiler,
   so it no longer runs the `/usr/bin/cc` stub, which opens an installer dialog. The libuv
@@ -1646,6 +1653,19 @@ its tag.
   requests to one URL; `:ignore-console` lists known messages. `:expect-stored` with a probe the
   target cannot run is reported as not run. Without a browser the tests are skipped, or fail when
   `OURANOS_REQUIRE_BROWSER=1`. The user guide is `dokimasia/README.md`.
+- **dokimasia's `:audit` step checks a page's accessibility with axe-core** (#1028, dokimasia
+  ADR-0001). It runs axe-core in the page once for each colour scheme of the run, so contrast is
+  checked on the colours the page shows in each, and fails when a rule finds a violation at or
+  above `:impact` (`:minor`, `:moderate`, `:serious` or `:critical`; default
+  `dokimasia:*audit-impact*`, `:serious`). `:ignore` lists axe-core rule ids to turn off, and
+  `:timeout` defaults to `dokimasia:*audit-timeout*` (30 seconds). The failure names each rule,
+  its impact, the scheme, how many elements and the first of them. axe-core 4.14.0 (MPL-2.0) is
+  vendored unmodified in `dokimasia/vendor/` with its licence, pinned in
+  `dokimasia/vendor/ASSETS.pin`, and compiled into the image.
+- **`scripts/check-pins.lisp` checks the bytes of every vendored asset** (#1028). Each asset
+  block of an `ASSETS.pin` file must name its `file`, and that file must hash to the sha256 or
+  sha384 on the asset's first line; a missing file, a missing `file` line or a different hash
+  fails the check. `hyperion/assets/vendor/ASSETS.pin` passes unchanged.
 
 - **`aion/dynamic:timed-wait`** waits on an `sb-thread` waitqueue for at most a number of
   seconds and always returns holding the mutex: true when woken, NIL when the time ran out.
