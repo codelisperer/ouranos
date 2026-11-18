@@ -315,13 +315,6 @@ it was recorded with, and delete the record. A record whose image still runs is 
                  (sb-unix:unix-kill pid 9))
                (ignore-errors (delete-file file))))))))
 
-(defun %timed-wait (queue mutex seconds)
-  "CONDITION-WAIT on QUEUE for up to SECONDS, holding MUTEX again when it returns. SBCL returns from
-a wait that timed out without the mutex, so a loop that waits again would wait without it."
-  (sb-thread:condition-wait queue mutex :timeout seconds)
-  (unless (sb-thread:holding-mutex-p mutex)
-    (sb-thread:grab-mutex mutex)))
-
 ;;; --- one running sidecar ------------------------------------------------------------------
 ;;;
 ;;; GENERATIONS. Each launch and each deliberate stop of a sidecar's process increments its
@@ -571,7 +564,7 @@ stale. Runs on the supervisor thread. Returns how it ended, or NIL when there wa
           (unless (eq state :starting) (return state)))
         (let ((left (/ (- deadline (get-internal-real-time)) internal-time-units-per-second)))
           (when (<= left 0) (return :timeout))
-          (%timed-wait (sidecar-changed s) (sidecar-lock s) left))))))
+          (aion/dynamic:timed-wait (sidecar-changed s) (sidecar-lock s) left))))))
 
 (defun %stop-one (s)
   "Stop S for good: no restart, no further launch. Runs on the supervisor thread."
@@ -631,7 +624,7 @@ stale. Runs on the supervisor thread. Returns how it ended, or NIL when there wa
                 (let ((next (first (sidecar-set-queue set))))
                   (if (and next (<= (car next) (get-internal-real-time)))
                       (return (cdr (pop (sidecar-set-queue set))))
-                      (%timed-wait (sidecar-set-changed set) (sidecar-set-lock set)
+                      (aion/dynamic:timed-wait (sidecar-set-changed set) (sidecar-set-lock set)
                                    (if next
                                        (max 0.01 (/ (- (car next) (get-internal-real-time))
                                                     internal-time-units-per-second))
