@@ -1545,6 +1545,18 @@ its tag.
 
 ### Fixed
 
+- **`hyperion/server-uv`'s `upgraded-wait-writable` signals `upgraded-closed` when its timeout
+  runs out.** It could instead signal a `simple-error`, "The current thread is not holding" the
+  connection's mutex, the same defect as in `aion/cdp` below. It now waits through
+  `aion/dynamic:timed-wait` (#1267).
+
+- **An `aion/cdp` command or event wait that times out signals `cdp-timeout`.** It could instead
+  signal a `simple-error`, "The current thread is not holding" the `aion/cdp state` mutex,
+  because `sb-thread:condition-wait` returns without the mutex when it times out and the wait
+  loop then waited again or released it. This affected `send`, `evaluate`, `navigate`, the other
+  commands, and `new-page`'s connection handshake. The waits now go through `%wait-on`, which
+  takes the mutex back (#1028).
+
 - **`scripts/build-libuv.lisp` refuses before downloading when a Unix machine has no C compiler**,
   as it already did on Windows, and on macOS counts the Xcode Command Line Tools as the compiler,
   so it no longer runs the `/usr/bin/cc` stub, which opens an installer dialog. The libuv
@@ -1621,6 +1633,26 @@ its tag.
     literal `<br/>` into the attribute before.
 
 ### Added
+
+- **`dokimasia`, acceptance tests for an app in a browser, written as data** (#1028, dokimasia
+  ADR-0001), a new satellite. `define-screen`, `define-case` (steps, plus rows inline or from a
+  CSV or s-expression file through `:rows (:file "…")`), `define-suite` and `define-probe` define
+  them; a malformed step signals `invalid-definition` when the case is defined. `run` runs a suite
+  against a `url-target` or a `process-target` in a headless browser through `aion/cdp`, as one
+  FiveAM test per case and row, and writes `report.txt` and `report.json` to `:out` (default
+  `build/dokimasia/`), with screenshots per viewport (`:desktop`, `:phone`) and colour scheme.
+  After every step it fails the step on a console error, an uncaught exception, a log entry at
+  error level, a same-origin response of 500 or more, or more than `:max-requests-per-url`
+  requests to one URL; `:ignore-console` lists known messages. `:expect-stored` with a probe the
+  target cannot run is reported as not run. Without a browser the tests are skipped, or fail when
+  `OURANOS_REQUIRE_BROWSER=1`. The user guide is `dokimasia/README.md`.
+
+- **`aion/dynamic:timed-wait`** waits on an `sb-thread` waitqueue for at most a number of
+  seconds and always returns holding the mutex: true when woken, NIL when the time ran out.
+  A bare `sb-thread:condition-wait` with `:timeout` returns without the mutex when it times out.
+  `aion/schedule`, `aion/cdp`, `hyperion/sidecar`, `hyperion/server-uv` and `mnemosyne`'s pool
+  checkout now use it in place of their own copies, and a sweep in `aion/dynamic`'s tests fails
+  on a timed `sb-thread:condition-wait` anywhere else in a framework's source (#1267).
 
 - **`aion/cdp`, a Chrome DevTools Protocol client** (#1028, dokimasia ADR-0001), opt-in.
   `find-browser` names the browser: `OURANOS_BROWSER`, then `HYPERION_SMOKE_BROWSER`, then PATH

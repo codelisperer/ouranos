@@ -20,7 +20,10 @@ systems, which may reach right:
 - `dokimasia/elenchon`: cases derived from an elenchon decision table.
 
 The design is [ADR-0001](docs/adr/0001-browser-driver-and-acceptance-harness.md), and the
-work is tracked on #1028 (label `pkg:dokimasia`). No code has landed yet.
+work is tracked on #1028 (label `pkg:dokimasia`). Step b1 is the harness against a URL or a
+started app: `dokimasia/core` (the verdict, in Coalton) and `dokimasia` (definitions, targets,
+steps, the checks after every step, the report and the run). The user guide is
+[`README.md`](README.md). Accessibility checks (b2) and the aux systems (b3) have not landed.
 
 ## Design facts
 
@@ -39,5 +42,6 @@ work is tracked on #1028 (label `pkg:dokimasia`). No code has landed yet.
 
 ## Where to look
 
-[`docs/adr/`](docs/adr/README.md) · #1028 · `aion/cdp` and `aion/websocket` once step (a)
-lands.
+[`docs/adr/`](docs/adr/README.md) · #1028 · `aion/cdp` and `aion/websocket` ·
+`src/core/core.lisp` (the verdict rule) · `src/run.lisp` (one FiveAM test per case and row) ·
+`tests/server.lisp` (the HTTP app the browser tests run against).
