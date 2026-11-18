@@ -80,8 +80,8 @@ AION/DYNAMIC:TIMED-WAIT. Returns true when woken, NIL when the time ran out."
   (and (connection-out-fd connection) t))
 
 (defun %write-fd (fd octets)
-  "Write all of OCTETS to the descriptor FD."
-  #-win32
+  "Write all of OCTETS to the descriptor FD. On Windows FD is the pipe's handle, which SBCL's
+SB-UNIX functions take there."
   (let ((at 0) (n (length octets)))
     (sb-sys:with-pinned-objects (octets)
       (loop while (< at n)
@@ -90,10 +90,7 @@ AION/DYNAMIC:TIMED-WAIT. Returns true when woken, NIL when the time ran out."
                  (cond ((and written (plusp written)) (incf at written))
                        ((eql errno sb-unix:eintr))
                        (t (error 'connection-closed
-                                 :reason "the browser's command pipe refused a write")))))))
-  #+win32
-  (error "aion/cdp's pipe transport is not available on Windows yet (#1028, step (c)); write ~D octets to ~S"
-         (length octets) fd))
+                                 :reason "the browser's command pipe refused a write"))))))))
 
 (defun %send-message (connection text)
   "Send TEXT, one CDP message, on CONNECTION: as a WebSocket text frame, or followed by a NUL
@@ -149,8 +146,7 @@ the reader's receive. Idempotent; the first reason is kept."
     nil))
 
 (defun %close-fd (fd)
-  #-win32 (ignore-errors (sb-unix:unix-close fd))
-  #+win32 (declare (ignore fd)))
+  (ignore-errors (sb-unix:unix-close fd)))
 
 ;;; --- what the reader does with a message ---------------------------------------------
 
@@ -309,15 +305,14 @@ it to its page's events."
 
 (defun %read-fd (fd buffer)
   "Read into BUFFER from the descriptor FD, waiting until something arrives. Returns the count,
-0 at the end of the stream, or NIL when the read failed."
-  #-win32
+0 at the end of the stream, or NIL when the read failed. On Windows a pipe whose other end has
+closed reads as the end of the stream."
   (sb-sys:with-pinned-objects (buffer)
     (loop
       (multiple-value-bind (n errno) (sb-unix:unix-read fd (sb-sys:vector-sap buffer) (length buffer))
         (cond (n (return n))
               ((eql errno sb-unix:eintr))
-              (t (return nil))))))
-  #+win32 (progn fd buffer nil))
+              (t (return nil)))))))
 
 (defun %append-octets (message chunk start end)
   "Append CHUNK's octets from START to END to MESSAGE, an adjustable vector with a fill pointer,

@@ -3,10 +3,11 @@
 ;;;; The browser is started headless, with a fresh profile in a temporary directory, and is
 ;;;; reached in one of two ways (dokimasia ADR-0001, step (c)):
 ;;;;
-;;;; - :PIPE, the default on Linux and macOS: --remote-debugging-pipe. The browser is started
-;;;;   through aion/uv/process with two pipes as its descriptors 3 and 4, and no debugging port
-;;;;   is opened, so no other local process can reach it. On Windows this transport is the
-;;;;   second part of step (c), and :PORT stays the default there until it lands.
+;;;; - :PIPE, the default: --remote-debugging-pipe. The browser gets two pipes as its descriptors
+;;;;   3 and 4, and no debugging port is opened, so no other local process can reach it. On Linux
+;;;;   and macOS it is started through aion/uv/process. On Windows it is started by
+;;;;   aion/windows:spawn-in-job, which passes the pipes as C runtime descriptors and keeps the
+;;;;   browser in its kill-on-close job from before it runs.
 ;;;; - :PORT: --remote-debugging-port=0, so the operating system picks a free port. The browser
 ;;;;   writes the port and its WebSocket path into DevToolsActivePort in the profile, and
 ;;;;   LAUNCH-BROWSER reads them from there. Two runs on one machine cannot race for a port.
@@ -116,9 +117,8 @@ credential-store dialog on the machine it runs on. BROWSER-COMMAND-LINE uses it,
 tests that run a browser themselves, so a switch added here reaches every launch site."
   (append (list "--no-first-run" "--no-default-browser-check") +keychain-switches+))
 
-(defparameter +default-transport+ #-win32 :pipe #+win32 :port
-  "The transport LAUNCH-BROWSER uses when it is given none: :PIPE on Linux and macOS, and :PORT on
-Windows until the pipe transport is done there (#1028, step (c)).")
+(defparameter +default-transport+ :pipe
+  "The transport LAUNCH-BROWSER uses when it is given none: :PIPE, on Linux, macOS and Windows.")
 
 (defun browser-command-line (executable profile &key arguments (transport +default-transport+))
   "The command line LAUNCH-BROWSER runs, as a list of strings starting with EXECUTABLE. It
@@ -184,6 +184,37 @@ copy it hands the child without that flag."
     (dolist (fd (list read write))
       (sb-posix:fcntl fd sb-posix:f-setfd 1))   ; FD_CLOEXEC is 1 on Linux and macOS
     (values read write)))
+
+#+win32
+(defun %pipe-pair ()
+  "A new pipe, as its read and write handles. SB-UNIX:UNIX-PIPE calls CreatePipe with no security
+attributes, so neither handle is inheritable, and a process this image starts later does not get
+them. SPAWN-IN-JOB makes the browser's ends inheritable for its own call only."
+  (sb-unix:unix-pipe))
+
+#+win32
+(defun %spawn-piped (command-line stderr-file)
+  "Start COMMAND-LINE, which has --remote-debugging-pipe, in a kill-on-close job with standard
+input and output discarded, standard error appended to STDERR-FILE, and two new pipes as its C
+runtime descriptors 3 and 4. Returns the JOB-PROCESS, the handle to write commands to, and the one
+to read answers from."
+  (let ((handles '()) (spawned nil))
+    (unwind-protect
+         (multiple-value-bind (child-read our-write) (%pipe-pair)
+           (push child-read handles) (push our-write handles)
+           (multiple-value-bind (our-read child-write) (%pipe-pair)
+             (push our-read handles) (push child-write handles)
+             (let ((process (aion/windows:spawn-in-job
+                             (first command-line) (rest command-line)
+                             :input nil :output nil
+                             :error (uiop:native-namestring stderr-file)
+                             :inherit-handles (list child-read child-write)
+                             :if-no-job :error)))
+               (setf spawned process
+                     handles (list child-read child-write))
+               (values process our-write our-read))))
+      ;; The child's ends are the child's now, or nobody's.
+      (dolist (h handles) (ignore-errors (sb-unix:unix-close h))))))
 
 #-win32
 (defun %spawn-piped (command-line stderr-file)

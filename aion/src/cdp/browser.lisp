@@ -41,20 +41,18 @@ set the headless mode, the debugging port or pipe, or the profile. BROWSER-COMMA
 the exact command line. TIMEOUT is how many seconds the browser has to start and answer.
 
 TRANSPORT is how this process reaches the browser:
-- :PIPE, the default on Linux and macOS: --remote-debugging-pipe, through aion/uv/process. No
-  debugging port is opened, so no other local process can reach the browser. It needs libuv;
-  without it LAUNCH-BROWSER signals an error naming :PORT, and does not fall back by itself.
-- :PORT, the default on Windows until the pipe transport is done there (#1028, step (c)):
-  --remote-debugging-port=0, read back from the profile's DevToolsActivePort. Any local
+- :PIPE, the default: --remote-debugging-pipe. No debugging port is opened, so no other local
+  process can reach the browser. On Linux and macOS the browser is started through
+  aion/uv/process, which needs libuv; without it LAUNCH-BROWSER signals an error naming :PORT,
+  and does not fall back by itself. On Windows it is started by aion/windows:spawn-in-job,
+  which needs no libuv.
+- :PORT: --remote-debugging-port=0, read back from the profile's DevToolsActivePort. Any local
   process can connect to that port while the browser runs.
 
 Signals BROWSER-NOT-FOUND, BROWSER-EXITED or CDP-TIMEOUT. On any failure the process is ended
 and its profile deleted. CLOSE-BROWSER ends a browser that started; WITH-BROWSER calls it."
   (unless (member transport '(:pipe :port))
     (error "LAUNCH-BROWSER's transport is :PIPE or :PORT; got ~S." transport))
-  #+win32
-  (when (eq transport :pipe)
-    (error "LAUNCH-BROWSER's pipe transport is not available on Windows yet (#1028, step (c)); use :TRANSPORT :PORT."))
   (check-browser-arguments arguments)
   (let ((exe (or executable (find-browser) (error 'browser-not-found))))
     (unless (probe-file (uiop:parse-native-namestring exe))
@@ -72,13 +70,10 @@ and its profile deleted. CLOSE-BROWSER ends a browser that started; WITH-BROWSER
                           exe (string-right-trim "/\\" (uiop:native-namestring profile))
                           :arguments arguments :transport transport)))
                (ecase transport
-                 #-win32
                  (:pipe
                   (multiple-value-bind (p to-browser from-browser) (%spawn-piped line stderr)
                     (setf process p
                           connection (%open-pipe-connection from-browser to-browser))))
-                 #+win32
-                 (:pipe)
                  (:port
                   (setf process (%spawn line stderr))
                   (multiple-value-bind (port path)

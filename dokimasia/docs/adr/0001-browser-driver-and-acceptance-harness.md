@@ -11,6 +11,9 @@
   - `hyperion/websocket` moves to `aion/websocket` now.
   - Pipe transport is the third step of the work, and becomes the default for browsers the
     harness launches.
+- **2026-11-18 (issue comment 6977600580):** on Windows the pipe transport passes the pipes as
+  C runtime descriptors through `lpReserved2`, and the browser stays inside
+  `aion/windows:spawn-in-job`. See the amendment under "Launching".
 
 In Athens the dokimasia was the examination a person passed before taking office. This
 library examines an app before it is released.
@@ -93,6 +96,17 @@ nothing about what a test is.
 
     After step (c), a caller gets the port only by asking for it (`:transport :port`), for
     example on a machine without libuv. The driver never falls back to the port by itself.
+
+    Amended 2026-11-18 (#1028): on Windows the browser for the pipe transport is started by
+    `aion/windows:spawn-in-job`, not by `aion/uv/process`. libuv's `uv_spawn` starts the
+    process running, so the browser could be put in its kill-on-close job only after it had
+    started, and a process the browser starts before that is outside the job and outlives a
+    crashed test image. `spawn-in-job` creates the process suspended, puts it in the job, and
+    only then lets it run. It passes the two pipes as the browser's C runtime descriptors 3 and
+    4 in `STARTUPINFO`'s `lpReserved2`, the block the Microsoft C runtime reads at startup and
+    the same one libuv writes, and names them in the list of handles the browser inherits. The
+    pipe transport therefore needs no libuv on Windows. On Linux and macOS the browser is still
+    started through `aion/uv/process`.
   - Process lifetime follows `hyperion/sidecar`, so a crashed test image cannot leave a
     browser running:
     - on Windows, a kill-on-close job object (`aion/windows:spawn-in-job`);
@@ -120,7 +134,7 @@ nothing about what a test is.
     `aion/windows` on Windows;
   - `com.inuoe.jzon`, `cl-base64`, and the SBCL contribs `sb-bsd-sockets` and
     `sb-concurrency`;
-  - from step (c), `aion/uv/process`.
+  - from step (c), `aion/uv/process` on Linux and macOS.
 
   Every one is already loaded somewhere in aion, so there is **no new external
   dependency**.
@@ -335,8 +349,9 @@ never built.
 - aion gains two systems that must work on all three platforms. The placement rule already
   accepts that cost for aion's other bindings, and both systems are opt-in, so core aion
   stays `coalton` + `alexandria`.
-- After step (c), launching a browser through dokimasia needs libuv. `scripts/setup.sh` and
-  `scripts/setup.ps1` build it by default since #504.
+- After step (c), launching a browser through dokimasia needs libuv on Linux and macOS.
+  `scripts/setup.sh` and `scripts/setup.ps1` build it by default since #504. On Windows it does
+  not (amendment of 2026-11-18, under "Launching").
 - Each runner has its own browser version, so screenshots are only comparable within one
   platform. Option 3 in #1028, a pinned Chromium, was ruled out for that cost.
 - A browser run is slow. `url-target` exists so that an app can run its cases after a deploy
