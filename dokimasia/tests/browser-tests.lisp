@@ -212,6 +212,23 @@ OURANOS_REQUIRE_BROWSER=1."
         (is (null (app-user *app* "nobody@example.com")))
         (is (equal "pro" (getf (app-user *app* "pro@example.com") :plan)))))))
 
+;; A suite with no :MASK or :MASK-TEXT. Its lists are empty, which reach the page as null; a
+;; screenshot once failed there with "sels is not iterable" (#1028, found by the worked example).
+(d:define-case bt-unmasked-screenshot
+  :steps ((:visit "/signup") (:screenshot "plain")))
+
+(d:define-suite bt-unmasked :cases (bt-unmasked-screenshot) :target (app-target))
+
+(test a-screenshot-works-in-a-suite-with-nothing-to-mask
+  (when (browser-available-p)
+    (with-temporary-directory (out "dokimasia-unmasked")
+      (multiple-value-bind (passed-p report) (d:run :bt-unmasked :out out :explain nil)
+        (let ((files (gethash "artifacts" (gethash "bt-unmasked-screenshot/row-1"
+                                                    (report-rows out)))))
+          (is-true passed-p "~A" (read-text report))
+          (is (= 1 (length files)) "~S" files)
+          (is (every #'png-p files)))))))
+
 (defun reason-of (rows key)
   (or (gethash "reason" (gethash key rows) nil) ""))
 

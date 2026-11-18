@@ -585,6 +585,9 @@ jobs:
           OURANOS_WITH_UV: "1"
           OURANOS_WITH_TLS: "1"
           OURANOS_WITH_LIBGIT: "1"
+          # dokimasia's worked example (#1028, step 4) writes its report and screenshots here,
+          # and the next step uploads them, so a reader can see what the suite saw on each leg.
+          OURANOS_DOKIMASIA_EXAMPLE_OUT: ${{ runner.temp }}/dokimasia-example
         run: |
           set -o pipefail
           # On Linux the gate runs with a throwaway Secret Service (the step above).
@@ -592,6 +595,19 @@ jobs:
           if [ "$RUNNER_OS" = "Linux" ]; then wrap=(scripts/with-secret-service.sh); fi
           "${wrap[@]}" sbcl --dynamic-space-size 4096 --script scripts/verify-tree.lisp \
             2>&1 | tee verify.log
+
+      # The worked example's report.txt, report.json and screenshots, laid out as
+      # <case>/<row>/NN-name-viewport-scheme.png. Uploaded when the gate fails too, since that is
+      # when the screenshots are most useful. A leg where the example did not run uploads nothing.
+      - name: Upload the dokimasia example's report and screenshots
+        id: upload-the-dokimasia-example-s-report-and-screenshots
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dokimasia-example-${{ matrix.platform }}
+          path: ${{ runner.temp }}/dokimasia-example
+          if-no-files-found: ignore
+          retention-days: 14
 
       # --- the README's numbers, against the run that just happened -------------------
       #
