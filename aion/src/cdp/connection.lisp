@@ -61,15 +61,9 @@ A string key reads an object, an integer key an array. JSON null reads as NIL."
   (/ (- deadline (get-internal-real-time)) internal-time-units-per-second))
 
 (defun %wait-on (connection seconds)
-  "Wait up to SECONDS on CONNECTION's queue, holding its state lock before and after.
-SB-THREAD:CONDITION-WAIT returns NIL without the lock when it times out, so a loop that waits
-again, or a WITH-MUTEX that releases on the way out, would act on a lock it no longer holds and
-signal \"The current thread is not holding\" (seen on the Linux CI legs). This takes the lock
-back in that case. Returns true when woken, NIL when the time ran out."
-  (let ((lock (connection-lock connection)))
-    (or (sb-thread:condition-wait (connection-queue connection) lock :timeout seconds)
-        (progn (unless (sb-thread:holding-mutex-p lock) (sb-thread:grab-mutex lock))
-               nil))))
+  "Wait up to SECONDS on CONNECTION's queue, holding its state lock before and after, through
+AION/DYNAMIC:TIMED-WAIT. Returns true when woken, NIL when the time ran out."
+  (aion/dynamic:timed-wait (connection-queue connection) (connection-lock connection) seconds))
 
 (defun %send-octets (connection octets)
   "Write all of OCTETS to CONNECTION's socket, under its write lock."

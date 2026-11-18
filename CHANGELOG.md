@@ -1545,6 +1545,11 @@ its tag.
 
 ### Fixed
 
+- **`hyperion/server-uv`'s `upgraded-wait-writable` signals `upgraded-closed` when its timeout
+  runs out.** It could instead signal a `simple-error`, "The current thread is not holding" the
+  connection's mutex, the same defect as in `aion/cdp` below. It now waits through
+  `aion/dynamic:timed-wait` (#1267).
+
 - **An `aion/cdp` command or event wait that times out signals `cdp-timeout`.** It could instead
   signal a `simple-error`, "The current thread is not holding" the `aion/cdp state` mutex,
   because `sb-thread:condition-wait` returns without the mutex when it times out and the wait
@@ -1641,6 +1646,14 @@ its tag.
   requests to one URL; `:ignore-console` lists known messages. `:expect-stored` with a probe the
   target cannot run is reported as not run. Without a browser the tests are skipped, or fail when
   `OURANOS_REQUIRE_BROWSER=1`. The user guide is `dokimasia/README.md`.
+
+- **`aion/dynamic:timed-wait`** waits on an `sb-thread` waitqueue for at most a number of
+  seconds and always returns holding the mutex: true when woken, NIL when the time ran out.
+  A bare `sb-thread:condition-wait` with `:timeout` returns without the mutex when it times out.
+  `aion/schedule`, `aion/cdp`, `hyperion/sidecar`, `hyperion/server-uv` and `mnemosyne`'s pool
+  checkout now use it in place of their own copies, and a sweep in `aion/dynamic`'s tests fails
+  on a timed `sb-thread:condition-wait` anywhere else in a framework's source (#1267).
+
 - **`aion/cdp`, a Chrome DevTools Protocol client** (#1028, dokimasia ADR-0001), opt-in.
   `find-browser` names the browser: `OURANOS_BROWSER`, then `HYPERION_SMOKE_BROWSER`, then PATH
   and the usual install locations. `launch-browser` starts Chrome or Edge headless
