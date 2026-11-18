@@ -4,12 +4,15 @@
 ;;;; thread, closing the connection after one response. Its pages are made for the checks: a
 ;;;; sign-up and sign-in flow with a store the tests can read directly, a page that logs a console
 ;;;; error, one that logs a known message, one that requests the same URL in a loop, one whose
-;;;; request is answered with 500, a scrolling pane, and a clock to mask in screenshots.
+;;;; request is answered with 500, a scrolling pane, and a clock to mask in screenshots. Started
+;;;; with :FAVICON NIL it has no /favicon.ico, for the pages that link no icon or a missing one, and
+;;;; with :FAVICON :SLOW it answers /favicon.ico after 1.5 seconds.
 
 (in-package #:dokimasia/tests)
 
 (defstruct (app (:constructor %make-app))
   listener thread port
+  (favicon t)
   (lock (sb-thread:make-mutex :name "dokimasia test app"))
   (users (make-hash-table :test 'equal))
   (sessions (make-hash-table :test 'equal)))
@@ -91,6 +94,11 @@
   (format nil "<!doctype html><html><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width\"><title>~A</title><style>body{font-family:sans-serif;margin:2em} @media (prefers-color-scheme: dark){body{background:#111;color:#eee}}</style></head><body>~A<script>~A</script></body></html>"
           title body script))
 
+(defun %icon-page (href)
+  "A page that links the icon HREF itself."
+  (format nil "<!doctype html><html><head><meta charset=\"utf-8\"><title>Icon</title><link rel=\"icon\" href=\"~A\"></head><body><h1 id=\"title\">Icon</h1></body></html>"
+          href))
+
 (defun %a11y-page (title body &optional (style ""))
   "A page for the :audit tests: it has a language, a title and the viewport line, so the only
 violations axe-core finds are the ones BODY and STYLE put there."
@@ -114,7 +122,20 @@ violations axe-core finds are the ones BODY and STYLE put there."
 (defun %route (app stream method path cookie body)
   (let ((email (%session-email app cookie)))
     (cond
-      ((string= path "/favicon.ico") (%respond stream 204))
+      ((and (string= path "/favicon.ico") (app-favicon app))
+       (when (eq (app-favicon app) :slow) (sleep 1.5))
+       (%respond stream 204))
+      ((string= path "/no-icon")
+       (%respond stream 200 :body (%page "No icon" "<h1 id=\"title\">No icon</h1>")))
+      ((string= path "/replaced")
+       ;; Replaces itself with /no-icon while the browser's request for /favicon.ico, made for
+       ;; this page, is still unanswered when the app is started with :FAVICON :SLOW.
+       (%respond stream 200 :body (%page "Replaced" "<h1 id=\"title\">Replaced</h1>"
+                                         "setTimeout(() => location.replace('/no-icon'), 300);")))
+      ((string= path "/own-icon")
+       (%respond stream 200 :body (%icon-page "/missing-icon.png")))
+      ((string= path "/own-favicon")
+       (%respond stream 200 :body (%icon-page "/favicon.ico")))
       ((and (string= method "GET") (string= path "/signup"))
        (%respond stream 200 :body (%page "Sign up" +signup-form+)))
       ((and (string= method "POST") (string= path "/signup"))
@@ -203,10 +224,11 @@ violations axe-core finds are the ones BODY and STYLE put there."
         (%route app stream (first parts) (second parts)
                 (cdr (assoc "cookie" headers :test #'string=)) body)))))
 
-(defun start-app (&key users)
-  "Start the test app with USERS, plists (:email :password :plan), already signed up."
+(defun start-app (&key users (favicon t))
+  "Start the test app with USERS, plists (:email :password :plan), already signed up. With FAVICON
+NIL, /favicon.ico is answered with 404, and with :SLOW it is answered after 1.5 seconds."
   (let* ((listener (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp))
-         (app (%make-app :listener listener)))
+         (app (%make-app :listener listener :favicon favicon)))
     (dolist (u users) (%store-user app (getf u :email) (getf u :password) (getf u :plan)))
     (setf (sb-bsd-sockets:sockopt-reuse-address listener) t)
     (sb-bsd-sockets:socket-bind listener #(127 0 0 1) 0)

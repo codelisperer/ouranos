@@ -12,9 +12,11 @@
 
 (defparameter +alice+ '(:email "alice@example.com" :password "pw-alice" :plan "pro"))
 
-(defun app-target ()
-  "A process target that starts and stops a fresh test app with Alice signed up."
-  (d:process-target :start (lambda () (setf *app* (start-app :users (list +alice+)))
+(defun app-target (&key (favicon t))
+  "A process target that starts and stops a fresh test app with Alice signed up. FAVICON NIL
+starts it without a /favicon.ico, and :SLOW with one answered after 1.5 seconds."
+  (d:process-target :start (lambda ()
+                             (setf *app* (start-app :users (list +alice+) :favicon favicon))
                              (app-base-url *app*))
                     :stop (lambda () (stop-app *app*))
                     :users (list (list :name :alice :email "alice@example.com"
@@ -98,6 +100,41 @@
   :cases (bt-f-console bt-f-loop bt-f-server-error bt-f-screen bt-f-scroll bt-f-missing)
   :target (app-target)
   :max-requests-per-url 10)
+
+;;; --- an app with no /favicon.ico ---------------------------------------------------------
+;;; Each suite is its own run, so its own browser: a browser that has already had a 404 for
+;;; /favicon.ico may not ask again.
+
+(d:define-case bt-icon-none
+  :steps ((:visit "/no-icon") (:expect-text "#title" "No icon")
+          (:wait-for (:expression "true") :timeout 1)
+          (:expect-text "#title" "No icon")))
+
+(d:define-suite bt-icon-none :cases (bt-icon-none) :target (app-target :favicon nil))
+
+(d:define-case bt-icon-own-favicon
+  :steps ((:visit "/own-favicon") (:expect-text "#title" "Icon")
+          (:wait-for (:expression "true") :timeout 1)
+          (:expect-text "#title" "Icon")))
+
+(d:define-suite bt-icon-own-favicon :cases (bt-icon-own-favicon)
+  :target (app-target :favicon nil))
+
+(d:define-case bt-icon-own-missing
+  :steps ((:visit "/own-icon") (:expect-text "#title" "Icon")
+          (:wait-for (:expression "true") :timeout 1)
+          (:expect-text "#title" "Icon")))
+
+(d:define-suite bt-icon-own-missing :cases (bt-icon-own-missing)
+  :target (app-target :favicon nil))
+
+;;; A page replaced while the browser's /favicon.ico request for it is unanswered: the browser
+;;; sends no event that ends that request, so the settle check must not wait for it.
+
+(d:define-case bt-replaced
+  :steps ((:visit "/replaced") (:expect-text "#title" "No icon" :timeout 5)))
+
+(d:define-suite bt-replaced :cases (bt-replaced) :target (app-target :favicon :slow))
 
 ;;; --- a target whose store the test image cannot see ---------------------------------------
 
@@ -267,3 +304,43 @@ OURANOS_REQUIRE_BROWSER=1."
                      "~A" text)
                  (is (search "dokimasia-test-browser" text) "~A" text)))))
       (stop-app app))))
+
+(defun run-one (suite)
+  "Run SUITE into a temporary directory. Returns whether it passed and its one row's report."
+  (with-temporary-directory (out "dokimasia-icon")
+    (let ((passed-p (d:run suite :out out :explain nil)))
+      (values passed-p
+              (let ((rows (report-rows out)))
+                (gethash (format nil "~(~A~)/row-1" suite) rows))))))
+
+(defun favicon-entries (row)
+  "ROW's console entries about a request for /favicon.ico."
+  (remove-if-not (lambda (c) (search "favicon.ico" (or (gethash "why" c) (gethash "message" c) "")))
+                 (coerce (gethash "console" row) 'list)))
+
+(test a-request-of-a-replaced-page-does-not-hold-the-settle-check
+  ;; The CI failure of train 64: a form's response navigated twice, and the settle check waited
+  ;; ten seconds for the first page's /favicon.ico request, which the browser never ends.
+  (when (browser-available-p)
+    (multiple-value-bind (passed-p row) (run-one :bt-replaced)
+      (is-true passed-p "~A" (gethash "reason" row)))))
+
+(test the-browser-s-own-favicon-request-fails-no-step-when-the-page-links-no-icon
+  (when (browser-available-p)
+    (multiple-value-bind (passed-p row) (run-one :bt-icon-none)
+      (is-true passed-p "~A" (gethash "reason" row))
+      (let ((entries (favicon-entries row)))
+        (is (= 1 (length entries))
+            "the report does not show the 404 for /favicon.ico, so the run did not see it: ~S"
+            (gethash "console" row))
+        (when entries
+          (is (eq t (gethash "ignored" (first entries))))
+          (is (search "404" (gethash "message" (first entries)))))))
+    ;; The controls: the same 404 for /favicon.ico fails the page that links it, and a page that
+    ;; links a different missing icon fails as before.
+    (multiple-value-bind (passed-p row) (run-one :bt-icon-own-favicon)
+      (is-false passed-p "a page that links a missing /favicon.ico itself passed")
+      (is (search "log error (network)" (or (gethash "reason" row) "")) "~A" (gethash "reason" row)))
+    (multiple-value-bind (passed-p row) (run-one :bt-icon-own-missing)
+      (is-false passed-p "a page that links a missing icon passed")
+      (is (search "log error (network)" (or (gethash "reason" row) "")) "~A" (gethash "reason" row)))))
