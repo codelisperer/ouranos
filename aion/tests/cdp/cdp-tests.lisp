@@ -29,15 +29,24 @@
   '(#+darwin "--use-mock-keychain" #+linux "--password-store=basic")
   "Written out here rather than read from the driver, so a change to them shows in this file.")
 
-(test the-command-line-is-headless-with-a-fresh-profile-and-port-0
+(defparameter +default-debugging-switch+
+  #-win32 "--remote-debugging-pipe" #+win32 "--remote-debugging-port=0"
+  "The pipe on Linux and macOS; the port on Windows until the pipe is done there (#1028, step (c)).")
+
+(test the-command-line-is-headless-with-a-fresh-profile-and-the-platform-s-transport
   (is (equal `("/b/chrome" "--lang=en"
-               "--headless=new" "--remote-debugging-port=0" "--user-data-dir=/tmp/p"
+               "--headless=new" ,+default-debugging-switch+ "--user-data-dir=/tmp/p"
                "--no-first-run" "--no-default-browser-check" ,@+keychain+ "about:blank")
              (cdp:browser-command-line "/b/chrome" "/tmp/p" :arguments '("--lang=en"))))
   (is (equal `("/b/chrome"
                "--headless=new" "--remote-debugging-port=0" "--user-data-dir=/tmp/p"
                "--no-first-run" "--no-default-browser-check" ,@+keychain+ "about:blank")
-             (cdp:browser-command-line "/b/chrome" "/tmp/p")))
+             (cdp:browser-command-line "/b/chrome" "/tmp/p" :transport :port)))
+  (is (equal `("/b/chrome"
+               "--headless=new" "--remote-debugging-pipe" "--user-data-dir=/tmp/p"
+               "--no-first-run" "--no-default-browser-check" ,@+keychain+ "about:blank")
+             (cdp:browser-command-line "/b/chrome" "/tmp/p" :transport :pipe)))
+  (signals error (cdp:browser-command-line "/b/chrome" "/tmp/p" :transport :socket))
   #+darwin (is (member "--use-mock-keychain" (cdp:browser-command-line "/b/c" "/p") :test #'equal)
                "on macOS the browser never opens the real Keychain")
   #+linux (is (member "--password-store=basic" (cdp:browser-command-line "/b/c" "/p") :test #'equal)
@@ -69,8 +78,9 @@
 (test launch-browser-names-a-missing-executable
   (signals cdp:browser-not-found (cdp:launch-browser :executable "/no/such/browser")))
 
-(test launch-browser-has-only-the-port-transport-until-step-c
-  (signals error (cdp:launch-browser :executable "/no/such/browser" :transport :pipe)))
+(test launch-browser-refuses-an-unknown-transport
+  (signals error (cdp:launch-browser :executable "/no/such/browser" :transport :socket))
+  #+win32 (signals error (cdp:launch-browser :executable "/no/such/browser" :transport :pipe)))
 
 (defmacro with-env ((&rest names-and-values) &body body)
   "Run BODY with each environment variable set to its value (\"\" for unset), restoring them."

@@ -1,9 +1,17 @@
-;;;; connection.lisp --- one WebSocket connection to a browser, and its reader thread (#1028).
+;;;; connection.lisp --- one connection to a browser, and its reader thread (#1028).
+;;;;
+;;;; A connection is a WebSocket over a loopback socket, or a pair of pipes to a browser this
+;;;; process started with --remote-debugging-pipe: the browser reads commands on its descriptor
+;;;; 3 and writes on 4, each message followed by a NUL byte.
 ;;;;
 ;;;; Every read happens on the reader thread, the opening handshake included, so every wait in
 ;;;; the calling thread is a CONDITION-WAIT with a timeout and nothing blocks in a socket call
-;;;; that a timeout cannot end. Closing the connection shuts the socket down, which ends the
-;;;; reader's receive.
+;;;; that a timeout cannot end. Closing a WebSocket connection shuts the socket down, which ends
+;;;; the reader's receive. Closing a pipe connection closes the pipe the browser reads, and the
+;;;; reader's read ends when the browser's end of the other pipe closes, which happens when the
+;;;; browser exits; the reader closes its own descriptor then. Closing a descriptor that another
+;;;; thread is blocked reading would leave that read waiting, and the descriptor's number free
+;;;; to be reused under it.
 ;;;;
 ;;;; Writes are made under WRITE-LOCK, so frames from two threads never interleave. The state
 ;;;; the reader and the callers share (pending commands, sessions, the closed reason) is
@@ -40,9 +48,12 @@ A string key reads an object, an integer key an array. JSON null reads as NIL."
 
 ;;; --- the connection -----------------------------------------------------------------
 
-(defstruct (connection (:constructor %make-connection (socket key)))
+(defstruct (connection (:constructor %make-connection (socket key))
+                       (:constructor %make-pipe-connection (in-fd out-fd &aux (state :open))))
   socket
   key
+  (in-fd nil)                         ; a pipe connection: the descriptor the browser writes to
+  (out-fd nil)                        ; and the one it reads
   (write-lock (sb-thread:make-mutex :name "aion/cdp write"))
   (lock (sb-thread:make-mutex :name "aion/cdp state"))
   (queue (sb-thread:make-waitqueue :name "aion/cdp state"))
@@ -64,6 +75,40 @@ A string key reads an object, an integer key an array. JSON null reads as NIL."
   "Wait up to SECONDS on CONNECTION's queue, holding its state lock before and after, through
 AION/DYNAMIC:TIMED-WAIT. Returns true when woken, NIL when the time ran out."
   (aion/dynamic:timed-wait (connection-queue connection) (connection-lock connection) seconds))
+
+(defun %pipe-connection-p (connection)
+  (and (connection-out-fd connection) t))
+
+(defun %write-fd (fd octets)
+  "Write all of OCTETS to the descriptor FD."
+  #-win32
+  (let ((at 0) (n (length octets)))
+    (sb-sys:with-pinned-objects (octets)
+      (loop while (< at n)
+            do (multiple-value-bind (written errno)
+                   (sb-unix:unix-write fd octets at (- n at))
+                 (cond ((and written (plusp written)) (incf at written))
+                       ((eql errno sb-unix:eintr))
+                       (t (error 'connection-closed
+                                 :reason "the browser's command pipe refused a write")))))))
+  #+win32
+  (error "aion/cdp's pipe transport is not available on Windows yet (#1028, step (c)); write ~D octets to ~S"
+         (length octets) fd))
+
+(defun %send-message (connection text)
+  "Send TEXT, one CDP message, on CONNECTION: as a WebSocket text frame, or followed by a NUL
+byte on the pipe the browser reads."
+  (if (%pipe-connection-p connection)
+      (let* ((octets (ws:encode-utf8 text))
+             (framed (make-array (1+ (length octets)) :element-type '(unsigned-byte 8)
+                                                      :initial-element 0)))
+        (replace framed octets)
+        (sb-thread:with-mutex ((connection-write-lock connection))
+          (let ((fd (connection-out-fd connection)))
+            (unless (integerp fd)
+              (error 'connection-closed :reason "the browser's command pipe is closed"))
+            (%write-fd fd framed))))
+      (%send-frame connection ws:+text+ (ws:encode-utf8 text))))
 
 (defun %send-octets (connection octets)
   "Write all of OCTETS to CONNECTION's socket, under its write lock."
@@ -91,10 +136,21 @@ the reader's receive. Idempotent; the first reason is kept."
               first t)
         (sb-thread:condition-broadcast (connection-queue connection))))
     (when first
-      (let ((socket (connection-socket connection)))
-        (ignore-errors (sb-bsd-sockets:socket-shutdown socket :direction :io))
-        (ignore-errors (sb-bsd-sockets:socket-close socket))))
+      (if (%pipe-connection-p connection)
+          ;; Only the pipe the browser reads; the reader closes the other (see the top of the file).
+          (sb-thread:with-mutex ((connection-write-lock connection))
+            (let ((fd (connection-out-fd connection)))
+              (when (integerp fd)
+                (setf (connection-out-fd connection) :closed)
+                (%close-fd fd))))
+          (let ((socket (connection-socket connection)))
+            (ignore-errors (sb-bsd-sockets:socket-shutdown socket :direction :io))
+            (ignore-errors (sb-bsd-sockets:socket-close socket)))))
     nil))
+
+(defun %close-fd (fd)
+  #-win32 (ignore-errors (sb-unix:unix-close fd))
+  #+win32 (declare (ignore fd)))
 
 ;;; --- what the reader does with a message ---------------------------------------------
 
@@ -249,6 +305,68 @@ it to its page's events."
         (when (eq (connection-state connection) :closed)
           (return-from %read-loop))))))
 
+;;; --- the pipe reader -----------------------------------------------------------------
+
+(defun %read-fd (fd buffer)
+  "Read into BUFFER from the descriptor FD, waiting until something arrives. Returns the count,
+0 at the end of the stream, or NIL when the read failed."
+  #-win32
+  (sb-sys:with-pinned-objects (buffer)
+    (loop
+      (multiple-value-bind (n errno) (sb-unix:unix-read fd (sb-sys:vector-sap buffer) (length buffer))
+        (cond (n (return n))
+              ((eql errno sb-unix:eintr))
+              (t (return nil))))))
+  #+win32 (progn fd buffer nil))
+
+(defun %pipe-read-loop (connection)
+  "The reader thread's body for a pipe connection: NUL-ended messages until the browser's end
+closes. Closes the descriptor it reads when it ends."
+  (let ((fd (connection-in-fd connection))
+        (chunk (make-array 65536 :element-type '(unsigned-byte 8)))
+        (message (make-array 65536 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+    (unwind-protect
+         (flet ((fail (reason) (%close-connection connection reason) (return-from %pipe-read-loop)))
+           (loop
+             (let ((n (%read-fd fd chunk)))
+               (cond ((null n) (fail "the pipe from the browser failed"))
+                     ((zerop n) (fail "the browser closed its end of the pipe"))
+                     ((> n (length chunk))
+                      (fail (format nil "the pipe from the browser ended (read returned ~S)" n))))
+               (loop with start = 0
+                     for nul = (position 0 chunk :start start :end n)
+                     do (let ((end (or nul n)))
+                          (when (> (+ (fill-pointer message) (- end start)) *max-message-octets*)
+                            (fail (format nil "the browser sent a message longer than ~D octets"
+                                          *max-message-octets*)))
+                          (loop for i from start below end
+                                do (vector-push-extend (aref chunk i) message))
+                          (unless nul (return))
+                          (let ((parsed (handler-case
+                                            (jzon:parse (sb-ext:octets-to-string
+                                                         message :external-format :utf-8))
+                                          (error () nil))))
+                            (unless (hash-table-p parsed)
+                              (fail "the browser sent a message that is not a JSON object"))
+                            (%dispatch connection parsed))
+                          (setf (fill-pointer message) 0
+                                start (1+ nul)))))))
+      (%close-fd fd))))
+
+(defun %open-pipe-connection (in-fd out-fd)
+  "A connection over two pipes to a browser started with --remote-debugging-pipe: it writes to
+IN-FD and reads OUT-FD. Starts the reader thread. The connection takes both descriptors."
+  (let ((connection (%make-pipe-connection in-fd out-fd)))
+    (setf (connection-thread connection)
+          ;; THREAD-LIFETIME: independent. The reader lives as long as the connection, which
+          ;; outlives the call that opened it, and carries no caller's context.
+          (sb-thread:make-thread
+           (lambda ()
+             (aion/dynamic:unblock-interrupts)
+             (%pipe-read-loop connection))
+           :name "aion/cdp pipe reader"))
+    connection))
+
 ;;; --- opening ------------------------------------------------------------------------
 
 (defun %loopback-address (host)
@@ -308,7 +426,7 @@ handshake for PATH within TIMEOUT seconds. Returns the open CONNECTION."
 
 (defun %shutdown-connection (connection)
   "Send a close frame, close CONNECTION, and wait briefly for its reader to end."
-  (when (eq (connection-state connection) :open)
+  (when (and (eq (connection-state connection) :open) (not (%pipe-connection-p connection)))
     (ignore-errors (%send-frame connection ws:+close+
                                 (ws:encode-close-payload ws:+normal-closure+))))
   (%close-connection connection "closed by this process")
@@ -334,7 +452,7 @@ result object, or signals CDP-ERROR, CDP-TIMEOUT or CONNECTION-CLOSED."
          (let ((message (json-object "id" id "method" method
                                      "params" (or params (json-object)))))
            (when session-id (setf (gethash "sessionId" message) session-id))
-           (%send-frame connection ws:+text+ (ws:encode-utf8 (jzon:stringify message)))
+           (%send-message connection (jzon:stringify message))
            (let ((deadline (%deadline timeout))
                  (answer nil))
              (sb-thread:with-mutex (lock)

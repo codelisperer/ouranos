@@ -9,13 +9,24 @@
 (in-suite cdp)
 
 (defun %browser-or-skip ()
-  "The browser to run, or NIL after a skip, or a failure when OURANOS_REQUIRE_BROWSER is 1."
-  (or (cdp:find-browser)
-      (progn
-        (if (equal (uiop:getenv "OURANOS_REQUIRE_BROWSER") "1")
-            (fail "No Chrome or Edge was found, and OURANOS_REQUIRE_BROWSER=1")
-            (skip "No Chrome or Edge found; set OURANOS_BROWSER to run the browser checks"))
-        nil)))
+  "The browser to run, or NIL after a skip, or a failure when OURANOS_REQUIRE_BROWSER is 1. On
+Linux and macOS the default transport, the pipe, needs libuv, so a machine without it skips too."
+  (let ((required (equal (uiop:getenv "OURANOS_REQUIRE_BROWSER") "1"))
+        (exe (cdp:find-browser))
+        (no-libuv #-win32 (handler-case (progn (aion/uv:ensure-available) nil)
+                            (error (c) (princ-to-string c)))
+                  #+win32 nil))
+    (cond ((null exe)
+           (if required
+               (fail "No Chrome or Edge was found, and OURANOS_REQUIRE_BROWSER=1")
+               (skip "No Chrome or Edge found; set OURANOS_BROWSER to run the browser checks"))
+           nil)
+          (no-libuv
+           (if required
+               (fail "libuv is not available for the pipe transport, and OURANOS_REQUIRE_BROWSER=1: ~A" no-libuv)
+               (skip "libuv is not available for the pipe transport; run scripts/build-libuv.lisp"))
+           nil)
+          (t exe))))
 
 (defparameter +test-page+
   "<!doctype html><html><head><meta charset='utf-8'><title>cdp</title></head><body>
@@ -96,9 +107,39 @@ setTimeout(() => { throw new Error('thrown later'); }, 50);
         (is (null (probe-file dir)) "the temporary profile is gone")
         (is (null (cdp:close-browser browser)) "a second close does nothing")))))
 
+(defun %launch-and-ask (exe transport)
+  "Launch EXE with TRANSPORT, run one page, and return whether the profile had a
+DevToolsActivePort while it ran, and the product the browser reported."
+  (cdp:with-browser (browser :executable exe :timeout 60 :transport transport)
+    (let ((page (cdp:new-page browser)))
+      (cdp:navigate page (%data-url "<p id='p'>piped</p>"))
+      (is (equal "piped" (cdp:text-of page "#p")) "a page runs over ~S" transport))
+    (values (and (probe-file (merge-pathnames "profile/DevToolsActivePort"
+                                              (aion/cdp::browser-directory browser)))
+                 t)
+            (cdp:browser-version browser))))
+
+(test the-default-transport-is-the-pipe-on-linux-and-macos-and-opens-no-port
+  (let ((exe (%browser-or-skip)))
+    (when exe
+      (is (eq #-win32 :pipe #+win32 :port aion/cdp::+default-transport+))
+      #-win32
+      (multiple-value-bind (port-file product) (%launch-and-ask exe :pipe)
+        (is (null port-file) "a browser on the pipe writes no DevToolsActivePort")
+        (is (stringp product))))))
+
+(test the-port-transport-still-works
+  (let ((exe (%browser-or-skip)))
+    (when exe
+      (multiple-value-bind (port-file product) (%launch-and-ask exe :port)
+        (is-true port-file "a browser on the port writes DevToolsActivePort")
+        (is (stringp product))))))
+
 (test a-browser-that-exits-at-once-is-reported
   ;; A program that exits at once, standing in for a browser that crashes on start.
   (let ((exe #+win32 (or (ignore-errors (aion/windows:find-executable "whoami")) "C:/Windows/System32/whoami.exe")
              #-win32 (or (probe-file "/usr/bin/false") (probe-file "/bin/false"))))
-    (signals cdp:browser-exited
-      (cdp:launch-browser :executable (uiop:native-namestring exe) :timeout 20))))
+    (dolist (transport '(#-win32 :pipe :port))
+      (signals cdp:browser-exited
+        (cdp:launch-browser :executable (uiop:native-namestring exe) :timeout 20
+                            :transport transport)))))
