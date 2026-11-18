@@ -725,7 +725,13 @@ Each read is preceded by SB-SYS:WAIT-UNTIL-FD-USABLE with what is left of one ov
 deadline, because that wait is the only bound that works on every platform: on Windows a
 stream's :TIMEOUT does not bound a socket read, and neither does SB-SYS:WITH-DEADLINE -- the
 readiness probe read from a listener that never answered for over fifteen minutes, while
-the wait timed out after 1.015 s (measured by Ouranos Claude (Windows) on #188)."
+the wait timed out after 1.015 s (measured by Ouranos Claude (Windows) on #188).
+
+A count from SOCKET-RECEIVE that is not between 1 and the buffer's length ends the read, and
+nothing of that receive is kept. On Windows SBCL can return recv's -1 read as an unsigned 32-bit
+number, 4294967295, instead of signalling (#1259, found by aion/cdp in #1258). Copying that many
+octets used to put the buffer's leftover octets from the previous receive after what had really
+arrived, up to the buffer's 1024, before the copy signalled at the buffer's end."
   (let ((fd (sb-bsd-sockets:socket-file-descriptor sock))
         (buffer (make-array 1024 :element-type '(unsigned-byte 8)))
         (got (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
@@ -738,7 +744,7 @@ the wait timed out after 1.015 s (measured by Ouranos Claude (Windows) on #188).
               (return))
             (multiple-value-bind (buf n) (sb-bsd-sockets:socket-receive sock buffer nil)
               (declare (ignore buf))
-              (when (or (null n) (zerop n)) (return))
+              (unless (and (integerp n) (<= 1 n (length buffer))) (return))
               (loop for i below n do (vector-push-extend (aref buffer i) got)))))
       (error () nil))
     (sb-ext:octets-to-string (coerce got '(simple-array (unsigned-byte 8) (*)))

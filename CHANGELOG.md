@@ -1557,6 +1557,13 @@ its tag.
   commands, and `new-page`'s connection handshake. The waits now go through `%wait-on`, which
   takes the mutex back (#1028).
 
+- **hyperion/server: `start`'s readiness check no longer reads stale octets after a failed
+  receive on Windows** (#1259). SBCL on Windows can return a count of 4294967295, recv's -1, from
+  `sb-bsd-sockets:socket-receive` instead of signalling. The check read that as data and added up
+  to 1024 octets left over from its previous receive to the reply in which it looks for its
+  nonce. A count that is not between 1 and the buffer's length now ends the read. Nothing an app
+  calls changes.
+
 - **`scripts/build-libuv.lisp` refuses before downloading when a Unix machine has no C compiler**,
   as it already did on Windows, and on macOS counts the Xcode Command Line Tools as the compiler,
   so it no longer runs the `/usr/bin/cc` stub, which opens an installer dialog. The libuv

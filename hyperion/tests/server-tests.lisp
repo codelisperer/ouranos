@@ -510,6 +510,57 @@ invisible to a connect probe, so CHECK-PORT cannot see it and only the bind can 
                  "the backend's own error must be kept, not replaced")))
       (sb-bsd-sockets:socket-close squatter))))
 
+(defclass %lying-socket (sb-bsd-sockets:inet-socket)
+  ((receives :initform 0 :accessor %lying-receives))
+  (:documentation "A TCP socket whose second and later SOCKET-RECEIVE read nothing and return the
+count 4294967295, as SBCL on Windows can when recv fails (#1259). The first receive is real."))
+
+(defmethod sb-bsd-sockets:socket-receive :around ((socket %lying-socket) buffer length &rest options)
+  (declare (ignore length options))
+  (if (> (incf (%lying-receives socket)) 1)
+      (values buffer 4294967295)
+      (call-next-method)))
+
+(test a-receive-count-the-buffer-cannot-hold-ends-the-probe-read
+  "#1259: %RECEIVE-WITHIN, which reads START's readiness reply, ends its read when SOCKET-RECEIVE
+returns a count that is not between 1 and its buffer's length, and keeps nothing from that
+receive. The server sends \"hello\", then \"world\" 0.3 seconds later; the client's second receive
+returns 4294967295, recv's -1 as SBCL on Windows can return it. Before this, the read went on
+to copy the 1024-octet buffer, so the probe got \"hello\" followed by 1019 octets left in the
+buffer, and it searched those for its nonce."
+  (let ((listener (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp))
+        (client (make-instance '%lying-socket :type :stream :protocol :tcp))
+        (server nil))
+    (unwind-protect
+         (progn
+           (sb-bsd-sockets:socket-bind listener #(127 0 0 1) 0)
+           (sb-bsd-sockets:socket-listen listener 1)
+           (let ((port (nth-value 1 (sb-bsd-sockets:socket-name listener))))
+             ;; INTERRUPTS: a test thread, started from the test body, which has no interrupt
+             ;; deferred. THREAD-LIFETIME: scoped -- it ends after 2 seconds at most, and the test
+             ;; joins it.
+             (setf server
+                   (sb-thread:make-thread
+                    (lambda ()
+                      (let ((peer (sb-bsd-sockets:socket-accept listener)))
+                        (unwind-protect
+                             (progn
+                               (sb-bsd-sockets:socket-send peer (sb-ext:string-to-octets "hello") nil)
+                               (sleep 0.3)
+                               (sb-bsd-sockets:socket-send peer (sb-ext:string-to-octets "world") nil)
+                               (sleep 1.5))
+                          (sb-bsd-sockets:socket-close peer))))
+                    :name "receive-count test server"))
+             (sb-bsd-sockets:socket-connect client #(127 0 0 1) port)
+             (let ((got (srv::%receive-within client 3 4096)))
+               (is (string= "hello" got) "the probe read ~D octets: ~S" (length got)
+                   (subseq got 0 (min 20 (length got))))
+               (is (= 2 (%lying-receives client))
+                   "control: the second receive, the one that returned the count, was made"))))
+      (sb-bsd-sockets:socket-close client)
+      (when server (sb-thread:join-thread server :default nil :timeout 5))
+      (sb-bsd-sockets:socket-close listener))))
+
 (test a-listener-already-on-the-port-is-never-taken-for-our-server
   ;; Another program LISTENING on the port, with SO_REUSEADDR, before START binds it, and the
   ;; preflight off so that only the bind and the readiness check decide. Each platform's
