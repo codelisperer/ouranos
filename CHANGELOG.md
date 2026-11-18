@@ -1662,6 +1662,15 @@ its tag.
   its impact, the scheme, how many elements and the first of them. axe-core 4.14.0 (MPL-2.0) is
   vendored unmodified in `dokimasia/vendor/` with its licence, pinned in
   `dokimasia/vendor/ASSETS.pin`, and compiled into the image.
+- **`dokimasia/mnemosyne`: ready-made `:expect-stored` probes that read the app's database
+  through mnemosyne** (#1028, dokimasia ADR-0001), an aux system that depends on `dokimasia` and
+  `mnemosyne`. `define-row-probe` checks that `:table` has a row whose `:match` columns hold the
+  step's values, or with `:absent t` that none does; when no row matches, the failure gives the
+  other columns' stored values in the rows that match the first column. `define-query-probe`
+  runs a mnemosyne query built from the step's values by a function. `:source` is a mnemosyne
+  backend, a pool, or a function that returns one when the step runs. Both are local probes, so
+  against a `url-target` the step is reported as not run unless the probe is also given an
+  `:http` form.
 - **`scripts/check-pins.lisp` checks the bytes of every vendored asset** (#1028). Each asset
   block of an `ASSETS.pin` file must name its `file`, and that file must hash to the sha256 or
   sha384 on the asset's first line; a missing file, a missing `file` line or a different hash

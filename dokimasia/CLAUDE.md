@@ -24,8 +24,10 @@ work is tracked on #1028 (label `pkg:dokimasia`). Step b1 is the harness against
 started app: `dokimasia/core` (the verdict, in Coalton) and `dokimasia` (definitions, targets,
 steps, the checks after every step, the report and the run). The user guide is
 [`README.md`](README.md). Step b2 adds the `:audit` step, which runs the vendored axe-core
-(`vendor/`, pinned in `vendor/ASSETS.pin`) in the page once for each colour scheme. The aux
-systems (b3) have not landed.
+(`vendor/`, pinned in `vendor/ASSETS.pin`) in the page once for each colour scheme. Step b3's
+first part is `dokimasia/mnemosyne` (`src/mnemosyne/`): `define-row-probe` and
+`define-query-probe`, stored-data probes that read the app's database through mnemosyne. Its
+tests use a SQLite file and no browser. `dokimasia/hyperion` has not landed.
 
 ## Design facts
 

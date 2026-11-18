@@ -6,8 +6,9 @@ in a headless Chrome or Edge, against an app it starts or one already deployed, 
 report. Each case and row is one FiveAM test. The design is
 [ADR-0001](docs/adr/0001-browser-driver-and-acceptance-harness.md); the work is #1028.
 
-What exists today is the harness itself and its accessibility checks with axe-core (steps b1
-and b2 of #1028). The add-ons for hyperion and mnemosyne apps are still to come.
+What exists today is the harness itself, its accessibility checks with axe-core, and ready-made
+stored-data probes for apps that use mnemosyne (steps b1, b2 and the first part of b3 of #1028).
+The add-on for hyperion apps is still to come.
 
 ## A first suite
 
@@ -139,6 +140,38 @@ passwords in `aion/secret` values; they are revealed only when typed into the pa
 Each form returns true, or NIL and a reason. `:local` runs only against a target that can see the
 app's store (a process target). When the target can run neither form, the step is **not run**, with
 that reason; it is never reported as passed.
+
+### Probes that read a mnemosyne database
+
+The aux system `dokimasia/mnemosyne` defines the local form for you:
+
+```lisp
+(asdf:load-system :dokimasia/mnemosyne)
+
+(dokimasia/mnemosyne:define-row-probe :account-stored
+  :source #'my-app:database          ; a mnemosyne backend, a pool, or a function returning one
+  :table :accounts
+  :match '(:email :plan))            ; (:expect-stored :account-stored (:input :email) (:input :plan))
+
+(dokimasia/mnemosyne:define-row-probe :no-account
+  :source #'my-app:database :table :accounts :match '(:email) :absent t)
+```
+
+`define-row-probe` passes when `:table` has a row whose `:match` columns hold the step's values, in
+order, or with `:absent t` when none does. A step's values are strings; the database compares them
+with the column's type. When no row matches, the reason gives the other columns' stored values in
+the rows that match the first column:
+
+```
+the probe account-stored: accounts has no row with email = "new@example.com" and plan = "team"; the rows with email = "new@example.com" have plan = "free"
+```
+
+`define-query-probe` takes `:query`, a function of the step's values that returns a mnemosyne query,
+and passes when the query returns a row (or none, with `:absent t`). A function given as `:source` is
+called when the step runs, so it can name a database that exists only once the app has started.
+`:dialect` defaults to `mnemosyne/query:*dialect*`. A table, column or dialect mnemosyne refuses is
+refused with `invalid-definition` when the probe is defined. Both kinds are local probes; pass
+`:http` as well to run the step against a deployed URL.
 
 ## The report
 
