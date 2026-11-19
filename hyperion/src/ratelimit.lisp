@@ -312,7 +312,8 @@ no handler runs to delete them; WRAP-CSRF gives the full reasoning."
     (log:warn "ratelimit: refused"
               :limit (limit-name limit)
               :method (getf env :request-method)
-              :path (getf env :path-info)
+              ;; Cut short: a path can carry a token (#1036).
+              :path (hyperion/logging:logged-path env)
               :retry-after seconds)
     (%release-parts env)
     (funcall on-limited env seconds limit)))
