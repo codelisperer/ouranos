@@ -314,8 +314,8 @@ present or absent -- which is the only way a test can tell the two apart."
            (let ((st (sb-bsd-sockets:socket-make-stream s :input t :output t
                                                           :element-type 'character
                                                           :external-format :latin-1)))
-             (format st "GET ~A HTTP/~A~C~CHost: 127.0.0.1~C~CConnection: close~C~C~C~C"
-                     path version #\Return #\Linefeed #\Return #\Linefeed
+             (format st "GET ~A HTTP/~A~C~CHost: 127.0.0.1:~D~C~CConnection: close~C~C~C~C"
+                     path version #\Return #\Linefeed port #\Return #\Linefeed
                      #\Return #\Linefeed #\Return #\Linefeed)
              (finish-output st)
              (with-output-to-string (out)

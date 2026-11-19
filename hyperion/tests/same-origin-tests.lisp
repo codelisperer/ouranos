@@ -262,9 +262,8 @@ name and value; Host included only if listed) and return the status code."
 ;;; #302 put the guard on RUN-APP only. An app's development server (dev:serve) and a
 ;;; headless server:start on 127.0.0.1 serve the same data to the same machine, and a
 ;;; DNS-rebinding page could read from and post to either. dev:serve now guards by default on
-;;; loopback; server:start guards when asked, because behind a same-machine reverse proxy it
-;;; binds 127.0.0.1 and receives the public Host, and a default guard would refuse every
-;;; request.
+;;; loopback. server:start and serve-forever guard by default too since #1037; behind a
+;;; same-machine reverse proxy, HYPERION_ORIGINS gives them the public origin.
 
 (defmacro %so-with-start ((port-var &rest start-args) &body body)
   "BODY with PORT-VAR bound to a server START ran with START-ARGS on a free loopback port."
@@ -327,12 +326,99 @@ SERVE-ARGS, and torn down afterwards."
         (is (= 200 (getf a :foreign-get)))
         (is (= 200 (getf a :cross-post)))))))
 
-(test server-start-is-unguarded-by-default
+(defmacro %so-with-origins-setting ((value) &body body)
+  "BODY with HYPERION_ORIGINS set to VALUE, restored afterwards. NIL sets it to the empty
+string, which ORIGINS-SETTING reads as unset; uiop cannot unset a variable on every OS."
+  (let ((old (gensym "OLD")))
+    `(let ((,old (uiop:getenv "HYPERION_ORIGINS")))
+       (unwind-protect
+            (progn (setf (uiop:getenv "HYPERION_ORIGINS") (or ,value ""))
+                   ,@body)
+         (setf (uiop:getenv "HYPERION_ORIGINS") (or ,old ""))))))
+
+(test server-start-guards-by-default
+  "#1037: START installs the same-origin guard unless told not to. Before, the default was :NONE,
+and a web page the user visited could post to an app started with START."
   (%quietly
-    (%so-with-start (port)
+    (%so-with-origins-setting (nil)
+      (%so-with-start (port)
+        (let ((a (%so-guarded-answers port)))
+          (is (= 200 (getf a :own-get)))
+          (is (= 200 (getf a :localhost-get)))
+          (is (= 403 (getf a :foreign-get)) "a rebinding page's Host is refused")
+          (is (= 200 (getf a :own-post)) "a same-origin POST passes")
+          (is (= 403 (getf a :cross-post)) "a cross-site POST is refused"))))))
+
+(test server-start-with-request-guard-none-lets-a-cross-site-post-through
+  "The control for the test above: :REQUEST-GUARD :NONE is still the way to turn it off."
+  (%quietly
+    (%so-with-start (port :request-guard :none)
       (let ((a (%so-guarded-answers port)))
-        (is (= 200 (getf a :foreign-get)) "a proxy's public Host must still reach the app")
+        (is (= 200 (getf a :foreign-get)))
         (is (= 200 (getf a :cross-post)))))))
+
+(test a-cross-origin-post-is-accepted-only-when-hyperion-origins-lists-it
+  "A POST whose Origin is another site's is refused under the default guard, and accepted once
+HYPERION_ORIGINS lists that origin. The Host is the server's own in both, so only the Origin
+check decides."
+  (flet ((post (port)
+           (%so-raw-status port "POST" "/x" `(("Host" . ,(format nil "127.0.0.1:~D" port))
+                                              ("Origin" . "https://app.example.test")))))
+    (%quietly
+      (%so-with-origins-setting (nil)
+        (%so-with-start (port)
+          (is (= 403 (post port)) "refused without the setting")))
+      (%so-with-origins-setting ("https://app.example.test, https://other.example.test")
+        (%so-with-start (port)
+          (is (= 200 (post port)) "accepted when the setting lists it")
+          (is (= 403 (%so-raw-status port "POST" "/x"
+                                     `(("Host" . ,(format nil "127.0.0.1:~D" port))
+                                       ("Origin" . "https://attacker.example.test"))))
+                 "an origin the setting does not list is still refused"))))))
+
+(test hyperion-origins-gives-the-public-host-behind-a-same-machine-proxy
+  "Behind a proxy on the same machine the server binds 127.0.0.1 and receives the public Host.
+Without the setting that Host is refused; with it, it is accepted."
+  (let ((proxied '(("Host" . "app.example.test"))))
+    (%quietly
+      (%so-with-origins-setting (nil)
+        (%so-with-start (port)
+          (is (= 403 (%so-raw-status port "GET" "/" proxied)))))
+      (%so-with-origins-setting ("https://app.example.test")
+        (%so-with-start (port)
+          (is (= 200 (%so-raw-status port "GET" "/" proxied))))))))
+
+(test binding-every-interface-with-no-origins-refuses-to-start
+  "Bound to every interface, the guard cannot work out the app's origins, so START refuses
+before it binds, and the error says what to do. With HYPERION_ORIGINS set, the origins are the
+setting's. The every-interface case is checked without binding 0.0.0.0, which on macOS can show
+a firewall dialog."
+  (%so-with-origins-setting (nil)
+    (let ((e (handler-case (progn (srv:start (%srv-ok-app) :server :hunchentoot :host "0.0.0.0"
+                                                           :port (ports:candidate-port)
+                                                           :check-port nil)
+                                  nil)
+               (error (c) c))))
+      (is (typep e 'error) "START refused")
+      (let ((text (and e (princ-to-string e))))
+        (is (search "HYPERION_ORIGINS" text) "~A" text)
+        (is (search ":request-guard :none" text) "~A" text)
+        (is (search ":same-origin" text) "~A" text))))
+  (is (equal '("https://app.example.test")
+             (srv::%request-guard-origins "0.0.0.0" 8080 '("https://app.example.test"))))
+  (%so-with-origins-setting ("https://app.example.test")
+    (is (equal '("https://app.example.test") (srv::%request-guard-origins "0.0.0.0" 8080)))
+    (is (equal '("https://app.example.test" "http://127.0.0.1:8080" "http://localhost:8080")
+               (srv::%request-guard-origins "127.0.0.1" 8080))
+        "on loopback the setting adds to the derived origins")))
+
+(test hyperion-origins-refuses-what-is-not-an-origin
+  (is (null (srv::%parse-origin-setting nil)))
+  (is (null (srv::%parse-origin-setting "  ")))
+  (is (equal '("https://a.test" "http://b.test:8080")
+             (srv::%parse-origin-setting "https://a.test,http://b.test:8080")))
+  (dolist (bad '("a.test" "https://a.test/path" "ftp://a.test" "https://"))
+    (signals error (srv::%parse-origin-setting bad))))
 
 (test server-start-with-request-guard-same-origin-guards-like-run-app
   (%quietly

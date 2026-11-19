@@ -18,18 +18,26 @@ page the user visits posting to it, and a DNS-rebinding page reading from it.
 | `hyperion/desktop:run-app`, `:embedded` or `:hybrid` | on (`:request-guard :same-origin`) | never, unless the app does its own checking (`:none`) |
 | `hyperion/dev:serve` on loopback (127.0.0.1, ::1, localhost) | on | never for a real app; `:request-guard :none` only for a test that needs it off |
 | `hyperion/dev:serve` on any other host | off, with a warning | pass `:request-guard (:same-origin "http://HOST:PORT" ...)` with the origins you browse to |
-| `hyperion/server:start`, `serve-forever` | off (`:none`) | on (`:same-origin`) when it serves a desktop app's UI or a user's data headless on 127.0.0.1. `serve-forever`'s `:readiness-path` is always exempt (below) |
+| `hyperion/server:start`, `serve-forever` | on (`:request-guard :same-origin`) since #1037 | behind a proxy or under another name, set `HYPERION_ORIGINS` to the public origins; `:request-guard :none` turns it off. `serve-forever`'s `:readiness-path` is always exempt (below) |
 | `run-app :backend (:remote URL)` | none of its own | guard the server at URL instead |
 
 On loopback the guard accepts both `127.0.0.1:PORT` and `localhost:PORT`. A rebinding page cannot
 use either, because its Host is the attacker's domain.
 
-`server:start` is off by default because of reverse proxies. A production app behind a proxy on
-the same machine binds 127.0.0.1 but receives the public Host from the proxy, so a default guard
-would refuse every real request. For a server reached by a name other than its bind address, pass
-the origins: `:request-guard (:same-origin "https://app.example.com")`. `:same-origin` with a
-server bound to every interface (`0.0.0.0`) signals an error, because the guard cannot know which
-names are the app's own.
+`server:start` and `serve-forever` were off by default until #1037, because of reverse proxies:
+an app behind a proxy on the same machine binds 127.0.0.1 but receives the public Host from the
+proxy, so the guard refuses every request unless it knows the public origin. It is on by default
+now, because an app started with `start` was reachable from any web page its user visited, and
+the proxy case has a setting:
+
+- `HYPERION_ORIGINS` lists the origins the app is reached by, separated by commas or spaces, such
+  as `https://app.example.com`. The guard accepts them, as well as the loopback origins worked
+  out from the host and port. A deployment sets it without changing code.
+- `:request-guard (:same-origin "https://app.example.com")` names the origins in code, and only
+  those.
+- A server bound to every interface (`0.0.0.0`) with neither refuses to start, and the error names
+  both, and `:request-guard :none`, because the guard cannot know which names are the app's own.
+- With `:port 0`, the origins use the port the server actually bound.
 
 **The readiness path is exempt from the request guard.** In `serve-forever`, a request for
 `:readiness-path` skips both the Host check and the Origin check, because a platform's health
