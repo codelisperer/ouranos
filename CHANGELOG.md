@@ -1560,6 +1560,16 @@ its tag.
 
 ### Fixed
 
+- **dokimasia's `:audit` and `:screenshot` steps now judge and capture the colours a page shows at
+  rest in each colour scheme** (#1288). After switching the scheme they waited two animation
+  frames, so on a page with CSS colour transitions, such as Bulma's links, axe-core read colours
+  part way from the other scheme's, and a screenshot could show them. That could fail a page that
+  passes at rest, or pass one that fails. The steps now turn CSS transitions and animations off
+  for their whole run, with a constructed stylesheet that a Content-Security-Policy does not block,
+  and turn them back on afterwards. An app's audit results and dark screenshots can change: on
+  hyperion's active-search example, the light-then-dark audit reported 11 elements failing
+  `color-contrast` in the dark scheme and now reports the one that fails at rest, `.subtitle`.
+
 - **dokimasia's `:screenshot` step works in a suite that sets no `:mask` or `:mask-text`**
   (#1028). An empty list reached the page as `null`, and every screenshot in such a suite failed
   with `TypeError: sels is not iterable`. Suites that set `:mask` were not affected.

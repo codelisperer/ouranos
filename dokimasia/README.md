@@ -380,8 +380,8 @@ will turn an elenchon decision table into rows, waits until `elenchon/cases` exi
 | `(:expect-text selector value)` | Waits until the element's text contains VALUE. |
 | `(:expect-stored probe value…)` | Asks the probe whether the app stored what it should (below). |
 | `(:expect-scroll-kept action :pane selector :scroll n)` | Runs ACTION and fails if the scroll position of PANE, or of the window, moved. |
-| `(:screenshot name)` | Writes one PNG per viewport and colour scheme, grown to the page's full height. |
-| `(:audit)` | Runs axe-core in the page once for each colour scheme and fails on a violation at or above `:serious` (below). |
+| `(:screenshot name)` | Writes one PNG per viewport and colour scheme, grown to the page's full height, with CSS transitions and animations turned off so each image shows the page at rest. |
+| `(:audit)` | Runs axe-core in the page once for each colour scheme, with CSS transitions and animations turned off, and fails on a violation at or above `:serious` (below). |
 
 The steps that wait take `:timeout` in seconds; otherwise they wait `*step-timeout*` (10).
 A value is a string, a number, `(:input key)` or `(:user key)`. A step of an unknown kind, or with
