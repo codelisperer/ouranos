@@ -51,9 +51,11 @@
     the whole point of keeping the calling convention while dropping the library.
 
     A STREAMED BODY is a FUNCTION in body position -- (status headers (lambda (writer) ...))
-    -- answered with chunked transfer-encoding. The response stays a three-list, so no
-    middleware and no interceptor learns that streaming exists, and hyperion/server adapts
-    the same shape onto Clack so an application cannot tell which backend it is on.
+    -- answered with chunked transfer-encoding, or, for an HTTP/1.0 request, with no
+    framing and the connection closed after the body (#1244). The response stays a
+    three-list, so no middleware and no interceptor learns that streaming exists, and
+    hyperion/server adapts the same shape onto Clack so an application cannot tell which
+    backend it is on.
 
     The handler runs behind *DISPATCH*: on the loop thread by default, on a worker pool
     with POOL-DISPATCH. A streaming app wants the pool -- the file header says why.")
@@ -383,21 +385,28 @@ as pieces, not joined into a new vector first (#430)."
 
 (defun %write-head-only (conn status headers length keep-alive)
   "Answer a HEAD request: the head a GET would get, and no body (RFC 9110 9.3.2). LENGTH is
-the body's octet count, sent as Content-Length, or :CHUNKED for a streamed body, whose head
-says Transfer-Encoding: chunked as a GET's would. Returns KEEP-ALIVE, or NIL after a refused
-header has been answered with a 500, as %WRITE-RESPONSE does.
+the body's octet count, sent as Content-Length; :CHUNKED for a streamed body, whose head
+says Transfer-Encoding: chunked as a GET's would; or :CLOSE-DELIMITED for a streamed body
+asked for over HTTP/1.0, whose head has neither and says Connection: close (#1244). Returns
+KEEP-ALIVE, NIL for :CLOSE-DELIMITED, or NIL after a refused header has been answered with a
+500, as %WRITE-RESPONSE does.
 
 Nothing after the head is written. On a kept-alive connection the client reads the next
 octets as the start of the next response, so a body here would have been taken for one."
-  (let ((encoded (if (eq length :chunked)
-                     (h1:encode-head-chunked-flat
-                      status (%head-strings headers 'h1:encode-head-chunked-flat) keep-alive)
-                     (h1:encode-head-flat
-                      status (%head-strings headers 'h1:encode-head-flat) length keep-alive))))
+  (let ((encoded (case length
+                   (:chunked
+                    (h1:encode-head-chunked-flat
+                     status (%head-strings headers 'h1:encode-head-chunked-flat) keep-alive))
+                   (:close-delimited
+                    (h1:encode-head-close-delimited-flat
+                     status (%head-strings headers 'h1:encode-head-close-delimited-flat)))
+                   (t
+                    (h1:encode-head-flat
+                     status (%head-strings headers 'h1:encode-head-flat) length keep-alive)))))
     (cond
       ((h1:encode-ok? encoded)
        (net:write-bytes conn (%latin1 (h1:encode-text encoded)))
-       keep-alive)
+       (and keep-alive (not (eq length :close-delimited))))
       (t
        (log:warn "server-uv: response refused" :reason (h1:encode-reason encoded))
        (net:write-bytes conn (%latin1 (h1:encode-error 500)))
@@ -505,6 +514,9 @@ simply stops, which aborts the stream, which the client sees as a truncated mess
 
 (defstruct (stream-out (:constructor %make-stream-out) (:copier nil) (:conc-name so-))
   conn app state loop keep-alive
+  ;; :CHUNKED, or :CLOSE for an HTTP/1.0 request (#1244): the octets are written as they
+  ;; are, and the body ends when the connection closes.
+  (framing :chunked)
   (open t)          ; may more chunks be written?
   (settled nil))    ; a semaphore, while a saturated write is outstanding
 
@@ -518,11 +530,19 @@ vector passes through. NIL and empty are NIL, which callers read as `write nothi
     (and octets (plusp (length octets)) octets)))
 
 (defun %stream-emit (so octets)
-  "Write one chunk: size line, the octets, CRLF. LOOP THREAD ONLY.
+  "Write one chunk: size line, the octets, CRLF. LOOP THREAD ONLY. With :CLOSE framing, an
+HTTP/1.0 request's (#1244), the octets alone.
 
 Three writes would be three small segments on the wire, and the terminating one is exactly
 the write Nagle holds -- the 44 ms defect ADR-0011 measured. One write per chunk instead, of
 three pieces that NET:WRITE-BYTES copies into one buffer (#430)."
+  (when (eq (so-framing so) :close)
+    (net:write-bytes (so-conn so) octets
+                     :on-complete (lambda (&rest _) (declare (ignore _))
+                                    (%stream-settle so))
+                     :on-error (lambda (&rest _) (declare (ignore _))
+                                 (%stream-settle so)))
+    (return-from %stream-emit))
   (let ((header (h1:encode-chunk-header (length octets))))
     (unless (h1:encode-ok? header)
       ;; Unreachable: %CHUNK-OCTETS has already refused the empty chunk, which is the only
@@ -619,13 +639,20 @@ into STREAM-WRITE-FAILED instead. See there."
 
 OK writes the terminating chunk and the connection may be reused. NOT OK closes WITHOUT it,
 which is the whole point: a truncated chunked message is an error to every client, and it is
-the only way left to say `this response is wrong' once its head is on the wire."
+the only way left to say `this response is wrong' once its head is on the wire.
+
+With :CLOSE framing, an HTTP/1.0 request's (#1244), there is no terminating chunk and the
+connection is closed either way, because closing is how that body ends. So an HTTP/1.0
+client cannot tell a body that failed after its head from a complete one; HTTP/1.0 gives the
+server no way to say so. The failure is still logged."
   (when (so-open so)
     (setf (so-open so) nil)
     (setf (conn-state-streaming (so-state so)) nil)
     (let ((conn (so-conn so)) (state (so-state so)))
       (cond
         ((conn-state-done state) nil)
+        ((and ok (eq (so-framing so) :close))
+         (%close-after conn state))
         (ok
          (net:write-bytes conn (%latin1 (coalton:coalton h1:last-chunk)))
          (if (so-keep-alive so)
@@ -653,12 +680,22 @@ header, by definition, because that is what makes a browser hold the connection 
   "Answer with a chunked response whose body is produced by BODY, a function of one
 argument -- the writer.
 
+AN HTTP/1.0 REQUEST GETS NO CHUNKED FRAMING (#1244). HTTP/1.0 has no chunked transfer
+coding, so its client would read the chunk-size lines as part of the body. Its head has no
+Transfer-Encoding and no Content-Length, the octets are written as they are, and the
+connection closes after the last of them, whatever the request said about keep-alive.
+
 The head is encoded and refused HERE, before anything is written, because it is the last
 moment a refusal can still become a 500. After it, the only report available is a truncated
 message."
-  (let ((encoded (h1:encode-head-chunked-flat status
-                                              (%head-strings headers 'h1:encode-head-chunked-flat)
-                                              keep-alive)))
+  (let* ((http-1-0 (conn-state-http-1-0 state))
+         (keep-alive (and keep-alive (not http-1-0)))
+         (encoded (if http-1-0
+                      (h1:encode-head-close-delimited-flat
+                       status (%head-strings headers 'h1:encode-head-close-delimited-flat))
+                      (h1:encode-head-chunked-flat
+                       status (%head-strings headers 'h1:encode-head-chunked-flat)
+                       keep-alive))))
     (cond
       ;; AN SSE STREAM ON THE LOOP THREAD IS NOT A TRADE-OFF, IT IS A DEAD SERVER, and it
       ;; is the one streaming case that is never correct rather than merely costly. A
@@ -685,7 +722,8 @@ message."
        (net:write-bytes conn (%latin1 (h1:encode-text encoded)))
        (let* ((loop* (net:connection-loop conn))
               (so (%make-stream-out :conn conn :app app :state state :loop loop*
-                                    :keep-alive keep-alive))
+                                    :keep-alive keep-alive
+                                    :framing (if http-1-0 :close :chunked)))
               (writer (lambda (chunk) (%stream-write so chunk))))
          ;; THE BODY IS APPLICATION CODE, so it goes through *DISPATCH* like the handler
          ;; did rather than running here on the loop thread. With a pool it occupies one
@@ -1018,6 +1056,10 @@ different situations reach it, and they get different answers -- see %IDLE-EXPIR
   ;; The peer's address, (HOST . PORT), asked of the socket on the connection's first request
   ;; and kept (#430). See %PEER.
   (peer nil)
+  ;; The request in flight is HTTP/1.0 (#1244). Its streamed body is then sent with no
+  ;; Transfer-Encoding and ends when the connection closes, because HTTP/1.0 has no chunked
+  ;; transfer coding. Set by %RESPOND for each request; one request is in flight at a time.
+  (http-1-0 nil)
   ;; The UPGRADED this connection became after a 101 (#376), or NIL while it speaks HTTP.
   ;; Once set, every read goes to it and none is parsed as HTTP. See %TAKE-OVER.
   (upgraded nil))
@@ -1567,7 +1609,9 @@ request, which gets the head only."
           ;; and nothing after it. A streamed body's function is not called.
           ;; Hyperion's router strips a HEAD body itself; a Clack app does not.
           ((and head-request (functionp body))
-           (%write-head-only conn status headers :chunked keep-alive))
+           (%write-head-only conn status headers
+                             (if (conn-state-http-1-0 state) :close-delimited :chunked)
+                             keep-alive))
           ((and head-request (pathnamep body))
            (%write-head-only conn status headers (%file-size body) keep-alive))
           ;; AN OPEN FILE (#314): what hyperion/static returns, the handle whose path it
@@ -1616,7 +1660,8 @@ The HANDLER-CASE here catches the DISPATCHER failing, not the handler: a pool th
 accept work, or a seam somebody rebound badly. Without it that condition escapes into the
 callback guard and the request hangs -- the exact failure the boundary exists to prevent,
 one level up."
-  (setf (conn-state-in-flight state) t)
+  (setf (conn-state-in-flight state) t
+        (conn-state-http-1-0 state) (string= "HTTP/1.0" (h1:head-version head)))
   (multiple-value-bind (host port) (%peer conn state)
     (let* ((env (%env head (and (plusp (length body-octets)) body-octets) (or host "") port))
            (head-request (string= "HEAD" (h1:head-method head)))
