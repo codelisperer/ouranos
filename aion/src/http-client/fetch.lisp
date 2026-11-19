@@ -235,6 +235,30 @@ itself: loopback, private or link-local, and neither 6to4 nor NAT64."
        (member (address-category address) '(:loopback :private :link-local))
        t))
 
+(defun %loopback-address-p (address)
+  "Whether ADDRESS, an octet vector or text, is a loopback address of this machine: ADDRESS-CATEGORY
+says :LOOPBACK, and it is neither 6to4 nor NAT64, whose traffic goes through a relay or gateway
+whatever IPv4 address it carries (#1211). An IPv4-mapped loopback address counts."
+  (and (not (%6to4-p address))
+       (not (%nat64-p address))
+       (eq :loopback (ignore-errors (address-category address)))))
+
+(defun loopback-host-p (host)
+  "Whether HOST, as URL-HOST returns it, is this machine by its spelling alone: \"localhost\", or
+an IP address in text that %LOOPBACK-ADDRESS-P accepts, such as 127.0.0.1, ::1 or
+::ffff:127.0.0.1. A 6to4 or NAT64 address carrying 127.0.0.1 is not, and neither is a dotted
+quad with a leading zero, which a resolver may read differently (%LEADING-ZERO-QUAD-P).
+
+NOTHING IS RESOLVED, so any other name is NIL, even one that resolves to a loopback address. This
+is the rule a request made with :STAY-LOCAL is held to (#1212), and the one #1211 asks
+praxeon/llm's ENDPOINT-LOOPBACK-P to share."
+  (and (stringp host)
+       (not (%leading-zero-quad-p host))
+       (or (string-equal host "localhost")
+           (let ((literal (parse-address host)))
+             (and literal (%loopback-address-p literal))))
+       t))
+
 (defun local-host-p (host)
   "Whether HOST names something only this machine or this network can reach, so sending it
 requests in plaintext does not put them on the public internet. HOST is a name or an IP address
