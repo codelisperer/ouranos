@@ -223,7 +223,9 @@ as false."
   (%eval "(() => { let h = Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0); for (const e of document.querySelectorAll('*')) { const s = getComputedStyle(e); if (/(auto|scroll)/.test(s.overflowY) && e.scrollHeight > e.clientHeight) { const r = e.getBoundingClientRect(); h = Math.max(h, Math.ceil(r.top + window.scrollY + e.scrollHeight)); } } return h; })()"))
 
 (defun %mask (suite)
-  (%eval "((sels, pats) => { const saved = [], texts = []; for (const s of sels) for (const e of document.querySelectorAll(s)) { saved.push([e, e.style.visibility]); e.style.visibility = 'hidden'; } const res = pats.map(p => new RegExp(p, 'g')); if (res.length && document.body) { const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT); let n; while ((n = w.nextNode())) { const t = n.nodeValue; let u = t; for (const r of res) u = u.replace(r, '[masked]'); if (u !== t) { texts.push([n, t]); n.nodeValue = u; } } } window.__dokimasiaMask = {saved, texts}; return true; })(~A, ~A)"
+  "Hide the suite's :MASK elements and replace its :MASK-TEXT matches before a screenshot. %JS
+writes an empty list as null, so the script treats null as no selectors and no patterns."
+  (%eval "((sels, pats) => { const saved = [], texts = []; for (const s of (sels || [])) for (const e of document.querySelectorAll(s)) { saved.push([e, e.style.visibility]); e.style.visibility = 'hidden'; } const res = (pats || []).map(p => new RegExp(p, 'g')); if (res.length && document.body) { const w = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT); let n; while ((n = w.nextNode())) { const t = n.nodeValue; let u = t; for (const r of res) u = u.replace(r, '[masked]'); if (u !== t) { texts.push([n, t]); n.nodeValue = u; } } } window.__dokimasiaMask = {saved, texts}; return true; })(~A, ~A)"
          (suite-mask suite) (suite-mask-text suite)))
 
 (defun %unmask ()
