@@ -65,5 +65,7 @@ that hides which scripts it is about.")
                              ;; #1086: an undefined call in a test's child script
                              (:file "child-scripts")
                              ;; #1099: a contrib a dumped image carries must load, or the dump stops
-                             (:file "bake-contribs"))))
+                             (:file "bake-contribs")
+                             ;; #199: a leg's failing items, compared with an earlier run
+                             (:file "suite-status"))))
   :perform (test-op (o c) (symbol-call :checkers/tests '#:run-tests)))

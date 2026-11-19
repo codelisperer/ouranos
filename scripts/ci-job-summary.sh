@@ -17,10 +17,10 @@
 #     gate step tees;
 #   * the gate's total and verdict, and the README check's verdict where that step ran.
 #
-# What it does NOT do: compare against a previous run. #167 also proposes a stored
-# baseline of failing suites per platform, with the difference reported. How that baseline
-# is stored and what a growing set should do are open questions on the issue, so that part
-# is not here.
+# It also prints, when SUITE_DIFF names a file, that file's comparison of this run's failing
+# items with the same platform's previous run on main (#199): scripts/suite-status.lisp writes
+# it, from a baseline scripts/ci-suite-baseline.sh downloads. A comparison that could not be
+# made says so in one line there, and the job goes on.
 #
 # It also says how long the job has run and how far that is from its limit (#1146), when the
 # workflow provides JOB_START (seconds since the epoch, written by the job's first step) and
@@ -93,6 +93,16 @@ BODY=$(mktemp)
   else
     echo "**Gate:** no log at \`${LOG}\` (the gate step did not run, or failed before writing it)."
     echo
+  fi
+
+  # --- compared with the previous run on main (#199) ---------------------------
+  if [ -n "${SUITE_DIFF:-}" ]; then
+    if [ -s "$SUITE_DIFF" ]; then
+      cat "$SUITE_DIFF"
+    else
+      echo "**Compared with the previous run on main:** no comparison was written (\`${SUITE_DIFF}\` is missing or empty)."
+      echo
+    fi
   fi
 
   # --- how close the job came to its limit (#1146) -----------------------------
