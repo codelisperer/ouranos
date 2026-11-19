@@ -14,6 +14,11 @@ its tag.
 
 ### An app may have to act
 
+- **An app's `aion/oauth` store: `delete-token` must succeed when there is no row** (#1175).
+  `disconnect` now calls it even when `get-token` answered NIL, so that a row the store cannot
+  decrypt is still removed. A `delete-token` that signals when nothing matches makes `disconnect`
+  fail for a connection that was never made or is already gone.
+
 - **`aion/cdp:launch-browser` reaches the browser over a pipe by default on Linux, macOS and
   Windows** (#1028, step (c) of dokimasia ADR-0001). Its `:transport` argument is now `:pipe` or
   `:port`. `:pipe` starts the browser with `--remote-debugging-pipe` and opens no debugging port,
@@ -1571,6 +1576,13 @@ its tag.
   one, because HTTP/1.0 has no way to mark the end other than closing; the failure is still
   logged. `hyperion/http1` exports `encode-head-close-delimited` and
   `encode-head-close-delimited-flat`, the encoders for that head.
+
+- **`aion/oauth`'s `disconnect` deletes a stored token the store cannot read** (#1175). When
+  `get-token` answers NIL for a row that is there, because the store's key was rotated or the row
+  is damaged, `disconnect` used to skip `delete-token` as well as the revocation, so the row stayed
+  and the user could not remove the connection. It now calls `delete-token` in every case, under
+  the same refresh lock, and skips only the revocation request, which needs the token.
+
 - **dokimasia's `:audit` and `:screenshot` steps now judge and capture the colours a page shows at
   rest in each colour scheme** (#1288). After switching the scheme they waited two animation
   frames, so on a page with CSS colour transitions, such as Bulma's links, axe-core read colours
@@ -1694,6 +1706,16 @@ its tag.
     literal `<br/>` into the attribute before.
 
 ### Added
+
+- **A praxeon provider can be set so that every request it sends stays on this machine**
+  (#1293). `anthropic`, `openai-compatible` and the remote embedding providers
+  (`openai-compatible-embeddings`, `voyage-embeddings`) take `:stay-local t`. The new exported
+  generic `provider-stay-local` reads the setting and answers NIL for any provider without it.
+  Each request is then sent with `aion/http-client`'s `:stay-local` (#1212): it uses no proxy, it
+  is refused before connecting when the endpoint's host is not loopback, and a redirect off the
+  machine is refused. The refusal reaches the caller as `aion/http-client:stay-local-refused`,
+  not wrapped in `provider-request-failed`, so a retry under `*retry*` or an app's fallback to
+  another provider on `provider-request-failed` does not act on it.
 
 - **`aion/http-client` can mark a request as one that must not leave this machine** (#1212).
   `make-request` takes `:stay-local t` (reader `request-stay-local`; the default NIL changes
