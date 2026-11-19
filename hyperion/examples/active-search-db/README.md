@@ -17,6 +17,11 @@ Then open **http://127.0.0.1:8080/** and:
   the server runs a `LIKE` across name/email/role and swaps the server-rendered rows in. Try
   `lisp`, `co`, `zzz`.
 - The help line updates **instantly** — Alpine reacting client-side on the *same* input HTMX drives.
+- **Add a contact** with the form under the table. The posted fields go through mnemosyne's
+  changeset (`cast`, then `validate-required` and `validate-format`, then `insert!`, stamped by
+  `touch!`); leave the name empty or type a malformed email and the form comes back with the
+  error, and nothing is written. The POST passes hyperion's CSRF check: the `:form` tag adds the
+  token, and the page sends it to the search box's htmx POST as an `hx-headers` value.
 - Press **`/`** to focus the box — that shortcut is Lisp compiled to JS by **Parenscript** (no Node).
 - **Hot reload:** edit `app.lisp`, save, the browser refreshes. Stop with `(hyperion/dev:unwatch)`.
 
