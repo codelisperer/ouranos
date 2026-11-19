@@ -142,3 +142,50 @@ DevToolsActivePort while it ran, and the product the browser reported."
       (signals cdp:browser-exited
         (cdp:launch-browser :executable (uiop:native-namestring exe) :timeout 20
                             :transport transport)))))
+
+(defun %exit-of (exe transport)
+  "The BROWSER-EXITED that launching EXE on TRANSPORT signals, or NIL if it signals none."
+  (handler-case (progn (cdp:close-browser (cdp:launch-browser :executable exe :timeout 20
+                                                              :transport transport))
+                       nil)
+    (cdp:browser-exited (c) c)))
+
+#-win32
+(test a-browser-killed-by-a-signal-is-reported-as-killed-not-as-exiting-with-code-0
+  ;; #1305: a browser that ended on CI was reported as exiting with code 0, with no output.
+  ;; libuv reports a process killed by a signal with an exit status of 0, and that status was
+  ;; all the report read, so a browser killed by the system read as one that chose to exit.
+  ;; The stand-in here kills itself with SIGKILL. Control: a program that exits with status 1
+  ;; is reported with its code and no signal, on both transports.
+  (let* ((dir (aion/fs:make-temporary-directory "cdp-killed"))
+         (script (merge-pathnames "killed-browser" dir)))
+    (unwind-protect
+         (progn
+           (with-open-file (out script :direction :output :if-exists :supersede)
+             (format out "#!/bin/sh~%kill -KILL $$~%"))
+           (sb-posix:chmod (uiop:native-namestring script) #o700)
+           (dolist (transport '(:pipe :port))
+             (let ((c (%exit-of (uiop:native-namestring script) transport)))
+               (is-true c "~A: the stand-in was not reported as exited" transport)
+               (when c
+                 (is (eql 9 (cdp:browser-exited-signal c)) "~A: signal ~S" transport
+                     (cdp:browser-exited-signal c))
+                 (is (null (cdp:browser-exited-code c)) "~A: code ~S" transport
+                     (cdp:browser-exited-code c))
+                 (is-true (search "killed by signal 9" (princ-to-string c))
+                          "~A: ~A" transport c)
+                 (is-true (search "wrote nothing to standard error" (princ-to-string c))
+                          "~A: ~A" transport c))))
+           (let ((false (uiop:native-namestring (or (probe-file "/usr/bin/false")
+                                                    (probe-file "/bin/false")))))
+             (dolist (transport '(:pipe :port))
+               (let ((c (%exit-of false transport)))
+                 (is-true c "control, ~A: false was not reported as exited" transport)
+                 (when c
+                   (is (eql 1 (cdp:browser-exited-code c)) "control, ~A: code ~S" transport
+                       (cdp:browser-exited-code c))
+                   (is (null (cdp:browser-exited-signal c)) "control, ~A: signal ~S" transport
+                       (cdp:browser-exited-signal c))
+                   (is-true (search "exited with code 1" (princ-to-string c))
+                            "control, ~A: ~A" transport c))))))
+      (aion/fs:delete-tree dir))))

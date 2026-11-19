@@ -33,7 +33,7 @@ ELEMENT-NOT-FOUND and EVALUATION-ERROR, both kinds of CDP-ERROR.")
   (:export
    ;; conditions
    #:cdp-condition #:browser-not-found #:browser-exited #:browser-exited-code
-   #:browser-exited-output #:cdp-error #:cdp-error-method #:cdp-error-code
+   #:browser-exited-signal #:browser-exited-output #:cdp-error #:cdp-error-method #:cdp-error-code
    #:cdp-error-message #:cdp-timeout #:cdp-timeout-what #:cdp-timeout-seconds
    #:target-crashed #:element-not-found #:element-not-found-selector #:evaluation-error
    #:connection-closed
