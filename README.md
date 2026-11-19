@@ -216,7 +216,7 @@ this page and the tree, stated rather than left to be discovered.
 | Framework | Where it is | Checks (linux) |
 |---|---|---|
 | **hyperion** | **alpha** — HTMX + Spinneret, i18n (incl. RTL), sessions, channels, static caching, typed interceptors, a native libuv HTTP server (the default when libuv loads; `HYPERION_SERVER` chooses another; WebSockets, TLS termination and the name Okeanos *(in progress)*), and a native-webview desktop app that builds and installs on three OSes | 6060 |
-| **aion** | **mixed** — `aion/log`, `aion/csv`, `aion/random`, `aion/signature` and the opt-in `aion/uv` (libuv) are real; the Coalton-first collections core *(in progress)* | 4325 |
+| **aion** | **mixed** — `aion/log`, `aion/csv`, `aion/random`, `aion/signature` and the opt-in `aion/uv` (libuv) are real; the Coalton-first collections core *(in progress)* | 4343 |
 | **cons** | **alpha** — the bootstrap seed and the per-project task runner work; the full `build/test/serve/run` CLI *(in progress)* | 1134 |
 | **mnemosyne** | **alpha** — DDL-as-data, a CL-DBI shell over the typed backend, exercised against **both SQLite and a real Postgres**. Six design questions still open | 1566 |
 | **hermes** | **alpha** — email + SMS with signature-verified inbound, a content-addressed blob store, and payments behind a neutral protocol with a Stripe backend | 2079 |
@@ -227,7 +227,7 @@ this page and the tree, stated rather than left to be discovered.
 | **dokimasia** | **alpha** — acceptance tests written as data: screens, cases with rows inline or from CSV and s-expression files, and suites, run through `aion/cdp` in a headless Chrome or Edge against a URL or an app the run starts. Every step is checked for console errors, same-origin 5xx responses and request loops; screenshots per viewport and colour scheme with masks; a report.txt and report.json per run; one FiveAM test per case and row; an `:audit` step that runs the vendored axe-core in each colour scheme; `dokimasia/mnemosyne`, ready-made `:expect-stored` probes that read the app's database through mnemosyne; `dokimasia/hyperion`, a target that starts a hyperion app on a scratch database, waits for htmx to settle and can sign a user in with a session. The pipe transport and a worked example *(in progress, #1028)* | 301 |
 | **checkers** | **not a framework** — the gate's own guard scripts (`check-pins`, `check-asd-collisions` and the rest), tested against trees built to break them. A row of its own because the total is the sum of the rows, and a suite that runs in the gate but is excluded from the table would make the two disagree | 828 |
 
-Counts above are from the Linux CI leg at `649eecf`; each suite runs in its own image. Nothing here is
+Counts above are from the Linux CI leg at `48565e7`; each suite runs in its own image. Nothing here is
 API-stable; expect breakage. See [`ECOSYSTEM.md`](ECOSYSTEM.md), the
 [Roadmap board](https://github.com/orgs/codelisperer/projects/1) (filter
 `label:pkg:<framework>`), and [`docs/wiki/`](docs/wiki/Home.md) for the design narrative.
