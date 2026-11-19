@@ -1659,6 +1659,17 @@ its tag.
   browser that was killed. The report reads "was killed by signal N", and says when the browser
   wrote nothing to standard error.
 
+- **A saved image with `aion/http-client` starts on a machine without the OpenSSL it was built
+  against** (#1173). cl+ssl opens libssl and libcrypto when it loads, and SBCL reopens every shared
+  object an image had open when it was saved, before the program runs, so such an image used to
+  exit at startup, in `sb-sys:reopen-shared-objects`, even when it only made plain-http requests.
+  Where cl+ssl is loaded (Linux and the other Unixes; not Windows, and not macOS since #905),
+  `aion/http-client` now marks cl+ssl's two libraries so that SBCL does not reopen them, and
+  reopens them itself at startup with `cl+ssl:reload`, inside a handler. Where OpenSSL is present
+  an image behaves as before. Where it is missing, the image starts, plain-http requests work, and
+  the first TLS use signals `aion/http-client:http-error` naming the library that could not be
+  opened.
+
 - **`hyperion/server-uv` no longer sends a chunked body to an HTTP/1.0 client** (#1244). A
   streamed response, one whose body is a function, was always sent with
   `Transfer-Encoding: chunked`, and HTTP/1.0 has no chunked transfer coding, so an HTTP/1.0

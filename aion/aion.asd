@@ -429,6 +429,8 @@
                 :components ((:file "packages")
                              (:file "client")
                              (:file "openssl") ; a patch to cl+ssl for OpenSSL 4 (#706)
+                             ;; a saved image starts without OpenSSL (#1173)
+                             (:file "openssl-reopen")
                              (:file "http1")   ; the pinned exchange on Windows (#536)
                              (:file "fetch")
                              (:file "macos-tls") ; dexador's https over aion/tls on macOS (#905)
