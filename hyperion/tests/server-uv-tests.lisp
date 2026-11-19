@@ -1237,6 +1237,58 @@ whole, which is the failure -- a silent truncation the application believes it d
       (is-false (search (concatenate 'string +crlf+ "0" +crlf+ +crlf+) (body-of r))
                 "NO terminator -- the client must see this as truncated, not complete"))))
 
+;;; --- a streamed body to an HTTP/1.0 client (#1244) -------------------------------------
+;;;
+;;; HTTP/1.0 has no chunked transfer coding, so an HTTP/1.0 client reads chunk-size lines as
+;;; part of the body. Its streamed body is sent with no Transfer-Encoding and no
+;;; Content-Length, and its end is the connection closing (RFC 9112 6.3, rule 8). Each test
+;;; reads to end of stream, which is how an HTTP/1.0 client reads such a body.
+
+(test an-http-1-0-request-for-a-streamed-body-gets-no-transfer-encoding
+  "The body arrives exactly as written, with no chunk-size lines in it, and the connection
+closes after it, because closing is the only end an HTTP/1.0 client can recognise."
+  (with-server (port (stream-app "alpha" "" "beta" (string (code-char 233))))
+    (let ((r (raw-exchange port (req "GET / HTTP/1.0"))))
+      (is (= 200 (status-of r)) "~S" r)
+      (is-false (header-of r "Transfer-Encoding")
+                "an HTTP/1.0 client cannot decode chunked framing: ~S" r)
+      (is-false (header-of r "Content-Length")
+                "a streamed body has no length to declare")
+      (is (string-equal "close" (header-of r "Connection")))
+      (is (string= (sb-ext:octets-to-string
+                    (sb-ext:string-to-octets (format nil "alphabeta~C" (code-char 233))
+                                             :external-format :utf-8)
+                    :external-format :latin-1)
+                   (body-of r))
+          "the body is the written octets and nothing else: ~S" (body-of r)))))
+
+(test an-http-1-0-keep-alive-request-for-a-streamed-body-is-still-closed
+  "An HTTP/1.0 client that asks for keep-alive still has no way to find the end of a body of
+unknown length except the connection closing, so the server closes it. Before #1244 the
+body was chunked and the connection stayed open after it until the idle timeout."
+  (with-server (port (stream-app "alpha" "beta"))
+    (let ((r (raw-exchange port (req "GET / HTTP/1.0" "Connection: keep-alive"))))
+      (is (= 200 (status-of r)) "~S" r)
+      (is-false (header-of r "Transfer-Encoding") "~S" r)
+      (is (string-equal "close" (header-of r "Connection")))
+      (is (string= "alphabeta" (body-of r)) "~S" (body-of r)))))
+
+(test an-http-1-0-head-request-to-a-streamed-body-gets-no-transfer-encoding
+  "HEAD gets the head a GET would get, and over HTTP/1.0 that head has no Transfer-Encoding."
+  (with-server (port (stream-app "never"))
+    (let ((r (raw-exchange port (req "HEAD / HTTP/1.0"))))
+      (is (= 200 (status-of r)) "~S" r)
+      (is-false (header-of r "Transfer-Encoding") "~S" r)
+      (is (string= "" (body-of r)) "the HEAD response carried a body: ~S" r))))
+
+(test an-http-1-1-request-for-a-streamed-body-is-still-chunked
+  "The control for the three tests above: the same apps over HTTP/1.1 are chunked, so those
+tests are about the request's version and not about the app."
+  (with-server (port (stream-app "alpha" "beta"))
+    (let ((r (raw-exchange port (req "GET / HTTP/1.1" "Host: x" "Connection: close"))))
+      (is (string-equal "chunked" (header-of r "Transfer-Encoding")) "~S" r)
+      (is (equal '(5 4 0) (chunk-sizes r))))))
+
 (test a-streamed-response-refuses-a-header-it-would-not-send
   "Response splitting does not become safe because the body is streamed, and refusing is
 still possible HERE -- the head has not been written yet, so it can still become a 500."

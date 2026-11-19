@@ -1560,6 +1560,17 @@ its tag.
 
 ### Fixed
 
+- **`hyperion/server-uv` no longer sends a chunked body to an HTTP/1.0 client** (#1244). A
+  streamed response, one whose body is a function, was always sent with
+  `Transfer-Encoding: chunked`, and HTTP/1.0 has no chunked transfer coding, so an HTTP/1.0
+  client read the chunk-size lines as part of the body. For an HTTP/1.0 request the head now
+  has no `Transfer-Encoding` and no `Content-Length`, the body is written as it is, and the
+  connection closes after it, even when the request asked for keep-alive. A `HEAD` request
+  over HTTP/1.0 to a streamed body gets the same head. HTTP/1.1 requests are chunked as
+  before. An HTTP/1.0 client cannot tell a body that failed after its head from a complete
+  one, because HTTP/1.0 has no way to mark the end other than closing; the failure is still
+  logged. `hyperion/http1` exports `encode-head-close-delimited` and
+  `encode-head-close-delimited-flat`, the encoders for that head.
 - **dokimasia's `:audit` and `:screenshot` steps now judge and capture the colours a page shows at
   rest in each colour scheme** (#1288). After switching the scheme they waited two animation
   frames, so on a page with CSS colour transitions, such as Bulma's links, axe-core read colours
