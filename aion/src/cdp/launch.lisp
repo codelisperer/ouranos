@@ -283,9 +283,24 @@ only after the browser has exited."
               (proc:process-running-p (piped-process-process p))
               (sb-ext:process-alive-p p)))
 
+(defun %exit-signal (p)
+  "The number of the signal that killed P, or NIL while P runs or when it exited by itself.
+Always NIL on Windows."
+  #+win32 (progn p nil)
+  #-win32 (cond ((%alive-p p) nil)
+                ((piped-process-p p)
+                 (let ((signal (proc:term-signal (piped-process-process p))))
+                   (and signal (plusp signal) signal)))
+                ((eq (sb-ext:process-status p) :signaled) (sb-ext:process-exit-code p))
+                (t nil)))
+
 (defun %exit-code (p)
+  "The status P exited with, or NIL while it runs or when a signal killed it. libuv reports a
+process killed by a signal with an exit status of 0, so the status is read only when no signal
+killed it (#1305)."
   #+win32 (aion/windows:job-process-exit-code p)
   #-win32 (cond ((%alive-p p) nil)
+                ((%exit-signal p) nil)
                 ((piped-process-p p) (proc:exit-status (piped-process-process p)))
                 (t (sb-ext:process-exit-code p))))
 

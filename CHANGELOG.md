@@ -1615,6 +1615,14 @@ its tag.
 
 ### Fixed
 
+- **`aion/cdp:browser-exited` says whether the browser was killed by a signal, and which one**
+  (#1305). A browser killed by a signal while starting was reported as "exited with code 0"
+  over the pipe transport, because libuv reports such a process with an exit status of 0, and
+  with the signal's number as its code over the port transport. The new reader
+  `browser-exited-signal` returns the signal's number, and `browser-exited-code` is now NIL for a
+  browser that was killed. The report reads "was killed by signal N", and says when the browser
+  wrote nothing to standard error.
+
 - **`hyperion/server-uv` no longer sends a chunked body to an HTTP/1.0 client** (#1244). A
   streamed response, one whose body is a function, was always sent with
   `Transfer-Encoding: chunked`, and HTTP/1.0 has no chunked transfer coding, so an HTTP/1.0

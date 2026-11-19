@@ -82,6 +82,7 @@ and its profile deleted. CLOSE-BROWSER ends a browser that started; WITH-BROWSER
                           (when port (return (values port path))))
                         (unless (%alive-p process)
                           (error 'browser-exited :code (%exit-code process)
+                                                 :signal (%exit-signal process)
                                                  :output (%file-tail stderr)))
                         (when (<= (%remaining deadline) 0)
                           (error 'cdp-timeout :what "The browser's start" :seconds timeout))
@@ -99,6 +100,7 @@ and its profile deleted. CLOSE-BROWSER ends a browser that started; WITH-BROWSER
                                    ;; its end of the pipe closing.
                                    (if (%wait-for-exit process 2)
                                        (error 'browser-exited :code (%exit-code process)
+                                                              :signal (%exit-signal process)
                                                               :output (%file-tail stderr))
                                        (error c))))
                                "product"))
