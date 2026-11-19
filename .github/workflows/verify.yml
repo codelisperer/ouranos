@@ -195,12 +195,17 @@ jobs:
           restore-keys: |
             toolchain-${{ matrix.platform }}-
 
+      # The macOS key also names :dexador-no-ssl (#905). On macOS dexador must be compiled with
+      # that feature, which aion.asd pushes, and aion.asd stops with an error when the cached
+      # dexador was compiled without it. Every .asd is already in the hash, so a change to
+      # aion.asd gives a cold build anyway; the name makes the macOS key differ from every key
+      # saved before #905 whatever the .asd files hash to.
       - name: Cache compiled fasls (exact match only)
         id: cache-compiled-fasls-exact-match-only
         uses: actions/cache@v6
         with:
           path: ${{ matrix.fasl }}
-          key: fasl-${{ matrix.platform }}-${{ hashFiles('scripts/versions.env', 'coalton.pin', '**/*.asd') }}
+          key: fasl-${{ matrix.platform }}${{ runner.os == 'macOS' && '-dexador-no-ssl' || '' }}-${{ hashFiles('scripts/versions.env', 'coalton.pin', '**/*.asd') }}
 
       # --- toolchain ----------------------------------------------------------------
       - name: Provision the Lisp toolchain
