@@ -1560,6 +1560,17 @@ its tag.
 
 ### Fixed
 
+- **`hyperion/server-uv` no longer sends a chunked body to an HTTP/1.0 client** (#1244). A
+  streamed response, one whose body is a function, was always sent with
+  `Transfer-Encoding: chunked`, and HTTP/1.0 has no chunked transfer coding, so an HTTP/1.0
+  client read the chunk-size lines as part of the body. For an HTTP/1.0 request the head now
+  has no `Transfer-Encoding` and no `Content-Length`, the body is written as it is, and the
+  connection closes after it, even when the request asked for keep-alive. A `HEAD` request
+  over HTTP/1.0 to a streamed body gets the same head. HTTP/1.1 requests are chunked as
+  before. An HTTP/1.0 client cannot tell a body that failed after its head from a complete
+  one, because HTTP/1.0 has no way to mark the end other than closing; the failure is still
+  logged. `hyperion/http1` exports `encode-head-close-delimited` and
+  `encode-head-close-delimited-flat`, the encoders for that head.
 - **dokimasia's `:audit` and `:screenshot` steps now judge and capture the colours a page shows at
   rest in each colour scheme** (#1288). After switching the scheme they waited two animation
   frames, so on a page with CSS colour transitions, such as Bulma's links, axe-core read colours
@@ -1683,6 +1694,18 @@ its tag.
     literal `<br/>` into the attribute before.
 
 ### Added
+
+- **`aion/http-client` can mark a request as one that must not leave this machine** (#1212).
+  `make-request` takes `:stay-local t` (reader `request-stay-local`; the default NIL changes
+  nothing). Such a request uses no proxy for http or https, so an https request to 127.0.0.1 no
+  longer goes to `HTTPS_PROXY` as a CONNECT. Its URL's host must be loopback by the new exported
+  predicate `loopback-host-p`, which decides from the text with no DNS lookup and does not count a
+  6to4 or NAT64 address carrying 127.0.0.1. Otherwise `send-request` and `open-response-stream`
+  signal the new condition `stay-local-refused` before anything connects. A `:connect-address`
+  that is not loopback is refused the same way, and the condition's `stay-local-refused-address`
+  is set. A redirect to a host that is not loopback also signals `stay-local-refused` instead of
+  being followed or returned. `stay-local-refused-url` names the target, and
+  `stay-local-refused-from` names the URL that redirected.
 
 - **dokimasia's worked example: acceptance tests for hyperion's active-search app, written as
   data** (#1028, step 4). The system `dokimasia/examples/active-search` defines the screen

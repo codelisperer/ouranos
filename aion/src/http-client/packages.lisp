@@ -34,6 +34,10 @@
            #:request-connect-timeout #:request-read-timeout
            #:request-follow-redirects #:request-max-body-bytes
            #:request-connect-address #:request-ca-path
+           ;; a request that must not leave this machine (#1212)
+           #:request-stay-local #:loopback-host-p
+           #:stay-local-refused #:stay-local-refused-url #:stay-local-refused-from
+           #:stay-local-refused-address
            #:response #:make-response #:response-p
            #:response-status #:response-headers #:response-body #:response-bytes
            #:responsep
