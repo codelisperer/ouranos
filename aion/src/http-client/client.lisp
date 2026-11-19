@@ -103,12 +103,18 @@ compiles."))
    (verdict :initarg :verdict :reader certificate-rejected-verdict)
    (code :initarg :code :initform nil :reader certificate-rejected-code))
   (:report (lambda (c s)
-             (format s "the TLS certificate of ~A was rejected (~(~A~)~@[, Windows error #x~8,'0X~])"
-                     (certificate-rejected-host c) (certificate-rejected-verdict c)
-                     (certificate-rejected-code c))))
-  (:documentation "The operating system refused a TLS server's certificate on a pinned connection
-(#536). VERDICT is the reason as a keyword and CODE the operating system's own error code. A
-reason with its own subclass is signalled as that subclass; any other reason as this class."))
+             (let ((code (certificate-rejected-code c)))
+               (format s "the TLS certificate of ~A was rejected (~(~A~)~A)"
+                       (certificate-rejected-host c) (certificate-rejected-verdict c)
+                       (cond ((null code) "")
+                             ;; Windows' codes are HRESULTs, written in hex; macOS's are OSStatus
+                             ;; values, negative and written in decimal (#905).
+                             ((minusp code) (format nil ", macOS OSStatus ~D" code))
+                             (t (format nil ", Windows error #x~8,'0X" code)))))))
+  (:documentation "The operating system refused a TLS server's certificate: on Windows on a pinned
+connection (#536), on macOS on any https connection (#905). VERDICT is the reason as a keyword and
+CODE the operating system's own error code. A reason with its own subclass is signalled as that
+subclass; any other reason as this class."))
 
 (define-condition certificate-expired (certificate-rejected) ()
   (:documentation "The server's certificate, or one in its chain, is outside its validity period."))
@@ -118,11 +124,13 @@ reason with its own subclass is signalled as that subclass; any other reason as 
   (:documentation "The server's certificate is not valid for the URL's host name."))
 (define-condition certificate-revoked (certificate-rejected) ()
   (:documentation "A certificate in the chain is revoked. Revocation is not checked by default
-(see aion/windows:verify-server-certificate-chain), so this comes only from a policy that did."))
+(see aion/windows:verify-server-certificate-chain and aion/darwin:verify-server-certificate-chain),
+so this comes only from a policy that did."))
 (define-condition certificate-revocation-unknown (certificate-rejected) ()
   (:documentation "Revocation was checked and could not be decided, for instance offline."))
 (define-condition certificate-distrusted (certificate-rejected) ()
-  (:documentation "A certificate in the chain is in the machine's Disallowed store."))
+  (:documentation "A certificate in the chain is one the machine distrusts: in Windows' Disallowed
+store, or set to Deny in macOS's trust settings."))
 (define-condition certificate-chain-incomplete (certificate-rejected) ()
   (:documentation "No chain could be built from the server's certificate to a root."))
 (define-condition certificate-wrong-usage (certificate-rejected) ()
@@ -251,11 +259,11 @@ CONNECT-ADDRESS   an IP address, as a string or an octet vector, to connect to i
                   resolving the URL's host. The Host header, TLS SNI and certificate
                   verification still use the URL's host name. On every OS the request is then
                   written and its response read by this client's own HTTP/1.1 (http1.lisp,
-                  #985), not by dexador; for https it goes over aion/tls on Windows, where
-                  Windows decides about the certificate (#536), and over cl+ssl elsewhere. See
-                  %REQUEST-PINNED.
+                  #985), not by dexador; for https it goes over aion/tls on Windows and macOS,
+                  where the operating system decides about the certificate (#536, #905), and
+                  over cl+ssl on Linux. See %REQUEST-PINNED.
 CA-PATH           trust roots for certificate verification (a PEM file or a directory; on
-                  Windows a PEM file only). NIL uses the system's.
+                  Windows and macOS a PEM file only). NIL uses the system's.
 
 STAY-LOCAL        T for a request that must not leave this machine (#1212). The URL's host
                   must be loopback by LOOPBACK-HOST-P, decided from the text with no lookup, or

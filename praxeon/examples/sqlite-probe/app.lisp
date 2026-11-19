@@ -11,7 +11,12 @@
 ;;;; desktop-release.yml's sqlite-probe job does this on Linux, macOS and Windows, and builds
 ;;;; nothing it publishes.
 ;;;;
-;;;; It opens no window, starts no hyperion-view and makes no network call. It opens a SQLite
+;;;; It opens no window and starts no hyperion-view. Given `--https URL', it first makes one https
+;;;; GET to URL through aion/http-client, before SQLite is opened, and checks that the response
+;;;; was 2xx and that no CL+SSL package is in the image (#905): on macOS that request goes over
+;;;; aion/tls and opens Security.framework, which links the system's own SQLite, so the SQLite
+;;;; checks below then also show that the bundle's copy still answers. Without the argument it
+;;;; makes no network call. It opens a SQLite
 ;;;; file in a new temporary directory, syncs a fixed corpus, embeds it with a fixed word-hash
 ;;;; embedder defined here (no model), and runs RETRIEVE-SIMILAR and RETRIEVE-HYBRID. Then it
 ;;;; checks three things, and exits 0 only if all hold:
@@ -30,7 +35,8 @@
                     (#:llm #:praxeon/llm)
                     (#:conn #:mnemosyne/conn)
                     (#:be #:mnemosyne/backend)
-                    (#:lib #:mnemosyne/sqlite-library))
+                    (#:lib #:mnemosyne/sqlite-library)
+                    (#:http #:aion/http-client))
   (:export #:main))
 
 (in-package #:praxeon/examples/sqlite-probe)
@@ -179,12 +185,35 @@ Windows, whose file system does."
         (b (uiop:native-namestring (truename b))))
     (if (uiop:os-windows-p) (string-equal a b) (string= a b))))
 
+(defun %https (url)
+  "One https GET to URL through aion/http-client. Returns the number of failures: the status was
+not 2xx, or a CL+SSL package is in the image afterwards."
+  (let* ((status (http:response-status
+                  (http:send-request (http:make-request :url url :read-timeout 30) '())))
+         (cl+ssl (find-package "CL+SSL"))
+         (failures 0))
+    (report "https" (format nil "~A ~D" url status))
+    (unless (<= 200 status 299)
+      (report "FAIL" (format nil "the https request answered ~D" status))
+      (incf failures))
+    (report "cl+ssl-package" (if cl+ssl "present" "absent"))
+    #-(or win32 linux)
+    (when cl+ssl
+      (report "FAIL" "CL+SSL is a package in this image, and on macOS nothing should load it")
+      (incf failures))
+    failures))
+
+(defun %https-argument ()
+  "The URL after --https on the command line, or NIL."
+  (second (member "--https" (uiop:command-line-arguments) :test #'string=)))
+
 (defun probe ()
   "Every step prints, so a failure names itself in the log. Returns the number of failures."
-  (let* ((loaded (lib:loaded-library))
+  (let* ((url (%https-argument))
+         (failures (if url (%https url) 0))
+         (loaded (lib:loaded-library))
          (path (getf loaded :path))
-         (version (getf loaded :version))
-         (failures 0))
+         (version (getf loaded :version)))
     (report "SQLITE-LIBRARY" (lib:describe-loaded-library loaded))
     (report "pinned-version" *pinned-version*)
     (unless (equal version *pinned-version*)

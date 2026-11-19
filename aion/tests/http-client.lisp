@@ -250,20 +250,26 @@ UTF-8 sequence -- because that is the case the old contract silently destroyed."
 (defun server-heads (server) (aion/test-http:server-heads server))
 
 (defparameter +tls-certificate+
-  #+os-windows "pinned-test-ec.crt" #-os-windows "pinned-test.crt"
-  "The test server's certificate: an EC one on Windows, where aion/tls serves TLS and cannot
-present the RSA one (see fixtures/http-client/README.md), the RSA one elsewhere.")
-(defparameter +tls-key+ #+os-windows "pinned-test-ec.key" #-os-windows "pinned-test.key")
+  #+(or os-windows os-macosx) "pinned-test-ec.crt" #-(or os-windows os-macosx) "pinned-test.crt"
+  "The test server's certificate: an EC one on Windows and macOS, where aion/tls serves TLS and
+cannot present the RSA one (see fixtures/http-client/README.md), the RSA one on Linux.")
+(defparameter +tls-key+
+  #+(or os-windows os-macosx) "pinned-test-ec.key" #-(or os-windows os-macosx) "pinned-test.key")
 
 (defun %start-server (handler &key tls)
   "A server on 127.0.0.1 answering with HANDLER, a function of (path head stream) that writes
 the response. Records every request head. TLS T presents the certificate for pinned.test
-(+TLS-CERTIFICATE+, an EC one on Windows); TLS :IP presents the one whose names are the addresses
-127.0.0.1 and ::1; a string names another fixture pair, \"cn-only-test\" for one such pair."
+(+TLS-CERTIFICATE+, an EC one on Windows and macOS); TLS :IP presents the one whose names are the
+addresses 127.0.0.1 and ::1; a string names another fixture pair, \"cn-only-test\" for one such
+pair. On Windows and macOS, where aion/tls serves, an RSA pair's key is its PKCS#1 copy, because
+mbedTLS refuses an RSA key in PKCS#8 form (#914, fixtures/http-client/README.md)."
   (multiple-value-bind (certificate key)
-      (cond ((stringp tls) (values (format nil "~A.crt" tls) (format nil "~A.key" tls)))
-            ((eq tls :ip) (values "ip-test.crt" "ip-test.key"))
-            (t (values +tls-certificate+ +tls-key+)))
+      (flet ((rsa-key (name)
+               #+(or os-windows os-macosx) (format nil "~A-pkcs1.key" name)
+               #-(or os-windows os-macosx) (format nil "~A.key" name)))
+        (cond ((stringp tls) (values (format nil "~A.crt" tls) (rsa-key tls)))
+              ((eq tls :ip) (values "ip-test.crt" (rsa-key "ip-test")))
+              (t (values +tls-certificate+ +tls-key+))))
     (aion/test-http:start-server
      (lambda (request stream)
        (funcall handler (aion/test-http:request-path request)
@@ -535,9 +541,10 @@ OpenSSL 4 removed ASN1_STRING_data, which cl+ssl calls to read a certificate's n
 when the patch is missing, and when a later load of cl+ssl has put the old definition back. On a
 host whose libcrypto is OpenSSL 4, the pinned test above fails as well. Remove the patch and this
 test once the pinned cl+ssl contains cl-plus-ssl pull request 202."
-  (skip-on-windows "cl+ssl is not used on Windows"
-    ;; Read only off Windows: there is no CL+SSL package on Windows.
-    #-os-windows
+  #+(or os-windows os-macosx) (skip "cl+ssl is not used on Windows or macOS (#905)")
+  ;; Read only on Linux: there is no CL+SSL package on Windows or macOS.
+  #-(or os-windows os-macosx)
+  (progn
     (is (eq (fdefinition 'cl+ssl::asn1-string-get0-data) (fdefinition 'cl+ssl::asn1-string-data))
         "cl+ssl::asn1-string-data is the call to ASN1_STRING_get0_data")))
 
@@ -1189,12 +1196,14 @@ machine trusts. And the chain is judged for the name it is given."
     (aion/windows:verify-server-certificate-chain
      (list (make-array 8 :element-type '(unsigned-byte 8) :initial-element 1)) "x.test")))
 
-#+os-windows
+#+(or os-windows os-macosx)
 (test a-pinned-connection-on-windows-asks-windows-and-honours-its-answer
   "Without CA-PATH, the pinned TLS connection gives the server's chain and the URL's host to the
 verifier and obeys it. A verifier that accepts gets the response; one that answers :EXPIRED
 makes the request signal CERTIFICATE-EXPIRED with Windows' code; and the real verifier refuses
-the self-signed test certificate as CERTIFICATE-UNTRUSTED-ROOT."
+the self-signed test certificate: Windows as CERTIFICATE-UNTRUSTED-ROOT, macOS as
+CERTIFICATE-REJECTED, because the most serious problem macOS reports for it is its 100-year
+validity period (errSecCertificateValidityPeriodTooLong, -67901), which has no subclass (#905)."
   (with-server (s (lambda (path head stream)
                     (declare (ignore path head))
                     (%write-response stream 200 '() "verified by the caller"))
@@ -1214,7 +1223,63 @@ the self-signed test certificate as CERTIFICATE-UNTRUSTED-ROOT."
           (http:certificate-expired (e)
             (is (string= "pinned.test" (http:certificate-rejected-host e)))
             (is (= #x800B0101 (http:certificate-rejected-code e))))))
-      (signals http:certificate-untrusted-root (get-it)))))
+      #+os-windows (signals http:certificate-untrusted-root (get-it))
+      #+os-macosx (handler-case (progn (get-it) (fail "macOS trusted the self-signed certificate"))
+                    (http:certificate-rejected (e)
+                      (is (= -67901 (http:certificate-rejected-code e))
+                          "macOS's reason: ~D" (http:certificate-rejected-code e)))))))
+
+#+os-macosx
+(defun %call-with-make-ssl-stream (function thunk)
+  "Call THUNK with dexador's MAKE-SSL-STREAM set to FUNCTION, and put back what was there."
+  (let* ((name (find-symbol "MAKE-SSL-STREAM" "DEXADOR.BACKEND.USOCKET"))
+         (saved (fdefinition name)))
+    (setf (fdefinition name) function)
+    (unwind-protect (funcall thunk)
+      (setf (fdefinition name) saved))))
+
+#+os-macosx
+(test on-macos-dexadors-https-goes-over-aion-tls-and-loads-no-cl+ssl
+  "#905: on macOS an https request that is not pinned goes through DEX:REQUEST, and the stream
+dexador reads and writes is an AION/TLS:TLS-STREAM made by aion/http-client, whose verdict comes
+from *SERVER-CERTIFICATE-VERIFIER*. No CL+SSL package exists in the image, so no OpenSSL was
+opened. CONTROL: with dexador's own MAKE-SSL-STREAM put back, the one compiled with
+:DEXADOR-NO-SSL, the same request makes no aion/tls stream and fails, so the replacement in
+macos-tls.lisp is what makes https work, not something else in the image."
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "over aion/tls"))
+                  :tls t)
+    (let ((made '())
+          (asked '()))
+      (flet ((recording (inner)
+               (lambda (&rest args)
+                 (let ((stream (apply inner args)))
+                   (push (type-of stream) made)
+                   stream)))
+             (get-it ()
+               ;; :STAY-LOCAL so that no proxy from the environment is used, and no connection
+               ;; dexador pooled earlier can answer instead of a new one.
+               (http:send-request (http:make-request :url (%local s "/" "127.0.0.1" "https")
+                                                     :stay-local t :read-timeout 5)
+                                  '())))
+        (let ((http::*server-certificate-verifier*
+                (lambda (chain host) (push (list (length chain) host) asked) :trusted)))
+          ;; Whatever loading aion/http-client installed, observed, not replaced: a test that
+          ;; put %DEXADOR-TLS-STREAM in place itself would pass with the installation missing.
+          (%call-with-make-ssl-stream
+              (recording (fdefinition (find-symbol "MAKE-SSL-STREAM" "DEXADOR.BACKEND.USOCKET")))
+            (lambda ()
+              (is (string= "over aion/tls" (http:response-body (get-it))))))
+          (is (equal '(aion/tls:tls-stream) made) "dexador's https stream was ~S" made)
+          (is (equal '((1 "127.0.0.1")) asked) "the verifier was asked ~S" asked)
+          (is (null (find-package "CL+SSL")) "CL+SSL is a package in this image")
+          ;; The control.
+          (setf made '())
+          (%call-with-make-ssl-stream (recording http::*%dexador-own-make-ssl-stream*)
+            (lambda ()
+              (signals error (get-it))))
+          (is (null made) "control: dexador's own function made ~S" made))))))
 
 ;;; --- the opt-in check against public servers (GitHub Actions only) ------------------------
 
@@ -1265,7 +1330,7 @@ test."
           (let* ((r (http:fetch-public "https://example.com/" :read-timeout 30 :deadline 60))
                  (status (http:response-status r)))
             (is (and (integerp status) (<= 100 status 599)) "the status was ~S" status))
-          #+os-windows
+          #+(or os-windows os-macosx)
           (signals http:certificate-expired
             (http:fetch-public "https://expired.badssl.com/" :read-timeout 30 :deadline 60))))))
 
@@ -1364,7 +1429,7 @@ control character and no DEL."
     (is (= 200 status))
     (is (string= (format nil "a~Cb~Cc" #\Tab (code-char #xE9)) (gethash "x-a" fields)))))
 
-#+os-windows
+#+(or os-windows os-macosx)
 (test a-pinned-connection-to-an-ipv6-literal-asks-about-the-bare-address
   "F3: QURI keeps the brackets of https://[::1]/; the verifier is asked about ::1, the name a
 certificate's IP address entry holds. The same address written out in full, [0:0:0:0:0:0:0:1], is
