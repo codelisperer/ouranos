@@ -206,6 +206,20 @@ record, and nothing downstream can tell the difference until the data is stored.
 ;;; built from, so the answer cannot differ from the address the request uses. The egress hook
 ;;; (#988) is to be given the same value, so an app's check and the hook agree.
 
+(defgeneric provider-stay-local (provider)
+  (:documentation "True when every request PROVIDER sends must stay on this machine (#1293). Set
+with :STAY-LOCAL T when the provider is made; the default is NIL, and a provider class without
+the setting answers NIL.
+
+Each request is then sent with aion/http-client's :STAY-LOCAL (#1212): it uses no proxy, it is
+refused before anything connects when the endpoint's host is not loopback by
+AION/HTTP-CLIENT:LOOPBACK-HOST-P, and a redirect to a host that is not loopback is refused
+instead of followed. A refusal is signalled as AION/HTTP-CLIENT:STAY-LOCAL-REFUSED, NOT WRAPPED
+IN PROVIDER-REQUEST-FAILED: it means the configuration was broken, not that the provider failed,
+so code that retries or falls back to another provider on a provider failure does not do either
+on it. Falling back to a remote provider would send the request where the setting forbids.")
+  (:method ((provider t)) nil))
+
 (defstruct (endpoint (:constructor %make-endpoint (scheme host port)))
   "Where a provider's requests go: SCHEME (\"http\" or \"https\", lowercase), HOST (lowercase,
 an IPv6 address without its brackets) and PORT (an integer, the scheme's default when the URL
@@ -478,16 +492,18 @@ praxeon module that calls a service itself rather than through COMPLETE (#758). 
 with LABEL and carries the status, error type and code and the body's length, never the body."
   (%request-failure label e))
 
-(defun %post-json (url headers payload)
+(defun %post-json (url headers payload &key stay-local)
   "One JSON POST through the shared interceptor client, returning the response body.
 
 A non-2xx signals HTTP-ERROR carrying the provider's body, which is what the callers below
-turn into a DELIBERATION-FAILURE. Timeouts are the module's own, as before."
+turn into a DELIBERATION-FAILURE. Timeouts are the module's own, as before. STAY-LOCAL is the
+provider's PROVIDER-STAY-LOCAL, passed to the request (#1293)."
   (http:response-body
    (http:send-request
     (http:make-request :method :post :url url :headers headers :content payload
                        :connect-timeout *connect-timeout*
-                       :read-timeout *read-timeout*)
+                       :read-timeout *read-timeout*
+                       :stay-local stay-local)
     (list (http:ensure-2xx url)))))
 
 ;;; --------------------------------------------------------------------------
@@ -655,19 +671,23 @@ PROVIDER-REQUEST-FAILED with their length, never their text."
       (error (%stream-failure label "a tool call's streamed arguments are not JSON, ~D characters"
                               (length raw))))))
 
-(defun %stream-events (url headers payload label tally on-event)
+(defun %stream-events (url headers payload label tally stay-local on-event)
   "POST PAYLOAD to URL asking for a stream, and call ON-EVENT with the data and event name of
 each event until the stream ends. A cancel through *CANCEL* signals COMPLETION-CANCELLED from
 TALLY. A failed request, or a status other than 2xx, signals PROVIDER-REQUEST-FAILED as COMPLETE
-does, with a report starting with LABEL. The connection is closed on every exit."
+does, with a report starting with LABEL. The connection is closed on every exit. STAY-LOCAL is
+the provider's PROVIDER-STAY-LOCAL, passed to the request (#1293)."
   (multiple-value-bind (body status headers)
       (handler-case
           (http:open-response-stream
            (http:make-request :method :post :url url :headers headers :content payload
                               :connect-timeout *connect-timeout*
-                              :read-timeout *read-timeout*)
+                              :read-timeout *read-timeout*
+                              :stay-local stay-local)
            :cancel *cancel*)
         (http:request-cancelled () (%cancelled tally))
+        ;; A STAY-LOCAL refusal is signalled as itself, not as a provider failure (#1293).
+        (http:stay-local-refused (e) (error e))
         (error (e) (error (%request-failure label e))))
     (unwind-protect
          (handler-case
@@ -700,7 +720,8 @@ does, with a report starting with LABEL. The connection is closed on every exit.
    (endpoint :initarg :endpoint
              :initform "https://api.anthropic.com/v1/messages"
              :reader anthropic-endpoint)
-   (version :initarg :version :initform "2023-06-01" :reader anthropic-version))
+   (version :initarg :version :initform "2023-06-01" :reader anthropic-version)
+   (stay-local :initarg :stay-local :initform nil :reader provider-stay-local))
   (:documentation "The Anthropic Messages API as a Praxeon provider. Authenticates
 with an x-api-key from PRAXEON_ANTHROPIC_API_KEY (or PRAXEON_LLM_API_KEY when
 PRAXEON_LLM_IMPL is anthropic), billed to that key's API credits. (A
@@ -782,7 +803,11 @@ translation happened."
         (let* ((payload (jzon:stringify body))
                (response
                  (handler-case
-                     (%post-json (anthropic-endpoint p) (%auth-headers p) payload)
+                     (%post-json (anthropic-endpoint p) (%auth-headers p) payload
+                                 :stay-local (provider-stay-local p))
+                   ;; A STAY-LOCAL refusal is signalled as itself,
+                   ;; not as a provider failure (#1293).
+                   (http:stay-local-refused (e) (error e))
                    (error (e)
                      (error (%request-failure "Anthropic request failed" e))))))
           (%parse-completion (jzon:parse response))))))
@@ -813,6 +838,7 @@ reply."
     (flet ((block-at (index) (find index blocks :key #'first)))
       (%stream-events
        (anthropic-endpoint p) (%auth-headers p) (jzon:stringify body) label tally
+       (provider-stay-local p)
        (lambda (data event)
          (declare (ignore event))
          (let* ((ev (%event-json label data))
@@ -1062,7 +1088,8 @@ PRAXEON_LLM_IMPL names one this class serves, otherwise \"openai\"."
   ((impl :initarg :impl :initform (%default-oai-impl) :reader oai-impl)
    (model :initarg :model :reader oai-model)
    (base-url :initarg :base-url :reader oai-base-url)
-   (api-key :initarg :api-key :reader oai-api-key))
+   (api-key :initarg :api-key :reader oai-api-key)
+   (stay-local :initarg :stay-local :initform nil :reader provider-stay-local))
   (:documentation "Any OpenAI-compatible chat endpoint as a Praxeon provider.
 BASE-URL selects the target (Ollama http://localhost:11434/v1, OpenRouter
 https://openrouter.ai/api/v1, ...); API-KEY is sent as a Bearer token when set
@@ -1193,14 +1220,18 @@ through response_format (#680)."
                                           (format nil "Bearer ~A" (oai-api-key p)))))))
            (label (format nil "OpenAI-compatible request to ~A failed" url)))
       (if (%streaming-p p)
-          (%openai-stream body url headers label)
-          (let ((response (handler-case (%post-json url headers payload)
+          (%openai-stream body url headers label :stay-local (provider-stay-local p))
+          (let ((response (handler-case (%post-json url headers payload
+                                                    :stay-local (provider-stay-local p))
+                            ;; A STAY-LOCAL refusal is signalled as itself,
+                            ;; not as a provider failure (#1293).
+                            (http:stay-local-refused (e) (error e))
                             (error (e) (error (%request-failure label e))))))
             (%parse-openai (jzon:parse response)))))))
 
 (defmethod supports-streaming-p ((p openai-compatible)) t)
 
-(defun %openai-stream (body url headers label)
+(defun %openai-stream (body url headers label &key stay-local)
   "COMPLETE for an OpenAI-compatible server with BODY sent as a stream (#984). Each chunk's
 choices[0].delta carries a piece of the text or of a tool call, keyed by the call's index; the
 finish reason comes with the last of them, and with stream_options.include_usage the usage comes
@@ -1222,7 +1253,7 @@ servers close the connection after it; the usage chunk may then be missing."
         (done nil)
         (usage nil))
     (%stream-events
-     url headers (jzon:stringify body) label tally
+     url headers (jzon:stringify body) label tally stay-local
      (lambda (data event)
        (declare (ignore event))
        (let ((chunk (if (equal data "[DONE]")

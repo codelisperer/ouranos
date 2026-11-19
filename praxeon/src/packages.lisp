@@ -154,6 +154,8 @@
    ;; where a provider sends its requests (#1034)
    #:endpoint #:endpoint-p #:endpoint-scheme #:endpoint-host #:endpoint-port
    #:parse-endpoint #:provider-endpoint #:endpoint-loopback-p
+   ;; a provider whose requests must stay on this machine (#1293)
+   #:provider-stay-local
    ;; the embedding seam (#138, #150) -- a SEPARATE hierarchy, not a capability on PROVIDER
    #:embedding-provider #:embed #:embed-batch #:embed-documents #:embed-query
    #:embedding-dimensions #:embedding-model-of

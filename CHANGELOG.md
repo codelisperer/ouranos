@@ -1684,6 +1684,16 @@ its tag.
 
 ### Added
 
+- **A praxeon provider can be set so that every request it sends stays on this machine**
+  (#1293). `anthropic`, `openai-compatible` and the remote embedding providers
+  (`openai-compatible-embeddings`, `voyage-embeddings`) take `:stay-local t`. The new exported
+  generic `provider-stay-local` reads the setting and answers NIL for any provider without it.
+  Each request is then sent with `aion/http-client`'s `:stay-local` (#1212): it uses no proxy, it
+  is refused before connecting when the endpoint's host is not loopback, and a redirect off the
+  machine is refused. The refusal reaches the caller as `aion/http-client:stay-local-refused`,
+  not wrapped in `provider-request-failed`, so a retry under `*retry*` or an app's fallback to
+  another provider on `provider-request-failed` does not act on it.
+
 - **`aion/http-client` can mark a request as one that must not leave this machine** (#1212).
   `make-request` takes `:stay-local t` (reader `request-stay-local`; the default NIL changes
   nothing). Such a request uses no proxy for http or https, so an https request to 127.0.0.1 no
