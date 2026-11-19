@@ -71,17 +71,22 @@ finds a violation at or above the step's :IMPACT."
            (floor (%impact-rank impact))
            (version (%load-axe page timeout))
            (found '()))
-      (unwind-protect
-           (dolist (scheme (run-context-schemes ctx))
-             (cdp:emulate-color-scheme page scheme :timeout *step-timeout*)
-             (%next-frame)
-             (dolist (v (%axe-violations page ignore timeout))
-               (when (>= (%impact-rank (getf v :impact)) floor)
-                 (push (format nil "~(~A~): ~A (~A, ~D element~:P, first at ~A): ~A"
-                               scheme (getf v :id) (getf v :impact) (getf v :count)
-                               (getf v :target) (getf v :help))
-                       found))))
-        (cdp:emulate-color-scheme page (first (run-context-schemes ctx)) :timeout *step-timeout*))
+      ;; Transitions are off for the whole step, so axe judges each scheme's colours at rest
+      ;; rather than part way from the other scheme's (#1288).
+      (%call-still
+       (lambda ()
+         (unwind-protect
+              (dolist (scheme (run-context-schemes ctx))
+                (cdp:emulate-color-scheme page scheme :timeout *step-timeout*)
+                (%next-frame)
+                (dolist (v (%axe-violations page ignore timeout))
+                  (when (>= (%impact-rank (getf v :impact)) floor)
+                    (push (format nil "~(~A~): ~A (~A, ~D element~:P, first at ~A): ~A"
+                                  scheme (getf v :id) (getf v :impact) (getf v :count)
+                                  (getf v :target) (getf v :help))
+                          found))))
+           (cdp:emulate-color-scheme page (first (run-context-schemes ctx))
+                                     :timeout *step-timeout*))))
       (when found
         (%fail "axe-core ~A found ~D violation~:P at ~(~A~) or above: ~{~A~^; ~}"
                version (length found) impact (reverse found))))))
