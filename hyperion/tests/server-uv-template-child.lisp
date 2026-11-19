@@ -31,7 +31,8 @@
                                                              :element-type 'character
                                                              :external-format :latin-1
                                                              :timeout 30)))
-             (write-string (concatenate 'string "GET / HTTP/1.1" crlf "Host: 127.0.0.1" crlf
+             (write-string (concatenate 'string "GET / HTTP/1.1" crlf
+                                        "Host: 127.0.0.1:" (princ-to-string port) crlf
                                         "Connection: close" crlf crlf)
                            stream)
              (finish-output stream)

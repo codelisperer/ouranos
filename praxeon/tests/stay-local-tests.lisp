@@ -179,3 +179,89 @@ retrying it could only be refused again."
                                         (list (llm:msg "user" "hi"))))))))
       (is-true (%refused-p outcome) "~S" outcome)
       (is (= 0 scheduled) "retries scheduled: ~D" scheduled))))
+
+;;; --- the image providers (#1302) -----------------------------------------------------------
+;;;
+;;; OPENAI-IMAGES and GOOGLE-IMAGES send the prompt too, so they take :STAY-LOCAL the same way.
+;;; Each case below runs for both classes; the reply a local server answers with is each
+;;; provider's own, from image-tests and image-google-tests.
+
+(defun %stay-local-image-providers (base-url-for &key stay-local)
+  "An OPENAI-IMAGES and a GOOGLE-IMAGES provider, as (name . provider) pairs, made with
+STAY-LOCAL and the base URL (funcall BASE-URL-FOR name)."
+  (list (cons "openai"
+              (praxeon/image:make-openai-images :api-key "k" :stay-local stay-local
+                                                :base-url (funcall base-url-for "openai")))
+        (cons "google"
+              (praxeon/image:make-google-images :api-key "k" :stay-local stay-local
+                                                :base-url (funcall base-url-for "google")))))
+
+(defun %stay-local-image-reply (name)
+  (if (equal name "openai") (%image-reply) (%google-reply)))
+
+(defun %generate (provider)
+  (praxeon/image:generate-image provider "a lighthouse at dusk"))
+
+(test an-image-provider-takes-stay-local-and-the-default-is-nil
+  "Both image provider classes answer PROVIDER-STAY-LOCAL: NIL unless set, and T when set
+through MAKE-*, *-FROM-ENV or MAKE-INSTANCE."
+  (is (null (llm:provider-stay-local (praxeon/image:make-openai-images :api-key "k"))))
+  (is (null (llm:provider-stay-local (praxeon/image:make-google-images :api-key "k"))))
+  (is (eq t (llm:provider-stay-local
+             (praxeon/image:make-openai-images :api-key "k" :stay-local t))))
+  (is (eq t (llm:provider-stay-local
+             (praxeon/image:make-google-images :api-key "k" :stay-local t))))
+  (is (eq t (llm:provider-stay-local
+             (praxeon/image:openai-images-from-env :api-key "k" :stay-local t))))
+  (is (eq t (llm:provider-stay-local
+             (praxeon/image:google-images-from-env :api-key "k" :stay-local t))))
+  (is (eq t (llm:provider-stay-local
+             (make-instance 'praxeon/image:openai-images :api-key "k" :stay-local t)))))
+
+(test a-stay-local-image-provider-whose-endpoint-is-not-loopback-signals-the-refusal-itself
+  "Each image provider, set to stay local with a base URL whose host is not loopback, signals
+STAY-LOCAL-REFUSED: not IMAGE-REQUEST-FAILED, which would tell the agent to try again later, and
+not PROVIDER-REQUEST-FAILED. Control: without the setting, a 500 from a local server is still a
+provider failure."
+  (loop for (name . p) in (%stay-local-image-providers
+                           (lambda (name) (format nil "https://~A.example.invalid/v1" name))
+                           :stay-local t)
+        do (let ((outcome (%outcome (lambda () (%generate p)))))
+             (is-true (%refused-p outcome) "~A: ~S" name outcome)
+             (is-false (typep (second outcome) 'praxeon/image:image-request-failed) "~A" name)
+             (is-false (typep (second outcome) 'cnd:provider-request-failed) "~A" name)))
+  (aion/test-http:with-server (s (%stay-local-server :status 500 :body "{}"))
+    (loop for (name . p) in (%stay-local-image-providers
+                             (lambda (name) (declare (ignore name))
+                               (aion/test-http:server-url s "/v1")))
+          do (let ((outcome (%outcome (lambda () (%generate p)))))
+               (is (typep (second outcome) 'cnd:provider-request-failed)
+                   "control, ~A: a 500 is still a provider failure: ~S" name outcome)))))
+
+(test a-stay-local-image-provider-redirected-off-the-machine-signals-the-refusal-itself
+  "A local server that answers the image request with a 307 to a host that is not loopback: the
+provider set to stay local signals STAY-LOCAL-REFUSED naming that target, so the prompt is not
+sent there. Control: a local server that answers with an image is used as before."
+  (aion/test-http:with-server (s (%stay-local-server :status 307
+                                                     :location "http://images.example.invalid/x"
+                                                     :body ""))
+    (loop for (name . p) in (%stay-local-image-providers
+                             (lambda (name) (declare (ignore name))
+                               (aion/test-http:server-url s "/v1"))
+                             :stay-local t)
+          do (let ((outcome (%outcome (lambda () (%generate p)))))
+               (is-true (%refused-p outcome) "~A: ~S" name outcome)
+               (is (equal "http://images.example.invalid/x"
+                          (and (%refused-p outcome)
+                               (aion/http-client:stay-local-refused-url (second outcome))))
+                   "~A" name))))
+  (dolist (name '("openai" "google"))
+    (aion/test-http:with-server (s (%stay-local-server :body (%stay-local-image-reply name)))
+      (let* ((p (cdr (assoc name (%stay-local-image-providers
+                                  (lambda (name) (declare (ignore name))
+                                    (aion/test-http:server-url s "/v1"))
+                                  :stay-local t)
+                            :test #'equal)))
+             (results (%generate p)))
+        (is (= 1 (length results)) "control, ~A: a loopback endpoint answers" name)
+        (is (= 1 (length (aion/test-http:server-requests s))) "~A" name)))))
