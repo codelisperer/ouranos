@@ -7,6 +7,11 @@
 ;;;; event). A dependency-light leaf: dexador/jzon/base64 for the wire, ironclad for the
 ;;;; inbound signature. Consumable by any app; hermes is "the messenger".
 
+;;; dexador without cl+ssl on macOS (#905): see the same form at the top of aion/aion.asd. It is
+;;; repeated here because this file names dexador, and ASDF may resolve that dependency before it
+;;; reads aion.asd.
+#+os-macosx (pushnew :dexador-no-ssl *features*)
+
 (defsystem "hermes"
   :description "External-integrations framework: neutral email + SMS delivery and inbound (SendGrid/Twilio)."
   :author "Bob <eternal.recursion@proton.me>"

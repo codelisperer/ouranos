@@ -18,6 +18,11 @@
 ;;;;   sqlite-carried-and-system.txt
 ;;;;                          sbcl opened the bundle's libsqlite3.dylib and then
 ;;;;                          /usr/lib/libsqlite3.dylib.
+;;;; and, for #905, a transcript from Darwin 27.2 of praxeon/examples/sqlite-probe's own bundle
+;;;; run with --https, trimmed to the lines about the processes, libSystem, Security.framework,
+;;;; libsqlite3, libssl and libcrypto, with the bundle directory replaced in the same way:
+;;;;   https-security.txt     sbcl opened the bundle's libsqlite3.dylib, and Security.framework
+;;;;                          brought in Apple's libsqlite3, libcrypto and libssl.
 
 (in-package #:checkers/tests)
 
@@ -68,19 +73,33 @@ before, reports both libraries, which is the false report on #781."
                      :key #'ouranos-dyld-libraries:image-path :test #'string=)))
       (is (and ssl (eq :delayed (ouranos-dyld-libraries:image-state ssl)))))))
 
-(test apples-openssl-opened-by-the-app-fails-and-opened-by-webkit-passes
-  "The same two libraries, moved back to loaded. In sbcl, which is the app's Lisp process,
-that is a FAIL. In hyperion-view it is WebKit's own and passes. CONTROL: the WebKit
-transcript with its process renamed to sbcl fails, so it passes because of the process."
-  (is (equal '((:fail "sbcl" "/usr/lib/libcrypto.46.dylib")
-               (:fail "sbcl" "/usr/lib/libssl.48.dylib"))
+(test apples-openssl-passes-in-any-process-and-any-other-openssl-fails
+  "The same two libraries, moved back to loaded. Since #905, Apple's own copy, exactly
+/usr/lib/libssl.*.dylib or /usr/lib/libcrypto.*.dylib, passes in sbcl as :APPLE, because
+Security.framework loads it and every Mac has it; in hyperion-view it is still WebKit's. Whether
+the image holds cl+ssl is checked by build-desktop-app.lisp instead. CONTROLS: the same file
+names under Homebrew's prefix, or in a directory below /usr/lib, fail."
+  (is (equal '((:apple "sbcl" "/usr/lib/libcrypto.46.dylib")
+               (:apple "sbcl" "/usr/lib/libssl.48.dylib"))
              (%openssl-verdicts "opened-directly")))
   (is (equal '((:webkit "hyperion-view" "/usr/lib/libcrypto.46.dylib")
                (:webkit "hyperion-view" "/usr/lib/libssl.48.dylib"))
              (%openssl-verdicts "opened-by-webkit")))
-  (is (equal '(:fail :fail)
+  (is (equal '(:apple :apple)
              (%verdicts-of (uiop:frob-substrings (%dyld-fixture "opened-by-webkit")
-                                                 '("hyperion-view") "sbcl")))))
+                                                 '("hyperion-view") "sbcl"))))
+  (let ((https (%dyld-fixture "https-security")))
+    (is (equal '(:apple :apple) (%verdicts-of https)))
+    (is (equal '(:apple :fail)
+               (%verdicts-of (uiop:frob-substrings
+                              https '("/usr/lib/libssl.48.dylib")
+                              "/opt/homebrew/opt/openssl@3/lib/libssl.3.dylib")))
+        "control: Homebrew's libssl fails")
+    (is (equal '(:fail :apple)
+               (%verdicts-of (uiop:frob-substrings
+                              https '("/usr/lib/libcrypto.46.dylib")
+                              "/usr/lib/ssl/libcrypto.46.dylib")))
+        "control: a libcrypto in a directory below /usr/lib fails")))
 
 (test a-carried-library-passes-and-exec-starts-a-new-process
   "The launcher execs sbcl under the same pid; the images after sbcl's path line belong to sbcl.
@@ -109,7 +128,7 @@ excused or none is, 2 on a bad command line; `loaded' lists only libraries still
              (values code out)))
          (fixture (name)
            (uiop:native-namestring (%dyld-fixture-path name))))
-    (is (eql 1 (check-dyld-log "openssl" (fixture "opened-directly") +example-bundle+)))
+    (is (eql 0 (check-dyld-log "openssl" (fixture "opened-directly") +example-bundle+)))
     (is (eql 0 (check-dyld-log "openssl" (fixture "opened-by-webkit") +example-bundle+)))
     (is (eql 0 (check-dyld-log "openssl" (fixture "unused") +example-bundle+)))
     (is (eql 2 (check-dyld-log "openssl" (fixture "unused"))))
@@ -140,6 +159,52 @@ copy counts as loaded and fails, and the bundle's copy passes (#899)."
                                                   "/Applications/Other.app/Contents/MacOS")))
         "the same copy judged against another bundle fails")))
 
+(test apples-libsqlite3-is-waived-only-beside-security-framework
+  "#905: Security.framework brings in Apple's /usr/lib/libsqlite3.dylib. In a process where
+Security.framework is loaded, that copy is waived as :SECURITY-FRAMEWORK, which check-dyld-log
+prints as a WAIVED line. CONTROLS: the same transcript with the Security.framework line removed
+fails, as does the #899 fixture, which has no Security.framework; a copy of libsqlite3 from any
+path other than /usr/lib/libsqlite3.dylib fails beside Security.framework."
+  (let* ((bundle-copy (concatenate 'string +example-bundle+ "/libsqlite3.dylib"))
+         (https (%dyld-fixture "https-security"))
+         (no-security (format nil "~{~A~%~}"
+                              (remove-if (lambda (line) (search "Security.framework" line))
+                                         (uiop:split-string https :separator '(#\Newline)))))
+         (verdicts (lambda (text)
+                     (mapcar (lambda (f) (list (first f) (fourth f)))
+                             (ouranos-dyld-libraries:carried-findings
+                              (ouranos-dyld-libraries:parse-dyld-log text) +example-bundle+
+                              "libsqlite3.dylib")))))
+    (is (equal `((:carried ,bundle-copy) (:security-framework "/usr/lib/libsqlite3.dylib"))
+               (funcall verdicts https)))
+    (is (search "Security.framework" https) "control: the fixture has Security.framework")
+    (is (not (search "Security.framework" no-security)))
+    (is (equal `((:carried ,bundle-copy) (:fail "/usr/lib/libsqlite3.dylib"))
+               (funcall verdicts no-security))
+        "control: without Security.framework, Apple's copy fails")
+    (is (equal '(:fail :carried)
+               (mapcar #'first (%carried-verdicts "sqlite-carried-and-system" "libsqlite3.dylib")))
+        "control: the #899 fixture still fails")
+    (is (equal `((:carried ,bundle-copy) (:fail "/opt/homebrew/lib/libsqlite3.dylib"))
+               (funcall verdicts (uiop:frob-substrings https '("/usr/lib/libsqlite3.dylib")
+                                                       "/opt/homebrew/lib/libsqlite3.dylib")))
+        "control: another path fails beside Security.framework")))
+
+(test the-apps-own-report-of-its-sqlite-must-name-the-bundle
+  "#905: REPORTED-LIBRARY-FINDINGS reads the probe's `SQLITE-LIBRARY: <version> <path>' line.
+A report naming the bundle's copy passes; one naming /usr/lib fails, even in a log where
+Security.framework is loaded and the dyld rule waives Apple's copy; no report gives nothing."
+  (let ((https (%dyld-fixture "https-security"))
+        (good (format nil "SQLITE-LIBRARY: 3.54.1 ~A/libsqlite3.dylib" +example-bundle+))
+        (bad "SQLITE-LIBRARY: 3.54.0 /usr/lib/libsqlite3.dylib"))
+    (flet ((verdicts (text)
+             (ouranos-dyld-libraries:reported-library-findings text +example-bundle+)))
+      (is (equal `((:carried "3.54.1" ,(concatenate 'string +example-bundle+ "/libsqlite3.dylib")))
+                 (verdicts (format nil "~A~%~A~%" https good))))
+      (is (equal '((:fail "3.54.0" "/usr/lib/libsqlite3.dylib"))
+                 (verdicts (format nil "~A~%~A~%" https bad))))
+      (is (null (verdicts https))))))
+
 (test check-dyld-log-exits-by-the-carried-verdict
   "verify-bundle-macos.sh's check for each carried library: exit 1 when a copy from outside the
 bundle is loaded, even beside the bundle's; 0 when only the bundle's is; 3 when none is; 2 on a
@@ -159,4 +224,9 @@ bad command line."
                                "libsqlite3.dylib")))
     (is (eql 3 (check-dyld-log "carried" (fixture "sqlite-carried") +example-bundle+
                                "libuv.1.dylib")))
-    (is (eql 2 (check-dyld-log "carried" (fixture "sqlite-carried") +example-bundle+)))))
+    (is (eql 2 (check-dyld-log "carried" (fixture "sqlite-carried") +example-bundle+)))
+    (is (eql 0 (check-dyld-log "carried" (fixture "https-security") +example-bundle+
+                               "libsqlite3.dylib"))
+        "Apple's libsqlite3 beside Security.framework is waived")
+    (is (eql 0 (check-dyld-log "reported" (fixture "https-security") +example-bundle+))
+        "a log with no SQLITE-LIBRARY line passes the report check")))

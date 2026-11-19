@@ -290,10 +290,13 @@ onto another port is fragility bought for nothing.
   VM. The shared design is ADR-0013.
   `desktop-release.yml`'s `sqlite-probe` job builds `praxeon/examples/sqlite-probe` on all
   three, runs praxeon's retrieval on SQLite inside the bundle, and checks that the probe
-  called the bundle's pinned libsqlite3 (#899). On macOS it reads the dyld log for libsqlite3
-  alone, through `check-dyld-log.lisp carried`, rather than running
-  `verify-bundle-macos.sh`, because praxeon loads cl+ssl and the runner's Homebrew OpenSSL,
-  which that script's OpenSSL rule fails. On Linux it runs on the runner, not in a clean room.
+  called the bundle's pinned libsqlite3 (#899). On macOS it also reads the dyld log for
+  libsqlite3 through `check-dyld-log.lisp carried`, and then runs the whole of
+  `verify-bundle-macos.sh` on the probe with `--https https://example.com/` (#905). That run
+  makes one https request through `aion/http-client`, which on macOS goes over `aion/tls` and
+  opens Security.framework. The script accepts Apple's `/usr/lib` libssl and libcrypto, prints
+  a WAIVED line for Apple's libsqlite3 beside Security.framework, and fails unless the probe's
+  `SQLITE-LIBRARY` line names the bundle's copy. On Linux it runs on the runner, not in a clean room.
 - **`elenchon/tests`.** Deliberately unwired — a `:perform` over an empty suite relocates
   the dishonesty rather than removing it.
 - **Anything on a `+known-warnings+` line** in `scripts/compile-warnings.lisp`, **or a `+known-empty+` line** in `verify-tree.lisp`. Those

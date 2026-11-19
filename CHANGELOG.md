@@ -14,6 +14,42 @@ its tag.
 
 ### An app may have to act
 
+- **On macOS, `aion/http-client` makes every https request over `aion/tls`, and macOS decides
+  which certificates to trust, so it no longer loads cl+ssl or OpenSSL there** (#905), and a
+  macOS desktop bundle no longer needs Homebrew's OpenSSL (#191). One exception remains: Woo
+  still loads cl+ssl on macOS, because `woo.asd` depends on it unless `:woo-no-ssl` is on
+  `*features*`, so an image that loads `clack-handler-woo` still opens OpenSSL (#1310).
+  On macOS, `aion.asd`, `hermes.asd`, `praxeon.asd` and `hyperion.asd` push `:dexador-no-ssl`
+  onto `*features*`, so dexador is compiled without cl+ssl. `aion/http-client` then replaces dexador's TLS function with an
+  `aion/tls` stream, so `dex:request` and everything built on it, `hermes/blob` included, use
+  mbedTLS. A certificate is checked by Security.framework through the new
+  `aion/darwin:verify-server-certificate-chain`, the default of
+  `aion/http-client:*server-certificate-verifier*` on macOS. What an app may have to change:
+  - **The fasl cache is shared by every Lisp project on a Mac.** Once a dexador compiled under
+    `:dexador-no-ssl` is in it, another project on the same Mac that loads dexador without
+    loading aion first gets a dexador with no TLS, and its https requests fail with "SSL not
+    supported". That project can load `aion/http-client` before dexador, or delete dexador's
+    compiled files so that they are rebuilt for it; the directory is the one
+    `(asdf:apply-output-translations (asdf:system-source-directory "dexador"))` names. The
+    reverse case, a dexador compiled with cl+ssl by such a project and then loaded by aion,
+    stops `aion.asd` with an error naming the same directory to delete.
+  - A request that gives dexador a client certificate (`:ssl-key-file`, `:ssl-cert-file`) or
+    `:insecure t` signals `aion/http-client:http-error` on macOS.
+  - `:ca-path` must name one PEM file on macOS, as on Windows.
+  - `aion/http-client:certificate-rejected` reports a macOS `OSStatus` as ", macOS OSStatus
+    -67843" and so on, where Windows reports its hexadecimal error code.
+  - Every macOS image with `aion/http-client` now loads Security.framework, on its first https
+    request. `aion/darwin` opens CoreFoundation and Security on first use with `RTLD_LOCAL`,
+    because Security links the system's `/usr/lib/libsqlite3.dylib`, and a global open made a
+    desktop bundle's SQLite calls reach that copy instead of the pinned one the bundle carries
+    (#899). Code that looked up a CoreFoundation or Security constant with
+    `cffi:foreign-symbol-pointer` no longer finds it; use the new
+    `aion/darwin/ffi:framework-symbol`, or `aion/darwin:cf-constant`.
+  - `scripts/build-desktop-app.lisp` refuses, with exit code 3, to build a macOS bundle whose
+    image has a `CL+SSL` package, because that image opens an OpenSSL from the build machine's
+    path when it starts. An app that declared `cl+ssl` itself, for Postgres TLS for example, or
+    that declares `clack-handler-woo`, now finds this out at build time.
+
 - **An app's `aion/oauth` store: `delete-token` must succeed when there is no row** (#1175).
   `disconnect` now calls it even when `get-token` answered NIL, so that a row the store cannot
   decrypt is still removed. A `delete-token` that signals when nothing matches makes `disconnect`

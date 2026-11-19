@@ -9,7 +9,7 @@
 ;;;;
 ;;;; TWO PACKAGES, the same split aion/windows uses:
 ;;;;
-;;;;   AION/DARWIN/FFI  the raw layer -- defcfun and the frameworks. Apple's spellings survive
+;;;;   AION/DARWIN/FFI  the raw layer -- the frameworks and their functions. Apple's spellings survive
 ;;;;                    here (CFStringCreateWithBytes, SecItemAdd) so a reader can look them up.
 ;;;;   AION/DARWIN      the Lisp surface -- owned CF objects, WITH-CF, OSStatus as a condition.
 ;;;;
@@ -32,7 +32,8 @@
    #:cf-array-get-count #:cf-array-get-value-at-index
    #:sec-copy-error-message-string
    #:sec-certificate-create-with-data #:sec-policy-create-ssl #:sec-trust-create-with-certificates
-   #:sec-trust-evaluate-with-error #:cf-error-get-code #:cf-array-create))
+   #:sec-trust-evaluate-with-error #:cf-error-get-code #:cf-array-create
+   #:framework-symbol))
 
 (cl:defpackage #:aion/darwin
   (:use #:common-lisp)

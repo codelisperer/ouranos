@@ -17,7 +17,7 @@
 ;;; The patch is applied when this file loads, which is after cl+ssl, so it applies only in an
 ;;; image that loads aion/http-client. A later load of cl+ssl would put the old definition back;
 ;;; the test in aion/tests/http-client.lisp checks that it has not.
-#-os-windows
+#-(or os-windows os-macosx)
 (progn
   (cl+ssl::define-crypto-function ("ASN1_STRING_get0_data" cl+ssl::asn1-string-get0-data)
       :pointer

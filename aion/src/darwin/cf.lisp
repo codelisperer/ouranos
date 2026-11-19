@@ -126,8 +126,8 @@ its keys and values (the standard CFType callbacks), so the caller still release
             do (setf (cffi:mem-aref keys :pointer i) k
                      (cffi:mem-aref vals :pointer i) v))
       (%created (ffi:cf-dictionary-create (cffi:null-pointer) keys vals n
-                                          (cffi:foreign-symbol-pointer "kCFTypeDictionaryKeyCallBacks")
-                                          (cffi:foreign-symbol-pointer "kCFTypeDictionaryValueCallBacks"))
+                                          (ffi:framework-symbol "kCFTypeDictionaryKeyCallBacks")
+                                          (ffi:framework-symbol "kCFTypeDictionaryValueCallBacks"))
                 :make-cf-dictionary))))
 
 ;;; --- framework constants --------------------------------------------------------------------
@@ -136,7 +136,7 @@ its keys and values (the standard CFType callbacks), so the caller still release
   "The value of the exported CF constant NAME, such as \"kSecClass\" or \"kCFBooleanTrue\": a
 CFTypeRef the framework owns, which the caller never releases. Signals DARWIN-ERROR when no
 loaded framework exports NAME."
-  (let ((address (cffi:foreign-symbol-pointer name)))
+  (let ((address (ffi:framework-symbol name)))
     (unless address
       (error 'darwin-error :operation :cf-constant :message (format nil "no loaded framework exports ~A" name)))
     (cffi:mem-ref address :pointer)))

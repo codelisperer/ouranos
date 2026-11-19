@@ -56,7 +56,7 @@ it means. A code not listed here is the verdict :REJECTED, with the code beside 
     (cffi:with-foreign-object (values :pointer (max 1 n))
       (loop for r in refs for i from 0 do (setf (cffi:mem-aref values :pointer i) r))
       (%created (ffi:cf-array-create (cffi:null-pointer) values n
-                                     (cffi:foreign-symbol-pointer "kCFTypeArrayCallBacks"))
+                                     (ffi:framework-symbol "kCFTypeArrayCallBacks"))
                 :cf-array-create))))
 
 (defun verify-server-certificate-chain (chain hostname)
