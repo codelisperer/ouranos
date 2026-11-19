@@ -466,7 +466,8 @@
                 :serial t
                 :components ((:file "packages")
                              (:file "ffi")
-                             (:file "cf"))))
+                             (:file "cf")
+                             (:file "trust"))))   ; a TLS server's certificates (#905)
   :in-order-to ((test-op (test-op "aion/darwin/tests"))))
 
 (defsystem "aion/darwin/tests"
@@ -475,7 +476,8 @@
   :serial t
   :components ((:module "tests/darwin"
                 :serial t
-                :components ((:file "cf-tests"))))
+                :components ((:file "cf-tests")
+                             (:file "trust-tests"))))   ; #905
   :perform (test-op (o c) (uiop:symbol-call :aion/darwin/tests '#:run-tests)))
 
 (defsystem "aion/libsecret"

@@ -73,3 +73,23 @@ attributes-only read rather than showing an unlock dialog (#1035).")
 (cffi:defcfun ("SecItemDelete" sec-item-delete) :int32 (query :pointer))
 (cffi:defcfun ("SecCopyErrorMessageString" sec-copy-error-message-string) :pointer
   (status :int32) (reserved :pointer))
+
+;;; --- Security.framework: trust evaluation (#905) ----------------------------------------------
+;;;
+;;; What aion/http-client asks before it trusts a TLS server on macOS: a SecTrust built from the
+;;; server's certificates with the SSL policy for the host name, evaluated by the system against
+;;; its own trust settings. Signatures from the macOS SDK headers SecCertificate.h, SecPolicy.h
+;;; and SecTrust.h. SecTrustEvaluateWithError returns a C bool and, on failure, a CFError the
+;;; caller owns; its code is an OSStatus from SecBase.h.
+
+(cffi:defcfun ("SecCertificateCreateWithData" sec-certificate-create-with-data) :pointer
+  (alloc :pointer) (data :pointer))
+(cffi:defcfun ("SecPolicyCreateSSL" sec-policy-create-ssl) :pointer
+  (server :uint8) (hostname :pointer))
+(cffi:defcfun ("SecTrustCreateWithCertificates" sec-trust-create-with-certificates) :int32
+  (certificates :pointer) (policies :pointer) (trust :pointer))
+(cffi:defcfun ("SecTrustEvaluateWithError" sec-trust-evaluate-with-error) :bool
+  (trust :pointer) (error :pointer))
+(cffi:defcfun ("CFErrorGetCode" cf-error-get-code) :long (error :pointer))
+(cffi:defcfun ("CFArrayCreate" cf-array-create) :pointer
+  (alloc :pointer) (values :pointer) (num-values :long) (callbacks :pointer))
