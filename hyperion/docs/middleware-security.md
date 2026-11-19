@@ -18,7 +18,7 @@ page the user visits posting to it, and a DNS-rebinding page reading from it.
 | `hyperion/desktop:run-app`, `:embedded` or `:hybrid` | on (`:request-guard :same-origin`) | never, unless the app does its own checking (`:none`) |
 | `hyperion/dev:serve` on loopback (127.0.0.1, ::1, localhost) | on | never for a real app; `:request-guard :none` only for a test that needs it off |
 | `hyperion/dev:serve` on any other host | off, with a warning | pass `:request-guard (:same-origin "http://HOST:PORT" ...)` with the origins you browse to |
-| `hyperion/server:start`, `serve-forever` | on (`:request-guard :same-origin`) since #1037 | behind a proxy or under another name, set `HYPERION_ORIGINS` to the public origins; `:request-guard :none` turns it off. `serve-forever`'s `:readiness-path` is always exempt (below) |
+| `hyperion/server:start`, `serve-forever` | on (`:request-guard :same-origin`) since #1037 | behind a proxy or under another name, set `HYPERION_ORIGINS` to the public origins; list the paths that take POSTs from clients that are not browsers in `:request-guard-exempt`; `:request-guard :none` turns it off. `serve-forever`'s `:readiness-path` is always exempt (below) |
 | `run-app :backend (:remote URL)` | none of its own | guard the server at URL instead |
 
 On loopback the guard accepts both `127.0.0.1:PORT` and `localhost:PORT`. A rebinding page cannot
@@ -38,6 +38,17 @@ the proxy case has a setting:
 - A server bound to every interface (`0.0.0.0`) with neither refuses to start, and the error names
   both, and `:request-guard :none`, because the guard cannot know which names are the app's own.
 - With `:port 0`, the origins use the port the server actually bound.
+
+**Clients that are not browsers need their paths listed.** The guard refuses an unsafe request
+that carries neither `Origin` nor `Sec-Fetch-Site`, because it cannot tell such a request from one
+whose browser left both out. curl, API clients and webhook senders send neither, so an app that
+takes POSTs from them lists those paths in `:request-guard-exempt`, which `start` and
+`serve-forever` pass to `hyperion/csrf:wrap-same-origin` as `:exempt`. An entry is a path matched
+exactly, or a function of the request env; a prefix is not supported, so an entry exempts only
+the path it names. An exempt request skips the Origin check and still has its Host checked, so a
+DNS-rebinding page cannot reach the server through it. The guard logs the list once, at warn
+level, when the server starts, because an exempt path accepts a POST from any site. Such a path
+must check the request itself, for example by verifying the webhook sender's signature.
 
 **The readiness path is exempt from the request guard.** In `serve-forever`, a request for
 `:readiness-path` skips both the Host check and the Origin check, because a platform's health

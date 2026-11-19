@@ -533,12 +533,14 @@ worked out, so SETTING must list them, and without it this is an error saying wh
         (error "hyperion/server: the request guard, which is on by default, cannot work out the app's origins when the server is bound to every interface (~S). Set HYPERION_ORIGINS to the origins the app is reached by, such as https://app.example.com; or pass them: :request-guard (:same-origin \"https://app.example.com\"); or bind 127.0.0.1; or turn the guard off with :request-guard :none." host))
       (remove-duplicates (append setting derived) :test #'string-equal :from-end t))))
 
-(defun %apply-request-guard (app request-guard host port)
+(defun %apply-request-guard (app request-guard host port &optional exempt)
   "APP behind the CSRF defence REQUEST-GUARD names (#304). Returns (values guarded-app finish).
   :NONE                    nothing;
   :SAME-ORIGIN             HYPERION/CSRF:WRAP-SAME-ORIGIN with %REQUEST-GUARD-ORIGINS: the
                            origins in HYPERION_ORIGINS and those of HOST:PORT;
   (:SAME-ORIGIN ORIGIN...) the same guard with the origins given.
+EXEMPT is passed to WRAP-SAME-ORIGIN as :EXEMPT: an exempt request skips the Origin check and
+still has its Host checked. With :NONE there is no guard, and EXEMPT is not used.
 
 FINISH is NIL, or a function the caller must call with the port the server bound once it is
 listening. It is a function when PORT is 0, because then the origins depend on the port the
@@ -547,7 +549,8 @@ operating system chooses (#1037). Until FINISH is called, the guarded app answer
 HYPERION/CSRF loads after this file, so it is called by name; it is part of the same system
 and is always loaded by the time a server starts."
   (flet ((wrap (origins)
-           (uiop:symbol-call :hyperion/csrf :wrap-same-origin app :origins origins)))
+           (uiop:symbol-call :hyperion/csrf :wrap-same-origin app :origins origins
+                                                                  :exempt exempt)))
     (cond ((eq request-guard :none) (values app nil))
           ((and (eq request-guard :same-origin) (eql port 0))
            ;; Check now, before binding, that the origins can be worked out at all.
@@ -580,7 +583,7 @@ before the error reaches the caller, so no server is left running that answers o
 (defun start (app &key (server (default-server)) (port *default-port*)
                        (host "127.0.0.1") debug (log t) (check-port t)
                        (security-headers t) (workers nil workers-p) loops
-                       (request-guard :same-origin))
+                       (request-guard :same-origin) request-guard-exempt)
   "Start APP (a Ring handler) and return the running handler; stop it with STOP.
 SERVER names the backend (see DEFAULT-SERVER) and may be a Clack handler or ours;
 the returned handler differs between the two and STOP takes either.
@@ -650,7 +653,15 @@ visits cannot post to the server, or read from it after a DNS rebinding.
   :NONE                    no guard.
 Behind a reverse proxy on the same machine, the server binds 127.0.0.1 but receives the public
 Host from the proxy, so HYPERION_ORIGINS must list the public origin, such as
-https://app.example.com, or every request is refused."
+https://app.example.com, or every request is refused.
+
+REQUEST-GUARD-EXEMPT lists the requests that skip the guard's Origin check, as
+HYPERION/CSRF:WRAP-SAME-ORIGIN's :EXEMPT: a string is matched exactly against the path, and a
+function is called with the request env. Their Host is still checked. The guard refuses an
+unsafe request that carries neither Origin nor Sec-Fetch-Site, which is what curl, an API
+client or a webhook sender sends, so an app that takes POSTs from such clients lists those
+paths here, for example :request-guard-exempt '(\"/webhooks/stripe\"). The list is logged once,
+when the server starts, because an exempt path accepts a cross-site POST."
   (unless workers-p (setf workers (default-workers server)))
   (check-type workers (or null (integer 1)))
   (check-type loops (or null (integer 1)))
@@ -663,7 +674,8 @@ https://app.example.com, or every request is refused."
               server)))
   (when (and check-port (port-answering-p host port))
     (error 'port-in-use :host host :port port))
-  (multiple-value-bind (guarded finish) (%apply-request-guard app request-guard host port)
+  (multiple-value-bind (guarded finish)
+      (%apply-request-guard app request-guard host port request-guard-exempt)
     (%finish-guard finish (%start-guarded guarded server port host debug log security-headers
                                           workers loops))))
 
@@ -1276,7 +1288,7 @@ grace period, while it still answers everything else."
                   (list "draining"))
             (funcall app env)))))
 
-(defun %guard-except-readiness (app request-guard host port readiness-path)
+(defun %guard-except-readiness (app request-guard host port readiness-path &optional exempt)
   "APP behind REQUEST-GUARD (see %APPLY-REQUEST-GUARD) for every path except READINESS-PATH,
 which reaches APP unguarded (#304). Returns (values app finish), as %APPLY-REQUEST-GUARD does.
 
@@ -1285,7 +1297,8 @@ A platform's health checker sends no Origin and may use another Host, and refusi
 take a healthy instance out of rotation. When the server is not draining, a request for that
 path reaches the app's own handler, so an app must serve nothing there but a status: a
 DNS-rebinding page can read whatever that path returns."
-  (multiple-value-bind (guarded finish) (%apply-request-guard app request-guard host port)
+  (multiple-value-bind (guarded finish)
+      (%apply-request-guard app request-guard host port exempt)
     (values (if (or (null readiness-path) (eq guarded app))
                 guarded
                 (lambda (env)
@@ -1319,7 +1332,8 @@ and a load balancer that stops sending after SECONDS could still reach an open l
                                name (banner :derive) (signals t) on-ready
                                (drain-seconds (%env-seconds "HYPERION_DRAIN_SECONDS" 5))
                                (drain-timeout (%env-seconds "HYPERION_DRAIN_TIMEOUT_SECONDS" 20))
-                               readiness-path (request-guard :same-origin))
+                               readiness-path (request-guard :same-origin)
+                               request-guard-exempt)
   "Start APP and BLOCK until interrupted or until REQUEST-SHUTDOWN is called. Returns NIL.
 
 The production counterpart to START: same arguments, plus a banner and interrupt handling.
@@ -1354,10 +1368,11 @@ Keep DRAIN-SECONDS + DRAIN-TIMEOUT below the platform's termination grace period
 after which it sends SIGKILL. Ctrl-C, SIGINT and REQUEST-SHUTDOWN stop at once. Hunchentoot gets
 phase 1 and then stops as it always has; Woo does not see SIGTERM at all.
 
-REQUEST-GUARD is START's (#304), and defaults the same way, to :SAME-ORIGIN, with one
-difference: READINESS-PATH is exempt from it, both its Host check and its Origin check, so a
-health checker that sends no Origin or another Host is never refused. When the server is not draining, a request for that path reaches the app's
-own handler unguarded, so an app must serve nothing there but a status: a DNS-rebinding page
+REQUEST-GUARD and REQUEST-GUARD-EXEMPT are START's (#304). REQUEST-GUARD defaults the same way,
+to :SAME-ORIGIN, with one difference: READINESS-PATH is exempt from the guard, both its Host
+check and its Origin check, so a health checker that sends no Origin or another Host is never
+refused. When the server is not draining, a request for that path reaches the app's own
+handler unguarded, so an app must serve nothing there but a status: a DNS-rebinding page
 can read whatever that path returns."
   (let* ((session (%make-server-session :handler nil))
          (restore-signals nil)
@@ -1388,7 +1403,8 @@ can read whatever that path returns."
     ;; outside both, so a health checker is never refused (#304). START gets :NONE, so the
     ;; guard is not applied twice.
     (multiple-value-bind (guarded finish)
-        (%guard-except-readiness app request-guard host port readiness-path)
+        (%guard-except-readiness app request-guard host port readiness-path
+                                 request-guard-exempt)
       (setf handler (%finish-guard
                      finish
                      (start (%readiness-app guarded session readiness-path)

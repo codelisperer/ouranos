@@ -376,6 +376,101 @@ check decides."
                                        ("Origin" . "https://attacker.example.test"))))
                  "an origin the setting does not list is still refused"))))))
 
+;;; A webhook sender, curl or an API client sends neither Origin nor Sec-Fetch-Site. The
+;;; guard refuses such a POST, because it cannot tell it from a request whose browser left both
+;;; out, so an app that takes them lists their paths in :REQUEST-GUARD-EXEMPT (#1037).
+
+(defun %so-webhook-post (port path &optional (host (format nil "127.0.0.1:~D" port)))
+  "The status for a POST to PATH carrying a Host and no Origin or Sec-Fetch-Site, as a webhook
+sender sends it."
+  (%so-raw-status port "POST" path `(("Host" . ,host) ("Content-Type" . "application/json"))))
+
+(test a-webhook-post-with-no-origin-is-refused-by-default-and-accepted-on-an-exempt-path
+  "A POST with no Origin and no Sec-Fetch-Site is refused under the default guard, and accepted
+on a path listed in :REQUEST-GUARD-EXEMPT. A path that is not listed is still refused, so the
+exemption covers only what it names; a function in the list is matched against the env."
+  (%quietly
+    (%so-with-origins-setting (nil)
+      (%so-with-start (port)
+        (is (= 403 (%so-webhook-post port "/webhooks/stripe")) "refused by default"))
+      (%so-with-start (port :request-guard-exempt '("/webhooks/stripe"))
+        (is (= 200 (%so-webhook-post port "/webhooks/stripe")) "accepted on the exempt path")
+        (is (= 403 (%so-webhook-post port "/webhooks/stripe/other"))
+            "a longer path is not the exempt one")
+        (is (= 403 (%so-webhook-post port "/x")) "a path that is not listed is still refused"))
+      (%so-with-start (port :request-guard-exempt
+                            (list (lambda (env) (equal "/api/ingest" (getf env :path-info)))))
+        (is (= 200 (%so-webhook-post port "/api/ingest")) "a function in the list matches")
+        (is (= 403 (%so-webhook-post port "/x")))))))
+
+(test an-exempt-path-still-has-its-host-checked
+  "An exemption skips the Origin check only. A request to an exempt path whose Host is not the
+server's is refused, so a DNS-rebinding page cannot use an exempt path to reach the server.
+Control: the same request with the server's own Host is accepted."
+  (%quietly
+    (%so-with-origins-setting (nil)
+      (%so-with-start (port :request-guard-exempt '("/webhooks/stripe"))
+        (is (= 403 (%so-webhook-post port "/webhooks/stripe"
+                                     (format nil "attacker.example.test:~D" port)))
+            "a foreign Host is refused on the exempt path")
+        (is (= 403 (%so-raw-status port "GET" "/webhooks/stripe"
+                                   `(("Host" . ,(format nil "attacker.example.test:~D" port)))))
+            "for a safe method too")
+        (is (= 200 (%so-webhook-post port "/webhooks/stripe")) "control: own Host")))))
+
+(test serve-forever-passes-request-guard-exempt-to-the-guard
+  "SERVE-FOREVER takes :REQUEST-GUARD-EXEMPT as START does: the exempt path accepts a POST with
+no Origin, and another path refuses it."
+  (%quietly
+    (%so-with-origins-setting (nil)
+      (%srv-with-serving (session port :server :hunchentoot :signals nil
+                                       :request-guard-exempt '("/webhooks/stripe"))
+        (is (= 200 (%so-webhook-post port "/webhooks/stripe")))
+        (is (= 403 (%so-webhook-post port "/x")))))))
+
+(defmacro %so-captured-log ((stream) &body body)
+  "Run BODY with the log at :INFO going to STREAM, then put back the appenders, level and
+layout that were there."
+  (let ((appenders (gensym)) (level (gensym)) (layout (gensym)))
+    `(let ((,appenders (copy-list (log4cl:logger-appenders log4cl:*root-logger*)))
+           (,level (log4cl:logger-log-level log4cl:*root-logger*))
+           (,layout aion/log:*layout*))
+       (unwind-protect
+            (progn (aion/log:setup :env :dev :level :info :stream ,stream)
+                   ,@body)
+         (log4cl:remove-all-appenders log4cl:*root-logger*)
+         (dolist (a ,appenders) (log4cl:add-appender log4cl:*root-logger* a))
+         (log4cl:set-log-level log4cl:*root-logger* ,level)
+         (setf aion/log:*layout* ,layout)))))
+
+(defun %so-count-occurrences (needle haystack)
+  (loop with start = 0
+        for at = (search needle haystack :start2 start)
+        while at count t do (setf start (1+ at))))
+
+(test request-guard-exempt-is-logged-once-when-the-server-starts
+  "An exempt path accepts a cross-site POST, so the list is logged once, naming the path, when
+the server starts, and not again on each request to it. Control: with no exemptions nothing of
+the kind is logged."
+  (let ((with-exempt (make-string-output-stream))
+        (without (make-string-output-stream)))
+    (%so-with-origins-setting (nil)
+      (%so-captured-log (with-exempt)
+        (%so-with-start (port :request-guard-exempt '("/webhooks/stripe"))
+          (%so-webhook-post port "/webhooks/stripe")
+          (%so-webhook-post port "/webhooks/stripe")))
+      (%so-captured-log (without)
+        (%so-with-start (port)
+          (%so-webhook-post port "/x"))))
+    (let ((logged (get-output-stream-string with-exempt))
+          (control (get-output-stream-string without)))
+      (is (= 1 (%so-count-occurrences "exemptions configured" logged)) "~A" logged)
+      (is-true (let ((line (find-if (lambda (l) (search "exemptions configured" l))
+                                    (uiop:split-string logged :separator '(#\Newline)))))
+                 (and line (search "/webhooks/stripe" line)))
+               "the exemption line names the path")
+      (is (= 0 (%so-count-occurrences "exemptions configured" control)) "~A" control))))
+
 (test hyperion-origins-gives-the-public-host-behind-a-same-machine-proxy
   "Behind a proxy on the same machine the server binds 127.0.0.1 and receives the public Host.
 Without the setting that Host is refused; with it, it is accepted."

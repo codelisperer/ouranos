@@ -29,6 +29,14 @@ its tag.
   - **Bound to every interface (`0.0.0.0`) with no origins**: `start` signals an error and the
     server does not start. The message names `HYPERION_ORIGINS`, `:request-guard (:same-origin
     "https://app.example.com")` and `:request-guard :none`.
+  - **Taking webhooks or API POSTs from clients that are not browsers**: they get a 403. curl,
+    an API client or a webhook sender sends neither `Origin` nor `Sec-Fetch-Site`, and the guard
+    refuses an unsafe request that carries neither. List those paths in the new
+    `:request-guard-exempt` argument of `start` and `serve-forever`, such as
+    `:request-guard-exempt '("/webhooks/stripe")`, or pass `:request-guard :none`. An entry is
+    a path matched exactly or a function of the request env, as `hyperion/csrf:wrap-same-origin`'s
+    `:exempt`. An exempt request skips the Origin check only; its `Host` is still checked. The
+    list is logged once, at warn level, when the server starts.
   - **With `:port 0`**: the origins use the port the server bound.
 
   The one line that keeps the old behaviour is `:request-guard :none` on the `start` or
