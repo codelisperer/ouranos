@@ -1765,6 +1765,15 @@ its tag.
 
 ### Added
 
+- **dokimasia's "the page did not settle" message says, for each request still in flight, why the
+  settle check kept waiting for it** (#1308). It names each request's URL, its type, the frame and
+  loader of the document that made it (or `none` when the browser's event carried none), and how
+  many milliseconds ago it was sent, followed by the row's latest navigations, newest first, with
+  their frame and loader. The settle check stops waiting for a request when a navigation replaces
+  the document that made it, so these are the values to compare when a report shows a request it
+  did not stop waiting for. The message still begins `the page did not settle within N seconds`,
+  and the list of requests now follows a colon instead of `such as`.
+
 - **The image providers `openai-images` and `google-images` take `:stay-local t`** (#1302), as
   the chat and embedding providers do since #1293. `make-openai-images`, `openai-images-from-env`,
   `register-openai-image`, `make-google-images`, `google-images-from-env` and

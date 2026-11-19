@@ -30,6 +30,7 @@
   (console '())
   (network '())
   (artifacts '())
+  (navigations '())
   (events-dropped 0))
 
 (setf (documentation 'row-page 'function)
@@ -95,6 +96,40 @@ like any other. When the page cannot be read, the request is checked too."
        (row-page row)
        (equal "none" (ignore-errors (cdp:evaluate (row-page row) +page-links-an-icon+ :timeout 2)))))
 
+(defparameter +navigations-kept+ 4
+  "How many of a row's latest Page.frameNavigated events the settle check's message can name.")
+
+(defun %short-id (id)
+  "ID, or \"none\" when the event did not carry it. Ids are kept whole: they are what has to match."
+  (if (and (stringp id) (plusp (length id))) id "none"))
+
+(defun %in-flight-description (entry)
+  "One request still in flight, for the settle check's message: its URL, type, the frame and
+loader of the document that made it, and how long ago it was sent."
+  (destructuring-bind (url frame loader type sent) entry
+    (format nil "~A (type ~A, frame ~A, loader ~A, sent ~D ms ago)"
+            url (or type "unknown") (%short-id frame) (%short-id loader) (%elapsed-ms sent))))
+
+(defun %navigation-description (navigation)
+  (destructuring-bind (url frame loader at) navigation
+    (format nil "~A (frame ~A, loader ~A, ~D ms ago)"
+            url (%short-id frame) (%short-id loader) (%elapsed-ms at))))
+
+(defun %not-settled-message (row timeout)
+  "The settle check's message when ROW's page did not settle within TIMEOUT seconds. It names
+each request still in flight with what the check needs to drop it (the frame and loader of the
+document that made it) and the latest navigations, so an occurrence says which case it was: a
+request recorded without a frame or loader, one whose document no navigation replaced, or one
+made after the navigation that replaced its document (#1308)."
+  (let ((entries '()))
+    (maphash (lambda (k v) (declare (ignore k)) (push v entries)) (row-in-flight row))
+    (setf entries (sort entries #'< :key #'fifth))
+    (format nil "the page did not settle within ~A seconds: ~D request~:P still in flight~@[: ~{~A~^; ~}~]~@[~A~]. Latest navigations, newest first: ~:[none~;~:*~{~A~^; ~}~]"
+            timeout (length entries)
+            (mapcar #'%in-flight-description (subseq entries 0 (min 3 (length entries))))
+            (and (> (length entries) 3) (format nil "; and ~D more" (- (length entries) 3)))
+            (mapcar #'%navigation-description (row-navigations row)))))
+
 (defun %handle-event (row event)
   (let ((method (cdp:event-method event))
         (params (cdp:event-params event)))
@@ -106,9 +141,11 @@ like any other. When the page cannot be read, the request is checked too."
          (setf (row-last-activity row) (get-internal-real-time))
          (when (and id url (not (member type +unwatched-request-types+ :test #'equal))
                     (not (uiop:string-prefix-p "data:" url)))
-           ;; The frame and loader say which document made it; see Page.frameNavigated below.
+           ;; The frame and loader say which document made it; see Page.frameNavigated below. The
+           ;; type and the time it was sent are for the settle check's message (#1308).
            (setf (gethash id (row-in-flight row))
-                 (list url (cdp:json-get params "frameId") (cdp:json-get params "loaderId"))))
+                 (list url (cdp:json-get params "frameId") (cdp:json-get params "loaderId")
+                       type (get-internal-real-time))))
          (when url
            (incf (gethash (%without-fragment url) (row-step-requests row) 0)))))
       ((string= method "Page.frameNavigated")
@@ -120,10 +157,15 @@ like any other. When the page cannot be read, the request is checked too."
        (let ((frame (cdp:json-get params "frame" "id"))
              (loader (cdp:json-get params "frame" "loaderId"))
              (gone '()))
+         ;; Kept, newest first and at most +NAVIGATIONS-KEPT+, for the settle check's message.
+         (push (list (cdp:json-get params "frame" "url") frame loader (get-internal-real-time))
+               (row-navigations row))
+         (when (> (length (row-navigations row)) +navigations-kept+)
+           (setf (row-navigations row) (subseq (row-navigations row) 0 +navigations-kept+)))
          (when (and frame loader)
            (maphash (lambda (id entry)
-                      (destructuring-bind (url request-frame request-loader) entry
-                        (declare (ignore url))
+                      (destructuring-bind (url request-frame request-loader &rest more) entry
+                        (declare (ignore url more))
                         (when (and (equal request-frame frame) request-loader
                                    (not (equal request-loader loader)))
                           (push id gone))))
@@ -206,8 +248,5 @@ like any other. When the page cannot be read, the request is checked too."
                    (>= (- now (row-last-activity row)) quiet))
           (return nil))
         (when (> now deadline)
-          (let ((urls '()))
-            (maphash (lambda (k v) (declare (ignore k)) (push (first v) urls)) (row-in-flight row))
-            (return (format nil "the page did not settle within ~A seconds: ~D request~:P still in flight~@[, such as ~{~A~^, ~}~]"
-                            timeout (length urls) (subseq urls 0 (min 3 (length urls)))))))
+          (return (%not-settled-message row timeout)))
         (sleep 0.05)))))
