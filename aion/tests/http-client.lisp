@@ -541,6 +541,120 @@ test once the pinned cl+ssl contains cl-plus-ssl pull request 202."
     (is (eq (fdefinition 'cl+ssl::asn1-string-get0-data) (fdefinition 'cl+ssl::asn1-string-data))
         "cl+ssl::asn1-string-data is the call to ASN1_STRING_get0_data")))
 
+;;; --- a saved image that makes only plain-http requests starts without OpenSSL (#1173) -------
+
+(defun %mapped-file (name)
+  "The path of the file named NAME that this process has mapped, read from /proc/self/maps, or
+NIL where there is no such file."
+  (with-open-file (in "/proc/self/maps" :if-does-not-exist nil)
+    (and in
+         (loop for line = (read-line in nil)
+               while line
+               do (let ((slash (position #\/ line)))
+                    (when (and slash (string= name (file-namestring (subseq line slash))))
+                      (return (subseq line slash))))))))
+
+(defun %cl+ssl-library-files ()
+  "The files this image opened for cl+ssl's libcrypto and libssl, in that order, as absolute
+paths, or NIL when either cannot be found."
+  (let ((files (loop for name in '("LIBCRYPTO" "LIBSSL")
+                     for path = (namestring (cffi:foreign-library-pathname
+                                             (cffi::get-foreign-library (find-symbol name "CL+SSL"))))
+                     collect (if (uiop:absolute-pathname-p path)
+                                 (and (probe-file path) path)
+                                 (%mapped-file (file-namestring path))))))
+    (and (every #'identity files) files)))
+
+(defun %saved-plain-http-image (directory files core &key without-save-hook)
+  "Save, from a fresh image, an executable CORE that loads aion/http-client with cl+ssl pointed at
+copies of FILES (libcrypto, libssl) in DIRECTORY. Run with a URL, it makes one plain-http GET and
+prints \"STATUS <code>\", then asks cl+ssl to initialise and prints \"TLS ok\" or
+\"TLS <condition type>: <message>\". WITHOUT-SAVE-HOOK removes the hook that keeps SBCL from
+reopening OpenSSL at startup, for the control. Returns the child's output."
+  (let ((crypto (namestring (merge-pathnames (file-namestring (first files)) directory)))
+        (ssl (namestring (merge-pathnames (file-namestring (second files)) directory))))
+    (uiop:run-program
+     (list (uiop:native-namestring sb-ext:*runtime-pathname*)
+           "--noinform" "--no-userinit" "--no-sysinit" "--non-interactive"
+           "--eval" "(require :asdf)"
+           "--eval" (format nil "(load ~S)"
+                            (uiop:native-namestring
+                             (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname))))
+           "--eval" "(let ((*standard-output* (make-broadcast-stream))) (asdf:load-system :cl+ssl/config))"
+           "--eval" (format nil "(eval (list (find-symbol \"DEFINE-LIBCRYPTO-PATH\" \"CL+SSL/CONFIG\") ~S))" crypto)
+           "--eval" (format nil "(eval (list (find-symbol \"DEFINE-LIBSSL-PATH\" \"CL+SSL/CONFIG\") ~S))" ssl)
+           "--eval" "(let ((*standard-output* (make-broadcast-stream))) (asdf:load-system :aion/http-client))"
+           "--eval" (if without-save-hook
+                        "(setf sb-ext:*save-hooks* (remove 'aion/http-client::%openssl-dont-save sb-ext:*save-hooks*))"
+                        "t")
+           "--eval" (format nil "(sb-ext:save-lisp-and-die ~S :executable t :toplevel (lambda () (let ((url (second sb-ext:*posix-argv*))) (format t \"~~&STATUS ~~A~~%\" (aion/http-client:response-status (aion/http-client:send-request (aion/http-client:make-request :url url :read-timeout 10) '()))) (format t \"~~&TLS ~~A~~%\" (handler-case (progn (funcall (find-symbol \"ENSURE-INITIALIZED\" \"CL+SSL\")) \"ok\") (error (e) (format nil \"~~A: ~~A\" (type-of e) e)))) (finish-output) (sb-ext:exit :code 0))))"
+                            (uiop:native-namestring core)))
+     :output :string :error-output :output :ignore-error-status t)))
+
+(defun %run-saved-image (core url)
+  "Run CORE with URL. Returns (values OUTPUT EXIT-CODE)."
+  (multiple-value-bind (out err code)
+      (uiop:run-program (list (uiop:native-namestring core) url)
+                        :output :string :error-output :string :ignore-error-status t)
+    (values (concatenate 'string out err) code)))
+
+(defun %output-line (prefix output)
+  (find-if (lambda (line) (uiop:string-prefix-p prefix line))
+           (uiop:split-string output :separator '(#\Newline #\Return))))
+
+(test a-saved-plain-http-image-starts-without-openssl
+  "#1173: an image saved with aion/http-client, and so with cl+ssl, starts and makes a plain-http
+request on a machine without the OpenSSL it was built against, and its first TLS use signals
+HTTP-ERROR naming the library. cl+ssl is pointed at copies of this machine's libcrypto and libssl,
+and the copies are deleted after the image is saved. Control: the same image saved without
+aion/http-client's save hook exits at startup, because SBCL reopens every shared object an image
+had open when it was saved."
+  (let ((files (and (find-package "CL+SSL") (%cl+ssl-library-files))))
+    (cond
+      ((not (find-package "CL+SSL"))
+       (skip "cl+ssl is not loaded on this platform, so there is no OpenSSL to start without"))
+      ((null files)
+       (skip "the files cl+ssl opened could not be found, so there is nothing to copy"))
+      (t
+       (let* ((directory (uiop:ensure-directory-pathname
+                          (merge-pathnames (format nil "aion-1173-~D-~D/" (get-universal-time)
+                                                   (random 1000000000 (make-random-state t)))
+                                           (uiop:temporary-directory))))
+              (core (merge-pathnames "plain-http" directory))
+              (control (merge-pathnames "plain-http-control" directory)))
+         (unwind-protect
+              (progn
+                (ensure-directories-exist directory)
+                (dolist (file files)
+                  (uiop:copy-file file (merge-pathnames (file-namestring file) directory)))
+                (%saved-plain-http-image directory files core)
+                (%saved-plain-http-image directory files control :without-save-hook t)
+                (is (and (probe-file core) (probe-file control)) "both images were saved")
+                (with-server (s (lambda (path head stream)
+                                  (declare (ignore path head))
+                                  (%write-response stream 200 '() "plain")))
+                  (let ((url (%local s "/")))
+                    (multiple-value-bind (out code) (%run-saved-image core url)
+                      (is (equal "TLS ok" (%output-line "TLS " out))
+                          "with OpenSSL present the image opens it as before: ~A" out)
+                      (is (eql 0 code)))
+                    (dolist (file files)
+                      (delete-file (merge-pathnames (file-namestring file) directory)))
+                    (multiple-value-bind (out code) (%run-saved-image core url)
+                      (is (eql 0 code) "without OpenSSL the image starts: ~A" out)
+                      (is (equal "STATUS 200" (%output-line "STATUS " out))
+                          "and makes its plain-http request: ~A" out)
+                      (let ((tls (%output-line "TLS " out)))
+                        (is (and tls (search "HTTP-ERROR" tls)
+                                 (search (file-namestring (first files)) tls :test #'char-equal))
+                            "its first TLS use signals HTTP-ERROR naming the library: ~A" tls)))
+                    (multiple-value-bind (out code) (%run-saved-image control url)
+                      (is (not (eql 0 code))
+                          "control: without the save hook the image exits at startup: ~A" out)
+                      (is (null (%output-line "STATUS " out))
+                          "control: and makes no request: ~A" out)))))
+           (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore)))))))
+
 ;;; --- fetch-public ---------------------------------------------------------------------
 
 (defun %resolver (table)
