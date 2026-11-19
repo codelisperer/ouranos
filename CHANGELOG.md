@@ -1707,6 +1707,16 @@ its tag.
 
 ### Added
 
+- **The image providers `openai-images` and `google-images` take `:stay-local t`** (#1302), as
+  the chat and embedding providers do since #1293. `make-openai-images`, `openai-images-from-env`,
+  `register-openai-image`, `make-google-images`, `google-images-from-env` and
+  `register-google-image` take `:stay-local`; `provider-stay-local` reads it, default NIL. Each
+  image request is then sent with `aion/http-client`'s `:stay-local`: it uses no proxy, it is
+  refused before connecting when the base URL's host is not loopback, and a redirect off the
+  machine is refused. The refusal reaches the caller as `aion/http-client:stay-local-refused`. It
+  is not turned into `praxeon/image:image-request-failed`, so the generate-image means does not
+  tell the agent to try again later.
+
 - **A praxeon provider can be set so that every request it sends stays on this machine**
   (#1293). `anthropic`, `openai-compatible` and the remote embedding providers
   (`openai-compatible-embeddings`, `voyage-embeddings`) take `:stay-local t`. The new exported
