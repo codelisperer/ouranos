@@ -62,6 +62,9 @@ concurrency:
 
 permissions:
   contents: read
+  # To list main's runs of this workflow and download one's suite-status artifact, which each
+  # leg compares its failing suites with (#199). Read-only.
+  actions: read
 
 jobs:
   verify:
@@ -631,6 +634,37 @@ jobs:
           set -o pipefail
           sbcl --script scripts/check-readme-counts.lisp --from verify.log 2>&1 | tee readme.log
 
+      # WHICH FAILURES ARE NEW (#199). The job summary lists the failing suites, but on a leg that
+      # is already red a reader has to notice that the list got longer. This records this leg's
+      # failing items as an artifact and compares them with the same platform's artifact from the
+      # previous run on main (a pull request's base commit first). It reports and never fails the
+      # job: a comparison that cannot be made says why in the summary, in one line.
+      - name: Compare the failing suites with the previous run on main
+        id: compare-the-failing-suites-with-the-previous-run-on-main
+        if: always()
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          sbcl --script scripts/suite-status.lisp write verify.log suite-status/suite-status.txt \
+            "platform=${{ matrix.platform }}" "commit=$(git rev-parse HEAD)" \
+            "run=${{ github.run_id }}" "event=${{ github.event_name }}"
+          bash scripts/ci-suite-baseline.sh "suite-status-${{ matrix.platform }}" suite-baseline.txt
+          sbcl --script scripts/suite-status.lisp diff suite-status/suite-status.txt suite-baseline.txt \
+            > suite-diff.md
+
+      - name: Upload the failing-suite status
+        id: upload-the-failing-suite-status
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: suite-status-${{ matrix.platform }}
+          path: suite-status/suite-status.txt
+          if-no-files-found: ignore
+          retention-days: 30
+
       - name: Stop Postgres (Linux)
         id: stop-postgres-linux
         if: always() && runner.os == 'Linux'
@@ -646,6 +680,7 @@ jobs:
         env:
           STEPS_JSON: ${{ toJSON(steps) }}
           JOB_TIMEOUT_MINUTES: ${{ matrix.timeout }}
+          SUITE_DIFF: suite-diff.md
         run: bash scripts/ci-job-summary.sh "${{ matrix.platform }}" verify.log readme.log
 
   # --- release mode ---------------------------------------------------------------
@@ -838,6 +873,37 @@ jobs:
         id: benchmark-release
         run: sbcl --dynamic-space-size 4096 --script scripts/with-mode.lisp release scripts/bench.lisp
 
+      # WHICH FAILURES ARE NEW (#199). The job summary lists the failing suites, but on a leg that
+      # is already red a reader has to notice that the list got longer. This records this leg's
+      # failing items as an artifact and compares them with the same platform's artifact from the
+      # previous run on main (a pull request's base commit first). It reports and never fails the
+      # job: a comparison that cannot be made says why in the summary, in one line.
+      - name: Compare the failing suites with the previous run on main
+        id: compare-the-failing-suites-with-the-previous-run-on-main
+        if: always()
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          sbcl --script scripts/suite-status.lisp write verify.log suite-status/suite-status.txt \
+            "platform=release-mode-linux-x86-64" "commit=$(git rev-parse HEAD)" \
+            "run=${{ github.run_id }}" "event=${{ github.event_name }}"
+          bash scripts/ci-suite-baseline.sh "suite-status-release-mode-linux-x86-64" suite-baseline.txt
+          sbcl --script scripts/suite-status.lisp diff suite-status/suite-status.txt suite-baseline.txt \
+            > suite-diff.md
+
+      - name: Upload the failing-suite status
+        id: upload-the-failing-suite-status
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: suite-status-release-mode-linux-x86-64
+          path: suite-status/suite-status.txt
+          if-no-files-found: ignore
+          retention-days: 30
+
       - name: Stop Postgres
         id: stop-postgres
         if: always()
@@ -850,4 +916,5 @@ jobs:
         env:
           STEPS_JSON: ${{ toJSON(steps) }}
           JOB_TIMEOUT_MINUTES: ${{ matrix.timeout }}
+          SUITE_DIFF: suite-diff.md
         run: bash scripts/ci-job-summary.sh "${{ matrix.label }}" verify.log
