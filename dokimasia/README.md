@@ -215,6 +215,28 @@ database. From [`tests/hyperion/tests.lisp`](tests/hyperion/tests.lisp):
   :steps ((:visit "/") (:expect-stored :dh-user "alice@example.com" "team")))
 ```
 
+The worked example's `active-search-db` suite does the same for a form that writes to the
+database: each row of `add-contact` fills in the form and checks the stored row, and each row of
+`invalid-contact` checks the error shown and that no row was written. From
+[`examples/active-search/acceptance.lisp`](examples/active-search/acceptance.lisp):
+
+```lisp
+(dm:define-row-probe :stored-contact
+  :source #'dh:current-database :table :contacts :match '(:name :email :role) :dialect :sqlite)
+
+(d:define-case add-contact
+  :requirement "ADD-1"
+  :rows (:file "rows/add.csv")
+  :steps ((:visit "/")
+          (:expect-screen contacts-with-form)
+          (:fill "#new-name" (:input :name))
+          (:fill "#new-email" (:input :email))
+          (:fill "#new-role" (:input :role))
+          (:click "#add-contact-submit")
+          (:expect-text "#results" (:input :name))
+          (:expect-stored :stored-contact (:input :name) (:input :email) (:input :role))))
+```
+
 `dm` is `dokimasia/mnemosyne` and `dh` is `dokimasia/hyperion`. "Probes" below gives the rest:
 `define-query-probe`, the failure reasons, and what happens against a URL.
 
@@ -380,8 +402,8 @@ will turn an elenchon decision table into rows, waits until `elenchon/cases` exi
 | `(:expect-text selector value)` | Waits until the element's text contains VALUE. |
 | `(:expect-stored probe value…)` | Asks the probe whether the app stored what it should (below). |
 | `(:expect-scroll-kept action :pane selector :scroll n)` | Runs ACTION and fails if the scroll position of PANE, or of the window, moved. |
-| `(:screenshot name)` | Writes one PNG per viewport and colour scheme, grown to the page's full height. |
-| `(:audit)` | Runs axe-core in the page once for each colour scheme and fails on a violation at or above `:serious` (below). |
+| `(:screenshot name)` | Writes one PNG per viewport and colour scheme, grown to the page's full height, with CSS transitions and animations turned off so each image shows the page at rest. |
+| `(:audit)` | Runs axe-core in the page once for each colour scheme, with CSS transitions and animations turned off, and fails on a violation at or above `:serious` (below). |
 
 The steps that wait take `:timeout` in seconds; otherwise they wait `*step-timeout*` (10).
 A value is a string, a number, `(:input key)` or `(:user key)`. A step of an unknown kind, or with

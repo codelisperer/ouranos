@@ -107,6 +107,13 @@ violations axe-core finds are the ones BODY and STYLE put there."
 
 (defparameter +a11y-ok+ "<main><h1 id=\"title\">Accessible</h1><p>Plain text in the main landmark.</p></main>")
 
+(defun %motion-page (title style)
+  "A page for the tests of #1288: STYLE gives the body a slow colour transition, and the page
+counts in #runs every transition that starts, so a test can check that a step started none."
+  (%a11y-page title
+              "<main><h1 id=\"title\">Motion</h1><p id=\"runs\">Transitions run: 0.</p></main><script>let runs = 0; document.addEventListener('transitionrun', () => { runs += 1; document.getElementById('runs').textContent = 'Transitions run: ' + runs + '.'; });</script>"
+              style))
+
 (defun %redirect (stream location &rest headers)
   (%respond stream 303 :headers (cons (format nil "Location: ~A" location) headers)))
 
@@ -200,6 +207,20 @@ violations axe-core finds are the ones BODY and STYLE put there."
        (%respond stream 200
                  :body (%a11y-page "Dark" +a11y-ok+
                                    "body{background:#fff;color:#000} @media (prefers-color-scheme: dark){body{background:#222;color:#333}}")))
+      ;; The tests of #1288. Each body changes colour over 5 seconds when the scheme changes.
+      ;; /motion-ok passes in both schemes at rest, but only its text colour moves, so read part
+      ;; way through it has dark text on the dark background, or light text on the light one.
+      ;; /motion-dark-low fails only in the dark scheme at rest, and /motion-light-low only in
+      ;; the light scheme; read part way through, each still has the other scheme's colours.
+      ((string= path "/motion-ok")
+       (%respond stream 200
+                 :body (%motion-page "Motion OK" "body{background:#fff;color:#000;transition:color 5s linear} @media (prefers-color-scheme: dark){body{background:#111;color:#eee}}")))
+      ((string= path "/motion-dark-low")
+       (%respond stream 200
+                 :body (%motion-page "Motion dark low" "body{background:#fff;color:#000;transition:color 5s linear,background-color 5s linear} @media (prefers-color-scheme: dark){body{background:#222;color:#333}}")))
+      ((string= path "/motion-light-low")
+       (%respond stream 200
+                 :body (%motion-page "Motion light low" "body{background:#fff;color:#ccc;transition:color 5s linear,background-color 5s linear} @media (prefers-color-scheme: dark){body{background:#111;color:#eee}}")))
       (t (%respond stream 404 :body (%page "Not found" "<h1>Not found</h1>"))))))
 
 (defun %serve-connection (app socket)

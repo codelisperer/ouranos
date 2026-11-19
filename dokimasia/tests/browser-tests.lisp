@@ -158,6 +158,18 @@ starts it without a /favicon.ico, and :SLOW with one answered after 1.5 seconds.
           bt-a-unknown-rule)
   :target (app-target))
 
+;; The tests of #1288: a step that switches the colour scheme must judge and capture the page's
+;; colours at rest, not part way through a CSS transition, in either direction.
+(d:define-case bt-m-ok :steps ((:visit "/motion-ok") (:audit) (:expect-text "#runs" "Transitions run: 0.")))
+(d:define-case bt-m-dark-low :steps ((:visit "/motion-dark-low") (:audit)))
+(d:define-case bt-m-light-low :steps ((:visit "/motion-light-low") (:audit)))
+(d:define-case bt-m-screenshot
+  :steps ((:visit "/motion-ok") (:screenshot "motion") (:expect-text "#runs" "Transitions run: 0.")))
+
+(d:define-suite bt-motion
+  :cases (bt-m-ok bt-m-dark-low bt-m-light-low bt-m-screenshot)
+  :target (app-target))
+
 ;;; --- helpers --------------------------------------------------------------------------------
 
 (defun browser-available-p ()
@@ -305,6 +317,41 @@ OURANOS_REQUIRE_BROWSER=1."
                 (reason "bt-a-unknown-rule/row-1"))
             (is (search "no-such-rule" (reason "bt-a-unknown-rule/row-1"))
                 "~A" (reason "bt-a-unknown-rule/row-1"))))))))
+
+(test the-audit-and-screenshots-see-the-colours-at-rest-after-switching-the-scheme
+  ;; #1288. Each page's body changes colour over 5 seconds. The suite runs light then dark, and
+  ;; dark then light, so the audit switches scheme in both directions. A read part way through
+  ;; makes /motion-ok fail when it should pass, and makes each low-contrast page pass in the
+  ;; scheme where it should fail.
+  (when (browser-available-p)
+    (dolist (schemes '((:light :dark) (:dark :light)))
+      (with-temporary-directory (out "dokimasia-motion")
+        (d:run :bt-motion :out out :viewports '(:desktop) :schemes schemes :explain nil)
+        (let ((rows (report-rows out)))
+          (flet ((verdict (key) (gethash "verdict" (gethash key rows)))
+                 (reason (key)
+                   ;; A passed row's reason is JSON null, which jzon reads as the symbol NULL.
+                   (let ((r (reason-of rows key))) (if (stringp r) r ""))))
+            (is (equal "passed" (verdict "bt-m-ok/row-1"))
+                "~S: a page that passes at rest passes, and no transition ran: ~A"
+                schemes (reason "bt-m-ok/row-1"))
+            (is (equal "passed" (verdict "bt-m-screenshot/row-1"))
+                "~S: no transition ran while the screenshots were taken: ~A"
+                schemes (reason "bt-m-screenshot/row-1"))
+            (is (equal "failed" (verdict "bt-m-dark-low/row-1"))
+                "~S: a page with too little contrast in the dark scheme fails" schemes)
+            (is (search "dark: color-contrast" (reason "bt-m-dark-low/row-1"))
+                "~S: ~A" schemes (reason "bt-m-dark-low/row-1"))
+            (is (not (search "light:" (reason "bt-m-dark-low/row-1")))
+                "~S: the light scheme has enough contrast at rest: ~A"
+                schemes (reason "bt-m-dark-low/row-1"))
+            (is (equal "failed" (verdict "bt-m-light-low/row-1"))
+                "~S: a page with too little contrast in the light scheme fails" schemes)
+            (is (search "light: color-contrast" (reason "bt-m-light-low/row-1"))
+                "~S: ~A" schemes (reason "bt-m-light-low/row-1"))
+            (is (not (search "dark:" (reason "bt-m-light-low/row-1")))
+                "~S: the dark scheme has enough contrast at rest: ~A"
+                schemes (reason "bt-m-light-low/row-1"))))))))
 
 (test a-browser-that-cannot-start-fails-every-row-with-the-reason
   (let ((app (start-app)))

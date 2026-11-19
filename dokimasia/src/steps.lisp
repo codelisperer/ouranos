@@ -218,6 +218,27 @@ as false."
 (defun %next-frame ()
   (%eval "new Promise(r => requestAnimationFrame(() => requestAnimationFrame(() => r(true))))"))
 
+(defparameter +still-css+
+  "*, *::before, *::after { transition: none !important; animation: none !important; }"
+  "The style that turns CSS transitions and animations off while a step switches the colour
+scheme (#1288).")
+
+(defun %call-still (function)
+  "Call FUNCTION with CSS transitions and animations turned off in the row's page, and turn them
+back on afterwards. A step that switches the colour scheme runs inside this, so the colours it
+judges or captures are the ones the page shows at rest, not ones part way through a transition
+the switch started (#1288). The style is a constructed stylesheet in adoptedStyleSheets, which a
+page's Content-Security-Policy does not block. Reading a computed style afterwards makes the
+browser apply it at once, which also cancels a transition already running."
+  (%eval "((css) => { if (!window.__dokimasiaStill) { const s = new CSSStyleSheet(); s.replaceSync(css); document.adoptedStyleSheets = [...document.adoptedStyleSheets, s]; window.__dokimasiaStill = s; } getComputedStyle(document.documentElement).color; return true; })(~A)"
+         +still-css+)
+  (unwind-protect (funcall function)
+    ;; The scheme is restored before this runs, so turning transitions back on changes no
+    ;; colour and starts no transition. A browser that has gone away has nothing to restore.
+    (handler-case
+        (%eval "(() => { const s = window.__dokimasiaStill; if (!s) return false; document.adoptedStyleSheets = document.adoptedStyleSheets.filter(x => x !== s); delete window.__dokimasiaStill; return true; })()")
+      (cdp:cdp-condition () nil))))
+
 (defun %content-height ()
   "The height of the document, or of the tallest scrolling pane's content, whichever is larger."
   (%eval "(() => { let h = Math.max(document.documentElement.scrollHeight, document.body ? document.body.scrollHeight : 0); for (const e of document.querySelectorAll('*')) { const s = getComputedStyle(e); if (/(auto|scroll)/.test(s.overflowY) && e.scrollHeight > e.clientHeight) { const r = e.getBoundingClientRect(); h = Math.max(h, Math.ceil(r.top + window.scrollY + e.scrollHeight)); } } return h; })()"))
@@ -237,32 +258,36 @@ writes an empty list as null, so the script treats null as no selectors and no p
                (format nil "~A/~A/" (%path-part (dcase-name (run-context-dcase ctx)))
                        (%path-part (run-context-row-id ctx)))
                (run-context-out ctx))))
-    (unwind-protect
-         (dolist (viewport (run-context-viewports ctx))
-           (dolist (scheme (run-context-schemes ctx))
-             (%apply-viewport page viewport)
-             (cdp:emulate-color-scheme page scheme :timeout *step-timeout*)
-             (%next-frame)
-             (let ((height (%content-height)))
-               (when (and (integerp height)
-                          (> height (getf (rest (assoc viewport +viewports+)) :height)))
-                 (%apply-viewport page viewport (min height +max-screenshot-height+))
-                 (%next-frame)))
-             (let ((file (merge-pathnames
-                          (format nil "~2,'0D-~A-~(~A~)-~(~A~).png"
-                                  (run-context-step-number ctx) (%path-part name) viewport scheme)
-                          dir))
-                   (png nil))
-               (%mask (run-context-suite ctx))
-               (unwind-protect (setf png (cdp:screenshot page :timeout *step-timeout*))
-                 (%unmask))
-               (ensure-directories-exist file)
-               (with-open-file (out file :direction :output :element-type '(unsigned-byte 8)
-                                         :if-exists :supersede)
-                 (write-sequence png out))
-               (push (uiop:native-namestring file) (row-artifacts *row*)))))
-      (%apply-viewport page (first (run-context-viewports ctx)))
-      (cdp:emulate-color-scheme page (first (run-context-schemes ctx)) :timeout *step-timeout*))))
+    (%call-still
+     (lambda ()
+       (unwind-protect
+            (dolist (viewport (run-context-viewports ctx))
+              (dolist (scheme (run-context-schemes ctx))
+                (%apply-viewport page viewport)
+                (cdp:emulate-color-scheme page scheme :timeout *step-timeout*)
+                (%next-frame)
+                (let ((height (%content-height)))
+                  (when (and (integerp height)
+                             (> height (getf (rest (assoc viewport +viewports+)) :height)))
+                    (%apply-viewport page viewport (min height +max-screenshot-height+))
+                    (%next-frame)))
+                (let ((file (merge-pathnames
+                             (format nil "~2,'0D-~A-~(~A~)-~(~A~).png"
+                                     (run-context-step-number ctx) (%path-part name) viewport
+                                     scheme)
+                             dir))
+                      (png nil))
+                  (%mask (run-context-suite ctx))
+                  (unwind-protect (setf png (cdp:screenshot page :timeout *step-timeout*))
+                    (%unmask))
+                  (ensure-directories-exist file)
+                  (with-open-file (out file :direction :output :element-type '(unsigned-byte 8)
+                                            :if-exists :supersede)
+                    (write-sequence png out))
+                  (push (uiop:native-namestring file) (row-artifacts *row*)))))
+         (%apply-viewport page (first (run-context-viewports ctx)))
+         (cdp:emulate-color-scheme page (first (run-context-schemes ctx))
+                                   :timeout *step-timeout*))))))
 
 ;;; --- one step ------------------------------------------------------------------------------
 
