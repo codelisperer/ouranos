@@ -14,6 +14,26 @@ its tag.
 
 ### An app may have to act
 
+- **Hyperion's request log records the template of the route that answered, not the concrete
+  path** (#1036). A token in a path, as in `/reset/<token>`, was written to the log on every
+  request. The `path` field changes on three lines that `hyperion/logging:wrap` writes:
+  - `request` and `request failed` record the matched route's template, such as
+    `/reset/:token`, with any `mount` prefix in front;
+  - `request start` no longer has a `path` field, because it is written before a route is chosen.
+    Its request id matches the `request` line, which has the path.
+  - A request no route answered, a 404, records the path cut to
+    `hyperion/logging:+max-logged-path-length+` (32) characters, followed by `...` when it was cut.
+    A token in an unmatched path is still logged up to that length.
+
+  The `path` field on the `csrf: refused` and `ratelimit: refused` lines is cut the same way,
+  because both are written before routing. A route whose parameters are not secret, and whose log
+  an app reads by value, keeps the concrete path with `(hyperion/router:route :get "/items/:id"
+  handler :log-path :path)`. An app that searches its logs for concrete paths of routed requests
+  searches for the template instead, or declares those routes with `:log-path :path`. The new
+  function `hyperion/logging:logged-path` returns what a line records for a Clack env, for an
+  app's own middleware that logs the path. The query string is not logged on any of these lines,
+  as before: the start line logs only its parameter names.
+
 - **`aion/cdp:launch-browser` reaches the browser over a pipe by default on Linux, macOS and
   Windows** (#1028, step (c) of dokimasia ADR-0001). Its `:transport` argument is now `:pipe` or
   `:port`. `:pipe` starts the browser with `--remote-debugging-pipe` and opens no debugging port,

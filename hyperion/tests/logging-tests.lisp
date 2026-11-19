@@ -231,3 +231,90 @@ bare-parts and not named. The control is a name with a real value, which is logg
     (is (search "unparsed" out) "~A" out)
     (is (null (search "SECRETVALUE" out)) "~A" out)
     (is (null (search "x%zz" out)) "not even the name: ~A" out)))
+
+;;; --- the path a log line records: the route's template, not a token in it (#1036) -----
+
+(defparameter +log-marker+ "QZTOKENXQZWVKJMPQZ"
+  "Stands for a token in a path. Upper case and with no hex digits after the first, so the
+request id, which is hex, cannot hold it.")
+
+(defun %log-routed (app path &key (method :get) query)
+  "Everything WRAP logs at DEBUG for one request to APP, a Clack app, of PATH with QUERY. Errors
+from APP are ignored after they are logged."
+  (with-clean-quiet-paths
+    (%log-capture :debug
+                  (lambda ()
+                    (ignore-errors
+                     (funcall (hyperion/logging:wrap app)
+                              (list* :request-method method
+                                     :query-string query
+                                     :request-uri (format nil "~A~@[?~A~]" path query)
+                                     (cddr (%log-env path)))))))))
+
+(test a-route-with-a-token-in-its-path-logs-the-template-not-the-token
+  "The request log records the template of the route that answered, so a token in the path is
+not written to the log. The query string is not logged either, on either line. Control: the same
+route declared with :LOG-PATH :PATH logs the concrete path, so this test can see the marker when
+it is there."
+  (let* ((path (format nil "/reset/~A" +log-marker+))
+         (query "t=QZQUERYVALUEQZ")
+         (out (%log-routed (rt:to-app (rt:router (rt:route :get "/reset/:token" (%log-ok-app))))
+                           path :query query)))
+    (is (search "request start" out) "~A" out)
+    (is (search "/reset/:token" out) "the template: ~A" out)
+    (is (null (search +log-marker+ out)) "not the token: ~A" out)
+    (is (null (search "QZQUERYVALUEQZ" out)) "not the query's value: ~A" out))
+  (let* ((path (format nil "/reset/~A" +log-marker+))
+         (out (%log-routed (rt:to-app (rt:router (rt:route :get "/reset/:token" (%log-ok-app)
+                                                           :log-path :path)))
+                           path :query "t=QZQUERYVALUEQZ")))
+    (is (search +log-marker+ out) "control: with :log-path :path the path is logged: ~A" out)
+    (is (null (search "/reset/:token" out)) "and not the template: ~A" out)
+    (is (null (search "QZQUERYVALUEQZ" out)) "the query's value still is not: ~A" out)))
+
+(test a-mounted-route-logs-the-template-with-the-mount-prefix
+  (let ((out (%log-routed (rt:to-app
+                           (rt:router
+                            (rt:mount "/account"
+                                      (rt:router (rt:route :post "/verify/:code" (%log-ok-app))))))
+                          (format nil "/account/verify/~A" +log-marker+) :method :post)))
+    (is (search "/account/verify/:code" out) "~A" out)
+    (is (null (search +log-marker+ out)) "~A" out)))
+
+(test a-failing-route-logs-its-template-on-the-failure-line
+  (let ((out (%log-routed (rt:to-app (rt:router (rt:route :get "/invite/:token"
+                                                          (lambda (env) (declare (ignore env))
+                                                            (error "boom")))))
+                          (format nil "/invite/~A" +log-marker+))))
+    (is (search "request failed" out) "~A" out)
+    (is (search "/invite/:token" out) "~A" out)
+    (is (null (search +log-marker+ out)) "~A" out)))
+
+(test an-unmatched-path-is-logged-cut-to-the-limit
+  "A 404 has no template, so its path is logged, cut to +MAX-LOGGED-PATH-LENGTH+ characters. A
+token in an unmatched path is still logged up to that length: this is the limit, and it is
+known. Control: a short unmatched path is logged whole."
+  (let* ((limit hyperion/logging:+max-logged-path-length+)
+         (path (format nil "/reset/~A~A/extra" +log-marker+ +log-marker+))
+         (out (%log-routed (rt:to-app (rt:router (rt:route :get "/reset/:token" (%log-ok-app))))
+                           path)))
+    (is (< limit (length path)) "the path is longer than the limit")
+    (is (search "404" out) "a 404: ~A" out)
+    (is (search (concatenate 'string (subseq path 0 limit) "...") out) "cut at ~D: ~A" limit out)
+    (is (null (search (subseq path 0 (1+ limit)) out))
+        "nothing past the first ~D characters: ~A" limit out))
+  (let ((out (%log-routed (rt:to-app (rt:router)) "/favicon.ico")))
+    (is (search "/favicon.ico" out) "control: ~A" out)
+    (is (null (search "/favicon.ico..." out)) "not marked as cut: ~A" out)))
+
+(test logged-path-outside-a-route-is-the-cut-path
+  "The CSRF and rate-limit refusals log before any route is chosen, so they record the cut path."
+  (let ((long (format nil "/a/~A~A" +log-marker+ +log-marker+)))
+    (is (equal "/short" (hyperion/logging:logged-path (%log-env "/short"))))
+    (is (= (+ 3 hyperion/logging:+max-logged-path-length+)
+           (length (hyperion/logging:logged-path (%log-env long)))))))
+
+(test a-route-refuses-an-unknown-log-path
+  (signals rt:route-error (rt:route :get "/x" (%log-ok-app) :log-path :yes))
+  (is (eq :template (rt:route-log-path (rt:route :get "/x" (%log-ok-app)))))
+  (is (eq :path (rt:route-log-path (rt:route :get "/x" (%log-ok-app) :log-path :path)))))
