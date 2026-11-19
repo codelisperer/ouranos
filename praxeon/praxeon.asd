@@ -432,7 +432,9 @@
                              ;; #827: untrusted content in a turn, using the stub reader pattern
                              (:file "reader-guard-tests")
                              ;; #984: streaming a completion from stub servers, and cancelling it
-                             (:file "stream-tests"))))
+                             (:file "stream-tests")
+                             ;; #1293: a provider set to stay local, after stream-tests
+                             (:file "stay-local-tests"))))
   :perform (test-op (op c)
              (uiop:symbol-call :fiveam :run! (uiop:find-symbol* :praxeon :praxeon/tests))))
 
