@@ -7,59 +7,365 @@ report. Each case and row is one FiveAM test. The design is
 [ADR-0001](docs/adr/0001-browser-driver-and-acceptance-harness.md); the work is #1028.
 
 What exists today is the harness itself, its accessibility checks with axe-core, ready-made
-stored-data probes for apps that use mnemosyne, and a target for hyperion apps (steps b1 to b3 of
-#1028).
+stored-data probes for apps that use mnemosyne, a target for hyperion apps (steps b1 to b3 of
+#1028), and a worked example that runs in CI (step 4). "Getting started" below takes an app from
+nothing to a suite in CI; the sections after it are the reference.
 
-## A first suite
+## Getting started
+
+This section takes an app from nothing to a suite that runs in CI. The reference is the worked
+example, [`examples/active-search/`](examples/active-search/): a suite for hyperion's
+active-search example app that the gate runs on Linux, macOS and Windows. Every code sample
+below is copied from a file the gate runs, and names that file so you can check it against the
+code.
+
+dokimasia does not need your app to be written in Lisp. The suite is Lisp, and the app is
+whatever answers at a URL: a hyperion app that dokimasia starts itself, a process that your
+start function launches, or an app already running somewhere. Only the parts that start a
+hyperion app, or read a mnemosyne database, need those frameworks, and they are separate
+systems (see "Systems" below).
+
+### 1. A screen, a case and a suite
+
+A **screen** says what the page must show for a step to accept "we are on it". A **case** is a
+list of steps, run once per row. A **suite** names its cases and the target they run against.
+From [`examples/active-search/acceptance.lisp`](examples/active-search/acceptance.lisp):
 
 ```lisp
-(asdf:load-system :dokimasia)
+(d:define-screen contacts
+  :path "/"
+  :present '("#q" "#results"))
 
-(defpackage #:my-app/acceptance (:use #:cl) (:local-nicknames (#:d #:dokimasia)))
-(in-package #:my-app/acceptance)
+(d:define-case search-contacts
+  :requirement "SEARCH-1"
+  :rows (:file "rows/search.csv")
+  :steps ((:visit "/")
+          (:expect-screen contacts)
+          (:fill "#q" (:input :query))
+          (:expect-text "#results tr:first-child td:first-child" (:input :first))
+          (:expect-text "p.help" (:input :echo))))
 
-;; A screen is what the page must look like for a step to say "we are on it".
-(d:define-screen dashboard :path "/dashboard" :present "#welcome")
-(d:define-screen sign-in :path "/login" :present "form#login")
-(d:define-screen sign-up :path "/signup" :present "form#signup")
+(d:define-case contacts-page
+  :requirement "PAGE-1"
+  :steps ((:visit "/")
+          (:expect-screen contacts)
+          (:screenshot "contacts")
+          (:audit)))
 
-;; A case: steps, run once per row. (:input key) is the row's value for KEY.
-(d:define-case sign-up
-  :requirement "ACCT-1"
-  :rows (:file "rows/sign-up.csv")          ; relative to this file
+(d:define-suite active-search
+  :cases (search-contacts contacts-page)
+  :target (app-target))
+```
+
+`d` is the package nickname for `dokimasia`. `define-screen` evaluates its options, so a list
+needs a quote. `define-suite` evaluates `:target` each time the suite runs, so each run gets a
+new target. `:requirement` is the id of the requirement the case checks; the report prints it on
+every line. A case name is a symbol in your package, so do not name a case after a symbol your
+package inherits, such as `search` from `cl`.
+
+`(:input key)` is the current row's value for KEY. The "Steps" table below lists every step.
+
+### 2. Rows: inline, a Lisp data file, or CSV
+
+A case without `:rows` runs once, as `row-1`. Otherwise `:rows` takes one of three forms.
+
+**Inline**, as a list of plists. `:id` names the row in the report. From
+[`tests/browser-tests.lisp`](tests/browser-tests.lisp):
+
+```lisp
+(d:define-case bt-signup
+  :requirement "SIGNUP-1"
+  :rows ((:id "free-user" :email "free@example.com" :password "pw-1" :plan "free")
+         (:id "pro-user" :email "pro@example.com" :password "pw-2" :plan "pro"))
   :steps ((:visit "/signup")
           (:fill "#email" (:input :email))
           (:fill "#password" (:input :password))
           (:select "#plan" (:input :plan))
-          (:click "button[type=submit]")
-          (:expect-screen (:input :screen))  ; each row names the screen it expects
-          (:screenshot "after-sign-up")
-          (:audit)))                          ; axe-core, in each colour scheme
+          (:click "#submit")
+          (:expect-screen bt-home)
+          (:expect-text "#welcome" (:input :email))
+          (:expect-stored :bt-user-stored (:input :email) (:input :plan))
+          (:screenshot "home")))
+```
 
-(d:define-suite smoke
-  :cases :all
-  :target (d:url-target "https://staging.example.com"
-                        :users (list (list :name :admin :email "admin@example.com"
-                                           :password (aion/secret:make-secret "…"))))
+**CSV**, with `(:file "path.csv")`. The path is relative to the file that defines the case. The
+first line names the columns, and the column `id`, when present, names each row. Column names
+are compared in lower case, and a blank line is not a row. This is
+[`examples/active-search/rows/search.csv`](examples/active-search/rows/search.csv), which the
+case above reads:
+
+```
+id,query,first,echo
+by-name,turing,Alan Turing,Filtering: turing
+by-email,nasa,Margaret Hamilton,Filtering: nasa
+by-role,coalton,Robert Smith,Filtering: coalton
+no-match,zzz,No matches.,Filtering: zzz
+```
+
+**A Lisp data file**, with `(:file "path.sexp")`: one list of plists. It is read as data, so
+`#.` and anything else that would run code is refused. This is the file
+[`tests/data-tests.lisp`](tests/data-tests.lisp) writes and reads in
+`rows-are-read-inline-from-csv-and-from-s-expressions`:
+
+```lisp
+; rows for a test
+((:email "c@example.com" :count 3) (:email "d@example.com" :count 4))
+```
+
+A row file with a short line, code in it, or the wrong shape is refused with
+`invalid-definition` when the case is defined, not during a run.
+
+### 3. Targets: where the app comes from
+
+**An app that is already running**, on any stack: `url-target`. From
+[`tests/mnemosyne/tests.lisp`](tests/mnemosyne/tests.lisp):
+
+```lisp
+(d:url-target "https://staging.example.com")
+(d:url-target "http://127.0.0.1:1" :local-probes t)
+```
+
+`:local-probes t` says that the test image can reach the store the app at that URL uses, so the
+probes' local forms may run (section 4). dokimasia cannot check this: if the store is not the
+app's, the probes pass or fail on another store's data. Without it, a probe that has only a
+local form is reported as not run, never as passed.
+
+**An app that a function starts and stops**: `process-target`. `:start` returns the base URL,
+and `:stop` runs after the run however it ended. Your start function can launch anything, such
+as a server for an app written in another language. From
+[`tests/browser-tests.lisp`](tests/browser-tests.lisp), where the app is a small test server:
+
+```lisp
+(defun app-target (&key (favicon t))
+  "A process target that starts and stops a fresh test app with Alice signed up. FAVICON NIL
+starts it without a /favicon.ico, and :SLOW with one answered after 1.5 seconds."
+  (d:process-target :start (lambda ()
+                             (setf *app* (start-app :users (list +alice+) :favicon favicon))
+                             (app-base-url *app*))
+                    :stop (lambda () (stop-app *app*))
+                    :users (list (list :name :alice :email "alice@example.com"
+                                       :password (secret:make-secret "pw-alice")))))
+```
+
+A user is a plist with a `:name` and whatever the sign-in steps read with `(:user key)`. Keep
+passwords in `aion/secret` values (`secret` above); they are revealed only when typed into the
+page.
+
+**A hyperion app**: `dokimasia/hyperion:hyperion-target` starts it on a free port of 127.0.0.1
+with a new SQLite database, and stops it and deletes the database afterwards. The worked
+example's `app-target`, from
+[`examples/active-search/acceptance.lisp`](examples/active-search/acceptance.lisp):
+
+```lisp
+(defun app-target ()
+  "A dokimasia/hyperion target that starts hyperion/examples/active-search on a free port. The
+app does not use a database, so its :APP function ignores the scratch database it is given."
+  (dh:hyperion-target :app (lambda (backend)
+                             (declare (ignore backend))
+                             (app:make-app))
+                      :server :hunchentoot))
+```
+
+An app that has tables passes `:setup` and `:seed` as well. From
+[`tests/hyperion/tests.lisp`](tests/hyperion/tests.lisp):
+
+```lisp
+(defun app-target (&rest options)
+  (apply #'dh:hyperion-target :app #'make-app :setup #'setup-app :seed #'seed-app
+                              :users +users+ :server :hunchentoot options))
+```
+
+"Hyperion apps" below covers the settle check and signing in with a session.
+
+### 4. Stored data: probes
+
+`(:expect-stored probe value…)` asks a probe whether the app stored what it should. A probe
+defined with `define-probe` has a `:local` form, which reads the store from the test image, an
+`:http` form, which asks the app, or both. Each returns true, or NIL and a reason. From
+[`tests/browser-tests.lisp`](tests/browser-tests.lisp):
+
+```lisp
+(d:define-probe :bt-user-stored
+  :local (lambda (email plan)
+           (let ((user (app-user *app* email)))
+             (cond ((null user) (values nil (format nil "no user ~A is stored" email)))
+                   ((equal (getf user :plan) plan) t)
+                   (t (values nil (format nil "~A is stored with the plan ~A, not ~A"
+                                          email (getf user :plan) plan)))))))
+```
+
+When the app's database is one mnemosyne can open, `dokimasia/mnemosyne` writes the local form
+for you. `define-row-probe` passes when the table has a row whose `:match` columns hold the
+step's values, and with `:absent t` when none does. `:source` is a mnemosyne backend, a pool, or
+a function that returns one when the step runs. From
+[`tests/mnemosyne/tests.lisp`](tests/mnemosyne/tests.lisp):
+
+```lisp
+(dm:define-row-probe :t-account :source db :table :accounts :match '(:email :plan))
+(dm:define-row-probe :t-no-account :source db :table :accounts :match '(:email) :absent t)
+```
+
+Against a hyperion target, `dokimasia/hyperion:current-database` is the running target's
+database. From [`tests/hyperion/tests.lisp`](tests/hyperion/tests.lisp):
+
+```lisp
+(dm:define-row-probe :dh-user :source #'dh:current-database :table :users :match '(:email :plan))
+
+(d:define-case dh-stored
+  :steps ((:visit "/") (:expect-stored :dh-user "alice@example.com" "team")))
+```
+
+`dm` is `dokimasia/mnemosyne` and `dh` is `dokimasia/hyperion`. "Probes" below gives the rest:
+`define-query-probe`, the failure reasons, and what happens against a URL.
+
+### 5. Screenshots and masks
+
+`(:screenshot name)` writes one PNG for each viewport and colour scheme of the run, grown to the
+page's full height. A suite's `:mask` lists selectors whose elements are hidden in its
+screenshots, and `:mask-text` lists regular expressions whose matching text is replaced, so a
+clock or a timestamp does not change the image from run to run. From
+[`tests/browser-tests.lisp`](tests/browser-tests.lisp):
+
+```lisp
+(d:define-suite bt-passing
+  :cases (bt-signup bt-signed-in bt-signin-rows bt-scroll-kept bt-known-console)
+  :target (app-target)
   :sign-in ((:visit "/login")
             (:fill "#email" (:user :email))
             (:fill "#password" (:user :password))
-            (:click "button[type=submit]")
-            (:expect-screen dashboard))
-  :mask ("#clock")                  ; hidden in screenshots
-  :mask-text ("Updated \\d+s ago")) ; replaced in screenshots
-
-(d:run :smoke :viewports '(:desktop :phone) :schemes '(:light :dark))
-;; => T, #P".../build/dokimasia/report.txt"
+            (:click "#submit")
+            (:expect-screen bt-home))
+  :ignore-console ("known noise")
+  :mask ("#clock")
+  :mask-text ("Generated at \\d+"))
 ```
 
-`rows/sign-up.csv`:
+A suite with no `:mask` takes its screenshots unmasked.
+
+### 6. The accessibility audit
+
+`(:audit)` runs axe-core in the page once for each colour scheme of the run, and fails on a
+violation at or above `:serious`. `:impact` changes that level and `:ignore` turns rules off. From
+[`tests/browser-tests.lisp`](tests/browser-tests.lisp):
+
+```lisp
+(d:define-case bt-a-ok :steps ((:visit "/a11y-ok") (:audit :impact :minor)))
+(d:define-case bt-a-image-ignored :steps ((:visit "/a11y-image") (:audit :ignore ("image-alt"))))
+```
+
+"Accessibility" below gives the options and what a failure reports.
+
+### 7. Running a suite, and the report
+
+`run` takes the suite's name. The first viewport and scheme are the ones the cases run in; each
+`:screenshot` step captures every combination, and each `:audit` runs in every scheme. From
+[`examples/active-search/acceptance.lisp`](examples/active-search/acceptance.lisp), with its
+docstring left out:
+
+```lisp
+(defun run-acceptance (&key out (viewports '(:desktop :phone)) (schemes '(:light))
+                            (explain t))
+  (d:run :active-search :out out :viewports viewports :schemes schemes :explain explain))
+```
+
+`run` returns true when every row passed, and the path of `report.txt`. It writes to `:out`, by
+default `build/dokimasia/`. A run of the worked example's suite wrote these files:
 
 ```
-id,email,password,plan,screen
-new-user,new@example.com,correct-horse,free,dashboard
-weak-password,weak@example.com,1,free,sign-up
+report.txt
+report.json
+contacts-page/row-1/03-contacts-desktop-light.png
+contacts-page/row-1/03-contacts-phone-light.png
 ```
+
+A screenshot is `<case>/<row>/NN-name-viewport-scheme.png`, where NN is the step's number. This
+is the start of `report.txt` from a run of the worked example's suite:
+
+```
+dokimasia: the suite active-search against http://127.0.0.1:59723
+5 rows: 5 passed, 0 failed, 0 not run. Browser: Chrome/157.0.8103.79. Viewports: desktop, phone. Schemes: light.
+
+PASSED   search-contacts by-name [SEARCH-1]
+PASSED   search-contacts by-email [SEARCH-1]
+PASSED   search-contacts by-role [SEARCH-1]
+PASSED   search-contacts no-match [SEARCH-1]
+PASSED   contacts-page row-1 [PAGE-1]
+```
+
+and from its control suite, whose one row expects the wrong first result
+([`examples/active-search/tests.lisp`](examples/active-search/tests.lisp)):
+
+```
+FAILED   example-control wrong-first: step 3 (:expect-text "#results tr:first-child td:first-child" (:input :first) :timeout
+ ...): the text of #results tr:first-child td:first-child does not contain "Grace Hopper"; it is "Alan Turing"
+```
+
+Failures come first, then rows not run, then passes. Below them are each row's steps with their
+durations, the console and network findings, and the files written. `report.json` holds the
+same: at the top `suite`, `base-url`, `browser`, `viewports`, `schemes`, the `passed`, `failed`
+and `not-run` counts, and `rows`. Each row has `case`, `row`, `requirement`, `user`, `verdict`,
+`decided-at-step`, `decided-by`, `reason`, `duration-ms`, `steps` (each with `label`, `outcome`,
+`reason` and `ms`), `console`, `network` and `artifacts`, the screenshot paths.
+
+Each case and row is also one FiveAM test, so a suite run inside `asdf:test-system` reports
+through FiveAM as well.
+
+### 8. In CI
+
+`aion/cdp:find-browser` looks at `OURANOS_BROWSER`, then PATH and the usual install locations.
+With no browser a test is skipped with the reason. Set `OURANOS_REQUIRE_BROWSER=1` in CI, so a
+runner without a browser fails instead of passing on skips. GitHub's hosted runners for Linux,
+macOS and Windows have Chrome. The browser always runs headless, with a new profile that is
+deleted afterwards.
+
+To keep the report and screenshots, write them to a directory the job then uploads, and upload
+when the job fails too, since that is when the screenshots help most. The worked example's
+tests write to `OURANOS_DOKIMASIA_EXAMPLE_OUT` when it is set
+([`examples/active-search/tests.lisp`](examples/active-search/tests.lisp)), and this repository's
+workflow sets it and uploads the directory. From
+[`.github/workflows/verify.yml`](../.github/workflows/verify.yml):
+
+```yaml
+    env:
+      OURANOS_TEST_REAL_CREDENTIAL_STORE: "1"
+      OURANOS_REQUIRE_BROWSER: "1"
+```
+
+```yaml
+          # dokimasia's worked example (#1028, step 4) writes its report and screenshots here,
+          # and the next step uploads them, so a reader can see what the suite saw on each leg.
+          OURANOS_DOKIMASIA_EXAMPLE_OUT: ${{ runner.temp }}/dokimasia-example
+```
+
+```yaml
+      - name: Upload the dokimasia example's report and screenshots
+        id: upload-the-dokimasia-example-s-report-and-screenshots
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dokimasia-example-${{ matrix.platform }}
+          path: ${{ runner.temp }}/dokimasia-example
+          if-no-files-found: ignore
+          retention-days: 14
+```
+
+`OURANOS_TEST_REAL_CREDENTIAL_STORE` belongs to another suite in this repository; an app needs
+only `OURANOS_REQUIRE_BROWSER`.
+
+## Systems
+
+| System | Depends on | What it adds |
+|---|---|---|
+| `dokimasia/core` | `coalton` | The typed verdict of a row. |
+| `dokimasia` | `dokimasia/core`, `aion` systems, `com.inuoe.jzon`, `fiveam` | Screens, cases, suites, probes, `url-target` and `process-target`, the steps, the checks after every step, the audit, the run and the report. |
+| `dokimasia/mnemosyne` | `dokimasia`, `mnemosyne` | `define-row-probe` and `define-query-probe`, which read the app's database. |
+| `dokimasia/hyperion` | `dokimasia`, `hyperion`, `mnemosyne` | `hyperion-target`, the settle check that waits for htmx, and sign-in with a session in the app's store. |
+| `dokimasia/examples/active-search` | `dokimasia`, `dokimasia/hyperion`, `hyperion/examples/active-search` | The worked example. |
+
+dokimasia attaches at `aion`: `dokimasia` itself never loads hyperion, mnemosyne, elenchon or
+praxeon, so an app on another stack loads only it. `dokimasia/mnemosyne` and
+`dokimasia/hyperion` are aux systems that reach right into the line. `dokimasia/elenchon`, which
+will turn an elenchon decision table into rows, waits until `elenchon/cases` exists (#28).
 
 ## Steps
 
@@ -108,10 +414,13 @@ cookies and the app origin's storage, so no row sees another's session.
 
 `(:audit)` loads axe-core into the page and runs it once for each colour scheme of the run, so
 contrast is checked on the colours the page actually shows in each scheme. The step fails when a
-rule finds a violation at or above its impact level, and the reason names each one:
+rule finds a violation at or above its impact level, and the reason names each one. This line is
+from the worked example's page case run in the dark scheme alone (`run-dark-audit` in
+[`examples/active-search/tests.lisp`](examples/active-search/tests.lisp)), the failure that keeps
+that test skipped until #1281:
 
 ```
-FAILED   sign-up new-user [ACCT-1]: step 8 (:audit): axe-core 4.14.0 found 1 violation at serious or above: dark: color-contrast (serious, 3 elements, first at .hint): Elements must meet minimum color contrast ratio thresholds
+FAILED   contacts-page row-1 [PAGE-1]: step 4 (:audit): axe-core 4.14.0 found 1 violation at serious or above: dark: color-contrast (serious, 1 element, first at .subtitle): Elements must meet minimum color contrast ratio thresholds
 ```
 
 | Option | Default | |
@@ -127,59 +436,41 @@ no network for it.
 
 ## Targets
 
-- `(d:url-target base-url :users … :local-probes nil)`: an app that is already running. Set
+- `url-target base-url &key users local-probes`: an app that is already running. Pass
   `:local-probes t` when the test image can reach the store that app uses (see "Probes").
-- `(d:process-target :start fn :stop fn :users …)`: START starts the app and returns its base URL;
-  STOP runs after the run, however it ended.
+- `process-target &key start stop users`: START starts the app and returns its base URL; STOP
+  runs after the run, however it ended.
+
+Section 3 of "Getting started" has an example of each, and of `hyperion-target`.
 
 A user is a plist with a `:name` and whatever the sign-in steps read with `(:user key)`. Keep
 passwords in `aion/secret` values; they are revealed only when typed into the page.
 
 ## Probes
 
-```lisp
-(d:define-probe :account-stored
-  :local (lambda (email plan) …)                ; reads the store from the test image
-  :http (lambda (page base-url email plan) …))  ; asks the app's API, e.g. through cdp:evaluate
-```
-
-Each form returns true, or NIL and a reason. `:local` runs only against a target that can see the
+`define-probe name &key local http`. LOCAL is a function of the step's values that reads the
+store from the test image. HTTP is a function of the page, the base URL and the step's values
+that asks the app, for example through `aion/cdp:evaluate`. Section 4 of "Getting started" has an
+example. Each form returns true, or NIL and a reason. `:local` runs only against a target that can see the
 app's store: a process target, or a URL target made with `:local-probes t`. When the target can run
 neither form, the step is **not run**, with that reason; it is never reported as passed.
 
 `:local-probes t` is for an app at a local or staging URL whose database the test machine can
-connect to, which includes an app not written in Lisp:
-
-```lisp
-(d:url-target "http://localhost:3000" :local-probes t)
-```
-
-dokimasia cannot check this. It is your statement that the store your probes read is the one the
+connect to, which includes an app not written in Lisp. dokimasia cannot check this. It is your statement that the store your probes read is the one the
 app at that URL uses. If it is not, the probes pass or fail on another store's data.
 
 ### Probes that read a mnemosyne database
 
-The aux system `dokimasia/mnemosyne` defines the local form for you:
-
-```lisp
-(asdf:load-system :dokimasia/mnemosyne)
-
-(dokimasia/mnemosyne:define-row-probe :account-stored
-  :source #'my-app:database          ; a mnemosyne backend, a pool, or a function returning one
-  :table :accounts
-  :match '(:email :plan))            ; (:expect-stored :account-stored (:input :email) (:input :plan))
-
-(dokimasia/mnemosyne:define-row-probe :no-account
-  :source #'my-app:database :table :accounts :match '(:email) :absent t)
-```
-
-`define-row-probe` passes when `:table` has a row whose `:match` columns hold the step's values, in
+The aux system `dokimasia/mnemosyne` defines the local form for you. Section 4 of "Getting
+started" has examples. `define-row-probe` passes when `:table` has a row whose `:match` columns hold the step's values, in
 order, or with `:absent t` when none does. A step's values are strings; the database compares them
 with the column's type. When no row matches, the reason gives the other columns' stored values in
-the rows that match the first column:
+the rows that match the first column. This reason is asserted in
+[`tests/mnemosyne/tests.lisp`](tests/mnemosyne/tests.lisp); the report puts "the probe NAME: "
+in front of it:
 
 ```
-the probe account-stored: accounts has no row with email = "new@example.com" and plan = "team"; the rows with email = "new@example.com" have plan = "free"
+accounts has no row with email = "new@example.com" and plan = "team"; the rows with email = "new@example.com" have plan = "free"
 ```
 
 `define-query-probe` takes `:query`, a function of the step's values that returns a mnemosyne query,
@@ -191,20 +482,17 @@ URL target they run only when it was made with `:local-probes t`; otherwise pass
 
 ## Hyperion apps
 
-The aux system `dokimasia/hyperion` starts a hyperion app for the run:
+The aux system `dokimasia/hyperion` starts a hyperion app for the run with `hyperion-target`,
+which takes:
 
-```lisp
-(asdf:load-system :dokimasia/hyperion)
+- `:app`, a function of the database's mnemosyne backend that returns the app's handler;
+- `:setup`, a function of the backend that creates the tables, for example by running the app's
+  migrations;
+- `:seed`, a function of the backend and the users that stores the users a case signs in as;
+- `:teardown`, optional, which closes what `:app` opened;
+- `:users`, `:server`, and the sign-in options below.
 
-(dokimasia/hyperion:hyperion-target
-  :setup #'my-app:migrate                 ; (lambda (backend) …): create the tables
-  :seed (lambda (backend users) …)        ; store the users a case signs in as
-  :app #'my-app:make-app                  ; (lambda (backend) …) → the Ring handler
-  :teardown #'my-app:close-database       ; optional: close what :app opened
-  :users (list (list :name :admin :email "admin@example.com" :password "…")))
-```
-
-Before the first case it makes a new SQLite file in a temporary directory, calls `:setup`, then
+Section 3 of "Getting started" has two examples. Before the first case it makes a new SQLite file in a temporary directory, calls `:setup`, then
 `:seed`, then `:app` with that database's mnemosyne backend, and starts the handler with
 `hyperion/server` on a free port of 127.0.0.1. `:server` names the backend (`:uv`, `:hunchentoot`,
 …); by default hyperion picks one. After the run, or when starting fails part way, it stops the
@@ -216,40 +504,33 @@ htmx's requests and swaps; on a page without htmx only the network check applies
 
 **Signing in.** By default a case signs in through the suite's `:sign-in` steps, as with any
 target. For cases that do not test signing in, `:sign-in :session` adds a session for the user to
-the app's store and sets its cookie, which is faster:
+the app's store and sets its cookie, which is faster. `:session-store` is a function that
+returns the store the app gave `wrap-session`, and `:session-data` a function of the user and the
+backend that returns the session's data. This is the target built in
+`sign-in-with-a-session-needs-no-sign-in-steps` in
+[`tests/hyperion/tests.lisp`](tests/hyperion/tests.lisp), with the call around it left out; the
+test app keeps its store in `*sessions*`:
 
 ```lisp
-(dokimasia/hyperion:hyperion-target …
-  :sign-in :session
-  :session-store (lambda () my-app:*sessions*)          ; the store the app gave wrap-session
-  :session-data (lambda (user backend)                  ; the session's data for USER
-                  (list (cons :user-id (my-app:user-id-by-email backend (getf user :email))))))
+(app-target :sign-in :session :session-store (lambda () *sessions*)
+            :session-data (lambda (user db)
+                            (declare (ignore db))
+                            (list (cons :user-id (getf user :email)))))
 ```
 
 `:cookie-name` is the name the app gave `wrap-session`, `hyperion-session` by default. The report
 shows the sign-in as one step, "sign-in: a session for admin in the app's store".
 
 **Probes.** Local probes run against this target. `dokimasia/hyperion:current-database` returns the
-running target's database, for a probe's `:source`:
-
-```lisp
-(dokimasia/mnemosyne:define-row-probe :account-stored
-  :source #'dokimasia/hyperion:current-database :table :accounts :match '(:email :plan))
-```
+running target's database, for a probe's `:source`, as in section 4 of "Getting started".
 
 ## The report
 
 `run` writes `report.txt` and `report.json` to `:out` (default `build/dokimasia/`), with
 screenshots under `<case>/<row>/NN-name-viewport-scheme.png`. `report.txt` starts with one line per
 case and row, failures first, then rows not run, then passes, so the result can be read without
-opening anything else:
-
-```
-FAILED   sign-up weak-password [ACCT-1]: step 6 (:expect-screen (:input :screen)): the page is not the screen sign-up: the path is /dashboard, not /signup
-PASSED   sign-up new-user [ACCT-1]
-```
-
-Below that are each row's steps with their durations, and the console and network findings and
+opening anything else. Section 7 of "Getting started" shows a run's report and the keys of
+`report.json`. Below that are each row's steps with their durations, and the console and network findings and
 files written.
 
 ## Running without a browser
