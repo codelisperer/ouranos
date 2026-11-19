@@ -104,7 +104,7 @@
            #:native-backend-p
            #:*default-port* #:start #:stop #:handler-port
            ;; the same-origin guard for a server on this machine (#304)
-           #:loopback-host-p
+           #:loopback-host-p #:origins-setting
            ;; the blocking, production entry point (pre-publication issue 124) + its interrupt seam
            #:serve-forever #:request-shutdown #:request-shutdown-from-signal
            ;; pre-publication issue 238: the preflight, and the condition a caller may handle.

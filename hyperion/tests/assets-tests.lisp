@@ -233,8 +233,8 @@ octets -- headers and body -- with no decoding anywhere."
                           sock :input t :output t :element-type '(unsigned-byte 8))))
              (write-sequence
               (sb-ext:string-to-octets
-               (format nil "GET ~A HTTP/1.0~A~AHost: 127.0.0.1~A~A~A~A"
-                       path #\Return #\Newline #\Return #\Newline #\Return #\Newline)
+               (format nil "GET ~A HTTP/1.0~A~AHost: 127.0.0.1:~D~A~A~A~A"
+                       path #\Return #\Newline port #\Return #\Newline #\Return #\Newline)
                :external-format :latin-1)
               stream)
              (finish-output stream)

@@ -39,6 +39,36 @@ its tag.
   app's own middleware that logs the path. The query string is not logged on any of these lines,
   as before: the start line logs only its parameter names.
 
+- **`hyperion/server:start` and `serve-forever` install the same-origin request guard by
+  default** (#1037). `:request-guard` now defaults to `:same-origin`; it was `:none`, so any web
+  page a user visited could post to an app started this way. The guard refuses a request whose
+  `Host` is not the server's own, and an unsafe request (POST, PUT, PATCH, DELETE) whose
+  `Sec-Fetch-Site` or `Origin` is another site's. What an app that relied on `:none` sees now:
+  - **Bound to 127.0.0.1 and reached there**, as the dev loop, the examples and a new `cons init`
+    web project are: nothing changes for a browser. A client that sends `Host: 127.0.0.1`
+    without the port, or another name, gets a 403.
+  - **Behind a reverse proxy on the same machine**: every request gets a 403, because the proxy
+    passes the public `Host`. Set the new `HYPERION_ORIGINS` environment variable to the public
+    origins, such as `HYPERION_ORIGINS=https://app.example.com` (commas or spaces between
+    several).
+  - **Bound to every interface (`0.0.0.0`) with no origins**: `start` signals an error and the
+    server does not start. The message names `HYPERION_ORIGINS`, `:request-guard (:same-origin
+    "https://app.example.com")` and `:request-guard :none`.
+  - **Taking webhooks or API POSTs from clients that are not browsers**: they get a 403. curl,
+    an API client or a webhook sender sends neither `Origin` nor `Sec-Fetch-Site`, and the guard
+    refuses an unsafe request that carries neither. List those paths in the new
+    `:request-guard-exempt` argument of `start` and `serve-forever`, such as
+    `:request-guard-exempt '("/webhooks/stripe")`, or pass `:request-guard :none`. An entry is
+    a path matched exactly or a function of the request env, as `hyperion/csrf:wrap-same-origin`'s
+    `:exempt`. An exempt request skips the Origin check only; its `Host` is still checked. The
+    list is logged once, at warn level, when the server starts.
+  - **With `:port 0`**: the origins use the port the server bound.
+
+  The one line that keeps the old behaviour is `:request-guard :none` on the `start` or
+  `serve-forever` call. `serve-forever`'s `:readiness-path` stays exempt. `hyperion/desktop:run-app`
+  applies its own guard as before, and its `:request-guard :none` still installs none. New:
+  `hyperion/server:origins-setting` returns what `HYPERION_ORIGINS` lists.
+
 - **`aion/cdp:launch-browser` reaches the browser over a pipe by default on Linux, macOS and
   Windows** (#1028, step (c) of dokimasia ADR-0001). Its `:transport` argument is now `:pipe` or
   `:port`. `:pipe` starts the browser with `--remote-debugging-pipe` and opens no debugging port,

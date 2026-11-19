@@ -366,9 +366,12 @@ The guard is applied here rather than by the caller because the origin it checks
 includes the port, and the port is not known until this function picks it."
   (let* ((p (if (eq port :auto) (free-port) port))
          (origin (format nil "http://127.0.0.1:~D" p))
+         ;; START gets :NONE: the guard is applied here, by %GUARD, so that RUN-APP's
+         ;; :REQUEST-GUARD :NONE installs none (#1037 made START guard by default).
          (handler (hyperion/server:start (%guard app origin request-guard)
                                          :port p :host "127.0.0.1" :server server
-                                         :workers workers :loops loops)))
+                                         :workers workers :loops loops
+                                         :request-guard :none)))
     (unless (wait-until-listening p)
       (ignore-errors (hyperion/server:stop handler))
       (error "hyperion/desktop: server did not start listening on 127.0.0.1:~D" p))

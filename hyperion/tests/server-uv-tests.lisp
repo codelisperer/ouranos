@@ -802,9 +802,11 @@ Ignoring it is the tempting reading and it deadlocks the peer."
 ;;; neither the other way round.
 
 (defmacro with-hyperion-server ((port &rest start-args) &body body)
-  "Start through HYPERION/SERVER (not SRV:START) and always stop through it."
+  "Start through HYPERION/SERVER (not SRV:START) and always stop through it. These tests are
+about the transport and send `Host: x', so the request guard is off unless START-ARGS name one;
+the guard has its own tests (#1037)."
   (let ((h (gensym "HANDLER")))
-    `(let ((,h (hsrv:start ,@start-args :server :uv :port 0)))
+    `(let ((,h (hsrv:start ,@start-args :server :uv :port 0 :request-guard :none)))
        (unwind-protect (let ((,port (srv:server-port ,h))) ,@body)
          (hsrv:stop ,h)))))
 
@@ -852,7 +854,7 @@ Clack's, so `it works under the other backend' is not evidence about this one."
 (test stop-through-hyperion-server-actually-stops-it
   "STOP dispatches on the handler, because the handler is what callers hold. If it guessed
 Clack it would signal here rather than stopping anything."
-  (let* ((h (hsrv:start (const-app 200 +ok+ '("x")) :server :uv :port 0 :log nil))
+  (let* ((h (hsrv:start (const-app 200 +ok+ '("x")) :server :uv :port 0 :log nil :request-guard :none))
          (port (srv:server-port h)))
     (is (= 200 (status-of (get* port "GET / HTTP/1.1" "Host: h"))))
     (finishes (hsrv:stop h))
@@ -871,7 +873,8 @@ Accepting it silently would let an operator believe it did something."
          (progn
            (handler-bind ((warning (lambda (c) (setf warned t) (muffle-warning c))))
              (setf handler (hsrv:start (const-app 200 +ok+ '("x"))
-                                       :server :uv :port 0 :log nil :debug t)))
+                                       :server :uv :port 0 :log nil :debug t
+                                       :request-guard :none)))
            (is-true warned ":debug t must warn on a native backend"))
       (when handler (hsrv:stop handler)))))
 
@@ -1093,7 +1096,7 @@ HYPERION/DEV:SERVE do (#710). Control: :WORKERS NIL, given explicitly, runs it i
                               (setf ran-on (sb-thread:thread-name sb-thread:*current-thread*)
                                     threads (length (%worker-threads)))
                               (list 200 +ok+ (list "x")))
-                            :server :uv :port 0 :log nil workers)))
+                            :server :uv :port 0 :log nil :request-guard :none workers)))
              (unwind-protect (get* (srv:server-port h) "GET / HTTP/1.1" "Host: x")
                (hsrv:stop h))
              (values ran-on threads))))
@@ -1104,7 +1107,7 @@ HYPERION/DEV:SERVE do (#710). Control: :WORKERS NIL, given explicitly, runs it i
         "control: :workers nil ran it on the loop thread")))
 
 (test stop-ends-the-worker-threads-start-made
-  (let ((h (hsrv:start (const-app 200 +ok+ '("x")) :server :uv :port 0 :log nil :workers 3)))
+  (let ((h (hsrv:start (const-app 200 +ok+ '("x")) :server :uv :port 0 :log nil :workers 3 :request-guard :none)))
     (is (= 200 (status-of (get* (srv:server-port h) "GET / HTTP/1.1" "Host: x"))))
     (is (= 3 (length (%worker-threads))) "control: the server made three worker threads")
     (hsrv:stop h)
@@ -1134,7 +1137,7 @@ HYPERION/DEV:SERVE do (#710). Control: :WORKERS NIL, given explicitly, runs it i
                                  (sb-thread:signal-semaphore entered)
                                  (sb-thread:wait-on-semaphore gate :timeout 30)
                                  (list 200 +ok+ (list "late")))
-                               :server :uv :port 0 :log nil :workers 1))
+                               :server :uv :port 0 :log nil :workers 1 :request-guard :none))
                 (port (srv:server-port h))
                 ;; THREAD-LIFETIME: scoped -- its request fails once the server stops, and it
                 ;; is joined below.
@@ -2453,7 +2456,7 @@ REASON, the way the signal handler calls it. The installer is replaced, so no si
          (runner (bt:make-thread
                   (lambda ()
                     (hsrv:serve-forever (const-app 200 +ok+ '("ok"))
-                                        :server :uv :port 0 :log nil :banner nil
+                                        :server :uv :port 0 :log nil :banner nil :request-guard :none
                                         :drain-seconds drain-seconds :drain-timeout 1
                                         :on-ready (lambda (s) (declare (ignore s))
                                                     (sb-thread:signal-semaphore ready))))
@@ -2499,7 +2502,7 @@ is sent."
          (runner (bt:make-thread
                   (lambda ()
                     (hsrv:serve-forever (const-app 200 +ok+ '("ok"))
-                                        :server :uv :port 0 :log nil :banner nil :loops 1
+                                        :server :uv :port 0 :log nil :banner nil :loops 1 :request-guard :none
                                         :drain-seconds 1 :drain-timeout 1
                                         :on-ready (lambda (session)
                                                     (setf port (srv:server-port
@@ -3200,3 +3203,34 @@ stubbed out, as in aion/uv's control for #877."
     (is (eq :freed (uv:loop-freed-p loop)) "a later STOP frees it")
     (is (null (srv::server-shards server)))
     (cffi:foreign-free handle)))
+
+;;; --- the request guard on :port 0 (#1037) ------------------------------------------------
+
+(in-suite server-uv)
+
+(test hyperion-start-on-port-0-guards-with-the-port-it-bound
+  "HYPERION/SERVER:START guards by default since #1037. With :PORT 0 the origins depend on the
+port the operating system chooses, so the guard is built once the server is listening: its own
+Host passes, another Host is refused, and so is a cross-site POST. Control: with :REQUEST-GUARD
+:NONE the other Host is answered."
+  (flet ((status (port method host &rest more)
+           (status-of (apply #'get* port (format nil "~A / HTTP/1.1" method)
+                             (format nil "Host: ~A" host) "Content-Length: 0" more))))
+    (let ((old (uiop:getenv "HYPERION_ORIGINS")))
+      (unwind-protect
+           (progn
+             (setf (uiop:getenv "HYPERION_ORIGINS") "")
+             (let* ((h (hsrv:start (const-app 200 +ok+ '("x")) :server :uv :port 0 :log nil))
+                    (port (srv:server-port h)))
+              (unwind-protect
+               (let ((own (format nil "127.0.0.1:~D" port)))
+                 (is (= 200 (status port "GET" own)) "the bound port is the server's own")
+                 (is (= 200 (status port "GET" (format nil "localhost:~D" port))))
+                 (is (= 403 (status port "GET" (format nil "attacker.example:~D" port))))
+                 (is (= 403 (status port "POST" own "Sec-Fetch-Site: cross-site")))
+                 (is (= 200 (status port "POST" own "Sec-Fetch-Site: same-origin"))))
+               (hsrv:stop h)))
+             (with-hyperion-server (port (const-app 200 +ok+ '("x")) :log nil :request-guard :none)
+               (is (= 200 (status port "GET" (format nil "attacker.example:~D" port)))
+                   "control: without the guard another Host is answered")))
+        (setf (uiop:getenv "HYPERION_ORIGINS") (or old ""))))))
