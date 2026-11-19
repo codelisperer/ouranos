@@ -215,6 +215,28 @@ database. From [`tests/hyperion/tests.lisp`](tests/hyperion/tests.lisp):
   :steps ((:visit "/") (:expect-stored :dh-user "alice@example.com" "team")))
 ```
 
+The worked example's `active-search-db` suite does the same for a form that writes to the
+database: each row of `add-contact` fills in the form and checks the stored row, and each row of
+`invalid-contact` checks the error shown and that no row was written. From
+[`examples/active-search/acceptance.lisp`](examples/active-search/acceptance.lisp):
+
+```lisp
+(dm:define-row-probe :stored-contact
+  :source #'dh:current-database :table :contacts :match '(:name :email :role) :dialect :sqlite)
+
+(d:define-case add-contact
+  :requirement "ADD-1"
+  :rows (:file "rows/add.csv")
+  :steps ((:visit "/")
+          (:expect-screen contacts-with-form)
+          (:fill "#new-name" (:input :name))
+          (:fill "#new-email" (:input :email))
+          (:fill "#new-role" (:input :role))
+          (:click "#add-contact-submit")
+          (:expect-text "#results" (:input :name))
+          (:expect-stored :stored-contact (:input :name) (:input :email) (:input :role))))
+```
+
 `dm` is `dokimasia/mnemosyne` and `dh` is `dokimasia/hyperion`. "Probes" below gives the rest:
 `define-query-probe`, the failure reasons, and what happens against a URL.
 

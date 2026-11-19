@@ -105,7 +105,7 @@ Working today, and run by the gate on Linux, macOS and Windows:
 
 Open work is on the [board](https://github.com/orgs/codelisperer/projects/1) under the label
 `pkg:dokimasia`. The dark-scheme audit of the worked example is skipped until #1281 sets
-hyperion's dark colours for links and grey text.
+hyperion's dark colour for grey text.
 
 ---
 
