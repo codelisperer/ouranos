@@ -1695,6 +1695,18 @@ its tag.
 
 ### Added
 
+- **`aion/http-client` can mark a request as one that must not leave this machine** (#1212).
+  `make-request` takes `:stay-local t` (reader `request-stay-local`; the default NIL changes
+  nothing). Such a request uses no proxy for http or https, so an https request to 127.0.0.1 no
+  longer goes to `HTTPS_PROXY` as a CONNECT. Its URL's host must be loopback by the new exported
+  predicate `loopback-host-p`, which decides from the text with no DNS lookup and does not count a
+  6to4 or NAT64 address carrying 127.0.0.1. Otherwise `send-request` and `open-response-stream`
+  signal the new condition `stay-local-refused` before anything connects. A `:connect-address`
+  that is not loopback is refused the same way, and the condition's `stay-local-refused-address`
+  is set. A redirect to a host that is not loopback also signals `stay-local-refused` instead of
+  being followed or returned. `stay-local-refused-url` names the target, and
+  `stay-local-refused-from` names the URL that redirected.
+
 - **dokimasia's worked example: acceptance tests for hyperion's active-search app, written as
   data** (#1028, step 4). The system `dokimasia/examples/active-search` defines the screen
   `contacts`, the case `search-contacts`, the case `contacts-page` and the suite

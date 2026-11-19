@@ -3216,3 +3216,150 @@ seconds, before that, and the request succeeded. Elsewhere the bound is the read
             connect seconds)
         (is (eq :response (and (typep outcome 'http:http-error) (http:http-error-phase outcome)))
             "with connect timeout ~A: after the request was sent: ~A" connect outcome)))))
+
+;;; --- a request that stays on this machine (#1212) -----------------------------------
+;;;
+;;; :STAY-LOCAL T on MAKE-REQUEST. The host has to be loopback by LOOPBACK-HOST-P, decided from
+;;; the text with no lookup; no proxy is used, for http or https; and a redirect to a host that
+;;; is not loopback signals STAY-LOCAL-REFUSED instead of being followed.
+
+(test loopback-host-p-decides-from-the-text-and-excludes-6to4-and-nat64
+  "#1211's rule. localhost and loopback literals count, including an IPv4-mapped one, which does
+not leave the machine. 6to4 and NAT64 addresses that carry 127.0.0.1 do not, because their
+traffic goes through a relay or gateway. A name other than localhost does not count, whatever it
+resolves to, because nothing is resolved."
+  (dolist (host '("localhost" "LOCALHOST" "127.0.0.1" "127.8.9.10" "::1" "::ffff:127.0.0.1"))
+    (is-true (http:loopback-host-p host) "~A is loopback" host))
+  (dolist (host '("64:ff9b::7f00:1" "64:ff9b:1::7f00:1" "2002:7f00:1::"
+                  "10.0.0.1" "192.168.1.1" "8.8.8.8" "0.0.0.0" "::"
+                  "localhost.example" "127.0.0.1.nip.io" "minio" "0127.0.0.1" "" "  " nil))
+    (is-false (http:loopback-host-p host) "~S is not loopback" host)))
+
+(test a-stay-local-https-request-to-loopback-does-not-go-through-the-proxy
+  "An https request to 127.0.0.1 with a proxy configured, as HTTPS_PROXY would configure it, goes
+straight to the server. The proxy is a second local server that records what it receives. The
+control: the same request without :STAY-LOCAL goes to the proxy as a CONNECT, which is the
+current default and stays so. Skipped on Windows, where dexador's WinHTTP backend never uses
+*DEFAULT-PROXY* and the test server cannot present the IP-address certificate (#914)."
+  (skip-on-windows "WinHTTP ignores *DEFAULT-PROXY*; ip-test.key is refused there (#914)"
+    (with-server (proxy (lambda (path head stream)
+                          (declare (ignore path head))
+                          (%write-response stream 502 '() "proxy")))
+      (with-server (s (lambda (path head stream)
+                        (declare (ignore path head))
+                        (%write-response stream 200 '() "direct"))
+                      :tls :ip)
+        (let ((dexador.util:*default-proxy* (%local proxy "")))
+          (flet ((send (&rest args)
+                   (handler-case
+                       (http:send-request
+                        (apply #'http:make-request :url (%local s "/x" "127.0.0.1" "https")
+                                                   :ca-path (%fixture "ip-test.crt")
+                                                   :read-timeout 5 args)
+                        '())
+                     (http:http-error (e) e))))
+            (let ((r (send :stay-local t)))
+              (is (equal "direct" (and (typep r 'http:response) (http:response-body r)))
+                  "the request reached the server: ~A" r)
+              (is (= 0 (%requests proxy)) "the proxy received ~D requests" (%requests proxy)))
+            ;; The control counts from here, so it holds whether or not the request above
+            ;; also went to the proxy.
+            (let ((before (%requests proxy)))
+              (send)
+              (is (= (1+ before) (%requests proxy))
+                  "control: without :STAY-LOCAL the request goes to the proxy")
+              (is-true (search "CONNECT" (or (first (server-heads proxy)) ""))
+                       "as a CONNECT: ~S" (first (server-heads proxy))))))))))
+
+(test a-stay-local-request-refuses-a-redirect-off-the-machine
+  "A 302 from 127.0.0.1 to a host that is not loopback signals STAY-LOCAL-REFUSED, naming the
+target and the URL that redirected, on each path a request can take: dexador's own following (no
+credential and no body), this client's loop (a credential header), and a deadline. The targets
+are a name and a NAT64 address carrying 127.0.0.1, neither of which is connected to. Control: a
+redirect to another path on 127.0.0.1 is followed."
+  (dolist (target '("http://api.example.invalid/x" "http://[64:ff9b::7f00:1]:9/x"))
+    (with-server (s (lambda (path head stream)
+                      (declare (ignore head))
+                      (if (string= path "/away")
+                          (%write-response stream 302 `(("Location" . ,target)) "")
+                          (%write-response stream 200 '() "here"))))
+      (dolist (variant '(:plain :credential :deadline))
+        (let ((e (handler-case
+                     (progn
+                       (http:send-request
+                        (http:make-request :url (%local s "/away") :read-timeout 5 :stay-local t
+                                           :headers (and (eq variant :credential)
+                                                         '(("Authorization" . "Bearer s"))))
+                        '() :deadline (and (eq variant :deadline) 30))
+                       nil)
+                   (error (e) e))))
+          (is (typep e 'http:stay-local-refused) "~A, ~A: ~S" target variant e)
+          (when (typep e 'http:stay-local-refused)
+            (is (equal target (http:stay-local-refused-url e)) "~A: names the target" variant)
+            (is (equal (%local s "/away") (http:stay-local-refused-from e))
+                "~A: names the URL that redirected" variant))))
+      (let ((r (http:send-request (http:make-request :url (%local s "/same") :read-timeout 5
+                                                     :stay-local t)
+                                  '())))
+        (is (equal "here" (http:response-body r)) "control: a request that is not redirected")))
+    (with-server (s (lambda (path head stream)
+                      (declare (ignore head))
+                      (if (string= path "/same")
+                          (%write-response stream 302 '(("Location" . "/here")) "")
+                          (%write-response stream 200 '() "here"))))
+      (is (equal "here"
+                 (http:response-body
+                  (http:send-request (http:make-request :url (%local s "/same") :read-timeout 5
+                                                        :stay-local t)
+                                     '())))
+          "control: a redirect that stays on 127.0.0.1 is followed"))))
+
+(test a-stay-local-request-to-a-host-that-is-not-loopback-is-refused-before-connecting
+  "Refused before any connection and without a lookup, through SEND-REQUEST, with and without a
+deadline, and through OPEN-RESPONSE-STREAM. A pinned CONNECT-ADDRESS that is not loopback is
+refused too, whatever the URL's host. Each URL here would fail or hang differently if it were
+sent: a name that does not exist, an unroutable private address, and the NAT64 and 6to4 forms of
+127.0.0.1. Control: the same option with 127.0.0.1 reaches the server."
+  (let ((resolved '()))
+    (dolist (url '("http://api.example.invalid/x" "https://10.255.255.1/x"
+                   "http://[64:ff9b::7f00:1]:9/x" "https://[2002:7f00:1::]/x"))
+      (dolist (deadline '(nil 30))
+        (let ((e (handler-case
+                     (progn (http:send-request
+                             (http:make-request :url url :stay-local t :connect-timeout 2)
+                             '() :deadline deadline)
+                            nil)
+                   (error (e) e))))
+          (is (typep e 'http:stay-local-refused) "~A (deadline ~A): ~S" url deadline e)
+          (when (typep e 'http:stay-local-refused)
+            (is (equal url (http:stay-local-refused-url e)))
+            (is (null (http:stay-local-refused-from e))))))
+      (let ((e (handler-case
+                   (progn (http:open-response-stream
+                           (http:make-request :url url :stay-local t)
+                           :resolve (lambda (host) (push host resolved) (list #(127 0 0 1))))
+                          nil)
+                 (error (e) e))))
+        (is (typep e 'http:stay-local-refused) "open-response-stream ~A: ~S" url e)))
+    (is (null resolved) "open-response-stream resolved ~S" resolved))
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "local")))
+    (is (typep (handler-case
+                   (progn (http:send-request
+                           (http:make-request :url (%local s "/") :stay-local t
+                                              :connect-address "10.255.255.1" :connect-timeout 2)
+                           '())
+                          nil)
+                 (error (e) e))
+               'http:stay-local-refused)
+        "a loopback URL pinned to an address that is not loopback is refused")
+    (is (equal 0 (%requests s)) "nothing refused above reached the server")
+    (is (equal "local"
+               (http:response-body
+                (http:send-request (http:make-request :url (%local s "/") :stay-local t
+                                                      :read-timeout 5)
+                                   '())))
+        "control: 127.0.0.1 is sent")
+    (is (null (http:request-stay-local (http:make-request :url "http://x/")))
+        "the default is NIL, so every other caller is unchanged")))
