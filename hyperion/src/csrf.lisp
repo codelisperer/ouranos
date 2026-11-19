@@ -437,7 +437,8 @@ apart."
                   (log:warn "csrf: refused"
                             :reason (csrf-failure-reason failure)
                             :method (getf env :request-method)
-                            :path (getf env :path-info))
+                            ;; Cut short: a path can carry a token (#1036).
+                            :path (hyperion/logging:logged-path env))
                   ;; THE MIDDLEWARE OWNS THE TEMP FILES ON THIS PATH ONLY, and the asymmetry
                   ;; is deliberate rather than an oversight -- read this before tidying it.
                   ;;
@@ -601,6 +602,7 @@ not replace WRAP-CSRF for an app that has sessions."
               (log:warn "csrf: refused"
                         :reason (csrf-failure-reason failure)
                         :method (getf env :request-method)
-                        :path (getf env :path-info))
+                        ;; Cut short: a path can carry a token (#1036).
+                        :path (hyperion/logging:logged-path env))
               (funcall on-failure env failure))
             (funcall app env))))))
