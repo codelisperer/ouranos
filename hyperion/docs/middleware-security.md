@@ -119,6 +119,17 @@ A header the application sets on its own response is never replaced, so one rout
 or tighten a header (a page that must be framed by a known origin, say) without the wrapper
 knowing about it.
 
+**`form-action 'self'` also blocks a redirect after a form POST.** The default policy does not
+set `form-action`. An app that adds `form-action 'self'` should know that browsers apply the
+directive to the target of a redirect that follows a form submission, not only to the form's
+own target. A form POST answered with a 303 to another host is then blocked by the browser,
+which shows nothing and stays on the page. The case that found this is a form that starts an
+OAuth sign-in and redirects to the authorization server (#1181). Answer such a POST with a
+page that forwards the browser instead: `hyperion/oauth:forwarding-response` is one, a 200
+with a meta refresh and a link, which `form-action` does not apply to. Starting the action from
+a link (a GET) also works, and so does adding the other host's origin to `form-action`.
+[`aion/docs/oauth.md`](../../aion/docs/oauth.md) has the sign-in case in full.
+
 **HSTS** is off by default because it binds browsers to HTTPS for the whole host for
 `max-age`, and hyperion does not terminate TLS itself (#125), so it cannot know the deployment
 is HTTPS-only. `(hyperion/security-headers:hsts-value)` builds a value: one year and

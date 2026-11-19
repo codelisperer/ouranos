@@ -1727,6 +1727,15 @@ its tag.
 
 ### Added
 
+- **`hyperion/oauth:forwarding-response` answers a form POST that starts a sign-in with a page
+  that forwards the browser** (#1181). It returns a 200 HTML page with a meta refresh to the URL
+  and a link to it, with `Cache-Control: no-store` and `Referrer-Policy: no-referrer`, and refuses
+  a URL that is not http or https. Use it in place of a 303 to the authorization server when the
+  app's Content-Security-Policy has `form-action 'self'`: browsers apply that directive to a
+  redirect that follows a form submission and block the 303 without showing anything.
+  `aion/docs/oauth.md` and `hyperion/docs/middleware-security.md` describe the problem and the
+  other ways round it.
+
 - **A praxeon provider can be set so that every request it sends stays on this machine**
   (#1293). `anthropic`, `openai-compatible` and the remote embedding providers
   (`openai-compatible-embeddings`, `voyage-embeddings`) take `:stay-local t`. The new exported
