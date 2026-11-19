@@ -56,6 +56,11 @@
  :where ((:env "scripts/versions.env" "APPIMAGETOOL_VERSION"))
  :upstream (:github-tag "AppImage/appimagetool" ""))
 
+(:name "NSIS" :category :toolchain
+ :where ((:env "scripts/versions.env" "NSIS_VERSION"))
+ :upstream (:manual "https://community.chocolatey.org/packages/nsis")
+ :reviewed "2026-11-09")
+
 (:name "WebView2 SDK" :category :toolchain
  :where ((:env "scripts/versions.env" "WEBVIEW2_SDK_VERSION"))
  :upstream (:nuget "Microsoft.Web.WebView2"))
