@@ -15,13 +15,22 @@
 
 (define-condition browser-exited (cdp-condition)
   ((code :initarg :code :initform nil :reader browser-exited-code)
+   (signal :initarg :signal :initform nil :reader browser-exited-signal)
    (output :initarg :output :initform "" :reader browser-exited-output))
   (:report (lambda (c s)
-             (format s "The browser exited~@[ with code ~A~] before it was ready.~@[~%Its last output:~%~A~]"
-                     (browser-exited-code c)
-                     (let ((o (browser-exited-output c))) (and (plusp (length o)) o)))))
-  (:documentation "The browser process ended while it was being started or used. OUTPUT is the end
-of what it wrote to standard error."))
+             (if (browser-exited-signal c)
+                 (format s "The browser was killed by signal ~A before it was ready."
+                         (browser-exited-signal c))
+                 (format s "The browser exited~@[ with code ~A~] before it was ready."
+                         (browser-exited-code c)))
+             (let ((o (browser-exited-output c)))
+               (if (plusp (length o))
+                   (format s "~%Its last output:~%~A" o)
+                   (format s " It wrote nothing to standard error.")))))
+  (:documentation "The browser process ended while it was being started or used. CODE is the
+status it exited with, and NIL when it was killed by a signal. SIGNAL is the number of the
+signal that killed it, and NIL when it exited by itself; it is always NIL on Windows. OUTPUT is
+the end of what it wrote to standard error."))
 
 (define-condition cdp-error (cdp-condition)
   ((method :initarg :method :initform nil :reader cdp-error-method)
