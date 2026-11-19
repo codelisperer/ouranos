@@ -3262,11 +3262,14 @@ current default and stays so. Skipped on Windows, where dexador's WinHTTP backen
               (is (equal "direct" (and (typep r 'http:response) (http:response-body r)))
                   "the request reached the server: ~A" r)
               (is (= 0 (%requests proxy)) "the proxy received ~D requests" (%requests proxy)))
-            (send)
-            (is (= 1 (%requests proxy))
-                "control: without :STAY-LOCAL the request goes to the proxy")
-            (is-true (search "CONNECT" (or (first (server-heads proxy)) ""))
-                     "as a CONNECT: ~S" (first (server-heads proxy)))))))))
+            ;; The control counts from here, so it holds whether or not the request above
+            ;; also went to the proxy.
+            (let ((before (%requests proxy)))
+              (send)
+              (is (= (1+ before) (%requests proxy))
+                  "control: without :STAY-LOCAL the request goes to the proxy")
+              (is-true (search "CONNECT" (or (first (server-heads proxy)) ""))
+                       "as a CONNECT: ~S" (first (server-heads proxy))))))))))
 
 (test a-stay-local-request-refuses-a-redirect-off-the-machine
   "A 302 from 127.0.0.1 to a host that is not loopback signals STAY-LOCAL-REFUSED, naming the
