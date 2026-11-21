@@ -1812,6 +1812,18 @@ its tag.
 
 ### Added
 
+- **praxeon: `make-agent :cache-messages t` marks each request's latest message as the end of the
+  cacheable prefix, so a multi-step tool turn reads the earlier steps from the provider's cache**
+  (#1317). With `:cache-system t` alone, the cached prefix was the tools and the system prompt, and
+  every message, tool results included, was sent at full price on every step. The mark goes on
+  what is sent, never on `agent-history`. It is added after the history is trimmed and before the
+  retrieved facts, which follow it, so neither changes the cached prefix. With
+  `offload-tool-results` clearing, the messages before the mark change only when a new batch is
+  cleared. A request that already carries four cache marks, Anthropic's limit, gets no further
+  mark. With the option on, a message whose content is a string is sent as one text part. Off by
+  default; `agent-cache-messages` reads it, and `move-conversation` keeps the new agent's own
+  setting.
+
 - **dokimasia's "the page did not settle" message says, for each request still in flight, why the
   settle check kept waiting for it** (#1308). It names each request's URL, its type, the frame and
   loader of the document that made it (or `none` when the browser's event carried none), and how

@@ -69,6 +69,11 @@ client rendering `agent-history' still shows the whole conversation."
   ;; billing behaviour, and one that arrived without being asked for would be a surprise in a
   ;; line item. See DELIBERATE for what it does and what it deliberately does not reach.
   (cache-system nil)
+  ;; CACHE-MESSAGES (#1317): mark the latest message of every request as the end of the cacheable
+  ;; prefix, so the next step of a turn, and the next turn, read the conversation so far from the
+  ;; provider's cache. NIL by default, for the same reason as CACHE-SYSTEM. See
+  ;; %WITH-LATEST-MESSAGE-MARKED.
+  (cache-messages nil)
   (means (make-hash-table :test #'equal)) ; name(string) -> means-entry
   (context (ctx:make-context) :type ctx:context)
   ;; 120000 ESTIMATED tokens, not NIL, and the default is the decision. An opt-in bound
@@ -154,7 +159,7 @@ and the thread memory. TO's conversation taint becomes the higher of the two age
 (%HIGHER-TAINT), so a value the app gave TO is not lowered. TO is private when either agent is,
 so a conversation that was private stays private on an agent the app built without :PRIVATE
 (#983, the hub's review of #1027). TO keeps the rest of its own configuration: provider, system
-prompt, means, budgets, taint scope and RETAIN-CONTENT. An app does this when what an agent may
+prompt and its cache settings, means, budgets, taint scope and RETAIN-CONTENT. An app does this when what an agent may
 do changes and its conversation should go on, such as praxeon/web when a session's grant
 changes (#67). The two agents share the moved tables afterwards, so FROM is not used again."
   (setf (agent-history to) (agent-history from)
@@ -857,6 +862,71 @@ cleared. Returns how many were erased. A stand-in that names one of them then re
     (clrhash (agent-cleared agent))
     (if store (res:forget-conversation-results store (agent-conversation agent)) 0)))
 
+;;; --- a cache breakpoint on the latest message (#1317) ------------------------------
+;;;
+;;; With CACHE-SYSTEM alone, the cached prefix is the tools and the system prompt, and every
+;;; message, tool results included, is sent at full price on every step of a turn. A consuming app
+;;; measured a 6-step tool turn: cache reads stayed at 6,573 tokens while uncached input grew from
+;;; 103 to 12,778. With CACHE-MESSAGES, each request also marks its latest message as the end of
+;;; the cacheable prefix. The next request begins with the same messages and adds to them, so the
+;;; provider finds the earlier request's prefix in its cache. Anthropic looks for a cached prefix at
+;;; the block boundaries before a breakpoint, up to about 20 blocks back, so the mark need not stay
+;;; on the earlier message, and a request carries one message mark from this producer, not one per
+;;; step.
+;;;
+;;; WHAT KEEPS THE MESSAGES BEFORE THE MARK THE SAME FROM ONE STEP TO THE NEXT:
+;;;
+;;;   - The mark goes on after trimming (so a marked message never pins the history against the
+;;;     trim) and before the retrieved facts are attached (prompt:attach-context puts them after
+;;;     the marked part, so they change without touching the prefix).
+;;;   - Every message whose content is a string is sent as one text part. Otherwise the latest
+;;;     message, marked and so sent as a part, would be sent as a string on the next step, and the
+;;;     bytes before the next mark would differ.
+;;;   - Results cleared by OFFLOAD-TOOL-RESULTS keep their stand-ins in the same places, so the
+;;;     messages change only when a new batch is cleared; the step after a batch writes the cache
+;;;     again, and the steps after it read it.
+;;;
+;;; A PROVIDER'S LIMIT ON BREAKPOINTS. Anthropic accepts at most +CACHE-BREAKPOINTS-ALLOWED+ marks
+;;; in one request, counting the system prompt's and any in the messages, such as the thread's
+;;; observations. When the request already has that many, no mark is added. A provider without a
+;;; caller-controlled cache ignores the marks.
+
+(defparameter +cache-breakpoints-allowed+ 4
+  "The most cache breakpoints one Anthropic request may carry.")
+
+(defun %parts-of (content)
+  (if (stringp content) (list (llm:text-part content)) content))
+
+(defun %marks-in (system messages)
+  "How many parts of SYSTEM (a string or a list of parts) and MESSAGES are marked."
+  (+ (if (listp system) (count-if #'llm:cache-boundary-p system) 0)
+     (loop for m in messages
+           for c = (llm:content m)
+           when (listp c) sum (count-if #'llm:cache-boundary-p c))))
+
+(defun %with-latest-message-marked (messages system)
+  "MESSAGES, each string content as one text part, with the last part of the last message marked
+as the end of the cacheable prefix (#1317). Nothing is marked when that part already is, when it
+is an empty text, or when SYSTEM and MESSAGES already carry +CACHE-BREAKPOINTS-ALLOWED+ marks."
+  (let* ((messages (mapcar (lambda (m)
+                             ;; A copy with its other properties kept: only the content changes.
+                             (let ((copy (copy-list m)))
+                               (setf (getf copy :content) (%parts-of (llm:content m)))
+                               copy))
+                           messages))
+         (last (car (last messages)))
+         (parts (and last (llm:content last)))
+         (final (car (last parts))))
+    (cond ((or (null final)
+               (llm:cache-boundary-p final)
+               (and (eq :text (getf final :type)) (zerop (length (getf final :text))))
+               (>= (%marks-in system messages) +cache-breakpoints-allowed+))
+           messages)
+          (t (let ((marked (copy-list last)))
+               (setf (getf marked :content)
+                     (append (butlast parts) (list (append final (list :cache t)))))
+               (append (butlast messages) (list marked)))))))
+
 (defun request-messages (agent)
   "The messages a deliberation SENDS. Returns (values messages estimated-tokens breakdown).
 
@@ -912,6 +982,10 @@ untrusted, the turn becomes untrusted (#317's taint ruling)."
     ;; the member's own wish, so its source is harder to see than the original's.
     (when (some #'ctx:ctx-item-untrusted assembled)
       (%taint-guard (%turn-guard agent)))
+    ;; After trimming, so the mark pins nothing against the trim, and before the facts, so they
+    ;; stay after it (#1317).
+    (when (agent-cache-messages agent)
+      (setf trimmed (%with-latest-message-marked trimmed (agent-system-parts agent))))
     (let* ((messages (if facts
                          (prompt:attach-context trimmed facts)
                          trimmed))
@@ -1192,14 +1266,13 @@ because it is the shape a consuming app is starting with -- one large shared bri
 short completions -- and it is where the measurement that opened pre-publication issue 401 came from (574 input
 tokens for a one-line question against an EMPTY history, essentially all prefix).
 
-WHAT IT DOES NOT DO, said here so nobody reads more into it: the conversation is not cached.
-A long history is still resent and still charged in full every turn, because nothing marks a
-boundary inside MESSAGES. That is a second producer and a separate decision -- and it is the
-one where `prompt:pinned-exchange-count' becomes load-bearing, which corrects an argument I
-made when this shape was chosen: I said the boundary interacts with history trimming, and under
-THIS producer it does not. The pinning scans messages; the marker is not in them, so
-PINNED-EXCHANGE-COUNT returns 0 on the actor path. Asserted in the suite so that when a message
-breakpoint does arrive, the test says what changed rather than passing quietly.
+WHAT IT DOES NOT DO, said here so nobody reads more into it: the conversation is not cached by
+this producer. A long history is resent and charged in full every turn unless the agent also
+sets CACHE-MESSAGES, the second producer (#1317), which marks the latest message of each request;
+see %WITH-LATEST-MESSAGE-MARKED. That mark is added after the history is trimmed, so
+`prompt:pinned-exchange-count' still finds no mark in what the trim reads, and the pinning stays
+inert on the actor path. It does find the mark in the request that is sent, which the suite
+asserts.
 
 AN EMPTY PROMPT IS NOT MARKED. Marking nothing is not a prefix, and it would put a
 `cache_control' block on an empty string for a provider to reject or ignore.
