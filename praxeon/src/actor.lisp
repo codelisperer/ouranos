@@ -1255,9 +1255,25 @@ stops bounding.
 PERMIT is passed to AGENT-TOOL-SPECS, so a means the caller may not use is never described
 to the model at all (#90).
 
-WRAP-UP true makes this the turn's last call when its steps have run out (#1182): no tools are
-offered, and +WRAP-UP-INSTRUCTION+ follows the system prompt, asking for the best answer from
-what was gathered. The history is not changed."
+WRAP-UP true makes this the turn's last call when its steps have run out (#1182):
++WRAP-UP-INSTRUCTION+ follows the system prompt, asking for the best answer from what was
+gathered, and the model is kept from calling a tool. The history is not changed. How it is kept
+from calling one depends on the provider (#1318):
+
+  - A provider whose LLM:HONOURS-TOOL-CHOICE-NONE-P is true (Anthropic, and the
+    OpenAI-compatible backends other than Meta's and Ollama) is sent the same tools as the
+    earlier steps, with the tool choice :NONE. A provider renders its prompt as tools, then
+    system, then messages, so leaving the tools out changed the prompt from its first byte, and
+    the wrap-up could read nothing from the cache. With the tools kept, it reads the cached tools
+    and system prompt, up to the system prompt's cache boundary, which the instruction follows
+    (%WITH-WRAP-UP). It does not read the cached messages: Anthropic drops the cached message
+    blocks when the tool choice changes, so the history is sent at full price.
+  - Any other provider is sent no tools, as before. It either has no setting that forbids a
+    call while tools are offered, or, like Ollama, accepts :NONE and lets the model call a tool
+    anyway.
+
+Either way a model can still return a call, and RUN-TURN fails such a wrap-up without running
+the call."
   (unless (agent-provider agent)
     (error 'cnd:deliberation-failure :detail "no provider configured"))
   (multiple-value-bind (messages estimate breakdown) (request-messages agent)
@@ -1265,14 +1281,22 @@ what was gathered. The history is not changed."
     ;; provider had reported no input count (#984).
     (handler-bind ((cnd:completion-cancelled
                      (lambda (c) (setf (cnd:completion-cancelled-estimated-input c) estimate))))
-      (values (llm:complete (agent-provider agent)
-                            messages
-                            :system (if wrap-up
-                                        (%with-wrap-up (agent-system-parts agent))
-                                        (agent-system-parts agent))
-                            :tools (if wrap-up nil (agent-tool-specs agent :permit permit))
-                            :max-tokens (%output-limit agent max-tokens))
-              estimate breakdown))))
+      (let* ((provider (agent-provider agent))
+             (specs (agent-tool-specs agent :permit permit))
+             ;; True when the wrap-up keeps the tools and forbids a call through the provider's
+             ;; own setting. With no tools there is nothing to keep, and a tool choice sent
+             ;; without tools is an error at Anthropic.
+             (forbid (and wrap-up specs (llm:honours-tool-choice-none-p provider))))
+        (values (apply #'llm:complete provider
+                       messages
+                       :system (if wrap-up
+                                   (%with-wrap-up (agent-system-parts agent))
+                                   (agent-system-parts agent))
+                       :tools (if (and wrap-up (not forbid)) nil specs)
+                       :max-tokens (%output-limit agent max-tokens)
+                       ;; Only on a wrap-up, so every other request is built as before.
+                       (and forbid (list :tool-choice :none)))
+                estimate breakdown)))))
 
 (defun %deliberate-step (agent permit limit step &optional wrap-up)
   "DELIBERATE for STEP of a turn, with the turn's cancel handle given to the provider and, while
@@ -1526,9 +1550,10 @@ as it is written, and the turn emits a :TEXT-DELTA event for each piece.
 
 ON-STEP-LIMIT is NIL, the default, or :WRAP-UP (#1182). With NIL, a turn that has used all
 MAX-STEPS without an answer signals DELIBERATION-FAILURE, as before. With :WRAP-UP, the last of
-the MAX-STEPS is a wrap-up instead: the model is offered no tools and asked for the best answer
-from what the turn gathered, and RUN-TURN returns that answer with a second value of :WRAPPED-UP,
-so the caller can tell it from an ordinary answer. The wrap-up counts as a step, so MAX-STEPS
+the MAX-STEPS is a wrap-up instead: the model may not call a tool (see DELIBERATE for how each
+provider is told) and is asked for the best answer from what the turn gathered, and RUN-TURN
+returns that answer with a second value of :WRAPPED-UP, so the caller can tell it from an
+ordinary answer. The wrap-up counts as a step, so MAX-STEPS
 stays the ceiling, and emits the usual :USAGE event. A turn that answers earlier is unchanged.
 :WRAP-UP needs MAX-STEPS of at least 2; any other value, or :WRAP-UP with fewer steps, signals an
 error before anything is recorded. A wrap-up that asks for tools anyway signals
@@ -1581,10 +1606,10 @@ steps: the wrap-up is the last step, so with one there would be nothing gathered
   "Deliberate and act until the model answers, at most MAX-STEPS times. Returns RUN-TURN's
 values. CONTINUE-TURN enters here too, after it has written a held step's results.
 
-ON-STEP-LIMIT :WRAP-UP makes the last of the MAX-STEPS a wrap-up (#1182): it offers no tools
-and asks for the best answer from what was gathered, and its answer is returned with a second
-value of :WRAPPED-UP. It is a step like any other, so MAX-STEPS stays the ceiling, and it emits
-the usual :USAGE event. A turn that answers before its last step is not affected.
+ON-STEP-LIMIT :WRAP-UP makes the last of the MAX-STEPS a wrap-up (#1182): it forbids a tool call
+(DELIBERATE, #1318) and asks for the best answer from what was gathered, and its answer is
+returned with a second value of :WRAPPED-UP. It is a step like any other, so MAX-STEPS stays the
+ceiling, and it emits the usual :USAGE event. A turn that answers before its last step is not affected.
 
 It first emits :TURN-STARTED with the agent's name, the model and provider it will call, its
 conversation id and MAX-STEPS, so an observer can tell where a turn begins and which model its
