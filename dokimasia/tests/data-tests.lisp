@@ -240,3 +240,50 @@ file on disk; this checks what the fasl holds, which a stale build can make diff
       (is (equal "REQ-1" (gethash "requirement" bad)))
       (is (= 2 (length (gethash "steps" bad))))
       (is (= 12 (gethash "duration-ms" bad))))))
+
+;;; --- the settle check's message names what it was waiting for (#1308) ------------------------
+
+(defun %event (method &rest params)
+  (cdp::make-event method (apply #'cdp:json-object params)))
+
+(defun %navigated (url frame loader)
+  (%event "Page.frameNavigated" "frame" (cdp:json-object "id" frame "loaderId" loader "url" url)))
+
+(defun %sent (id url type &key frame loader)
+  (apply #'%event "Network.requestWillBeSent" "requestId" id "type" type
+         "request" (cdp:json-object "url" url)
+         (append (and frame (list "frameId" frame)) (and loader (list "loaderId" loader)))))
+
+(test the-settle-message-names-each-request-s-frame-and-loader-and-the-navigations
+  "#1308: when the settle check gives up, its message names, for each request still in flight,
+its type, the frame and loader of the document that made it and how long ago it was sent, and
+the latest navigations. Those are what the check compares to drop a request of a replaced
+document, so the message says why a request was not dropped. Control: the request whose
+document a navigation replaced is dropped and leaves the message."
+  (let ((row (d::%make-row :origin "http://127.0.0.1:1")))
+    (dolist (e (list (%navigated "http://127.0.0.1:1/login" "F1" "L1")
+                     (%sent "1" "http://127.0.0.1:1/favicon.ico" "Other" :frame "F1" :loader "L1")
+                     (%sent "2" "http://127.0.0.1:1/poll" "Fetch")))
+      (d::%handle-event row e))
+    (let ((before (d::%not-settled-message row 10)))
+      (is (search "2 requests still in flight" before) "~A" before)
+      (is (search "http://127.0.0.1:1/favicon.ico (type Other, frame F1, loader L1, sent " before)
+          "~A" before)
+      (is (search "http://127.0.0.1:1/poll (type Fetch, frame none, loader none, sent " before)
+          "a request that carried no frame or loader says so: ~A" before)
+      (is (search "Latest navigations, newest first: http://127.0.0.1:1/login (frame F1, loader L1, "
+                  before)
+          "~A" before))
+    (d::%handle-event row (%navigated "http://127.0.0.1:1/me" "F1" "L2"))
+    (let ((after (d::%not-settled-message row 10)))
+      (is (search "1 request still in flight" after) "~A" after)
+      (is (not (search "favicon.ico" after))
+          "control: the request of the replaced document is dropped: ~A" after)
+      (is (search "newest first: http://127.0.0.1:1/me (frame F1, loader L2, " after)
+          "the newest navigation comes first: ~A" after)
+      (is (< (search "/me (frame" after) (search "/login (frame" after)) "~A" after))))
+
+(test the-settle-message-says-when-no-navigation-was-seen
+  (let ((row (d::%make-row :origin "http://127.0.0.1:1")))
+    (d::%handle-event row (%sent "1" "http://127.0.0.1:1/x" "Document" :frame "F" :loader "L"))
+    (is (search "Latest navigations, newest first: none" (d::%not-settled-message row 10)))))
