@@ -179,7 +179,7 @@
    #:msg #:role #:content
    #:text-part #:tool-use-part #:tool-result-part
    ;; neutral tools + completions
-   #:tool-choice #:supports-tool-choice-p #:check-tool-choice
+   #:tool-choice #:supports-tool-choice-p #:honours-tool-choice-none-p #:check-tool-choice
    #:supports-response-format-p #:complete-with-schema
    #:anthropic-request-body #:openai-request-body
    #:generate-structured #:validate-arguments #:validate-against-schema

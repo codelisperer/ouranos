@@ -304,6 +304,15 @@ silently downgraded. A new backend opts in by defining this, which is a decision
 makes rather than a default they inherit.")
   (:method ((p provider)) nil))
 
+(defgeneric honours-tool-choice-none-p (provider)
+  (:documentation "True when PROVIDER, sent tools with the tool choice :NONE, keeps the model from
+calling one (#1318). The actor's wrap-up step relies on this to keep the tools in the request.
+
+A provider that accepts a tool choice does not always apply it, so this is a separate question
+from SUPPORTS-TOOL-CHOICE-P. The default is that answer, and a backend that accepts :NONE and
+ignores it says so by defining this.")
+  (:method ((p provider)) (supports-tool-choice-p p)))
+
 (defgeneric supports-response-format-p (provider)
   (:documentation "True when PROVIDER can be asked, through COMPLETE-WITH-SCHEMA, for a reply whose
 text is a JSON object in a given schema, using the provider's own structured-output setting
@@ -1074,6 +1083,18 @@ does (https://dev.meta.ai/docs/structured-output, #680). RESPONSE-FORMAT-SCHEMA-
 \"none\", \"required\" and a named function (https://dev.meta.ai/docs/tool-calling, #678), so
 SUPPORTS-TOOL-CHOICE-P is false for it and a forced choice signals before anything is sent.")
 
+(defparameter +openai-compatible-ignores-tool-choice-none-impls+
+  '("ollama")
+  "The backends that accept tool_choice \"none\" and ignore it, so HONOURS-TOOL-CHOICE-NONE-P is
+false for them. Measured for Ollama 0.40.16 with qwen3.5:9b on 2026-11-21: sent one tool and a
+request to use it, the model called the tool in 3 of 3 requests with tool_choice \"none\", as it
+did in 3 of 3 with \"auto\" (#1318). A base URL on Ollama's port, 11434, counts as Ollama
+whatever the backend is called, because the \"openai\" backend points there by default.")
+
+(defun %ollama-endpoint-p (p)
+  (or (member (oai-impl p) +openai-compatible-ignores-tool-choice-none-impls+ :test #'string=)
+      (search ":11434/" (concatenate 'string (or (oai-base-url p) "") "/"))))
+
 (defun %oai-default-model (impl)
   "The model OPENAI-COMPATIBLE uses for IMPL when none is configured."
   (or (cdr (assoc impl +openai-compatible-default-models+ :test #'string=)) "qwen2.5"))
@@ -1183,6 +1204,9 @@ through response_format (#680)."
 
 (defmethod supports-tool-choice-p ((p openai-compatible))
   (not (member (oai-impl p) +openai-compatible-auto-only-impls+ :test #'string=)))
+
+(defmethod honours-tool-choice-none-p ((p openai-compatible))
+  (and (supports-tool-choice-p p) (not (%ollama-endpoint-p p))))
 
 (defmethod supports-response-format-p ((p openai-compatible))
   (and (member (oai-impl p) +openai-compatible-response-format-impls+ :test #'string=) t))

@@ -9872,6 +9872,66 @@ no tools and no tool choice, as before #1318."
       (is (null (getf wrap :tools)) "control: no tool choice, so the wrap-up is sent no tools")
       (is (null (getf wrap :tool-choice)) "and no tool choice"))))
 
+(defclass %body-recording-openai (llm:openai-compatible)
+  ((script :initarg :script :accessor %body-script)
+   (bodies :initform '() :accessor %body-bodies))
+  (:documentation "An OpenAI-compatible provider that records, oldest first, the request body each
+call would send, and replies from SCRIPT without sending anything."))
+
+(defmethod llm:complete ((p %body-recording-openai) messages
+                         &key system tools max-tokens temperature tool-choice)
+  (declare (ignore max-tokens temperature))
+  (setf (%body-bodies p)
+        (append (%body-bodies p)
+                (list (llm:openai-request-body p messages :system system :tools tools
+                                                          :tool-choice tool-choice))))
+  (pop (%body-script p)))
+
+(test an-openai-compatible-wrap-up-keeps-the-tools-only-where-none-is-honoured
+  "#1318. On an OpenAI-compatible backend that honours tool_choice none (OpenRouter here), the
+wrap-up request body carries the same tools as the step before it, as the same bytes, and
+tool_choice \"none\".
+
+Ollama accepts \"none\" and lets the model call a tool anyway (measured: 3 of 3 calls with
+qwen3.5:9b on Ollama 0.40.16), so for the \"ollama\" backend, and for the \"openai\" backend on
+Ollama's default URL, the wrap-up is sent no tools and no tool_choice, as before #1318. That is
+the control: had the tools been kept there, the model could call one and the turn would fail
+instead of returning a :WRAPPED-UP answer."
+  (flet ((turn (&rest initargs)
+           (let* ((provider (apply #'make-instance '%body-recording-openai :model "m" :api-key "k"
+                                   :script (append (%looks 1)
+                                                   (list (llm:make-completion :text "Done."
+                                                                              :stop-reason :end)))
+                                   initargs))
+                  (runs 0)
+                  (ag (actor:make-agent :name "looker" :system-prompt "You look things up."
+                                        :provider provider)))
+             (actor:register-means ag "look" "Look something up."
+                                   (lambda (args) (declare (ignore args)) (incf runs) "Found a fact."))
+             (multiple-value-bind (text how)
+                 (actor:run-turn ag "What do you know?" :max-steps 2 :on-step-limit :wrap-up)
+               (is (equal "Done." text))
+               (is (eq :wrapped-up how)))
+             (is (= 1 runs))
+             (%body-bodies provider))))
+    (destructuring-bind (gather wrap)
+        (turn :impl "openrouter" :base-url "https://openrouter.ai/api/v1")
+      (is-true (gethash "tools" gather))
+      (is (equal (%json-of (gethash "tools" gather)) (%json-of (gethash "tools" wrap)))
+          "the wrap-up body carries the same tools as the step before it")
+      (is (equal "none" (gethash "tool_choice" wrap)) "with tool_choice none")
+      (is (null (gethash "tool_choice" gather)) "and only the wrap-up sends a tool choice"))
+    (dolist (initargs (list (list :impl "ollama" :base-url "http://localhost:11434/v1")
+                            (list :impl "openai" :base-url "http://localhost:11434/v1")
+                            (list :impl "openai" :base-url "http://gpu-box:11434/v1/")))
+      (destructuring-bind (gather wrap) (apply #'turn initargs)
+        (is-true (gethash "tools" gather) "~S: the gathering step is offered tools" initargs)
+        (is (null (gethash "tools" wrap)) "~S: the wrap-up is sent no tools" initargs)
+        (is (null (gethash "tool_choice" wrap)) "~S: and no tool choice" initargs)))
+    (is-true (llm:supports-tool-choice-p (make-instance 'llm:openai-compatible :impl "ollama"
+                                                        :model "m" :api-key "k"))
+             "Ollama still accepts a tool choice; only HONOURS-TOOL-CHOICE-NONE-P changed")))
+
 (test a-turn-that-answers-before-its-last-step-is-not-wrapped-up
   "#1182. :WRAP-UP changes only the last step. A turn that answers on its first step was offered
 tools as usual, and returns its text with no :WRAPPED-UP."
