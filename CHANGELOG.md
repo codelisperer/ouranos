@@ -1651,6 +1651,15 @@ its tag.
 
 ### Fixed
 
+- **praxeon: a turn's wrap-up step keeps its tools, so it can read the earlier steps' cached
+  prompt** (#1318). With `run-turn ... :on-step-limit :wrap-up`, the wrap-up request was sent no
+  tools (`:tools nil`). A provider renders its prompt as tools, then system, then messages, so
+  that request matched none of the cached prefix of the turn's earlier steps. Now, on a provider
+  whose `llm:supports-tool-choice-p` is true (Anthropic, and the OpenAI-compatible backends other
+  than Meta's), the wrap-up is sent the same tools as the earlier steps with `:tool-choice :none`
+  (`tool_choice` none). Any other provider is sent no tools, as before. A wrap-up whose model
+  returns a call anyway still signals `deliberation-failure` without running it.
+
 - **`aion/cdp:browser-exited` says whether the browser was killed by a signal, and which one**
   (#1305). A browser killed by a signal while starting was reported as "exited with code 0"
   over the pipe transport, because libuv reports such a process with an exit status of 0, and

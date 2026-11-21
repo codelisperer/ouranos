@@ -9747,14 +9747,19 @@ lower a value the app recorded on the new agent. NIL, not recorded, is lower tha
 
 (defclass %recording-provider (llm:provider)
   ((script :initarg :script :accessor %recording-script)
-   (requests :initform '() :accessor %recording-requests))
+   (requests :initform '() :accessor %recording-requests)
+   (tool-choice-p :initarg :tool-choice-p :initform nil :reader %recording-tool-choice-p))
   (:documentation "A provider that answers from SCRIPT and records, for each request, the system
-prompt and the tools it was sent, oldest first in %RECORDING-REQUESTS once reversed."))
+prompt, the tools and the tool choice it was sent, oldest first in %RECORDING-REQUESTS once
+reversed. With TOOL-CHOICE-P it says it can honour a tool choice, as Anthropic does (#1318)."))
+
+(defmethod llm:supports-tool-choice-p ((p %recording-provider))
+  (%recording-tool-choice-p p))
 
 (defmethod llm:complete ((p %recording-provider) messages
                          &key system tools max-tokens temperature tool-choice)
-  (declare (ignore messages max-tokens temperature tool-choice))
-  (push (list :system system :tools tools) (%recording-requests p))
+  (declare (ignore messages max-tokens temperature))
+  (push (list :system system :tools tools :tool-choice tool-choice) (%recording-requests p))
   (pop (%recording-script p)))
 
 (defun %looks (n)
@@ -9765,11 +9770,13 @@ prompt and the tools it was sent, oldest first in %RECORDING-REQUESTS once rever
                  :tool-calls (list (llm:make-tool-call :id (format nil "l~D" i) :name "look"
                                                        :arguments (make-hash-table :test #'equal))))))
 
-(defun %looking-agent (script)
+(defun %looking-agent (script &key tool-choice-p)
   "An agent whose provider answers from SCRIPT, with a means \"look\" that counts its runs.
-Returns the agent, the provider, and a function answering how many times \"look\" ran."
+TOOL-CHOICE-P is passed to the %RECORDING-PROVIDER. Returns the agent, the provider, and a
+function answering how many times \"look\" ran."
   (let* ((runs 0)
-         (provider (make-instance '%recording-provider :script script))
+         (provider (make-instance '%recording-provider :script script
+                                                       :tool-choice-p tool-choice-p))
          (ag (actor:make-agent :name "looker" :system-prompt "You look things up."
                                :provider provider)))
     (actor:register-means ag "look" "Look something up."
@@ -9782,7 +9789,7 @@ Returns the agent, the provider, and a function answering how many times \"look\
       (format nil "~{~A~^~%~}" (mapcar (lambda (p) (getf p :text)) system))))
 
 (test a-turn-wraps-up-on-its-last-step-and-says-so
-  "#1182. With :ON-STEP-LIMIT :WRAP-UP, the last of MAX-STEPS offers no tools and asks for the
+  "#1182. With :ON-STEP-LIMIT :WRAP-UP, the last of MAX-STEPS calls no tool and asks for the
 best answer from what was gathered. RUN-TURN returns that answer with :WRAPPED-UP, the wrap-up
 counted within MAX-STEPS, and a :USAGE event for it. The instruction goes to the system prompt
 for that call only: the history gains the answer and nothing else.
@@ -9793,7 +9800,8 @@ of steps and signals DELIBERATION-FAILURE, as before."
       (%looking-agent (append (%looks 2)
                               (list (llm:make-completion :text "Here is what I found."
                                                          :stop-reason :end
-                                                         :input-tokens 30 :output-tokens 5))))
+                                                         :input-tokens 30 :output-tokens 5)))
+                      :tool-choice-p t)
     (let ((usage 0) (before nil))
       (multiple-value-bind (text how)
           (evt:with-observer ((lambda (e) (when (eq :usage (evt:event-type e)) (incf usage))))
@@ -9806,12 +9814,13 @@ of steps and signals DELIBERATION-FAILURE, as before."
           (is (= 3 (length requests)) "three calls, within :max-steps 3")
           (is-true (and (getf (first requests) :tools) (getf (second requests) :tools))
                    "the gathering steps were offered tools")
-          (is (null (getf (third requests) :tools)) "the wrap-up was offered none")
+          (is (equalp (getf (second requests) :tools) (getf (third requests) :tools))
+              "the wrap-up was sent the same tools as the step before it (#1318)")
           (is-true (search "used every step" (%system-text (getf (third requests) :system)))
                    "and was told to answer from what it gathered")
           (is-false (search "used every step" (%system-text (getf (first requests) :system)))
                     "the earlier steps were not"))
-        (is (= 2 (funcall runs)) "\"look\" ran on the two gathering steps")
+        (is (= 2 (funcall runs)) "\"look\" ran on the two gathering steps, and no tool on the wrap-up")
         (is (= 3 usage) "a :usage event for every step, the wrap-up included")
         (let ((last-message (car (last (actor:agent-history ag)))))
           (is (equal "assistant" (getf last-message :role)) "the history ends with the answer")
@@ -9821,6 +9830,47 @@ of steps and signals DELIBERATION-FAILURE, as before."
   (let ((ag (%looking-agent (%looks 3))))
     (signals cnd:deliberation-failure
       (actor:run-turn ag "What do you know?" :max-steps 3))))
+
+(test a-wrap-up-keeps-the-tools-and-forbids-a-call-where-the-provider-can
+  "#1318. A provider renders its prompt as tools, then system, then messages, so a wrap-up sent
+without the tools could not read the cached prefix of the steps before it. Where the provider
+can honour a tool choice, the wrap-up is sent the same tools with the choice :NONE, and only the
+wrap-up: the gathering steps send no tool choice, so they are built as before. The Anthropic
+request built from the recorded arguments carries tools identical to the previous step's and
+tool_choice none.
+
+THE CONTROL is the same turn on a provider that cannot honour a tool choice: its wrap-up is sent
+no tools and no tool choice, as before #1318."
+  (flet ((turn (tool-choice-p)
+           (multiple-value-bind (ag provider runs)
+               (%looking-agent (append (%looks 1)
+                                       (list (llm:make-completion :text "Done." :stop-reason :end)))
+                               :tool-choice-p tool-choice-p)
+             (multiple-value-bind (text how)
+                 (actor:run-turn ag "What do you know?" :max-steps 2 :on-step-limit :wrap-up)
+               (is (equal "Done." text))
+               (is (eq :wrapped-up how))
+               (is (= 1 (funcall runs)) "no tool ran on the wrap-up"))
+             (reverse (%recording-requests provider)))))
+    (destructuring-bind (gather wrap) (turn t)
+      (is-true (getf gather :tools))
+      (is (null (getf gather :tool-choice)) "a gathering step sends no tool choice")
+      (is (equalp (getf gather :tools) (getf wrap :tools)) "the wrap-up keeps the same tools")
+      (is (eq :none (getf wrap :tool-choice)) "and forbids a call")
+      (let ((anthropic (make-instance 'llm:anthropic :api-key "k" :model "m")))
+        (flet ((body (request)
+                 (llm:anthropic-request-body anthropic '((:role :user :content "hi"))
+                                             :tools (getf request :tools)
+                                             :tool-choice (getf request :tool-choice))))
+          (is (equal (%json-of (gethash "tools" (body gather)))
+                     (%json-of (gethash "tools" (body wrap))))
+              "the tools Anthropic is sent are the same bytes on both steps")
+          (is (search "\"type\":\"none\"" (%json-of (gethash "tool_choice" (body wrap)))))
+          (is (null (gethash "tool_choice" (body gather)))))))
+    (destructuring-bind (gather wrap) (turn nil)
+      (is-true (getf gather :tools))
+      (is (null (getf wrap :tools)) "control: no tool choice, so the wrap-up is sent no tools")
+      (is (null (getf wrap :tool-choice)) "and no tool choice"))))
 
 (test a-turn-that-answers-before-its-last-step-is-not-wrapped-up
   "#1182. :WRAP-UP changes only the last step. A turn that answers on its first step was offered
@@ -9834,16 +9884,18 @@ tools as usual, and returns its text with no :WRAPPED-UP."
       (is-true (getf (first (%recording-requests provider)) :tools) "tools were offered"))))
 
 (test a-wrap-up-that-asks-for-tools-fails-without-running-or-recording-them
-  "#1182. No tools are offered on the wrap-up, but a model can still return a call. It is not run
-and not appended, because the turn has no step left for its result and a call without a result
-would break the next turn. The turn fails as it did without the option."
-  (multiple-value-bind (ag provider runs) (%looking-agent (%looks 2))
-    (declare (ignore provider))
-    (signals cnd:deliberation-failure
-      (actor:run-turn ag "What do you know?" :max-steps 2 :on-step-limit :wrap-up))
-    (is (= 1 (funcall runs)) "only the gathering step's call ran")
-    (is-false (search "l2" (format nil "~S" (actor:agent-history ag)))
-              "the wrap-up's call is not in the history")))
+  "#1182. The wrap-up forbids a tool call, but a model can still return one. It is not run and
+not appended, because the turn has no step left for its result and a call without a result would
+break the next turn. The turn fails as it did without the option. The same holds whether the
+wrap-up was sent no tools or the same tools with the choice :NONE (#1318)."
+  (dolist (tool-choice-p '(nil t))
+    (multiple-value-bind (ag provider runs) (%looking-agent (%looks 2) :tool-choice-p tool-choice-p)
+      (declare (ignore provider))
+      (signals cnd:deliberation-failure
+        (actor:run-turn ag "What do you know?" :max-steps 2 :on-step-limit :wrap-up))
+      (is (= 1 (funcall runs)) "only the gathering step's call ran")
+      (is-false (search "l2" (format nil "~S" (actor:agent-history ag)))
+                "the wrap-up's call is not in the history"))))
 
 (test on-step-limit-is-checked-before-anything-is-recorded
   "#1182. :ON-STEP-LIMIT takes NIL or :WRAP-UP, and :WRAP-UP needs at least two steps, one to
