@@ -4869,8 +4869,9 @@ them, and the comparison sees it, which is its control."
 
 (test the-latest-message-is-not-marked-past-the-provider-s-limit
   "#1317. Anthropic accepts four cache breakpoints in a request. With the system prompt's and two
-in the messages, the latest message is marked as the fourth; with three in the messages, it is
-not. A message that is already marked, or empty, is not marked again."
+in the messages, the latest message is marked as the fourth; with three in the messages, or a
+marked tool spec as well, it is not. A message that is already marked, or empty, is not marked
+again."
   (let* ((system (list (llm:text-part "brief" :cache t)))
          (marked (lambda (text) (llm:msg "user" (list (llm:text-part text :cache t)))))
          (two (list (funcall marked "a") (llm:msg "assistant" "b") (funcall marked "c")
@@ -4891,7 +4892,82 @@ not. A message that is already marked, or empty, is not marked again."
         "an already marked latest message is left as it is")
     (is (null (%marked-parts (actor::%with-latest-message-marked
                               (list (llm:msg "user" "")) system)))
-        "an empty text is not marked")))
+        "an empty text is not marked")
+    (is (= 2 (length (%marked-parts
+                      (actor::%with-latest-message-marked
+                       two system (list (llm:make-tool-spec :name "t" :description "d" :cache t))))))
+        "a marked tool spec counts too: with it, the two marks in the messages make four")))
+
+(defun %near-budget-turn (cache-messages)
+  "A turn of six tool steps on an agent whose history of ten earlier exchanges is near its budget
+of 700 estimated tokens. Returns the requests sent, oldest first, and the steps (1-based request
+numbers) at which more exchanges were dropped than on the step before."
+  (let* ((p (make-instance 'request-log
+                           :script (append (loop for i from 1 to 6
+                                                 collect (%call (format nil "c~D" i) "fetch" "n" i))
+                                           (list (llm:make-completion :text "answer" :stop-reason :end)))))
+         (agent (actor:make-agent :provider p :history-budget 700 :cache-messages cache-messages))
+         (dropped 0)
+         (trims '()))
+    (setf (actor:agent-history agent)
+          (loop for i from 1 to 10
+                append (list (llm:msg "user" (format nil "q~D ~A" i (make-string 200 :initial-element #\q)))
+                             (llm:msg "assistant" (format nil "a~D" i)))))
+    (actor:register-means agent "fetch" "fetches"
+                          (lambda (args) (format nil "result ~D ~A" (gethash "n" args)
+                                                 (make-string 250 :initial-element #\y))))
+    (evt:with-observer ((lambda (e)
+                          (when (eq :context-trimmed (evt:event-type e))
+                            (let ((now (evt:event-get e :dropped-exchanges)))
+                              (when (> now dropped)
+                                (push (1+ (length (request-log-requests p))) trims))
+                              (setf dropped now)))))
+      (actor:run-turn agent "go" :max-steps 8))
+    (values (request-log-requests p) (reverse trims))))
+
+(test near-the-budget-the-history-is-trimmed-in-steps-when-messages-are-cached
+  "#1317, the cold review of #1321. PROMPT:TRIM-HISTORY keeps the newest exchanges that fit, so
+on an agent near its history budget a growing turn drops the oldest exchange on almost every
+step, and the messages before the cache mark change each time: every such step misses the cache
+and writes the history to it again. With CACHE-MESSAGES the history is trimmed to half the budget
+when it no longer fits, and then sent from the same first exchange until it no longer fits again.
+
+Over six tool steps, each request begins with the one before it, marks aside, except at a step
+that dropped more exchanges, and there are at most two such steps. Every request stays within
+the budget.
+
+THE CONTROL is the same turn without CACHE-MESSAGES, trimmed one exchange at a time: the
+request changes what came before it on at least four steps."
+  (multiple-value-bind (requests trims) (%near-budget-turn t)
+    (is (= 7 (length requests)))
+    (is (<= 1 (length trims) 2) "trimmed once or twice, not on every step: ~S" trims)
+    (loop for i from 0 below (1- (length requests))
+          for before = (%unmarked (nth i requests))
+          for after = (%unmarked (nth (1+ i) requests))
+          unless (member (+ 2 i) trims)
+            do (is (%prefix-p before after) "request ~D begins with request ~D" (+ 2 i) (1+ i)))
+    (is (every (lambda (r) (or (<= (prompt:messages-tokens r) 700)
+                               (= 1 (length (prompt:exchanges r)))))
+               requests)
+        "every request within the budget, or only the turn's own exchange: ~S"
+        (mapcar #'prompt:messages-tokens requests)))
+  (let ((requests (%near-budget-turn nil)))
+    (is (<= 4 (loop for i from 0 below (1- (length requests))
+                    count (not (%prefix-p (%unmarked (nth i requests))
+                                          (%unmarked (nth (1+ i) requests))))))
+        "control: one exchange at a time, the earlier messages change on most steps")))
+
+(test a-trim-point-that-is-not-in-the-history-is-not-used
+  "#1317. TRIM-FROM is where the last trim left the history. When the history is replaced by a
+shorter one, that index is not the start of an exchange in it, and the trim starts again from
+the beginning rather than sending nothing or a broken exchange."
+  (let* ((p (make-instance 'request-log :script nil))
+         (agent (actor:make-agent :provider p :history-budget 700 :cache-messages t)))
+    (setf (praxeon/actor::agent-trim-from agent) 15
+          (actor:agent-history agent) (list (llm:msg "user" "q1") (llm:msg "assistant" "a1")))
+    (actor:run-turn agent "q2")
+    (is (= 3 (length (first (request-log-requests p)))) "the whole short history was sent")
+    (is (= 0 (praxeon/actor::agent-trim-from agent)))))
 
 (test stored-results-are-erased-with-their-conversation
   (let* ((agent (actor:make-agent :provider (make-instance 'request-log)))
@@ -9815,7 +9891,7 @@ that is not private, whose log holds it."
 
 (defparameter +moved-agent-slots+
   '("CONTEXT" "RESULT-STORE" "CONVERSATION" "RESULT-INDEX" "CLEARED" "GUARD" "UNTRUSTED-INPUTS"
-    "UNTRUSTED-CALLS" "CONVERSATION-TAINT" "THREAD-MEMORY" "HISTORY"
+    "UNTRUSTED-CALLS" "CONVERSATION-TAINT" "THREAD-MEMORY" "HISTORY" "TRIM-FROM"
     ;; Moved one way only: TO is private when either agent is (#983).
     "PRIVATE"))
 
