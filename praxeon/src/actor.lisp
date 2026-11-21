@@ -69,6 +69,14 @@ client rendering `agent-history' still shows the whole conversation."
   ;; billing behaviour, and one that arrived without being asked for would be a surprise in a
   ;; line item. See DELIBERATE for what it does and what it deliberately does not reach.
   (cache-system nil)
+  ;; CACHE-MESSAGES (#1317): mark the latest message of every request as the end of the cacheable
+  ;; prefix, so the next step of a turn, and the next turn, read the conversation so far from the
+  ;; provider's cache. NIL by default, for the same reason as CACHE-SYSTEM. See
+  ;; %WITH-LATEST-MESSAGE-MARKED.
+  (cache-messages nil)
+  ;; TRIM-FROM (#1317): with CACHE-MESSAGES and a history budget, the index in the history of the
+  ;; first message still sent after the last trim. Conversation state; see %TRIM-IN-STEPS.
+  (trim-from 0)
   (means (make-hash-table :test #'equal)) ; name(string) -> means-entry
   (context (ctx:make-context) :type ctx:context)
   ;; 120000 ESTIMATED tokens, not NIL, and the default is the decision. An opt-in bound
@@ -150,13 +158,13 @@ NIL means not recorded, so either recorded value is kept over it."
   "Give TO, an agent just made, FROM's conversation, and return TO. What moves is the history and
 the state needed to read it as it was read before: the retrieved context, the offloaded and
 cleared tool results with the store they are in, the untrusted-content records, the turn guard,
-and the thread memory. TO's conversation taint becomes the higher of the two agents' values
-(%HIGHER-TAINT), so a value the app gave TO is not lowered. TO is private when either agent is,
-so a conversation that was private stays private on an agent the app built without :PRIVATE
-(#983, the hub's review of #1027). TO keeps the rest of its own configuration: provider, system
-prompt, means, budgets, taint scope and RETAIN-CONTENT. An app does this when what an agent may
-do changes and its conversation should go on, such as praxeon/web when a session's grant
-changes (#67). The two agents share the moved tables afterwards, so FROM is not used again."
+the thread memory, and where the last trim left the history (TRIM-FROM). TO's conversation
+taint becomes the higher of the two agents' values (%HIGHER-TAINT), so a value the app gave TO is
+not lowered. TO is private when either agent is, so a conversation that was private stays
+private on an agent the app built without :PRIVATE (#983, the hub's review of #1027). TO keeps
+the rest of its own configuration: provider, system prompt and its cache settings, means,
+budgets, taint scope and RETAIN-CONTENT. An app does this when what an agent may do changes and
+its conversation should go on, such as praxeon/web when a session's grant changes (#67). The two agents share the moved tables afterwards, so FROM is not used again."
   (setf (agent-history to) (agent-history from)
         (agent-context to) (agent-context from)
         (agent-result-index to) (agent-result-index from)
@@ -167,7 +175,8 @@ changes (#67). The two agents share the moved tables afterwards, so FROM is not 
         (agent-conversation-taint to) (%higher-taint (agent-conversation-taint from)
                                                      (agent-conversation-taint to))
         (agent-private to) (or (agent-private from) (agent-private to))
-        (agent-thread-memory to) (agent-thread-memory from))
+        (agent-thread-memory to) (agent-thread-memory from)
+        (agent-trim-from to) (agent-trim-from from))
   ;; The result index names results in FROM's store, so the store goes with it.
   (when (agent-result-store from)
     (setf (agent-result-store to) (agent-result-store from)
@@ -857,6 +866,135 @@ cleared. Returns how many were erased. A stand-in that names one of them then re
     (clrhash (agent-cleared agent))
     (if store (res:forget-conversation-results store (agent-conversation agent)) 0)))
 
+;;; --- a cache breakpoint on the latest message (#1317) ------------------------------
+;;;
+;;; With CACHE-SYSTEM alone, the cached prefix is the tools and the system prompt, and every
+;;; message, tool results included, is sent at full price on every step of a turn. A consuming app
+;;; measured a 6-step tool turn: cache reads stayed at 6,573 tokens while uncached input grew from
+;;; 103 to 12,778. With CACHE-MESSAGES, each request also marks its latest message as the end of
+;;; the cacheable prefix. The next request begins with the same messages and adds to them, so the
+;;; provider finds the earlier request's prefix in its cache. Anthropic looks for a cached prefix at
+;;; the block boundaries before a breakpoint, up to about 20 blocks back, so the mark need not stay
+;;; on the earlier message, and a request carries one message mark from this producer, not one per
+;;; step.
+;;;
+;;; WHAT KEEPS THE MESSAGES BEFORE THE MARK THE SAME FROM ONE STEP TO THE NEXT:
+;;;
+;;;   - The mark goes on after trimming (so a marked message never pins the history against the
+;;;     trim) and before the retrieved facts are attached (prompt:attach-context puts them after
+;;;     the marked part, so they change without touching the prefix).
+;;;   - Every message whose content is a string is sent as one text part. Otherwise the latest
+;;;     message, marked and so sent as a part, would be sent as a string on the next step, and the
+;;;     bytes before the next mark would differ.
+;;;   - Results cleared by OFFLOAD-TOOL-RESULTS keep their stand-ins in the same places, so the
+;;;     messages change only when a new batch is cleared; the step after a batch writes the cache
+;;;     again, and the steps after it read it.
+;;;   - With a history budget, the history is trimmed in steps (%TRIM-IN-STEPS), not one exchange
+;;;     at a time. PROMPT:TRIM-HISTORY keeps the newest exchanges that fit, so near the budget it
+;;;     drops the oldest exchange on almost every step; each such step would miss the cache and
+;;;     write the whole history to it again, at 1.25 times the price of sending it uncached.
+;;;     %TRIM-IN-STEPS keeps sending from the same first exchange while the history fits the budget,
+;;;     and when it no longer fits, drops old exchanges until it fits half the budget. The cache is
+;;;     then missed once per trim. The cost is that between trims the history sent is between half
+;;;     the budget and the whole of it, where the exchange-at-a-time trim keeps it near the budget.
+;;;
+;;; WHEN THE CACHE IS STILL MISSED. The step after a batch is cleared or the history is trimmed
+;;; writes the cache again. A step that adds more than about 20 content blocks, for example an
+;;; assistant message with 10 or more tool calls in parallel (each call is one block, and each
+;;; result another), puts the previous request's mark further back than Anthropic looks, so that
+;;; step is sent and cached at the full price too. Nothing reports either case beyond the
+;;; completion's cache token counts.
+;;;
+;;; A PROVIDER'S LIMIT ON BREAKPOINTS. Anthropic accepts at most +CACHE-BREAKPOINTS-ALLOWED+ marks
+;;; in one request, counting the tool specs', the system prompt's and any in the messages, such as
+;;; the thread's observations. When the request already has that many, no mark is added. A
+;;; provider without a caller-controlled cache ignores the marks.
+
+(defparameter +cache-breakpoints-allowed+ 4
+  "The most cache breakpoints one Anthropic request may carry.")
+
+(defun %parts-of (content)
+  (if (stringp content) (list (llm:text-part content)) content))
+
+(defun %marks-in (system messages &optional tools)
+  "How many parts of SYSTEM (a string or a list of parts) and MESSAGES, and how many TOOLS (tool
+specs), are marked."
+  (+ (count-if #'llm:tool-spec-cache tools)
+     (if (listp system) (count-if #'llm:cache-boundary-p system) 0)
+     (loop for m in messages
+           for c = (llm:content m)
+           when (listp c) sum (count-if #'llm:cache-boundary-p c))))
+
+(defun %with-latest-message-marked (messages system &optional tools)
+  "MESSAGES, each string content as one text part, with the last part of the last message marked
+as the end of the cacheable prefix (#1317). Nothing is marked when that part already is, when it
+is an empty text, or when TOOLS, SYSTEM and MESSAGES already carry +CACHE-BREAKPOINTS-ALLOWED+
+marks."
+  (let* ((messages (mapcar (lambda (m)
+                             ;; A copy with its other properties kept: only the content changes.
+                             (let ((copy (copy-list m)))
+                               (setf (getf copy :content) (%parts-of (llm:content m)))
+                               copy))
+                           messages))
+         (last (car (last messages)))
+         (parts (and last (llm:content last)))
+         (final (car (last parts))))
+    (cond ((or (null final)
+               (llm:cache-boundary-p final)
+               (and (eq :text (getf final :type)) (zerop (length (getf final :text))))
+               (>= (%marks-in system messages tools) +cache-breakpoints-allowed+))
+           messages)
+          (t (let ((marked (copy-list last)))
+               (setf (getf marked :content)
+                     (append (butlast parts) (list (append final (list :cache t)))))
+               (append (butlast messages) (list marked)))))))
+
+(defun %trim-in-steps (agent history from budget)
+  "The tail of HISTORY, from index FROM on, that is sent under BUDGET when the agent caches its
+messages (#1317). Unlike PROMPT:TRIM-HISTORY, which keeps the newest exchanges that fit and so
+drops the oldest exchange on almost every step near the budget, this keeps the first message the
+last trim kept (AGENT-TRIM-FROM) for as long as the history from it fits BUDGET. When it no longer
+fits, old exchanges are dropped until what is left fits half of BUDGET, the newest exchange always
+kept, and AGENT-TRIM-FROM records where the history now starts. The messages before the cache
+mark then change once per trim rather than on every step.
+
+AGENT-TRIM-FROM is ignored, and the trim starts again from FROM, when it is not the start of an
+exchange in HISTORY, such as after the history was replaced by a shorter one. FROM is where the
+thread's observations leave the history (0 without them). Emits :CONTEXT-TRIMMED when anything
+before FROM's tail is not sent, as PROMPT:TRIM-HISTORY does, and leaves :CONTEXT-OVERFLOW to it."
+  (let* ((tail (nthcdr from history))
+         (groups (prompt:exchanges tail))
+         ;; The index in HISTORY at which each exchange starts.
+         (starts (loop for g in groups
+                       for at = from then (+ at n)
+                       for n = (length g)
+                       collect at))
+         (kept-from (if (member (agent-trim-from agent) starts) (agent-trim-from agent) from))
+         (kept (nthcdr (or (position kept-from starts) 0) groups))
+         (tokens (lambda (gs) (prompt:messages-tokens (loop for g in gs append g)))))
+    (if (plusp (prompt:pinned-exchange-count groups))
+        ;; A mark in the history itself, which no producer in this file puts there: leave the
+        ;; pinning to PROMPT:TRIM-HISTORY.
+        (prompt:trim-history tail budget)
+        (progn
+          (when (> (funcall tokens kept) budget)
+            (let ((target (floor budget 2)))
+              (loop while (and (rest kept) (> (funcall tokens kept) target))
+                    do (pop kept))
+              (setf kept-from (nth (- (length groups) (length kept)) starts))))
+          (setf (agent-trim-from agent) kept-from)
+          (let ((dropped (- (length groups) (length kept))))
+            (when (plusp dropped)
+              (evt:emit :context-trimmed
+                        :dropped-exchanges dropped
+                        :kept-exchanges (length kept)
+                        :pinned-exchanges 0
+                        :estimated-tokens (funcall tokens kept)
+                        :budget budget)))
+          ;; Drops nothing more: it emits :CONTEXT-OVERFLOW when the newest exchange alone is
+          ;; over BUDGET.
+          (prompt:trim-history (loop for g in kept append g) budget)))))
+
 (defun request-messages (agent)
   "The messages a deliberation SENDS. Returns (values messages estimated-tokens breakdown).
 
@@ -887,7 +1025,9 @@ untrusted, the turn becomes untrusted (#317's taint ruling)."
                    (if (and b (first observed))
                        (max 0 (- b (prompt:estimate-tokens (first observed))))
                        b)))
-         (trimmed (prompt:trim-history (if start (nthcdr start history) history) budget))
+         (trimmed (if (and (agent-cache-messages agent) budget)
+                      (%trim-in-steps agent history (or start 0) budget)
+                      (prompt:trim-history (if start (nthcdr start history) history) budget)))
          (assembled-context (ctx:assemble (agent-context agent)))
          (assembled (append assembled-context
                             ;; Subject facts go with the other context items, after the cache
@@ -912,6 +1052,11 @@ untrusted, the turn becomes untrusted (#317's taint ruling)."
     ;; the member's own wish, so its source is harder to see than the original's.
     (when (some #'ctx:ctx-item-untrusted assembled)
       (%taint-guard (%turn-guard agent)))
+    ;; After trimming, so the mark pins nothing against the trim, and before the facts, so they
+    ;; stay after it (#1317).
+    (when (agent-cache-messages agent)
+      (setf trimmed (%with-latest-message-marked trimmed (agent-system-parts agent)
+                                                 (agent-tool-specs agent))))
     (let* ((messages (if facts
                          (prompt:attach-context trimmed facts)
                          trimmed))
@@ -1192,14 +1337,13 @@ because it is the shape a consuming app is starting with -- one large shared bri
 short completions -- and it is where the measurement that opened pre-publication issue 401 came from (574 input
 tokens for a one-line question against an EMPTY history, essentially all prefix).
 
-WHAT IT DOES NOT DO, said here so nobody reads more into it: the conversation is not cached.
-A long history is still resent and still charged in full every turn, because nothing marks a
-boundary inside MESSAGES. That is a second producer and a separate decision -- and it is the
-one where `prompt:pinned-exchange-count' becomes load-bearing, which corrects an argument I
-made when this shape was chosen: I said the boundary interacts with history trimming, and under
-THIS producer it does not. The pinning scans messages; the marker is not in them, so
-PINNED-EXCHANGE-COUNT returns 0 on the actor path. Asserted in the suite so that when a message
-breakpoint does arrive, the test says what changed rather than passing quietly.
+WHAT IT DOES NOT DO, said here so nobody reads more into it: the conversation is not cached by
+this producer. A long history is resent and charged in full every turn unless the agent also
+sets CACHE-MESSAGES, the second producer (#1317), which marks the latest message of each request;
+see %WITH-LATEST-MESSAGE-MARKED. That mark is added after the history is trimmed, so
+`prompt:pinned-exchange-count' still finds no mark in what the trim reads, and the pinning stays
+inert on the actor path. It does find the mark in the request that is sent, which the suite
+asserts.
 
 AN EMPTY PROMPT IS NOT MARKED. Marking nothing is not a prefix, and it would put a
 `cache_control' block on an empty string for a provider to reject or ignore.

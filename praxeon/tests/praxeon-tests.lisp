@@ -2054,8 +2054,13 @@ behaviour, and one that arrived without being asked for would be a surprise in a
   "Recorded as a test rather than a comment because it corrects an argument made when this
 shape was chosen. The marker lives on the SYSTEM prompt; `pinned-exchange-count' scans MESSAGES.
 So the pinning pre-publication issue 402 built is inert on the actor path -- which is fine, and it means the two
-features do not meet until a second producer marks a boundary inside the conversation. When one
-arrives, this test fails and says so."
+features do not meet until a second producer marks a boundary inside the conversation.
+
+That producer arrived with #1317 (CACHE-MESSAGES), and this is the test that says what changed.
+Without it, nothing in the request is pinned, as before. With it, the request that is sent marks
+its latest message, so PINNED-EXCHANGE-COUNT over the request counts every exchange. The trim
+still does not see it, because the mark goes on after trimming: an agent with a small history
+budget still sends less than it remembers."
   (let* ((provider (make-instance 'system-capturing))
          (agent (actor:make-agent :provider provider :system-prompt "brief" :cache-system t)))
     (actor:run-turn agent "q")
@@ -2064,7 +2069,21 @@ arrives, this test fails and says so."
           "no message carries a boundary, so nothing is pinned against trimming")
       (is-true (llm:cache-boundary-p (first (actor:agent-system-parts agent)))
                "while the system prompt does carry one -- the control, so the zero above is
-about WHERE the marker is and not about there being none"))))
+about WHERE the marker is and not about there being none")))
+  (let* ((provider (make-instance 'system-capturing))
+         (agent (actor:make-agent :provider provider :system-prompt "brief" :cache-system t
+                                  :cache-messages t :history-budget 300)))
+    (setf (actor:agent-history agent)
+          (loop for i from 1 to 8
+                append (list (llm:msg "user" (format nil "q~A ~A" i (make-string 200 :initial-element #\q)))
+                             (llm:msg "assistant" (format nil "a~A" i)))))
+    (let* ((remembered (length (actor:agent-history agent)))
+           (sent (actor:request-messages agent))
+           (exchanges (prompt:exchanges sent)))
+      (is (= (length exchanges) (prompt:pinned-exchange-count exchanges))
+          "with CACHE-MESSAGES the request's latest message is marked, so every exchange in it counts as pinned")
+      (is (< (length sent) remembered)
+          "and the trim still ran: the mark went on after it"))))
 
 ;;; --- data through parameterised means (pre-publication issue 400, ADR-0002) -----------------------
 ;;;
@@ -4746,6 +4765,209 @@ request starts with the one before it, message for message."
                        "request ~D, the batch, changed what came before" (1+ i))
                    (is (%prefix-p (nth i requests) (nth (1+ i) requests))
                        "request ~D starts with request ~D exactly" (1+ i) i))))))
+
+;;; --- a cache breakpoint on the latest message (#1317) ------------------------------------
+
+(defun %marked-parts (messages)
+  "The marked parts of MESSAGES, as (message-index . part), oldest first."
+  (loop for m in messages
+        for i from 0
+        for c = (llm:content m)
+        when (listp c)
+          append (loop for part in c
+                       when (llm:cache-boundary-p part) collect (cons i part))))
+
+(defun %unmarked (messages)
+  "MESSAGES with every :CACHE mark removed and string content as one text part, so two requests
+can be compared by what the provider caches, not by where each put its mark."
+  (mapcar (lambda (m)
+            (let ((c (llm:content m)))
+              (list :role (llm:role m)
+                    :content (mapcar (lambda (part)
+                                       (loop for (k v) on part by #'cddr
+                                             unless (eq k :cache) append (list k v)))
+                                     (if (stringp c) (list (llm:text-part c)) c)))))
+          messages))
+
+(defun %fetching-agent (n &rest agent-args)
+  "An agent whose model fetches N times and then answers, each result about 400 estimated tokens,
+and its REQUEST-LOG provider."
+  (let* ((p (make-instance 'request-log
+                           :script (append (loop for i from 1 to n
+                                                 collect (%call (format nil "c~D" i) "fetch" "n" i))
+                                           (list (llm:make-completion :text "answer" :stop-reason :end)))))
+         (agent (apply #'actor:make-agent :provider p :system-prompt "brief" agent-args)))
+    (actor:register-means agent "fetch" "fetches"
+                          (lambda (args)
+                            (format nil "result ~D ~A" (gethash "n" args)
+                                    (make-string 1600 :initial-element #\y))))
+    (values agent p)))
+
+(test each-request-marks-its-latest-message-once-when-asked
+  "#1317. Over a turn of four tool steps and an answer, with CACHE-MESSAGES, every request marks
+the last part of its latest message, and that is the only marked part in its messages. The
+history is not marked: the mark is on what is sent. The retrieved facts come after the mark.
+
+THE CONTROL is the same turn without CACHE-MESSAGES: no message part is marked, and the system
+prompt still is, as before #1317."
+  (multiple-value-bind (agent p) (%fetching-agent 4 :cache-system t :cache-messages t)
+    (ctx:add-item (actor:agent-context agent)
+                  (ctx:make-ctx-item :content "a retrieved fact" :tokens 5 :value 1 :valid-time 1))
+    (actor:run-turn agent "go" :max-steps 8)
+    (let ((requests (request-log-requests p)))
+      (is (= 5 (length requests)))
+      (loop for request in requests
+            for i from 1
+            for marks = (%marked-parts request)
+            for last = (car (last request))
+            for parts = (llm:content last)
+            do (is (= 1 (length marks)) "request ~D carries one message mark: ~S" i marks)
+               (is (= (1- (length request)) (car (first marks)))
+                   "request ~D's mark is on its latest message" i)
+               (is (search "a retrieved fact" (getf (car (last parts)) :text))
+                   "request ~D's facts are its latest message's last part" i)
+               (is (eq (cdr (first marks)) (car (last (butlast parts))))
+                   "and the marked part is the one just before them"))
+      (is (eq :tool-result (getf (cdr (first (%marked-parts (second requests)))) :type))
+          "after a tool step, the mark is on the tool result")
+      (is (null (%marked-parts (actor:agent-history agent))) "the history carries no mark")))
+  (multiple-value-bind (agent p) (%fetching-agent 2 :cache-system t)
+    (actor:run-turn agent "go" :max-steps 8)
+    (is (every #'null (mapcar #'%marked-parts (request-log-requests p)))
+        "control: without CACHE-MESSAGES no message is marked")
+    (is-true (llm:cache-boundary-p (first (actor:agent-system-parts agent)))
+             "while the system prompt is")))
+
+(test the-messages-before-the-mark-change-only-when-a-batch-is-cleared
+  "#1317 with OFFLOAD-TOOL-RESULTS clearing. Between batches, each request begins with every
+message of the request before it, up to and including the one that request marked, unchanged
+apart from the mark itself; so the next request finds that prefix in the cache. A batch changes
+them, and the comparison sees it, which is its control."
+  (multiple-value-bind (agent p) (%fetching-agent 8 :cache-messages t)
+    (let ((batches '()) (step 0))
+      (actor:offload-tool-results agent (res:make-memory-result-store) :conversation "c"
+                                  :threshold nil :clear-budget 1500 :keep-recent 1)
+      (evt:with-observer ((lambda (e)
+                            (case (evt:event-type e)
+                              (:deliberating (setf step (length (request-log-requests p))))
+                              (:results-cleared (push step batches)))))
+        (actor:run-turn agent "go" :max-steps 12))
+      (let* ((requests (request-log-requests p))
+             (n (length requests)))
+        (is (= 9 n))
+        (is (<= 1 (length batches) 2) "a batch was cleared, and not on every step: ~S" batches)
+        (loop for i from 0 below (1- n)
+              for before = (nth i requests)
+              for after = (nth (1+ i) requests)
+              for upto = (1+ (car (first (%marked-parts before))))
+              do (is (= 1 (length (%marked-parts after))) "request ~D has one message mark" (1+ i))
+                 (if (member (1+ i) batches)
+                     (is (not (%prefix-p (%unmarked (subseq before 0 upto)) (%unmarked after)))
+                         "request ~D, the batch, changed the messages before the earlier mark" (1+ i))
+                     (is (%prefix-p (%unmarked (subseq before 0 upto)) (%unmarked after))
+                         "request ~D begins with request ~D's messages up to its mark" (1+ i) i)))))))
+
+(test the-latest-message-is-not-marked-past-the-provider-s-limit
+  "#1317. Anthropic accepts four cache breakpoints in a request. With the system prompt's and two
+in the messages, the latest message is marked as the fourth; with three in the messages, or a
+marked tool spec as well, it is not. A message that is already marked, or empty, is not marked
+again."
+  (let* ((system (list (llm:text-part "brief" :cache t)))
+         (marked (lambda (text) (llm:msg "user" (list (llm:text-part text :cache t)))))
+         (two (list (funcall marked "a") (llm:msg "assistant" "b") (funcall marked "c")
+                    (llm:msg "assistant" "d") (llm:msg "user" "latest")))
+         (three (append (butlast two) (list (funcall marked "e") (llm:msg "assistant" "f")
+                                           (llm:msg "user" "latest")))))
+    (is (= 3 (length (%marked-parts (actor::%with-latest-message-marked two system))))
+        "three marks in the messages, four with the system prompt's")
+    (is-true (llm:cache-boundary-p
+              (first (llm:content (car (last (actor::%with-latest-message-marked two system)))))))
+    (is (= 3 (length (%marked-parts (actor::%with-latest-message-marked three system))))
+        "no fifth mark")
+    (is (equal "latest" (getf (first (llm:content (car (last (actor::%with-latest-message-marked
+                                                               three system)))))
+                              :text)))
+    (is (= 1 (length (%marked-parts (actor::%with-latest-message-marked
+                                     (list (funcall marked "x")) system))))
+        "an already marked latest message is left as it is")
+    (is (null (%marked-parts (actor::%with-latest-message-marked
+                              (list (llm:msg "user" "")) system)))
+        "an empty text is not marked")
+    (is (= 2 (length (%marked-parts
+                      (actor::%with-latest-message-marked
+                       two system (list (llm:make-tool-spec :name "t" :description "d" :cache t))))))
+        "a marked tool spec counts too: with it, the two marks in the messages make four")))
+
+(defun %near-budget-turn (cache-messages)
+  "A turn of six tool steps on an agent whose history of ten earlier exchanges is near its budget
+of 700 estimated tokens. Returns the requests sent, oldest first, and the steps (1-based request
+numbers) at which more exchanges were dropped than on the step before."
+  (let* ((p (make-instance 'request-log
+                           :script (append (loop for i from 1 to 6
+                                                 collect (%call (format nil "c~D" i) "fetch" "n" i))
+                                           (list (llm:make-completion :text "answer" :stop-reason :end)))))
+         (agent (actor:make-agent :provider p :history-budget 700 :cache-messages cache-messages))
+         (dropped 0)
+         (trims '()))
+    (setf (actor:agent-history agent)
+          (loop for i from 1 to 10
+                append (list (llm:msg "user" (format nil "q~D ~A" i (make-string 200 :initial-element #\q)))
+                             (llm:msg "assistant" (format nil "a~D" i)))))
+    (actor:register-means agent "fetch" "fetches"
+                          (lambda (args) (format nil "result ~D ~A" (gethash "n" args)
+                                                 (make-string 250 :initial-element #\y))))
+    (evt:with-observer ((lambda (e)
+                          (when (eq :context-trimmed (evt:event-type e))
+                            (let ((now (evt:event-get e :dropped-exchanges)))
+                              (when (> now dropped)
+                                (push (1+ (length (request-log-requests p))) trims))
+                              (setf dropped now)))))
+      (actor:run-turn agent "go" :max-steps 8))
+    (values (request-log-requests p) (reverse trims))))
+
+(test near-the-budget-the-history-is-trimmed-in-steps-when-messages-are-cached
+  "#1317, the cold review of #1321. PROMPT:TRIM-HISTORY keeps the newest exchanges that fit, so
+on an agent near its history budget a growing turn drops the oldest exchange on almost every
+step, and the messages before the cache mark change each time: every such step misses the cache
+and writes the history to it again. With CACHE-MESSAGES the history is trimmed to half the budget
+when it no longer fits, and then sent from the same first exchange until it no longer fits again.
+
+Over six tool steps, each request begins with the one before it, marks aside, except at a step
+that dropped more exchanges, and there are at most two such steps. Every request stays within
+the budget.
+
+THE CONTROL is the same turn without CACHE-MESSAGES, trimmed one exchange at a time: the
+request changes what came before it on at least four steps."
+  (multiple-value-bind (requests trims) (%near-budget-turn t)
+    (is (= 7 (length requests)))
+    (is (<= 1 (length trims) 2) "trimmed once or twice, not on every step: ~S" trims)
+    (loop for i from 0 below (1- (length requests))
+          for before = (%unmarked (nth i requests))
+          for after = (%unmarked (nth (1+ i) requests))
+          unless (member (+ 2 i) trims)
+            do (is (%prefix-p before after) "request ~D begins with request ~D" (+ 2 i) (1+ i)))
+    (is (every (lambda (r) (or (<= (prompt:messages-tokens r) 700)
+                               (= 1 (length (prompt:exchanges r)))))
+               requests)
+        "every request within the budget, or only the turn's own exchange: ~S"
+        (mapcar #'prompt:messages-tokens requests)))
+  (let ((requests (%near-budget-turn nil)))
+    (is (<= 4 (loop for i from 0 below (1- (length requests))
+                    count (not (%prefix-p (%unmarked (nth i requests))
+                                          (%unmarked (nth (1+ i) requests))))))
+        "control: one exchange at a time, the earlier messages change on most steps")))
+
+(test a-trim-point-that-is-not-in-the-history-is-not-used
+  "#1317. TRIM-FROM is where the last trim left the history. When the history is replaced by a
+shorter one, that index is not the start of an exchange in it, and the trim starts again from
+the beginning rather than sending nothing or a broken exchange."
+  (let* ((p (make-instance 'request-log :script nil))
+         (agent (actor:make-agent :provider p :history-budget 700 :cache-messages t)))
+    (setf (praxeon/actor::agent-trim-from agent) 15
+          (actor:agent-history agent) (list (llm:msg "user" "q1") (llm:msg "assistant" "a1")))
+    (actor:run-turn agent "q2")
+    (is (= 3 (length (first (request-log-requests p)))) "the whole short history was sent")
+    (is (= 0 (praxeon/actor::agent-trim-from agent)))))
 
 (test stored-results-are-erased-with-their-conversation
   (let* ((agent (actor:make-agent :provider (make-instance 'request-log)))
@@ -9669,12 +9891,12 @@ that is not private, whose log holds it."
 
 (defparameter +moved-agent-slots+
   '("CONTEXT" "RESULT-STORE" "CONVERSATION" "RESULT-INDEX" "CLEARED" "GUARD" "UNTRUSTED-INPUTS"
-    "UNTRUSTED-CALLS" "CONVERSATION-TAINT" "THREAD-MEMORY" "HISTORY"
+    "UNTRUSTED-CALLS" "CONVERSATION-TAINT" "THREAD-MEMORY" "HISTORY" "TRIM-FROM"
     ;; Moved one way only: TO is private when either agent is (#983).
     "PRIVATE"))
 
 (defparameter +kept-agent-slots+
-  '("NAME" "PROVIDER" "SYSTEM-PROMPT" "CACHE-SYSTEM" "MEANS" "HISTORY-BUDGET" "MAX-TOKENS"
+  '("NAME" "PROVIDER" "SYSTEM-PROMPT" "CACHE-SYSTEM" "CACHE-MESSAGES" "MEANS" "HISTORY-BUDGET" "MAX-TOKENS"
     "OFFLOAD-THRESHOLD" "CLEAR-BUDGET" "CLEAR-TARGET" "KEEP-RECENT" "NEVER-CLEAR" "TAINT-SCOPE"
     "RETAIN-CONTENT"))
 
