@@ -533,7 +533,7 @@ is how cl+ssl writes a certificate's iPAddress entries before it compares them, 
         (values nil (usocket:host-to-hostname address))
         (values host host))))
 
-#-os-windows
+#-(or os-windows os-macosx)
 (defun %verify-peer-name (stream name)
   "Verify the certificate the server on STREAM presented against NAME, and free it. Signals
 HTTP-ERROR when the certificate does not name NAME.
@@ -567,7 +567,7 @@ cl+ssl for the whole image (#917)."
                     :detail (format nil "the server's certificate does not name ~A" name))))
       (cl+ssl:x509-free certificate))))
 
-#-os-windows
+#-(or os-windows os-macosx)
 (defun %request-pinned (req)
   "Run REQ over a connection to its CONNECT-ADDRESS, returning (values BODY STATUS HEADERS).
 
@@ -641,19 +641,23 @@ like any other response, while the connection is open, so its body is kept (#527
                      (values octets status headers)))))
         (unless body-owns-connection (close-connection))))))
 
-#+os-windows
-(defvar *server-certificate-verifier* 'aion/windows:verify-server-certificate-chain
-  "The function that decides about a pinned connection's server certificate on Windows: called
+#+(or os-windows os-macosx)
+(defvar *server-certificate-verifier*
+  #+os-windows 'aion/windows:verify-server-certificate-chain
+  #+os-macosx 'aion/darwin:verify-server-certificate-chain
+  "The function that decides about an https server's certificate on Windows and macOS: called
 with the chain, DER and leaf first, and the URL's host, it returns (values VERDICT CODE) as
-AION/WINDOWS:VERIFY-SERVER-CERTIFICATE-CHAIN does. A test binds it; nothing else should.")
+AION/WINDOWS:VERIFY-SERVER-CERTIFICATE-CHAIN and AION/DARWIN:VERIFY-SERVER-CERTIFICATE-CHAIN do.
+On Windows it decides for a pinned connection; on macOS for every https connection, pinned or
+through dexador (#905). A test binds it; nothing else should.")
 
-#+os-windows
+#+(or os-windows os-macosx)
 (defvar *%verifying-config* nil
   "The aion/tls client config whose verifier is the one above, made once on first use.")
-#+os-windows
+#+(or os-windows os-macosx)
 (defvar *%verifying-config-lock* (sb-thread:make-mutex :name "aion/http-client tls config"))
 
-#+os-windows
+#+(or os-windows os-macosx)
 (defun %verifying-config ()
   (sb-thread:with-mutex (*%verifying-config-lock*)
     (or *%verifying-config*
@@ -666,13 +670,13 @@ AION/WINDOWS:VERIFY-SERVER-CERTIFICATE-CHAIN does. A test binds it; nothing else
                        (error (certificate-condition-class verdict)
                               :host host :verdict verdict :code code)))))))))
 
-#+os-windows
+#+(or os-windows os-macosx)
 (defun %ca-path-config (path)
   "A client config that trusts the CA certificates in the PEM file PATH, as cl+ssl's
-:VERIFY-LOCATION does on the other platforms, and the certificate chain it holds: (values CONFIG
+:VERIFY-LOCATION does on Linux, and the certificate chain it holds: (values CONFIG
 CHAIN), both for the caller to free. A directory is refused: aion/tls reads one file."
   (when (uiop:directory-exists-p path)
-    (error 'http-error :detail (format nil "ca-path ~A is a directory; on Windows give one PEM file" path)))
+    (error 'http-error :detail (format nil "ca-path ~A is a directory; on Windows and macOS give one PEM file" path)))
   (let ((octets (with-open-file (in path :element-type '(unsigned-byte 8))
                   (let* ((buffer (make-array (file-length in) :element-type '(unsigned-byte 8)))
                          (n (read-sequence buffer in)))
@@ -795,22 +799,23 @@ is NIL."
         (make-instance '%idle-watched-stream :inner stream :socket socket :seconds seconds)
         stream)))
 
-#+os-windows
+#+(or os-windows os-macosx)
 (defun %request-pinned (req)
   "Run REQ over a connection to its CONNECT-ADDRESS, returning (values BODY STATUS HEADERS) as
-DEX:REQUEST does (#536).
+DEX:REQUEST does (#536; on macOS since #905).
 
 The socket is opened here, to that address and nowhere else. For https, aion/tls does the
-handshake with the URL's host name, so the server is asked for that name (SNI), and Windows
-decides whether to trust the certificate, for that name, through *SERVER-CERTIFICATE-VERIFIER*:
-a refusal is a CERTIFICATE-REJECTED of the matching subclass. With the request's CA-PATH, the CA
-certificates in that file decide instead. The request is written and the response read by
-http1.lisp, whose limits apply, and the Host header is the URL's.
+handshake with the URL's host name, so the server is asked for that name (SNI), and the
+operating system decides whether to trust the certificate, for that name, through
+*SERVER-CERTIFICATE-VERIFIER*: a refusal is a CERTIFICATE-REJECTED of the matching subclass.
+With the request's CA-PATH, the CA certificates in that file decide instead. The request is
+written and the response read by http1.lisp, whose limits apply, and the Host header is the
+URL's.
 
-The socket is lent to FETCH-PUBLIC's deadline watch. The read timeout is kept by
-%IDLE-WATCHED-STREAM, because Windows ignores the socket's receive timeout. A body read as a
-stream (MAX-BODY-BYTES) keeps the connection, and closing the body closes it; otherwise the body
-is read here and the connection closed."
+The socket is lent to FETCH-PUBLIC's deadline watch. On Windows the read timeout is kept by
+%IDLE-WATCHED-STREAM, because Windows ignores the socket's receive timeout; on macOS it is the
+socket's receive timeout. A body read as a stream (MAX-BODY-BYTES) keeps the connection, and
+closing the body closes it; otherwise the body is read here and the connection closed."
   (let* ((uri (quri:uri (request-url req)))
          (host (quri:uri-host uri))
          (address (or (parse-address (request-connect-address req))
@@ -836,7 +841,12 @@ is read here and the connection closed."
              (when own-chain (ignore-errors (aion/tls:free-certificate-chain own-chain)))))
       (unwind-protect
            (progn
-             (setf stream (%watch-reads socket (request-read-timeout req)))
+             #+os-windows (setf stream (%watch-reads socket (request-read-timeout req)))
+             #-os-windows (progn
+                            (setf stream (usocket:socket-stream socket))
+                            (when (request-read-timeout req)
+                              (setf (usocket:socket-option socket :receive-timeout)
+                                    (request-read-timeout req))))
              (when (string-equal (quri:uri-scheme uri) "https")
                (when (request-ca-path req)
                  (multiple-value-setq (own-config own-chain) (%ca-path-config (request-ca-path req))))

@@ -54,3 +54,12 @@ Made with:
       -addext "subjectAltName=DNS:san.test"
     openssl req -x509 -newkey rsa:2048 -nodes -keyout cn-only-test.key -out cn-only-test.crt \
       -days 36500 -subj "/CN=cn-only.test"
+
+`ip-test-pkcs1.key`, `cn-and-san-test-pkcs1.key` and `cn-only-test-pkcs1.key` are the same keys
+as `ip-test.key`, `cn-and-san-test.key` and `cn-only-test.key` in PKCS#1 form, for the test server
+on Windows and macOS, which serves TLS through aion/tls and cannot use an RSA key in PKCS#8 form
+(#914, #905). Made with:
+
+    openssl rsa -in ip-test.key -traditional -out ip-test-pkcs1.key
+    openssl rsa -in cn-and-san-test.key -traditional -out cn-and-san-test-pkcs1.key
+    openssl rsa -in cn-only-test.key -traditional -out cn-only-test-pkcs1.key

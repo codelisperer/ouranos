@@ -14,6 +14,42 @@ its tag.
 
 ### An app may have to act
 
+- **On macOS, `aion/http-client` makes every https request over `aion/tls`, and macOS decides
+  which certificates to trust, so it no longer loads cl+ssl or OpenSSL there** (#905), and a
+  macOS desktop bundle no longer needs Homebrew's OpenSSL (#191). One exception remains: Woo
+  still loads cl+ssl on macOS, because `woo.asd` depends on it unless `:woo-no-ssl` is on
+  `*features*`, so an image that loads `clack-handler-woo` still opens OpenSSL (#1310).
+  On macOS, `aion.asd`, `hermes.asd`, `praxeon.asd` and `hyperion.asd` push `:dexador-no-ssl`
+  onto `*features*`, so dexador is compiled without cl+ssl. `aion/http-client` then replaces dexador's TLS function with an
+  `aion/tls` stream, so `dex:request` and everything built on it, `hermes/blob` included, use
+  mbedTLS. A certificate is checked by Security.framework through the new
+  `aion/darwin:verify-server-certificate-chain`, the default of
+  `aion/http-client:*server-certificate-verifier*` on macOS. What an app may have to change:
+  - **The fasl cache is shared by every Lisp project on a Mac.** Once a dexador compiled under
+    `:dexador-no-ssl` is in it, another project on the same Mac that loads dexador without
+    loading aion first gets a dexador with no TLS, and its https requests fail with "SSL not
+    supported". That project can load `aion/http-client` before dexador, or delete dexador's
+    compiled files so that they are rebuilt for it; the directory is the one
+    `(asdf:apply-output-translations (asdf:system-source-directory "dexador"))` names. The
+    reverse case, a dexador compiled with cl+ssl by such a project and then loaded by aion,
+    stops `aion.asd` with an error naming the same directory to delete.
+  - A request that gives dexador a client certificate (`:ssl-key-file`, `:ssl-cert-file`) or
+    `:insecure t` signals `aion/http-client:http-error` on macOS.
+  - `:ca-path` must name one PEM file on macOS, as on Windows.
+  - `aion/http-client:certificate-rejected` reports a macOS `OSStatus` as ", macOS OSStatus
+    -67843" and so on, where Windows reports its hexadecimal error code.
+  - Every macOS image with `aion/http-client` now loads Security.framework, on its first https
+    request. `aion/darwin` opens CoreFoundation and Security on first use with `RTLD_LOCAL`,
+    because Security links the system's `/usr/lib/libsqlite3.dylib`, and a global open made a
+    desktop bundle's SQLite calls reach that copy instead of the pinned one the bundle carries
+    (#899). Code that looked up a CoreFoundation or Security constant with
+    `cffi:foreign-symbol-pointer` no longer finds it; use the new
+    `aion/darwin/ffi:framework-symbol`, or `aion/darwin:cf-constant`.
+  - `scripts/build-desktop-app.lisp` refuses, with exit code 3, to build a macOS bundle whose
+    image has a `CL+SSL` package, because that image opens an OpenSSL from the build machine's
+    path when it starts. An app that declared `cl+ssl` itself, for Postgres TLS for example, or
+    that declares `clack-handler-woo`, now finds this out at build time.
+
 - **An app's `aion/oauth` store: `delete-token` must succeed when there is no row** (#1175).
   `disconnect` now calls it even when `get-token` answered NIL, so that a row the store cannot
   decrypt is still removed. A `delete-token` that signals when nothing matches makes `disconnect`
@@ -1622,6 +1658,17 @@ its tag.
   `browser-exited-signal` returns the signal's number, and `browser-exited-code` is now NIL for a
   browser that was killed. The report reads "was killed by signal N", and says when the browser
   wrote nothing to standard error.
+
+- **A saved image with `aion/http-client` starts on a machine without the OpenSSL it was built
+  against** (#1173). cl+ssl opens libssl and libcrypto when it loads, and SBCL reopens every shared
+  object an image had open when it was saved, before the program runs, so such an image used to
+  exit at startup, in `sb-sys:reopen-shared-objects`, even when it only made plain-http requests.
+  Where cl+ssl is loaded (Linux and the other Unixes; not Windows, and not macOS since #905),
+  `aion/http-client` now marks cl+ssl's two libraries so that SBCL does not reopen them, and
+  reopens them itself at startup with `cl+ssl:reload`, inside a handler. Where OpenSSL is present
+  an image behaves as before. Where it is missing, the image starts, plain-http requests work, and
+  the first TLS use signals `aion/http-client:http-error` naming the library that could not be
+  opened.
 
 - **`hyperion/server-uv` no longer sends a chunked body to an HTTP/1.0 client** (#1244). A
   streamed response, one whose body is a function, was always sent with

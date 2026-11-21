@@ -7,6 +7,53 @@
 ;;;; Coalton layer and a pure-CL layer. The name = immutability (values that never
 ;;;; change). See docs/roadmap.md, docs/coalton-gap-analysis.md, docs/aion-vision.md.
 
+;;; --- dexador without cl+ssl on macOS (#905) ----------------------------------------------
+;;;
+;;; On macOS, aion/http-client makes every https request over aion/tls, and Security.framework
+;;; decides whether to trust the server (#905), so nothing needs cl+ssl or OpenSSL. dexador still
+;;; loads cl+ssl unless :DEXADOR-NO-SSL is on *FEATURES* when its plan is made and its sources are
+;;; compiled: dexador.asd decides its cl+ssl dependency from the feature, and its usocket backend
+;;; tests it with reader conditionals. aion/http-client then supplies dexador's TLS itself
+;;; (src/http-client/macos-tls.lisp).
+;;;
+;;; WHY HERE, the same reason as :HUNCHENTOOT-NO-SSL at the top of hyperion.asd: ASDF reads this
+;;; file before it resolves the :DEPENDS-ON of any system below, so the tree, the gate and the
+;;; desktop build all see the feature before dexador's plan is made. The same form is at the top
+;;; of hermes.asd, praxeon.asd and hyperion.asd, the other files that name dexador. A dexador
+;;; compiled before the feature was set still imports cl+ssl; macos-tls.lisp refuses to load
+;;; with it and names the directory to delete. An application outside the tree that depends on
+;;; dexador directly must list an aion system before it, or push the feature itself.
+#+os-macosx (pushnew :dexador-no-ssl *features*)
+
+;;; A DEXADOR COMPILED BEFORE THE FEATURE. ASDF does not recompile dexador when a feature changes,
+;;; so a fasl of dexador's usocket backend cached on this machine before #905, or built since by
+;;; another project that loads dexador without aion, still imports cl+ssl. Loading it then fails
+;;; inside dexador's DEFPACKAGE with "CL+SSL does not designate any package", which says nothing
+;;; about why. This finds that fasl first, by the package name in its bytes, and says what to
+;;; delete. The directory is the one ASDF's output translations give for dexador's sources, so it
+;;; is right wherever this machine's fasl cache is. src/http-client/macos-tls.lisp checks the
+;;; dexador already in an image, for an image that loaded dexador before reading this file.
+#+os-macosx
+(let* ((source (ignore-errors (asdf:system-source-directory "dexador")))
+       (fasl (and source (asdf:apply-output-translations
+                          (merge-pathnames "src/backend/usocket.fasl" source)))))
+  (when (and fasl (probe-file fasl)
+             (with-open-file (in fasl :element-type '(unsigned-byte 8))
+               (let ((octets (make-array (file-length in) :element-type '(unsigned-byte 8))))
+                 (search (map 'vector #'char-code "CL+SSL")
+                         (subseq octets 0 (read-sequence octets in))))))
+    (error "~{~A~%~}"
+           (list "aion.asd: dexador's compiled files on this machine were built with cl+ssl."
+                 (concatenate 'string
+                              "On macOS, aion makes https requests over aion/tls and needs dexador"
+                              " compiled with :DEXADOR-NO-SSL on *FEATURES* (#905). ASDF does not"
+                              " recompile dexador when that feature changes.")
+                 ""
+                 "Delete dexador's compiled files and load again:"
+                 (format nil "  ~A" (namestring (make-pathname :name nil :type nil
+                                                               :directory (butlast (pathname-directory fasl) 2)
+                                                               :defaults fasl)))))))
+
 (defsystem "aion"
   :description "A Coalton-first functional standard library for Common Lisp."
   :author "Bob <eternal.recursion@proton.me>"
@@ -368,9 +415,13 @@
   ;; WinHTTP; fetch.lisp opens a pinned TLS connection with it (#295). Guarded on :os-windows,
   ;; which UIOP maintains before any .asd is read (see scripts/install-deps.lisp).
   ;; On Windows a pinned connection uses aion/tls for TLS and aion/windows for Windows' verdict
-  ;; on the server's certificate (#536). aion/tls loads its mbedTLS on first use, not here.
-  :depends-on ("dexador" "quri" "usocket" (:feature (:not :os-windows) "cl+ssl")
-               (:feature :os-windows "aion/tls") (:feature :os-windows "aion/windows")
+  ;; on the server's certificate (#536). On macOS every https request uses aion/tls, with
+  ;; aion/darwin's verdict, and cl+ssl is not loaded at all (#905, and the feature at the top of
+  ;; this file). aion/tls loads its mbedTLS on first use, not here.
+  :depends-on ("dexador" "quri" "usocket"
+               (:feature (:and (:not :os-windows) (:not :os-macosx)) "cl+ssl")
+               (:feature (:or :os-windows :os-macosx) "aion/tls")
+               (:feature :os-windows "aion/windows") (:feature :os-macosx "aion/darwin")
                "aion/retry")   ; TRANSIENCE and RETRY-AFTER methods for HTTP-ERROR (#79)
   :serial t
   :components ((:module "src/http-client"
@@ -378,22 +429,26 @@
                 :components ((:file "packages")
                              (:file "client")
                              (:file "openssl") ; a patch to cl+ssl for OpenSSL 4 (#706)
+                             ;; a saved image starts without OpenSSL (#1173)
+                             (:file "openssl-reopen")
                              (:file "http1")   ; the pinned exchange on Windows (#536)
                              (:file "fetch")
+                             (:file "macos-tls") ; dexador's https over aion/tls on macOS (#905)
                              (:file "stream"))))  ; a streamed response, cancellable (#984)
   :in-order-to ((test-op (test-op "aion/http-client/tests"))))
 
 (defsystem "aion/http-client/tests"
   :description "Tests for aion/http-client: stage order, the effect seam, and failure."
   ;; The transport tests run a small HTTP server in the test image (usocket, bordeaux-threads)
-  ;; and, off Windows, a TLS one (cl+ssl) (#295). On Windows the pinned-connection tests call
-  ;; aion/tls and aion/windows directly (#536).
+  ;; and a TLS one: cl+ssl on Linux (#295), aion/tls on Windows and macOS. On Windows and macOS
+  ;; the pinned-connection tests call aion/tls and the platform's verifier directly (#536, #905).
   :depends-on ("aion/http-client" "fiveam" "usocket" "bordeaux-threads" "aion/test-threads" "quri"
                "aion/test-http"
                "aion/retry"   ; TRANSIENCE and RETRY-AFTER of an HTTP-ERROR (#79)
                "dexador"      ; the default User-Agent a pinned request sends (#985)
-               (:feature (:not :os-windows) "cl+ssl")
-               (:feature :os-windows "aion/tls") (:feature :os-windows "aion/windows"))
+               (:feature (:and (:not :os-windows) (:not :os-macosx)) "cl+ssl")
+               (:feature (:or :os-windows :os-macosx) "aion/tls")
+               (:feature :os-windows "aion/windows") (:feature :os-macosx "aion/darwin"))
   :serial t
   :components ((:module "tests"
                 :serial t
@@ -466,7 +521,8 @@
                 :serial t
                 :components ((:file "packages")
                              (:file "ffi")
-                             (:file "cf"))))
+                             (:file "cf")
+                             (:file "trust"))))   ; a TLS server's certificates (#905)
   :in-order-to ((test-op (test-op "aion/darwin/tests"))))
 
 (defsystem "aion/darwin/tests"
@@ -475,7 +531,8 @@
   :serial t
   :components ((:module "tests/darwin"
                 :serial t
-                :components ((:file "cf-tests"))))
+                :components ((:file "cf-tests")
+                             (:file "trust-tests"))))   ; #905
   :perform (test-op (o c) (uiop:symbol-call :aion/darwin/tests '#:run-tests)))
 
 (defsystem "aion/libsecret"
@@ -883,7 +940,7 @@
   ;; Moved out of aion/http-client's tests so the tests of aion/oauth and praxeon/mcp can run
   ;; their own servers in the test image (#527). TLS is reached through cl+ssl when a test asks
   ;; for it, and that test's system loads cl+ssl; this one does not, so it loads on Windows.
-  ;; On Windows TLS is reached through aion/tls the same way (#536).
+  ;; On Windows and macOS TLS is reached through aion/tls the same way (#536, #905).
   :depends-on ("usocket" "bordeaux-threads" "aion/test-threads")
   :components ((:file "tests/test-http")))
 

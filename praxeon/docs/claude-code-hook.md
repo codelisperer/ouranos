@@ -31,8 +31,9 @@ sbcl --non-interactive --load praxeon/scripts/build-claude-code.lisp
 This writes `bin/praxeon-claude-code`, a saved SBCL image (about 95 MB) that starts in about
 10 ms. It is dumped through `scripts/dump-image.lisp`, so it takes its temporary and cache
 directories from the environment it runs in, not the build machine's. It needs no SBCL or
-Quicklisp to run. On Linux and macOS it opens OpenSSL at start from the path it was built
-against, so it runs only on a machine that has that library there. The image is saved
+Quicklisp to run. On Linux it opens OpenSSL at start from the path it was built against, so it
+runs only on a machine that has that library there. On macOS it opens no OpenSSL (#905): its
+https goes through `aion/tls`, which loads mbedTLS on the first https request. The image is saved
 uncompressed on purpose: a compressed image is decompressed on every start, and the hook starts
 once per matching tool call.
 
