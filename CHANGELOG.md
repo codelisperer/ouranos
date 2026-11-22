@@ -1677,7 +1677,9 @@ its tag.
   compared by identity. A replaced history does not contain it, so the trim starts again. Two
   related changes:
   - A workflow's merge carries a child's trim point back to the agent when it is further on, so
-    the next turn sends from where the child's turn did and reads its cached prefix.
+    the next turn sends from about where the child's turn did. A child that trimmed into its own
+    turn hands back the first message its `wf:parallel` group added instead, so the turns of
+    children that merged before it are still sent.
   - The trim point is not moved back when the budget grows, for example after `move-conversation`
     to an agent with a larger `:history-budget`: less is sent than the budget allows until the
     history next outgrows it. Set `agent-trim-from` to NIL to send everything that fits at once,

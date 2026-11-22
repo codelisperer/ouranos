@@ -4999,6 +4999,58 @@ agent sends from where the child's did. When the child's is earlier, the agent k
       (praxeon/workflow::%merge-child-history original view 12)
       (is (eq ours (actor:agent-trim-from original)) "an earlier trim point is not taken"))))
 
+(defclass %locked-request-log (llm:provider)
+  ((lock :initform (bt:make-lock "px-locked-request-log") :reader locked-request-log-lock)
+   (requests :initform '() :accessor locked-request-log-requests))
+  (:documentation "Answers every request with \"done\" and keeps the messages of each, under a
+lock, so the children of a parallel group can share it."))
+
+(defmethod llm:supports-tool-choice-p ((p %locked-request-log)) t)
+
+(defmethod llm:complete ((p %locked-request-log) messages
+                         &key system tools max-tokens temperature tool-choice)
+  (declare (ignore system tools max-tokens temperature tool-choice))
+  (bt:with-lock-held ((locked-request-log-lock p))
+    (setf (locked-request-log-requests p)
+          (append (locked-request-log-requests p) (list messages))))
+  (llm:make-completion :text "done" :stop-reason :end))
+
+(defun %said-p (request text)
+  "True when a message of REQUEST has TEXT in its content."
+  (some (lambda (m) (search text (format nil "~A" (llm:content m)))) request))
+
+(test a-parallel-sibling-s-turn-is-still-sent-after-another-child-trimmed-into-its-own-turn
+  "#1317, the hub's cold review of #1324. Two children of one WF:PARALLEL group share an agent
+near its history budget. The first child's turn is short and trims nothing. The second's is long
+enough that its trim drops the whole history it started from, so its trim point is its own
+prompt. After the merge, the first child's turn sits between the old history and the second
+child's turn. The step after the group must still send the first child's turn, which fits.
+
+Before this fix, the merge took the second child's trim point as it was, and every later request
+started at the second child's prompt."
+  (let* ((p (make-instance '%locked-request-log))
+         (agent (actor:make-agent :provider p :history-budget 700 :cache-messages t))
+         (long (format nil "second child ~A" (make-string 1600 :initial-element #\l)))
+         (flow (wf:make-workflow
+                :fan "fan out"
+                (wf:parallel (wf:step :first agent "first child, short")
+                             (wf:step :second agent long))
+                (wf:step :after agent "after the group"))))
+    (setf (actor:agent-history agent) (%conversation "old" 10))
+    (wf:run-workflow flow)
+    (let* ((requests (locked-request-log-requests p))
+           (second-child (find-if (lambda (r) (%said-p r "second child")) requests))
+           (after (car (last requests))))
+      (is (= 3 (length requests)) "one request per step: ~D" (length requests))
+      (is (not (%said-p second-child "old q10"))
+          "the second child's own trim dropped the history it started from")
+      (is (%said-p after "after the group") "the last request is the step after the group")
+      (is (%said-p after "second child") "it sends the second child's turn")
+      (is (%said-p after "first child, short")
+          "and the first child's turn, which the second child never saw")
+      (is (<= (prompt:messages-tokens after) 700) "within the budget: ~D"
+          (prompt:messages-tokens after)))))
+
 (test a-history-replaced-by-another-conversation-of-the-same-length-is-sent-whole
   "#1317, the hub's re-review of #1321. The trim point is a message, compared with EQ, not an
 index. An app that replaces the history with another conversation of the same length gets every
@@ -10222,7 +10274,11 @@ and are not asked through response_format."
     (dolist (initargs (list (list :impl "ollama" :base-url "https://ollama.example.com/v1")
                             (list :impl "Ollama" :base-url "https://ollama.example.com/v1")
                             (list :impl "openai" :base-url "http://localhost:11434/v1")
-                            (list :impl "openai" :base-url "http://gpu-box:11434")))
+                            (list :impl "openai" :base-url "http://gpu-box:11434")
+                            ;; The port is read through userinfo, IPv6 brackets and a query.
+                            (list :impl "openai" :base-url "http://user:pw@gpu-box:11434/v1")
+                            (list :impl "openai" :base-url "http://[::1]:11434/v1")
+                            (list :impl "openai" :base-url "http://gpu-box:11434/v1?key=x")))
       (let ((p (apply #'make initargs)))
         (is-false (llm:supports-tool-choice-p p) "~S cannot force a choice" initargs)
         (is-false (llm:honours-tool-choice-none-p p) "~S cannot forbid a call" initargs)
@@ -10235,7 +10291,10 @@ and are not asked through response_format."
           "a forced choice signals before sending"))
     (dolist (initargs (list (list :impl "openrouter" :base-url "https://openrouter.ai/api/v1")
                             (list :impl "openai" :base-url "http://localhost:8080/v1")
-                            (list :impl "openai" :base-url "https://proxy.example.com/v1")))
+                            (list :impl "openai" :base-url "https://proxy.example.com/v1")
+                            ;; 11434 elsewhere in the URL is not its port.
+                            (list :impl "openai" :base-url "http://[::1]/v1?port=11434")
+                            (list :impl "openai" :base-url "http://user:11434@gpu-box/v1")))
       (let ((p (apply #'make initargs)))
         (is-true (llm:supports-tool-choice-p p) "control: ~S forces a choice" initargs)
         (is-false (llm:supports-response-format-p p) "control: ~S is asked through a tool call"

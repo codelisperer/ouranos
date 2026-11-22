@@ -225,21 +225,28 @@ Done at the join rather than inside the thread, and in declaration order, which 
 the resulting transcript independent of how the threads were scheduled.
 
 Also carries back the child's trim point (AGENT-TRIM-FROM, #1317) when the child trimmed further
-than ORIGINAL had: the trim point is a message, and the merged history holds the same message
-objects, so the next turn on ORIGINAL sends from where the child's turn did and reads its cached
-prefix. A trim point after another child's turn in the merged history drops that turn from what
-is sent, as any trim drops older exchanges; the history itself keeps it."
+than ORIGINAL had, so the next turn on ORIGINAL sends from about where the child's turn did. A
+child's trim point inside the history it started from is taken as it is. One inside the child's
+own turn is taken as the first message after BASE in the merged history instead: in a parallel
+group, the children that merged earlier put their turns there, and the child never saw them, so
+sending from the child's own turn would leave those turns out of every later request although
+they fit. When this child is the only one, or the first to merge, that message is the first of
+its own turn, which is where it sent from when it trimmed that far."
   (when (and original view)
     (setf (actor:agent-history original)
           (append (actor:agent-history original)
                   (nthcdr base (actor:agent-history view))))
     (let* ((merged (actor:agent-history original))
            (theirs (actor:agent-trim-from view))
-           (at-theirs (and theirs (position theirs merged :test #'eq)))
+           (in-view (and theirs (position theirs (actor:agent-history view) :test #'eq)))
+           (candidate (cond ((null in-view) nil)
+                            ((< in-view base) theirs)
+                            (t (nth base merged))))
+           (at-candidate (and candidate (position candidate merged :test #'eq)))
            (ours (actor:agent-trim-from original))
            (at-ours (and ours (position ours merged :test #'eq))))
-      (when (and at-theirs (or (null at-ours) (> at-theirs at-ours)))
-        (setf (actor:agent-trim-from original) theirs)))))
+      (when (and at-candidate (or (null at-ours) (> at-candidate at-ours)))
+        (setf (actor:agent-trim-from original) candidate)))))
 
 (defun %run-group (grp bb)
   "Run a GROUP's children CONCURRENTLY -- one thread each -- with parallel semantics: every
