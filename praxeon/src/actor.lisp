@@ -74,9 +74,10 @@ client rendering `agent-history' still shows the whole conversation."
   ;; provider's cache. NIL by default, for the same reason as CACHE-SYSTEM. See
   ;; %WITH-LATEST-MESSAGE-MARKED.
   (cache-messages nil)
-  ;; TRIM-FROM (#1317): with CACHE-MESSAGES and a history budget, the index in the history of the
-  ;; first message still sent after the last trim. Conversation state; see %TRIM-IN-STEPS.
-  (trim-from 0)
+  ;; TRIM-FROM (#1317): with CACHE-MESSAGES and a history budget, the first message of the history
+  ;; still sent after the last trim, as the message object itself, or NIL. Conversation state; see
+  ;; %TRIM-IN-STEPS.
+  (trim-from nil)
   (means (make-hash-table :test #'equal)) ; name(string) -> means-entry
   (context (ctx:make-context) :type ctx:context)
   ;; 120000 ESTIMATED tokens, not NIL, and the default is the decision. An opt-in bound
@@ -958,10 +959,20 @@ fits, old exchanges are dropped until what is left fits half of BUDGET, the newe
 kept, and AGENT-TRIM-FROM records where the history now starts. The messages before the cache
 mark then change once per trim rather than on every step.
 
-AGENT-TRIM-FROM is ignored, and the trim starts again from FROM, when it is not the start of an
-exchange in HISTORY, such as after the history was replaced by a shorter one. FROM is where the
-thread's observations leave the history (0 without them). Emits :CONTEXT-TRIMMED when anything
-before FROM's tail is not sent, as PROMPT:TRIM-HISTORY does, and leaves :CONTEXT-OVERFLOW to it."
+HISTORY is AGENT-HISTORY with cleared results replaced by their stand-ins, message for message,
+so an index into one is an index into the other. AGENT-TRIM-FROM is a message object of
+AGENT-HISTORY, compared with EQ, not an index, so a history the app replaces with another
+conversation, of any length, does not contain it: the trim then starts again from FROM, and
+everything that fits is sent. It is also ignored when it is not the first message of an exchange
+after FROM. FROM is where the thread's observations leave the history (0 without them).
+
+THE TRIM POINT IS NOT MOVED BACK. When the budget grows, as when MOVE-CONVERSATION hands the
+history to an agent with a larger budget, the history is still sent from AGENT-TRIM-FROM, so
+less is sent than the budget would allow until the history next outgrows it. Set
+AGENT-TRIM-FROM to NIL to send everything that fits at once, at the price of one cache miss.
+
+Emits :CONTEXT-TRIMMED when anything before FROM's tail is not sent, as PROMPT:TRIM-HISTORY does,
+and leaves :CONTEXT-OVERFLOW to it."
   (let* ((tail (nthcdr from history))
          (groups (prompt:exchanges tail))
          ;; The index in HISTORY at which each exchange starts.
@@ -969,7 +980,9 @@ before FROM's tail is not sent, as PROMPT:TRIM-HISTORY does, and leaves :CONTEXT
                        for at = from then (+ at n)
                        for n = (length g)
                        collect at))
-         (kept-from (if (member (agent-trim-from agent) starts) (agent-trim-from agent) from))
+         (marker (agent-trim-from agent))
+         (at (and marker (position marker (agent-history agent) :test #'eq)))
+         (kept-from (if (and at (member at starts)) at from))
          (kept (nthcdr (or (position kept-from starts) 0) groups))
          (tokens (lambda (gs) (prompt:messages-tokens (loop for g in gs append g)))))
     (if (plusp (prompt:pinned-exchange-count groups))
@@ -982,7 +995,7 @@ before FROM's tail is not sent, as PROMPT:TRIM-HISTORY does, and leaves :CONTEXT
               (loop while (and (rest kept) (> (funcall tokens kept) target))
                     do (pop kept))
               (setf kept-from (nth (- (length groups) (length kept)) starts))))
-          (setf (agent-trim-from agent) kept-from)
+          (setf (agent-trim-from agent) (nth kept-from (agent-history agent)))
           (let ((dropped (- (length groups) (length kept))))
             (when (plusp dropped)
               (evt:emit :context-trimmed
