@@ -5051,6 +5051,24 @@ started at the second child's prompt."
       (is (<= (prompt:messages-tokens after) 700) "within the budget: ~D"
           (prompt:messages-tokens after)))))
 
+(test the-compiler-takes-the-cond-clause-after-a-member-of-char-codes
+  "#911, #1214. SBCL 2.6.9 compiles this COND so that the clause after the MEMBER of character
+codes is never taken: compiled, the form leaves the [ unescaped, and interpreted it escapes it.
+PRAXEON/ACTOR's %OBSERVATION-LINE-TEXT is written as a CASE to avoid this, and keeps that form
+whatever this test says. The form is compiled here, at run time, so the result is about the SBCL
+that runs the test."
+  (let ((form '(lambda (text)
+                (with-output-to-string (s)
+                  (loop for ch across text
+                        do (cond ((member ch '(#\Newline #\Return #\Page #\Tab)) (write-char #\Space s))
+                                 ((member (char-code ch) '(#x0B #x85 #x2028 #x2029)) (write-char #\Space s))
+                                 ((char= ch #\[) (write-string "\\[" s))
+                                 (t (write-char ch s))))))))
+    (is (string= "a\\[b" (funcall (compile nil form) "a[b"))
+        "compiled by SBCL ~A" (lisp-implementation-version))
+    (is (string= "a\\[b" (let ((sb-ext:*evaluator-mode* :interpret)) (funcall (eval form) "a[b")))
+        "control: the same form interpreted")))
+
 (test a-history-replaced-by-another-conversation-of-the-same-length-is-sent-whole
   "#1317, the hub's re-review of #1321. The trim point is a message, compared with EQ, not an
 index. An app that replaces the history with another conversation of the same length gets every

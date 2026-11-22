@@ -157,8 +157,8 @@ Pins live in [`scripts/versions.env`](../scripts/versions.env) and the repo-root
 `coalton.pin` — one set for CI and dev machines both.
 
 - **Linux** — the official SBCL binary tarball at the pinned version. That pin sets a
-  **glibc floor**: SBCL 2.6.9's Linux binary needs `GLIBC_2.38`, which `ubuntu-22.04`
-  (2.35) does not have. The test matrix runs `ubuntu-26.04` (glibc 2.43), and
+  **glibc floor**: SBCL 2.6.10's Linux binary needs `GLIBC_2.38` (as 2.6.9's did), which
+  `ubuntu-22.04` (2.35) does not have. The test matrix runs `ubuntu-26.04` (glibc 2.43), and
   `desktop-release.yml` builds on `ubuntu-24.04` (glibc 2.39), so the bundles it produces
   run on Ubuntu 24.04 and later; a build on 26.04 would need glibc 2.43 (#766). Lowering the
   floor below 2.39 means building SBCL from source.
