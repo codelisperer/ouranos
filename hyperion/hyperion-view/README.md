@@ -68,8 +68,8 @@ xcode-select --install     # if `xcode-select -p` prints nothing
 ./build.sh                 # clang++ -std=c++17 -O2 … -framework WebKit
 ```
 
-Verified on Apple clang 21 / Apple silicon → a native `arm64` Mach-O. (Three harmless
-`-Wdeprecated-literal-operator` warnings from the vendored `webview.h`; the binary is fine.)
+Verified on Apple clang 21 / Apple silicon → a native `arm64` Mach-O, with no warnings (#1214
+removed the three `-Wdeprecated-literal-operator` warnings the vendored `webview.h` caused).
 
 ### Windows — WebView2  ✅ *(verified — MSVC and mingw-w64)*
 
@@ -175,5 +175,8 @@ is a design item, not yet built — tracked for `cons desktop`.
 
 ## Provenance
 
-- `webview.h` — webview/webview **v0.10.0**, MIT (license header intact in the file).
+- `webview.h` — webview/webview **v0.10.0**, MIT (license header intact in the file). One local
+  change: the three string-literal operators `_cls`, `_sel` and `_str` are declared as
+  `operator""_cls` rather than `operator"" _cls`, because clang 21 warns that the form with a
+  space is deprecated (#1214). Keep this change when the file is updated from upstream.
 - **WebView2 SDK headers** — fetched at build time on Windows, **not committed** (Microsoft license).

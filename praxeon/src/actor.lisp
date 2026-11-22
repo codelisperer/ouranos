@@ -1197,7 +1197,8 @@ line break is any of the characters PRAXEON/PROMPT counts as one; each becomes a
   ;; A CASE ON THE CHARACTER, with the code test last. Written as a COND whose second clause was
   ;; (MEMBER (CHAR-CODE CH) '(#x0B #x85 #x2028 #x2029)), SBCL 2.6.9 compiled it so that the next
   ;; clause, (CHAR= CH #\[), was never taken, and no [ was escaped; the same COND interpreted
-  ;; escaped it. Found writing #908's forging test, which fails without the escape.
+  ;; escaped it. Found writing #908's forging test, which fails without the escape. SBCL 2.6.10
+  ;; compiles it the same way, measured on its Linux, macOS and release-mode CI legs (#911, #1214).
   (with-output-to-string (s)
     (loop for ch across text
           do (case ch

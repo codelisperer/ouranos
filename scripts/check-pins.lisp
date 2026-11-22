@@ -136,11 +136,16 @@ checked and nothing said so."
 
 (defun file-digest (algorithm path)
   "The lowercase hex digest of PATH's bytes. ALGORITHM is \"sha256\" or \"sha384\"."
+  ;; ironclad's DIGEST-FILE, given no buffer, reads into a 128 KB buffer declared DYNAMIC-EXTENT,
+  ;; which SBCL allocates on the stack. On the Windows leg with SBCL 2.6.10 the process exited at
+  ;; that call with code 1 and no message, while hashing the same bytes from a heap array gave the
+  ;; right digest (#1214). Passing a heap buffer avoids the stack allocation.
   (string-downcase
    (with-output-to-string (s)
      (loop for b across (funcall (read-from-string "ironclad:digest-file")
                                  (if (string= algorithm "sha384") :sha384 :sha256)
-                                 path)
+                                 path
+                                 :buffer (make-array 65536 :element-type '(unsigned-byte 8)))
            do (format s "~2,'0x" b)))))
 
 (defun asset-bytes-problem (fields)
@@ -188,6 +193,8 @@ not an asset block's. The file is named by the block's `file' field, relative to
                                         (enough-namestring path *root*) e)
                                 (uiop:quit 2)))))
     (dolist (block pins)
+      ;; Flushed after each pin, so that a run that dies on a pin shows every pin before it.
+      (finish-output)
       (let* ((name (car block))
              (fields (cdr block))
              (malformed (cdr (assoc :malformed fields)))
@@ -229,4 +236,15 @@ not an asset block's. The file is named by the block's `file' field, relative to
        (format t "All ~D pin~:P declare an advisory source and a review date, and every vendored asset's file matches its hash.~%" (length pins))
        (uiop:quit 0)))))
 
-(main)
+;;; An error this script does not handle is printed with its backtrace and exits 2, so a run that
+;;; fails says why. On the Windows leg with SBCL 2.6.10, the script exited 1 after its first pin
+;;; and printed nothing (#1214).
+(handler-bind ((error (lambda (e)
+                        ;; Standard error first: when the error is about standard output, writing
+                        ;; there again would fail before anything was said.
+                        (format *error-output* "~&check-pins: unhandled error: ~A~%" e)
+                        (sb-debug:print-backtrace :stream *error-output* :count 30)
+                        (finish-output *error-output*)
+                        (ignore-errors (finish-output))
+                        (uiop:quit 2))))
+  (main))

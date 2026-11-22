@@ -132,7 +132,7 @@ jobs:
         #   - Linux: tests run on ubuntu-26.04 (glibc 2.43), the current LTS image, and
         #     desktop-release.yml builds on ubuntu-24.04, because a binary built on 26.04
         #     needs glibc 2.43 and Ubuntu 24.04 desktops have 2.39 (the maintainer's ruling on
-        #     #766). SBCL's own binary sets the lowest image either can use: 2.6.9 needs
+        #     #766). SBCL's own binary sets the lowest image either can use: 2.6.10 needs
         #     GLIBC_2.38, and ubuntu-22.04 ships 2.35. See scripts/versions.env.
         #   - macOS: tests run on macos-26, and desktop-release.yml builds on an older image,
         #     because a build on macos-26 requires macOS 26 to run (#763).

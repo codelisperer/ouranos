@@ -14,6 +14,23 @@ its tag.
 
 ### An app may have to act
 
+- **Toolchain: the pinned SBCL is 2.6.10** (#1214). `scripts/versions.env` sets
+  `SBCL_VERSION=2.6.10` and new `SBCL_SHA256_X86_64_LINUX`, `SBCL_SHA256_X86_64_WINDOWS` and
+  `SBCL_SHA256_ARM64_WINDOWS` values, so a fresh install by `scripts/setup.sh` or
+  `scripts/setup.ps1` gets 2.6.10 and refuses a 2.6.9 download. The Linux binary still needs
+  glibc 2.38. A machine that already has SBCL is not upgraded by every script:
+  - Linux: re-running `scripts/setup.sh` installs 2.6.10 alongside the older one.
+  - macOS: `setup.sh` leaves Homebrew's SBCL alone; run `brew upgrade sbcl`.
+  - Windows: `setup.ps1` leaves an installed SBCL alone. Install the 2.6.10 MSI over it, or
+    uninstall the old one and re-run `setup.ps1`.
+
+  Then rebuild every `bin/cons` and `cons.exe`, worktrees included, because cons refuses to run
+  under an SBCL other than the one that built it (#701, #1110). The fasls under the old
+  `sbcl-2.6.9-*` cache directory are no longer read and can be deleted. An app that pins SBCL in
+  its own CI or Dockerfile moves that pin to 2.6.10 to build against the same compiler the
+  framework is tested on. `hyperion-view`'s vendored `webview.h` no longer makes clang print
+  three `-Wdeprecated-literal-operator` warnings when the launcher is built.
+
 - **praxeon: an `openai-compatible` provider for Ollama no longer claims it can force or forbid a
   tool call, and `generate-structured` asks Ollama through `response_format`** (#1323). Ollama's
   OpenAI-compatible endpoint accepts every `tool_choice` and applies none of them. Measured on
