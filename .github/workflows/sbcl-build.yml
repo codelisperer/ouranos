@@ -125,8 +125,11 @@ jobs:
     needs: build
     runs-on: ubuntu-26.04
     timeout-minutes: 90
+    # verify.yml's job-level env. OURANOS_REQUIRE_BROWSER (#1028) makes a missing Chrome fail
+    # aion/cdp's real-browser tests instead of skipping them; the runner has Chrome.
     env:
       OURANOS_TEST_REAL_CREDENTIAL_STORE: "1"
+      OURANOS_REQUIRE_BROWSER: "1"
     steps:
       - uses: actions/checkout@v7
 
@@ -223,6 +226,8 @@ jobs:
           OURANOS_WITH_UV: "1"
           OURANOS_WITH_TLS: "1"
           OURANOS_WITH_LIBGIT: "1"
+          # As in verify.yml: dokimasia's worked example (#1028) writes its report here.
+          OURANOS_DOKIMASIA_EXAMPLE_OUT: ${{ runner.temp }}/dokimasia-example
         run: |
           set -o pipefail
           scripts/with-secret-service.sh sbcl --dynamic-space-size 4096 --script scripts/verify-tree.lisp \
