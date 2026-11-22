@@ -1651,6 +1651,19 @@ its tag.
 
 ### Fixed
 
+- **praxeon: a turn's wrap-up step keeps its tools, so it reads the cached tools and system
+  prompt** (#1318). With `run-turn ... :on-step-limit :wrap-up`, the wrap-up request was sent no
+  tools (`:tools nil`). A provider renders its prompt as tools, then system, then messages, so
+  that request matched none of the cached prefix of the turn's earlier steps. Now, on a provider
+  whose new `llm:honours-tool-choice-none-p` is true (Anthropic, and the OpenAI-compatible
+  backends other than Meta's and Ollama), the wrap-up is sent the same tools as the earlier steps
+  with `:tool-choice :none` (`tool_choice` none), and reads the cached tools and system prompt.
+  The history is still sent at full price, because Anthropic drops cached message blocks when the
+  tool choice changes. Any other provider is sent no tools, as before. That includes Ollama (the
+  `"ollama"` backend, or any base URL on port 11434), which accepts `tool_choice` none and lets
+  the model call a tool anyway. A wrap-up whose model returns a call anyway still signals
+  `deliberation-failure` without running it.
+
 - **`aion/cdp:browser-exited` says whether the browser was killed by a signal, and which one**
   (#1305). A browser killed by a signal while starting was reported as "exited with code 0"
   over the pipe transport, because libuv reports such a process with an exit status of 0, and
@@ -1811,6 +1824,29 @@ its tag.
     literal `<br/>` into the attribute before.
 
 ### Added
+
+- **praxeon: `make-agent :cache-messages t` marks each request's latest message as the end of the
+  cacheable prefix, so a multi-step tool turn reads the earlier steps from the provider's cache**
+  (#1317). With `:cache-system t` alone, the cached prefix was the tools and the system prompt, and
+  every message, tool results included, was sent at full price on every step. The mark goes on
+  what is sent, never on `agent-history`. It is added after the history is trimmed and before the
+  retrieved facts, which follow it, so a change to the facts does not change the cached prefix.
+  With `offload-tool-results` clearing, the messages before the mark change only when a new batch
+  is cleared. A request that already carries four cache marks (Anthropic's limit), counting tool
+  specs, the system prompt and messages, gets no further mark. With the option on, a message
+  whose content is a string is sent as one text part. Off by default; `agent-cache-messages`
+  reads it, and `move-conversation` keeps the new agent's own setting.
+
+  With the option on and a `:history-budget`, the history is trimmed in steps instead of one
+  exchange at a time: it is sent from the same first exchange while it fits the budget, and when
+  it no longer fits, old exchanges are dropped until it fits half the budget. Trimming one
+  exchange at a time near the budget changed the cached prefix on almost every step, and each such
+  step wrote the whole history to the cache again at 1.25 times the uncached price. The step after
+  a trim, or after a cleared batch, still writes the cache again, and between trims less history
+  is sent than the budget allows. A step that adds more than about 20 content blocks, such as 10
+  or more parallel tool calls, also misses the cache, because Anthropic looks back about 20 blocks
+  for the previous mark. Where the last trim left the history is conversation state, and
+  `move-conversation` moves it.
 
 - **dokimasia's "the page did not settle" message says, for each request still in flight, why the
   settle check kept waiting for it** (#1308). It names each request's URL, its type, the frame and

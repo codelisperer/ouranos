@@ -179,7 +179,7 @@
    #:msg #:role #:content
    #:text-part #:tool-use-part #:tool-result-part
    ;; neutral tools + completions
-   #:tool-choice #:supports-tool-choice-p #:check-tool-choice
+   #:tool-choice #:supports-tool-choice-p #:honours-tool-choice-none-p #:check-tool-choice
    #:supports-response-format-p #:complete-with-schema
    #:anthropic-request-body #:openai-request-body
    #:generate-structured #:validate-arguments #:validate-against-schema
@@ -358,7 +358,7 @@
    #:agent #:make-agent #:agent-name #:agent-provider #:agent-means
    #:agent-context #:agent-history #:agent-history-budget #:agent-system-prompt
    #:move-conversation
-   #:agent-cache-system #:agent-system-parts #:agent-max-tokens #:agent-private
+   #:agent-cache-system #:agent-cache-messages #:agent-system-parts #:agent-max-tokens #:agent-private
    #:request-messages #:prompt-breakdown
    #:means-entry #:means-entry-source #:register-means #:means-permitted-p #:agent-means-for
    ;; untrusted content in a turn (#827)
