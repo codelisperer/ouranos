@@ -136,11 +136,16 @@ checked and nothing said so."
 
 (defun file-digest (algorithm path)
   "The lowercase hex digest of PATH's bytes. ALGORITHM is \"sha256\" or \"sha384\"."
+  ;; ironclad's DIGEST-FILE, given no buffer, reads into a 128 KB buffer declared DYNAMIC-EXTENT,
+  ;; which SBCL allocates on the stack. On the Windows leg with SBCL 2.6.10 the process exited at
+  ;; that call with code 1 and no message, while hashing the same bytes from a heap array gave the
+  ;; right digest (#1214). Passing a heap buffer avoids the stack allocation.
   (string-downcase
    (with-output-to-string (s)
      (loop for b across (funcall (read-from-string "ironclad:digest-file")
                                  (if (string= algorithm "sha384") :sha384 :sha256)
-                                 path)
+                                 path
+                                 :buffer (make-array 65536 :element-type '(unsigned-byte 8)))
            do (format s "~2,'0x" b)))))
 
 (defun asset-bytes-problem (fields)
