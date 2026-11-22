@@ -14,6 +14,24 @@ its tag.
 
 ### An app may have to act
 
+- **praxeon: an `openai-compatible` provider for Ollama no longer claims it can force or forbid a
+  tool call, and `generate-structured` asks Ollama through `response_format`** (#1323). Ollama's
+  OpenAI-compatible endpoint accepts every `tool_choice` and applies none of them. Measured on
+  Ollama 0.40.16: with the tool named, or `"required"`, qwen3.5:9b called it in 0 of 3 requests
+  each, and with `"none"` it called it in 3 of 3. Ollama is recognised by `:impl "ollama"`, in any
+  case, or by a base URL on port 11434, the default of the `"openai"` backend. For it,
+  `llm:supports-tool-choice-p` and `llm:honours-tool-choice-none-p` are now false and
+  `llm:supports-response-format-p` is true.
+  - **What an app has to do:** an app that passes `:tool-choice` other than `:auto` to such a
+    provider now gets `tool-choice-unsupported` before anything is sent, where the choice used to
+    be ignored. Drop the choice for Ollama.
+  - **What `generate-structured` does now:** it sends the schema as `response_format` json_schema
+    and offers no tools. On a model that supports structured output, such as gpt-oss:20b in the
+    same measurement, it returns the record. On one that does not, such as qwen3.5:9b, Ollama
+    answers HTTP 501 "structured output is unavailable" on the first request.
+  - **Ollama behind a proxy:** when Ollama runs behind a proxy on another port, such as 80 or 443,
+    it is not recognised from the URL; make the provider with `:impl "ollama"`.
+
 - **On macOS, `aion/http-client` makes every https request over `aion/tls`, and macOS decides
   which certificates to trust, so it no longer loads cl+ssl or OpenSSL there** (#905), and a
   macOS desktop bundle no longer needs Homebrew's OpenSSL (#191). One exception remains: Woo
@@ -1650,6 +1668,22 @@ its tag.
   `cons/run`, `toolchain-refusal`, which decides whether a target is refused.
 
 ### Fixed
+
+- **praxeon: with `:cache-messages t`, an app that replaces `agent-history` with another
+  conversation has all of it sent again when it fits** (#1317, follow-up to #1321). The trim
+  point was kept as an index into the history, so a replacement of the same length or longer
+  still started from it, and the earliest exchanges were not sent although everything fitted. The
+  trim point, `agent-trim-from` (now exported), is the first message sent after the last trim,
+  compared by identity. A replaced history does not contain it, so the trim starts again. Two
+  related changes:
+  - A workflow's merge carries a child's trim point back to the agent when it is further on, so
+    the next turn sends from about where the child's turn did. A child that trimmed into its own
+    turn hands back the first message its `wf:parallel` group added instead, so the turns of
+    children that merged before it are still sent.
+  - The trim point is not moved back when the budget grows, for example after `move-conversation`
+    to an agent with a larger `:history-budget`: less is sent than the budget allows until the
+    history next outgrows it. Set `agent-trim-from` to NIL to send everything that fits at once,
+    at the cost of one cache miss.
 
 - **praxeon: a turn's wrap-up step keeps its tools, so it reads the cached tools and system
   prompt** (#1318). With `run-turn ... :on-step-limit :wrap-up`, the wrap-up request was sent no

@@ -4963,11 +4963,117 @@ shorter one, that index is not the start of an exchange in it, and the trim star
 the beginning rather than sending nothing or a broken exchange."
   (let* ((p (make-instance 'request-log :script nil))
          (agent (actor:make-agent :provider p :history-budget 700 :cache-messages t)))
-    (setf (praxeon/actor::agent-trim-from agent) 15
+    (setf (actor:agent-trim-from agent) (llm:msg "user" "a message of another conversation")
           (actor:agent-history agent) (list (llm:msg "user" "q1") (llm:msg "assistant" "a1")))
     (actor:run-turn agent "q2")
     (is (= 3 (length (first (request-log-requests p)))) "the whole short history was sent")
-    (is (= 0 (praxeon/actor::agent-trim-from agent)))))
+    (is (eq (first (actor:agent-history agent)) (actor:agent-trim-from agent))
+        "and the trim point is now its first message")))
+
+(defun %conversation (tag n)
+  "N exchanges of fresh messages, each user message about 55 estimated tokens."
+  (loop for i from 1 to n
+        append (list (llm:msg "user" (format nil "~A q~D ~A" tag i (make-string 200 :initial-element #\q)))
+                     (llm:msg "assistant" (format nil "~A a~D" tag i)))))
+
+(test a-workflow-merge-carries-back-the-child-s-trim-point-when-it-is-further
+  "#1317, the hub's re-review of #1321. A child's turn runs on a copy of the agent, and trimming
+moves the copy's TRIM-FROM. The merge appends the child's messages and takes the child's trim
+point when it is further into the merged history than the agent's own, so the next turn on the
+agent sends from where the child's did. When the child's is earlier, the agent keeps its own."
+  (let* ((old (%conversation "old" 4))
+         (original (actor:make-agent :provider (make-instance 'request-log :script nil)))
+         (view nil))
+    (setf (actor:agent-history original) old
+          (actor:agent-trim-from original) (nth 2 old)
+          view (copy-structure original))
+    (let ((added (%conversation "child" 2)))
+      (setf (actor:agent-history view) (append old added)
+            (actor:agent-trim-from view) (first added))
+      (praxeon/workflow::%merge-child-history original view (length old))
+      (is (= 12 (length (actor:agent-history original))) "the child's messages were appended")
+      (is (eq (first added) (actor:agent-trim-from original)) "and its further trim point taken"))
+    (let ((ours (actor:agent-trim-from original)))
+      (setf view (copy-structure original)
+            (actor:agent-trim-from view) (first old))
+      (praxeon/workflow::%merge-child-history original view 12)
+      (is (eq ours (actor:agent-trim-from original)) "an earlier trim point is not taken"))))
+
+(defclass %locked-request-log (llm:provider)
+  ((lock :initform (bt:make-lock "px-locked-request-log") :reader locked-request-log-lock)
+   (requests :initform '() :accessor locked-request-log-requests))
+  (:documentation "Answers every request with \"done\" and keeps the messages of each, under a
+lock, so the children of a parallel group can share it."))
+
+(defmethod llm:supports-tool-choice-p ((p %locked-request-log)) t)
+
+(defmethod llm:complete ((p %locked-request-log) messages
+                         &key system tools max-tokens temperature tool-choice)
+  (declare (ignore system tools max-tokens temperature tool-choice))
+  (bt:with-lock-held ((locked-request-log-lock p))
+    (setf (locked-request-log-requests p)
+          (append (locked-request-log-requests p) (list messages))))
+  (llm:make-completion :text "done" :stop-reason :end))
+
+(defun %said-p (request text)
+  "True when a message of REQUEST has TEXT in its content."
+  (some (lambda (m) (search text (format nil "~A" (llm:content m)))) request))
+
+(test a-parallel-sibling-s-turn-is-still-sent-after-another-child-trimmed-into-its-own-turn
+  "#1317, the hub's cold review of #1324. Two children of one WF:PARALLEL group share an agent
+near its history budget. The first child's turn is short and trims nothing. The second's is long
+enough that its trim drops the whole history it started from, so its trim point is its own
+prompt. After the merge, the first child's turn sits between the old history and the second
+child's turn. The step after the group must still send the first child's turn, which fits.
+
+Before this fix, the merge took the second child's trim point as it was, and every later request
+started at the second child's prompt."
+  (let* ((p (make-instance '%locked-request-log))
+         (agent (actor:make-agent :provider p :history-budget 700 :cache-messages t))
+         (long (format nil "second child ~A" (make-string 1600 :initial-element #\l)))
+         (flow (wf:make-workflow
+                :fan "fan out"
+                (wf:parallel (wf:step :first agent "first child, short")
+                             (wf:step :second agent long))
+                (wf:step :after agent "after the group"))))
+    (setf (actor:agent-history agent) (%conversation "old" 10))
+    (wf:run-workflow flow)
+    (let* ((requests (locked-request-log-requests p))
+           (second-child (find-if (lambda (r) (%said-p r "second child")) requests))
+           (after (car (last requests))))
+      (is (= 3 (length requests)) "one request per step: ~D" (length requests))
+      (is (not (%said-p second-child "old q10"))
+          "the second child's own trim dropped the history it started from")
+      (is (%said-p after "after the group") "the last request is the step after the group")
+      (is (%said-p after "second child") "it sends the second child's turn")
+      (is (%said-p after "first child, short")
+          "and the first child's turn, which the second child never saw")
+      (is (<= (prompt:messages-tokens after) 700) "within the budget: ~D"
+          (prompt:messages-tokens after)))))
+
+(test a-history-replaced-by-another-conversation-of-the-same-length-is-sent-whole
+  "#1317, the hub's re-review of #1321. The trim point is a message, compared with EQ, not an
+index. An app that replaces the history with another conversation of the same length gets every
+message of it sent when it fits, although the old trim point's index is the start of an exchange
+in the new history too.
+
+THE CONTROL keeps the first conversation: there the trim point is used, and the messages before
+it are not sent."
+  (flet ((first-request (replace)
+           (let* ((p (make-instance 'request-log :script nil))
+                  (agent (actor:make-agent :provider p :history-budget 700 :cache-messages t))
+                  (old (%conversation "old" 6)))
+             (setf (actor:agent-history agent) old
+                   (actor:agent-trim-from agent) (nth 4 old))
+             (when replace
+               (setf (actor:agent-history agent) (%conversation "new" 6)))
+             (actor:run-turn agent "go")
+             (first (request-log-requests p)))))
+    (is (= 13 (length (first-request t))) "the new conversation is sent whole, with the question")
+    (is (= 9 (length (first-request nil)))
+        "control: the same conversation is sent from its trim point, the third exchange")))
+
+
 
 (test stored-results-are-erased-with-their-conversation
   (let* ((agent (actor:make-agent :provider (make-instance 'request-log)))
@@ -10150,9 +10256,65 @@ instead of returning a :WRAPPED-UP answer."
         (is-true (gethash "tools" gather) "~S: the gathering step is offered tools" initargs)
         (is (null (gethash "tools" wrap)) "~S: the wrap-up is sent no tools" initargs)
         (is (null (gethash "tool_choice" wrap)) "~S: and no tool choice" initargs)))
-    (is-true (llm:supports-tool-choice-p (make-instance 'llm:openai-compatible :impl "ollama"
-                                                        :model "m" :api-key "k"))
-             "Ollama still accepts a tool choice; only HONOURS-TOOL-CHOICE-NONE-P changed")))
+    (is-false (llm:supports-tool-choice-p (make-instance 'llm:openai-compatible :impl "ollama"
+                                                         :model "m" :api-key "k"))
+              "Ollama ignores a forced choice as well (#1323), so it cannot force one either")))
+
+(test ollama-is-recognised-by-backend-or-port-and-cannot-force-a-tool-choice
+  "#1323. Ollama ignores every tool_choice, so an OPENAI-COMPATIBLE that talks to it cannot force
+a tool call or forbid one, and GENERATE-STRUCTURED asks it through response_format instead. It
+is recognised by its backend, compared without regard to case, or by a base URL on port 11434.
+A forced choice signals TOOL-CHOICE-UNSUPPORTED before anything is sent. The base URL in that
+case is a closed port, so a request would have failed differently.
+
+THE CONTROL is OpenRouter, and an \"openai\" backend on another port: both still force a choice
+and are not asked through response_format."
+  (flet ((make (&rest initargs)
+           (apply #'make-instance 'llm:openai-compatible :model "m" :api-key "k" initargs)))
+    (dolist (initargs (list (list :impl "ollama" :base-url "https://ollama.example.com/v1")
+                            (list :impl "Ollama" :base-url "https://ollama.example.com/v1")
+                            (list :impl "openai" :base-url "http://localhost:11434/v1")
+                            (list :impl "openai" :base-url "http://gpu-box:11434")
+                            ;; The port is read through userinfo, IPv6 brackets and a query.
+                            (list :impl "openai" :base-url "http://user:pw@gpu-box:11434/v1")
+                            (list :impl "openai" :base-url "http://[::1]:11434/v1")
+                            (list :impl "openai" :base-url "http://gpu-box:11434/v1?key=x")))
+      (let ((p (apply #'make initargs)))
+        (is-false (llm:supports-tool-choice-p p) "~S cannot force a choice" initargs)
+        (is-false (llm:honours-tool-choice-none-p p) "~S cannot forbid a call" initargs)
+        (is-true (llm:supports-response-format-p p) "~S is asked through response_format" initargs)))
+    (let ((p (make :impl "ollama" :base-url "http://127.0.0.1:1/v1")))
+      (is (typep (nth-value 1 (ignore-errors
+                               (llm:complete p '((:role :user :content "hi"))
+                                             :tools (list (%spec)) :tool-choice '(:tool "draft_copy"))))
+                 'cnd:tool-choice-unsupported)
+          "a forced choice signals before sending"))
+    (dolist (initargs (list (list :impl "openrouter" :base-url "https://openrouter.ai/api/v1")
+                            (list :impl "openai" :base-url "http://localhost:8080/v1")
+                            (list :impl "openai" :base-url "https://proxy.example.com/v1")
+                            ;; 11434 elsewhere in the URL is not its port.
+                            (list :impl "openai" :base-url "http://[::1]/v1?port=11434")
+                            (list :impl "openai" :base-url "http://user:11434@gpu-box/v1")))
+      (let ((p (apply #'make initargs)))
+        (is-true (llm:supports-tool-choice-p p) "control: ~S forces a choice" initargs)
+        (is-false (llm:supports-response-format-p p) "control: ~S is asked through a tool call"
+                  initargs)))))
+
+(test generate-structured-on-ollama-asks-through-response-format
+  "#1323. On Ollama, GENERATE-STRUCTURED sends the spec's schema as response_format json_schema,
+offers no tools and sends no tool_choice, and returns the JSON object in the reply's text."
+  (multiple-value-bind (port server)
+      (%serve-replies (list (%meta-text-reply "{\"headline\":\"Spring\",\"characters\":6}")))
+    (let* ((p (make-instance 'llm:openai-compatible :impl "ollama" :api-key "k" :model "m"
+                                                    :base-url (format nil "http://127.0.0.1:~D/v1" port)))
+           (result (llm:generate-structured p '((:role :user :content "Write a headline."))
+                                            (%spec)))
+           (request (first (aion/test-threads:join server :timeout 10)))
+           (sent (jzon:parse (third request))))
+      (is (string= "json_schema" (gethash "type" (gethash "response_format" sent))))
+      (is (null (nth-value 1 (gethash "tools" sent))) "no tools are offered")
+      (is (null (nth-value 1 (gethash "tool_choice" sent))) "and no tool_choice is sent")
+      (is (equal "Spring" (gethash "headline" result))))))
 
 (test a-turn-that-answers-before-its-last-step-is-not-wrapped-up
   "#1182. :WRAP-UP changes only the last step. A turn that answers on its first step was offered

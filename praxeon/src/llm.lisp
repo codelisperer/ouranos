@@ -309,8 +309,9 @@ makes rather than a default they inherit.")
 calling one (#1318). The actor's wrap-up step relies on this to keep the tools in the request.
 
 A provider that accepts a tool choice does not always apply it, so this is a separate question
-from SUPPORTS-TOOL-CHOICE-P. The default is that answer, and a backend that accepts :NONE and
-ignores it says so by defining this.")
+from SUPPORTS-TOOL-CHOICE-P. The default is that answer, and a backend that honours a forced
+choice but not :NONE says so by defining this. Ollama applies neither, so it answers NIL to
+both (#1323).")
   (:method ((p provider)) (supports-tool-choice-p p)))
 
 (defgeneric supports-response-format-p (provider)
@@ -1070,7 +1071,8 @@ qwen2.5. Meta's Model API serves only Meta's models, so qwen2.5 cannot be its de
   "The backends SUPPORTS-RESPONSE-FORMAT-P is true for: those that take response_format with type
 json_schema. Meta's Model API does (https://dev.meta.ai/docs/structured-output, #680). Others
 may too, but GENERATE-STRUCTURED prefers a forced tool call wherever one is supported, so a
-backend is listed here only when it cannot force one.")
+backend is listed here only when it cannot force one. Ollama is not listed by name, because it
+is also recognised by its port (%OLLAMA-ENDPOINT-P); SUPPORTS-RESPONSE-FORMAT-P adds it.")
 
 (defparameter +openai-compatible-no-recursive-schema-impls+
   '("meta")
@@ -1083,17 +1085,33 @@ does (https://dev.meta.ai/docs/structured-output, #680). RESPONSE-FORMAT-SCHEMA-
 \"none\", \"required\" and a named function (https://dev.meta.ai/docs/tool-calling, #678), so
 SUPPORTS-TOOL-CHOICE-P is false for it and a forced choice signals before anything is sent.")
 
-(defparameter +openai-compatible-ignores-tool-choice-none-impls+
+(defparameter +openai-compatible-ignores-tool-choice-impls+
   '("ollama")
-  "The backends that accept tool_choice \"none\" and ignore it, so HONOURS-TOOL-CHOICE-NONE-P is
-false for them. Measured for Ollama 0.40.16 with qwen3.5:9b on 2026-11-21: sent one tool and a
-request to use it, the model called the tool in 3 of 3 requests with tool_choice \"none\", as it
-did in 3 of 3 with \"auto\" (#1318). A base URL on Ollama's port, 11434, counts as Ollama
-whatever the backend is called, because the \"openai\" backend points there by default.")
+  "The backends that accept every tool_choice and apply none of them, so SUPPORTS-TOOL-CHOICE-P
+is false for them, and through it HONOURS-TOOL-CHOICE-NONE-P (#1318, #1323). Measured for
+Ollama 0.40.16 on 2026-11-21, POST /v1/chat/completions, three requests per setting:
+
+  - one tool and a request to use it: qwen3.5:9b called the tool in 3 of 3 requests with
+    tool_choice \"none\", as in 3 of 3 with \"auto\";
+  - one tool and a request that does not need it: qwen3.5:9b called it in 0 of 3 requests with
+    the tool named, 0 of 3 with \"required\", and 0 of 3 with no tool_choice; gpt-oss:20b in 0
+    of 1 with the tool named.
+
+Compared without regard to case. See %OLLAMA-ENDPOINT-P for the base URLs that count as Ollama.")
+
+(defparameter +ollama-port+ 11434
+  "The port Ollama listens on by default, and the one the \"openai\" and \"ollama\" backends'
+default base URL names.")
 
 (defun %ollama-endpoint-p (p)
-  (or (member (oai-impl p) +openai-compatible-ignores-tool-choice-none-impls+ :test #'string=)
-      (search ":11434/" (concatenate 'string (or (oai-base-url p) "") "/"))))
+  "True when P, an OPENAI-COMPATIBLE, is taken to talk to Ollama: its backend is one of
++OPENAI-COMPATIBLE-IGNORES-TOOL-CHOICE-IMPLS+, or its base URL's port is +OLLAMA-PORT+, whatever
+the backend is called, because the \"openai\" backend points there by default. Ollama behind a
+proxy on another port, such as 80 or 443, is not recognised from its URL; make the provider with
+:IMPL \"ollama\" there."
+  (or (member (oai-impl p) +openai-compatible-ignores-tool-choice-impls+ :test #'string-equal)
+      (let ((endpoint (ignore-errors (parse-endpoint (oai-base-url p)))))
+        (and endpoint (= +ollama-port+ (endpoint-port endpoint))))))
 
 (defun %oai-default-model (impl)
   "The model OPENAI-COMPATIBLE uses for IMPL when none is configured."
@@ -1203,13 +1221,17 @@ through response_format (#680)."
     body))
 
 (defmethod supports-tool-choice-p ((p openai-compatible))
-  (not (member (oai-impl p) +openai-compatible-auto-only-impls+ :test #'string=)))
-
-(defmethod honours-tool-choice-none-p ((p openai-compatible))
-  (and (supports-tool-choice-p p) (not (%ollama-endpoint-p p))))
+  (not (or (member (oai-impl p) +openai-compatible-auto-only-impls+ :test #'string=)
+           (%ollama-endpoint-p p))))
 
 (defmethod supports-response-format-p ((p openai-compatible))
-  (and (member (oai-impl p) +openai-compatible-response-format-impls+ :test #'string=) t))
+  (or (and (member (oai-impl p) +openai-compatible-response-format-impls+ :test #'string=) t)
+      ;; Ollama cannot force a tool call (+OPENAI-COMPATIBLE-IGNORES-TOOL-CHOICE-IMPLS+), and
+      ;; takes response_format with type json_schema on a model that supports structured output.
+      ;; Measured on Ollama 0.40.16 (#1323): gpt-oss:20b returned an object matching a
+      ;; two-field schema; qwen3.5:9b returned HTTP 501 \"structured output is unavailable\",
+      ;; which fails the first request instead of every attempt.
+      (and (%ollama-endpoint-p p) t)))
 
 (declaim (ftype function schema-recursion)) ; praxeon/structured, loaded after this file
 
