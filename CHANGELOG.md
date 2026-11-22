@@ -1876,6 +1876,19 @@ its tag.
 
 ### Added
 
+- **dokimasia: `cons acceptance` runs an app's suite in a headless browser from the command line**
+  (#1028). `dokimasia/cons.lisp` is new, with the targets `build`, `test`, `repl` and
+  `acceptance`. `cons acceptance SYSTEM=<system> SUITE=<suite>` loads the system, runs the suite and
+  exits 0 when every row passed, 1 when a row failed or was not run (a run with no browser exits 1),
+  and 2 for a wrong parameter, a system that does not load, or a suite that is not defined.
+  `VIEWPORTS` (`desktop`, `phone`) and `SCHEMES` (`light`, `dark`) take comma-separated names, and
+  `OUT` is the directory for the report and screenshots, by default `build/dokimasia/`. An app can
+  copy the target into its own `cons.lisp` unchanged. The functions behind it are
+  `dokimasia:run-from-command-line`, which quits with the code, and
+  `dokimasia:command-line-exit-code`, which returns it; `dokimasia:parse-viewports` and
+  `dokimasia:parse-schemes` read the lists and signal `dokimasia:command-line-error`. See
+  "From the command line" in `dokimasia/README.md`.
+
 - **praxeon: `make-agent :cache-messages t` marks each request's latest message as the end of the
   cacheable prefix, so a multi-step tool turn reads the earlier steps from the provider's cache**
   (#1317). With `:cache-system t` alone, the cached prefix was the tools and the system prompt, and
