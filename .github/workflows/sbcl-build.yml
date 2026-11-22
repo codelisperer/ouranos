@@ -266,8 +266,10 @@ jobs:
     needs: build
     runs-on: macos-26
     timeout-minutes: 90
+    # verify.yml's job-level env, as in gate-linux.
     env:
       OURANOS_TEST_REAL_CREDENTIAL_STORE: "1"
+      OURANOS_REQUIRE_BROWSER: "1"
     steps:
       - uses: actions/checkout@v7
 
@@ -371,6 +373,7 @@ jobs:
           OURANOS_WITH_UV: "1"
           OURANOS_WITH_TLS: "1"
           OURANOS_WITH_LIBGIT: "1"
+          OURANOS_DOKIMASIA_EXAMPLE_OUT: ${{ runner.temp }}/dokimasia-example
         run: |
           set -o pipefail
           sbcl --dynamic-space-size 4096 --script scripts/verify-tree.lisp 2>&1 | tee verify.log
