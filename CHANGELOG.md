@@ -14,6 +14,35 @@ its tag.
 
 ### An app may have to act
 
+- **Toolchain: the pinned Coalton is `a07305a5`** (#1326), upstream `main` of 2026-11-22, in
+  `coalton.pin`, 55 commits after `024d0a17`. No file in this tree needed a change. On a
+  development machine, re-run `scripts/setup.sh` or `scripts/setup.ps1`, which fetch it and check
+  the Coalton checkout out at it, or run `git fetch origin && git checkout a07305a5` in that
+  checkout; then clear the fasl cache. An app that pins Coalton in its own build moves that pin
+  to `a07305a5`. An app's own Coalton code may now fail to compile for these reasons, each a
+  change upstream made on purpose:
+  - a `define-type`, `define-exception` or `define-resumption` constructor field that names a type
+    variable the type's head does not declare is an `Unknown type variable` error (`30c9eb00`);
+  - an unmatched close paren in a `coalton-toplevel` form is an error; before, the input after it
+    was dropped without a message (`cd15e48d`);
+  - value restriction is stricter, so an expansive binding such as `(cell:new [])` no longer
+    generalizes (`93ba26ab`), and recursive instance constraints and superclass functional
+    dependencies are checked more strictly (`4d7b6258`, `4d2d3f08`).
+
+  Behaviour changes that compile without an error:
+  - `coalton/format`'s `~A` prints a string's or a character's contents, as Common Lisp's `~A`
+    does, instead of the quoted and escaped form `Show` gives (`53054fc0`);
+  - heuristic inlining is gone, with its settings `*coalton-heuristic-inlining*`,
+    `:perform-heuristic-inlining` and `COALTON_HEURISTIC_INLINING`; `(inline)` and `(noinline)`
+    still work (`35493dda`);
+  - Coalton no longer depends on `sb-mpfr`, and `coalton/xmath`'s `Big-Float` uses one portable
+    implementation on every Lisp (`72ec1133`).
+
+  Pattern matches now compile to decision DAGs (`124ea72a`), and there are new calling
+  conventions and unboxing (`1d0ee3f2`, `2b8b0424`, `6e146fd1`) and release-mode constants
+  (`65ceda44`, `9d589ce9`). Upstream means these to change the generated code only; this tree's
+  release-mode CI job is the one that exercises the release-mode changes.
+
 - **Toolchain: the pinned SBCL is 2.6.10** (#1214). `scripts/versions.env` sets
   `SBCL_VERSION=2.6.10` and new `SBCL_SHA256_X86_64_LINUX`, `SBCL_SHA256_X86_64_WINDOWS` and
   `SBCL_SHA256_ARM64_WINDOWS` values, so a fresh install by `scripts/setup.sh` or
@@ -1888,6 +1917,21 @@ its tag.
   `dokimasia:command-line-exit-code`, which returns it; `dokimasia:parse-viewports` and
   `dokimasia:parse-schemes` read the lists and signal `dokimasia:command-line-error`. See
   "From the command line" in `dokimasia/README.md`.
+
+- **praxeon/llm: a provider can add vendor-specific fields to its request body, such as OpenAI's
+  `"store": false` or OpenRouter's `"provider": {"data_collection": "deny"}`** (#1172).
+  `praxeon/llm:anthropic` and `praxeon/llm:openai-compatible` take `:extra-body`, a JSON object as
+  a string or an `equal` hash-table, added to every request; when not passed it is read from
+  `PRAXEON_<IMPL>_EXTRA_BODY` (or `PRAXEON_<ROLE>_EXTRA_BODY`, or `PRAXEON_LLM_EXTRA_BODY` for the
+  shared backend), so `make-provider-from-env` reads it too. Binding `praxeon/llm:*extra-body*`
+  adds fields to the calls made inside it, replacing the provider's field of the same name, and a
+  thread started through `aion/dynamic:inheriting` carries it. A field the provider builds itself
+  (`model`, `messages`, `stream` and the like), or a value that is not a JSON object, signals
+  `praxeon/conditions:invalid-extra-body`. A provider whose new
+  `praxeon/llm:supports-extra-body-p` is false signals `praxeon/conditions:extra-body-unsupported`
+  from `complete` when `*extra-body*` has fields, instead of sending the request without them.
+  `praxeon/llm:provider-extra-body` reads a provider's fields. A request with no extra fields is
+  unchanged. See "Vendor-specific request fields" in `praxeon/docs/user-guide.md`.
 
 - **praxeon: `make-agent :cache-messages t` marks each request's latest message as the end of the
   cacheable prefix, so a multi-step tool turn reads the earlier steps from the provider's cache**

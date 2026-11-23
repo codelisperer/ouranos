@@ -419,6 +419,7 @@
                "quri"                 ; the #1034 tests read a provider's request URL as the request does
                "fiveam"
                "aion/test-threads"    ; the #531 tests continue a held turn on another thread
+               "aion/dynamic"         ; the #1172 test starts a thread through INHERITING
                ;; The #678 tests answer the meta impl from a server on 127.0.0.1. An SBCL
                ;; contrib, declared because it otherwise arrives only through usocket.
                (:require "sb-bsd-sockets"))
@@ -440,7 +441,10 @@
                              ;; #984: streaming a completion from stub servers, and cancelling it
                              (:file "stream-tests")
                              ;; #1293: a provider set to stay local, after stream-tests
-                             (:file "stay-local-tests"))))
+                             (:file "stay-local-tests")
+                             ;; #1172: vendor-specific request fields, after stream-tests,
+                             ;; whose stub servers it uses
+                             (:file "extra-body-tests"))))
   :perform (test-op (op c)
              (uiop:symbol-call :fiveam :run! (uiop:find-symbol* :praxeon :praxeon/tests))))
 

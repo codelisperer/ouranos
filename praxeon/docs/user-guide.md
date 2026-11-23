@@ -430,6 +430,55 @@ instead of waiting that long. Each retry is logged at info.
   provider's method to accept it, providers outside this tree included. Bind it around a call to
   retry only that call.
 
+### Vendor-specific request fields (`:extra-body`, `praxeon/llm:*extra-body*`)
+
+Some request settings exist for one vendor only. Two that apps ask for are OpenAI's
+`"store": false`, which asks OpenAI not to store the request, and OpenRouter's
+`"provider": {"data_collection": "deny"}`, which routes the request only to upstream providers
+that do not collect data (OpenRouter also has `"zdr": true` in the same object, for endpoints
+with zero data retention). praxeon adds such fields to the JSON body it sends (#1172).
+
+The fields are a JSON object, given as a string of JSON or as an `equal` hash-table with string
+keys. There are three places to set them:
+
+```lisp
+;; 1. On the provider, for every request it sends.
+(make-instance 'praxeon/llm:openai-compatible :impl "openrouter"
+               :extra-body "{\"provider\": {\"data_collection\": \"deny\"}}")
+
+;; 2. Around the calls that need them. A field here replaces the provider's field of the same name.
+(let ((praxeon/llm:*extra-body* "{\"store\": false}"))
+  (praxeon/llm:complete provider messages))
+```
+
+```sh
+# 3. In the environment, for a provider made by make-provider-from-env. Read like the other
+#    settings: PRAXEON_<ROLE>_EXTRA_BODY, then PRAXEON_<IMPL>_EXTRA_BODY, then
+#    PRAXEON_LLM_EXTRA_BODY when <IMPL> is the backend PRAXEON_LLM_IMPL names.
+PRAXEON_OPENROUTER_EXTRA_BODY='{"provider": {"data_collection": "deny"}}'
+PRAXEON_OPENAI_EXTRA_BODY='{"store": false}'
+```
+
+- A field the provider builds itself (`model`, `messages`, `max_tokens`, `temperature`, `tools`,
+  `tool_choice`, `stream`, and for Anthropic `system`, for OpenAI-compatible backends
+  `response_format` and `stream_options`) is refused with
+  `praxeon/conditions:invalid-extra-body`. Set those through `complete`'s arguments.
+- Fields that are not a JSON object with string keys signal the same condition, when the provider
+  is made for `:extra-body` and the environment, and at the request for `*extra-body*`. The
+  message names the problem and never quotes the value.
+- The Anthropic and OpenAI-compatible providers add the fields
+  (`praxeon/llm:supports-extra-body-p` is true for both). A provider class that does not say it
+  can makes `complete` signal `praxeon/conditions:extra-body-unsupported` when `*extra-body*` has
+  fields, before anything is sent, instead of sending the request without them.
+- A thread started through `aion/dynamic:inheriting`, as an agent's parallel children are,
+  carries `*extra-body*`.
+- praxeon logs only whether `*extra-body*` was set, never the fields.
+- praxeon does not check the fields against what the vendor accepts. A field the vendor does not
+  know may be ignored or refused by the vendor; read its documentation. When OpenRouter finds no
+  upstream provider that meets a routing restriction, the request fails as any refused request
+  does, with `praxeon/conditions:provider-request-failed`, whose status, error code and body say
+  why. praxeon has no separate condition for that case.
+
 ### The output limit (`:max-tokens`)
 
 Each model call of a turn may generate at most a set number of output tokens. The text, the
