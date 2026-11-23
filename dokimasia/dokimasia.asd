@@ -48,7 +48,8 @@
                              (:file "steps")
                              (:file "audit")
                              (:file "report")
-                             (:file "run"))))
+                             (:file "run")
+                             (:file "command"))))
   :in-order-to ((test-op (test-op "dokimasia/tests"))))
 
 (defsystem "dokimasia/tests"
@@ -64,7 +65,8 @@
                 :components ((:file "packages")
                              (:file "data-tests")
                              (:file "server")
-                             (:file "browser-tests"))))
+                             (:file "browser-tests")
+                             (:file "command-tests"))))
   :perform (test-op (o c)
              (uiop:symbol-call :dokimasia/tests :run-tests)))
 

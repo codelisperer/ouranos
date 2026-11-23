@@ -28,6 +28,9 @@
    ;; running
    #:run #:*default-out* #:+viewports+
    #:*settle-timeout* #:*step-timeout* #:*quiet-period* #:*audit-impact* #:*audit-timeout*
+   ;; the `acceptance' target of dokimasia/cons.lisp
+   #:run-from-command-line #:command-line-exit-code #:parse-viewports #:parse-schemes
+   #:command-line-error #:command-line-error-reason
    ;; for a settle check or a probe written outside this package
    #:row-page #:row-base-url #:row-target #:row-user #:*row*))
 
