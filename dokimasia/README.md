@@ -374,6 +374,51 @@ workflow sets it and uploads the directory. From
 `OURANOS_TEST_REAL_CREDENTIAL_STORE` belongs to another suite in this repository; an app needs
 only `OURANOS_REQUIRE_BROWSER`.
 
+### 9. From the command line: `cons acceptance`
+
+[`cons.lisp`](cons.lisp) has an `acceptance` target that runs any app's suite without writing
+Lisp to call `run`. From this directory:
+
+```
+cons acceptance SYSTEM=dokimasia/examples/active-search SUITE=active-search VIEWPORTS=desktop,phone OUT=build/acceptance
+```
+
+| Parameter | Default | What it is |
+|---|---|---|
+| `SYSTEM` | none, required | the ASDF system that defines the suite; it is loaded first, and must be on the ASDF path |
+| `SUITE` | none, required | the suite's name, as given to `define-suite` |
+| `VIEWPORTS` | `desktop` | `desktop`, `phone`, or both, separated by commas; the first is the one the cases run in |
+| `SCHEMES` | `light` | `light`, `dark`, or both, separated by commas; the first is the one the cases run in |
+| `OUT` | `build/dokimasia/` | the directory for `report.txt`, `report.json` and the screenshots |
+
+The suite runs against the target its `define-suite` names. The browser always runs headless,
+and the target passes no browser arguments, so it cannot show a window.
+
+The target runs in an sbcl of its own and exits with:
+
+- 0 when every row passed;
+- 1 when a row failed or was not run, or the suite has no rows. A run with no browser, or whose
+  browser could not start, has no passing rows, so it exits 1 whether or not
+  `OURANOS_REQUIRE_BROWSER` is set;
+- 2 when a parameter is wrong, `SYSTEM` could not be loaded, or `SYSTEM` defines no suite named
+  `SUITE`. The message says which.
+
+It prints the report's full path and the counts. This is from the command above, run on macOS;
+the gate does not run the `cons` command itself, but
+[`tests/command-tests.lisp`](tests/command-tests.lisp) calls the function behind it with the same
+kinds of arguments, on every leg:
+
+```
+dokimasia: the report is /…/ouranos/dokimasia/build/acceptance/report.txt
+dokimasia: 5 passed, 0 failed, 0 not run
+```
+
+An app runs the target from its own repository by copying it into its own `cons.lisp`, with the
+five parameters. The target only loads `dokimasia` and calls `dokimasia:run-from-command-line`,
+so it works unchanged there. In CI, run it as a step and upload `OUT` with `if: always()`, as in
+section 8. `dokimasia:command-line-exit-code` takes the same arguments and returns the exit code
+without quitting, for calling from Lisp.
+
 ## Systems
 
 | System | Depends on | What it adds |

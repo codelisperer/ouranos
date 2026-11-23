@@ -184,8 +184,9 @@ The shape of a suite, from the worked example
 - **`dokimasia/elenchon`**, once `elenchon/cases` exists (#28).
 - **Screenshot comparison** between runs.
 
-Not decided: a command built into cons for running a suite. Today an app adds a target to its own
-`cons.lisp` that loads its suite and calls `dokimasia:run`.
+A suite runs from the command line with `cons acceptance SYSTEM=… SUITE=…` in `dokimasia/`, and an
+app copies that target into its own `cons.lisp` (#1028). The dokimasia README's Getting started,
+section 9, has the parameters and exit codes.
 
 Open issues: https://github.com/codelisperer/ouranos/issues?q=is%3Aissue+is%3Aopen+label%3A%22pkg%3Adokimasia%22
 
