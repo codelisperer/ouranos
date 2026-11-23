@@ -274,6 +274,31 @@ PRAXEON/LLM uses it for the UNKNOWN-TOOL-CHOICE detail (#727)."
 REQUESTED is the tool choice as given. The report says only what kind of value it was and its
 length, because COMPLETE signals this inside the handler that logs a failed request at warn,
 and a forced tool's name can come from a prompt (#727)."))
+;;; #1172: fields a provider's request body carries for one vendor only.
+
+(define-condition invalid-extra-body (praxeon-error)
+  ((source :initarg :source :reader invalid-extra-body-source)
+   (reason :initarg :reason :reader invalid-extra-body-reason))
+  (:report (lambda (c s)
+             (format s "The extra request fields from ~A cannot be used: ~A"
+                     (invalid-extra-body-source c) (invalid-extra-body-reason c))))
+  (:documentation "Signalled when extra request fields (PRAXEON/LLM's :EXTRA-BODY, *EXTRA-BODY*
+or a PRAXEON_<IMPL>_EXTRA_BODY variable) are not a JSON object with string keys, or name a field
+the provider builds itself (#1172). SOURCE says where they came from. REASON names the field and
+the problem; neither carries a field's value."))
+
+(define-condition extra-body-unsupported (praxeon-error)
+  ((provider :initarg :provider :reader extra-body-unsupported-provider)
+   (fields :initarg :fields :reader extra-body-unsupported-fields))
+  (:report (lambda (c s)
+             (format s "~A cannot add vendor-specific fields to its request, and ~{~A~^, ~} ~[~;was~:;were~] asked for.~%~%This is signalled rather than sending the request without them on purpose. Such a field can be a request not to store the conversation or not to train on it, and sending the request without it would do what the caller asked not to happen."
+                     (extra-body-unsupported-provider c)
+                     (extra-body-unsupported-fields c)
+                     (length (extra-body-unsupported-fields c)))))
+  (:documentation "Signalled by PRAXEON/LLM:COMPLETE when PRAXEON/LLM:*EXTRA-BODY* is set and the
+provider's PRAXEON/LLM:SUPPORTS-EXTRA-BODY-P is false (#1172). PROVIDER is the provider's class
+name; FIELDS are the names of the fields asked for."))
+
 (define-condition parallel-child-failure (praxeon-error)
   ((failures :initarg :failures :initform nil :reader parallel-child-failure-failures)
    (completed :initarg :completed :initform nil :reader parallel-child-failure-completed))

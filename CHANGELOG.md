@@ -1889,6 +1889,21 @@ its tag.
   `dokimasia:parse-schemes` read the lists and signal `dokimasia:command-line-error`. See
   "From the command line" in `dokimasia/README.md`.
 
+- **praxeon/llm: a provider can add vendor-specific fields to its request body, such as OpenAI's
+  `"store": false` or OpenRouter's `"provider": {"data_collection": "deny"}`** (#1172).
+  `praxeon/llm:anthropic` and `praxeon/llm:openai-compatible` take `:extra-body`, a JSON object as
+  a string or an `equal` hash-table, added to every request; when not passed it is read from
+  `PRAXEON_<IMPL>_EXTRA_BODY` (or `PRAXEON_<ROLE>_EXTRA_BODY`, or `PRAXEON_LLM_EXTRA_BODY` for the
+  shared backend), so `make-provider-from-env` reads it too. Binding `praxeon/llm:*extra-body*`
+  adds fields to the calls made inside it, replacing the provider's field of the same name, and a
+  thread started through `aion/dynamic:inheriting` carries it. A field the provider builds itself
+  (`model`, `messages`, `stream` and the like), or a value that is not a JSON object, signals
+  `praxeon/conditions:invalid-extra-body`. A provider whose new
+  `praxeon/llm:supports-extra-body-p` is false signals `praxeon/conditions:extra-body-unsupported`
+  from `complete` when `*extra-body*` has fields, instead of sending the request without them.
+  `praxeon/llm:provider-extra-body` reads a provider's fields. A request with no extra fields is
+  unchanged. See "Vendor-specific request fields" in `praxeon/docs/user-guide.md`.
+
 - **praxeon: `make-agent :cache-messages t` marks each request's latest message as the end of the
   cacheable prefix, so a multi-step tool turn reads the earlier steps from the provider's cache**
   (#1317). With `:cache-system t` alone, the cached prefix was the tools and the system prompt, and
