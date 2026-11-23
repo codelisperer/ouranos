@@ -10,9 +10,10 @@
 #     commit, builds SBCL twice (the second build compiled by the first), checks what the build
 #     says about itself, runs SBCL's own test suite and packages the result as
 #       sbcl-<version>-ouranos.<release>-<arch>-<os>-binary.tar.bz2 (+ .sha256, + -build.txt)
-#     Linux x86-64 only so far; macOS arm64 and Windows x86-64 come next (#1251).
-#   - gate-linux: installs the Linux build and runs this tree's gate against it, the same
-#     sequence of scripts as the Linux leg of verify.yml (see the note on that job).
+#     Linux x86-64 and macOS arm64 so far; Windows x86-64 comes next (#1251).
+#   - gate-linux, gate-macos: each installs its platform's build and runs this tree's gate
+#     against it, the same sequence of scripts as that platform's leg of verify.yml (see the
+#     note on gate-linux).
 #   - publish: attaches every built file to the release sbcl-v<version>-ouranos.<release>.
 #
 # Triggers:
@@ -66,6 +67,12 @@ jobs:
           # build-sbcl.sh prints the newest glibc symbol the runtime uses.
           - os: ubuntu-24.04
             platform: x86-64-linux
+          # Built on macos-15, not verify.yml's macos-26, for the reason desktop-release.yml
+          # gives (#763): a binary needs at least the macOS it was built for, and macos-15 keeps
+          # that at 15. build-sbcl.sh prints the runtime's minimum macOS. libzstd is linked
+          # statically from the zstd release in sbcl.pin (ruling on #1251, 2026-11-17).
+          - os: macos-15
+            platform: arm64-darwin
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v7
@@ -91,6 +98,17 @@ jobs:
           sudo apt-get "${apt_opts[@]}" install -y --no-download sbcl libzstd-dev
           sbcl --version
 
+      # Homebrew's sbcl compiles only the first build. No zstd from Homebrew: the macOS build
+      # links a libzstd.a that build-sbcl.sh builds from the pinned zstd source.
+      - name: Install the host SBCL (macOS)
+        if: runner.os == 'macOS'
+        timeout-minutes: 15
+        shell: bash
+        run: |
+          set -euo pipefail
+          brew install sbcl >/dev/null
+          sbcl --version
+
       - name: Build, check, test and package SBCL
         shell: bash
         run: |
@@ -103,10 +121,11 @@ jobs:
         if: failure()
         uses: actions/upload-artifact@v7
         with:
-          name: sbcl-logs-${{ matrix.platform }}
+          name: logs-sbcl-${{ matrix.platform }}
           path: |
             ${{ runner.temp }}/sbcl-build/build.log
             ${{ runner.temp }}/sbcl-build/tests.log
+            ${{ runner.temp }}/sbcl-build/zstd.log
           if-no-files-found: ignore
 
       - uses: actions/upload-artifact@v7
@@ -238,9 +257,130 @@ jobs:
         shell: bash
         run: ./scripts/test-postgres.sh down || true
 
+  # The macOS leg of verify.yml, cold, against the macOS build: the same scripts, with Postgres
+  # and pgvector from Homebrew exactly as verify.yml's macOS leg sets them up. verify.yml runs
+  # its macOS leg on macos-26, and so does this job; the build ran on macos-15. When verify.yml's
+  # macOS leg changes, this job changes with it.
+  gate-macos:
+    name: gate on arm64-darwin
+    needs: build
+    runs-on: macos-26
+    timeout-minutes: 90
+    # verify.yml's job-level env, as in gate-linux.
+    env:
+      OURANOS_TEST_REAL_CREDENTIAL_STORE: "1"
+      OURANOS_REQUIRE_BROWSER: "1"
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v7
+        with:
+          name: sbcl-arm64-darwin
+          path: incoming
+
+      # As in gate-linux: installed into ~/.local from the tarball the publish job would upload,
+      # and SBCL_VERSION set to the built version in this runner's copy of versions.env only.
+      - name: Install the SBCL that was built
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd incoming && shasum -a 256 -c ./*.sha256)
+          tarball=$(ls incoming/sbcl-*-arm64-darwin-binary.tar.bz2)
+          version=$(awk '$1 == "version" {print $2; exit}' sbcl.pin)
+          mkdir -p "$RUNNER_TEMP/sbcl-unpack"
+          tar -xjf "$tarball" -C "$RUNNER_TEMP/sbcl-unpack"
+          (cd "$RUNNER_TEMP/sbcl-unpack/sbcl-$version-arm64-darwin" && INSTALL_ROOT="$HOME/.local" sh install.sh >/dev/null)
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          echo "SBCL_HOME=$HOME/.local/lib/sbcl" >> "$GITHUB_ENV"
+          sed -i '' "s/^SBCL_VERSION=.*/SBCL_VERSION=$version/" scripts/versions.env
+          grep '^SBCL_VERSION=' scripts/versions.env
+
+      - name: Check that sbcl is the build under test
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(awk '$1 == "version" {print $2; exit}' sbcl.pin)
+          echo "sbcl is $(command -v sbcl)"
+          [ "$(command -v sbcl)" = "$HOME/.local/bin/sbcl" ] || { echo "::error::sbcl on PATH is not the build under test"; exit 1; }
+          [ "$(sbcl --version)" = "SBCL $version" ] || { echo "::error::sbcl --version says $(sbcl --version)"; exit 1; }
+          otool -L "$HOME/.local/bin/sbcl"
+          if otool -L "$HOME/.local/bin/sbcl" | grep -q zstd; then echo "::error::the runtime links libzstd dynamically"; exit 1; fi
+          sbcl --noinform --non-interactive --no-sysinit --no-userinit \
+            --eval '(unless (member :sb-core-compression *features*) (format t "~&no :sb-core-compression: not the build under test~%") (sb-ext:exit :code 1))' \
+            --eval '(format t "~&default heap ~D MB~%" (floor (sb-ext:dynamic-space-size) 1048576))'
+
+      - name: Provision the Lisp toolchain
+        shell: bash
+        run: ./scripts/setup.sh --ci
+
+      - name: Verify the toolchain
+        shell: bash
+        run: |
+          sbcl --version
+          ./scripts/setup.sh --check
+
+      # verify.yml's macOS leg writes the ASDF drop-in, as a person's first bootstrap does, so
+      # this does too: no OURANOS_BOOTSTRAP_LOCAL and no CL_SOURCE_REGISTRY.
+      - name: Bootstrap the tree
+        env:
+          OURANOS_NO_WARM: "1"
+        run: sbcl --dynamic-space-size 4096 --script bootstrap.lisp
+
+      - name: Install external dependencies (third-party only)
+        run: sbcl --dynamic-space-size 4096 --script scripts/install-deps.lisp
+
+      - name: Check the Coalton pin
+        run: sbcl --dynamic-space-size 4096 --script scripts/check-coalton.lisp
+
+      - name: Build the pinned libuv
+        run: sbcl --dynamic-space-size 4096 --script scripts/build-libuv.lisp
+
+      - name: Build the pinned mbedTLS
+        run: sbcl --dynamic-space-size 4096 --script scripts/build-mbedtls.lisp
+
+      - name: Build the pinned libgit2
+        run: sbcl --dynamic-space-size 4096 --script scripts/build-libgit2.lisp
+
+      - name: Postgres -- Homebrew, as verify.yml's macOS leg
+        shell: bash
+        run: |
+          set -eu
+          brew install postgresql@17 >/dev/null
+          brew link --overwrite --force postgresql@17 || true
+          export PATH="$(brew --prefix postgresql@17)/bin:$PATH"
+          echo "$(brew --prefix postgresql@17)/bin" >> "$GITHUB_PATH"
+          brew install pgvector >/dev/null
+          brew services start postgresql@17
+          for i in $(seq 1 60); do
+            pg_isready -h 127.0.0.1 -p 5432 >/dev/null 2>&1 && break
+            [ "$i" = 60 ] && { echo "postgres did not come up"; exit 1; }
+            sleep 1
+          done
+          createuser -h 127.0.0.1 -s ouranos || true
+          psql -h 127.0.0.1 -d postgres -c "ALTER ROLE ouranos WITH PASSWORD 'ouranos'"
+          n=$(psql -h 127.0.0.1 -d postgres -tAc \
+                "select count(*) from pg_available_extensions where name = 'vector'")
+          if [ "$n" != "1" ]; then
+            echo "pgvector installed but this server cannot see it (pg_available_extensions returned $n)."
+            exit 1
+          fi
+          createdb -h 127.0.0.1 -O ouranos ouranos_test || true
+          echo "MNEMOSYNE_TEST_PG_URL=postgres://ouranos:ouranos@127.0.0.1:5432/ouranos_test?sslmode=disable" >> "$GITHUB_ENV"
+
+      - name: Verify the tree
+        shell: bash
+        env:
+          OURANOS_WITH_UV: "1"
+          OURANOS_WITH_TLS: "1"
+          OURANOS_WITH_LIBGIT: "1"
+          OURANOS_DOKIMASIA_EXAMPLE_OUT: ${{ runner.temp }}/dokimasia-example
+        run: |
+          set -o pipefail
+          sbcl --dynamic-space-size 4096 --script scripts/verify-tree.lisp 2>&1 | tee verify.log
+
   publish:
     name: publish the release
-    needs: [build, gate-linux]
+    needs: [build, gate-linux, gate-macos]
     if: github.ref_type == 'tag' || inputs.publish
     runs-on: ubuntu-26.04
     # Creating a release and uploading assets with the built-in token needs write access to
@@ -253,7 +393,7 @@ jobs:
       - uses: actions/download-artifact@v7
         with:
           path: incoming
-          pattern: sbcl-*-linux
+          pattern: sbcl-*
           merge-multiple: true
 
       - name: Check the files against their checksums and sbcl.pin
