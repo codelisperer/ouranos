@@ -14,6 +14,18 @@ its tag.
 
 ### An app may have to act
 
+- **praxeon/web and praxeon/chat-ui: the agent's replies render no images and no links by
+  default** (#1119, the maintainer's ruling of 2026-11-14). An image in a reply now shows as its
+  alt text and is not fetched, and a link shows as its text with no `href`, because a browser
+  fetches an image as soon as it is shown and a reply can repeat text from elsewhere.
+  `praxeon/chat-ui:assistant-bubble` takes `:images` and `:links`, passed to
+  `hyperion/markdown:render`, and defaults to `:images nil :links :text`; the error bubble of a
+  failed turn uses the same default. To keep the earlier rendering, pass `:trusted-replies t` to
+  `praxeon/web:start`, `serve-forever` or `make-app`, or `:images t :links t` to
+  `assistant-bubble`. `praxeon/chat-ui:user-bubble` takes the same two keys and still renders
+  images and links by default. A Content-Security-Policy for `hyperion/desktop` webviews is not
+  part of this change.
+
 - **Toolchain: the pinned Coalton is `a07305a5`** (#1326), upstream `main` of 2026-11-22, in
   `coalton.pin`, 55 commits after `024d0a17`. No file in this tree needed a change. On a
   development machine, re-run `scripts/setup.sh` or `scripts/setup.ps1`, which fetch it and check
