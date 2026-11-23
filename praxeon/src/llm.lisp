@@ -373,6 +373,105 @@ identifier, not a value from a provider or a user.")
 ;;; whatever context was retrieved for them; that is exactly the data that must not be
 ;;; copied into a log aggregator. Sizes, model, stop reason, token usage and latency are
 ;;; what you need to diagnose a slow or expensive call, and none of them leak content.
+;;; --------------------------------------------------------------------------
+;;; Vendor-specific fields in a request body (#1172)
+;;;
+;;; Some settings exist for one vendor only: OpenAI's store, or OpenRouter's provider routing,
+;;; which can restrict a request to upstream providers that do not collect data. A provider
+;;; adds such fields to the JSON body it sends, from two places: its own :EXTRA-BODY, given when
+;;; it is made or read from PRAXEON_<IMPL>_EXTRA_BODY, and *EXTRA-BODY*, bound around the calls
+;;; that need it. A field in *EXTRA-BODY* replaces the provider's field of the same name.
+;;;
+;;; Fields are a JSON object, given as a string of JSON or as an EQUAL hash-table with string
+;;; keys, whose values COM.INUOE.JZON can write. A field that the provider builds itself, such
+;;; as model or messages, is refused, because it is set through COMPLETE's own arguments. A
+;;; provider that cannot add fields signals EXTRA-BODY-UNSUPPORTED rather than dropping them.
+;;; --------------------------------------------------------------------------
+
+(defvar *extra-body* nil
+  "NIL, or fields to add to the JSON body of each request COMPLETE sends (#1172): a string
+holding a JSON object, or an EQUAL hash-table with string keys. For example, to ask OpenAI not to
+store a request,
+  (let ((praxeon/llm:*extra-body* \"{\\\"store\\\": false}\")) (praxeon/llm:complete p messages))
+A field here replaces the provider's own PROVIDER-EXTRA-BODY field of the same name. A field the
+provider builds itself signals PRAXEON/CONDITIONS:INVALID-EXTRA-BODY. On a provider whose
+SUPPORTS-EXTRA-BODY-P is false, COMPLETE signals PRAXEON/CONDITIONS:EXTRA-BODY-UNSUPPORTED
+before sending anything.
+
+A child thread made through aion/dynamic inherits it, so the calls of an agent's parallel
+children carry the same fields. This is a variable, not a key on COMPLETE, for the reason given
+under *RETRY*.")
+
+(aion/dynamic:register-inheritable '*extra-body*)
+
+(defgeneric supports-extra-body-p (provider)
+  (:documentation "True when PROVIDER adds *EXTRA-BODY* and PROVIDER-EXTRA-BODY to the requests
+it sends (#1172). ANTHROPIC and OPENAI-COMPATIBLE do; a provider class that does not say answers
+NIL, and COMPLETE then refuses a call made with *EXTRA-BODY* set.")
+  (:method ((provider t)) nil))
+
+(defgeneric provider-extra-body (provider)
+  (:documentation "The fields PROVIDER adds to every request body, as an EQUAL hash-table, or NIL
+(#1172). Set with :EXTRA-BODY when the provider is made, or from PRAXEON_<IMPL>_EXTRA_BODY.")
+  (:method ((provider t)) nil))
+
+(defun %invalid-extra-body (source control &rest arguments)
+  (error 'praxeon/conditions:invalid-extra-body
+         :source source :reason (apply #'format nil control arguments)))
+
+(defun %extra-body-table (value source)
+  "VALUE, extra request fields as a string of JSON or a hash-table, as a new EQUAL hash-table,
+or NIL when VALUE is NIL or has no fields. SOURCE names where VALUE came from, for the error.
+Signals INVALID-EXTRA-BODY when VALUE is not a JSON object with string keys. The error never
+quotes VALUE."
+  (let ((table
+          (typecase value
+            (null nil)
+            (string
+             (let ((parsed (handler-case (jzon:parse value)
+                             (error () (%invalid-extra-body source "it is not valid JSON")))))
+               (unless (hash-table-p parsed)
+                 (%invalid-extra-body source "it is JSON, but not an object"))
+               parsed))
+            (hash-table value)
+            (t (%invalid-extra-body source "it is ~A, not a string of JSON or a hash-table"
+                                    (praxeon/conditions:value-shape value))))))
+    (when (and table (plusp (hash-table-count table)))
+      (let ((copy (make-hash-table :test #'equal)))
+        (maphash (lambda (k v)
+                   (unless (stringp k)
+                     (%invalid-extra-body source "a key is ~A, not a string"
+                                          (praxeon/conditions:value-shape k)))
+                   (setf (gethash k copy) v))
+                 table)
+        copy))))
+
+(defun %field-names (table)
+  (sort (loop for k being the hash-keys of table collect k) #'string<))
+
+(defun %add-extra-body (body provider reserved)
+  "BODY, a request body, with PROVIDER's PROVIDER-EXTRA-BODY fields and then *EXTRA-BODY*'s added
+to it (#1172). RESERVED lists the fields this backend builds itself; naming one signals
+INVALID-EXTRA-BODY."
+  (flet ((add (table source)
+           (when table
+             (dolist (name (%field-names table))
+               (when (member name reserved :test #'string=)
+                 (%invalid-extra-body source "~S is a field this provider builds itself; set it through COMPLETE's arguments"
+                                      name))
+               (setf (gethash name body) (gethash name table))))))
+    (add (provider-extra-body provider) "the provider's :EXTRA-BODY")
+    (add (%extra-body-table *extra-body* "PRAXEON/LLM:*EXTRA-BODY*") "PRAXEON/LLM:*EXTRA-BODY*")
+    body))
+
+(defun %check-extra-body-supported (provider)
+  "Signal EXTRA-BODY-UNSUPPORTED when *EXTRA-BODY* has fields and PROVIDER cannot add them."
+  (let ((table (%extra-body-table *extra-body* "PRAXEON/LLM:*EXTRA-BODY*")))
+    (when (and table (not (supports-extra-body-p provider)))
+      (error 'praxeon/conditions:extra-body-unsupported
+             :provider (string-downcase (class-name (class-of provider)))
+             :fields (%field-names table)))))
+
 (defmethod complete :around ((p provider) messages
                              &key system tools max-tokens temperature tool-choice)
   (declare (ignorable system))
@@ -382,11 +481,14 @@ identifier, not a value from a provider or a user.")
                              :messages (length messages) :tools (length tools)
                              :system (if system t nil)      ; presence, never the prompt
                              :max-tokens max-tokens :temperature temperature
+                             ;; #1172: whether extra fields are set, never their names or values
+                             :extra-body (if *extra-body* t nil)
                              ;; the SHAPE of the choice, never a tool name a prompt may have
                              ;; put there -- this log line is metadata only.
                              :tool-choice (cond ((null tool-choice) "auto")
                                                 ((keywordp tool-choice) (string-downcase tool-choice))
                                                 (t "forced")))
+    (%check-extra-body-supported p)
     (%complete-with-retry
      (lambda ()
     (handler-bind
@@ -731,15 +833,31 @@ the provider's PROVIDER-STAY-LOCAL, passed to the request (#1293)."
              :initform "https://api.anthropic.com/v1/messages"
              :reader anthropic-endpoint)
    (version :initarg :version :initform "2023-06-01" :reader anthropic-version)
-   (stay-local :initarg :stay-local :initform nil :reader provider-stay-local))
+   (stay-local :initarg :stay-local :initform nil :reader provider-stay-local)
+   ;; #1172: a JSON string or a hash-table when given, an EQUAL hash-table or NIL once made.
+   (extra-body :initarg :extra-body
+               :initform (%env-for "anthropic" "EXTRA_BODY")
+               :reader provider-extra-body))
   (:documentation "The Anthropic Messages API as a Praxeon provider. Authenticates
 with an x-api-key from PRAXEON_ANTHROPIC_API_KEY (or PRAXEON_LLM_API_KEY when
 PRAXEON_LLM_IMPL is anthropic), billed to that key's API credits. (A
 Pro/Max subscription funds Claude.ai and Claude Code, not the raw Messages API, so
-there is no subscription-billed path here.)"))
+there is no subscription-billed path here.)
+
+EXTRA-BODY is fields added to every request body, a string of JSON or a hash-table, read from
+PRAXEON_ANTHROPIC_EXTRA_BODY when not passed (#1172). See *EXTRA-BODY*."))
 
 (defmethod provider-endpoint ((p anthropic))
   (parse-endpoint (anthropic-endpoint p)))
+
+(defun %extra-body-source (impl)
+  (format nil ":EXTRA-BODY or PRAXEON_~:@(~A~)_EXTRA_BODY" impl))
+
+(defmethod initialize-instance :after ((p anthropic) &key)
+  (setf (slot-value p 'extra-body)
+        (%extra-body-table (slot-value p 'extra-body) (%extra-body-source "anthropic"))))
+
+(defmethod supports-extra-body-p ((p anthropic)) t)
 
 (defun %auth-headers (p)
   "Request headers for provider P: an x-api-key plus the API version."
@@ -765,6 +883,11 @@ property that makes every existing agent provably unaffected."
              (gethash "name" ht) (second tool-choice))
        ht))
     (t (error (%unknown-tool-choice tool-choice)))))
+
+(defparameter +anthropic-built-fields+
+  '("model" "max_tokens" "messages" "system" "tools" "temperature" "tool_choice" "stream")
+  "The request fields ANTHROPIC-REQUEST-BODY and the streaming path build, which extra fields may
+not name (#1172).")
 
 (defun anthropic-request-body (p messages &key system tools
                                             (max-tokens *default-max-tokens*)
@@ -796,7 +919,7 @@ translation happened."
       (setf (gethash "temperature" body) temperature))
     (let ((choice (%anthropic-tool-choice-json tool-choice)))
       (when choice (setf (gethash "tool_choice" body) choice)))
-    body))
+    (%add-extra-body body p +anthropic-built-fields+)))
 
 (defmethod supports-tool-choice-p ((p anthropic)) t)
 
@@ -1128,7 +1251,9 @@ PRAXEON_LLM_IMPL names one this class serves, otherwise \"openai\"."
    (model :initarg :model :reader oai-model)
    (base-url :initarg :base-url :reader oai-base-url)
    (api-key :initarg :api-key :reader oai-api-key)
-   (stay-local :initarg :stay-local :initform nil :reader provider-stay-local))
+   (stay-local :initarg :stay-local :initform nil :reader provider-stay-local)
+   ;; #1172: a JSON string or a hash-table when given, an EQUAL hash-table or NIL once made.
+   (extra-body :initarg :extra-body :reader provider-extra-body))
   (:documentation "Any OpenAI-compatible chat endpoint as a Praxeon provider.
 BASE-URL selects the target (Ollama http://localhost:11434/v1, OpenRouter
 https://openrouter.ai/api/v1, ...); API-KEY is sent as a Bearer token when set
@@ -1138,7 +1263,12 @@ IMPL is the backend these settings belong to: \"openai\", \"ollama\", \"openrout
 A MODEL, BASE-URL or API-KEY not passed is read for that backend as MAKE-PROVIDER-FROM-ENV
 reads it (%ENV-FOR), then defaulted. Unless given, IMPL is the backend PRAXEON_LLM_IMPL names
 when that is one of the four, so a direct MAKE-INSTANCE with PRAXEON_LLM_IMPL=openrouter uses
-the shared PRAXEON_LLM_* settings and OpenRouter's URL, as it did before #291."))
+the shared PRAXEON_LLM_* settings and OpenRouter's URL, as it did before #291.
+
+EXTRA-BODY is fields added to every request body, a string of JSON or a hash-table (#1172). When
+not passed it is read from PRAXEON_<IMPL>_EXTRA_BODY as %ENV-FOR reads a setting, so for
+OpenRouter, PRAXEON_OPENROUTER_EXTRA_BODY='{\"provider\": {\"data_collection\": \"deny\"}}'
+routes every request only to providers that do not collect data. See *EXTRA-BODY*."))
 
 (defmethod initialize-instance :after ((p openai-compatible) &key)
   (let ((impl (oai-impl p)))
@@ -1150,7 +1280,14 @@ the shared PRAXEON_LLM_* settings and OpenRouter's URL, as it did before #291.")
                 (cdr (assoc impl +openai-compatible-impls+ :test #'string=))
                 "http://localhost:11434/v1")))
     (unless (slot-boundp p 'api-key)
-      (setf (slot-value p 'api-key) (%env-for impl "API_KEY")))))
+      (setf (slot-value p 'api-key) (%env-for impl "API_KEY")))
+    (setf (slot-value p 'extra-body)
+          (%extra-body-table (if (slot-boundp p 'extra-body)
+                                 (slot-value p 'extra-body)
+                                 (%env-for impl "EXTRA_BODY"))
+                             (%extra-body-source impl)))))
+
+(defmethod supports-extra-body-p ((p openai-compatible)) t)
 
 (defun %oai-chat-url (p)
   (concatenate 'string (oai-base-url p) "/chat/completions"))
@@ -1199,6 +1336,12 @@ true would add rules of its own about the schema (https://dev.meta.ai/docs/struc
           (gethash "json_schema" response-format) json-schema)
     response-format))
 
+(defparameter +openai-built-fields+
+  '("model" "max_tokens" "messages" "tools" "temperature" "tool_choice" "response_format"
+    "stream" "stream_options")
+  "The request fields OPENAI-REQUEST-BODY and the streaming path build, which extra fields may not
+name (#1172).")
+
 (defun openai-request-body (p messages &key system tools
                                          (max-tokens *default-max-tokens*)
                                          temperature tool-choice response-format)
@@ -1218,7 +1361,7 @@ through response_format (#680)."
       (when choice (setf (gethash "tool_choice" body) choice)))
     (when response-format
       (setf (gethash "response_format" body) (%oai-response-format-json response-format)))
-    body))
+    (%add-extra-body body p +openai-built-fields+)))
 
 (defmethod supports-tool-choice-p ((p openai-compatible))
   (not (or (member (oai-impl p) +openai-compatible-auto-only-impls+ :test #'string=)
@@ -1619,7 +1762,7 @@ NAME, for PRAXEON_LLM_IMPL selection. Returns NAME."
   "Construct the provider for an agent ROLE (a string/keyword/symbol naming the agent,
 e.g. :translate or \"scribe\"), or the global default when ROLE is NIL. Resolution is
 per-role first: the impl comes from PRAXEON_<ROLE>_IMPL else PRAXEON_LLM_IMPL, and the
-chosen constructor then reads PRAXEON_<ROLE>_{MODEL,API_KEY,AUTH,BASE_URL}, then
+chosen constructor then reads PRAXEON_<ROLE>_{MODEL,API_KEY,AUTH,BASE_URL,EXTRA_BODY}, then
 PRAXEON_<IMPL>_*, then the shared PRAXEON_LLM_* when the role's backend is the shared one
 (see %ENV-FOR). So one process can run several agents, each on its
 own model/vendor; NIL role reproduces the old single-provider behavior."

@@ -67,6 +67,8 @@
    #:output-truncated-text #:output-truncated-tool-calls
    #:tool-choice-unsupported #:tool-choice-unsupported-provider
    #:tool-choice-unsupported-requested
+   #:invalid-extra-body #:invalid-extra-body-source #:invalid-extra-body-reason
+   #:extra-body-unsupported #:extra-body-unsupported-provider #:extra-body-unsupported-fields
    #:missing-provenance #:missing-provenance-operation #:missing-provenance-subject
    #:embedding-dimension-mismatch #:embedding-dimension-mismatch-provider
    #:embedding-dimension-mismatch-expected #:embedding-dimension-mismatch-actual
@@ -213,6 +215,8 @@
    #:*connect-timeout* #:*read-timeout* #:*retry*
    ;; environment-driven provider selection
    #:make-provider-from-env #:register-provider-impl #:env-setting
+   ;; vendor-specific fields in a provider's request body (#1172)
+   #:*extra-body* #:supports-extra-body-p #:provider-extra-body
    ;; #758: the #719 mapping of a failed HTTP request, for a module that calls a service itself
    #:request-failure))
 
