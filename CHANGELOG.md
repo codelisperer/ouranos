@@ -14,6 +14,35 @@ its tag.
 
 ### An app may have to act
 
+- **Toolchain: the pinned Coalton is `a07305a5`** (#1326), upstream `main` of 2026-11-22, in
+  `coalton.pin`, 55 commits after `024d0a17`. No file in this tree needed a change. On a
+  development machine, re-run `scripts/setup.sh` or `scripts/setup.ps1`, which fetch it and check
+  the Coalton checkout out at it, or run `git fetch origin && git checkout a07305a5` in that
+  checkout; then clear the fasl cache. An app that pins Coalton in its own build moves that pin
+  to `a07305a5`. An app's own Coalton code may now fail to compile for these reasons, each a
+  change upstream made on purpose:
+  - a `define-type`, `define-exception` or `define-resumption` constructor field that names a type
+    variable the type's head does not declare is an `Unknown type variable` error (`30c9eb00`);
+  - an unmatched close paren in a `coalton-toplevel` form is an error; before, the input after it
+    was dropped without a message (`cd15e48d`);
+  - value restriction is stricter, so an expansive binding such as `(cell:new [])` no longer
+    generalizes (`93ba26ab`), and recursive instance constraints and superclass functional
+    dependencies are checked more strictly (`4d7b6258`, `4d2d3f08`).
+
+  Behaviour changes that compile without an error:
+  - `coalton/format`'s `~A` prints a string's or a character's contents, as Common Lisp's `~A`
+    does, instead of the quoted and escaped form `Show` gives (`53054fc0`);
+  - heuristic inlining is gone, with its settings `*coalton-heuristic-inlining*`,
+    `:perform-heuristic-inlining` and `COALTON_HEURISTIC_INLINING`; `(inline)` and `(noinline)`
+    still work (`35493dda`);
+  - Coalton no longer depends on `sb-mpfr`, and `coalton/xmath`'s `Big-Float` uses one portable
+    implementation on every Lisp (`72ec1133`).
+
+  Pattern matches now compile to decision DAGs (`124ea72a`), and there are new calling
+  conventions and unboxing (`1d0ee3f2`, `2b8b0424`, `6e146fd1`) and release-mode constants
+  (`65ceda44`, `9d589ce9`). Upstream means these to change the generated code only; this tree's
+  release-mode CI job is the one that exercises the release-mode changes.
+
 - **Toolchain: the pinned SBCL is 2.6.10** (#1214). `scripts/versions.env` sets
   `SBCL_VERSION=2.6.10` and new `SBCL_SHA256_X86_64_LINUX`, `SBCL_SHA256_X86_64_WINDOWS` and
   `SBCL_SHA256_ARM64_WINDOWS` values, so a fresh install by `scripts/setup.sh` or
