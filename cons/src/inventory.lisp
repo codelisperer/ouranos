@@ -22,7 +22,7 @@
            #:offline-check #:self-test
            #:compare-pin #:retired-p #:today #:base #:write-markdown
            #:version-numbers #:version-shape #:version< #:newest #:stable-p
-           #:up-to-space))
+           #:up-to-space #:read-inventory))
 (in-package #:cons/inventory)
 
 (defvar *root* nil
