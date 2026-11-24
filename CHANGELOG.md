@@ -21,20 +21,6 @@ its tag.
   app that still uses Woo (`clack-handler-woo`) installs libev itself**: `brew install libev` on
   macOS, `sudo apt-get install libev-dev` on Debian and Ubuntu. The scripts under
   `hyperion/bench` that compare against Woo need it installed the same way.
-- **`scripts/setup.sh` and `scripts/setup.ps1` build libuv, and stop when there is no C compiler**
-  (#504). After SBCL, Quicklisp and Coalton, setup runs `scripts/build-libuv.lisp`, which builds
-  the libuv in `libuv.pin` into `vendor/libuv` for `hyperion/server-uv`, the default HTTP server.
-  It checks for a compiler before installing anything: on macOS the Xcode Command Line Tools
-  (`xcode-select -p`; `/usr/bin/cc` alone does not count), on Linux `cc`, `gcc` or `clang`, on
-  Windows MSVC found through `vswhere` or `OURANOS_MSVC_PATH`. Without one, setup prints what to
-  install (`xcode-select --install`, `build-essential`, or the `winget` command for the MSVC
-  Build Tools), the command to run again, and the opt-out, then exits 1. On Linux with root it
-  installs the compiler itself, as it does libsqlite3. **An app whose CI runs setup on
-  a runner without a compiler must install one or pass `--without-uv` (`-WithoutUv`).** An app
-  whose CI ran `sbcl --script scripts/build-libuv.lisp` after setup can drop that step; leaving
-  it costs nothing, because the build is reused. `--check` (`-Check`) now reports the compiler
-  and a missing or stale `vendor/libuv` as missing, unless `--without-uv` is also given; on
-  Windows MSVC was reported as optional before.
 - **No system in the tree declares Woo, Hunchentoot or their Clack handlers any more** (#373,
   step 5; ADR-0020 point 5). These systems stopped loading `clack-handler-hunchentoot`, and now
   declare `hyperion/server-uv` where they serve requests: `praxeon/elise`,
