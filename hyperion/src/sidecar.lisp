@@ -315,13 +315,6 @@ it was recorded with, and delete the record. A record whose image still runs is 
                  (sb-unix:unix-kill pid 9))
                (ignore-errors (delete-file file))))))))
 
-(defun %timed-wait (queue mutex seconds)
-  "CONDITION-WAIT on QUEUE for up to SECONDS, holding MUTEX again when it returns. SBCL returns from
-a wait that timed out without the mutex, so a loop that waits again would wait without it."
-  (sb-thread:condition-wait queue mutex :timeout seconds)
-  (unless (sb-thread:holding-mutex-p mutex)
-    (sb-thread:grab-mutex mutex)))
-
 ;;; --- one running sidecar ------------------------------------------------------------------
 ;;;
 ;;; GENERATIONS. Each launch and each deliberate stop of a sidecar's process increments its
@@ -394,10 +387,18 @@ while GENERATION is current, so a line from a process that has since exited is n
                        (log:info "hyperion/sidecar: ready" :name (%name s) :captured t)))))
       (error () nil))))
 
+(defparameter +restart-policy+
+  (aion/retry:make-retry-policy :name "sidecar restart" :base-delay 1 :multiplier 2 :max-delay 30
+                                :jitter :none)
+  "The schedule of a restarting sidecar's launches, as AION/RETRY computes it (#79). No jitter: one
+process restarts at a time, so there is nothing to spread out (the hub's ruling 5 on #79).")
+
 (defun %restart-delay (attempt)
   "Seconds to wait before launch number ATTEMPT, where 1 is the first launch and 2 the first
-restart: 1 s before the first restart, doubling to at most 30 s."
-  (min 30 (expt 2 (max 0 (- attempt 2)))))
+restart: 1 s before the first restart, doubling to at most 30 s. AION/RETRY:RETRY-DELAY of
++RESTART-POLICY+ (#79); attempt 1 is given attempt 2's delay, as before, since RETRY-DELAY starts
+at the first retry."
+  (aion/retry:retry-delay +restart-policy+ (max 2 attempt) 0))
 
 (defun %watch (s process generation)
   "Wait for PROCESS to exit. While GENERATION is current, record its exit code and, for a sidecar
@@ -563,7 +564,7 @@ stale. Runs on the supervisor thread. Returns how it ended, or NIL when there wa
           (unless (eq state :starting) (return state)))
         (let ((left (/ (- deadline (get-internal-real-time)) internal-time-units-per-second)))
           (when (<= left 0) (return :timeout))
-          (%timed-wait (sidecar-changed s) (sidecar-lock s) left))))))
+          (aion/dynamic:timed-wait (sidecar-changed s) (sidecar-lock s) left))))))
 
 (defun %stop-one (s)
   "Stop S for good: no restart, no further launch. Runs on the supervisor thread."
@@ -623,11 +624,11 @@ stale. Runs on the supervisor thread. Returns how it ended, or NIL when there wa
                 (let ((next (first (sidecar-set-queue set))))
                   (if (and next (<= (car next) (get-internal-real-time)))
                       (return (cdr (pop (sidecar-set-queue set))))
-                      (%timed-wait (sidecar-set-changed set) (sidecar-set-lock set)
-                                   (if next
-                                       (max 0.01 (/ (- (car next) (get-internal-real-time))
-                                                    internal-time-units-per-second))
-                                       1))))))))
+                      (aion/dynamic:timed-wait (sidecar-set-changed set) (sidecar-set-lock set)
+                                               (if next
+                                                   (max 0.01 (/ (- (car next) (get-internal-real-time))
+                                                                internal-time-units-per-second))
+                                                   1))))))))
       (handler-case (funcall thunk)
         (error (e) (log:warn "hyperion/sidecar: supervisor step failed" :error (type-of e)))))))
 

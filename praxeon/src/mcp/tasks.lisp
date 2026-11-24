@@ -471,13 +471,16 @@ finish by its deadline."
 
 (defun %backoff (interval failures cap)
   "The seconds to wait after the FAILURESth failed poll in a row: INTERVAL, doubled for each
-failure after the first, and no more than CAP, unless INTERVAL itself is more."
-  (let ((wait interval))
-    ;; Doubling stops at CAP, so a long run of failures does not compute a large power of two.
-    (loop repeat (1- failures)
-          while (and (plusp wait) (< wait cap))
-          do (setf wait (* 2 wait)))
-    (max interval (min cap wait))))
+failure after the first, and no more than CAP, unless INTERVAL itself is more.
+
+The doubling is AION/RETRY:RETRY-DELAY's, with no jitter, so the schedule is the shared code's and
+not a second copy of it (#79). It is the same schedule as before, by the hub's ruling on #79: the
+first failure is RETRY-DELAY's attempt 2, and an INTERVAL above CAP is kept, as it was."
+  (max interval
+       (aion/retry:retry-delay
+        (aion/retry:make-retry-policy :name "mcp task poll" :base-delay interval :multiplier 2
+                                      :max-delay cap :jitter :none)
+        (1+ failures) 0)))
 
 (defun %failed-poll (client task kind now)
   "Record a failed poll of TASK, of KIND :SIGN-IN or :ERROR, and set its next poll by %BACKOFF,

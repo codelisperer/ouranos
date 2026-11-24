@@ -332,7 +332,23 @@ sent a date.
 
 It is a PROVIDER-REQUEST-FAILED, so a caller outside a turn handles it as before. Inside a turn
 the generate-image means turns it into a TOOL-ERROR-RESULT, so the model can tell the user to try
-again and the turn goes on. Praxeon does not retry the request."))
+again and the turn goes on. Praxeon does not retry the request. It answers AION/RETRY's
+TRANSIENCE and RETRY-AFTER (#79), so an app that wants a retry can run GENERATE-IMAGE under
+AION/RETRY:WITH-RETRY and have the service's Retry-After honoured."))
+
+(defmethod aion/retry:transience ((c image-request-failed))
+  "From KIND (#79): a 429 is :TRANSIENT, since the service refused the request without making
+anything; a 5xx is what AION/HTTP-CLIENT:STATUS-TRANSIENCE says of its status, so a 503 is
+:TRANSIENT and a 500 :UNKNOWN; and no answer at all is :UNKNOWN, since the service may have made
+the image, and charged for it, before the connection was lost."
+  (case (image-request-failed-kind c)
+    (:rate-limited :transient)
+    (:server-error (aion/http-client:status-transience (cnd:provider-request-failed-status c) nil))
+    (:no-answer :unknown)))
+
+(defmethod aion/retry:retry-after ((c image-request-failed))
+  "The seconds the service's Retry-After header asked for, or NIL (#79)."
+  (image-request-failed-retry-after c))
 
 (defun %refusal-text (provider code stage categories)
   (format nil "The ~A image provider refused to create this image under its content policy~@[ (code ~A)~]~@[ at the ~A stage~]~@[; categories: ~{~A~^, ~}~]. No image was made. Tell the user it was refused, and do not retry the same request."
@@ -447,11 +463,17 @@ the wait is bounded. MAKE-OPENAI-IMAGES and REGISTER-OPENAI-IMAGE take :READ-TIM
    (base-url :initarg :base-url :initform *openai-images-base-url* :reader openai-images-base-url)
    (read-timeout :initarg :read-timeout :initform *openai-images-read-timeout*
                  :reader openai-images-read-timeout)
-   (connect-timeout :initarg :connect-timeout :initform 30 :reader openai-images-connect-timeout))
+   (connect-timeout :initarg :connect-timeout :initform 30 :reader openai-images-connect-timeout)
+   (stay-local :initarg :stay-local :initform nil :reader llm:provider-stay-local))
   (:documentation "OpenAI's Image API, POST BASE-URL/images/generations, as an image provider.
 API-KEY is sent as a bearer token. READ-TIMEOUT and CONNECT-TIMEOUT are in seconds; READ-TIMEOUT
 defaults to *OPENAI-IMAGES-READ-TIMEOUT*. A reply is read up to *MAX-BYTES-PER-IMAGE* for each
-image asked for; a longer one is PROVIDER-REQUEST-FAILED."))
+image asked for; a longer one is PROVIDER-REQUEST-FAILED.
+
+STAY-LOCAL true makes every request stay on this machine, as for the chat providers (#1293): it
+uses no proxy, is refused before anything connects when BASE-URL's host is not loopback, and a
+redirect off the machine is refused instead of followed. The refusal is
+AION/HTTP-CLIENT:STAY-LOCAL-REFUSED, signalled as itself and not as a provider failure."))
 
 (defparameter *max-bytes-per-image* (* 24 1024 1024)
   "The most bytes of reply read for each image requested. An image arrives as base64 inside JSON,
@@ -500,13 +522,13 @@ never falls back to the environment, because the app chose it."
 (defmethod llm:provider-endpoint ((p openai-images))
   (llm:parse-endpoint (openai-images-base-url p)))
 
-(defun make-openai-images (&key (api-key nil api-key-p) model base-url read-timeout)
+(defun make-openai-images (&key (api-key nil api-key-p) model base-url read-timeout stay-local)
   "An OPENAI-IMAGES provider. An API-KEY that is given is used, NIL included; the environment
 is read only when none is given (PRAXEON_OPENAI_API_KEY, then the deprecated
 PRAXEON_IMAGE_API_KEY, which logs a warning once). A given key of NIL or \"\" is no key. MODEL defaults to PRAXEON_IMAGE_MODEL, then *OPENAI-IMAGE-MODEL*;
 BASE-URL to PRAXEON_IMAGE_BASE_URL, then *OPENAI-IMAGES-BASE-URL*; READ-TIMEOUT, in seconds, to
-*OPENAI-IMAGES-READ-TIMEOUT*. Signals MISSING-PROVIDER-KEY when there is no key, because every
-request would fail."
+*OPENAI-IMAGES-READ-TIMEOUT*. STAY-LOCAL is as for the class, default NIL (#1302). Signals
+MISSING-PROVIDER-KEY when there is no key, because every request would fail."
   (let ((key (%key api-key api-key-p)))
     (unless key
       (error 'cnd:missing-provider-key
@@ -519,14 +541,16 @@ request would fail."
                    :model (or model (%getenv "PRAXEON_IMAGE_MODEL") *openai-image-model*)
                    :base-url (or base-url (%getenv "PRAXEON_IMAGE_BASE_URL")
                                  *openai-images-base-url*)
-                   :read-timeout (or read-timeout *openai-images-read-timeout*))))
+                   :read-timeout (or read-timeout *openai-images-read-timeout*)
+                   :stay-local stay-local)))
 
-(defun openai-images-from-env (&key (api-key nil api-key-p) model base-url read-timeout)
+(defun openai-images-from-env (&key (api-key nil api-key-p) model base-url read-timeout
+                                     stay-local)
   "An OPENAI-IMAGES provider as MAKE-OPENAI-IMAGES builds it, or NIL when there is no key, so a
 caller can leave the means unregistered rather than register one that cannot work."
   (let ((key (%key api-key api-key-p)))
     (and key (make-openai-images :api-key key :model model :base-url base-url
-                                 :read-timeout read-timeout))))
+                                 :read-timeout read-timeout :stay-local stay-local))))
 
 (defun openai-image-request-body (provider request)
   "The JSON body, as a hash table, of the request for REQUEST. Separate from the POST so a test
@@ -705,11 +729,16 @@ multipart/form-data to /images/edits."
                  content content-type count)))
 
 (defun %send (label url headers content &key read-timeout connect-timeout max-body-bytes
-                                              refusal)
+                                              refusal stay-local)
   "POST CONTENT to URL with HEADERS and return the reply parsed as JSON. LABEL names the provider
 in reports. A failed request signals IMAGE-REQUEST-FAILED when trying again later may help and
 PROVIDER-REQUEST-FAILED otherwise, unless REFUSAL, a function of that PROVIDER-REQUEST-FAILED,
-returns a condition to signal in its place, such as an IMAGE-REFUSED."
+returns a condition to signal in its place, such as an IMAGE-REFUSED.
+
+STAY-LOCAL is the provider's PROVIDER-STAY-LOCAL, passed to the request (#1302). Its refusal,
+AION/HTTP-CLIENT:STAY-LOCAL-REFUSED, is an HTTP-ERROR, so it is caught first and signalled as
+itself: it means the configuration was broken, and as an IMAGE-REQUEST-FAILED it would tell the
+agent to try again later."
   (let ((retry-after nil))
     (handler-case
         (%parse-reply
@@ -717,7 +746,7 @@ returns a condition to signal in its place, such as an IMAGE-REFUSED."
           (http:send-request
            (http:make-request :method :post :url url :headers headers :content content
                               :read-timeout read-timeout :connect-timeout connect-timeout
-                              :max-body-bytes max-body-bytes)
+                              :max-body-bytes max-body-bytes :stay-local stay-local)
            ;; Leave stages run last to first, so the header is read before ENSURE-2XX signals.
            (list (http:ensure-2xx label)
                  (http:make-interceptor
@@ -727,6 +756,7 @@ returns a condition to signal in its place, such as an IMAGE-REFUSED."
                                                                 "retry-after"))
                            resp)))))
          label)
+      (http:stay-local-refused (e) (error e))
       (http:http-error (e)
         (error (or (and refusal (funcall refusal (llm:request-failure label e)))
                    (%request-failed e retry-after label)))))))
@@ -750,7 +780,8 @@ refusal, otherwise NIL."
          :read-timeout (openai-images-read-timeout p)
          :connect-timeout (openai-images-connect-timeout p)
          :max-body-bytes (* *max-bytes-per-image* (max 1 (or count 1)))
-         :refusal #'%openai-refusal))
+         :refusal #'%openai-refusal
+         :stay-local (llm:provider-stay-local p)))
 
 (defun %media-type (format)
   (cond ((equal format "jpeg") "image/jpeg")
@@ -1194,7 +1225,8 @@ An app normally calls REGISTER-OPENAI-IMAGE, which registers nothing when there 
    :confirm confirm))
 
 (defun register-openai-image (agent &key on-image (api-key nil api-key-p) model base-url
-                                         read-timeout (name "generate-image") capability source
+                                         read-timeout stay-local (name "generate-image")
+                                         capability source
                                          (qualities *qualities*) default-quality
                                          (default-size :auto) resolve-reference
                                          (max-references 4) confirm
@@ -1207,16 +1239,16 @@ The key is API-KEY when given, NIL included, and otherwise PRAXEON_OPENAI_API_KE
 deprecated PRAXEON_IMAGE_API_KEY. A given key of NIL or \"\" is no key, and nothing is registered; an
 empty string is logged at warn, because it usually means the app's key setting is blank.
 ON-IMAGE, QUALITIES, DEFAULT-QUALITY, DEFAULT-SIZE, RESOLVE-REFERENCE, MAX-REFERENCES, CONFIRM
-and REQUIRES-USER-INTENT are as for REGISTER. MODEL, BASE-URL and READ-TIMEOUT are as for
-MAKE-OPENAI-IMAGES."
+and REQUIRES-USER-INTENT are as for REGISTER. MODEL, BASE-URL, READ-TIMEOUT and STAY-LOCAL are
+as for MAKE-OPENAI-IMAGES."
   (when (and api-key-p (equal api-key ""))
     (log:warn "generate-image not registered: the :api-key given is the empty string"
               :name name))
   (let ((provider (if api-key-p
                       (openai-images-from-env :api-key api-key :model model :base-url base-url
-                                              :read-timeout read-timeout)
+                                              :read-timeout read-timeout :stay-local stay-local)
                       (openai-images-from-env :model model :base-url base-url
-                                              :read-timeout read-timeout))))
+                                              :read-timeout read-timeout :stay-local stay-local))))
     (and provider
          (apply #'register agent provider :on-image on-image :name name
                                          :capability capability :source source

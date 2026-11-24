@@ -35,7 +35,7 @@ aion → cons → mnemosyne → elenchon → hyperion → praxeon
 
 A **core** system never depends on one to its **right** (ASDF errors on cycles). An
 **auxiliary** system may reach right if the *system-level* graph stays acyclic (e.g.
-`praxeon/web → hyperion`, `hyperion/testing → elenchon`). Combined apps/examples live in
+`praxeon/web → hyperion`, `dokimasia/elenchon → elenchon`). Combined apps/examples live in
 the **highest** framework they need. ASDF errors on a cycle, so this is enforced rather than advisory — see
 [`../ECOSYSTEM.md`](../ECOSYSTEM.md).
 

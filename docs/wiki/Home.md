@@ -100,15 +100,16 @@ cycles, so the rule is not aspirational — it's mechanical.
 | **Praxeon** | Praxeological framework for agentic AI — actors / means / ends, provider-neutral LLMs, workflow | [Framework Praxeon](Framework-Praxeon.md) |
 
 Auxiliary systems inside a framework *may* reach rightward (`praxeon/web → hyperion`,
-`hyperion/testing → elenchon`) as long as the system-level graph stays acyclic. It's the
+`dokimasia/elenchon → elenchon`) as long as the system-level graph stays acyclic. It's the
 **core** systems that are bound by the line. Apps and examples that combine frameworks live
 in the **highest** framework they need.
 
-### Plus hermes — a satellite leaf-lib, outside the DAG
+### Plus the satellites — hermes and dokimasia, outside the DAG
 
 | Framework | Role | Wiki |
 |---|---|---|
 | **hermes** | External integrations — all the messaging an app needs behind one neutral `deliver`/`send` protocol (email + SMS shipped, via SendGrid/Twilio and a dev transport, plus signature-verified inbound webhooks); payments next | [Framework Hermes](Framework-Hermes.md) |
+| **dokimasia** | Acceptance tests for any app that runs in a browser, written as data: cases with rows of inputs and the screens, text and stored values each should produce, run in a headless Chrome or Edge, with an axe-core audit and screenshots | [Framework Dokimasia](Framework-Dokimasia.md) |
 
 hermes deliberately sits **off the line**. It depends only on `aion` plus external
 HTTP/JSON libraries, and never on mnemosyne, hyperion, or praxeon. Crucially, **nothing in
@@ -116,6 +117,11 @@ the core DAG depends on hermes** — it is a leaf. Apps consume it directly, whi
 what lets it talk to the outside world without dragging third-party service concerns into
 the core. Persistence belongs to mnemosyne; web endpoints belong to hyperion; hermes owns
 only the provider protocol, the client, and webhook verification.
+
+dokimasia is a satellite in the same way: its core system depends only on `aion` and external
+libraries, so it can test an app on any stack, and nothing in the line depends on it. Its aux
+systems `dokimasia/mnemosyne` and `dokimasia/hyperion` reach right into the line, for apps built
+on those frameworks.
 
 ---
 
@@ -165,6 +171,7 @@ The roadmap is **not** duplicated in this wiki. It lives on the board:
 - [Framework Hyperion](Framework-Hyperion.md) — the web framework
 - [Framework Praxeon](Framework-Praxeon.md) — agentic AI
 - [Framework Hermes](Framework-Hermes.md) — external integrations (satellite leaf-lib)
+- [Framework Dokimasia](Framework-Dokimasia.md) — acceptance tests in a browser (satellite)
 
 **In the repository**
 

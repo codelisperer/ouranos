@@ -63,7 +63,9 @@ PRAXEON/CONDITIONS:DELIBERATION-FAILURE."))
   (if (null documents)
       '()
       (let ((start (get-internal-real-time))
-            (ranking (%check-ranking (call-next-method) (length documents))))
+            ;; Under *RETRY* when an app set one (#79).
+            (ranking (%check-ranking (%with-retry (lambda () (call-next-method)))
+                                     (length documents))))
         ;; Counts only, never the query or the documents, as for a completion.
         (log:debug "rerank" :reranker (string (type-of r)) :model (reranker-model-of r)
                             :documents (length documents) :ms (%ms-since start))

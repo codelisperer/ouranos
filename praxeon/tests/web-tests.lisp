@@ -1571,8 +1571,8 @@ never updates. Ending the session then ends the stream, and the thread the serve
                                                             :element-type 'character
                                                             :external-format :utf-8))
                    (text ""))
-               (format st "GET /api/events?ticket=~A HTTP/1.1~C~CHost: 127.0.0.1~C~CConnection: close~C~C~C~C"
-                       ticket #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed
+               (format st "GET /api/events?ticket=~A HTTP/1.1~C~CHost: 127.0.0.1:~D~C~CConnection: close~C~C~C~C"
+                       ticket #\Return #\Linefeed port #\Return #\Linefeed #\Return #\Linefeed
                        #\Return #\Linefeed)
                (finish-output st)
                (handler-case
@@ -1631,9 +1631,9 @@ grant URL at /grant that mints grants with PRIV and counts its calls in the car 
   "Allowed: the panel asks, the host's grant URL is called, the service opens a session, and a
 poll arrives with it. Not allowed: from a host origin missing from :EMBED-ORIGINS, the browser
 does not run the framed panel, so no grant is asked for and no session is opened."
-  (let ((browser (hyperion/assets/tests::%smoke-browser)))
+  (let ((browser (aion/cdp:find-browser)))
     (if (null browser)
-        (skip "No Chrome or Edge found; set HYPERION_SMOKE_BROWSER to run the embed hand-off")
+        (skip "No Chrome or Edge found; set OURANOS_BROWSER to run the embed hand-off")
         (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
           (let* ((service-port (list nil))
                  (allowed-grants (list 0))

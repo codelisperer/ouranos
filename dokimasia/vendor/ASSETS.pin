@@ -1,0 +1,29 @@
+# Vendored browser assets of dokimasia: version, checksum, source and licence.
+#
+# axe-core is the accessibility engine the :audit step injects into the page under test
+# (dokimasia ADR-0001, #1028). It is vendored rather than fetched from a CDN at run time, so
+# a run needs no network beyond the app under test, and the bytes that run are the bytes
+# pinned here.
+#
+# axe.min.js is the release file exactly as upstream publishes it in the npm package, with no
+# edits and no minification of ours. Its licence is MPL-2.0 (axe.LICENSE). The file also
+# bundles third-party code under MIT, whose notices upstream ships as LICENSE-3RD-PARTY.txt;
+# that file is copied unchanged as axe.LICENSE-3RD-PARTY.txt. The maintainer approved
+# including it on 2026-11-17, on these terms.
+#
+# dokimasia embeds the file in the image when dokimasia/src/audit.lisp is compiled, so a run
+# never reads the source tree for it.
+#
+# UPDATING: download the package tarball named in `url', check it against the `integrity'
+# value npm's registry gives for that version, and copy axe.min.js, LICENSE and
+# LICENSE-3RD-PARTY.txt out of it unchanged. Put the new version and sha256 below, read the
+# advisories page and set `reviewed' to the date you read it. scripts/check-pins.lisp fails
+# when axe.min.js does not hash to the sha256 below, and dokimasia's tests fail when the
+# bytes compiled into the image do not.
+
+axe-core    4.14.0   sha256 20c09fe157a8a34a30e241aaa1fcdade657734f08ab379ecfbeb7d45cc46e878
+            file     axe.min.js
+            url      https://registry.npmjs.org/axe-core/-/axe-core-4.14.0.tgz (package/axe.min.js)
+            licence  MPL-2.0 (axe.LICENSE); bundled code under MIT (axe.LICENSE-3RD-PARTY.txt)
+            advisories https://github.com/dequelabs/axe-core/security/advisories
+            reviewed   2026-11-17

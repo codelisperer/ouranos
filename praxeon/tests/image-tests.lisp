@@ -1350,3 +1350,24 @@ refuses that combination, so passing :CONFIRM :AFTER-UNTRUSTED alone used to sig
             "an estimate function is passed on"))
       (signals error (funcall #'entry register :confirm :after-untrusted :requires-user-intent t)
         "and the contradiction is still refused"))))
+
+(test an-image-failure-answers-aion-retry
+  "#79: IMAGE-REQUEST-FAILED answers AION/RETRY's TRANSIENCE and RETRY-AFTER, so an app can run
+GENERATE-IMAGE under WITH-RETRY. A 429 is :TRANSIENT, as no image was made; a 503 is :TRANSIENT and
+a 500 :UNKNOWN, as AION/HTTP-CLIENT says of those statuses; no answer at all is :UNKNOWN, since the
+image may have been made and charged for. The Retry-After the service sent is the wait."
+  (flet ((failure (kind status retry-after)
+           (make-condition 'praxeon/image:image-request-failed :kind kind :status status
+                                                               :retry-after retry-after
+                                                               :detail "failed")))
+    (let ((rate (failure :rate-limited 429 12)))
+      (is (eq :transient (aion/retry:transience rate)))
+      (is (eql 12 (aion/retry:retry-after rate)) "the Retry-After is the wait"))
+    (is (eq :transient (aion/retry:transience (failure :server-error 503 nil))))
+    (is (eq :unknown (aion/retry:transience (failure :server-error 500 nil))))
+    (is (eq :unknown (aion/retry:transience (failure :no-answer nil nil))))
+    (is (null (aion/retry:retry-after (failure :no-answer nil nil))) "no Retry-After, no wait")
+    (is-true (aion/retry:transient-p (failure :rate-limited 429 nil))
+             "so the default policy retries a rate limit")
+    (is-false (aion/retry:transient-p (failure :no-answer nil nil))
+              "and not a lost answer, which only TRANSIENT-OR-UNKNOWN-P retries")))

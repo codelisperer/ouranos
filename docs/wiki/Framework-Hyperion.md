@@ -415,9 +415,9 @@ The parts have since landed separately, and an earlier version of this paragraph
 they did not exist; it was written before they landed and not updated when they did.
 `hyperion/security-headers` sends the security headers by default (#119). `hyperion/csrf`
 has `wrap-csrf`, which checks a token held in the session, and `wrap-same-origin`, which
-checks Host, Sec-Fetch-Site and Origin for an app with no session and which
-`hyperion/desktop:run-app` installs by default (#293). What is missing is the one call that
-composes them.
+checks Host, Sec-Fetch-Site and Origin for an app with no session. `hyperion/desktop:run-app`
+installs it by default (#293), and so do `hyperion/server:start` and `serve-forever` (#1037).
+What is missing is the one call that composes them.
 
 XSS *is* already defended **at output** — Spinneret auto-escapes and
 `hyperion/markdown:render` is safe by default — which is real, and is the reason the

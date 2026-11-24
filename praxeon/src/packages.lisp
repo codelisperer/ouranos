@@ -55,7 +55,7 @@
    #:deliberation-failure
    #:provider-request-failed #:provider-request-failed-status
    #:provider-request-failed-error-type #:provider-request-failed-error-code
-   #:provider-request-failed-body
+   #:provider-request-failed-body #:provider-request-failed-retry-after #:provider-request-failed-phase
    #:unknown-tool-choice #:unknown-tool-choice-value #:value-shape
    #:completion-cancelled #:completion-cancelled-input-tokens #:completion-cancelled-output-tokens
    #:completion-cancelled-cache-read-tokens #:completion-cancelled-cache-write-tokens
@@ -67,6 +67,8 @@
    #:output-truncated-text #:output-truncated-tool-calls
    #:tool-choice-unsupported #:tool-choice-unsupported-provider
    #:tool-choice-unsupported-requested
+   #:invalid-extra-body #:invalid-extra-body-source #:invalid-extra-body-reason
+   #:extra-body-unsupported #:extra-body-unsupported-provider #:extra-body-unsupported-fields
    #:missing-provenance #:missing-provenance-operation #:missing-provenance-subject
    #:embedding-dimension-mismatch #:embedding-dimension-mismatch-provider
    #:embedding-dimension-mismatch-expected #:embedding-dimension-mismatch-actual
@@ -154,6 +156,8 @@
    ;; where a provider sends its requests (#1034)
    #:endpoint #:endpoint-p #:endpoint-scheme #:endpoint-host #:endpoint-port
    #:parse-endpoint #:provider-endpoint #:endpoint-loopback-p
+   ;; a provider whose requests must stay on this machine (#1293)
+   #:provider-stay-local
    ;; the embedding seam (#138, #150) -- a SEPARATE hierarchy, not a capability on PROVIDER
    #:embedding-provider #:embed #:embed-batch #:embed-documents #:embed-query
    #:embedding-dimensions #:embedding-model-of
@@ -177,7 +181,7 @@
    #:msg #:role #:content
    #:text-part #:tool-use-part #:tool-result-part
    ;; neutral tools + completions
-   #:tool-choice #:supports-tool-choice-p #:check-tool-choice
+   #:tool-choice #:supports-tool-choice-p #:honours-tool-choice-none-p #:check-tool-choice
    #:supports-response-format-p #:complete-with-schema
    #:anthropic-request-body #:openai-request-body
    #:generate-structured #:validate-arguments #:validate-against-schema
@@ -208,9 +212,11 @@
    #:anthropic #:anthropic-model #:anthropic-api-key
    #:openai-compatible #:model-of
    #:*default-model* #:*default-max-tokens*
-   #:*connect-timeout* #:*read-timeout*
+   #:*connect-timeout* #:*read-timeout* #:*retry*
    ;; environment-driven provider selection
    #:make-provider-from-env #:register-provider-impl #:env-setting
+   ;; vendor-specific fields in a provider's request body (#1172)
+   #:*extra-body* #:supports-extra-body-p #:provider-extra-body
    ;; #758: the #719 mapping of a failed HTTP request, for a module that calls a service itself
    #:request-failure))
 
@@ -356,7 +362,8 @@
    #:agent #:make-agent #:agent-name #:agent-provider #:agent-means
    #:agent-context #:agent-history #:agent-history-budget #:agent-system-prompt
    #:move-conversation
-   #:agent-cache-system #:agent-system-parts #:agent-max-tokens #:agent-private
+   #:agent-cache-system #:agent-cache-messages #:agent-trim-from
+   #:agent-system-parts #:agent-max-tokens #:agent-private
    #:request-messages #:prompt-breakdown
    #:means-entry #:means-entry-source #:register-means #:means-permitted-p #:agent-means-for
    ;; untrusted content in a turn (#827)

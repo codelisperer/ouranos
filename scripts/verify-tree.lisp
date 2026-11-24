@@ -156,6 +156,13 @@
     :hermes
     :klio
     :hades :hades/single-instance :hades/credentials :hades/notify :hades/program :hades/open
+    :dokimasia/core :dokimasia
+    ;; dokimasia's stored-data probes through mnemosyne (#1028), an aux system that reaches right.
+    :dokimasia/mnemosyne
+    ;; dokimasia's target for a hyperion app (#1028), another aux system that reaches right.
+    :dokimasia/hyperion
+    ;; dokimasia's worked example against hyperion's active-search app (#1028, step 4).
+    :dokimasia/examples/active-search
     ;; aux systems -- these hold real code and were previously never compiled here,
     ;; so a change to any of them could break unnoticed. praxeon/web is the case that
     ;; exposed it: a refactor landed in praxeon/src/web.lisp and a green run of this
@@ -175,6 +182,11 @@
     ;; break here silently un-redacts a password in three frameworks at once.
     :aion/secret :aion/secret/types
     :hyperion/http1
+    ;; The WebSocket protocol (#376): pure, and here for the reason hyperion/http1 is.
+    :aion/websocket
+    ;; The browser driver (#1028, dokimasia ADR-0001). Its suite runs a CDP server written in
+    ;; the suite on every machine, and a real headless browser where one is found.
+    :aion/cdp
     :praxeon/translate :praxeon/web :praxeon/web-search :praxeon/memory-db :praxeon/results-db
     :praxeon/retrieval
     ;; The chat widget's parts, which praxeon/web's page and its embed panel share (#67). It
@@ -183,6 +195,10 @@
     :praxeon/chat-ui
     ;; The MCP client and its OAuth sign-in (#527).
     :praxeon/mcp :aion/oauth :hyperion/oauth
+    ;; OpenTelemetry spans from the event stream (#1225).
+    :praxeon/trace
+    ;; Agent evaluations and their example dataset (#1224).
+    :praxeon/eval :praxeon/examples/eval
     ;; The job scheduler and its database store (#689).
     :aion/schedule :mnemosyne/jobs
     ;; Test support: one migrated SQLite template per run, a copy per test (#1047). Its
@@ -206,7 +222,8 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
 (defparameter +test-systems+
   '(:aion/tests :aion/sexp/tests :aion/tz/tests :aion/boundary/tests :aion/dynamic/tests :aion/test-threads/tests :aion/platform/tests :aion/fs/tests :aion/pool/tests :aion/interceptor/tests :aion/signature/tests :aion/http-client/tests :aion/retry/tests :cons/tests :mnemosyne/tests :hyperion/tests :praxeon/tests :hermes/tests :hermes/payments/tests
     :elenchon/tests :klio/tests :hades/single-instance/tests :hades/credentials/tests
-    :hades/notify/tests :hades/open/tests
+    :hades/notify/tests :hades/open/tests :dokimasia/tests :dokimasia/mnemosyne/tests :dokimasia/hyperion/tests
+    :dokimasia/examples/active-search/tests
     ;; aux suites that existed but were never run from here
     :cons/coalton-repl/tests :hyperion/session-db/tests :hyperion/auth-db/tests
     ;; The pooled-connection middleware (#325), registered in the commit that adds it.
@@ -246,6 +263,12 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
     ;; The MCP client (#527), registered in the commit that adds it. Its MCP servers run on
     ;; 127.0.0.1 in the test image, so it runs on every leg with no network.
     :praxeon/mcp/tests
+    ;; OpenTelemetry spans (#1225), registered in the commit that adds them. Its collector runs
+    ;; on 127.0.0.1 in the test image, so it runs on every leg with no network.
+    :praxeon/trace/tests
+    ;; Agent evaluations (#1224), registered in the commit that adds them. The agent and the
+    ;; rubric grader's judge are stub providers, so it runs on every leg with no network.
+    :praxeon/eval/tests
     ;; Dev sidecars (#700). It was left out of the pull request's first commit, and its first CI run
     ;; reported the same total as main; registered here so that it runs. Each sidecar is a child SBCL,
     ;; so it needs nothing installed.
@@ -290,6 +313,11 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
     ;; aion/uv* is excluded from this checker for needing a C toolchain, and the most
     ;; security-critical code in the tree must not sit outside it. See ADR-0015.
     :hyperion/http1/tests
+    ;; The WebSocket frame parser and handshake (#376), for the same reason.
+    :aion/websocket/tests
+    ;; The browser driver (#1028): the command line it refuses to widen, the connection
+    ;; against a CDP server in the suite, and a headless browser when one is found.
+    :aion/cdp/tests
     ;; The contacts example's changeset path (#94). Its test system existed with an empty
     ;; component list and no :perform -- declared, loadable, and asserting nothing. Named
     ;; under its parent so its checks land in mnemosyne's README row (pre-publication issue 357).
@@ -328,6 +356,8 @@ decision someone made, not an accident -- which is the difference that matters."
     :hyperion/server-uv
     ;; Its Clack handler (#373, ADR-0020), here for the same reason: it starts server-uv.
     :hyperion/clack-handler-uv
+    ;; WebSockets on server-uv (#376).
+    :hyperion/server-uv/websocket
     ;; The scheduler's libuv driver (#689).
     :aion/schedule/uv
     ;; Watching a folder for settled files, over aion/uv's watch and timers (#996).
@@ -339,6 +369,7 @@ not evidence of anything.")
 (defparameter +uv-test-systems+
   '(:aion/uv/tests :aion/uv/net/tests :aion/uv/process/tests
     :hyperion/server-uv/tests :hyperion/clack-handler-uv/tests
+    :hyperion/server-uv/websocket/tests
     :aion/schedule/uv/tests
     :aion/folder-watch/tests)
   "Their suites -- real checks over a real libuv, verified by nothing automatic until CI.")
@@ -538,7 +569,7 @@ the section reports and why."
   "The uv axis is off. One cause only: the caller did not ask for it."
   (format t "  off     ~a axis~34tthis host CAN answer these; the caller declined~%" name)
   (dolist (s '(:aion/uv :aion/uv/net :aion/uv/process :hyperion/server-uv
-               :hyperion/clack-handler-uv))
+               :hyperion/clack-handler-uv :hyperion/server-uv/websocket))
     (format t "          ~(~a~)~%" s))
   (format t "          OURANOS_WITH_UV is unset. Set it to 1 to include them (needs scripts/build-libuv.lisp to have run).~%")
   (format t "          Their checks are NOT in the total below, and no figure here says how many.~%"))
@@ -757,7 +788,7 @@ surfaces -- it just is not confused with a failing test."
 
 (defparameter +checkers+
   '(("check-pins.lisp" ("--report") nil
-     "every pin declares an advisory source and a review date")
+     "every pin declares an advisory source and a review date, and every vendored asset's file hashes to its pin")
     ("check-coalton.lisp" () t
      "the Coalton that LOADS is the pinned one")
     ("check-assets.lisp" () nil

@@ -27,7 +27,7 @@ Three corollaries follow, and they're where the nuance lives:
 
 **Auxiliary systems may reach right.** A framework may ship an auxiliary system that
 depends on something further up, as long as the *system-level* graph stays acyclic —
-`praxeon/web → hyperion`, `elenchon/web → hyperion`, `hyperion/testing → elenchon` are all
+`praxeon/web → hyperion`, `elenchon/web → hyperion`, `dokimasia/elenchon → elenchon` are all
 fine. The DAG binds **core** systems. The escape hatch is real, but it's an escape hatch:
 if you find yourself reaching for it in a core system, the design is wrong.
 
@@ -147,8 +147,9 @@ cd hyperion && cons test
 
 Elenchon deserves a mention here, since it's the house's own answer to test design:
 Requirements-Based Testing via Cause-Effect Graphs, reducing a requirement to a minimal
-decision table (roughly MC/DC coverage). `hyperion/testing → elenchon` is one of the
-sanctioned rightward auxiliary edges.
+decision table (roughly MC/DC coverage). `dokimasia/elenchon → elenchon` is one of the
+sanctioned rightward auxiliary edges: it runs the cases elenchon derives in a browser
+(dokimasia ADR-0001).
 
 ---
 

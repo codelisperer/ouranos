@@ -107,8 +107,13 @@ jobs:
     # sets it. On Linux the store is a GNOME Keyring the gate step starts for itself (see
     # "Secret Service (Linux)" below). A leg where they were skipped fails the gate
     # (+BACKEND-RULES+ in scripts/verify-tree.lisp).
+    #
+    # The runners for all three operating systems have Chrome, so aion/cdp's real-browser tests
+    # (#1028) must run on every leg: OURANOS_REQUIRE_BROWSER makes a missing browser fail them
+    # instead of skipping them.
     env:
       OURANOS_TEST_REAL_CREDENTIAL_STORE: "1"
+      OURANOS_REQUIRE_BROWSER: "1"
 
     strategy:
       # One OS failing must never hide the other two. The whole value of a matrix is
@@ -127,7 +132,7 @@ jobs:
         #   - Linux: tests run on ubuntu-26.04 (glibc 2.43), the current LTS image, and
         #     desktop-release.yml builds on ubuntu-24.04, because a binary built on 26.04
         #     needs glibc 2.43 and Ubuntu 24.04 desktops have 2.39 (the maintainer's ruling on
-        #     #766). SBCL's own binary sets the lowest image either can use: 2.6.9 needs
+        #     #766). SBCL's own binary sets the lowest image either can use: 2.6.10 needs
         #     GLIBC_2.38, and ubuntu-22.04 ships 2.35. See scripts/versions.env.
         #   - macOS: tests run on macos-26, and desktop-release.yml builds on an older image,
         #     because a build on macos-26 requires macOS 26 to run (#763).
@@ -190,12 +195,17 @@ jobs:
           restore-keys: |
             toolchain-${{ matrix.platform }}-
 
+      # The macOS key also names :dexador-no-ssl (#905). On macOS dexador must be compiled with
+      # that feature, which aion.asd pushes, and aion.asd stops with an error when the cached
+      # dexador was compiled without it. Every .asd is already in the hash, so a change to
+      # aion.asd gives a cold build anyway; the name makes the macOS key differ from every key
+      # saved before #905 whatever the .asd files hash to.
       - name: Cache compiled fasls (exact match only)
         id: cache-compiled-fasls-exact-match-only
         uses: actions/cache@v6
         with:
           path: ${{ matrix.fasl }}
-          key: fasl-${{ matrix.platform }}-${{ hashFiles('scripts/versions.env', 'coalton.pin', '**/*.asd') }}
+          key: fasl-${{ matrix.platform }}${{ runner.os == 'macOS' && '-dexador-no-ssl' || '' }}-${{ hashFiles('scripts/versions.env', 'coalton.pin', '**/*.asd') }}
 
       # --- toolchain ----------------------------------------------------------------
       - name: Provision the Lisp toolchain
@@ -589,6 +599,9 @@ jobs:
           OURANOS_WITH_UV: "1"
           OURANOS_WITH_TLS: "1"
           OURANOS_WITH_LIBGIT: "1"
+          # dokimasia's worked example (#1028, step 4) writes its report and screenshots here,
+          # and the next step uploads them, so a reader can see what the suite saw on each leg.
+          OURANOS_DOKIMASIA_EXAMPLE_OUT: ${{ runner.temp }}/dokimasia-example
         run: |
           set -o pipefail
           # On Linux the gate runs with a throwaway Secret Service (the step above).
@@ -596,6 +609,19 @@ jobs:
           if [ "$RUNNER_OS" = "Linux" ]; then wrap=(scripts/with-secret-service.sh); fi
           "${wrap[@]}" sbcl --dynamic-space-size 4096 --script scripts/verify-tree.lisp \
             2>&1 | tee verify.log
+
+      # The worked example's report.txt, report.json and screenshots, laid out as
+      # <case>/<row>/NN-name-viewport-scheme.png. Uploaded when the gate fails too, since that is
+      # when the screenshots are most useful. A leg where the example did not run uploads nothing.
+      - name: Upload the dokimasia example's report and screenshots
+        id: upload-the-dokimasia-example-s-report-and-screenshots
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dokimasia-example-${{ matrix.platform }}
+          path: ${{ runner.temp }}/dokimasia-example
+          if-no-files-found: ignore
+          retention-days: 14
 
       # --- the README's numbers, against the run that just happened -------------------
       #

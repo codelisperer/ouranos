@@ -58,7 +58,11 @@
    ;; the response encoder (commit 2)
    #:Encode-Result #:Encoded #:Refused
    #:encode-head #:encode-head-flat #:encode-error #:encode-interim #:reason-phrase
+   ;; the head of a 101 that hands the connection to another protocol (#376)
+   #:encode-switching-protocols #:encode-switching-protocols-flat
    #:encode-ok? #:encode-text #:encode-reason
    ;; chunked framing, for a streamed body whose length is not known up front (M2)
    #:encode-head-chunked #:encode-head-chunked-flat #:encode-chunk-header #:last-chunk
-   #:to-hex #:body-forbidden?))
+   #:to-hex #:body-forbidden?
+   ;; a streamed body to an HTTP/1.0 client, which ends when the connection closes (#1244)
+   #:encode-head-close-delimited #:encode-head-close-delimited-flat))

@@ -828,13 +828,20 @@ cache has expired or the server has refused a token."
   "Revoke PRINCIPAL's tokens for CONNECTION at the authorization server when it offers a
 revocation endpoint (RFC 7009), and delete them either way. A revocation that fails, or that the
 server refuses, is logged and does not stop the deletion. Runs under the refresh lock, so a
-refresh still running cannot store rotated tokens after the disconnect."
+refresh still running cannot store rotated tokens after the disconnect.
+
+A TOKEN THE STORE CANNOT READ IS DELETED TOO (#1175). When GET-TOKEN answers NIL, because the
+store's key was rotated or the row is damaged, there is no token to revoke, so no revocation is
+sent; DELETE-TOKEN is still called, under the same lock, so the user can always remove the
+connection. A store's DELETE-TOKEN is therefore called when there may be no row, and must not
+fail then."
   (let ((store (broker-store broker)))
     (call-with-refresh-lock
      store (list principal connection)
      (lambda ()
        (let ((current (get-token store principal connection)))
          (when current
+           ;; Revocation needs the token; with none readable it is skipped (#1175).
            (let ((endpoint (token-set-revocation-endpoint current))
                  (token (or (token-set-refresh current) (token-set-access current))))
              (when endpoint
@@ -851,6 +858,7 @@ refresh still running cannot store rotated tokens after the disconnect."
                        (log:warn "aion/oauth: revocation refused" :connection connection
                                                                   :status (http:response-status response))))
                  ;; Including PINNED-CONNECT-UNSUPPORTED on Windows: the tokens are deleted.
-                 (error () (log:warn "aion/oauth: revocation failed" :connection connection)))))
-           (delete-token store principal connection)))))
+                 (error () (log:warn "aion/oauth: revocation failed" :connection connection))))))
+         ;; Deleted whether or not the token could be read (#1175).
+         (delete-token store principal connection))))
     t))

@@ -682,11 +682,9 @@ pool is closed, or :TIMEOUT when DEADLINE passed with every connection lent out.
          (return :open))
         (t
          (let ((left (/ (- deadline (get-internal-real-time)) internal-time-units-per-second)))
-           ;; On a timeout CONDITION-WAIT returns NIL WITHOUT the lock held, so nothing after
-           ;; it may touch the pool; returning is all that is safe, and WITH-MUTEX allows it.
+           ;; TIMED-WAIT returns holding the lock, also after a timeout (#1267).
            (when (or (<= left 0)
-                     (not (sb-thread:condition-wait (pool-freed pool) (pool-lock pool)
-                                                    :timeout left)))
+                     (not (aion/dynamic:timed-wait (pool-freed pool) (pool-lock pool) left)))
              (return :timeout))))))))
 
 (defun %open-reserved (pool)

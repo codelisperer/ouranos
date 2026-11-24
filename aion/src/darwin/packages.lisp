@@ -2,12 +2,14 @@
 ;;;;
 ;;;; The macOS counterpart of aion/windows. It binds what macOS functionality in hades needs
 ;;;; from the frameworks every Mac ships: CoreFoundation's strings, data and dictionaries, and
-;;;; Security.framework's keychain item calls, with OSStatus decoded into a condition. The
-;;;; functionality itself (a credential store, for example) belongs to hades (hades ADR-0001).
+;;;; Security.framework's keychain item calls, with OSStatus decoded into a condition. It also
+;;;; asks Security.framework whether to trust a TLS server's certificates, for aion/http-client
+;;;; (#905). The functionality itself (a credential store, for example) belongs to hades (hades
+;;;; ADR-0001).
 ;;;;
 ;;;; TWO PACKAGES, the same split aion/windows uses:
 ;;;;
-;;;;   AION/DARWIN/FFI  the raw layer -- defcfun and the frameworks. Apple's spellings survive
+;;;;   AION/DARWIN/FFI  the raw layer -- the frameworks and their functions. Apple's spellings survive
 ;;;;                    here (CFStringCreateWithBytes, SecItemAdd) so a reader can look them up.
 ;;;;   AION/DARWIN      the Lisp surface -- owned CF objects, WITH-CF, OSStatus as a condition.
 ;;;;
@@ -28,7 +30,10 @@
    #:cf-dictionary-create #:cf-dictionary-get-count #:cf-dictionary-get-value
    #:sec-item-add #:sec-item-update #:sec-item-copy-matching #:sec-item-delete
    #:cf-array-get-count #:cf-array-get-value-at-index
-   #:sec-copy-error-message-string))
+   #:sec-copy-error-message-string
+   #:sec-certificate-create-with-data #:sec-policy-create-ssl #:sec-trust-create-with-certificates
+   #:sec-trust-evaluate-with-error #:cf-error-get-code #:cf-array-create
+   #:framework-symbol))
 
 (cl:defpackage #:aion/darwin
   (:use #:common-lisp)
@@ -42,4 +47,6 @@
    #:with-cf #:cf-release #:cf-retain
    ;; conversions
    #:make-cf-string #:cf-string-to-lisp #:make-cf-data #:cf-data-octets #:make-cf-dictionary
-   #:cf-constant))
+   #:cf-constant
+   ;; TLS server trust (#905)
+   #:verify-server-certificate-chain #:trust-verdict))

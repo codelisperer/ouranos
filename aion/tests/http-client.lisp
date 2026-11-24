@@ -250,20 +250,26 @@ UTF-8 sequence -- because that is the case the old contract silently destroyed."
 (defun server-heads (server) (aion/test-http:server-heads server))
 
 (defparameter +tls-certificate+
-  #+os-windows "pinned-test-ec.crt" #-os-windows "pinned-test.crt"
-  "The test server's certificate: an EC one on Windows, where aion/tls serves TLS and cannot
-present the RSA one (see fixtures/http-client/README.md), the RSA one elsewhere.")
-(defparameter +tls-key+ #+os-windows "pinned-test-ec.key" #-os-windows "pinned-test.key")
+  #+(or os-windows os-macosx) "pinned-test-ec.crt" #-(or os-windows os-macosx) "pinned-test.crt"
+  "The test server's certificate: an EC one on Windows and macOS, where aion/tls serves TLS and
+cannot present the RSA one (see fixtures/http-client/README.md), the RSA one on Linux.")
+(defparameter +tls-key+
+  #+(or os-windows os-macosx) "pinned-test-ec.key" #-(or os-windows os-macosx) "pinned-test.key")
 
 (defun %start-server (handler &key tls)
   "A server on 127.0.0.1 answering with HANDLER, a function of (path head stream) that writes
 the response. Records every request head. TLS T presents the certificate for pinned.test
-(+TLS-CERTIFICATE+, an EC one on Windows); TLS :IP presents the one whose names are the addresses
-127.0.0.1 and ::1; a string names another fixture pair, \"cn-only-test\" for one such pair."
+(+TLS-CERTIFICATE+, an EC one on Windows and macOS); TLS :IP presents the one whose names are the
+addresses 127.0.0.1 and ::1; a string names another fixture pair, \"cn-only-test\" for one such
+pair. On Windows and macOS, where aion/tls serves, an RSA pair's key is its PKCS#1 copy, because
+mbedTLS refuses an RSA key in PKCS#8 form (#914, fixtures/http-client/README.md)."
   (multiple-value-bind (certificate key)
-      (cond ((stringp tls) (values (format nil "~A.crt" tls) (format nil "~A.key" tls)))
-            ((eq tls :ip) (values "ip-test.crt" "ip-test.key"))
-            (t (values +tls-certificate+ +tls-key+)))
+      (flet ((rsa-key (name)
+               #+(or os-windows os-macosx) (format nil "~A-pkcs1.key" name)
+               #-(or os-windows os-macosx) (format nil "~A.key" name)))
+        (cond ((stringp tls) (values (format nil "~A.crt" tls) (rsa-key tls)))
+              ((eq tls :ip) (values "ip-test.crt" (rsa-key "ip-test")))
+              (t (values +tls-certificate+ +tls-key+))))
     (aion/test-http:start-server
      (lambda (request stream)
        (funcall handler (aion/test-http:request-path request)
@@ -535,11 +541,126 @@ OpenSSL 4 removed ASN1_STRING_data, which cl+ssl calls to read a certificate's n
 when the patch is missing, and when a later load of cl+ssl has put the old definition back. On a
 host whose libcrypto is OpenSSL 4, the pinned test above fails as well. Remove the patch and this
 test once the pinned cl+ssl contains cl-plus-ssl pull request 202."
-  (skip-on-windows "cl+ssl is not used on Windows"
-    ;; Read only off Windows: there is no CL+SSL package on Windows.
-    #-os-windows
+  #+(or os-windows os-macosx) (skip "cl+ssl is not used on Windows or macOS (#905)")
+  ;; Read only on Linux: there is no CL+SSL package on Windows or macOS.
+  #-(or os-windows os-macosx)
+  (progn
     (is (eq (fdefinition 'cl+ssl::asn1-string-get0-data) (fdefinition 'cl+ssl::asn1-string-data))
         "cl+ssl::asn1-string-data is the call to ASN1_STRING_get0_data")))
+
+;;; --- a saved image that makes only plain-http requests starts without OpenSSL (#1173) -------
+
+(defun %mapped-file (name)
+  "The path of the file named NAME that this process has mapped, read from /proc/self/maps, or
+NIL where there is no such file."
+  (with-open-file (in "/proc/self/maps" :if-does-not-exist nil)
+    (and in
+         (loop for line = (read-line in nil)
+               while line
+               do (let ((slash (position #\/ line)))
+                    (when (and slash (string= name (file-namestring (subseq line slash))))
+                      (return (subseq line slash))))))))
+
+(defun %cl+ssl-library-files ()
+  "The files this image opened for cl+ssl's libcrypto and libssl, in that order, as absolute
+paths, or NIL when either cannot be found."
+  (let ((files (loop for name in '("LIBCRYPTO" "LIBSSL")
+                     for path = (namestring (cffi:foreign-library-pathname
+                                             (cffi::get-foreign-library (find-symbol name "CL+SSL"))))
+                     collect (if (uiop:absolute-pathname-p path)
+                                 (and (probe-file path) path)
+                                 (%mapped-file (file-namestring path))))))
+    (and (every #'identity files) files)))
+
+(defun %saved-plain-http-image (directory files core &key without-save-hook)
+  "Save, from a fresh image, an executable CORE that loads aion/http-client with cl+ssl pointed at
+copies of FILES (libcrypto, libssl) in DIRECTORY. Run with a URL, it makes one plain-http GET and
+prints \"STATUS <code>\", then asks cl+ssl to initialise and prints \"TLS ok\" or
+\"TLS <condition type>: <message>\". WITHOUT-SAVE-HOOK removes the hook that keeps SBCL from
+reopening OpenSSL at startup, for the control. Returns the child's output."
+  (let ((crypto (namestring (merge-pathnames (file-namestring (first files)) directory)))
+        (ssl (namestring (merge-pathnames (file-namestring (second files)) directory))))
+    (uiop:run-program
+     (list (uiop:native-namestring sb-ext:*runtime-pathname*)
+           "--noinform" "--no-userinit" "--no-sysinit" "--non-interactive"
+           "--eval" "(require :asdf)"
+           "--eval" (format nil "(load ~S)"
+                            (uiop:native-namestring
+                             (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname))))
+           "--eval" "(let ((*standard-output* (make-broadcast-stream))) (asdf:load-system :cl+ssl/config))"
+           "--eval" (format nil "(eval (list (find-symbol \"DEFINE-LIBCRYPTO-PATH\" \"CL+SSL/CONFIG\") ~S))" crypto)
+           "--eval" (format nil "(eval (list (find-symbol \"DEFINE-LIBSSL-PATH\" \"CL+SSL/CONFIG\") ~S))" ssl)
+           "--eval" "(let ((*standard-output* (make-broadcast-stream))) (asdf:load-system :aion/http-client))"
+           "--eval" (if without-save-hook
+                        "(setf sb-ext:*save-hooks* (remove 'aion/http-client::%openssl-dont-save sb-ext:*save-hooks*))"
+                        "t")
+           "--eval" (format nil "(sb-ext:save-lisp-and-die ~S :executable t :toplevel (lambda () (let ((url (second sb-ext:*posix-argv*))) (format t \"~~&STATUS ~~A~~%\" (aion/http-client:response-status (aion/http-client:send-request (aion/http-client:make-request :url url :read-timeout 10) '()))) (format t \"~~&TLS ~~A~~%\" (handler-case (progn (funcall (find-symbol \"ENSURE-INITIALIZED\" \"CL+SSL\")) \"ok\") (error (e) (format nil \"~~A: ~~A\" (type-of e) e)))) (finish-output) (sb-ext:exit :code 0))))"
+                            (uiop:native-namestring core)))
+     :output :string :error-output :output :ignore-error-status t)))
+
+(defun %run-saved-image (core url)
+  "Run CORE with URL. Returns (values OUTPUT EXIT-CODE)."
+  (multiple-value-bind (out err code)
+      (uiop:run-program (list (uiop:native-namestring core) url)
+                        :output :string :error-output :string :ignore-error-status t)
+    (values (concatenate 'string out err) code)))
+
+(defun %output-line (prefix output)
+  (find-if (lambda (line) (uiop:string-prefix-p prefix line))
+           (uiop:split-string output :separator '(#\Newline #\Return))))
+
+(test a-saved-plain-http-image-starts-without-openssl
+  "#1173: an image saved with aion/http-client, and so with cl+ssl, starts and makes a plain-http
+request on a machine without the OpenSSL it was built against, and its first TLS use signals
+HTTP-ERROR naming the library. cl+ssl is pointed at copies of this machine's libcrypto and libssl,
+and the copies are deleted after the image is saved. Control: the same image saved without
+aion/http-client's save hook exits at startup, because SBCL reopens every shared object an image
+had open when it was saved."
+  (let ((files (and (find-package "CL+SSL") (%cl+ssl-library-files))))
+    (cond
+      ((not (find-package "CL+SSL"))
+       (skip "cl+ssl is not loaded on this platform, so there is no OpenSSL to start without"))
+      ((null files)
+       (skip "the files cl+ssl opened could not be found, so there is nothing to copy"))
+      (t
+       (let* ((directory (uiop:ensure-directory-pathname
+                          (merge-pathnames (format nil "aion-1173-~D-~D/" (get-universal-time)
+                                                   (random 1000000000 (make-random-state t)))
+                                           (uiop:temporary-directory))))
+              (core (merge-pathnames "plain-http" directory))
+              (control (merge-pathnames "plain-http-control" directory)))
+         (unwind-protect
+              (progn
+                (ensure-directories-exist directory)
+                (dolist (file files)
+                  (uiop:copy-file file (merge-pathnames (file-namestring file) directory)))
+                (%saved-plain-http-image directory files core)
+                (%saved-plain-http-image directory files control :without-save-hook t)
+                (is (and (probe-file core) (probe-file control)) "both images were saved")
+                (with-server (s (lambda (path head stream)
+                                  (declare (ignore path head))
+                                  (%write-response stream 200 '() "plain")))
+                  (let ((url (%local s "/")))
+                    (multiple-value-bind (out code) (%run-saved-image core url)
+                      (is (equal "TLS ok" (%output-line "TLS " out))
+                          "with OpenSSL present the image opens it as before: ~A" out)
+                      (is (eql 0 code)))
+                    (dolist (file files)
+                      (delete-file (merge-pathnames (file-namestring file) directory)))
+                    (multiple-value-bind (out code) (%run-saved-image core url)
+                      (is (eql 0 code) "without OpenSSL the image starts: ~A" out)
+                      (is (equal "STATUS 200" (%output-line "STATUS " out))
+                          "and makes its plain-http request: ~A" out)
+                      (let ((tls (%output-line "TLS " out)))
+                        (is (and tls (search "HTTP-ERROR" tls)
+                                 (search (file-namestring (first files)) tls :test #'char-equal))
+                            "its first TLS use signals HTTP-ERROR naming the library: ~A" tls)))
+                    (multiple-value-bind (out code) (%run-saved-image control url)
+                      (is (not (eql 0 code))
+                          "control: without the save hook the image exits at startup: ~A" out)
+                      (is (null (%output-line "STATUS " out))
+                          "control: and makes no request: ~A" out)))))
+           (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore)))))))
 
 ;;; --- fetch-public ---------------------------------------------------------------------
 
@@ -1189,12 +1310,14 @@ machine trusts. And the chain is judged for the name it is given."
     (aion/windows:verify-server-certificate-chain
      (list (make-array 8 :element-type '(unsigned-byte 8) :initial-element 1)) "x.test")))
 
-#+os-windows
+#+(or os-windows os-macosx)
 (test a-pinned-connection-on-windows-asks-windows-and-honours-its-answer
   "Without CA-PATH, the pinned TLS connection gives the server's chain and the URL's host to the
 verifier and obeys it. A verifier that accepts gets the response; one that answers :EXPIRED
 makes the request signal CERTIFICATE-EXPIRED with Windows' code; and the real verifier refuses
-the self-signed test certificate as CERTIFICATE-UNTRUSTED-ROOT."
+the self-signed test certificate: Windows as CERTIFICATE-UNTRUSTED-ROOT, macOS as
+CERTIFICATE-REJECTED, because the most serious problem macOS reports for it is its 100-year
+validity period (errSecCertificateValidityPeriodTooLong, -67901), which has no subclass (#905)."
   (with-server (s (lambda (path head stream)
                     (declare (ignore path head))
                     (%write-response stream 200 '() "verified by the caller"))
@@ -1214,7 +1337,63 @@ the self-signed test certificate as CERTIFICATE-UNTRUSTED-ROOT."
           (http:certificate-expired (e)
             (is (string= "pinned.test" (http:certificate-rejected-host e)))
             (is (= #x800B0101 (http:certificate-rejected-code e))))))
-      (signals http:certificate-untrusted-root (get-it)))))
+      #+os-windows (signals http:certificate-untrusted-root (get-it))
+      #+os-macosx (handler-case (progn (get-it) (fail "macOS trusted the self-signed certificate"))
+                    (http:certificate-rejected (e)
+                      (is (= -67901 (http:certificate-rejected-code e))
+                          "macOS's reason: ~D" (http:certificate-rejected-code e)))))))
+
+#+os-macosx
+(defun %call-with-make-ssl-stream (function thunk)
+  "Call THUNK with dexador's MAKE-SSL-STREAM set to FUNCTION, and put back what was there."
+  (let* ((name (find-symbol "MAKE-SSL-STREAM" "DEXADOR.BACKEND.USOCKET"))
+         (saved (fdefinition name)))
+    (setf (fdefinition name) function)
+    (unwind-protect (funcall thunk)
+      (setf (fdefinition name) saved))))
+
+#+os-macosx
+(test on-macos-dexadors-https-goes-over-aion-tls-and-loads-no-cl+ssl
+  "#905: on macOS an https request that is not pinned goes through DEX:REQUEST, and the stream
+dexador reads and writes is an AION/TLS:TLS-STREAM made by aion/http-client, whose verdict comes
+from *SERVER-CERTIFICATE-VERIFIER*. No CL+SSL package exists in the image, so no OpenSSL was
+opened. CONTROL: with dexador's own MAKE-SSL-STREAM put back, the one compiled with
+:DEXADOR-NO-SSL, the same request makes no aion/tls stream and fails, so the replacement in
+macos-tls.lisp is what makes https work, not something else in the image."
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "over aion/tls"))
+                  :tls t)
+    (let ((made '())
+          (asked '()))
+      (flet ((recording (inner)
+               (lambda (&rest args)
+                 (let ((stream (apply inner args)))
+                   (push (type-of stream) made)
+                   stream)))
+             (get-it ()
+               ;; :STAY-LOCAL so that no proxy from the environment is used, and no connection
+               ;; dexador pooled earlier can answer instead of a new one.
+               (http:send-request (http:make-request :url (%local s "/" "127.0.0.1" "https")
+                                                     :stay-local t :read-timeout 5)
+                                  '())))
+        (let ((http::*server-certificate-verifier*
+                (lambda (chain host) (push (list (length chain) host) asked) :trusted)))
+          ;; Whatever loading aion/http-client installed, observed, not replaced: a test that
+          ;; put %DEXADOR-TLS-STREAM in place itself would pass with the installation missing.
+          (%call-with-make-ssl-stream
+              (recording (fdefinition (find-symbol "MAKE-SSL-STREAM" "DEXADOR.BACKEND.USOCKET")))
+            (lambda ()
+              (is (string= "over aion/tls" (http:response-body (get-it))))))
+          (is (equal '(aion/tls:tls-stream) made) "dexador's https stream was ~S" made)
+          (is (equal '((1 "127.0.0.1")) asked) "the verifier was asked ~S" asked)
+          (is (null (find-package "CL+SSL")) "CL+SSL is a package in this image")
+          ;; The control.
+          (setf made '())
+          (%call-with-make-ssl-stream (recording http::*%dexador-own-make-ssl-stream*)
+            (lambda ()
+              (signals error (get-it))))
+          (is (null made) "control: dexador's own function made ~S" made))))))
 
 ;;; --- the opt-in check against public servers (GitHub Actions only) ------------------------
 
@@ -1265,7 +1444,7 @@ test."
           (let* ((r (http:fetch-public "https://example.com/" :read-timeout 30 :deadline 60))
                  (status (http:response-status r)))
             (is (and (integerp status) (<= 100 status 599)) "the status was ~S" status))
-          #+os-windows
+          #+(or os-windows os-macosx)
           (signals http:certificate-expired
             (http:fetch-public "https://expired.badssl.com/" :read-timeout 30 :deadline 60))))))
 
@@ -1364,7 +1543,7 @@ control character and no DEL."
     (is (= 200 status))
     (is (string= (format nil "a~Cb~Cc" #\Tab (code-char #xE9)) (gethash "x-a" fields)))))
 
-#+os-windows
+#+(or os-windows os-macosx)
 (test a-pinned-connection-to-an-ipv6-literal-asks-about-the-bare-address
   "F3: QURI keeps the brackets of https://[::1]/; the verifier is asked about ::1, the name a
 certificate's IP address entry holds. The same address written out in full, [0:0:0:0:0:0:0:1], is
@@ -3171,3 +3350,195 @@ finds it as the body's delimiter."
         (is-true (search "charset=utf-8" type) "the caller's other parameter is kept: ~A" type)
         (is-true (and boundary (search (format nil "--~A" boundary) body))
                  "the advertised boundary delimits the body: ~A" type)))))
+
+;;; --- a read timeout on dexador's path (#537) ------------------------------------------------
+
+(defun %late-answer (path head stream)
+  "A handler that waits 6 seconds and then answers 200."
+  (declare (ignore path head))
+  (sleep 6)
+  (%write-response stream 200 '() "late"))
+
+(defun %timed-send (request)
+  "Send REQUEST and return two values: the HTTP-ERROR it signalled, or :ANSWERED when it returned
+a response, and the seconds it took. An outer limit of 20 seconds turns a hang into a result."
+  (let* ((start (get-internal-real-time))
+         (outcome (handler-case
+                      (sb-ext:with-timeout 20
+                        (progn (http:send-request request '()) :answered))
+                    (http:http-error (e) e)
+                    (sb-ext:timeout () :hung))))
+    (values outcome (/ (- (get-internal-real-time) start) internal-time-units-per-second))))
+
+(test a-read-timeout-ends-a-request-the-server-answers-too-late
+  "#537: a request with :READ-TIMEOUT 1, sent through dexador (no CONNECT-ADDRESS and no DEADLINE),
+to a server that waits 6 seconds before writing anything. It must fail as a :RESPONSE failure
+before the server answers. It is sent once with a connect timeout and once without, because
+dexador's WinHTTP backend sets WinHTTP's timeouts only when it has a connect timeout; without one
+it uses its own default of 10 seconds.
+
+ON WINDOWS THE BOUND IS THE READ TIMEOUT PLUS 4 SECONDS. WinHTTP checks its receive timeout every
+4 seconds, so a request fails at the first multiple of 4 seconds after the timeout: measured on
+Windows 11, a timeout from 0.25 to 3 seconds ended the request at 4 seconds, 4 to 6 seconds at 8,
+and 8 seconds at 12, each over one connection. On the Windows leg of #530 the server answered at 3
+seconds, before that, and the request succeeded. Elsewhere the bound is the read timeout itself."
+  (with-server (s #'%late-answer)
+    (dolist (connect '(2 nil))
+      (multiple-value-bind (outcome seconds)
+          (%timed-send (http:make-request :url (%local s "/") :connect-timeout connect
+                                          :read-timeout 1))
+        (is (typep outcome 'http:http-error)
+            "with connect timeout ~A: the request failed rather than ~S after ~,2F s"
+            connect outcome seconds)
+        (is (< seconds #+os-windows 5.5 #-os-windows 2.5)
+            "with connect timeout ~A: it failed within its bound, not after ~,2F s"
+            connect seconds)
+        (is (eq :response (and (typep outcome 'http:http-error) (http:http-error-phase outcome)))
+            "with connect timeout ~A: after the request was sent: ~A" connect outcome)))))
+
+;;; --- a request that stays on this machine (#1212) -----------------------------------
+;;;
+;;; :STAY-LOCAL T on MAKE-REQUEST. The host has to be loopback by LOOPBACK-HOST-P, decided from
+;;; the text with no lookup; no proxy is used, for http or https; and a redirect to a host that
+;;; is not loopback signals STAY-LOCAL-REFUSED instead of being followed.
+
+(test loopback-host-p-decides-from-the-text-and-excludes-6to4-and-nat64
+  "#1211's rule. localhost and loopback literals count, including an IPv4-mapped one, which does
+not leave the machine. 6to4 and NAT64 addresses that carry 127.0.0.1 do not, because their
+traffic goes through a relay or gateway. A name other than localhost does not count, whatever it
+resolves to, because nothing is resolved."
+  (dolist (host '("localhost" "LOCALHOST" "127.0.0.1" "127.8.9.10" "::1" "::ffff:127.0.0.1"))
+    (is-true (http:loopback-host-p host) "~A is loopback" host))
+  (dolist (host '("64:ff9b::7f00:1" "64:ff9b:1::7f00:1" "2002:7f00:1::"
+                  "10.0.0.1" "192.168.1.1" "8.8.8.8" "0.0.0.0" "::"
+                  "localhost.example" "127.0.0.1.nip.io" "minio" "0127.0.0.1" "" "  " nil))
+    (is-false (http:loopback-host-p host) "~S is not loopback" host)))
+
+(test a-stay-local-https-request-to-loopback-does-not-go-through-the-proxy
+  "An https request to 127.0.0.1 with a proxy configured, as HTTPS_PROXY would configure it, goes
+straight to the server. The proxy is a second local server that records what it receives. The
+control: the same request without :STAY-LOCAL goes to the proxy as a CONNECT, which is the
+current default and stays so. Skipped on Windows, where dexador's WinHTTP backend never uses
+*DEFAULT-PROXY* and the test server cannot present the IP-address certificate (#914)."
+  (skip-on-windows "WinHTTP ignores *DEFAULT-PROXY*; ip-test.key is refused there (#914)"
+    (with-server (proxy (lambda (path head stream)
+                          (declare (ignore path head))
+                          (%write-response stream 502 '() "proxy")))
+      (with-server (s (lambda (path head stream)
+                        (declare (ignore path head))
+                        (%write-response stream 200 '() "direct"))
+                      :tls :ip)
+        (let ((dexador.util:*default-proxy* (%local proxy "")))
+          (flet ((send (&rest args)
+                   (handler-case
+                       (http:send-request
+                        (apply #'http:make-request :url (%local s "/x" "127.0.0.1" "https")
+                                                   :ca-path (%fixture "ip-test.crt")
+                                                   :read-timeout 5 args)
+                        '())
+                     (http:http-error (e) e))))
+            (let ((r (send :stay-local t)))
+              (is (equal "direct" (and (typep r 'http:response) (http:response-body r)))
+                  "the request reached the server: ~A" r)
+              (is (= 0 (%requests proxy)) "the proxy received ~D requests" (%requests proxy)))
+            ;; The control counts from here, so it holds whether or not the request above
+            ;; also went to the proxy.
+            (let ((before (%requests proxy)))
+              (send)
+              (is (= (1+ before) (%requests proxy))
+                  "control: without :STAY-LOCAL the request goes to the proxy")
+              (is-true (search "CONNECT" (or (first (server-heads proxy)) ""))
+                       "as a CONNECT: ~S" (first (server-heads proxy))))))))))
+
+(test a-stay-local-request-refuses-a-redirect-off-the-machine
+  "A 302 from 127.0.0.1 to a host that is not loopback signals STAY-LOCAL-REFUSED, naming the
+target and the URL that redirected, on each path a request can take: dexador's own following (no
+credential and no body), this client's loop (a credential header), and a deadline. The targets
+are a name and a NAT64 address carrying 127.0.0.1, neither of which is connected to. Control: a
+redirect to another path on 127.0.0.1 is followed."
+  (dolist (target '("http://api.example.invalid/x" "http://[64:ff9b::7f00:1]:9/x"))
+    (with-server (s (lambda (path head stream)
+                      (declare (ignore head))
+                      (if (string= path "/away")
+                          (%write-response stream 302 `(("Location" . ,target)) "")
+                          (%write-response stream 200 '() "here"))))
+      (dolist (variant '(:plain :credential :deadline))
+        (let ((e (handler-case
+                     (progn
+                       (http:send-request
+                        (http:make-request :url (%local s "/away") :read-timeout 5 :stay-local t
+                                           :headers (and (eq variant :credential)
+                                                         '(("Authorization" . "Bearer s"))))
+                        '() :deadline (and (eq variant :deadline) 30))
+                       nil)
+                   (error (e) e))))
+          (is (typep e 'http:stay-local-refused) "~A, ~A: ~S" target variant e)
+          (when (typep e 'http:stay-local-refused)
+            (is (equal target (http:stay-local-refused-url e)) "~A: names the target" variant)
+            (is (equal (%local s "/away") (http:stay-local-refused-from e))
+                "~A: names the URL that redirected" variant))))
+      (let ((r (http:send-request (http:make-request :url (%local s "/same") :read-timeout 5
+                                                     :stay-local t)
+                                  '())))
+        (is (equal "here" (http:response-body r)) "control: a request that is not redirected")))
+    (with-server (s (lambda (path head stream)
+                      (declare (ignore head))
+                      (if (string= path "/same")
+                          (%write-response stream 302 '(("Location" . "/here")) "")
+                          (%write-response stream 200 '() "here"))))
+      (is (equal "here"
+                 (http:response-body
+                  (http:send-request (http:make-request :url (%local s "/same") :read-timeout 5
+                                                        :stay-local t)
+                                     '())))
+          "control: a redirect that stays on 127.0.0.1 is followed"))))
+
+(test a-stay-local-request-to-a-host-that-is-not-loopback-is-refused-before-connecting
+  "Refused before any connection and without a lookup, through SEND-REQUEST, with and without a
+deadline, and through OPEN-RESPONSE-STREAM. A pinned CONNECT-ADDRESS that is not loopback is
+refused too, whatever the URL's host. Each URL here would fail or hang differently if it were
+sent: a name that does not exist, an unroutable private address, and the NAT64 and 6to4 forms of
+127.0.0.1. Control: the same option with 127.0.0.1 reaches the server."
+  (let ((resolved '()))
+    (dolist (url '("http://api.example.invalid/x" "https://10.255.255.1/x"
+                   "http://[64:ff9b::7f00:1]:9/x" "https://[2002:7f00:1::]/x"))
+      (dolist (deadline '(nil 30))
+        (let ((e (handler-case
+                     (progn (http:send-request
+                             (http:make-request :url url :stay-local t :connect-timeout 2)
+                             '() :deadline deadline)
+                            nil)
+                   (error (e) e))))
+          (is (typep e 'http:stay-local-refused) "~A (deadline ~A): ~S" url deadline e)
+          (when (typep e 'http:stay-local-refused)
+            (is (equal url (http:stay-local-refused-url e)))
+            (is (null (http:stay-local-refused-from e))))))
+      (let ((e (handler-case
+                   (progn (http:open-response-stream
+                           (http:make-request :url url :stay-local t)
+                           :resolve (lambda (host) (push host resolved) (list #(127 0 0 1))))
+                          nil)
+                 (error (e) e))))
+        (is (typep e 'http:stay-local-refused) "open-response-stream ~A: ~S" url e)))
+    (is (null resolved) "open-response-stream resolved ~S" resolved))
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "local")))
+    (is (typep (handler-case
+                   (progn (http:send-request
+                           (http:make-request :url (%local s "/") :stay-local t
+                                              :connect-address "10.255.255.1" :connect-timeout 2)
+                           '())
+                          nil)
+                 (error (e) e))
+               'http:stay-local-refused)
+        "a loopback URL pinned to an address that is not loopback is refused")
+    (is (equal 0 (%requests s)) "nothing refused above reached the server")
+    (is (equal "local"
+               (http:response-body
+                (http:send-request (http:make-request :url (%local s "/") :stay-local t
+                                                      :read-timeout 5)
+                                   '())))
+        "control: 127.0.0.1 is sent")
+    (is (null (http:request-stay-local (http:make-request :url "http://x/")))
+        "the default is NIL, so every other caller is unchanged")))
