@@ -17,7 +17,9 @@
   (:export #:read-data #:write-data #:write-data-to-string
            #:unsafe-data #:unsafe-data-reason #:unsafe-data-position #:unsafe-data-detail
            #:*max-depth* #:*max-elements* #:*max-string-length* #:*max-number-digits*
-           #:*max-input* #:*max-new-keywords*))
+           #:*max-input* #:*max-new-keywords*
+           #:unknown-keyword #:unknown-keyword-p #:unknown-keyword-name
+           #:argument-error #:argument-error-argument #:argument-error-value))
 
 (in-package #:aion/sexp)
 
@@ -37,6 +39,29 @@ accepts. REASON is a keyword: :DISPATCH-MACRO, :READER-MACRO, :ESCAPED-SYMBOL, :
 :TOO-MANY-NEW-KEYWORDS, :SYNTAX, :END-OF-INPUT or, from WRITE-DATA, :UNWRITABLE. POSITION is
 the character offset in the input, or NIL from WRITE-DATA. DETAIL quotes at most the first 40
 characters of the offending token."))
+
+(define-condition argument-error (error)
+  ((argument :initarg :argument :reader argument-error-argument)
+   (value :initarg :value :reader argument-error-value)
+   (expected :initarg :expected :reader %argument-error-expected))
+  (:report (lambda (c s)
+             (format s "aion/sexp: :~A must be ~A, not ~S." (argument-error-argument c)
+                     (%argument-error-expected c) (argument-error-value c))))
+  (:documentation "READ-DATA or WRITE-DATA was called with a keyword argument it does not
+accept. ARGUMENT is
+the argument's name, a keyword such as :INTERN-KEYWORDS, and VALUE what it was given. This is a
+fault in the calling code, not in the input, so it is not UNSAFE-DATA (#1166)."))
+
+(defun %argument-error (argument value expected)
+  (error 'argument-error :argument argument :value value :expected expected))
+
+(defstruct (unknown-keyword (:constructor %make-unknown-keyword (name)) (:copier nil))
+  "A keyword READ-DATA read under :INTERN-KEYWORDS :EXISTING that did not exist, so it was not
+interned. NAME is the keyword's name, upper-cased as the keyword's would be: :foo has the name
+\"FOO\". It is neither a string nor a symbol, so the caller can tell it from a string literal
+\"FOO\" and from an existing keyword, and decide what to do with it. WRITE-DATA refuses it as
+:UNWRITABLE, as it refuses anything that is not data (#1166)."
+  (name "" :type string :read-only t))
 
 (defparameter *max-depth* 64 "The deepest nesting of lists accepted.")
 (defparameter *max-elements* 100000
@@ -233,11 +258,11 @@ value too small for the type reads as zero, or as the nearest denormal: 1e-50 is
        (not (every (lambda (c) (char= c #\.)) name))))
 
 (defun %new-keyword (name r start)
-  "The keyword NAME, which does not exist yet, as :INTERN-KEYWORDS decides: under :EXISTING,
-NAME itself, a string, and nothing is interned; under T, the keyword, interned once the count of
-keywords this read has created is checked against MAX-NEW-KEYWORDS (#1166)."
+  "The keyword NAME, which does not exist yet, as :INTERN-KEYWORDS decides: under :EXISTING, an
+UNKNOWN-KEYWORD holding NAME, and nothing is interned; under T, the keyword, interned once the
+count of keywords this read has created is checked against MAX-NEW-KEYWORDS (#1166)."
   (if (eq (%r-intern-keywords r) :existing)
-      name
+      (%make-unknown-keyword name)
       (let ((limit (%r-max-new-keywords r)))
         (when (and limit (> (incf (%r-new-keywords r)) limit))
           (%unsafe :too-many-new-keywords start "more than ~D new keywords" limit))
@@ -346,7 +371,8 @@ is read."
                               (max-number-digits *max-number-digits*) (max-input *max-input*)
                               (max-new-keywords *max-new-keywords*))
   "Read one datum from SOURCE, a string or a character input stream, accepting plain data only.
-Returns the datum and the number of characters read. Signals UNSAFE-DATA for anything else.
+Returns the datum and the number of characters read. Signals UNSAFE-DATA for anything else, and
+ARGUMENT-ERROR for a keyword argument it does not accept.
 
 Accepted: proper and dotted lists; strings, whose only escapes are \\\\ and \\\"; integers;
 ratios; floats (see below); T and NIL; keywords that already exist; and the symbols in SYMBOLS,
@@ -356,9 +382,10 @@ standard reader folds it, so foo and FOO both name the symbol whose name is \"FO
 NEW KEYWORDS: a keyword that does not exist yet is refused, and nothing is interned, unless
 INTERN-KEYWORDS says otherwise (#1166):
 - NIL, the default: refused as :UNKNOWN-SYMBOL.
-- :EXISTING: read as its name, a string, upper-cased as the keyword's name would be, so :foo
-  reads as \"FOO\". Nothing is interned, and the caller decides what to accept. The string
-  cannot be told apart from a string literal \"FOO\" in the input.
+- :EXISTING: read as an UNKNOWN-KEYWORD, whose UNKNOWN-KEYWORD-NAME is the name upper-cased as
+  the keyword's would be, so :foo reads as one named \"FOO\". Nothing is interned. It is not a
+  string or a symbol, so the caller can tell it from the string literal \"FOO\" and from an
+  existing keyword, and decides what to accept.
 - T: interned. An interned keyword is never freed, so on input from outside each call can add
   keywords for the life of the image. MAX-NEW-KEYWORDS, when not NIL, is the most keywords one
   call creates; the next one is refused as :TOO-MANY-NEW-KEYWORDS before it is interned. The
@@ -381,12 +408,11 @@ either way.
 For a string, text after the datum is refused unless it is whitespace, or whitespace and
 comments under :SKIP; for a stream, the stream is left just after the datum."
   (unless (member comments '(:refuse :skip))
-    (error "aion/sexp: :COMMENTS must be :REFUSE or :SKIP, not ~S." comments))
+    (%argument-error :comments comments ":REFUSE or :SKIP"))
   (unless (member intern-keywords '(nil t :existing))
-    (error "aion/sexp: :INTERN-KEYWORDS must be NIL, T or :EXISTING, not ~S." intern-keywords))
+    (%argument-error :intern-keywords intern-keywords "NIL, T or :EXISTING"))
   (unless (or (null max-new-keywords) (typep max-new-keywords '(integer 0)))
-    (error "aion/sexp: :MAX-NEW-KEYWORDS must be NIL or a non-negative integer, not ~S."
-           max-new-keywords))
+    (%argument-error :max-new-keywords max-new-keywords "NIL or a non-negative integer"))
   (let* ((stream (if (stringp source) (make-string-input-stream source) source))
          (r (progn (%check-symbols-argument symbols)
                    (make-%reader :stream stream :symbols symbols :intern-keywords intern-keywords
@@ -406,7 +432,7 @@ comments under :SKIP; for a stream, the stream is left just after the datum."
 
 (defun %check-symbols-argument (symbols)
   (unless (and (listp symbols) (every #'symbolp symbols))
-    (error "aion/sexp: :SYMBOLS must be a list of symbols, not ~S." symbols)))
+    (%argument-error :symbols symbols "a list of symbols")))
 
 (defun %number-token-p (name)
   "Whether READ-DATA would read NAME as a number rather than as a symbol: through the reader's
@@ -474,7 +500,8 @@ a number, such as one out of range, counts too."
 EQUAL to it. Signals UNSAFE-DATA :UNWRITABLE, before writing anything, for a datum READ-DATA
 would refuse: a struct, a vector or another object that is not data, a symbol not in SYMBOLS or
 whose name would not read back as itself, a float that is not finite, and a datum past a
-limit, which includes a circular list. Returns DATUM."
+limit, which includes a circular list. Signals ARGUMENT-ERROR when SYMBOLS is not a list of
+symbols. Returns DATUM."
   (%check-symbols-argument symbols)
   ;; Elements are counted as READ-DATA counts them: each list once and each atom once.
   (let ((elements 0))
