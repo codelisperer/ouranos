@@ -1,0 +1,17 @@
+{
+  "name": "ouranos-ide-editor",
+  "version": "0.0.0",
+  "private": true,
+  "description": "The CodeMirror 6 editor of the Ouranos IDE example, bundled once with esbuild by build.sh. The built bundle is committed; running the IDE needs no Node.",
+  "license": "MIT",
+  "dependencies": {
+    "@codemirror/commands": "6.11.1",
+    "@codemirror/language": "6.13.1",
+    "@codemirror/legacy-modes": "6.5.5",
+    "@codemirror/state": "6.7.6",
+    "@codemirror/view": "6.43.15"
+  },
+  "devDependencies": {
+    "esbuild": "0.28.2"
+  }
+}

@@ -1914,6 +1914,124 @@ its tag.
 
 ### Added
 
+- **`hyperion/desktop-ui`: a desktop of floating windows served as one page, as a proof of
+  concept** (#1218). A new aux system; hyperion's core does not load it. `make-desktop` and
+  `open-window` build a desktop of `window` objects, each with a render function, named actions
+  and its own data; `make-app` serves it, with routes under `/window/:id`; the page moves,
+  resizes, raises and closes windows by posting events. The window's state and the events are
+  Coalton types in `hyperion/desktop-ui/state`, changed only by `apply-event`. `inspect-window`,
+  `inspect-event` and `inspect-desktop` return property lists, and `open-inspector` adds a
+  window that shows them. A window names its render function by symbol, so redefining the
+  function changes the window's next render. Nothing is saved between runs. The example that
+  uses it is the system `praxeon/examples/ouranos-ide`. This is experimental and its names may
+  change.
+- **`hyperion/desktop-ui` pushes changes to the page over `GET /events`, and the page no longer
+  polls** (#1218). The new route `GET /events` is a Server-Sent Events stream over one
+  `hyperion/feed` per desktop, written through `hyperion/sse`. The page opens it once with
+  `EventSource`. `open-window`, `remove-window`, `dispatch-event` and `window-changed` publish on
+  the feed, so a window opened from a REPL with `open-window` appears on a connected page without
+  a reload, and `window-changed`, which did nothing before, now sends the window's body, its
+  position and the record of any inspector looking at it. Each event carries the HTML, rendered
+  when the event is written, and `event-data` documents the event format. A window's `:refresh`
+  interval is now served by a timer thread on the server, named `desktop-ui timer: TITLE`, which
+  runs only while a page is connected; no `hx-trigger "every ..."` is rendered any more, on a
+  window, on the dock or in the inspector. `:refresh` may be a fraction of a second. The new
+  `stop-desktop` ends the streams and the timer, and an app calls it when its server stops;
+  `desktop-subscribers` counts the open streams. `POST /window/:id/event` now answers 204 for a
+  close and an open, without the `HX-Trigger: ou-dock` header: the page learns the result from
+  the stream. `GET /events` stays open, so the server must run each request on its own thread or
+  on a pool. In `praxeon/examples/ouranos-ide`, `start` no longer prints a log line for each
+  successful request: it passes `:log nil` to `hyperion/server:start` and wraps the app in
+  `hyperion/logging:wrap` with every path treated as a quiet path, so successful requests log at
+  `:trace` and failed ones are still logged. `stop` calls `stop-desktop`. Other apps' logging is
+  unchanged.
+- **`hyperion/desktop-ui/jobs`: background jobs for a desktop's windows, with cancel, a time
+  limit and captured output** (#1218). A new package in the `hyperion/desktop-ui` system.
+  `start-job` runs a function on a thread of its own and returns at once. In that thread
+  `*standard-output*` appends to the job's output, and `hyperion/desktop-ui:window-changed` is
+  called for the job's window when it writes (at most once every `*change-interval*` seconds) and
+  when it ends. `cancel-job` records `:cancelled` and interrupts the thread; `:time-limit`
+  records `:timed-out`; a function that signals any `serious-condition`, including running out
+  of stack, ends as `:failed`. `:bindings` passes special bindings such as `*package*` into the
+  thread, and `:on-stop` with `:stop-grace` stops work the function gave to another thread.
+  `job-status`, `job-output`, `job-result`, `job-error-text`, `wait-job`, `inspect-job`,
+  `find-job`, `window-jobs`, `desktop-jobs` and `all-jobs` read jobs; `*output-limit*` and
+  `*job-history*` bound what is kept. The status is the Coalton type `Job-Status` in
+  `hyperion/desktop-ui/job-status`, changed only by `next-status`. `hyperion/desktop-ui` now
+  depends on `aion/dynamic`. `render-window-body` now shows a `serious-condition` from a render
+  function in the window, not only an `error`. Under `sbcl --script` or `--lose-on-corruption`,
+  SBCL ends the process when a thread runs out of stack, and neither handler runs.
+- **The Ouranos IDE example evaluates REPL input and runs agent turns as background jobs**
+  (#1218), in `praxeon/examples/ouranos-ide`. `repl-eval` and `agent-say` answer at once with a
+  running entry that has a Cancel button, and no longer wait for the result. The REPL and agent
+  windows each have a new action `cancel` (`repl-cancel`, `agent-cancel`), which cancels the job
+  whose id is in the form field `cancel`; the Cancel button posts to it, and `repl-eval` and
+  `agent-say` do not read that field. Lisp-mode input now has the time limit Coalton input had,
+  `*eval-time-limit*` (20 seconds), and an agent's turn has `*turn-time-limit*` (300). A second
+  input to a REPL window whose last input is still running is refused, and so is a second turn
+  for an agent whose last turn is still running. `repl-entry` is a class and no longer a
+  structure, and `inspect-repl-entry` gained `:number`, `:output` and `:job`, and the kinds
+  `:running`, `:cancelled` and `:timed-out`. A window's transcript is kept newest first and cut
+  to `*transcript-limit*` (200). Element ids now start with the window's own (`win-repl-transcript`
+  where it was `ide-transcript`, `win-agent-chat` where it was `ide-chat`), so two REPL windows
+  do not write into each other, and the input fields carry an id and `data-ou-preserve`.
+- **When `GET /events` replaces a window's body, the page keeps every element that has an id
+  and `data-ou-preserve`** (#1218), in `hyperion/desktop-ui`'s `client-js`. The old node is put
+  back in place of the new element with the same id, so its value stays, and when it had the
+  focus it gets the focus back with the same selection. Text being typed into a REPL or agent
+  input is therefore not lost when a job's output pushes the window's body.
+- **`hyperion/desktop-ui:*page-scripts*`: scripts an app adds to the desktop's page** (#1218). A
+  list of URLs, empty by default. `render-page` adds a deferred `<script src>` for each, after
+  htmx, in order. An app binds it around a request, as it binds `*css*`, and serves the scripts
+  itself. When a pushed body keeps an element marked `data-ou-preserve`, the focus is now given
+  back when it was on an element inside the kept one, such as a code editor's editable element,
+  not only when it was on the kept element itself.
+- **The Ouranos IDE example has a code editor window, evaluated by Coalton's `mine/runtime`**
+  (#1218), in `praxeon/examples/ouranos-ide`. `build-desktop` adds a sixth window, `editor`
+  (`render-editor`, with the actions `eval` and `cancel`: `editor-eval`, `editor-cancel`), so
+  `inspect-desktop` lists six windows. The window holds a CodeMirror 6 editor with Lisp
+  highlighting and bracket matching, from the committed bundle
+  `praxeon/examples/ouranos-ide/editor/ouranos-editor.min.js`, which `make-app` serves at
+  `+editor-url+` (`/ide/editor/ouranos-editor.min.js`) and adds to the page through
+  `*page-scripts*`. Running the IDE needs no Node; `editor/build.sh` rebuilds the bundle with npm
+  and esbuild. The Evaluate button, or Mod-Enter, sends the selection, or the whole buffer, to a
+  child SBCL running `mine/runtime` (the runtime client), as a job with a Cancel button and the
+  time limit `*editor-time-limit*` (60 seconds, plus `*runtime-start-limit*`, 300, while the
+  first evaluation starts the runtime). In Coalton mode a run of definitions is compiled
+  together and other forms are evaluated (`coalton-runs`); Lisp mode evaluates in the child's
+  `CL-USER`. One evaluation runs at a time across all editor windows. `inspect-editor-entry`
+  describes an evaluation. `stop` and the new `stop-runtime` kill the child; `runtime-ready-p`
+  says whether it runs. `praxeon/examples/ouranos-ide` now depends on
+  `praxeon/examples/ouranos-ide/runtime`, whose client gained `runtime-busy-p`.
+- **The Ouranos IDE example is served by `hyperion/server-uv`** (#1218). The system
+  `praxeon/examples/ouranos-ide` depends on `hyperion/server-uv` in place of
+  `clack-handler-hunchentoot`, so loading it needs libuv: run `sbcl --script
+  scripts/build-libuv.lisp` once from the root of the tree, or install libuv on the system.
+  `start` and `native-window` no longer pass `:server :hunchentoot`; they take a `:server`
+  keyword whose default is `hyperion/server:default-server`, so `HYPERION_SERVER` still chooses
+  the backend, and a `:workers` keyword whose default is the new `*workers*`, 16. Each open page
+  holds one handler thread for its `GET /events` stream, and with hyperion/server's default of 2
+  for `:uv`, two open pages left every other request waiting. `:workers` is not passed to
+  Hunchentoot. `stop` now ends the event streams before it stops the server, so each stream
+  finishes as a complete response instead of failing to write.
+- **The Ouranos IDE example opens a project folder, shows its file tree, and edits and saves its
+  files in tabs** (#1228), in `praxeon/examples/ouranos-ide`. `build-desktop` adds a seventh
+  window, `files` (`render-files`), so `inspect-desktop` lists seven windows. It opens a folder
+  as the project, shows its tree with folders that expand and collapse, and leaves out names
+  starting with a dot (`.git`), `node_modules` and compiled Lisp files until "Show hidden" is
+  pressed. A file clicked in the tree opens in a tab of the `editor` window, which gains the
+  actions `save`, `close`, `switch`, `reload` and `dismiss` (`editor-save`, `editor-close`,
+  `editor-switch`, `editor-reload`, `editor-dismiss`); the scratch buffer stays as the first
+  tab. Save (the button, or Mod-S) writes a temporary file in the same folder and renames it
+  over the file. When the file changed on disk since it was opened or last saved, nothing is
+  written and the window asks whether to overwrite it, reload it or keep editing. Closing a tab
+  with unsaved changes asks first. New file and New folder make entries inside the project. The
+  new package `praxeon/examples/ouranos-ide/project` holds the file access: every path is
+  relative to the project's folder and is refused (`path-refused`) when it resolves outside it
+  through `..` or a symbolic link, checked on the resolved path; on Windows a path through any
+  link is refused, because SBCL's `truename` does not follow a junction. The editor bundle was
+  rebuilt for the tabs (same npm packages); the system now depends on `aion/fs` and, on Unix,
+  `sb-posix`.
 - **dokimasia: `cons acceptance` runs an app's suite in a headless browser from the command line**
   (#1028). `dokimasia/cons.lisp` is new, with the targets `build`, `test`, `repl` and
   `acceptance`. `cons acceptance SYSTEM=<system> SUITE=<suite>` loads the system, runs the suite and
