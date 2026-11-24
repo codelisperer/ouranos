@@ -80,6 +80,32 @@
   :serial t
   :components ((:file "src/coalton-repl")))
 
+;;; The offline upstream check: read an upstream.sexp and check it against the tree it describes
+;;; (#716). scripts/check-upstream.lisp LOADs the same three files directly, so the gate still
+;;; runs it with nothing but SBCL; this system is for code that loads it with ASDF, which
+;;; `cons outdated' will be. The two helpers stay in scripts/, where every other script loads
+;;; them, so there is one copy of each.
+(defsystem "cons/inventory"
+  :description "Read an upstream.sexp and check it against the tree it describes (#716)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ()
+  :serial t
+  :components ((:file "human-path" :pathname "../scripts/human-path")
+               (:file "pin-files" :pathname "../scripts/pin-files")
+               (:file "inventory" :pathname "src/inventory")))
+
+;;; The online half: ask each entry's upstream for its latest release. A separate system
+;;; because it needs aion/http-client and jzon, and core cons must not (the hub's ruling on
+;;; #716, 2026-11-24). scripts/check-upstream.lisp --online loads it.
+(defsystem "cons/outdated"
+  :description "Compare each upstream.sexp entry with its latest upstream release (#716)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("cons/inventory" "aion/http-client" "com.inuoe.jzon")
+  :serial t
+  :components ((:file "src/outdated")))
+
 (defsystem "cons/tests"
   :description "Test suite for cons."
   :depends-on ("aion/fs" "cons" "cons/env" "aion/secret" "fiveam")  ; env-tests.lisp calls cons/env: directly
