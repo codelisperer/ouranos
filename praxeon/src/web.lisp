@@ -128,6 +128,9 @@ translator agent, or a locale-aware guardrail. Overridable via :responder."
   ;; Whether the reply is shown while the model writes it (#1339): MAKE-APP's :STREAM-TEXT,
   ;; resolved to T or NIL.
   (stream-text nil)
+  ;; MAKE-APP's :RENDER-ITEM: a function of the agent's name and a transcript item that returns
+  ;; the item's HTML, or NIL for the default (#1340). NIL here means no renderer.
+  (render-item nil)
   ;; The running turn, set while it holds the turn lock: its id, and the handle POST /api/cancel
   ;; calls `praxeon/actor:cancel-turn' on. Both NIL between turns.
   (running nil)
@@ -483,9 +486,20 @@ numbered from 1; a reply before the first user message is turn 0."
                               (list (list :kind :assistant :turn turn :text text))))))))))
 
 (defun %item-html (conv item)
-  "ITEM as the chat page shows it. A turn that ended normally shows nothing, because its reply
-is an item of its own. One that ended in an error shows the error in the agent's bubble, as the
-page did before items existed."
+  "ITEM as the chat page shows it: what CONV's renderer returns for it, or, when there is none or
+it returns NIL, the default (%DEFAULT-ITEM-HTML). The renderer gets a copy of the item, so it
+cannot change the transcript (#1340)."
+  (let* ((render (conversation-render-item conv))
+         (html (and render (funcall render (conversation-agent-name conv) (copy-list item)))))
+    (cond ((null html) (%default-item-html conv item))
+          ((stringp html) html)
+          (t (error "praxeon/web: the :RENDER-ITEM function returned ~S for a ~S item; it must return a string of HTML, or NIL for the default."
+                    (type-of html) (getf item :kind))))))
+
+(defun %default-item-html (conv item)
+  "ITEM as the chat page shows it with no renderer. A turn that ended normally shows nothing,
+because its reply is an item of its own. One that ended in an error shows the error in the agent's
+bubble, as the page did before items existed."
   (ecase (getf item :kind)
     (:user (ui:user-bubble (getf item :text)))
     (:assistant (%assistant-html conv (getf item :text)))
@@ -931,14 +945,14 @@ JSON client gets {\"cancelled\": true} when a turn was running and false when no
 
 (defun %new-conversation (key agent agent-name responder
                           &key built-with rebuild (clock #'get-universal-time) trusted-replies
-                               stream-text)
+                               stream-text render-item)
   "A conversation over AGENT, for KEY, whose transcript starts with AGENT's history. Its next turn
-is numbered after the history's last. BUILT-WITH, REBUILD, CLOCK, TRUSTED-REPLIES and STREAM-TEXT:
-see the CONVERSATION slots."
+is numbered after the history's last. BUILT-WITH, REBUILD, CLOCK, TRUSTED-REPLIES, STREAM-TEXT and
+RENDER-ITEM: see the CONVERSATION slots."
   (let ((conv (make-conversation :key key :agent agent :agent-name agent-name
                                  :responder responder :built-with built-with :clock clock
                                  :rebuild rebuild :trusted-replies trusted-replies
-                                 :stream-text stream-text))
+                                 :stream-text stream-text :render-item render-item))
         (history (%history-items agent)))
     (dolist (item history) (%publish conv item))
     (setf (conversation-turns conv)
@@ -1030,7 +1044,8 @@ not before, and max_seconds says how long it can last at most."
                       dictionary gate conversation-key make-agent
                       grant-verifier audience sessions
                       (conversation-idle-seconds 1800) (clock #'get-universal-time)
-                      (transport :poll) embed-origins trusted-replies (stream-text :auto))
+                      (transport :poll) embed-origins trusted-replies (stream-text :auto)
+                      render-item)
   "A Clack app exposing an agent: GET / (chat page), POST /api/message (HTMX or JSON),
 GET /api/progress (live-progress poll). One agent holds one conversation, so turns
 are serialized; the HTMX turn runs on a background thread so no handler blocks.
@@ -1122,6 +1137,17 @@ the agent read elsewhere, and an image is fetched as soon as it is shown, which 
 its host. TRUSTED-REPLIES T renders images and links in replies, as before #1119. The user's own
 messages render images and links either way.
 
+AN APP'S OWN BUBBLES (#1340). RENDER-ITEM, a function or a function's name, is called with the
+agent's name and a copy of each transcript item, a plist: (:KIND :USER :TURN N :TEXT T),
+(:KIND :ASSISTANT :TURN N :TEXT T), or (:KIND :TURN-ENDED :TURN N :OUTCOME O), with :MESSAGE when
+O is :ERROR. It returns the item's HTML as a string, or NIL to use the default, which is what the
+page shows with no renderer. The page, a poll and an event stream all render items through it.
+`praxeon/chat-ui:user-bubble' and `assistant-bubble' are there for a renderer to call. ITS OUTPUT
+GOES INTO THE PAGE AS IT IS: a renderer that puts a message's text into its HTML itself escapes
+it, and one that calls `assistant-bubble' passes :IMAGES and :LINKS as #1119 describes, because
+:TRUSTED-REPLIES applies only to the default rendering. The reply shown while the model writes it
+(STREAM-TEXT) is not an item and keeps the default bubble.
+
 THE REPLY AS IT IS WRITTEN, AND STOPPING A TURN (#1339). With STREAM-TEXT true, the page shows the
 reply in the agent's bubble while the model writes it, from the provider's stream
 (`praxeon/llm:*on-text*'), and replaces it with the reply when the turn ends. Only the text of the
@@ -1148,6 +1174,8 @@ and no reply. See %TURN for how a custom responder is stopped."
          (error "praxeon/web: :GRANT-VERIFIER needs :AUDIENCE, the name grants for this service are minted with. Without it a grant minted for another service would open a session here."))
         ((not (typep conversation-idle-seconds '(integer 1)))
          (error "praxeon/web: :CONVERSATION-IDLE-SECONDS must be a whole number of seconds, at least 1, not ~S." conversation-idle-seconds))
+        ((not (typep render-item '(or null function symbol)))
+         (error "praxeon/web: :RENDER-ITEM must be a function or a function's name, not ~S." render-item))
         ((not (member stream-text '(:auto t nil)))
          (error "praxeon/web: :STREAM-TEXT must be :AUTO, T or NIL, not ~S." stream-text))
         ((not (member transport '(:poll :sse)))
@@ -1177,7 +1205,8 @@ and no reply. See %TURN for how a custom responder is stopped."
          (new-conversation
            (lambda (key agent) (%new-conversation key agent agent-name responder :clock clock
                                                    :trusted-replies trusted-replies
-                                                   :stream-text stream-text)))
+                                                   :stream-text stream-text
+                                                   :render-item render-item)))
          (shared (unless (or conversation-key grant-verifier) (funcall new-conversation nil agent)))
          (table (make-hash-table :test 'equal))  ; key -> %ENTRY
          (table-lock (sb-thread:make-mutex :name "praxeon-web-conversations"))
@@ -1242,7 +1271,8 @@ and no reply. See %TURN for how a custom responder is stopped."
                                                            :rebuild rebuild
                                                            :clock clock
                                                            :trusted-replies trusted-replies
-                                                           :stream-text stream-text)))
+                                                           :stream-text stream-text
+                                                           :render-item render-item)))
                              grant))))))
          ;; CONVERSATION-FOR returns the request's conversation, or the response that refuses it,
          ;; and with grants the session's grant as a second value.
@@ -1436,7 +1466,7 @@ other request; it is allowed on :UV, where each open page holds one of the serve
 (defun %build-app (agent agent-name title responder intro footer dev theme-css
                    dictionary gate conversation-key make-agent
                    grant-verifier audience sessions conversation-idle-seconds transport
-                   embed-origins trusted-replies stream-text)
+                   embed-origins trusted-replies stream-text render-item)
   "The app START and SERVE-FOREVER serve: MAKE-APP, called with the arguments they share.
 
 BOTH ENTRY POINTS GO THROUGH HERE. START and SERVE-FOREVER differ in how they BLOCK, not
@@ -1454,19 +1484,21 @@ forget one."
             :sessions sessions
             :conversation-idle-seconds (or conversation-idle-seconds 1800)
             :transport transport :embed-origins embed-origins
-            :trusted-replies trusted-replies :stream-text stream-text))
+            :trusted-replies trusted-replies :stream-text stream-text
+            :render-item render-item))
 
 (defun start (&key agent (agent-name "Praxeon") (title "Praxeon")
                    (responder #'%default-responder) intro footer dev theme-css
                    dictionary gate conversation-key make-agent
                    grant-verifier audience sessions conversation-idle-seconds embed-origins
-                   trusted-replies (stream-text :auto) (transport :auto) (server (default-server))
-                   (port *default-port*) (host "127.0.0.1") debug)
+                   trusted-replies (stream-text :auto) render-item (transport :auto)
+                   (server (default-server)) (port *default-port*) (host "127.0.0.1") debug)
   "Start a web server exposing AGENT and return a handler; stop it with STOP.
 Builds the agent/chat Clack app and hands it to hyperion/server:start. SERVER is
 the Clack backend (DEFAULT-SERVER, re-exported from Hyperion). RESPONDER, INTRO,
 FOOTER, THEME-CSS, DICTIONARY, CONVERSATION-KEY, MAKE-AGENT, GRANT-VERIFIER, AUDIENCE,
-SESSIONS, CONVERSATION-IDLE-SECONDS, EMBED-ORIGINS, TRUSTED-REPLIES, STREAM-TEXT and DEV pass
+SESSIONS, CONVERSATION-IDLE-SECONDS, EMBED-ORIGINS, TRUSTED-REPLIES, STREAM-TEXT, RENDER-ITEM and
+DEV pass
 through to MAKE-APP -- DICTIONARY turns
 on per-request locale negotiation (title/intro/footer may be locale functions); DEV
 t embeds the hot-reload poller so the page auto-refreshes on (MARK-RELOADED). TRANSPORT is
@@ -1483,14 +1515,14 @@ SERVE-FOREVER instead."
                          dictionary gate conversation-key make-agent
                          grant-verifier audience sessions conversation-idle-seconds
                          (%resolve-transport transport server) embed-origins
-                         trusted-replies stream-text)
+                         trusted-replies stream-text render-item)
              :server server :port port :host host :debug debug))
 
 (defun serve-forever (&key agent (agent-name "Praxeon") (title "Praxeon")
                            (responder #'%default-responder) intro footer dev theme-css
                            dictionary gate conversation-key make-agent
                            grant-verifier audience sessions conversation-idle-seconds embed-origins
-                           trusted-replies (stream-text :auto) (transport :auto)
+                           trusted-replies (stream-text :auto) render-item (transport :auto)
                            (server (default-server)) (port *default-port*)
                            (host "127.0.0.1") debug (log t)
                            (name agent-name) (banner :derive) (signals t) on-ready)
@@ -1517,7 +1549,7 @@ here rather than porting the symptom."
                                  theme-css dictionary gate conversation-key make-agent
                                  grant-verifier audience sessions conversation-idle-seconds
                                  (%resolve-transport transport server) embed-origins
-                                 trusted-replies stream-text)
+                                 trusted-replies stream-text render-item)
                      :server server :port port :host host :debug debug :log log
                      :name name :banner banner :signals signals :on-ready on-ready))
 
