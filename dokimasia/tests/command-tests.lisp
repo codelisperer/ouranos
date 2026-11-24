@@ -51,16 +51,37 @@ error, as three values."
         (is (search expected err) "~S: expected ~S in ~S" arguments expected err)
         (is (string= "" out) "~S printed ~S" arguments out)))))
 
+(defun report-text (out)
+  "The report.txt that a run wrote in OUT, or a sentence saying there is none."
+  (let ((path (merge-pathnames "report.txt" out)))
+    (if (probe-file path)
+        (read-text path)
+        (format nil "(there is no report.txt in ~A)" (namestring out)))))
+
 (test a-suite-whose-rows-all-pass-exits-0-and-writes-its-report-to-out
+  "This failed once on macOS and passed on a rerun of the same commit (#1353). The command's
+output says only that the row failed; the row's reason is in report.txt. So when a check here
+fails, its message carries the whole report, and the run's directory is kept, with the report and
+any screenshots, instead of being deleted. It is deleted when every check passes."
   (when (browser-available-p)
-    (with-temporary-directory (out "dokimasia-command")
-      (multiple-value-bind (code text err)
-          (exit-code-of :system "dokimasia/tests" :suite "bt-icon-none"
-                        :viewports "phone,desktop" :schemes "dark" :out (namestring out))
-        (is (eql 0 code) "~A~A" text err)
-        (is (search "1 passed, 0 failed, 0 not run" text) "~A" text)
-        (let ((report (read-text (merge-pathnames "report.txt" out))))
-          (is (search "Viewports: phone, desktop. Schemes: dark." report) "~A" report))))))
+    (let ((out (temporary-directory "dokimasia-command"))
+          (passed nil))
+      (unwind-protect
+           (multiple-value-bind (code text err)
+               (exit-code-of :system "dokimasia/tests" :suite "bt-icon-none"
+                             :viewports "phone,desktop" :schemes "dark" :out (namestring out))
+             (let ((report (report-text out)))
+               (setf passed (and (eql 0 code)
+                                 (search "1 passed, 0 failed, 0 not run" text)
+                                 (search "Viewports: phone, desktop. Schemes: dark." report)
+                                 t))
+               (is (eql 0 code) "~A~A~%The report, kept in ~A:~%~A" text err (namestring out) report)
+               (is (search "1 passed, 0 failed, 0 not run" text)
+                   "~A~%The report, kept in ~A:~%~A" text (namestring out) report)
+               (is (search "Viewports: phone, desktop. Schemes: dark." report)
+                   "The report, kept in ~A:~%~A" (namestring out) report)))
+        (when passed
+          (uiop:delete-directory-tree out :validate t :if-does-not-exist :ignore))))))
 
 (test a-suite-with-a-failing-row-exits-1
   "Control for the test above: the same command with a suite whose one row fails."
