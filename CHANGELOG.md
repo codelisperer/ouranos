@@ -14,6 +14,20 @@ its tag.
 
 ### An app may have to act
 
+- **hyperion/appearance: a muted text token, which Bulma's grey text classes now use** (#1281).
+  The token table has `:muted-text`, written as `--hy-muted-text`: `#5c6370` (light), `#9aa3b5`
+  (dark), `#454b59` (light, high contrast) and `#bfc5cf` (dark, high contrast). `appearance-css`
+  gives Bulma's `.has-text-grey`, `.has-text-grey-light`, `.has-text-grey-lighter`,
+  `.has-text-grey-dark` and `.has-text-grey-darker` that colour with `!important`, in both looks,
+  because Bulma's own fixed greys fail WCAG AA in one of the two themes. A page that serves
+  `appearance-css` shows its grey text in the new colour in every scheme, and the five shades of
+  grey become one. `appearance-contrast-failures` checks `:muted-text` at 4.5:1 against
+  `:surface`, `:surface-raised` and `:header` (`*muted-text-backgrounds*`), so an app's own table
+  whose surfaces do not pass with hyperion's muted value gets new failures in its own contrast
+  test; it gives `:muted-text` in that scheme's plist to `make-appearance-table`. The token must
+  be a colour, not a gradient. `hyperion/examples/active-search` now serves `appearance-css`, and
+  dokimasia's dark-scheme audit of it runs instead of being skipped.
+
 - **Toolchain: the pinned Coalton is `a07305a5`** (#1326), upstream `main` of 2026-11-22, in
   `coalton.pin`, 55 commits after `024d0a17`. No file in this tree needed a change. On a
   development machine, re-run `scripts/setup.sh` or `scripts/setup.ps1`, which fetch it and check

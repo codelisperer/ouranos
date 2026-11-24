@@ -13,12 +13,10 @@
 ;;;;   - CONTACTS-PAGE checks that the page is the contacts screen, takes a screenshot in every
 ;;;;     viewport and colour scheme of the run, and runs the axe-core audit in each scheme.
 ;;;;
-;;;; The run is in the light scheme only for now. In the dark scheme the audit finds the grey
-;;;; subtitle (.subtitle) below WCAG AA contrast, in Bulma's grey, which hyperion/appearance does
-;;;; not yet set (#1281). Runs that switched from light to dark also reported the ten mailto
-;;;; links, because the audit read them part way through their colour transition (#1288); at
-;;;; rest they pass. The suite ACTIVE-SEARCH-DARK holds the dark audit; its test is skipped as
-;;;; pending #1281.
+;;;; The run is in the light scheme. The suite ACTIVE-SEARCH-DARK holds the audit in the dark
+;;;; scheme, which its own test runs. Before #1281 that audit found the grey subtitle (.subtitle)
+;;;; below WCAG AA contrast, in Bulma's fixed grey; the example now serves hyperion/appearance's
+;;;; CSS, which colours Bulma's grey text classes with the scheme's muted text token.
 ;;;;
 ;;;; RUN-ACCEPTANCE runs the suite against the app, which dokimasia/hyperion starts on a free port
 ;;;; of 127.0.0.1 and stops afterwards. The app keeps its data in memory; the scratch database the

@@ -17,8 +17,8 @@
 ;;;; The second is the tokens. An app writes one table of token values per colour scheme,
 ;;;; APPEARANCE-CSS turns it into CSS for every combination of the three settings, and
 ;;;; APPEARANCE-CONTRAST-FAILURES checks every text token against its background in every
-;;;; combination, by WCAG's contrast formula, and the focus ring against every surface it can be
-;;;; drawn on, at 3:1. Token names are the same in both looks; only
+;;;; combination, by WCAG's contrast formula, the muted text against every surface it can sit on,
+;;;; and the focus ring against every surface it can be drawn on, at 3:1. Token names are the same in both looks; only
 ;;;; the values differ. In the flat look a background token is a colour; in the gradient look
 ;;;; it may be a linear gradient, so components use `background:', never `background-color:'.
 
@@ -138,14 +138,18 @@ WCAG AA in every combination of theme, contrast and look.")
 the surfaces a focused control sits on. A button's own fill is not one of them, because the ring
 is drawn outside the button.")
 
+(defparameter *muted-text-backgrounds* '(:surface :surface-raised :header)
+  "The background tokens the muted text, :MUTED-TEXT, is checked against at 4.5:1: the surfaces
+secondary text such as a subtitle, a caption or a count sits on (#1281).")
+
 (defparameter *colour-tokens*
-  (append (mapcar #'car *token-pairs*) '(:focus-ring))
-  "The tokens that must be a colour in every look, never a gradient: the text tokens and the
-focus ring.")
+  (append (mapcar #'car *token-pairs*) '(:muted-text :focus-ring))
+  "The tokens that must be a colour in every look, never a gradient: the text tokens, the muted
+text and the focus ring.")
 
 (defparameter *tokens*
   (append (loop for (text . background) in *token-pairs* append (list background text))
-          '(:focus-ring))
+          '(:muted-text :focus-ring))
   "Every appearance token, as keywords. Each becomes the custom property --hy-<name>.")
 
 (defparameter *default-spacing* '("4px" "8px" "12px" "16px" "24px" "32px" "48px")
@@ -173,6 +177,7 @@ for long reading text.")
      :button "#ffffff" :button-text "#2b2f36"
      :button-primary "#00d1b2" :button-primary-text "#14161a"
      :button-danger "#cc0f35" :button-danger-text "#ffffff"
+     :muted-text "#5c6370"
      :focus-ring "#485fc7"
      :gradient
      (:surface (:gradient "#ffffff" "#f3f4f7")
@@ -188,6 +193,7 @@ for long reading text.")
      :button "#2a2e36" :button-text "#e6e8eb"
      :button-primary "#00d1b2" :button-primary-text "#0b0c0e"
      :button-danger "#f14668" :button-danger-text "#000000"
+     :muted-text "#9aa3b5"
      :focus-ring "#7a9cff"
      :gradient
      (:surface (:gradient "#181a1f" "#111317")
@@ -203,6 +209,7 @@ for long reading text.")
      :button "#ffffff" :button-text "#000000"
      :button-primary "#00574b" :button-primary-text "#ffffff"
      :button-danger "#8f0022" :button-danger-text "#ffffff"
+     :muted-text "#454b59"
      :focus-ring "#0033cc"
      :gradient
      (:surface (:gradient "#ffffff" "#f4f4f4")
@@ -218,6 +225,7 @@ for long reading text.")
      :button "#000000" :button-text "#ffffff"
      :button-primary "#5cf2db" :button-primary-text "#000000"
      :button-danger "#ff8fa6" :button-danger-text "#000000"
+     :muted-text "#bfc5cf"
      :focus-ring "#ffd400"
      :gradient
      (:surface (:gradient "#0a0a0a" "#000000")
@@ -227,7 +235,11 @@ for long reading text.")
       :button-primary (:gradient "#7af5e2" "#5cf2db")
       :button-danger (:gradient "#ffa3b6" "#ff8fa6"))))
   "Hyperion's own token values, one plist per scheme. Each plist gives every token for the
-flat look, and its :GRADIENT plist gives the values the gradient look changes.")
+flat look, and its :GRADIENT plist gives the values the gradient look changes. :MUTED-TEXT is the
+colour of secondary text, which *MUTED-TEXT-TARGETS* gives Bulma's grey text classes; each value
+reaches 4.5:1 on every surface of its scheme in both looks, the lowest being 4.83 (light), 5.37
+(dark), 7.33 (light-high) and 10.43 (dark-high), against the darkest or lightest stop of the
+header's gradient (#1281).")
 
 (defstruct (appearance-table (:constructor %make-appearance-table
                                   (schemes spacing type-scale fonts)))
@@ -402,6 +414,14 @@ because they are not filled with the button's colour. The filled buttons, *GRADI
 also get hover, press and focus rules, because the background given here replaces the one Bulma
 changes on hover.")
 
+(defparameter *muted-text-targets*
+  '(".has-text-grey" ".has-text-grey-light" ".has-text-grey-lighter" ".has-text-grey-dark"
+    ".has-text-grey-darker")
+  "Bulma's grey text classes, which APPEARANCE-CSS colours with --hy-muted-text in both looks
+(#1281). Bulma gives each a fixed colour with !important, the same in light and dark, so each
+fails WCAG AA in one of the themes: the light greys on a light surface and the dark greys on a dark
+one. With the token they all draw in the scheme's muted text colour.")
+
 (defparameter *gradient-buttons* '(:button-primary :button-danger)
   "The background tokens in *GRADIENT-TARGETS* that fill a button, which get hover, press and
 focus rules.")
@@ -450,6 +470,7 @@ TABLE (hyperion's defaults when omitted). A bare :root rule gives the light, nor
 flat values, for a browser that matches no other rule, and the tokens that do not change with
 the settings: the spacing steps (--hy-space-1 to 7), the text roles (--hy-text-caps, -meta,
 -dense, -body, -heading, -title and -prose) and the fonts (--hy-font-ui and --hy-font-prose).
+Bulma's grey text classes, *MUTED-TEXT-TARGETS*, take --hy-muted-text in both looks.
 
 Serve it after Bulma. Bulma's own sizes, --bulma-size-1 to 7, which HYPERION/ASSETS:THEME
 sets, stay as they are; the text roles are separate tokens beside them.
@@ -467,7 +488,11 @@ page without data-contrast it shows the bare :root rule's light, flat look."
           (dolist (theme-explicit '(t nil))
             (dolist (contrast-explicit '(t nil))
               (%rule out table theme contrast look theme-explicit contrast-explicit))))))
-    (%gradient-targets out)))
+    (%gradient-targets out)
+    ;; Bulma's rule is `.has-text-grey{color:...!important}'; the :root prefix makes this
+    ;; one more specific, so it wins whichever stylesheet comes first.
+    (format out "~{~A~^, ~} {~%  color: var(--hy-muted-text) !important;~%}~%"
+            (mapcar (lambda (c) (format nil ":root ~A" c)) *muted-text-targets*))))
 
 ;;; --- contrast check ------------------------------------------------------------
 
@@ -544,11 +569,11 @@ against the text, and that contrast, as a cons."
 
 (defun appearance-contrast-failures (&optional (table (make-appearance-table)))
   "Every pair in TABLE that falls below WCAG AA, in any of the eight combinations of theme,
-contrast and look: each text token against its background at 4.5:1, and the focus ring against
-each of *RING-BACKGROUNDS* at 3:1. A button's text is checked on its fill at rest, on hover and
+contrast and look: each text token against its background at 4.5:1, the muted text against each
+of *MUTED-TEXT-BACKGROUNDS* at 4.5:1, and the focus ring against each of *RING-BACKGROUNDS* at 3:1. A button's text is checked on its fill at rest, on hover and
 when pressed (*BUTTON-TOKENS*, %STATE-COLOURS). Each failure is a plist (:THEME :CONTRAST :LOOK
-:TEXT :BACKGROUND :STATE :COLOUR :RATIO :REQUIRED), where :TEXT is the text token or
-:FOCUS-RING, :STATE is :RESTING, :HOVER or :PRESSED, :COLOUR is the darkest or lightest
+:TEXT :BACKGROUND :STATE :COLOUR :RATIO :REQUIRED), where :TEXT is the text token,
+:MUTED-TEXT or :FOCUS-RING, :STATE is :RESTING, :HOVER or :PRESSED, :COLOUR is the darkest or lightest
 background colour that failed, as drawn in that state, and :REQUIRED the ratio it had to reach.
 NIL means every pair passes. An app calls this in its own tests on its own table."
   (let ((failures '()))
@@ -559,6 +584,8 @@ NIL means every pair passes. An app calls this in its own tests on its own table
             (loop for (fg-token background required)
                     in (append (loop for (text . background) in *token-pairs*
                                      collect (list text background *minimum-contrast*))
+                               (loop for background in *muted-text-backgrounds*
+                                     collect (list :muted-text background *minimum-contrast*))
                                (loop for background in *ring-backgrounds*
                                      collect (list :focus-ring background
                                                    *minimum-ring-contrast*)))
