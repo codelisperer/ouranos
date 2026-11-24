@@ -163,7 +163,7 @@ app does not use a database, so its :APP function ignores the scratch database i
   (dh:hyperion-target :app (lambda (backend)
                              (declare (ignore backend))
                              (app:make-app))
-                      :server :hunchentoot))
+                      :server :uv))
 ```
 
 An app that has tables passes `:setup` and `:seed` as well. From
@@ -172,7 +172,7 @@ An app that has tables passes `:setup` and `:seed` as well. From
 ```lisp
 (defun app-target (&rest options)
   (apply #'dh:hyperion-target :app #'make-app :setup #'setup-app :seed #'seed-app
-                              :users +users+ :server :hunchentoot options))
+                              :users +users+ :server :uv options))
 ```
 
 "Hyperion apps" below covers the settle check and signing in with a session.

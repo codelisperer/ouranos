@@ -208,8 +208,10 @@ be stopped by its supervisor** — precisely the situation `serve-forever` exist
 *framework* was choosing the *application's* HTTP server at all — the thing pre-publication issue 139 / ADR-0011
 decided against and removed from `hyperion.asd`, which `praxeon/web` was simply missed by.
 So `praxeon/web` now declares **no** backend, and `praxeon/elise` — a real deployable, and
-the layer where the choice belongs — declares `clack-handler-hunchentoot` for itself. An
-image with no handler fails loudly at `default-server` with `NO-SERVER-BACKEND`.
+the layer where the choice belongs — declared `clack-handler-hunchentoot` for itself. Since
+#373 it declares `hyperion/server-uv`, and no framework system, test suite or example declares
+Woo or Hunchentoot. An image with no backend fails loudly at `default-server` with
+`NO-SERVER-BACKEND`.
 
 The rule is now asserted rather than merely written down (`praxeon/tests`): a framework
 system pulling a `clack-handler-*`, on any platform, fails the suite. It had been decided,

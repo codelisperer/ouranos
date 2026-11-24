@@ -11,19 +11,22 @@
 - **SBCL** + **Quicklisp** + **Coalton** — the last a *pinned git checkout*, not a
   Quicklisp system; `scripts/setup.sh` installs all three (see `coalton.pin`). (Hyperion's
   typed core is written in Coalton; pinning a checkout is a later hardening item).
-- **No native library** — Hyperion itself declares no HTTP server, so nothing to install.
-  An app that chooses `clack-handler-woo` needs **`libev`** (macOS `brew install libev`,
-  Debian/Ubuntu `sudo apt-get install libev-dev`) and cannot be shipped as a desktop bundle
-  without carrying it; `clack-handler-hunchentoot` is pure CL (pre-publication issue 139), but its
-  SSL support loads the system's OpenSSL on Linux and macOS (on macOS that means Homebrew's,
-  #191).
-- **No HTTPS from Hunchentoot on Windows.** On Windows the tree builds Hunchentoot without
-  its SSL support (`:hunchentoot-no-ssl`, set at the top of `hyperion.asd` and
-  `praxeon.asd`), because Windows ships no OpenSSL and a desktop bundle that loaded it quit
-  at startup on machines without it (#249). Hunchentoot therefore cannot serve HTTPS on
-  Windows. Outbound HTTPS is unaffected, because dexador uses WinHTTP there. This is a
-  stopgap: `hyperion/server-uv` terminating TLS with the mbedTLS this tree builds and carries
-  is #125, and Postgres over TLS on Windows and macOS is #258.
+- **libuv, for the server.** Hyperion itself declares no HTTP server. The server an app
+  normally declares is `hyperion/server-uv`, which needs the libuv the tree builds
+  (`scripts/build-libuv.lisp`; `scripts/setup.sh` runs it). No framework system in the tree
+  declares Woo or Hunchentoot since #373; an app that wants one of them adds it itself, as
+  described in [Choosing a server](#choosing-a-server). An app that chooses
+  `clack-handler-woo` needs **`libev`** (macOS `brew install libev`, Debian/Ubuntu
+  `sudo apt-get install libev-dev`) and cannot be shipped as a desktop bundle without
+  carrying it; `clack-handler-hunchentoot` is pure CL.
+- **No HTTPS from Hunchentoot.** The tree builds Hunchentoot without its SSL support
+  (`:hunchentoot-no-ssl`, set at the top of `hyperion.asd` and `praxeon.asd`) on every
+  platform: on Windows since #249, because Windows ships no OpenSSL and a desktop bundle that
+  loaded it quit at startup, and on Linux and macOS since #337. An app that adds Hunchentoot
+  gets this only when `hyperion.asd` is read before `hunchentoot.asd`, so list `hyperion`
+  before `clack-handler-hunchentoot` in its `:depends-on`. Outbound HTTPS is unaffected.
+  `hyperion/server-uv` terminating TLS with the mbedTLS this tree builds and carries is #125,
+  and Postgres over TLS on Windows and macOS is #258.
 
 ## Getting started
 
@@ -55,7 +58,7 @@ Package-per-module:
 
 | Module | What |
 |---|---|
-| `hyperion/server` | the Clack backend behind a neutral protocol — **your app declares the handler** (`clack-handler-hunchentoot` or `clack-handler-woo`); `default-server` picks from what is loaded, the native `hyperion/server-uv` first when libuv itself loads (#710), `HYPERION_SERVER` overrides, and no backend at all is a clear error rather than a guess — plus `start`/`stop`. |
+| `hyperion/server` | the HTTP backend behind a neutral protocol — **your app declares the server** (normally `hyperion/server-uv`; a Clack handler such as `clack-handler-hunchentoot` or `clack-handler-woo` if it wants one, see [Choosing a server](#choosing-a-server)); `default-server` picks from what is loaded, the native `hyperion/server-uv` first when libuv itself loads (#710), `HYPERION_SERVER` overrides, and no backend at all is a clear error rather than a guess — plus `start`/`stop`. |
 | `hyperion/clack-handler-uv` | hyperion's own server as a **Clack handler**: load it, then `(clack:clackup app :server :uv)` runs any Clack app on `hyperion/server-uv`, not only hyperion's (#373, ADR-0020). It passes Clack's own handler cases. `:workers` (or Woo's `:worker-num`) sets the worker pool, 16 by default; a streamed response holds one worker while it is open. `hyperion/server:start` does not go through it: it calls `:uv` directly. |
 | `hyperion/http` | request/response utilities over the raw Clack env: body, form/query params, cookies, headers, JSON. |
 | `hyperion/session` | cookie-based **HTTP sessions**: a `store` protocol + in-memory backend, `wrap-session` middleware (owns the `Set-Cookie` so an app cannot drop it), `rotate-session` for the privilege boundary, a thread-safe per-session key/value bag, and **REPL/dev management** (list/inspect/reset/kill). |
@@ -73,6 +76,67 @@ Package-per-module:
 component library, **auth** + security middleware (HTTP sessions now shipped — see
 `hyperion/session` above, and the fan-out primitive next), dynamic-resource
 hot-reload, and the desktop story.
+
+## Choosing a server
+
+Hyperion declares no HTTP server: the application names one in its own `:depends-on`, and
+`hyperion/server` uses what is loaded. `cons init` writes `hyperion/server-uv`, the native
+server, and that is the default. No system in this tree declares Woo or Hunchentoot (#373),
+so an app that wants either adds it itself.
+
+To run on Hunchentoot or Woo instead:
+
+1. Add the **Clack handler system** to the app's `:depends-on`: `clack-handler-hunchentoot`
+   or `clack-handler-woo`. Not the bare `hunchentoot` or `woo`: Clack finds a server through
+   the package `clack.handler.<name>`, which only the handler system defines. List `hyperion`
+   before `clack-handler-hunchentoot`, so that Hunchentoot is built without SSL (see
+   Prerequisites).
+
+   ```lisp
+   (defsystem "myapp"
+     :depends-on ("hyperion" "clack-handler-hunchentoot")
+     ...)
+   ```
+
+   The app may keep `hyperion/server-uv` as well, or drop it. Dropping it means the image
+   does not need libuv.
+
+2. Select it, with either of:
+   - `:server :hunchentoot` (or `:woo`) to `hyperion/server:start`,
+     `hyperion/server:serve-forever` or `hyperion/dev:serve`;
+   - the environment variable `HYPERION_SERVER=hunchentoot` (or `woo`), which
+     `hyperion/server:default-server` reads whenever no `:server` is passed.
+
+**When more than one is loaded**, `default-server` takes the first loaded one in this order:
+`:uv`, then `:woo`, then `:hunchentoot` (`hyperion/server::+backends+`). `:uv` is skipped
+when `hyperion/server-uv` is loaded but libuv itself does not load; the second value
+`default-server` returns is then `:libuv-unavailable`, and the third is libuv's error
+message. So an app that declares both `hyperion/server-uv` and `clack-handler-hunchentoot`
+runs on `:uv` unless it selects `:hunchentoot`.
+
+**When the requested one is not loaded**, the result depends on how it was requested:
+
+- `HYPERION_SERVER` naming `uv`, `woo` or `hunchentoot` when that system is not loaded:
+  `default-server` signals `hyperion/server:no-server-backend`, whose message names the
+  backend and the systems to add. It does not fall back to another loaded server.
+- `HYPERION_SERVER` naming a backend hyperion does not know: the name is passed to Clack
+  unchanged, and Clack refuses it if it has no such handler.
+- Nothing requested and nothing loaded: `no-server-backend`.
+- `:server` passed to `start` directly is not checked against what is loaded. Clack then
+  looks for `clack.handler.<name>`, and when that package is absent it loads the system of
+  that name itself through Quicklisp or ASDF, or signals that the handler is unknown. Do not
+  rely on that loading: declare the handler, so that a build or a desktop bundle contains it.
+
+The backends differ in a few places worth knowing:
+
+- `:workers` is honoured by `:uv` and by Woo. Hunchentoot runs a thread per connection and
+  ignores it, with a warning.
+- A streamed response that fails part way is truncated by `:uv`, so the client can tell. On
+  Hunchentoot the response is reported to the client as complete.
+- Woo does not stop on `SIGTERM` (`docs/signals-and-shutdown.md`), and only one Woo server
+  can run in an image (`hyperion/server:woo-server-running`).
+- A static file is sent with its `Content-Length` by `:uv` and Hunchentoot, and chunked by
+  Woo (see [Static files](#static-files--http-caching-hyperionstatic)).
 
 ## Project tooling — `cons`, not Hyperion
 
@@ -724,8 +788,8 @@ bounded pieces (`hyperion/server-uv:*file-chunk-bytes*`, 64 KiB), so a large dow
 one piece of memory rather than the whole file. It does not use `sendfile` (pre-publication
 issue 313; `sendfile` on `:uv` is PLANNED). On Clack backends, `hyperion:wrap-streaming-body`
 turns the stream into a writer loop of 64 KiB pieces with `Content-Length` taken from the
-stream: Hunchentoot sends that length, and Woo sends the file chunked, without
-`Content-Length`. Every server closes the stream after the response. A `HEAD` request that
+stream: Hunchentoot sends that length, and Woo and `hyperion/clack-handler-uv` send the
+file chunked, without `Content-Length`. Every server closes the stream after the response. A `HEAD` request that
 reaches `file-response` directly gets the file's length and no body, and the server closes the
 stream. A `HEAD` request answered through `hyperion/router`'s GET route has its body removed
 by the router, which closes the stream; that response carries no file length, as before.

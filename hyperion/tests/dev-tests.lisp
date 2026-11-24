@@ -787,7 +787,7 @@ LAST-ERROR SECONDS-TAKEN ANSWERING-AFTER)."
                       ;; The previous server has just been stopped: hold its port, once.
                       (setf holder (%hold-port port hold-seconds)))
                     (srv:start (lambda (env) (declare (ignore env)) '(200 () ("x")))
-                               :port port :server :hunchentoot :log nil)))
+                               :port port :server :uv :log nil)))
          (d (hyperion/dev::make-dev :builder builder :paths (list root))))
     (unwind-protect
          (let ((*error-output* (make-broadcast-stream)))

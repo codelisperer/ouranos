@@ -12,6 +12,11 @@ Decision 1 was carried out by #710 on 2026-10-24: `:uv` heads `+backends+`, and
 `hyperion/server-uv` is loaded but libuv itself does not load. The code quoted under Context
 below is the table as it was before that change.
 
+Decision 4 was carried out by step 5 of #373 on 2026-11-15, on the maintainer's ruling of that
+day: no system in `hyperion.asd`, `praxeon.asd` or `klio.asd` declares Woo, Hunchentoot or
+their Clack handlers, test and example systems included. An application that wants one adds
+the handler system itself (`hyperion/docs/user-guide.md`, "Choosing a server").
+
 ## Context
 
 pre-publication issue 117 M2 lands the native libuv server —

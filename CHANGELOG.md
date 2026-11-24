@@ -14,6 +14,26 @@ its tag.
 
 ### An app may have to act
 
+- **No system in the tree declares Woo, Hunchentoot or their Clack handlers any more** (#373,
+  step 5; ADR-0020 point 5). These systems stopped loading `clack-handler-hunchentoot`, and now
+  declare `hyperion/server-uv` where they serve requests: `praxeon/elise`,
+  `hyperion/examples/active-search`, `hyperion/examples/active-search-db`, and the suites
+  `hyperion/tests`, `hyperion/assets/tests`, `hyperion/sidecar/tests`, `praxeon/web/tests` and
+  `dokimasia/hyperion/tests`. The targets in `dokimasia/hyperion/tests` and in the worked example
+  `dokimasia/examples/active-search` now pass `:server :uv` instead of `:server :hunchentoot`.
+  `hyperion/examples/coalton-repl` dropped `clack-handler-hunchentoot` and keeps
+  `hyperion/server-uv`. `hyperion/woo` and `hyperion/woo/tests`, which declared
+  `clack-handler-woo` on Unix, are removed. The backend-selection tests moved to a new suite,
+  `hyperion/backends/tests`, which loads no server. **An app that got Hunchentoot or Woo through
+  one of these systems now gets no Clack handler from the tree: it adds
+  `clack-handler-hunchentoot` (after `hyperion` in its `:depends-on`, so that Hunchentoot is
+  still built without SSL) or `clack-handler-woo` to its own `:depends-on`, and selects it with
+  `:server` or `HYPERION_SERVER`.** An app that declares `hyperion/server-uv` needs libuv at run
+  time. When several servers are loaded, `hyperion/server:default-server` still takes `:uv`,
+  then Woo, then Hunchentoot, and `HYPERION_SERVER` naming one that is not loaded still signals
+  `hyperion/server:no-server-backend`, whose message now lists all three systems an app can add
+  and states that order. See `hyperion/docs/user-guide.md`, "Choosing a server".
+
 - **Toolchain: the pinned Coalton is `a07305a5`** (#1326), upstream `main` of 2026-11-22, in
   `coalton.pin`, 55 commits after `024d0a17`. No file in this tree needed a change. On a
   development machine, re-run `scripts/setup.sh` or `scripts/setup.ps1`, which fetch it and check

@@ -347,12 +347,20 @@ browser refreshes, session intact" loop is a genuine differentiator; lean into i
 
 ### Server backends behind a protocol — and when to poll and when to stream
 
-Hyperion declares **no HTTP server** (pre-publication issue 139). The application depends on the Clack handler
-it wants — `clack-handler-hunchentoot` (pure CL, every platform) or `clack-handler-woo`
-(Unix, and it binds libev at load time) — and `default-server` picks from the backends
-actually loaded into the image, overridable with `HYPERION_SERVER`. No backend shape leaks
-above the protocol, and neither of these two is a destination: both go when the native
-libuv server lands (pre-publication issue 117).
+Hyperion declares **no HTTP server** (pre-publication issue 139). The application depends on the server
+it wants. Normally that is `hyperion/server-uv`, the native libuv server (pre-publication
+issue 117), which `cons init` writes and which is the default. Since #373 no system in the
+tree declares Woo or Hunchentoot, not even a test suite or an example.
+
+**Choosing a server other than `:uv`.** An app that wants Hunchentoot or Woo adds the Clack
+handler system to its own `:depends-on`: `clack-handler-hunchentoot` (pure CL, every
+platform; list it after `hyperion`, so it is built without SSL) or `clack-handler-woo` (Unix,
+and it binds libev at load time). It selects it with `:server :hunchentoot` (or `:woo`) to
+`start`, or with `HYPERION_SERVER`. When several are loaded and none is selected,
+`default-server` takes `:uv`, then Woo, then Hunchentoot; `:uv` is skipped when libuv does not
+load. A server named in `HYPERION_SERVER` that is not loaded signals `no-server-backend`, and
+hyperion does not fall back to another. The full rules are in the user guide, "Choosing a
+server". No backend shape leaks above the protocol.
 
 Framework-declared backends were how every Linux desktop bundle came to die at startup on
 `libev.so.4` — the framework had made a native-dependency decision on behalf of apps that
@@ -373,7 +381,9 @@ True SSE therefore needs a thread-per-connection server (Hunchentoot) or a Woo-s
 `ev_async` integration that would be fragile and non-portable — defeating the "backend is
 configurable" goal. So the shipped transport is **HTMX polling**: handlers stay quick and
 non-blocking, long work runs on a background thread, and a small poller picks up results.
-It behaves **identically on Woo and Hunchentoot with no per-server code.**
+It behaves **identically on Woo and Hunchentoot with no per-server code.** (This section was
+written when Woo and Hunchentoot were the backends in use; the tree now serves on
+`hyperion/server-uv`, and Woo and Hunchentoot are servers an app may add.)
 
 The upshot: **polling is the portable floor, not a ceiling.** `hyperion/channel` is
 deliberately transport-agnostic — a poller reads it via `since`; a WebSocket or SSE
@@ -669,9 +679,9 @@ Hyperion supplies the *template*; `cons` supplies the *machinery*. This is why t
 
 The ambition is a stack that competes with the JS ecosystem without leaving Lisp. Beyond
 Parenscript: **Coalton→TypeScript** (typed "functional JavaScript" for when HTMX genuinely
-isn't enough), **Coalton→Dart** for mobile, and **libev on Windows** integrated into Woo so
-the async server story is truly cross-platform rather than falling back to Hunchentoot. All
-of it is gated on `aion` maturing, and sequenced well after the core framework.
+isn't enough), and **Coalton→Dart** for mobile. (A plan to integrate libev on Windows into Woo
+was overtaken by `hyperion/server-uv`, which runs on libuv on every platform; the tree no
+longer declares Woo or Hunchentoot, #373.) All of it is gated on `aion` maturing, and sequenced well after the core framework.
 
 ### Constraints (don't violate without cause)
 

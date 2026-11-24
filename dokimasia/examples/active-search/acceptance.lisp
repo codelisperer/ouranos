@@ -52,7 +52,7 @@ app does not use a database, so its :APP function ignores the scratch database i
   (dh:hyperion-target :app (lambda (backend)
                              (declare (ignore backend))
                              (app:make-app))
-                      :server :hunchentoot))
+                      :server :uv))
 
 (d:define-screen contacts
   :path "/"
@@ -98,7 +98,7 @@ report.txt."
 the target's scratch SQLite database, migrated and seeded by the app's own ENSURE-DB."
   (dh:hyperion-target :setup (lambda (backend) (app-db:ensure-db backend))
                       :app (lambda (backend) (app-db:make-app backend))
-                      :server :hunchentoot))
+                      :server :uv))
 
 (dm:define-row-probe :stored-contact
   :source #'dh:current-database :table :contacts :match '(:name :email :role) :dialect :sqlite)

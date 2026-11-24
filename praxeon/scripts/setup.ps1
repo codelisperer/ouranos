@@ -10,8 +10,8 @@
 #   2. Create .env from .env.example (never overwriting an existing one).
 # System discovery (finding praxeon.asd) is NOT done here: run
 # `sbcl --script bootstrap.lisp` at the monorepo root once (writes the ASDF drop-in).
-# NB: on Windows the web backend is Hunchentoot (Woo/libev are Unix-only), so
-# there is no libev step. Usage:  pwsh scripts/setup.ps1 [-Test]
+# NB: there is no libev step. Woo, which needs libev, is Unix-only, and no praxeon system
+# declares Woo or Hunchentoot since #373. Usage:  pwsh scripts/setup.ps1 [-Test]
 
 param([switch]$Test)
 $ErrorActionPreference = 'Stop'

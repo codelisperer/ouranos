@@ -44,9 +44,9 @@ QL_HOME="${QUICKLISP_HOME:-$HOME/quicklisp}"
 
 info "SBCL $(sbcl --version | awk '{print $2}')  |  Quicklisp at $QL_HOME"
 
-# libev: Woo (the web server) builds on it, and praxeon/elise depends on
-# praxeon/web -- so WITHOUT libev even a plain (ql:quickload :praxeon/elise) fails.
-# Best-effort detection across macOS (Homebrew) and Linux; warn (don't die) since
+# libev: Woo builds on it. No praxeon system declares Woo since #373 (praxeon/elise serves on
+# hyperion/server-uv), so libev is needed only by an app that adds clack-handler-woo itself.
+# This step predates that and is kept until it is removed separately. Best-effort detection across macOS (Homebrew) and Linux; warn (don't die) since
 # the check can miss a valid install.
 have_libev() {
   ls /opt/homebrew/lib/libev.* /opt/homebrew/opt/libev/lib/libev.* \
@@ -64,10 +64,10 @@ elif command -v brew >/dev/null 2>&1; then
   brew install libev || warn "'brew install libev' failed -- install it manually; 'make dev' may fail to load Woo."
   have_libev || warn "libev still not detected after 'brew install libev' -- 'make dev' may fail to load Woo."
 else
-  warn "libev not found -- Woo needs it, and praxeon/elise loads Woo. Install it:"
+  warn "libev not found -- Woo needs it, if your app adds clack-handler-woo. Install it:"
   warn "    macOS:         brew install libev"
   warn "    Debian/Ubuntu: sudo apt-get install libev-dev"
-  warn "  Without it, (ql:quickload :praxeon/elise) and 'make dev' fail to load Woo."
+  warn "  Without it, an app that declares clack-handler-woo fails to load."
 fi
 
 # --- 1. Coalton (local checkout; Praxeon's typed core needs it) --------------
