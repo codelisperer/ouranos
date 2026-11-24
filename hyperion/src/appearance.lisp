@@ -17,7 +17,8 @@
 ;;;; The second is the tokens. An app writes one table of token values per colour scheme,
 ;;;; APPEARANCE-CSS turns it into CSS for every combination of the three settings, and
 ;;;; APPEARANCE-CONTRAST-FAILURES checks every text token against its background in every
-;;;; combination, by WCAG's contrast formula, the muted text against every surface it can sit on,
+;;;; combination, by WCAG's contrast formula, the muted text and the link text against every
+;;;; surface they can sit on,
 ;;;; and the focus ring against every surface it can be drawn on, at 3:1. Token names are the same in both looks; only
 ;;;; the values differ. In the flat look a background token is a colour; in the gradient look
 ;;;; it may be a linear gradient, so components use `background:', never `background-color:'.
@@ -142,14 +143,18 @@ is drawn outside the button.")
   "The background tokens the muted text, :MUTED-TEXT, is checked against at 4.5:1: the surfaces
 secondary text such as a subtitle, a caption or a count sits on (#1281).")
 
+(defparameter *link-text-backgrounds* '(:surface :surface-raised :header)
+  "The background tokens the link text, :LINK-TEXT, is checked against at 4.5:1: the surfaces a
+link in running text sits on (#1281).")
+
 (defparameter *colour-tokens*
-  (append (mapcar #'car *token-pairs*) '(:muted-text :focus-ring))
+  (append (mapcar #'car *token-pairs*) '(:muted-text :link-text :focus-ring))
   "The tokens that must be a colour in every look, never a gradient: the text tokens, the muted
-text and the focus ring.")
+text, the link text and the focus ring.")
 
 (defparameter *tokens*
   (append (loop for (text . background) in *token-pairs* append (list background text))
-          '(:muted-text :focus-ring))
+          '(:muted-text :link-text :focus-ring))
   "Every appearance token, as keywords. Each becomes the custom property --hy-<name>.")
 
 (defparameter *default-spacing* '("4px" "8px" "12px" "16px" "24px" "32px" "48px")
@@ -178,6 +183,7 @@ for long reading text.")
      :button-primary "#00d1b2" :button-primary-text "#14161a"
      :button-danger "#cc0f35" :button-danger-text "#ffffff"
      :muted-text "#5c6370"
+     :link-text "#2942ff"
      :focus-ring "#485fc7"
      :gradient
      (:surface (:gradient "#ffffff" "#f3f4f7")
@@ -194,6 +200,7 @@ for long reading text.")
      :button-primary "#00d1b2" :button-primary-text "#0b0c0e"
      :button-danger "#f14668" :button-danger-text "#000000"
      :muted-text "#9aa3b5"
+     :link-text "#8f9cff"
      :focus-ring "#7a9cff"
      :gradient
      (:surface (:gradient "#181a1f" "#111317")
@@ -210,6 +217,7 @@ for long reading text.")
      :button-primary "#00574b" :button-primary-text "#ffffff"
      :button-danger "#8f0022" :button-danger-text "#ffffff"
      :muted-text "#454b59"
+     :link-text "#0015b8"
      :focus-ring "#0033cc"
      :gradient
      (:surface (:gradient "#ffffff" "#f4f4f4")
@@ -226,6 +234,7 @@ for long reading text.")
      :button-primary "#5cf2db" :button-primary-text "#000000"
      :button-danger "#ff8fa6" :button-danger-text "#000000"
      :muted-text "#bfc5cf"
+     :link-text "#a8b2ff"
      :focus-ring "#ffd400"
      :gradient
      (:surface (:gradient "#0a0a0a" "#000000")
@@ -239,7 +248,11 @@ flat look, and its :GRADIENT plist gives the values the gradient look changes. :
 colour of secondary text, which *MUTED-TEXT-TARGETS* gives Bulma's grey text classes; each value
 reaches 4.5:1 on every surface of its scheme in both looks, the lowest being 4.83 (light), 5.37
 (dark), 7.33 (light-high) and 10.43 (dark-high), against the darkest or lightest stop of the
-header's gradient (#1281).")
+header's gradient (#1281). :LINK-TEXT is the colour of links, which APPEARANCE-CSS gives Bulma's
+--bulma-link-text and .has-text-link. The light value is Bulma's own light link colour, and the
+others keep Bulma's link hue; their lowest contrast on every surface of their scheme, in both
+looks, is 5.05 (light), 5.42 (dark), 9.79 (light-high) and 9.03 (dark-high). Bulma's own dark
+link colour, #7585ff, reaches only 4.25 on the dark header gradient (#1281).")
 
 (defstruct (appearance-table (:constructor %make-appearance-table
                                   (schemes spacing type-scale fonts)))
@@ -498,13 +511,32 @@ specific, so it wins whichever stylesheet comes first."
                                         classes))
           (write-line "}" out))))))
 
+(defparameter *bulma-link-properties*
+  '("--bulma-link-text" "--bulma-link-text-hover" "--bulma-link-text-active")
+  "Bulma's custom properties for the colour of a link at rest, on hover and when pressed, which
+APPEARANCE-CSS sets to --hy-link-text (#1281). In Bulma 1.0.4, --bulma-link-text colours a plain
+`a', a breadcrumb item, a ghost button and the active tab, and the breadcrumb reads the hover and
+pressed forms. Bulma derives each from its link hue and the scheme, and the hover and pressed
+forms are a step darker or lighter, which on a dark surface lowers the contrast; with the token
+all three are the same colour.")
+
+(defun %link-text-targets (out)
+  "The rules that colour Bulma's links with --hy-link-text, in every theme, contrast and look.
+Bulma sets *BULMA-LINK-PROPERTIES* on :root and again under [data-theme] and the
+prefers-color-scheme query, each with one attribute or pseudo-class; html:root is one element
+more specific, so it wins whichever stylesheet comes first. .has-text-link has a fixed colour with
+!important that fails AA on hyperion's surfaces in every scheme, so it takes the token too."
+  (format out "html:root {~%~{  ~A: var(--hy-link-text);~%~}}~%" *bulma-link-properties*)
+  (format out ":root .has-text-link {~%  color: var(--hy-link-text) !important;~%}~%"))
+
 (defun appearance-css (&optional (table (make-appearance-table)))
   "CSS defining every --hy-* token for every combination of theme, contrast and look, from
 TABLE (hyperion's defaults when omitted). A bare :root rule gives the light, normal-contrast,
 flat values, for a browser that matches no other rule, and the tokens that do not change with
 the settings: the spacing steps (--hy-space-1 to 7), the text roles (--hy-text-caps, -meta,
 -dense, -body, -heading, -title and -prose) and the fonts (--hy-font-ui and --hy-font-prose).
-Bulma's grey text classes take --hy-muted-text in the themes *MUTED-TEXT-TARGETS* names.
+Bulma's grey text classes take --hy-muted-text in the themes *MUTED-TEXT-TARGETS* names, and
+Bulma's link colours (*BULMA-LINK-PROPERTIES* and .has-text-link) take --hy-link-text.
 
 Serve it after Bulma. Bulma's own sizes, --bulma-size-1 to 7, which HYPERION/ASSETS:THEME
 sets, stay as they are; the text roles are separate tokens beside them.
@@ -523,7 +555,8 @@ page without data-contrast it shows the bare :root rule's light, flat look."
             (dolist (contrast-explicit '(t nil))
               (%rule out table theme contrast look theme-explicit contrast-explicit))))))
     (%gradient-targets out)
-    (%muted-text-targets out)))
+    (%muted-text-targets out)
+    (%link-text-targets out)))
 
 ;;; --- contrast check ------------------------------------------------------------
 
@@ -601,10 +634,10 @@ against the text, and that contrast, as a cons."
 (defun appearance-contrast-failures (&optional (table (make-appearance-table)))
   "Every pair in TABLE that falls below WCAG AA, in any of the eight combinations of theme,
 contrast and look: each text token against its background at 4.5:1, the muted text against each
-of *MUTED-TEXT-BACKGROUNDS* at 4.5:1, and the focus ring against each of *RING-BACKGROUNDS* at 3:1. A button's text is checked on its fill at rest, on hover and
+of *MUTED-TEXT-BACKGROUNDS* and the link text against each of *LINK-TEXT-BACKGROUNDS* at 4.5:1, and the focus ring against each of *RING-BACKGROUNDS* at 3:1. A button's text is checked on its fill at rest, on hover and
 when pressed (*BUTTON-TOKENS*, %STATE-COLOURS). Each failure is a plist (:THEME :CONTRAST :LOOK
 :TEXT :BACKGROUND :STATE :COLOUR :RATIO :REQUIRED), where :TEXT is the text token,
-:MUTED-TEXT or :FOCUS-RING, :STATE is :RESTING, :HOVER or :PRESSED, :COLOUR is the darkest or lightest
+:MUTED-TEXT, :LINK-TEXT or :FOCUS-RING, :STATE is :RESTING, :HOVER or :PRESSED, :COLOUR is the darkest or lightest
 background colour that failed, as drawn in that state, and :REQUIRED the ratio it had to reach.
 NIL means every pair passes. An app calls this in its own tests on its own table."
   (let ((failures '()))
@@ -617,6 +650,8 @@ NIL means every pair passes. An app calls this in its own tests on its own table
                                      collect (list text background *minimum-contrast*))
                                (loop for background in *muted-text-backgrounds*
                                      collect (list :muted-text background *minimum-contrast*))
+                               (loop for background in *link-text-backgrounds*
+                                     collect (list :link-text background *minimum-contrast*))
                                (loop for background in *ring-backgrounds*
                                      collect (list :focus-ring background
                                                    *minimum-ring-contrast*)))

@@ -14,6 +14,21 @@ its tag.
 
 ### An app may have to act
 
+- **hyperion/appearance: a link text token, which Bulma's links now use** (#1281). The token
+  table has `:link-text`, written as `--hy-link-text`: `#2942ff` (light, Bulma's own light link
+  colour), `#8f9cff` (dark), `#0015b8` (light, high contrast) and `#a8b2ff` (dark, high contrast).
+  `appearance-css` sets Bulma's `--bulma-link-text`, `--bulma-link-text-hover` and
+  `--bulma-link-text-active` to it on `html:root` (`*bulma-link-properties*`), and gives
+  `.has-text-link` its colour with `!important`, in every theme, contrast and look. Bulma's own
+  dark link colour, `#7585ff`, is 4.25:1 on hyperion's dark header gradient, below WCAG AA, and
+  `.has-text-link`'s fixed `#4258ff` fails on hyperion's surfaces in every scheme. A page that
+  serves `appearance-css` shows its links in the new colour in the dark and high-contrast
+  schemes; a breadcrumb's links no longer change colour on hover or when pressed.
+  `appearance-contrast-failures` checks `:link-text` at 4.5:1 against `:surface`,
+  `:surface-raised` and `:header` (`*link-text-backgrounds*`), so an app's own table whose
+  surfaces do not pass with hyperion's link value gets new failures in its own contrast test; it
+  gives `:link-text` in that scheme's plist to `make-appearance-table`. The token must be a colour,
+  not a gradient.
 - **hyperion/appearance: a muted text token, which Bulma's grey text classes now use** (#1281).
   The token table has `:muted-text`, written as `--hy-muted-text`: `#5c6370` (light), `#9aa3b5`
   (dark), `#454b59` (light, high contrast) and `#bfc5cf` (dark, high contrast). Bulma gives its
