@@ -49,6 +49,26 @@
       (is (null (loopback host)) "~A is not a loopback address" host)))
   (is (null (llm:endpoint-loopback-p nil)) "an unknown endpoint is not on this machine"))
 
+(test endpoint-loopback-p-is-false-for-6to4-and-nat64-addresses-that-carry-127-0-0-1
+  "Traffic to a 6to4 or NAT64 address goes through a relay or a gateway, so it leaves the machine
+whatever IPv4 address it carries (#1211). An IPv4-mapped address does not, and stays true: that
+is the control, in the same form and with the same inner address."
+  (flet ((loopback (host)
+           (llm:endpoint-loopback-p (llm:parse-endpoint (format nil "http://[~A]:11434/" host)))))
+    (dolist (host '("64:ff9b::7f00:1"         ; NAT64, the well-known prefix 64:ff9b::/96
+                    "64:ff9b::127.0.0.1"
+                    "64:ff9b:1::7f00:1"       ; NAT64, the local-use prefix 64:ff9b:1::/48
+                    "2002:7f00:1::"           ; 6to4, 2002::/16
+                    "2002:7f00:0001:0:0:0:0:1"))
+      (is (null (loopback host)) "~A leaves the machine" host))
+    (is-true (loopback "::ffff:127.0.0.1"))
+    (is-true (loopback "::ffff:7f00:1"))))
+
+(test endpoint-loopback-p-is-false-for-a-dotted-quad-with-a-leading-zero
+  "A resolver may read 0127.0.0.1 as octal, so the spelling does not say which host it is."
+  (is (null (llm:endpoint-loopback-p (llm:parse-endpoint "http://0127.0.0.1:11434/"))))
+  (is-true (llm:endpoint-loopback-p (llm:parse-endpoint "http://127.0.0.1:11434/"))))
+
 (defun %every-provider ()
   "One of each provider class, as (name provider endpoint request-url): the endpoint it should
 report and the URL it builds for a request."

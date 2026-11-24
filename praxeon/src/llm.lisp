@@ -286,15 +286,16 @@ machine treats NIL as not on this machine.")
   (:method ((provider t)) nil))
 
 (defun endpoint-loopback-p (endpoint)
-  "True when ENDPOINT's host is a loopback address: localhost, an address in 127.0.0.0/8, ::1,
-or an IPv6 address carrying an IPv4 loopback address, such as ::ffff:127.0.0.1. Decided from
-the text, with no DNS lookup, so another name that resolves to a loopback address is answered
-NIL. NIL for NIL."
-  (and endpoint
-       (let ((host (endpoint-host endpoint)))
-         (or (string= host "localhost")
-             (and (http:parse-address host)
-                  (eq :loopback (http:address-category host)))))))
+  "True when ENDPOINT's host is this machine by its spelling: localhost, an address in
+127.0.0.0/8, ::1, or an IPv4-mapped loopback address such as ::ffff:127.0.0.1. A 6to4 or NAT64
+address that carries 127.0.0.1, such as 2002:7f00:1:: or 64:ff9b::7f00:1, is NIL, because its
+traffic goes through a relay or gateway and leaves the machine (#1211). So is a dotted quad with
+a leading zero, which a resolver may read differently. Decided from the text, with no DNS
+lookup, so another name that resolves to a loopback address is answered NIL. NIL for NIL.
+
+The rule is aion/http-client's LOOPBACK-HOST-P, the one a request made with :STAY-LOCAL is held
+to, so the two cannot disagree about which hosts are this machine."
+  (and endpoint (http:loopback-host-p (endpoint-host endpoint)) t))
 
 (defgeneric supports-tool-choice-p (provider)
   (:documentation "True when PROVIDER can honour a TOOL-CHOICE other than :auto.
