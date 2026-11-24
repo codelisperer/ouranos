@@ -29,6 +29,20 @@ It follows the authorization section of the MCP specification, revision 2026-07-
   - `sign-in-return-handler` at the redirect URI. It needs a `:principal-of` function that reads the signed-in user from the request's session.
   - `client-metadata-handler` at the client metadata URL, when the app publishes one.
 
+  It also has `forwarding-response`, for an app that starts a sign-in from a form; see the next section.
+
+## Starting a sign-in from a form POST
+
+If the app's Content-Security-Policy has `form-action 'self'`, do not answer the form POST that starts a sign-in with a redirect to the authorization server. The browser applies `form-action` to the target of a redirect that follows a form submission as well as to the form's own target, so it blocks the 303 to the authorization server's host. Nothing appears on the page and the browser stays where it was, while the server's log shows the client registered and the sign-in started (#1181).
+
+Do one of these instead:
+
+- Answer the POST with `(hyperion/oauth:forwarding-response url)`, where `url` is what `start-sign-in` returned. It is a 200 page with a meta refresh to the URL and a link to it, which `form-action` does not apply to. It is sent with `Cache-Control: no-store`, because the page contains the sign-in's `state` and PKCE challenge, and `Referrer-Policy: no-referrer`, so the browser does not send the app page's address to the authorization server. It refuses a URL that is not http or https, and escapes the URL in the page.
+- Start the sign-in from a link (a GET) whose handler redirects. `form-action` does not apply to a redirect that follows a link.
+- Add the authorization server's origin to `form-action`. This needs the origin of every server a user may sign in to, which an app that connects to MCP servers its users choose does not know in advance.
+
+hyperion's default policy does not set `form-action`, so this applies only to an app that sets the directive itself.
+
 ## The flow
 
 1. **The app finds out a sign-in is needed.** An MCP call answered 401 signals `praxeon/mcp:authorization-required`, carrying the `WWW-Authenticate` challenge.

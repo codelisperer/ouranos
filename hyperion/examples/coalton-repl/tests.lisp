@@ -103,11 +103,19 @@ features, as ASDF reads them from the .asd files. Nothing is loaded."
   "#783: the app loads no OpenSSL of its own, so a Mac without Homebrew runs it. Checked by
 the systems it depends on, which is what the desktop build loads into the image. A new
 dependency that brings cl+ssl in would make the bundle reopen the build machine's libssl at
-startup (#191). CONTROL: aion/http-client, which does depend on cl+ssl outside Windows, is
-found to, so the walk can see the dependency."
+startup (#191). CONTROL: on Linux, aion/http-client, which depends on cl+ssl there, is found
+to, so the walk can see the dependency. On macOS nothing depends on cl+ssl since #905:
+aion/http-client is checked to be free of it too, with dexador, which it reaches through, found
+in the same walk."
   (is (not (member "cl+ssl" (%dependency-closure "hyperion/examples/coalton-repl")
                    :test #'string=))
       "the Coalton REPL app depends on cl+ssl")
-  #-os-windows
+  #-(or os-windows os-macosx)
   (is (member "cl+ssl" (%dependency-closure "aion/http-client") :test #'string=)
-      "control: the walk does not find aion/http-client's cl+ssl"))
+      "control: the walk does not find aion/http-client's cl+ssl")
+  #+os-macosx
+  (let ((closure (%dependency-closure "aion/http-client")))
+    (is (member "dexador" closure :test #'string=)
+        "control: the walk does not reach dexador from aion/http-client")
+    (is (not (member "cl+ssl" closure :test #'string=))
+        "aion/http-client depends on cl+ssl on macOS")))

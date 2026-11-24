@@ -57,8 +57,8 @@ body."
                                                          :element-type '(unsigned-byte 8)
                                                          :buffering :full :timeout 10)))
              (write-sequence (sb-ext:string-to-octets
-                              (format nil "GET ~A HTTP/1.1~AHost: 127.0.0.1~AConnection: close~A~A"
-                                      path (%crlf) (%crlf) (%crlf) (%crlf))
+                              (format nil "GET ~A HTTP/1.1~AHost: 127.0.0.1:~D~AConnection: close~A~A"
+                                      path (%crlf) port (%crlf) (%crlf) (%crlf))
                               :external-format :latin-1)
                              stream)
              (finish-output stream)

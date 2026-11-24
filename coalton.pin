@@ -48,9 +48,9 @@
 # checkout alone does not prove -- ASDF may resolve elsewhere, or serve stale
 # fasls):  sbcl --dynamic-space-size 4096 --script scripts/check-coalton.lisp
 
-sha     024d0a17
-date    2026-10-12
-subject Check type constructors before matching predicates
+sha     a07305a5
+date    2026-11-22
+subject Use sentence case for documentation headings
 
 # --- staying current -------------------------------------------------------
 #
@@ -60,4 +60,4 @@ subject Check type constructors before matching predicates
 # opts out is a pin nobody reviews, and the exemption outlives the reasoning.
 
 advisories https://github.com/coalton-lang/coalton/security/advisories
-reviewed   2026-11-14
+reviewed   2026-11-22

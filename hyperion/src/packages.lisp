@@ -104,7 +104,7 @@
            #:native-backend-p
            #:*default-port* #:start #:stop #:handler-port
            ;; the same-origin guard for a server on this machine (#304)
-           #:loopback-host-p
+           #:loopback-host-p #:origins-setting
            ;; the blocking, production entry point (pre-publication issue 124) + its interrupt seam
            #:serve-forever #:request-shutdown #:request-shutdown-from-signal
            ;; pre-publication issue 238: the preflight, and the condition a caller may handle.
@@ -175,6 +175,7 @@
     an existing handler needs no change to be routed. PATH-PARAM reads one.")
   (:export #:route #:router #:mount #:routes #:route-p #:mount-p
            #:route-method #:route-template #:route-params #:route-handler #:route-name
+           #:route-log-path
            #:mount-prefix #:mount-router
            #:dispatch #:to-app #:describe-routes
            #:path-param #:path-params #:+params-key+
@@ -336,7 +337,9 @@
   (:export #:wrap #:request-id #:new-request-id #:*request-id*
            #:*request-id-header* #:*echo-request-id* #:*id-bits*
            ;; quiet paths: machine traffic on a timer (dev poller, health checks)
-           #:*quiet-paths* #:register-quiet-path #:quiet-path-p))
+           #:*quiet-paths* #:register-quiet-path #:quiet-path-p
+           ;; the path a log line records: the route's template, never a token in it (#1036)
+           #:logged-path #:note-route #:+max-logged-path-length+))
 
 ;;; --- Broadcast channel (fan-out to many readers) ------------------------
 (cl:defpackage #:hyperion/channel

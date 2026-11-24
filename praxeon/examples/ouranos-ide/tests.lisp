@@ -1097,9 +1097,9 @@ window.addEventListener('load', function () {
                                             (spinneret:escape-string (field "buffer"))))))))))))
 
 (test the-bundle-builds-the-editor-in-a-browser-and-fills-the-form
-  (let ((browser (smoke::%smoke-browser)))
+  (let ((browser (aion/cdp:find-browser)))
     (if (null browser)
-        (skip "No Chrome or Edge was found; set HYPERION_SMOKE_BROWSER to run this test.")
+        (skip "No Chrome or Edge was found; set OURANOS_BROWSER to run this test.")
         (%with-ide (app desktop)
           (let* ((port nil)
                  (handler (ports:call-with-port

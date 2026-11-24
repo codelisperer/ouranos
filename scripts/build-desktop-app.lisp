@@ -613,6 +613,17 @@ a later step does: a resource update rewrites the file and drops an Authenticode
 (finish-output)
 (funcall (read-from-string "ql:quickload") *system*)
 
+;;; NO CL+SSL IN A macOS IMAGE (#905). On macOS, aion/http-client makes https requests over
+;;; aion/tls and checks certificates with Security.framework, so it loads no cl+ssl there. Woo
+;;; still does unless :WOO-NO-SSL is on *FEATURES* (#1310), and so may an app's own dependency.
+;;; An image that does hold it opens an OpenSSL from the build machine's path when
+;;; it starts, which a Mac without Homebrew does not have (#191), so it is refused here, before
+;;; anything is written, rather than found by verify-bundle-macos.sh afterwards.
+(when (and (uiop:os-macosx-p) (find-package "CL+SSL"))
+  (format *error-output* "~&build-desktop-app: ~A loaded cl+ssl, so the bundle would need an OpenSSL from this machine's path. On macOS aion/http-client uses aion/tls and needs no cl+ssl (#905). Find what loaded it with (asdf:system-depends-on ...) on ~A's dependencies, or, if dexador did, delete dexador's compiled files, as loading aion/http-client explains.~%"
+          *system* *system*)
+  (sb-ext:exit :code 3))
+
 ;;; --- the bundle ---------------------------------------------------------------
 (defparameter *bundle* (%bundle-directory))
 (defparameter *vendor* (merge-pathnames "vendor/" *root*))

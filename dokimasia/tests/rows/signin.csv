@@ -1,0 +1,3 @@
+id,email,password,screen
+right-password,alice@example.com,pw-alice,bt-home
+wrong-password,alice@example.com,not-it,bt-login

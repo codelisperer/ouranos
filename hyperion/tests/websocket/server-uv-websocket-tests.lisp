@@ -2,7 +2,7 @@
 ;;;;
 ;;;; Every check goes through a TCP socket to a running server. The client is written here and
 ;;;; is deliberately small: it masks what it sends, reads the server's frames with its own
-;;;; decoder rather than with hyperion/websocket's parser, and can send frames a correct
+;;;; decoder rather than with aion/websocket's parser, and can send frames a correct
 ;;;; client never would (unmasked, oversized, with a bad opcode), because the refusals are
 ;;;; what a stranger's frames test.
 
@@ -10,7 +10,7 @@
   (:use #:cl #:fiveam)
   (:local-nicknames (#:srv #:hyperion/server-uv)
                     (#:wsrv #:hyperion/server-uv/websocket)
-                    (#:ws #:hyperion/websocket)
+                    (#:ws #:aion/websocket)
                     (#:sock #:sb-bsd-sockets)
                     (#:ports #:hyperion/test-ports))
   (:export #:run-tests
@@ -192,7 +192,7 @@ that lies about its size."
 
 (defun read-frame (c)
   "One frame from the server as (OPCODE PAYLOAD FIN MASKED), or NIL at end of stream. Its own
-decoder, so a fault in hyperion/websocket's parser cannot hide one in the encoder."
+decoder, so a fault in aion/websocket's parser cannot hide one in the encoder."
   (ports:with-deadline (+io-timeout+ "a frame from the server")
     (let* ((s (client-stream c))
            (b0 (read-byte s nil nil)))

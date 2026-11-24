@@ -298,6 +298,35 @@ this path its own."
   (is-false (h1:encode-ok? (chunked 200 (list "odd") t))
             "an odd-length flat list would silently drop the value of a header"))
 
+(defun close-delimited (status headers)
+  (h1:encode-head-close-delimited-flat status headers))
+
+(test a-close-delimited-head-has-no-framing-header-and-says-close
+  "#1244. The head of a streamed body sent to an HTTP/1.0 client: no Transfer-Encoding, no
+Content-Length, and Connection: close, because the connection closing is how that body ends.
+A framing header the caller set is dropped, as from a chunked head."
+  (let ((r (close-delimited 200 (list "Content-Type" "text/plain"
+                                      "Content-Length" "42" "Transfer-Encoding" "chunked"
+                                      "Connection" "keep-alive"))))
+    (is-true (h1:encode-ok? r) "~A" (h1:encode-reason r))
+    (is-true (search (concatenate 'string "HTTP/1.1 200 OK" +crlf+) (text-of r)))
+    (is-true (has-line r "Content-Type: text/plain"))
+    (is-true (has-line r "Connection: close"))
+    (is-false (search "Transfer-Encoding" (text-of r)))
+    (is-false (search "Content-Length" (text-of r)))
+    (is-false (search "keep-alive" (text-of r)))
+    (is (= (- (length (text-of r)) 4)
+           (search (concatenate 'string +crlf+ +crlf+) (text-of r)))
+        "the head ends once, with nothing after it")))
+
+(test a-close-delimited-head-refuses-what-a-chunked-head-refuses
+  "A status that cannot carry a body, and a header that would split the response."
+  (dolist (status '(100 204 304))
+    (is-false (h1:encode-ok? (close-delimited status nil)) "must refuse ~D" status))
+  (is-false (h1:encode-ok? (close-delimited 200 (list "X-Note" (format nil "a~Cb" +cr+)))))
+  (is-false (h1:encode-ok? (close-delimited 200 (list "odd"))))
+  (is-true (h1:encode-ok? (close-delimited 500 nil))))
+
 (test a-chunk-header-is-the-hex-length-and-nothing-else
   (let ((r (h1:encode-chunk-header 5)))
     (is-true (h1:encode-ok? r) "~A" (h1:encode-reason r))

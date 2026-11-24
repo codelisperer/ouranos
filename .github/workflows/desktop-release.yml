@@ -425,16 +425,25 @@ jobs:
 
       # macOS: which libsqlite3 the loader had in use, read from DYLD_PRINT_LIBRARIES by each
       # library's last state. Fails when any libsqlite3 from outside the bundle stays loaded
-      # beside the bundle's, because a global symbol lookup could then find Apple's (#899). This
-      # is the rule verify-bundle-macos.sh applies to every carried library; it runs here alone
-      # because that script also fails any process that loads an OpenSSL the bundle does not
-      # carry (#783), and praxeon loads cl+ssl, which opens the runner's Homebrew OpenSSL.
-      # That is a separate question from this job's.
+      # beside the bundle's, because a global symbol lookup could then find Apple's (#899).
       - name: The probe used only the bundle's libsqlite3 (macOS)
         if: runner.os == 'macOS'
         run: |
           DYLD_PRINT_LIBRARIES=1 "$PROBE_DIR/sqlite-probe" > dyld.log 2>&1
           sbcl --script scripts/check-dyld-log.lisp carried dyld.log "$(cd "$PROBE_DIR" && pwd)" libsqlite3.dylib
+
+      # macOS, with an https request (#905): the whole of verify-bundle-macos.sh, on the probe run
+      # with --https. The request goes through aion/http-client over aion/tls and opens
+      # Security.framework, which brings in Apple's libsqlite3, libssl and libcrypto. The script
+      # accepts Apple's OpenSSL, waives Apple's libsqlite3 beside Security.framework with a
+      # WAIVED line, and then fails unless the probe's own SQLITE-LIBRARY line names the bundle's
+      # copy. The probe also fails if a CL+SSL package is in its image. This is #905's check that
+      # a bundle making https calls on macOS loads no OpenSSL of its own.
+      - name: The probe with an https request passes verify-bundle-macos.sh (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          ./scripts/verify-bundle-macos.sh --require-carried libsqlite3 --require-carried libmbedtls \
+            "$PROBE_DIR" -- --https https://example.com/
 
       # Windows: every DLL the probe maps is in the bundle or the operating system's, and
       # sqlite3.dll is loaded from the bundle.

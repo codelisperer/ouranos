@@ -603,14 +603,6 @@ that has already finished: that run is the job's run, and RUN-JOB does not start
 
 ;;; --- stopping ------------------------------------------------------------------------------
 
-(defun %wait (queue mutex seconds)
-  "Wait on QUEUE for at most SECONDS, and return holding MUTEX. SBCL's CONDITION-WAIT may return
-from a timeout without taking MUTEX back (its documentation says so, and on Windows it does);
-leaving the caller's WITH-MUTEX to release a mutex it does not hold signals an error."
-  (unless (sb-thread:condition-wait queue mutex :timeout seconds)
-    (unless (sb-thread:holding-mutex-p mutex)
-      (sb-thread:grab-mutex mutex))))
-
 (defun %busy-p (scheduler)
   (%with-lock (scheduler)
     (or (plusp (%starting scheduler)) (plusp (hash-table-count (%running scheduler))))))
@@ -681,7 +673,7 @@ then runs them again."
         (loop while (and (%busy-p scheduler) (plusp (left)))
               do (%with-lock (scheduler)
                    (when (%busy-p scheduler)
-                     (%wait (%idle scheduler) (%lock scheduler) (min slice (left)))))
+                     (aion/dynamic:timed-wait (%idle scheduler) (%lock scheduler) (min slice (left)))))
                  (when (and (%busy-p scheduler) (> (left) +renewal-margin+))
                    (%renew-within scheduler (left)))))
       (let ((renewal (%with-lock (scheduler) (%renewal scheduler))))
@@ -778,7 +770,7 @@ threads; for a libuv timer instead, see aion/schedule/uv. Returns SCHEDULER."
                                              for left = (/ (- deadline (get-internal-real-time))
                                                            internal-time-units-per-second)
                                              until (or woken done (not (plusp left)))
-                                             do (%wait queue mutex left))
+                                             do (aion/dynamic:timed-wait queue mutex left))
                                        (setf woken nil))
                                      (unless (sb-thread:with-mutex (mutex) done)
                                        (tick-once)))))
