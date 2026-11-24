@@ -292,6 +292,42 @@ into its own HTML escapes it first. One that calls `praxeon/chat-ui:assistant-bu
 `:images` and `:links` itself, as described under "Images and links in the agent's replies",
 because `:trusted-replies` applies only to the default bubbles.
 
+### The chat as a JSON service, with no page
+
+An app that builds its own front end, in another framework or on another server, passes
+`:surface :service` to `make-app`, `start` or `serve-forever` (#1338). The server then serves no
+page, and these routes on the same conversations, turn runner and authentication as the page:
+
+- `POST /api/conversations` answers `{"id": ID, "cursor": N}`: the id of the request's
+  conversation, created if it has none, and the index just past what its transcript holds so far.
+  A request selects its conversation the way it does for the page: by its grant's principal, by
+  `:conversation-key`, or the one shared conversation.
+- `POST /api/conversations/ID/messages` with `{"message": "..."}` (or a form field `message`)
+  starts the turn on its own thread and answers `202` at once with `{"cursor": N}`, the index just
+  past the message.
+- `GET /api/conversations/ID/events?after=N` answers the items from index `N` on:
+  `{"items": [...], "cursor": N, "running": true|false, "draft": "..."|null}`. Each item has the
+  keys of a transcript item: `kind` (`"user"`, `"assistant"` or `"turn-ended"`), `turn`, `text`,
+  and on a `turn-ended` item `outcome` (`"ok"`, `"error"`, ...) and, for an error, `message`.
+  `draft` is the reply the model is writing, while it writes it. Poll again from the `cursor`
+  the answer gave.
+- `GET /api/conversations/ID/events` without `after`, on a server started with
+  `:transport :sse`, is a Server-Sent Events stream of the same objects, from index 0 or from the
+  `Last-Event-ID` a reconnecting client sends. Each event's id is its cursor. A server that polls
+  answers this form with `400`.
+
+An id that is not the request's conversation, for example one replaced after it was idle,
+answers `404`, and the client calls `POST /api/conversations` again. With `:grant-verifier`,
+every route needs the `Authorization: Session ID` header from `POST /embed/session`; a browser's
+`EventSource`, which cannot send headers, opens the stream with `?ticket=` from
+`POST /embed/stream-ticket`. `POST /api/message` (blocking, for JSON) and `POST /api/cancel`
+are served on every surface.
+
+`:surface :both` serves the page and the service together; `:ui`, the default, serves only the
+page. `:embed-origins` needs the page, so it is refused with `:service`. `serve-forever` reads
+the surface from the command line unless it is given one: `--service` selects `:service`,
+`--server` `:ui`, and both together `:both`.
+
 ### Talk to Elise in your language
 
 Elise ships an i18n dictionary (`examples/elise/resources/i18n/{en,es,ru}.json`) —

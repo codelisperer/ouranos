@@ -1929,6 +1929,18 @@ its tag.
 
 ### Added
 
+- **praxeon/web: the chat can run as a JSON service with no page** (#1338, part of #67).
+  `praxeon/web:make-app`, `start` and `serve-forever` take `:surface`: `:ui` (the default, the
+  page as before), `:service` or `:both`. Under `:service` and `:both` the app serves
+  `POST /api/conversations`, `POST /api/conversations/:id/messages`, which starts a turn and
+  answers 202 with a cursor, and `GET /api/conversations/:id/events`, which answers the items
+  after `?after=N` as JSON, or without it streams them as Server-Sent Events under
+  `:transport :sse`. Under `:service` there is no page, poll, asset route or embed panel;
+  `POST /api/message` and `POST /api/cancel` remain on every surface, and grants work the same
+  way, with the `Session` header or a stream ticket. `:surface :service` with `:embed-origins`
+  is an error. `serve-forever` reads `--service` and `--server` from the command line unless
+  given `:surface`; `praxeon/web:surface-from-arguments` is the function it uses.
+
 - **praxeon/web: an app can draw the chat's bubbles itself** (#1340, part of #67).
   `praxeon/web:make-app`, `start` and `serve-forever` take `:render-item`, a function of the
   agent's name and a copy of a transcript item (a plist with `:kind` `:user`, `:assistant` or
