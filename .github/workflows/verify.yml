@@ -604,9 +604,13 @@ jobs:
           OURANOS_DOKIMASIA_EXAMPLE_OUT: ${{ runner.temp }}/dokimasia-example
         run: |
           set -o pipefail
-          # On Linux the gate runs with a throwaway Secret Service (the step above).
+          # On Linux the gate runs with a throwaway Secret Service (the step above), and under
+          # Xvfb, so hyperion-view's Linux real-window tests have a display (#485). Xvfb has no
+          # window manager, so those tests cannot check maximising; see hyperion/docs/desktop.md.
           wrap=()
-          if [ "$RUNNER_OS" = "Linux" ]; then wrap=(scripts/with-secret-service.sh); fi
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            wrap=(xvfb-run -a -s "-screen 0 1920x1080x24" scripts/with-secret-service.sh)
+          fi
           "${wrap[@]}" sbcl --dynamic-space-size 4096 --script scripts/verify-tree.lisp \
             2>&1 | tee verify.log
 
@@ -840,7 +844,8 @@ jobs:
           OURANOS_TEST_REAL_CREDENTIAL_STORE: "1"
         run: |
           set -o pipefail
-          scripts/with-secret-service.sh \
+          # Under Xvfb, as the matrix leg's gate is, so the same real-window tests run (#485).
+          xvfb-run -a -s "-screen 0 1920x1080x24" scripts/with-secret-service.sh \
             sbcl --dynamic-space-size 4096 --script scripts/with-mode.lisp release scripts/verify-tree.lisp \
             2>&1 | tee verify.log
 
