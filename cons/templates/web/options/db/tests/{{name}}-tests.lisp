@@ -36,7 +36,9 @@ when it is given. Return the whole reply as a string."
                                                              :timeout 30)))
              (write-string (concatenate 'string
                                         "GET " path " HTTP/1.1" crlf
-                                        "Host: 127.0.0.1" crlf
+                                        ;; With the port: the server's request guard refuses a
+                                        ;; Host that is not its own.
+                                        "Host: 127.0.0.1:" (princ-to-string port) crlf
                                         (if cookie (concatenate 'string "Cookie: " cookie crlf) "")
                                         "Connection: close" crlf crlf)
                            stream)

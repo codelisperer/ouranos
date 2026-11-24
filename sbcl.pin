@@ -1,0 +1,60 @@
+# The SBCL source this tree builds its own SBCL binaries from (#1251).
+#
+# Ouranos builds SBCL from source and publishes the binaries as release assets of this
+# repository, so that setup does not depend on SourceForge, which refuses SBCL downloads to
+# some locations (#1216), and so that the project keeps working if SBCL's upstream stops
+# publishing binaries. The source comes from codelisperer/sbcl, a fork of github.com/sbcl/sbcl
+# (the official mirror of SBCL's git repository) that carries every release tag and no patches
+# of our own.
+#
+# The build is .github/workflows/sbcl-build.yml, which runs scripts/build-sbcl.sh on each
+# platform. That script clones `repo' at `tag', refuses the checkout unless its commit is
+# `commit', and builds with the options written in the script.
+#
+# `release' numbers our builds of one SBCL version. The release tag is
+# sbcl-v<version>-ouranos.<release>, and the asset names carry the same string, for example
+# sbcl-2.6.10-ouranos.1-x86-64-linux-binary.tar.bz2. A rebuild of the same version with
+# different options, or from a different host Lisp, takes the next release number, so that a
+# checksum pinned for one build never names a different file.
+#
+# Until setup downloads these builds (#1251, step 5), scripts/versions.env still pins the
+# SourceForge binary of SBCL_VERSION. The two versions can differ while that is so.
+#
+# To adopt a new SBCL release:
+#   1. git ls-remote --tags https://github.com/codelisperer/sbcl sbcl-X.Y.Z
+#      (the fork's tag sync brings new upstream tags in; compare with
+#       git ls-remote --tags https://github.com/sbcl/sbcl sbcl-X.Y.Z, which must agree)
+#   2. update version, tag and commit below, and set release back to 1
+#   3. run the workflow (its header says how) and read every leg's test and gate results
+#      before publishing.
+
+version 2.6.10
+repo    https://github.com/codelisperer/sbcl
+tag     sbcl-2.6.10
+commit  ee8952af37ab5a2a2408e7bddd966f2a903ffe9d
+release 1
+
+# The commit is the one both github.com/sbcl/sbcl and codelisperer/sbcl give for the tag
+# sbcl-2.6.10, read with `git ls-remote --tags' on 2026-11-15 by the maintainer (#1251). A
+# git commit identifies its tree, so no separate checksum of the source is pinned.
+
+# zstd, for --with-sb-core-compression. On macOS and Windows the runtime is linked with a
+# libzstd.a that scripts/build-sbcl.sh builds from this release, so a user's machine needs no
+# libzstd (ouranos-pm's ruling on #1251, 2026-11-17). On Linux the runtime links the system's
+# libzstd.so.1, which every Debian and Ubuntu system has. zstd is offered under BSD or GPLv2;
+# Ouranos uses it under the BSD licence. The SHA-256 is the one in zstd's own
+# zstd-1.5.7.tar.gz.sha256 release asset, and it matched the tarball downloaded on 2026-11-17.
+zstd-version 1.5.7
+zstd-url     https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz
+zstd-sha256  eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3
+
+# --- staying current -------------------------------------------------------
+#
+# SBCL has no security advisory feed. It lists every change in a release, fixes for security
+# problems included, in the NEWS file at the top of its source tree. REVIEWED is the date
+# someone last read the NEWS entries up to and including this pin's version. On 2026-11-16
+# the 2.6.10 entry listed no security fix; it lists fixes for miscompilations (DPB and
+# (SETF LDB), conversions to UTF-8) and for heap corruption in :weakness :key hash tables.
+
+advisories https://github.com/sbcl/sbcl/blob/master/NEWS
+reviewed   2026-11-16

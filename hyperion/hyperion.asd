@@ -30,6 +30,11 @@
 ;;; praxeon/praxeon.asd, for an app whose first dependency is a praxeon system.
 (pushnew :hunchentoot-no-ssl *features*)
 
+;;; dexador without cl+ssl on macOS (#905): see the same form at the top of aion/aion.asd. It is
+;;; repeated here because this file names dexador, and ASDF may resolve that dependency before it
+;;; reads aion.asd.
+#+os-macosx (pushnew :dexador-no-ssl *features*)
+
 (defsystem "hyperion"
   :description "A full-stack, HTMX-first web framework for Common Lisp (Coalton core)."
   :author "Bob <eternal.recursion@proton.me>"
@@ -168,37 +173,6 @@
                              (:file "encoder-tests"))))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/http1/tests :run-tests)))
 
-;;; --- websocket: the WebSocket protocol, pure and dependency-free (#376) -------
-;;;
-;;; Its own system and depending on nothing, for the reason hyperion/http1 is: the code that
-;;; reads frames from a stranger stays inside every run of scripts/verify-tree.lisp, which
-;;; leaves the libuv systems out unless OURANOS_WITH_UV=1. The connection side is
-;;; hyperion/server-uv/websocket.
-
-(defsystem "hyperion/websocket"
-  :description "The WebSocket protocol (RFC 6455) as pure functions: frames, messages, the handshake."
-  :author "Bob <eternal.recursion@proton.me>"
-  :license "MIT"
-  :serial t
-  :components ((:module "src/websocket"
-                :serial t
-                :components ((:file "packages")
-                             (:file "frame")
-                             (:file "handshake"))))
-  :in-order-to ((test-op (test-op "hyperion/websocket/tests"))))
-
-(defsystem "hyperion/websocket/tests"
-  :description "Test suite for hyperion/websocket: RFC 6455's examples and adversarial frames."
-  :author "Bob <eternal.recursion@proton.me>"
-  :license "MIT"
-  ;; ironclad and cl-base64 are the comparison for the SHA-1 and base64 written in
-  ;; hyperion/websocket; both are already in the tree (docs/dependencies.md).
-  :depends-on ("hyperion/websocket" "fiveam" "ironclad" "cl-base64")
-  :serial t
-  :components ((:module "tests/websocket"
-                :components ((:file "websocket-tests"))))
-  :perform (test-op (o c) (uiop:symbol-call :hyperion/websocket/tests :run-tests)))
-
 ;;; --- server-uv: the native HTTP server, on aion/uv ------------------------
 ;;;
 ;;; NOT :depends-on "hyperion", and that is the point rather than an oversight. This system
@@ -224,14 +198,14 @@
   :components ((:file "src/server-uv"))
   :in-order-to ((test-op (test-op "hyperion/server-uv/tests"))))
 
-;;; WebSockets on server-uv (#376): the frames are parsed by hyperion/websocket, the connection
+;;; WebSockets on server-uv (#376): the frames are parsed by aion/websocket, the connection
 ;;; is server-uv's after a 101. A system of its own so server-uv does not depend on the
 ;;; WebSocket code, and an application that does not use WebSockets does not load it.
 (defsystem "hyperion/server-uv/websocket"
   :description "WebSockets (RFC 6455) on hyperion/server-uv (#376)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
-  :depends-on ("hyperion/server-uv" "hyperion/websocket" "aion/log")
+  :depends-on ("hyperion/server-uv" "aion/websocket" "aion/log")
   :serial t
   :components ((:file "src/server-uv-websocket"))
   :in-order-to ((test-op (test-op "hyperion/server-uv/websocket/tests"))))
@@ -240,7 +214,7 @@
   :description "WebSockets on server-uv over real sockets, with a minimal client written in the suite (#376)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
-  :depends-on ("hyperion/server-uv/websocket" "hyperion/server-uv" "hyperion/websocket"
+  :depends-on ("hyperion/server-uv/websocket" "hyperion/server-uv" "aion/websocket"
                "hyperion/test-ports" "aion/pool" "fiveam" (:require "sb-bsd-sockets"))
   :serial t
   :components ((:module "tests/websocket"
@@ -499,6 +473,8 @@
                "hyperion/test-ports" "fiveam" "ironclad" "hyperion/server-uv"
                ;; kit-browser-tests runs hyperion/kit's dialogs in the smoke page's browser (#981).
                "hyperion/kit" "hyperion/list" "spinneret"
+               ;; The browser the smoke pages run in is found by aion/cdp's FIND-BROWSER (#1028).
+               "aion/cdp"
                (:require "sb-bsd-sockets"))
   :serial t
   :components ((:file "tests/assets-tests")

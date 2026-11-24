@@ -262,9 +262,8 @@ name and value; Host included only if listed) and return the status code."
 ;;; #302 put the guard on RUN-APP only. An app's development server (dev:serve) and a
 ;;; headless server:start on 127.0.0.1 serve the same data to the same machine, and a
 ;;; DNS-rebinding page could read from and post to either. dev:serve now guards by default on
-;;; loopback; server:start guards when asked, because behind a same-machine reverse proxy it
-;;; binds 127.0.0.1 and receives the public Host, and a default guard would refuse every
-;;; request.
+;;; loopback. server:start and serve-forever guard by default too since #1037; behind a
+;;; same-machine reverse proxy, HYPERION_ORIGINS gives them the public origin.
 
 (defmacro %so-with-start ((port-var &rest start-args) &body body)
   "BODY with PORT-VAR bound to a server START ran with START-ARGS on a free loopback port."
@@ -327,12 +326,194 @@ SERVE-ARGS, and torn down afterwards."
         (is (= 200 (getf a :foreign-get)))
         (is (= 200 (getf a :cross-post)))))))
 
-(test server-start-is-unguarded-by-default
+(defmacro %so-with-origins-setting ((value) &body body)
+  "BODY with HYPERION_ORIGINS set to VALUE, restored afterwards. NIL sets it to the empty
+string, which ORIGINS-SETTING reads as unset; uiop cannot unset a variable on every OS."
+  (let ((old (gensym "OLD")))
+    `(let ((,old (uiop:getenv "HYPERION_ORIGINS")))
+       (unwind-protect
+            (progn (setf (uiop:getenv "HYPERION_ORIGINS") (or ,value ""))
+                   ,@body)
+         (setf (uiop:getenv "HYPERION_ORIGINS") (or ,old ""))))))
+
+(test server-start-guards-by-default
+  "#1037: START installs the same-origin guard unless told not to. Before, the default was :NONE,
+and a web page the user visited could post to an app started with START."
   (%quietly
-    (%so-with-start (port)
+    (%so-with-origins-setting (nil)
+      (%so-with-start (port)
+        (let ((a (%so-guarded-answers port)))
+          (is (= 200 (getf a :own-get)))
+          (is (= 200 (getf a :localhost-get)))
+          (is (= 403 (getf a :foreign-get)) "a rebinding page's Host is refused")
+          (is (= 200 (getf a :own-post)) "a same-origin POST passes")
+          (is (= 403 (getf a :cross-post)) "a cross-site POST is refused"))))))
+
+(test server-start-with-request-guard-none-lets-a-cross-site-post-through
+  "The control for the test above: :REQUEST-GUARD :NONE is still the way to turn it off."
+  (%quietly
+    (%so-with-start (port :request-guard :none)
       (let ((a (%so-guarded-answers port)))
-        (is (= 200 (getf a :foreign-get)) "a proxy's public Host must still reach the app")
+        (is (= 200 (getf a :foreign-get)))
         (is (= 200 (getf a :cross-post)))))))
+
+(test a-cross-origin-post-is-accepted-only-when-hyperion-origins-lists-it
+  "A POST whose Origin is another site's is refused under the default guard, and accepted once
+HYPERION_ORIGINS lists that origin. The Host is the server's own in both, so only the Origin
+check decides."
+  (flet ((post (port)
+           (%so-raw-status port "POST" "/x" `(("Host" . ,(format nil "127.0.0.1:~D" port))
+                                              ("Origin" . "https://app.example.test")))))
+    (%quietly
+      (%so-with-origins-setting (nil)
+        (%so-with-start (port)
+          (is (= 403 (post port)) "refused without the setting")))
+      (%so-with-origins-setting ("https://app.example.test, https://other.example.test")
+        (%so-with-start (port)
+          (is (= 200 (post port)) "accepted when the setting lists it")
+          (is (= 403 (%so-raw-status port "POST" "/x"
+                                     `(("Host" . ,(format nil "127.0.0.1:~D" port))
+                                       ("Origin" . "https://attacker.example.test"))))
+                 "an origin the setting does not list is still refused"))))))
+
+;;; A webhook sender, curl or an API client sends neither Origin nor Sec-Fetch-Site. The
+;;; guard refuses such a POST, because it cannot tell it from a request whose browser left both
+;;; out, so an app that takes them lists their paths in :REQUEST-GUARD-EXEMPT (#1037).
+
+(defun %so-webhook-post (port path &optional (host (format nil "127.0.0.1:~D" port)))
+  "The status for a POST to PATH carrying a Host and no Origin or Sec-Fetch-Site, as a webhook
+sender sends it."
+  (%so-raw-status port "POST" path `(("Host" . ,host) ("Content-Type" . "application/json"))))
+
+(test a-webhook-post-with-no-origin-is-refused-by-default-and-accepted-on-an-exempt-path
+  "A POST with no Origin and no Sec-Fetch-Site is refused under the default guard, and accepted
+on a path listed in :REQUEST-GUARD-EXEMPT. A path that is not listed is still refused, so the
+exemption covers only what it names; a function in the list is matched against the env."
+  (%quietly
+    (%so-with-origins-setting (nil)
+      (%so-with-start (port)
+        (is (= 403 (%so-webhook-post port "/webhooks/stripe")) "refused by default"))
+      (%so-with-start (port :request-guard-exempt '("/webhooks/stripe"))
+        (is (= 200 (%so-webhook-post port "/webhooks/stripe")) "accepted on the exempt path")
+        (is (= 403 (%so-webhook-post port "/webhooks/stripe/other"))
+            "a longer path is not the exempt one")
+        (is (= 403 (%so-webhook-post port "/x")) "a path that is not listed is still refused"))
+      (%so-with-start (port :request-guard-exempt
+                            (list (lambda (env) (equal "/api/ingest" (getf env :path-info)))))
+        (is (= 200 (%so-webhook-post port "/api/ingest")) "a function in the list matches")
+        (is (= 403 (%so-webhook-post port "/x")))))))
+
+(test an-exempt-path-still-has-its-host-checked
+  "An exemption skips the Origin check only. A request to an exempt path whose Host is not the
+server's is refused, so a DNS-rebinding page cannot use an exempt path to reach the server.
+Control: the same request with the server's own Host is accepted."
+  (%quietly
+    (%so-with-origins-setting (nil)
+      (%so-with-start (port :request-guard-exempt '("/webhooks/stripe"))
+        (is (= 403 (%so-webhook-post port "/webhooks/stripe"
+                                     (format nil "attacker.example.test:~D" port)))
+            "a foreign Host is refused on the exempt path")
+        (is (= 403 (%so-raw-status port "GET" "/webhooks/stripe"
+                                   `(("Host" . ,(format nil "attacker.example.test:~D" port)))))
+            "for a safe method too")
+        (is (= 200 (%so-webhook-post port "/webhooks/stripe")) "control: own Host")))))
+
+(test serve-forever-passes-request-guard-exempt-to-the-guard
+  "SERVE-FOREVER takes :REQUEST-GUARD-EXEMPT as START does: the exempt path accepts a POST with
+no Origin, and another path refuses it."
+  (%quietly
+    (%so-with-origins-setting (nil)
+      (%srv-with-serving (session port :server :uv :signals nil
+                                       :request-guard-exempt '("/webhooks/stripe"))
+        (is (= 200 (%so-webhook-post port "/webhooks/stripe")))
+        (is (= 403 (%so-webhook-post port "/x")))))))
+
+(defmacro %so-captured-log ((stream) &body body)
+  "Run BODY with the log at :INFO going to STREAM, then put back the appenders, level and
+layout that were there."
+  (let ((appenders (gensym)) (level (gensym)) (layout (gensym)))
+    `(let ((,appenders (copy-list (log4cl:logger-appenders log4cl:*root-logger*)))
+           (,level (log4cl:logger-log-level log4cl:*root-logger*))
+           (,layout aion/log:*layout*))
+       (unwind-protect
+            (progn (aion/log:setup :env :dev :level :info :stream ,stream)
+                   ,@body)
+         (log4cl:remove-all-appenders log4cl:*root-logger*)
+         (dolist (a ,appenders) (log4cl:add-appender log4cl:*root-logger* a))
+         (log4cl:set-log-level log4cl:*root-logger* ,level)
+         (setf aion/log:*layout* ,layout)))))
+
+(defun %so-count-occurrences (needle haystack)
+  (loop with start = 0
+        for at = (search needle haystack :start2 start)
+        while at count t do (setf start (1+ at))))
+
+(test request-guard-exempt-is-logged-once-when-the-server-starts
+  "An exempt path accepts a cross-site POST, so the list is logged once, naming the path, when
+the server starts, and not again on each request to it. Control: with no exemptions nothing of
+the kind is logged."
+  (let ((with-exempt (make-string-output-stream))
+        (without (make-string-output-stream)))
+    (%so-with-origins-setting (nil)
+      (%so-captured-log (with-exempt)
+        (%so-with-start (port :request-guard-exempt '("/webhooks/stripe"))
+          (%so-webhook-post port "/webhooks/stripe")
+          (%so-webhook-post port "/webhooks/stripe")))
+      (%so-captured-log (without)
+        (%so-with-start (port)
+          (%so-webhook-post port "/x"))))
+    (let ((logged (get-output-stream-string with-exempt))
+          (control (get-output-stream-string without)))
+      (is (= 1 (%so-count-occurrences "exemptions configured" logged)) "~A" logged)
+      (is-true (let ((line (find-if (lambda (l) (search "exemptions configured" l))
+                                    (uiop:split-string logged :separator '(#\Newline)))))
+                 (and line (search "/webhooks/stripe" line)))
+               "the exemption line names the path")
+      (is (= 0 (%so-count-occurrences "exemptions configured" control)) "~A" control))))
+
+(test hyperion-origins-gives-the-public-host-behind-a-same-machine-proxy
+  "Behind a proxy on the same machine the server binds 127.0.0.1 and receives the public Host.
+Without the setting that Host is refused; with it, it is accepted."
+  (let ((proxied '(("Host" . "app.example.test"))))
+    (%quietly
+      (%so-with-origins-setting (nil)
+        (%so-with-start (port)
+          (is (= 403 (%so-raw-status port "GET" "/" proxied)))))
+      (%so-with-origins-setting ("https://app.example.test")
+        (%so-with-start (port)
+          (is (= 200 (%so-raw-status port "GET" "/" proxied))))))))
+
+(test binding-every-interface-with-no-origins-refuses-to-start
+  "Bound to every interface, the guard cannot work out the app's origins, so START refuses
+before it binds, and the error says what to do. With HYPERION_ORIGINS set, the origins are the
+setting's. The every-interface case is checked without binding 0.0.0.0, which on macOS can show
+a firewall dialog."
+  (%so-with-origins-setting (nil)
+    (let ((e (handler-case (progn (srv:start (%srv-ok-app) :server :uv :host "0.0.0.0"
+                                                           :port (ports:candidate-port)
+                                                           :check-port nil)
+                                  nil)
+               (error (c) c))))
+      (is (typep e 'error) "START refused")
+      (let ((text (and e (princ-to-string e))))
+        (is (search "HYPERION_ORIGINS" text) "~A" text)
+        (is (search ":request-guard :none" text) "~A" text)
+        (is (search ":same-origin" text) "~A" text))))
+  (is (equal '("https://app.example.test")
+             (srv::%request-guard-origins "0.0.0.0" 8080 '("https://app.example.test"))))
+  (%so-with-origins-setting ("https://app.example.test")
+    (is (equal '("https://app.example.test") (srv::%request-guard-origins "0.0.0.0" 8080)))
+    (is (equal '("https://app.example.test" "http://127.0.0.1:8080" "http://localhost:8080")
+               (srv::%request-guard-origins "127.0.0.1" 8080))
+        "on loopback the setting adds to the derived origins")))
+
+(test hyperion-origins-refuses-what-is-not-an-origin
+  (is (null (srv::%parse-origin-setting nil)))
+  (is (null (srv::%parse-origin-setting "  ")))
+  (is (equal '("https://a.test" "http://b.test:8080")
+             (srv::%parse-origin-setting "https://a.test,http://b.test:8080")))
+  (dolist (bad '("a.test" "https://a.test/path" "ftp://a.test" "https://"))
+    (signals error (srv::%parse-origin-setting bad))))
 
 (test server-start-with-request-guard-same-origin-guards-like-run-app
   (%quietly

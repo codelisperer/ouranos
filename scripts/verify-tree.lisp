@@ -156,6 +156,13 @@
     :hermes
     :klio
     :hades :hades/single-instance :hades/credentials :hades/notify :hades/program :hades/open
+    :dokimasia/core :dokimasia
+    ;; dokimasia's stored-data probes through mnemosyne (#1028), an aux system that reaches right.
+    :dokimasia/mnemosyne
+    ;; dokimasia's target for a hyperion app (#1028), another aux system that reaches right.
+    :dokimasia/hyperion
+    ;; dokimasia's worked example against hyperion's active-search app (#1028, step 4).
+    :dokimasia/examples/active-search
     ;; aux systems -- these hold real code and were previously never compiled here,
     ;; so a change to any of them could break unnoticed. praxeon/web is the case that
     ;; exposed it: a refactor landed in praxeon/src/web.lisp and a green run of this
@@ -176,7 +183,10 @@
     :aion/secret :aion/secret/types
     :hyperion/http1
     ;; The WebSocket protocol (#376): pure, and here for the reason hyperion/http1 is.
-    :hyperion/websocket
+    :aion/websocket
+    ;; The browser driver (#1028, dokimasia ADR-0001). Its suite runs a CDP server written in
+    ;; the suite on every machine, and a real headless browser where one is found.
+    :aion/cdp
     :praxeon/translate :praxeon/web :praxeon/web-search :praxeon/memory-db :praxeon/results-db
     :praxeon/retrieval
     ;; The chat widget's parts, which praxeon/web's page and its embed panel share (#67). It
@@ -212,7 +222,9 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
 (defparameter +test-systems+
   '(:aion/tests :aion/sexp/tests :aion/tz/tests :aion/boundary/tests :aion/dynamic/tests :aion/test-threads/tests :aion/platform/tests :aion/fs/tests :aion/pool/tests :aion/interceptor/tests :aion/signature/tests :aion/http-client/tests :aion/retry/tests :cons/tests :mnemosyne/tests :hyperion/backends/tests :praxeon/tests :hermes/tests :hermes/payments/tests
     :elenchon/tests :klio/tests :hades/single-instance/tests :hades/credentials/tests
-    :hades/notify/tests :hades/open/tests
+    :hades/notify/tests :hades/open/tests :dokimasia/tests :dokimasia/mnemosyne/tests
+    ;; dokimasia/hyperion/tests and dokimasia/examples/active-search/tests serve real requests,
+    ;; so they are in +UV-TEST-SYSTEMS+ since #373, which says why.
     ;; aux suites that existed but were never run from here
     :cons/coalton-repl/tests :hyperion/session-db/tests :hyperion/auth-db/tests
     ;; The pooled-connection middleware (#325), registered in the commit that adds it.
@@ -293,7 +305,10 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
     ;; security-critical code in the tree must not sit outside it. See ADR-0015.
     :hyperion/http1/tests
     ;; The WebSocket frame parser and handshake (#376), for the same reason.
-    :hyperion/websocket/tests
+    :aion/websocket/tests
+    ;; The browser driver (#1028): the command line it refuses to widen, the connection
+    ;; against a CDP server in the suite, and a headless browser when one is found.
+    :aion/cdp/tests
     ;; The contacts example's changeset path (#94). Its test system existed with an empty
     ;; component list and no :perform -- declared, loadable, and asserting nothing. Named
     ;; under its parent so its checks land in mnemosyne's README row (pre-publication issue 357).
@@ -355,6 +370,8 @@ not evidence of anything.")
     ;; backend-choice tests among them, are in hyperion/backends/tests, which stays in
     ;; +TEST-SYSTEMS+.
     :hyperion/tests :hyperion/assets/tests :hyperion/sidecar/tests
+    ;; dokimasia's two suites that start a hyperion app (#1028) serve on :uv for the same reason.
+    :dokimasia/hyperion/tests :dokimasia/examples/active-search/tests
     ;; praxeon/web's own suite (pre-publication issue 151) -- THE GAP THIS FILE ALREADY NAMES. Two entries
     ;; in +TEST-SYSTEMS+, `hyperion/update/tests' is justified as "invisible to this checker
     ;; until someone looked, which is the praxeon/web gap exactly", and the praxeon/web gap was
@@ -778,7 +795,7 @@ surfaces -- it just is not confused with a failing test."
 
 (defparameter +checkers+
   '(("check-pins.lisp" ("--report") nil
-     "every pin declares an advisory source and a review date")
+     "every pin declares an advisory source and a review date, and every vendored asset's file hashes to its pin")
     ("check-coalton.lisp" () t
      "the Coalton that LOADS is the pinned one")
     ("check-assets.lisp" () nil

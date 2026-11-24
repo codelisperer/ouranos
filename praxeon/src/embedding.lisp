@@ -473,7 +473,8 @@ that the service refuses that text with an error. It is never dropped or shorten
   ((model :initarg :model :reader %remote-model)
    (base-url :initarg :base-url :reader embedding-base-url)
    (api-key :initarg :api-key :initform nil :reader embedding-api-key)
-   (dimensions :initarg :dimensions :reader %remote-dimensions))
+   (dimensions :initarg :dimensions :reader %remote-dimensions)
+   (stay-local :initarg :stay-local :initform nil :reader provider-stay-local))
   (:documentation "An embedding service reached over HTTP at BASE-URL/embeddings, with API-KEY
 sent as a bearer token when set, replying with OpenAI's `data[].embedding' and `index' shape.
 A subclass supplies EMBEDDING-REQUEST-BODY and its limits."))
@@ -503,8 +504,11 @@ as a generic function so that a test can answer in its place without a network."
                           (when (embedding-api-key p)
                             (list (cons "authorization"
                                         (format nil "Bearer ~A" (embedding-api-key p))))))))
-    (handler-case (jzon:parse (%post-json url headers payload))
+    (handler-case (jzon:parse (%post-json url headers payload
+                                          :stay-local (provider-stay-local p)))
       (praxeon/conditions:praxeon-error (e) (error e))
+      ;; A STAY-LOCAL refusal is signalled as itself, not as a provider failure (#1293).
+      (http:stay-local-refused (e) (error e))
       (error (e)
         (error (%request-failure (format nil "embeddings request to ~A failed" url) e))))))
 

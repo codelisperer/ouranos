@@ -82,7 +82,8 @@ introspection), the parsed pattern, the parameter names, and the handler."
   (pattern nil)                       ; an OPAQUE hyperion/path:Pattern -- never inspected here
   (params '() :type list)             ; parameter names, in template order
   (handler nil :type (or function symbol))
-  (name nil))
+  (name nil)
+  (log-path :template :type (member :template :path)))
 
 (defstruct (mount (:constructor %mount) (:copier nil))
   "A sub-router nested under a path prefix. The prefix is stripped (segment-aligned)
@@ -91,15 +92,22 @@ it is mounted or top-level."
   (prefix "" :type string)
   (router nil))
 
-(defun route (method template handler &key name)
+(defun route (method template handler &key name (log-path :template))
   "Declare a route: METHOD (:get :post :put :patch :delete), a path TEMPLATE
  (\"/contacts/:id\", \"/files/*\"), and HANDLER, an ordinary Clack (env -> response)
 function. NAME is an optional keyword for introspection.
+
+LOG-PATH says what the request log records as the path of a request this route answers (#1036):
+:TEMPLATE, the default, records TEMPLATE itself, so a token in a parameter, as in
+\"/reset/:token\", is never logged; :PATH records the concrete path, for a route whose parameters
+are not secret and whose log is read by value.
 
 Three things are rejected here rather than at request time: an unroutable METHOD, a
 `*` segment with anything after it (those segments could never match), and a repeated
 parameter name (the second would silently shadow the first)."
   (%method-string method)                      ; validate; signals on a typo
+  (unless (member log-path '(:template :path))
+    (%fail "Route ~S: :log-path must be :template or :path, not ~S." template log-path))
   (let* ((pattern (path:parse-pattern template))
          (params (path:pattern-params pattern)))
     (unless (path:pattern-valid? pattern)
@@ -113,7 +121,7 @@ parameter name (the second would silently shadow the first)."
       (when dupes
         (%fail "Template ~S repeats parameter name~P ~{~S~^, ~}; the later binding would shadow the earlier." template (length dupes) dupes)))
     (%route :method method :template template :pattern pattern
-            :params params :handler handler :name name)))
+            :params params :handler handler :name name :log-path log-path)))
 
 (defun mount (prefix router)
   "Nest ROUTER under PREFIX. A request whose path begins with PREFIX (on a segment
@@ -215,10 +223,18 @@ reaching GET -- the one derivation, kept here so it is stated once."
   (or (eq request-method route-method)
       (and (eq request-method :head) (eq route-method :get))))
 
-(defun %dispatch (router env)
+(defun %full-template (prefix template)
+  "TEMPLATE under PREFIX, the mount prefixes passed on the way to it, as one path."
+  (if (or (string= prefix "") (string= prefix "/"))
+      template
+      (concatenate 'string (string-right-trim "/" prefix)
+                   (if (string= template "/") "" template))))
+
+(defun %dispatch (router env &optional (prefix ""))
   "Walk ROUTER in order. Returns (values response allowed) -- RESPONSE is NIL when
 nothing matched, and ALLOWED lists the methods whose routes DID match the path, which
-is what turns an unmatched request into a 405 rather than a 404."
+is what turns an unmatched request into a 405 rather than a 404. PREFIX is the mount
+prefixes already stripped from the path, for the template the request log records."
   (let ((method (getf env :request-method))
         (path (or (getf env :path-info) "/"))
         (allowed '()))
@@ -228,6 +244,11 @@ is what turns an unmatched request into a 405 rather than a 404."
          (when (path:path-matches? (route-pattern e) path)
            (push (route-method e) allowed)
            (when (%match-method method (route-method e))
+             ;; The request log records this route's template, not the path (#1036).
+             (hyperion/logging:note-route
+              (if (eq (route-log-path e) :path)
+                  :path
+                  (%full-template prefix (route-template e))))
              (let* ((bindings (%bindings-alist
                                (path:path-bindings (route-pattern e) path)))
                     (env* (list* +params-key+ bindings env))
@@ -239,7 +260,8 @@ is what turns an unmatched request into a 405 rather than a 404."
          (let ((sub (%prefix-match (mount-prefix e) path)))
            (when sub
              (multiple-value-bind (response sub-allowed)
-                 (%dispatch (mount-router e) (list* :path-info sub env))
+                 (%dispatch (mount-router e) (list* :path-info sub env)
+                            (%full-template prefix (path:normalize-path (mount-prefix e))))
                ;; A mount that matched the prefix but produced nothing still
                ;; contributes its methods -- otherwise a method mismatch inside a
                ;; mounted table would surface as 404 instead of 405.

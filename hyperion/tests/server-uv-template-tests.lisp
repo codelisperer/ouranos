@@ -265,7 +265,10 @@ Homebrew's lib directory, and the run would pass without using the copy beside E
          (progn
            (setf response
                  (%wait-until (lambda ()
-                                (or (ignore-errors (get* port "GET / HTTP/1.1" "Host: x"))
+                                (or (ignore-errors (get* port "GET / HTTP/1.1"
+                                                         ;; The binary's own Host, which its
+                                                         ;; request guard accepts (#1037).
+                                                         (format nil "Host: 127.0.0.1:~D" port)))
                                     (and (not (uiop:process-alive-p process)) :exited)))
                               :seconds 60))
            (when (and response (not (eq response :exited)))

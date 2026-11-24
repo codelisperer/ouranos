@@ -332,6 +332,37 @@ there the child is another SBCL running a six-line copy loop."
       (is (null (proc:process-stdout process)))
       (proc:close-process process))))
 
+#-win32
+(defun read-all-fd (fd)
+  "Everything readable from FD until its write end is closed everywhere, as a string."
+  (let ((buffer (make-array 256 :element-type '(unsigned-byte 8)))
+        (out (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+    (loop for n = (sb-posix:read fd (sb-sys:vector-sap buffer) 256)
+          while (plusp n)
+          do (loop for i below n do (vector-push-extend (aref buffer i) out)))
+    (text (coerce out '(simple-array (unsigned-byte 8) (*))))))
+
+#-win32
+(test inherited-descriptors-reach-the-child-as-3-and-4-and-a-descriptor-can-be-its-stderr
+  ;; The browser's pipe transport in aion/cdp depends on both (#1028, step (c)).
+  (uv:with-loop (l)
+    (multiple-value-bind (r3 w3) (sb-posix:pipe)
+      (multiple-value-bind (r4 w4) (sb-posix:pipe)
+        (multiple-value-bind (re we) (sb-posix:pipe)
+          (let ((process (proc:spawn l +shell+
+                                     :arguments (shell-args "echo three >&3; echo four >&4; echo err >&2; echo out")
+                                     :stdin :ignore :stdout :ignore :stderr we
+                                     :inherit-fds (list w3 w4))))
+            ;; Our copies of the write ends, so each read below ends when the child exits.
+            (mapc #'sb-posix:close (list w3 w4 we))
+            (is-true (pump l :until (lambda () (not (proc:process-running-p process)))))
+            (is-true (proc:succeeded-p process))
+            (is (equal (format nil "three~%") (read-all-fd r3)) "the child's descriptor 3")
+            (is (equal (format nil "four~%") (read-all-fd r4)) "the child's descriptor 4")
+            (is (equal (format nil "err~%") (read-all-fd re)) "the child's standard error")
+            (mapc #'sb-posix:close (list r3 r4 re))
+            (proc:close-process process)))))))
+
 ;;; --- backpressure reaches the child ------------------------------------------------
 
 (test a-childs-output-can-be-piped-with-backpressure
