@@ -205,6 +205,8 @@ setting that follows the system, so that the CSS media queries can decide.
   take it in the themes where Bulma's own grey fails WCAG AA (#1281): `.has-text-grey` in both
   themes, `.has-text-grey-dark` and `-darker` in dark, and `.has-text-grey-light` and `-lighter`
   in light;
+- `link-text`, for links. Bulma's `--bulma-link-text`, its hover and pressed forms, and
+  `.has-text-link` take it in every scheme (#1281);
 - `--hy-space-1` to `--hy-space-7` for spacing.
 
 An app writes its values once, as a table with one plist per scheme (light, dark, and the
@@ -214,7 +216,7 @@ high-contrast form of each). `appearance-css` generates the rules for all eight 
 checks which look is active. In the gradient look a background token may be a
 `linear-gradient`. Because of that, components set `background:`, not `background-color:`.
 `appearance-contrast-failures` checks every text token against its background, and the muted
-text against the surface, the raised surface and the header, in every combination, sampling along each gradient, and a button's text on hover and when pressed as well
+text and the link text against the surface, the raised surface and the header, in every combination, sampling along each gradient, and a button's text on hover and when pressed as well
 as at rest. An app runs it in its own tests, so a gradient that drops text below WCAG AA fails
 the build, not a visitor.
 
