@@ -34,7 +34,7 @@
   ;; hyperion/server fail to READ on Windows.
   ;; aion/secret is DEPENDENCY-FREE and Coalton-free by construction, which is what makes
   ;; it admissible here: cons's core stays trivial to install (pre-publication issue 209).
-  :depends-on ("aion/fs" "alexandria" "cons/env" "aion/secret"
+  :depends-on ("aion/fs" "alexandria" "cons/env" "aion/secret" "cons/inventory"
                (:feature :unix (:require :sb-posix)))
   :serial t
   :components ((:module "src"
@@ -42,6 +42,8 @@
                 :components ((:file "packages")
                              (:file "tempdir")  ; private scratch dirs, created not chosen
                              (:file "upstream") ; is the framework checkout behind? (pre-publication issue 240)
+                             (:file "ouranos-pin") ; ouranos.pin: the release an app was made from (#716)
+                             (:file "outdated-command") ; `cons outdated' (#716)
                              (:file "db")       ; db-repl/db-url: a session per environment
                              (:file "toolchain"); is the Lisp under us the one we think it is?
                              (:file "env-scan") ; which config keys does this project need?
@@ -123,6 +125,7 @@
                              (:file "upstream-tests")
                              (:file "dev-port-tests")
                              (:file "conform-tests")
+                             (:file "outdated-tests")   ; ouranos.pin and cons outdated (#716)
                              (:file "init-tests")
                              (:file "template-tests")
                              (:file "spec-tests")
