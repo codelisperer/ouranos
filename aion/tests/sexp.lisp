@@ -151,6 +151,95 @@ reader folds it."
     (is (eq (sexp:read-data (format nil ":~A" name) :intern-keywords t)
             (find-symbol name :keyword)))))
 
+(defun %keyword-count ()
+  "The number of symbols in the KEYWORD package."
+  (let ((n 0))
+    (do-symbols (s :keyword n)
+      (declare (ignore s))
+      (incf n))))
+
+(defun %keyword-list-input (names)
+  "Text of a list of the keywords NAMES, followed by the existing keyword :TEST."
+  (format nil "(~{:~A~^ ~} :test)" names))
+
+(test existing-mode-reads-a-new-keyword-as-an-unknown-keyword-and-interns-nothing
+  "#1166: under :INTERN-KEYWORDS :EXISTING, 200 keywords made of names generated here, so none
+exists, read as UNKNOWN-KEYWORDs holding their names, and the number of keywords in KEYWORD is the same after the read
+as before it. The existing :TEST still reads as the keyword. Control: the same kind of input
+under :INTERN-KEYWORDS T adds all 200 to KEYWORD."
+  (let* ((names (loop repeat 200 collect (%fresh-name "KW")))
+         (before (%keyword-count))
+         (datum (sexp:read-data (%keyword-list-input names) :intern-keywords :existing))
+         (after (%keyword-count)))
+    (is (= before after) "KEYWORD went from ~D to ~D symbols" before after)
+    (is (notany (lambda (n) (find-symbol n :keyword)) names) "a new name was interned")
+    (is (every #'sexp:unknown-keyword-p (butlast datum)) "a new keyword was not an unknown-keyword")
+    (is (equal names (mapcar #'sexp:unknown-keyword-name (butlast datum)))
+        "the new keywords did not keep their names")
+    (is (eq :test (car (last datum))) "an existing keyword did not read as itself"))
+  (is (equal "SEXP-1166-LOWER"
+             (sexp:unknown-keyword-name
+              (sexp:read-data ":sexp-1166-lower" :intern-keywords :existing)))
+      "the name is not upper-cased as the keyword's would be")
+  (let* ((names (loop repeat 200 collect (%fresh-name "KW")))
+         (before (%keyword-count)))
+    (sexp:read-data (%keyword-list-input names) :intern-keywords t)
+    (is (= (+ before 200) (%keyword-count)) "control: T did not add the 200 keywords")
+    (is (every (lambda (n) (find-symbol n :keyword)) names)
+        "control: T did not intern every name")))
+
+(test max-new-keywords-refuses-the-keyword-past-the-limit-before-interning-it
+  "#1166: under :INTERN-KEYWORDS T with :MAX-NEW-KEYWORDS 3, a fourth new keyword is refused
+as :TOO-MANY-NEW-KEYWORDS and is not interned, while the three before it are. An existing
+keyword does not count toward the limit, and 3 new keywords under a limit of 3 are accepted."
+  (let ((names (loop repeat 4 collect (%fresh-name "LIM"))))
+    (is (eq :too-many-new-keywords
+            (reason (sexp:read-data (%keyword-list-input names) :intern-keywords t
+                                                                :max-new-keywords 3))))
+    (is (every (lambda (n) (find-symbol n :keyword)) (subseq names 0 3))
+        "the three keywords under the limit were not interned")
+    (is (null (find-symbol (fourth names) :keyword)) "the keyword past the limit was interned"))
+  (let ((names (loop repeat 3 collect (%fresh-name "LIM"))))
+    (is (eq :none (reason (sexp:read-data (%keyword-list-input names) :intern-keywords t
+                                                                     :max-new-keywords 3)))
+        "3 new keywords and an existing one were refused under a limit of 3"))
+  (let ((names (loop repeat 4 collect (%fresh-name "LIM"))))
+    (is (eq :none (reason (sexp:read-data (%keyword-list-input names) :intern-keywords t)))
+        "control: with no limit, 4 new keywords were refused")))
+
+(test an-unknown-keyword-and-a-string-of-its-name-read-as-different-types
+  "#1166: under :EXISTING, (:foo \"FOO\") with :foo not interned reads as an UNKNOWN-KEYWORD and
+a string. They have the same name, and the caller can tell them apart. WRITE-DATA refuses the
+UNKNOWN-KEYWORD."
+  (let* ((name (%fresh-name "FOO"))
+         (datum (sexp:read-data (format nil "(:~A \"~A\")" name name) :intern-keywords :existing))
+         (unknown (first datum))
+         (string (second datum)))
+    (is (sexp:unknown-keyword-p unknown))
+    (is (stringp string))
+    (is (not (stringp unknown)) "the unknown keyword is a string")
+    (is (not (symbolp unknown)) "the unknown keyword is a symbol")
+    (is (not (eq (type-of unknown) (type-of string))))
+    (is (equal (sexp:unknown-keyword-name unknown) string))
+    (is (null (find-symbol name :keyword)) "the keyword was interned")
+    (is (eq :unwritable (reason (sexp:write-data-to-string datum))))))
+
+(defun %argument-refused (thunk)
+  "The argument an ARGUMENT-ERROR names, or :NONE."
+  (handler-case (progn (funcall thunk) :none)
+    (sexp:argument-error (c) (sexp:argument-error-argument c))))
+
+(test the-keyword-arguments-are-checked-with-argument-error
+  "#1166: each keyword argument READ-DATA checks is refused with ARGUMENT-ERROR naming it, which
+is not UNSAFE-DATA, because the fault is in the calling code."
+  (is (eq :intern-keywords (%argument-refused (lambda () (sexp:read-data ":test" :intern-keywords :yes)))))
+  (is (eq :max-new-keywords (%argument-refused (lambda () (sexp:read-data ":test" :max-new-keywords -1)))))
+  (is (eq :max-new-keywords (%argument-refused (lambda () (sexp:read-data ":test" :max-new-keywords "3")))))
+  (is (eq :comments (%argument-refused (lambda () (sexp:read-data "1" :comments t)))))
+  (is (eq :symbols (%argument-refused (lambda () (sexp:read-data "1" :symbols '("x"))))))
+  (is (eq :symbols (%argument-refused (lambda () (sexp:write-data-to-string 1 :symbols 'x)))))
+  (is (not (subtypep 'sexp:argument-error 'sexp:unsafe-data))))
+
 ;;; --- limits ------------------------------------------------------------------------------
 
 (test each-limit-accepts-its-value-and-refuses-one-more
