@@ -38,31 +38,29 @@
 
 (defun %waiting-provider-server (release closed-at)
   "A handler that streams +BEFORE-THE-WAIT+, then waits until RELEASE's car is true, and then
-streams +AFTER-THE-WAIT+. A thread of its own reads the connection while it waits, and stores the
-time in CLOSED-AT's car if the client closes it first. It waits at most 10 seconds."
+streams +AFTER-THE-WAIT+. While it waits it writes a ping event every tenth of a second, which the
+client ignores, and stores the time in CLOSED-AT's car when a write fails because the client has
+closed the connection. It waits at most 10 seconds.
+
+The close is found by writing rather than by a second thread reading the connection: on Linux and
+Windows a thread blocked reading a socket keeps it open when the handler closes it, so the client
+never saw the end of the response and timed out (#1339's first CI run)."
   (lambda (request stream)
     (declare (ignore request))
     (ignore-errors
      (aion/test-http:write-head stream 200 '(("Content-Type" . "text/event-stream")
                                              ("Connection" . "close")))
-     (%sse-events stream +before-the-wait+)
-     (let* ((ending (list nil))
-            ;; INTERRUPTS: a test fixture's thread, made by the stub server's handler and not by a
-            ;; framework; it blocks reading the connection until the client closes it or the
-            ;; handler ends, and the JOIN below waits for it.
-            (watcher (sb-thread:make-thread
-                      (lambda ()
-                        (ignore-errors (read-byte stream nil nil))
-                        (unless (car ending) (setf (car closed-at) (get-internal-real-time))))
-                      :name "stub provider close watcher")))
-       (loop repeat 100 until (or (car release) (car closed-at)) do (sleep 0.1))
-       (setf (car ending) t)
-       (if (and (car release) (not (car closed-at)))
-           (%sse-events stream +after-the-wait+)
-           (ignore-errors (close stream :abort t)))
-       (finish-output stream)
-       (ignore-errors (close stream :abort t))
-       (aion/test-threads:join watcher :timeout 15)))))
+     (%sse-events stream +before-the-wait+))
+    (loop repeat 100
+          until (or (car release) (car closed-at))
+          do (handler-case (%sse-events stream '(("ping" . "{\"type\":\"ping\"}")))
+               (error () (setf (car closed-at) (get-internal-real-time))))
+             (unless (car closed-at) (sleep 0.1)))
+    (if (and (car release) (not (car closed-at)))
+        (ignore-errors (%sse-events stream +after-the-wait+)
+                       (finish-output stream)
+                       (close stream))
+        (ignore-errors (close stream :abort t)))))
 
 (defun %stub-agent (server)
   (actor:make-agent :name "stub"
