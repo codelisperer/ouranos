@@ -306,6 +306,13 @@ design over convenience** unless the maintainer flags time pressure.
   [issue #83](https://github.com/codelisperer/ouranos/issues/83). **Currently pinned:
   `a07305a5`** (adopted 2026-11-22 in #1326; on Linux under WSL, every suite's check count equal
   to the previous pin's, 22965 checks).
+- **Ouranos builds its own SBCL binaries from source** (maintainer, 2026-11-15, #1251). SourceForge
+  refused SBCL downloads in some locations (#1216), and the project should not depend on someone
+  else's build and hosting. `sbcl.pin` names the source (the fork `codelisperer/sbcl`, a release
+  tag and its commit); `.github/workflows/sbcl-build.yml` builds it on each platform, runs SBCL's
+  tests and this tree's gate on the result, and publishes the binaries as releases of this
+  repository. The full record, with the build options and why, is
+  [cons ADR-0001](cons/docs/adr/0001-own-sbcl-builds.md).
 - **Publishing (future)** — **Ultralisp** (rolling, fast) for reach + **ocicl** (OCI,
   pinned/reproducible) for consumption. Independent per-lib release, if ever needed,
   via **`git subtree split`** mirrors (the monorepo layout is already split-ready).
