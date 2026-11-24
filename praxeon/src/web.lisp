@@ -16,6 +16,15 @@
 ;;;;                       stream, and the page reads that instead of polling (#67).
 ;;;;   - POST /api/cancel  stop the conversation's running turn: the page's Stop button (#1339).
 ;;;;
+;;;; With :SURFACE :SERVICE or :BOTH, the headless JSON surface for a front end built elsewhere
+;;;; (#1338), on the same conversations, turn runner and auth:
+;;;;   - POST /api/conversations                 the id of the request's conversation
+;;;;   - POST /api/conversations/:id/messages    start a turn; answers at once with a cursor
+;;;;   - GET  /api/conversations/:id/events      with ?after=N, the items from N as JSON;
+;;;;                                             without it, the same as a stream (:transport :sse)
+;;;; :SERVICE serves these, POST /api/message and POST /api/cancel, and with grants the session
+;;;; routes, and no page. :UI, the default, serves the page and not these.
+;;;;
 ;;;; Polling or a stream. An SSE stream holds a handler thread for as long as the page is
 ;;;; open. Hunchentoot runs each connection on its own thread, so it can. Woo runs every
 ;;;; handler on one event-loop thread that must never block, so it cannot, and the native
@@ -55,7 +64,7 @@
   (:import-from #:hyperion/dev #:mark-reloaded #:unwatch #:reload!)
   ;; Parenscript matches its own macros by symbol identity, so these are the real ones.
   (:import-from #:parenscript #:chain #:@ #:create #:new)
-  (:export #:start #:serve-forever #:stop #:request-shutdown
+  (:export #:start #:serve-forever #:surface-from-arguments #:stop #:request-shutdown
            #:make-app #:default-server #:*default-port*
            #:mark-reloaded
            #:watch #:unwatch #:reload!))
@@ -639,10 +648,10 @@ note instead."
       reply))
 
 (defun %publish-message (conv message)
-  "Give MESSAGE a new turn id, publish it to CONV's transcript, and return the id."
+  "Give MESSAGE a new turn id, publish it to CONV's transcript, and return the id, and as a second
+value the index just past the message."
   (let ((turn (%next-turn conv)))
-    (%publish conv (list :kind :user :turn turn :text message))
-    turn))
+    (values turn (%publish conv (list :kind :user :turn turn :text message)))))
 
 (defun %grant-terms (grant)
   "What of GRANT an agent is built from: its capabilities, as a sorted list, and its token and
@@ -747,22 +756,25 @@ is not running yet, so a cancel does not reach it."
 (defun %run-turn-async (conv message locale &optional grant)
   "Run one turn on a background thread so the web server's event loop stays free
 (critical on Woo). See %TURN. LOCALE is the resolved request locale, handed to the
-responder (e.g. for Elise's translator)."
+responder (e.g. for Elise's translator). Returns the thread, and as a second value the index just
+past the user's message in CONV's transcript."
   ;; The user's message is published here, on the request thread, and not by the turn
   ;; thread, so the poll that HX-Trigger asks for finds it even if the thread has not run yet.
-  (let ((turn (%publish-message conv message)))
+  (multiple-value-bind (turn next) (%publish-message conv message)
     ;; THREAD-LIFETIME: continues -- this thread runs ONE turn of the request that spawned it,
     ;; so it carries the caller's dynamic context (#158). Without the wrapper every line the
     ;; turn logs -- including the LLM request and response lines -- is missing the request-id
     ;; that hyperion/logging bound around the request, because a LET binding does not cross a
     ;; thread. The field is simply absent and nothing reports it.
-    (sb-thread:make-thread
-     (aion/dynamic:inheriting
-      (lambda ()
-        (aion/dynamic:unblock-interrupts)
-        (%turn conv message locale :turn turn :grant grant)
-        nil))
-     :name "praxeon-web-turn")))
+    (values
+     (sb-thread:make-thread
+      (aion/dynamic:inheriting
+       (lambda ()
+         (aion/dynamic:unblock-interrupts)
+         (%turn conv message locale :turn turn :grant grant)
+         nil))
+      :name "praxeon-web-turn")
+     next)))
 
 ;;; --------------------------------------------------------------------------
 ;;; Request parsing -- the raw-Clack utilities (body-string/form-param/wants-json/
@@ -869,12 +881,23 @@ Events, starting from AFTER and EPOCH (%STREAM-CURSOR).
 Each event's data is what a poll from the same cursor answers (%PROGRESS-FRAGMENT): the new
 items, and the cursor, status line and token count out of band. Its id is the cursor past those
 items, so a browser that reconnects by itself sends it back as Last-Event-ID and resumes where it
-stopped, with nothing lost or repeated. An event is sent at once, and then whenever an item is
-published or the status line or token count changes; a comment is sent when nothing has been for
+stopped, with nothing lost or repeated. When events are sent, and how the stream ends: see
+%STREAM-UPDATES."
+  (%stream-updates conv style live-p on-close
+                   (lambda ()
+                     (multiple-value-bind (html next) (%progress-fragment conv after epoch)
+                       (prog1 (sse:encode-event html :id (%cursor-value conv next))
+                         (setf after next
+                               epoch (conversation-epoch conv)))))))
+
+(defun %stream-updates (conv style live-p on-close next-event)
+  "A stream body, a function of the writer, that writes what NEXT-EVENT returns, an encoded event:
+once at once, and then whenever an item is published or the status line, token count, draft or
+running turn changes (%STREAM-STATE). A comment is sent when nothing has been for
 `hyperion/sse:*keep-alive-seconds*', so a proxy does not close the connection as idle.
 
 The stream ends when LIVE-P, called every *STREAM-CHECK-SECONDS*, returns false, or when the
-writer signals because the browser has gone. ON-CLOSE is then called. STYLE is the app's output
+writer signals because the client has gone. ON-CLOSE is then called. STYLE is the app's output
 style, bound here because the body runs after the handler has returned. While the stream is open,
 CONV counts it, so it is not dropped as idle."
   (lambda (writer)
@@ -887,12 +910,9 @@ CONV counts it, so it is not dropped as idle."
              (loop
                (let ((state (%stream-state conv)))
                  (cond ((not (equal state last))
-                        (multiple-value-bind (html next) (%progress-fragment conv after epoch)
-                          (funcall writer (sse:encode-event html :id (%cursor-value conv next)))
-                          (setf after next
-                                epoch (conversation-epoch conv)
-                                last state
-                                sent-at (get-universal-time))))
+                        (funcall writer (funcall next-event))
+                        (setf last state
+                              sent-at (get-universal-time)))
                        ((>= (- (get-universal-time) sent-at) sse:*keep-alive-seconds*)
                         (funcall writer (sse:comment))
                         (setf sent-at (get-universal-time)))))
@@ -902,6 +922,68 @@ CONV counts it, so it is not dropped as idle."
                (sleep (/ *stream-interval-ms* 1000)))))
       (%add-stream conv -1)
       (when on-close (funcall on-close)))))
+
+;;; --------------------------------------------------------------------------
+;;; The service surface (#1338): the same conversations, as JSON, for a front end built
+;;; elsewhere. A conversation's id is its epoch, and a cursor is a plain index into its
+;;; transcript, because the id is already in the path.
+;;; --------------------------------------------------------------------------
+(defun %json-response (status &rest plist)
+  (list status '(:content-type "application/json" :cache-control "no-store")
+        (list (http:json plist))))
+
+(defun %no-such-conversation ()
+  (%json-response 404 "error" "no such conversation: create one with POST /api/conversations"))
+
+(defun %item-object (item)
+  "ITEM, a transcript plist, as a hash table for jzon: its keys as lowercase strings, and a
+keyword value, such as :KIND's or :OUTCOME's, as a lowercase string."
+  (let ((h (make-hash-table :test #'equal)))
+    (loop for (k v) on item by #'cddr
+          do (setf (gethash (string-downcase (symbol-name k)) h)
+                   (if (keywordp v) (string-downcase (symbol-name v)) v)))
+    h))
+
+(defun %service-update (conv after)
+  "What the service's poll answers for CONV from index AFTER, and what each event of its stream
+carries, as JSON: the items from AFTER on (\"items\"), the index just past them (\"cursor\"),
+whether a turn is running (\"running\"), and the reply being written, or null (\"draft\").
+Returns the JSON, and as a second value the cursor."
+  (multiple-value-bind (items next) (%items-since conv after)
+    ;; Read after the items, as %PROGRESS-FRAGMENT does, so an update never has both a draft
+    ;; and the reply that replaced it.
+    (multiple-value-bind (draft running) (%draft-and-running conv)
+      (let ((h (make-hash-table :test #'equal)))
+        (setf (gethash "items" h) (map 'vector #'%item-object items)
+              (gethash "cursor" h) next
+              (gethash "running" h) (and running t)
+              (gethash "draft" h) (or draft 'null))
+        (values (jzon:stringify h) next)))))
+
+(defun %service-stream-body (conv after style live-p &optional on-close)
+  "The body of a GET /api/conversations/:id/events stream: CONV's updates from AFTER as
+Server-Sent Events whose data is %SERVICE-UPDATE's JSON and whose id is its cursor."
+  (%stream-updates conv style live-p on-close
+                   (lambda ()
+                     (multiple-value-bind (json next) (%service-update conv after)
+                       (prog1 (sse:encode-event json :id (princ-to-string next))
+                         (setf after next))))))
+
+(defun %service-cursor (raw)
+  "RAW, an `after' parameter or a Last-Event-ID, as a non-negative index, or NIL."
+  (let ((n (and raw (ignore-errors (parse-integer raw)))))
+    (and (integerp n) (>= n 0) n)))
+
+(defun %handle-service-message (env conv dictionary grant)
+  "POST /api/conversations/:id/messages: publish the message, start its turn on a thread, and
+answer at once with 202 and the cursor just past the message."
+  (let ((message (%request-message env))
+        (locale (%negotiate-locale env dictionary)))
+    (if (or (not (stringp message)) (string= message ""))
+        (%json-response 400 "error" "missing 'message'")
+        (multiple-value-bind (thread next) (%run-turn-async conv message locale grant)
+          (declare (ignore thread))
+          (%json-response 202 "cursor" next)))))
 
 (defun %handle-message (env conv dictionary &optional grant)
   (let ((message (%request-message env))
@@ -1045,7 +1127,7 @@ not before, and max_seconds says how long it can last at most."
                       grant-verifier audience sessions
                       (conversation-idle-seconds 1800) (clock #'get-universal-time)
                       (transport :poll) embed-origins trusted-replies (stream-text :auto)
-                      render-item)
+                      render-item (surface :ui))
   "A Clack app exposing an agent: GET / (chat page), POST /api/message (HTMX or JSON),
 GET /api/progress (live-progress poll). One agent holds one conversation, so turns
 are serialized; the HTMX turn runs on a background thread so no handler blocks.
@@ -1137,6 +1219,23 @@ the agent read elsewhere, and an image is fetched as soon as it is shown, which 
 its host. TRUSTED-REPLIES T renders images and links in replies, as before #1119. The user's own
 messages render images and links either way.
 
+THE SERVICE SURFACE (#1338). SURFACE is :UI, the default, for the page; :SERVICE for a headless
+JSON surface, for a front end built elsewhere; or :BOTH. The service's routes are
+POST /api/conversations, which answers {\"id\": ID, \"cursor\": N}: the id of the conversation the
+request holds, the one the page would show it, and the index just past its transcript so far;
+POST /api/conversations/ID/messages, which takes {\"message\": TEXT}, starts the turn and answers
+202 with {\"cursor\": N}, the index just past the message; and GET /api/conversations/ID/events.
+With ?after=N, that answers the items from index N on as JSON at once:
+{\"items\": [...], \"cursor\": N, \"running\": BOOLEAN, \"draft\": TEXT-OR-NULL}, each item an object
+with the keys of a transcript item (\"kind\", \"turn\", \"text\", \"outcome\", \"message\"). Without
+?after, and with :TRANSPORT :SSE, it is a Server-Sent Events stream of those objects from index 0,
+or from the Last-Event-ID a reconnecting client sends, each event's id its cursor. With
+:TRANSPORT :POLL the stream form answers 400. An ID that is not the request's conversation, for
+example one replaced after it was idle, answers 404, and the client creates it again. With grants,
+every service route needs `Authorization: Session ID' from POST /embed/session; the stream also
+takes ?ticket= from POST /embed/stream-ticket, for a browser's EventSource. POST /api/message and
+POST /api/cancel are served on every surface.
+
 AN APP'S OWN BUBBLES (#1340). RENDER-ITEM, a function or a function's name, is called with the
 agent's name and a copy of each transcript item, a plist: (:KIND :USER :TURN N :TEXT T),
 (:KIND :ASSISTANT :TURN N :TEXT T), or (:KIND :TURN-ENDED :TURN N :OUTCOME O), with :MESSAGE when
@@ -1174,6 +1273,10 @@ and no reply. See %TURN for how a custom responder is stopped."
          (error "praxeon/web: :GRANT-VERIFIER needs :AUDIENCE, the name grants for this service are minted with. Without it a grant minted for another service would open a session here."))
         ((not (typep conversation-idle-seconds '(integer 1)))
          (error "praxeon/web: :CONVERSATION-IDLE-SECONDS must be a whole number of seconds, at least 1, not ~S." conversation-idle-seconds))
+        ((not (member surface '(:ui :service :both)))
+         (error "praxeon/web: :SURFACE must be :UI, :SERVICE or :BOTH, not ~S." surface))
+        ((and embed-origins (eq surface :service))
+         (error "praxeon/web: :EMBED-ORIGINS needs the page, so :SURFACE :SERVICE cannot take it. Use :SURFACE :BOTH."))
         ((not (typep render-item '(or null function symbol)))
          (error "praxeon/web: :RENDER-ITEM must be a function or a function's name, not ~S." render-item))
         ((not (member stream-text '(:auto t nil)))
@@ -1198,6 +1301,8 @@ and no reply. See %TURN for how a custom responder is stopped."
   ;; `hyperion/output:*output-style*' there would change how the host renders. The turn thread
   ;; does not render; it publishes items, and the poll that reads them renders them here.
   (let* ((style (if dev :pretty :compact))
+         (page-p (member surface '(:ui :both)))
+         (service-p (member surface '(:service :both)))
          (sessions (or sessions (ws:make-session-table :clock clock)))
          (stream-text (if (eq stream-text :auto)
                           (eq responder #'%default-responder)
@@ -1289,6 +1394,15 @@ and no reply. See %TURN for how a custom responder is stopped."
                                (lambda ()
                                  (funcall new-conversation key (funcall make-agent key))))))))
              (t (lambda (env) (declare (ignore env)) shared))))
+         ;; SERVICE-CONVERSATION: of what CONVERSATION-FOR returned for ENV, the conversation and
+         ;; grant when it is the one the path's :id names, the refusal when it was refused, and
+         ;; 404 when it is another conversation.
+         (service-conversation
+           (lambda (env conv &optional grant)
+             (cond ((not (conversation-p conv)) conv)
+                   ((string/= (or (router:path-param env "id") "") (conversation-epoch conv))
+                    (%no-such-conversation))
+                   (t (values conv grant)))))
          ;; The route table -- DATA, built once. `(hyperion/router:describe-routes …)`
          ;; prints what this surface answers; the `cond` this replaces could not be
          ;; enumerated by anything, including its author. The vendored assets arrive
@@ -1306,7 +1420,7 @@ and no reply. See %TURN for how a custom responder is stopped."
                                 (let ((ceiling:*clock* clock))
                                   (%open-session env grant-verifier audience sessions)))
                               :name :embed-session))
-              (assets:mount)
+              (when page-p (assets:mount))
               (when embed-origins
                 (router:route :get "/embed/panel"
                               (lambda (env)
@@ -1332,49 +1446,51 @@ and no reply. See %TURN for how a custom responder is stopped."
                                 (list 200 '(:content-type "text/javascript; charset=utf-8")
                                       (list (ui:embed-loader-js))))
                               :name :embed-loader))
-              (router:route :get "/"
-                            (lambda (env)
-                              (let ((conv (funcall conversation-for env)))
-                                (if (not (conversation-p conv))
-                                    conv
-                                    (multiple-value-bind (locale set-cookie)
-                                        (%negotiate-locale env dictionary)
-                                      ;; The bubbles and the cursor come from one read of the
-                                      ;; channel, so an item published while the page renders is
-                                      ;; either in the page or after its cursor, never both.
-                                      (multiple-value-bind (items next) (%items-since conv -1)
-                                        (list 200
-                                              (append '(:content-type "text/html; charset=utf-8")
-                                                      (when set-cookie (list :set-cookie set-cookie)))
-                                              (list (%page (%resolve-content title locale)
-                                                           (%resolve-content intro locale)
-                                                           (%resolve-content footer locale)
-                                                           dev
-                                                           (%agent-model-label (conversation-agent conv))
-                                                           (%items-html conv items)
-                                                           theme-css
-                                                           locale
-                                                           (and dictionary (i18n:supported-locales dictionary))
-                                                           (and gate (if (functionp gate)
-                                                                         (funcall gate locale)
-                                                                         gate))
-                                                           (%cursor-value conv next)
-                                                           (and (eq transport :sse) "/api/events")
-                                                           (and (eq transport :sse) grant-verifier
-                                                                "/embed/stream-ticket")))))))))
-                            :name :chat)
-              (router:route :get "/api/progress"
-                            (lambda (env)
-                              (let ((conv (funcall conversation-for env)))
-                                (if (not (conversation-p conv))
-                                    conv
-                                    (multiple-value-bind (after epoch) (%request-cursor env)
-                                      (list 200 '(:content-type "text/html; charset=utf-8")
-                                            (list (%progress-fragment conv after epoch)))))))
-                            :name :progress)
+              (when page-p
+                (router:route :get "/"
+                              (lambda (env)
+                                (let ((conv (funcall conversation-for env)))
+                                  (if (not (conversation-p conv))
+                                      conv
+                                      (multiple-value-bind (locale set-cookie)
+                                          (%negotiate-locale env dictionary)
+                                        ;; The bubbles and the cursor come from one read of the
+                                        ;; channel, so an item published while the page renders is
+                                        ;; either in the page or after its cursor, never both.
+                                        (multiple-value-bind (items next) (%items-since conv -1)
+                                          (list 200
+                                                (append '(:content-type "text/html; charset=utf-8")
+                                                        (when set-cookie (list :set-cookie set-cookie)))
+                                                (list (%page (%resolve-content title locale)
+                                                             (%resolve-content intro locale)
+                                                             (%resolve-content footer locale)
+                                                             dev
+                                                             (%agent-model-label (conversation-agent conv))
+                                                             (%items-html conv items)
+                                                             theme-css
+                                                             locale
+                                                             (and dictionary (i18n:supported-locales dictionary))
+                                                             (and gate (if (functionp gate)
+                                                                           (funcall gate locale)
+                                                                           gate))
+                                                             (%cursor-value conv next)
+                                                             (and (eq transport :sse) "/api/events")
+                                                             (and (eq transport :sse) grant-verifier
+                                                                  "/embed/stream-ticket")))))))))
+                              :name :chat))
+              (when page-p
+                (router:route :get "/api/progress"
+                              (lambda (env)
+                                (let ((conv (funcall conversation-for env)))
+                                  (if (not (conversation-p conv))
+                                      conv
+                                      (multiple-value-bind (after epoch) (%request-cursor env)
+                                        (list 200 '(:content-type "text/html; charset=utf-8")
+                                              (list (%progress-fragment conv after epoch)))))))
+                              :name :progress))
               ;; The stream, for a page that does not poll. With grants it is opened with a ticket,
               ;; because an EventSource cannot send the session header.
-              (when (eq transport :sse)
+              (when (and page-p (eq transport :sse))
                 (router:route :get "/api/events"
                               (lambda (env)
                                 (multiple-value-bind (conv live-p)
@@ -1411,20 +1527,83 @@ and no reply. See %TURN for how a custom responder is stopped."
                                                          (ws:session-table-ticket-seconds sessions))))))))
                               :name :stream-ticket))
               ;; The dev page's poller reads these two, and only a dev app has them.
-              (when dev
+              (when (and page-p dev)
                 (router:route :get "/api/reload-epoch"
                               (lambda (env)
                                 (declare (ignore env))
                                 (list 200 '(:content-type "text/plain" :cache-control "no-store")
                                       (list (princ-to-string dev:*reload-epoch*))))
                               :name :reload-epoch))
-              (when dev
+              (when (and page-p dev)
                 (router:route :get "/api/dev-error"
                               (lambda (env)
                                 (declare (ignore env))
                                 (list 200 '(:content-type "text/plain" :cache-control "no-store")
                                       (list (or (dev:dev-error) ""))))
                               :name :dev-error))
+              (when service-p
+                (router:route :post "/api/conversations"
+                              (lambda (env)
+                                (let ((conv (funcall conversation-for env)))
+                                  (if (not (conversation-p conv))
+                                      conv
+                                      (%json-response 200 "id" (conversation-epoch conv)
+                                                      "cursor" (chan:channel-length
+                                                                (conversation-events conv))))))
+                              :name :conversations))
+              (when service-p
+                (router:route :post "/api/conversations/:id/messages"
+                              (lambda (env)
+                                (multiple-value-bind (conv grant)
+                                    (multiple-value-call service-conversation env
+                                      (funcall conversation-for env))
+                                  (if (not (conversation-p conv))
+                                      conv
+                                      (%handle-service-message env conv dictionary grant))))
+                              :name :conversation-messages))
+              (when service-p
+                (router:route :get "/api/conversations/:id/events"
+                              (lambda (env)
+                                (let ((raw-after (http:query-param env "after")))
+                                  (cond
+                                    (raw-after
+                                     (let ((conv (funcall service-conversation env
+                                                          (funcall conversation-for env)))
+                                           (after (%service-cursor raw-after)))
+                                       (cond ((not (conversation-p conv)) conv)
+                                             ((null after)
+                                              (%json-response 400 "error" "'after' must be a whole number, at least 0"))
+                                             (t (list 200 '(:content-type "application/json"
+                                                            :cache-control "no-store")
+                                                      (list (%service-update conv after)))))))
+                                    ((not (eq transport :sse))
+                                     (%json-response 400 "error" "this server does not stream; poll with ?after=N"))
+                                    (t
+                                     ;; With grants, the session header, or a ticket for a
+                                     ;; browser's EventSource, which cannot send headers.
+                                     (let* ((ticket (http:query-param env "ticket"))
+                                            (ticket-session (and grant-verifier ticket
+                                                                 (ws:redeem-ticket sessions ticket)))
+                                            (session-id (or ticket-session
+                                                            (and grant-verifier
+                                                                 (%authorization env "Session"))))
+                                            (conv (funcall service-conversation env
+                                                           (cond ((and ticket (null ticket-session))
+                                                                  (%unauthenticated "the ticket is not valid; get one from POST /embed/stream-ticket"))
+                                                                 (grant-verifier
+                                                                  (funcall session-conversation session-id))
+                                                                 (t (funcall conversation-for env)))))
+                                            (start (%service-cursor (http:request-header env "last-event-id"))))
+                                       (if (not (conversation-p conv))
+                                           conv
+                                           (list 200 (copy-list sse:*headers*)
+                                                 (%service-stream-body
+                                                  conv (or start 0) style
+                                                  (if grant-verifier
+                                                      (lambda () (ws:session-open-p sessions session-id))
+                                                      (constantly t))
+                                                  (lambda () (funcall touch conv))))))))))
+                              :name :conversation-events))
               (router:route :post "/api/message"
                             (lambda (env)
                               (multiple-value-bind (conv grant) (funcall conversation-for env)
@@ -1463,10 +1642,20 @@ other request; it is allowed on :UV, where each open page holds one of the serve
             (error "praxeon/web: :TRANSPORT :SSE cannot be served by Woo, which runs every handler on its one event-loop thread, so an open stream would hold up every other request. Use :SERVER :HUNCHENTOOT, or :TRANSPORT :POLL."))
           :sse)))
 
+(defun surface-from-arguments (arguments)
+  "The :SURFACE that ARGUMENTS, a list of command-line strings, select (#1338): :SERVICE for
+--service, :UI for --server, :BOTH for both, and :UI for neither. SERVE-FOREVER calls it with the
+process's arguments unless it is given :SURFACE."
+  (let ((server (member "--server" arguments :test #'string=))
+        (service (member "--service" arguments :test #'string=)))
+    (cond ((and server service) :both)
+          (service :service)
+          (t :ui))))
+
 (defun %build-app (agent agent-name title responder intro footer dev theme-css
                    dictionary gate conversation-key make-agent
                    grant-verifier audience sessions conversation-idle-seconds transport
-                   embed-origins trusted-replies stream-text render-item)
+                   embed-origins trusted-replies stream-text render-item surface)
   "The app START and SERVE-FOREVER serve: MAKE-APP, called with the arguments they share.
 
 BOTH ENTRY POINTS GO THROUGH HERE. START and SERVE-FOREVER differ in how they BLOCK, not
@@ -1485,20 +1674,20 @@ forget one."
             :conversation-idle-seconds (or conversation-idle-seconds 1800)
             :transport transport :embed-origins embed-origins
             :trusted-replies trusted-replies :stream-text stream-text
-            :render-item render-item))
+            :render-item render-item :surface surface))
 
 (defun start (&key agent (agent-name "Praxeon") (title "Praxeon")
                    (responder #'%default-responder) intro footer dev theme-css
                    dictionary gate conversation-key make-agent
                    grant-verifier audience sessions conversation-idle-seconds embed-origins
-                   trusted-replies (stream-text :auto) render-item (transport :auto)
+                   trusted-replies (stream-text :auto) render-item (surface :ui) (transport :auto)
                    (server (default-server)) (port *default-port*) (host "127.0.0.1") debug)
   "Start a web server exposing AGENT and return a handler; stop it with STOP.
 Builds the agent/chat Clack app and hands it to hyperion/server:start. SERVER is
 the Clack backend (DEFAULT-SERVER, re-exported from Hyperion). RESPONDER, INTRO,
 FOOTER, THEME-CSS, DICTIONARY, CONVERSATION-KEY, MAKE-AGENT, GRANT-VERIFIER, AUDIENCE,
-SESSIONS, CONVERSATION-IDLE-SECONDS, EMBED-ORIGINS, TRUSTED-REPLIES, STREAM-TEXT, RENDER-ITEM and
-DEV pass
+SESSIONS, CONVERSATION-IDLE-SECONDS, EMBED-ORIGINS, TRUSTED-REPLIES, STREAM-TEXT, RENDER-ITEM,
+SURFACE and DEV pass
 through to MAKE-APP -- DICTIONARY turns
 on per-request locale negotiation (title/intro/footer may be locale functions); DEV
 t embeds the hot-reload poller so the page auto-refreshes on (MARK-RELOADED). TRANSPORT is
@@ -1515,14 +1704,15 @@ SERVE-FOREVER instead."
                          dictionary gate conversation-key make-agent
                          grant-verifier audience sessions conversation-idle-seconds
                          (%resolve-transport transport server) embed-origins
-                         trusted-replies stream-text render-item)
+                         trusted-replies stream-text render-item surface)
              :server server :port port :host host :debug debug))
 
 (defun serve-forever (&key agent (agent-name "Praxeon") (title "Praxeon")
                            (responder #'%default-responder) intro footer dev theme-css
                            dictionary gate conversation-key make-agent
                            grant-verifier audience sessions conversation-idle-seconds embed-origins
-                           trusted-replies (stream-text :auto) render-item (transport :auto)
+                           trusted-replies (stream-text :auto) render-item
+                           (surface :command-line) (transport :auto)
                            (server (default-server)) (port *default-port*)
                            (host "127.0.0.1") debug (log t)
                            (name agent-name) (banner :derive) (signals t) on-ready)
@@ -1533,6 +1723,10 @@ makes a foreground server behave -- the banner, Ctrl-C, the shutdown hooks, rest
 previous signal handlers -- belongs to `hyperion/server:serve-forever' and is simply
 delegated to. NAME titles the derived banner and defaults to AGENT-NAME, since that is the
 name the app already answers to. TRANSPORT is as for START.
+
+SURFACE is as for MAKE-APP, or :COMMAND-LINE, the default, which reads it from the process's
+arguments with SURFACE-FROM-ARGUMENTS: --service selects :SERVICE, --server :UI, both :BOTH, and
+neither :UI (#1338).
 
 WHY IT LIVES HERE RATHER THAN IN EACH APP (pre-publication issue 151). A praxeon app that wants to block used to
 have to reach past praxeon/web into hyperion/server, build the Clack app itself with
@@ -1549,7 +1743,10 @@ here rather than porting the symptom."
                                  theme-css dictionary gate conversation-key make-agent
                                  grant-verifier audience sessions conversation-idle-seconds
                                  (%resolve-transport transport server) embed-origins
-                                 trusted-replies stream-text render-item)
+                                 trusted-replies stream-text render-item
+                                 (if (eq surface :command-line)
+                                     (surface-from-arguments (uiop:command-line-arguments))
+                                     surface))
                      :server server :port port :host host :debug debug :log log
                      :name name :banner banner :signals signals :on-ready on-ready))
 
