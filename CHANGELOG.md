@@ -1715,6 +1715,15 @@ its tag.
 
 ### Fixed
 
+- **praxeon/llm: `endpoint-loopback-p` no longer reports a 6to4 or NAT64 address as this
+  machine** (#1211). `http://[2002:7f00:1::]/` and `http://[64:ff9b::7f00:1]/` carry 127.0.0.1,
+  but their traffic goes through a 6to4 relay or a NAT64 gateway and leaves the machine, and
+  `endpoint-loopback-p` answered T for both. It now uses `aion/http-client:loopback-host-p`, the
+  rule a request made with `:stay-local` is held to, so it answers NIL for 6to4 (`2002::/16`) and
+  NAT64 (`64:ff9b::/96` and `64:ff9b:1::/48`) addresses, and for a dotted quad with a leading
+  zero such as `0127.0.0.1`. `localhost`, 127.0.0.0/8, `::1` and `::ffff:127.0.0.1` are still
+  true. An app that worked around this by checking for those prefixes itself can drop the check.
+
 - **praxeon: with `:cache-messages t`, an app that replaces `agent-history` with another
   conversation has all of it sent again when it fits** (#1317, follow-up to #1321). The trim
   point was kept as an index into the history, so a replacement of the same length or longer
