@@ -14,6 +14,12 @@ its tag.
 
 ### An app may have to act
 
+- **praxeon/chat-ui: the composer clears the message only after its post succeeds** (#1335).
+  `praxeon/chat-ui:composer` no longer resets the form on submit; it resets on
+  `htmx:afterRequest` when the request succeeded and came from the form itself. A message the host
+  refuses, with a 4xx or 5xx response, stays in the box. An app that relied on the box being
+  cleared after a refused post clears it itself.
+
 - **praxeon/web and praxeon/chat-ui: the agent's replies render no images and no links by
   default** (#1119, the maintainer's ruling of 2026-11-14). An image in a reply now shows as its
   alt text and is not fetched, and a link shows as its text with no `href`, because a browser
@@ -1736,6 +1742,12 @@ its tag.
   zero such as `0127.0.0.1`. `localhost`, 127.0.0.0/8, `::1` and `::ffff:127.0.0.1` are still
   true. An app that worked around this by checking for those prefixes itself can drop the check.
 
+- **praxeon/web: `start` and `serve-forever` called without `:responder` run their turns**
+  (#1339). Their default responder was `praxeon/actor:run-turn`, which the app calls with the
+  locale as a third argument; `run-turn` read that as a keyword with no value, so every turn
+  ended with "odd number of &KEY arguments". Both now default to the same responder as
+  `make-app`. An app that passed its own `:responder` was not affected.
+
 - **praxeon: with `:cache-messages t`, an app that replaces `agent-history` with another
   conversation has all of it sent again when it fits** (#1317, follow-up to #1321). The trim
   point was kept as an index into the history, so a replacement of the same length or longer
@@ -1925,6 +1937,53 @@ its tag.
     literal `<br/>` into the attribute before.
 
 ### Added
+
+- **praxeon/web: the chat can run as a JSON service with no page** (#1338, part of #67).
+  `praxeon/web:make-app`, `start` and `serve-forever` take `:surface`: `:ui` (the default, the
+  page as before), `:service` or `:both`. Under `:service` and `:both` the app serves
+  `POST /api/conversations`, `POST /api/conversations/:id/messages`, which starts a turn and
+  answers 202 with a cursor, and `GET /api/conversations/:id/events`, which answers the items
+  after `?after=N` as JSON, or without it streams them as Server-Sent Events under
+  `:transport :sse`. Under `:service` there is no page, poll, asset route or embed panel;
+  `POST /api/message` and `POST /api/cancel` remain on every surface, and grants work the same
+  way, with the `Session` header or a stream ticket. `:surface :service` with `:embed-origins`
+  is an error. `serve-forever` reads `--service` and `--server` from the command line unless
+  given `:surface`; `praxeon/web:surface-from-arguments` is the function it uses. An app that
+  passes neither flag keeps `:ui`. An app whose own command line already uses `--service` or
+  `--server` for something else should pass `:surface` to `serve-forever` explicitly, or the flag
+  changes what it serves.
+
+- **praxeon/web: an app can draw the chat's bubbles itself** (#1340, part of #67).
+  `praxeon/web:make-app`, `start` and `serve-forever` take `:render-item`, a function of the
+  agent's name and a copy of a transcript item (a plist with `:kind` `:user`, `:assistant` or
+  `:turn-ended`, `:turn`, and `:text`, or `:outcome` and `:message`). It returns the item's HTML
+  as a string, or `nil` for the default bubble. The page, the poll and the event stream all use
+  it. Its output goes into the page as it is, so a renderer that writes a message's text into its
+  own HTML escapes it; `:trusted-replies` applies only to the default bubbles. With no
+  `:render-item`, the items are the same bytes as before.
+
+- **praxeon/chat-ui: `composer` takes the options a host needs to use it as its own message
+  form** (#1335). `:label` shows a visible `<label>` tied to the box, `#msg`; `:placeholder`
+  (`nil` for none), `:autofocus` (true unless `:disabled`) and `:maxlength` set the box;
+  `:hidden-fields`, a list of `(name . value)` strings, are sent as hidden inputs with each
+  message, and the name `"message"` is refused; `:hx-target`, `:hx-swap` (`"none"` by default)
+  and `:hx-include` set the form's htmx attributes. With none of them, the form is the one it
+  rendered before.
+
+- **praxeon/web: the chat page shows the agent's reply while the model writes it, and a Stop
+  button ends the turn** (#1339). While a model call streams, each page update carries the text
+  so far in the agent's bubble, as a `#px-draft` element at the end of `#chat`; the finished reply
+  replaces it. `praxeon/web:make-app`, `start` and `serve-forever` take `:stream-text`: `:auto`,
+  the default, shows the draft only when the app gives no `:responder`, because a responder such
+  as a guardrail or a translator can change the reply after the model wrote it; `t` shows it for
+  any responder, and `nil` never. The new route `POST /api/cancel` stops the turn that is running
+  through `praxeon/actor:*turn-cancel*`, which closes the provider's connection; the turn ends
+  with a `:turn-ended` item whose outcome is `:cancelled`, the page shows "Stopped." and no reply
+  is published. A JSON client gets `{"cancelled": true}` or `false`. With grants, the route needs
+  the same session as `POST /api/message`. `praxeon/chat-ui:composer` takes `:cancel-action`,
+  which adds the button, and `praxeon/chat-ui:stop-button` is exported; the embed panel's script
+  enables the button with the composer. An app that renders its own page and wants the button
+  passes `:cancel-action "/api/cancel"` to `composer`.
 
 - **dokimasia: `cons acceptance` runs an app's suite in a headless browser from the command line**
   (#1028). `dokimasia/cons.lisp` is new, with the targets `build`, `test`, `repl` and

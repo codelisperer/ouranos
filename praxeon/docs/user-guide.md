@@ -224,6 +224,111 @@ renders the bubbles itself passes the same options to `hyperion/markdown:render`
 (`t` or `:text`). `assistant-bubble` defaults to `:images nil :links :text`, and `user-bubble`
 to `:images t :links t`.
 
+### The reply as it is written, and the Stop button
+
+While a model call streams, the chat page shows the text the model has written so far in the
+agent's bubble (#1339). Each page update, by poll or by the event stream, carries it as a
+`#px-draft` element at the end of `#chat`, and deletes the previous one first. When the turn ends,
+the finished reply is added as usual and the draft is removed. Nothing in the draft is saved: it
+is not a transcript item, and a page loaded later shows only finished replies.
+
+`make-app`, `start` and `serve-forever` take `:stream-text`. With `:auto`, the default, the draft
+is shown only when the app gives no `:responder`. A responder can change the reply after the model
+wrote it, as a crisis guardrail or a translator does, and then the draft would show text the
+reader was never meant to see. Pass `t` to show it with a responder whose reply is the model's
+text, or `nil` to never show it.
+
+While a turn runs, the composer shows a Stop button. It posts to `/api/cancel`, which cancels the
+turn through `praxeon/actor:*turn-cancel*`: the provider's connection is closed, no reply is
+published, and the transcript records the turn as ended with the outcome `:cancelled`, shown as
+"Stopped.". A custom responder that calls `run-turn` is stopped the same way, because the app
+binds `*turn-cancel*` around it. A responder that does its own model calls without `run-turn`
+stops only when its code checks `praxeon/actor:turn-cancelled-p`. A message sent while another
+turn runs waits for that turn and cannot be stopped until it starts. A JSON client posts to
+`/api/cancel` with `Accept: application/json` and gets `{"cancelled": true}`, or `false` when no
+turn was running. An app that renders its own page adds the button with
+`(praxeon/chat-ui:composer :cancel-action "/api/cancel")`.
+
+### Using the composer in an app's own page
+
+An app that renders the chat parts in its own page uses `praxeon/chat-ui:composer` for the
+message form (#1335). The form clears the box only after its post succeeds, so a message the app
+refuses, for example with a 409 when a usage limit is reached, stays in the box for the writer.
+The keywords, each defaulting to the form praxeon/web uses:
+
+- `:action`, the route the form posts to, `/api/message` by default.
+- `:label`, a visible label for the box; `:placeholder`, its placeholder text, `nil` for none;
+  `:autofocus`, true unless `:disabled`; `:maxlength`, a limit on the message's length.
+- `:hidden-fields`, a list of `(name . value)` strings sent with each message, such as
+  `'(("project" . "p-7") ("doc" . "d-3"))`. The name `"message"` is refused, because it is the box.
+- `:hx-target`, `:hx-swap` and `:hx-include`, the form's htmx attributes. `:hx-swap` is `"none"`
+  by default, because praxeon/web's response has nothing to show. An app whose response is the
+  rendered message passes, for example, `:hx-target "#log" :hx-swap "beforeend"`.
+- `:cancel-action`, the route of the Stop button described above, with no button by default.
+
+### Drawing the bubbles yourself
+
+An app that wants different markup in a bubble, such as an avatar, a timestamp, sources under a
+reply or buttons on a proposal, passes `:render-item` to `make-app`, `start` or `serve-forever`
+(#1340). It is called with the agent's name and a copy of each transcript item, and returns the
+item's HTML as a string, or `nil` to keep the default bubble:
+
+```lisp
+(praxeon/web:start
+ :agent agent
+ :render-item (lambda (agent-name item)
+                (when (eq (getf item :kind) :assistant)
+                  (format nil "<div class=\"my-reply\">~A</div>"
+                          (praxeon/chat-ui:assistant-bubble agent-name (getf item :text))))))
+```
+
+The items are plists: `(:kind :user :turn n :text text)`, `(:kind :assistant :turn n :text text)`
+and `(:kind :turn-ended :turn n :outcome outcome)`, with `:message` when the outcome is `:error`.
+The page, the poll and the event stream all draw items through the renderer. The reply shown
+while the model writes it is not an item and keeps the default bubble.
+
+What the renderer returns goes into the page unescaped. A renderer that writes a message's text
+into its own HTML escapes it first. One that calls `praxeon/chat-ui:assistant-bubble` passes
+`:images` and `:links` itself, as described under "Images and links in the agent's replies",
+because `:trusted-replies` applies only to the default bubbles.
+
+### The chat as a JSON service, with no page
+
+An app that builds its own front end, in another framework or on another server, passes
+`:surface :service` to `make-app`, `start` or `serve-forever` (#1338). The server then serves no
+page, and these routes on the same conversations, turn runner and authentication as the page:
+
+- `POST /api/conversations` answers `{"id": ID, "cursor": N}`: the id of the request's
+  conversation, created if it has none, and the index just past what its transcript holds so far.
+  A request selects its conversation the way it does for the page: by its grant's principal, by
+  `:conversation-key`, or the one shared conversation.
+- `POST /api/conversations/ID/messages` with `{"message": "..."}` (or a form field `message`)
+  starts the turn on its own thread and answers `202` at once with `{"cursor": N}`, the index just
+  past the message.
+- `GET /api/conversations/ID/events?after=N` answers the items from index `N` on:
+  `{"items": [...], "cursor": N, "running": true|false, "draft": "..."|null}`. Each item has the
+  keys of a transcript item: `kind` (`"user"`, `"assistant"` or `"turn-ended"`), `turn`, `text`,
+  and on a `turn-ended` item `outcome` (`"ok"`, `"error"`, ...) and, for an error, `message`.
+  `draft` is the reply the model is writing, while it writes it. Poll again from the `cursor`
+  the answer gave.
+- `GET /api/conversations/ID/events` without `after`, on a server started with
+  `:transport :sse`, is a Server-Sent Events stream of the same objects, from index 0 or from the
+  `Last-Event-ID` a reconnecting client sends. Each event's id is its cursor. A server that polls
+  answers this form with `400`.
+
+An id that is not the request's conversation, for example one replaced after it was idle,
+answers `404`, and the client calls `POST /api/conversations` again. With `:grant-verifier`,
+every route needs the `Authorization: Session ID` header from `POST /embed/session`; a browser's
+`EventSource`, which cannot send headers, opens the stream with `?ticket=` from
+`POST /embed/stream-ticket`. `POST /api/message` (blocking, for JSON) and `POST /api/cancel`
+are served on every surface.
+
+`:surface :both` serves the page and the service together; `:ui`, the default, serves only the
+page. `:embed-origins` needs the page, so it is refused with `:service`. `serve-forever` reads
+the surface from the command line unless it is given one: `--service` selects `:service`,
+`--server` `:ui`, and both together `:both`; with neither, it is `:ui`. An app whose own command
+line already uses `--service` or `--server` for something else passes `:surface` explicitly.
+
 ### Talk to Elise in your language
 
 Elise ships an i18n dictionary (`examples/elise/resources/i18n/{en,es,ru}.json`) —

@@ -256,11 +256,11 @@ rendering changed for the rest of the process."
   ;; the bug fully present. Measured: under the reverted fix this test failed `f.\', one of two.
   ;; So the non-dev case runs against a :pretty image and the dev case against a :compact one.
   (let ((out:*output-style* :pretty))
-    (web::%build-app nil "Guest" "Guest" #'identity nil nil nil nil nil nil nil nil nil nil nil nil :poll nil nil)
+    (web::%build-app nil "Guest" "Guest" #'identity nil nil nil nil nil nil nil nil nil nil nil nil :poll nil nil :auto nil :ui)
     (is (eq :pretty out:*output-style*)
         "a :pretty host survives a non-dev agent surface, which the defect would set :compact"))
   (let ((out:*output-style* :compact))
-    (web::%build-app nil "Guest" "Guest" #'identity nil nil t nil nil nil nil nil nil nil nil nil :poll nil nil)
+    (web::%build-app nil "Guest" "Guest" #'identity nil nil t nil nil nil nil nil nil nil nil nil :poll nil nil :auto nil :ui)
     (is (eq :compact out:*output-style*)
         "and a :compact host survives a :dev one, which the defect would set :pretty")))
 
@@ -438,7 +438,7 @@ user's own message, in the same page, has both."
          (page (lambda (trusted)
                  (%articles (nth-value 2 (%call (web::%build-app agent "R" "R" #'identity nil nil
                                                                  nil nil nil nil nil nil nil nil
-                                                                 nil nil :poll nil trusted)
+                                                                 nil nil :poll nil trusted :auto nil :ui)
                                                 :get "/"))
                             "px-assistant"))))
     (is (not (%fetches-or-follows-p (funcall page nil))))
@@ -460,6 +460,87 @@ posts there, escaped, and nowhere else."
     (is (search "disabled" (praxeon/chat-ui:composer :disabled t :action "/x"))
         "DISABLED still applies with an action"))
   (signals type-error (praxeon/chat-ui:composer :action nil)))
+
+;;; --------------------------------------------------------------------------
+;;; The composer as a host's own message form (#1335)
+;;; --------------------------------------------------------------------------
+
+(defun %quotes-removed (html)
+  "HTML with its double quotes removed, because spinneret quotes an attribute value only when it
+has to, and these tests are about the values."
+  (remove #\" html))
+
+(defun %tag-of (html id)
+  "The opening tag of the element with ID in HTML, quotes removed, or NIL."
+  (let* ((html (%quotes-removed html))
+         (at (search (format nil "id=~A" id) html))
+         (open (and at (position #\< html :end at :from-end t))))
+    (and open (subseq html open (1+ (position #\> html :start at))))))
+
+(test the-composer-clears-the-form-only-after-its-own-post-succeeds
+  "The form resets on htmx:afterRequest when the request succeeded and came from the form itself,
+so a refused post leaves the message in the box, and the Stop button's request inside the form
+does not clear it. Before #1335 it reset on submit. Control: the handler checks both conditions;
+removing either would fail the two SEARCHes for them."
+  (let* ((html (praxeon/chat-ui:composer))
+         (form (subseq html 0 (1+ (position #\> html)))))
+    (is (null (search "onsubmit" html)) "the form still resets on submit: ~S" form)
+    (is (search "hx-on::after-request" form) "~S" form)
+    (is (search "event.detail.successful" form) "~S" form)
+    (is (search "event.detail.elt===this" form) "~S" form)
+    (is (search "this.reset()" form) "~S" form)))
+
+(test the-composer-s-defaults-are-the-form-it-rendered-before
+  "With no new keywords: no label, the same placeholder, autofocus unless disabled, no maxlength,
+hx-swap none and no hx-target or hx-include, and no hidden inputs."
+  (let ((html (%quotes-removed (praxeon/chat-ui:composer)))
+        (box (%tag-of (praxeon/chat-ui:composer) "msg")))
+    (is (null (search "<label" html)))
+    (is (search "Say something" box) "~S" box)
+    (is (search "autofocus" box) "~S" box)
+    (is (null (search "maxlength" box)) "~S" box)
+    (is (search "hx-swap=none" html))
+    (is (null (search "hx-target" html)))
+    (is (null (search "hx-include" html)))
+    (is (null (search "type=hidden" html))))
+  (is (null (search "autofocus" (%tag-of (praxeon/chat-ui:composer :disabled t) "msg")))
+      "a disabled composer takes no focus"))
+
+(test the-composer-takes-a-label-placeholder-autofocus-and-maxlength
+  (let* ((html (praxeon/chat-ui:composer :label "Your message <to the editor>"
+                                         :placeholder "Ask about this chapter"
+                                         :autofocus nil :maxlength 4000))
+         (box (%tag-of html "msg")))
+    (is (search "<label class=label for=msg>Your message &lt;to the editor&gt;</label>"
+                (%quotes-removed html))
+        "the label is not tied to the box, or not escaped: ~S" html)
+    (is (search "placeholder=Ask about this chapter" box) "~S" box)
+    (is (null (search "Say something" box)))
+    (is (null (search "autofocus" box)) "~S" box)
+    (is (search "maxlength=4000" box) "~S" box))
+  (is (null (search "placeholder" (%tag-of (praxeon/chat-ui:composer :placeholder nil) "msg"))))
+  (signals type-error (praxeon/chat-ui:composer :maxlength 0))
+  (signals type-error (praxeon/chat-ui:composer :label 'yes)))
+
+(test the-composer-sends-hidden-fields-and-takes-the-form-s-htmx-attributes
+  "HIDDEN-FIELDS are inputs inside the form, so htmx sends them with each message; values are
+escaped so they cannot end their attribute. HX-TARGET, HX-SWAP and HX-INCLUDE replace the form's
+defaults."
+  (let ((html (%quotes-removed
+               (praxeon/chat-ui:composer
+                :hidden-fields '(("project" . "p-7") ("doc" . "a\"b<c"))
+                :hx-target "#log" :hx-swap "beforeend" :hx-include "#context"))))
+    (is (search "<input type=hidden name=project value=p-7>" html) "~S" html)
+    ;; A double quote in the value is escaped, so it cannot end the attribute; a < inside a quoted
+    ;; attribute value is valid HTML and is left as it is.
+    (is (search "name=doc value=a&quot;b<c>" html) "the value is not escaped: ~S" html)
+    (is (< (search "<form" html) (search "name=project" html) (search "</form>" html))
+        "the hidden field is not inside the form")
+    (is (search "hx-target=#log" html))
+    (is (search "hx-swap=beforeend" html))
+    (is (search "hx-include=#context" html)))
+  (dolist (bad '((("message" . "x")) (("doc" . 7)) (("" . "x")) "doc=1" (("doc"))))
+    (signals error (praxeon/chat-ui:composer :hidden-fields bad))))
 
 ;;; --------------------------------------------------------------------------
 ;;; A web turn logs with the request's context (#160)
@@ -1780,3 +1861,96 @@ does not run the framed panel, so no grant is asked for and no session is opened
                          (is (notany (lambda (r) (equal "/embed/session" (second r))) log)
                              "a session was asked for from a refused frame: ~S" log)))))
               (dolist (h handlers) (ignore-errors (srv:stop h)))))))))
+
+;;; --------------------------------------------------------------------------
+;;; An app's own bubble renderer (#1340)
+;;; --------------------------------------------------------------------------
+
+(defun %marking-renderer (&key (kinds '(:user :assistant)))
+  "A renderer that wraps the default bubble of an item whose kind is in KINDS in a marker element
+naming the kind, and returns NIL for every other item."
+  (lambda (agent-name item)
+    (let ((kind (getf item :kind)))
+      (when (member kind kinds)
+        (format nil "<div class=\"app-bubble\" data-kind=\"~(~A~)\">~A</div>"
+                kind
+                (if (eq kind :user)
+                    (praxeon/chat-ui:user-bubble (getf item :text))
+                    (praxeon/chat-ui:assistant-bubble agent-name (getf item :text))))))))
+
+(test an-app-s-renderer-draws-the-bubbles-by-poll-and-on-the-page
+  "The marker wraps both the user's and the agent's bubble in a poll's items and on a page loaded
+after the turn, and the default bubble is inside it, so the agent's name reached the renderer."
+  (let ((app (%echo-app :render-item (%marking-renderer))))
+    (is (eql 200 (%say app "hello")))
+    (dolist (html (list (%poll app 0) (nth-value 2 (%call app :get "/"))))
+      (is (search "data-kind=\"user\"" html) "~S" html)
+      (is (search "data-kind=\"assistant\"" html) "~S" html)
+      (is (= 2 (%count-matches "class=\"app-bubble\"" html)) "~S" html)
+      (is (search "echo: hello" html))
+      (is (search "Echo" html) "the agent's name is not in the bubble"))))
+
+(defun %count-matches (needle haystack)
+  (loop with start = 0
+        for at = (search needle haystack :start2 start)
+        while at count t do (setf start (1+ at))))
+
+(test an-app-s-renderer-draws-the-bubbles-on-the-event-stream
+  (let ((app (%echo-app :transport :sse :render-item (%marking-renderer))))
+    (is (eql 200 (%say app "hello")))
+    (let ((event (first (%read-stream (nth-value 2 (%stream-of app :query
+                                                               (format nil "after=~A:0"
+                                                                       (%page-epoch app))))))))
+      (is (search "data-kind=\"user\"" (or event "")) "~S" event)
+      (is (search "data-kind=\"assistant\"" (or event "")) "~S" event))))
+
+(test a-renderer-that-returns-nil-gets-the-default-bubble
+  "A renderer for the agent's replies only: the user's message keeps the default bubble, and an
+error, for which it also returns NIL, keeps the default error bubble."
+  (let* ((app (%echo-app :render-item (%marking-renderer :kinds '(:assistant))))
+         (html (progn (%say app "hello") (%say app "fail") (%poll app 0))))
+    (is (null (search "data-kind=\"user\"" html)) "~S" html)
+    (is (= 1 (%count-matches "class=\"app-bubble\"" html)) "~S" html)
+    ;; The app renders compactly unless it is made with :DEV, so the comparison does too.
+    (is (search (hyperion/output:with-output-style (:compact) (praxeon/chat-ui:user-bubble "hello"))
+                html)
+        "the default user bubble is missing")
+    (is (search "error: " html) "the default error bubble is missing")))
+
+(test without-a-renderer-the-items-are-the-default-bubbles
+  "Control: with no renderer each item is the bubble the page drew before #1340, compared byte for
+byte with what CHAT-UI's functions return for the same text."
+  (let* ((app (%echo-app))
+         (html (progn (%say app "hello") (%poll app 0))))
+    (is (search (hyperion/output:with-output-style (:compact)
+                  (concatenate 'string (praxeon/chat-ui:user-bubble "hello")
+                               (praxeon/chat-ui:assistant-bubble "Echo" "echo: hello")))
+                html)
+        "~S" html)
+    (is (null (search "app-bubble" html)))))
+
+(test a-renderer-gets-a-copy-and-must-return-html-or-nil
+  "Changing the item it was given does not change the transcript; a renderer that returns
+something other than a string or NIL is an error that names what it returned; MAKE-APP refuses a
+:RENDER-ITEM that is not a function."
+  (let* ((calls 0)
+         (app (%echo-app :render-item (lambda (name item)
+                                        (declare (ignore name))
+                                        (incf calls)
+                                        (setf (getf item :text) "changed")
+                                        nil))))
+    (%say app "hello")
+    (let ((first (%poll app 0)) (second (%poll app 0)))
+      (is (plusp calls) "the renderer was never called")
+      (is (null (search "changed" second)) "the transcript was changed: ~S" second)
+      (is (string= (subseq first 0 (search "px-cursor" first))
+                   (subseq second 0 (search "px-cursor" second))))))
+  (let ((conv (web::%new-conversation nil nil "Echo" #'identity
+                                      :render-item (lambda (name item)
+                                                     (declare (ignore name item))
+                                                     42))))
+    (let ((c (handler-case (progn (web::%item-html conv '(:kind :user :turn 1 :text "x")) nil)
+               (error (c) c))))
+      (is-true c)
+      (is (search "INTEGER" (princ-to-string c)) "~A" c)))
+  (signals error (%echo-app :render-item "not a function")))
