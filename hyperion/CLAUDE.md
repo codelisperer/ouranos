@@ -22,8 +22,9 @@ job. Its initial code was extracted from `praxeon/src/web.lisp`.
 ## Design facts
 
 - **Hyperion declares no HTTP server** (pre-publication issue 139). The app depends on the Clack handler it
-  wants; `hyperion/server:default-server` picks from what loaded. `server-uv` (native
-  libuv, pre-publication issue 117) is the destination; Woo and Hunchentoot go when it lands.
+  wants; `hyperion/server:default-server` picks from what loaded, `server-uv` first when
+  libuv itself loads (#710). `server-uv` (native libuv, pre-publication issue 117) is the
+  destination; Woo and Hunchentoot go when it lands.
 - Sessions are behind a `store` protocol; `rotate-session` exists — don't hand-roll it.
 - Desktop is an out-of-process native webview. `libev` is no longer needed (ADR-0011).
 - **A streaming body is a function in body position**, `(status headers (lambda (writer)

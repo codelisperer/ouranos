@@ -28,7 +28,8 @@ not one a message can carry (#366), before anything is sent."))
 (define-condition delivery-failure (hermes-error)
   ((provider :initarg :provider :initform nil :reader delivery-failure-provider)
    (status :initarg :status :initform nil :reader delivery-failure-status)
-   (detail :initarg :detail :initform nil :reader delivery-failure-detail))
+   (detail :initarg :detail :initform nil :reader delivery-failure-detail)
+   (transport-phase :initarg :phase :initform nil :reader delivery-failure-phase))
   (:report (lambda (c stream)
              (format stream "Delivery via ~A failed~@[ (HTTP ~A)~]~@[: ~A~]."
                      (delivery-failure-provider c)
@@ -36,7 +37,13 @@ not one a message can carry (#366), before anything is sent."))
                      (delivery-failure-detail c))))
   (:documentation "The provider rejected the message or the request could not be made. STATUS
 is the HTTP status when there was a response; DETAIL is the provider's response body (where it
-explains the failure) or a transport error."))
+explains the failure) or a transport error.
+
+DELIVERY-FAILURE-PHASE says how far a failure with no status got, carried from
+AION/HTTP-CLIENT:HTTP-ERROR-PHASE (#79): :CONNECT when no connection was made, so the message
+was NOT sent; :RESPONSE for a failure after it was made, after which the provider may already
+have sent the message. It is NIL when there is a status, and for a failure hermes raised itself.
+AION/RETRY:TRANSIENCE reads it, so an app does not have to: see the method below."))
 
 (define-condition delivery-rate-limited (delivery-failure)
   ((retry-after :initarg :retry-after :initform nil :reader delivery-rate-limited-retry-after))
@@ -46,9 +53,19 @@ explains the failure) or a transport error."))
                      (delivery-rate-limited-retry-after c))))
   (:documentation "The provider refused the message because too many were sent (HTTP 429).
 RETRY-AFTER is the number of seconds the provider asked the caller to wait, or NIL when it gave
-none. hermes neither waits nor retries: a caller that wants a retry schedules one, for example
-with AION/SCHEDULE:SCHEDULE-ONCE (#778). The Telegram backend signals it; the other backends
-still signal a plain DELIVERY-FAILURE for a 429."))
+none.
+
+HERMES NEITHER WAITS NOR RETRIES, and that is deliberate (#79 step two). Sending a message is
+not safe to repeat on a whim, and a blocking wait inside DELIVER would hold a request thread for
+as long as a provider's rate limit lasts -- minutes, for Facebook's estimated_time_to_regain_access.
+A caller that wants another attempt SCHEDULES one, for example with AION/SCHEDULE:SCHEDULE-ONCE,
+using RETRY-AFTER, or AION/RETRY:RETRY-AFTER, as the delay. AION/RETRY's own WITH-RETRY is not
+used here for the same reason: it sleeps.
+
+Every backend signals this for a rate limit now: Telegram from its own retry_after (#778),
+Facebook from Graph codes 4, 17, 32, 613 and 80001 with the wait from
+X-Business-Use-Case-Usage (#822), and SendGrid and Twilio from an HTTP 429, which used to
+arrive as a plain DELIVERY-FAILURE (#79)."))
 
 (define-condition telegram-chat-unreachable (delivery-failure)
   ()
@@ -149,16 +166,62 @@ does not implement (e.g. an SMS to an email-only provider)."))
 ;;; messaging framework, which is the only place "delivery" means anything.
 
 (defmacro as-delivery (provider &body body)
-  "Run BODY, translating an HTTP-ERROR into a DELIVERY-FAILURE attributed to PROVIDER.
+  "Run BODY, translating an HTTP-ERROR into a DELIVERY-FAILURE attributed to PROVIDER, or into a
+DELIVERY-RATE-LIMITED for an HTTP 429.
 
 Wraps a backend's whole outbound call rather than each stage, so a transport failure and a
 rejected status arrive as the same kind of thing to a caller -- which is what DELIVER's
-contract already promised."
+contract already promised.
+
+A 429 becomes DELIVERY-RATE-LIMITED, carrying the response's Retry-After as its RETRY-AFTER
+(#79). Before, it arrived as a plain DELIVERY-FAILURE and an app had to read the status to tell
+a rate limit from a rejection. Every other failure keeps HTTP-ERROR-PHASE, so
+AION/RETRY:TRANSIENCE can tell a message that was never sent from one that may have been."
   (let ((c (gensym)))
     `(handler-case (progn ,@body)
        (aion/http-client:http-error (,c)
-         (error 'delivery-failure
-                :provider ,provider
-                :status (aion/http-client:http-error-status ,c)
-                :detail (or (aion/http-client:http-error-detail ,c)
-                            (aion/http-client:http-error-body ,c)))))))
+         (let ((status (aion/http-client:http-error-status ,c))
+               (detail (or (aion/http-client:http-error-detail ,c)
+                           (aion/http-client:http-error-body ,c))))
+           (if (eql status 429)
+               (error 'delivery-rate-limited
+                      :provider ,provider :status status :detail detail
+                      :retry-after (aion/http-client:http-error-retry-after ,c))
+               (error 'delivery-failure
+                      :provider ,provider :status status :detail detail
+                      :phase (aion/http-client:http-error-phase ,c))))))))
+
+;;; --- what an app may try again, in AION/RETRY's vocabulary (#79 step two) -----------------
+;;;
+;;; hermes classifies; it never sleeps and never retries by itself. These two methods let an
+;;; app, or AION/RETRY's own predicates, ask about a hermes failure without reading statuses
+;;; itself. WITH-RETRY is deliberately not used inside hermes: it sleeps, and a send is not safe
+;;; to repeat blindly.
+;;;
+;;; "Never sleeps or retries by itself" is the whole claim, and it is narrower than "never
+;;; waits": SendGrid and Twilio build their requests without a connect or read timeout, and the
+;;; client defaults both to NIL, so a server that accepts a connection and never answers holds
+;;; DELIVER for as long as it likes. That is a real gap, filed as #1077; it is not
+;;; something these methods can fix (the review of #1067).
+
+(defmethod aion/retry:transience ((c delivery-failure))
+  "For a DELIVERY-FAILURE: :TRANSIENT when the provider's status says the message was not acted
+on, :UNKNOWN when it may have been, and NIL when trying again cannot help.
+
+The verdict is AION/HTTP-CLIENT:STATUS-TRANSIENCE, so hermes and the HTTP client cannot reach
+different answers: this calls the client's own function rather than repeating its COND over the
+client's two status lists, which is what it did until the review of #1067 pointed out that
+sharing the lists still left two copies of the logic. With no status the phase decides: :CONNECT
+means no connection was made, so the message was not sent (:TRANSIENT); :RESPONSE means it may
+have been (:UNKNOWN). A failure hermes raised itself, such as an answer with no message id, has
+neither and is NIL: repeating the send would not fix it and might deliver twice."
+  (aion/http-client:status-transience (delivery-failure-status c)
+                                      (delivery-failure-phase c)))
+
+(defmethod aion/retry:transience ((c delivery-rate-limited))
+  "A rate limit is :TRANSIENT: the provider refused the message, so it was not sent, and the
+same message may be sent later. RETRY-AFTER says how much later."
+  :transient)
+
+(defmethod aion/retry:retry-after ((c delivery-rate-limited))
+  (delivery-rate-limited-retry-after c))

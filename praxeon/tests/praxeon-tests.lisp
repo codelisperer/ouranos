@@ -409,8 +409,8 @@ their results."
 ;;; Progress events -- the client<->framework contract (network-free)
 ;;; --------------------------------------------------------------------------
 (test observer-receives-turn-events
-  "run-turn emits :deliberating/:tool-call/:tool-result/:answer, in order and
-with payloads, to a bound observer."
+  "run-turn emits :turn-started/:deliberating/:tool-call/:tool-result/:answer, in order and
+with payloads, to a bound observer. :TURN-STARTED was added for praxeon/trace (#1225)."
   (let* ((call (llm:make-tool-call :id "t1" :name "add"
                                    :arguments (%args "a" 2 "b" 3)))
          (script (list (llm:make-completion :tool-calls (list call)
@@ -425,7 +425,7 @@ with payloads, to a bound observer."
     (evt:with-observer ((lambda (e) (push e events)))
       (actor:run-turn ag "add 2 and 3"))
     (setf events (nreverse events))
-    (is (equal '(:deliberating :tool-call :tool-result :deliberating :answer)
+    (is (equal '(:turn-started :deliberating :tool-call :tool-result :deliberating :answer)
                (mapcar #'evt:event-type events)))
     (let ((tc (find :tool-call events :key #'evt:event-type)))
       (is (string= "add" (evt:event-get tc :name)))
@@ -627,6 +627,22 @@ effect did or did not happen."
       (signals ceiling:grant-invalid
         (ceiling:verify-grant (ceiling:make-ed25519-verifier pub) forged sig)))))
 
+(test a-signed-payload-of-the-wrong-shape-is-refused
+  "The signature is good and the payload is not a grant. Each is GRANT-INVALID, which a web
+service answers 401, and none is another error, which it would answer 500."
+  (with-keys (priv pub)
+    (let ((v (ceiling:make-ed25519-verifier pub)))
+      (dolist (payload '("not json" "[1,2]" "\"a string\""
+                         "{\"principal\":5}" "{\"principal\":\"u1\",\"audience\":[1]}"
+                         "{\"principal\":\"u1\",\"capabilities\":\"search\"}"
+                         "{\"principal\":\"u1\",\"capabilities\":[1]}"
+                         "{\"principal\":\"u1\",\"capabilities\":7}"))
+        (is (eq :refused (handler-case (progn (ceiling:verify-grant v payload (%sign priv payload))
+                                              :accepted)
+                           (ceiling:grant-invalid () :refused)
+                           (error (e) (type-of e))))
+            "~S" payload)))))
+
 (test a-grant-signed-by-the-wrong-key-is-rejected
   ;; The property a shared secret would NOT have given us: this side can verify and cannot
   ;; mint, so compromising it yields no usable grants.
@@ -669,6 +685,45 @@ effect did or did not happen."
             (is (search "signature" (ceiling:grant-invalid-reason c))
                 "must fail on the signature, not the expiry: got ~S"
                 (ceiling:grant-invalid-reason c))))))))
+
+;;; --- a grant as one string (#67) ---------------------------------------------
+
+(test a-grant-token-round-trips-and-verifies
+  "ENCODE-GRANT-TOKEN signs with an `aion/signature' key; DECODE-GRANT-TOKEN gives back the
+payload and signature, and VERIFY-GRANT accepts them under the matching public key."
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (let* ((payload (%grant-json :principal "ü1"))
+           (token (ceiling:encode-grant-token payload priv)))
+      (is (= 1 (count #\. token)) "a token is two parts and one dot: ~S" token)
+      (is (notany (lambda (c) (find c "+/=")) token)
+          "a token is base64url without padding, so it fits a header unescaped: ~S" token)
+      (multiple-value-bind (text signature) (ceiling:decode-grant-token token)
+        (is (string= payload text) "the payload came back changed")
+        (is (string= "ü1" (ceiling:grant-principal
+                           (ceiling:verify-grant (ceiling:make-ed25519-verifier pub :audience "elise")
+                                                 text signature)))
+            "a non-ASCII principal survives the round trip")))))
+
+(test a-grant-token-with-a-changed-payload-does-not-verify
+  "The payload part is only base64url, so anyone can rewrite it. The signature is what stops it."
+  (multiple-value-bind (priv pub) (aion/signature:generate-key-pair)
+    (let* ((token (ceiling:encode-grant-token (%grant-json :token-cap 10) priv))
+           (forged-payload (subseq (ceiling:encode-grant-token (%grant-json :token-cap 999999) priv)
+                                   0 (position #\. (ceiling:encode-grant-token
+                                                     (%grant-json :token-cap 999999) priv))))
+           (forged (concatenate 'string forged-payload (subseq token (position #\. token)))))
+      (signals ceiling:grant-invalid
+        (multiple-value-bind (text signature) (ceiling:decode-grant-token forged)
+          (ceiling:verify-grant (ceiling:make-ed25519-verifier pub) text signature))))))
+
+(test a-malformed-grant-token-is-refused-with-a-reason
+  ;; The last four have letters or a digit from outside ASCII in the payload or the signature.
+  (dolist (bad (list "" "no-dot" "a.b.c" ".abc" "abc." "a+b.c/d" "abcde.QUJD" nil 42
+                     "QUJD.QUJé" "QUJD.ＱＵＪＤ" "ＱＵＪＤ.QUJD" "QUJD.QUJ٣"))
+    (is (eq :refused (handler-case (progn (ceiling:decode-grant-token bad) :accepted)
+                       (ceiling:grant-invalid (e)
+                         (if (search "base64url" (ceiling:grant-invalid-reason e)) :refused :no-reason))))
+        "~S was not refused with the reason" bad)))
 
 ;;; --- the ledger ------------------------------------------------------------
 
@@ -1999,8 +2054,13 @@ behaviour, and one that arrived without being asked for would be a surprise in a
   "Recorded as a test rather than a comment because it corrects an argument made when this
 shape was chosen. The marker lives on the SYSTEM prompt; `pinned-exchange-count' scans MESSAGES.
 So the pinning pre-publication issue 402 built is inert on the actor path -- which is fine, and it means the two
-features do not meet until a second producer marks a boundary inside the conversation. When one
-arrives, this test fails and says so."
+features do not meet until a second producer marks a boundary inside the conversation.
+
+That producer arrived with #1317 (CACHE-MESSAGES), and this is the test that says what changed.
+Without it, nothing in the request is pinned, as before. With it, the request that is sent marks
+its latest message, so PINNED-EXCHANGE-COUNT over the request counts every exchange. The trim
+still does not see it, because the mark goes on after trimming: an agent with a small history
+budget still sends less than it remembers."
   (let* ((provider (make-instance 'system-capturing))
          (agent (actor:make-agent :provider provider :system-prompt "brief" :cache-system t)))
     (actor:run-turn agent "q")
@@ -2009,7 +2069,21 @@ arrives, this test fails and says so."
           "no message carries a boundary, so nothing is pinned against trimming")
       (is-true (llm:cache-boundary-p (first (actor:agent-system-parts agent)))
                "while the system prompt does carry one -- the control, so the zero above is
-about WHERE the marker is and not about there being none"))))
+about WHERE the marker is and not about there being none")))
+  (let* ((provider (make-instance 'system-capturing))
+         (agent (actor:make-agent :provider provider :system-prompt "brief" :cache-system t
+                                  :cache-messages t :history-budget 300)))
+    (setf (actor:agent-history agent)
+          (loop for i from 1 to 8
+                append (list (llm:msg "user" (format nil "q~A ~A" i (make-string 200 :initial-element #\q)))
+                             (llm:msg "assistant" (format nil "a~A" i)))))
+    (let* ((remembered (length (actor:agent-history agent)))
+           (sent (actor:request-messages agent))
+           (exchanges (prompt:exchanges sent)))
+      (is (= (length exchanges) (prompt:pinned-exchange-count exchanges))
+          "with CACHE-MESSAGES the request's latest message is marked, so every exchange in it counts as pinned")
+      (is (< (length sent) remembered)
+          "and the trim still ran: the mark went on after it"))))
 
 ;;; --- data through parameterised means (pre-publication issue 400, ADR-0002) -----------------------
 ;;;
@@ -4692,6 +4766,315 @@ request starts with the one before it, message for message."
                    (is (%prefix-p (nth i requests) (nth (1+ i) requests))
                        "request ~D starts with request ~D exactly" (1+ i) i))))))
 
+;;; --- a cache breakpoint on the latest message (#1317) ------------------------------------
+
+(defun %marked-parts (messages)
+  "The marked parts of MESSAGES, as (message-index . part), oldest first."
+  (loop for m in messages
+        for i from 0
+        for c = (llm:content m)
+        when (listp c)
+          append (loop for part in c
+                       when (llm:cache-boundary-p part) collect (cons i part))))
+
+(defun %unmarked (messages)
+  "MESSAGES with every :CACHE mark removed and string content as one text part, so two requests
+can be compared by what the provider caches, not by where each put its mark."
+  (mapcar (lambda (m)
+            (let ((c (llm:content m)))
+              (list :role (llm:role m)
+                    :content (mapcar (lambda (part)
+                                       (loop for (k v) on part by #'cddr
+                                             unless (eq k :cache) append (list k v)))
+                                     (if (stringp c) (list (llm:text-part c)) c)))))
+          messages))
+
+(defun %fetching-agent (n &rest agent-args)
+  "An agent whose model fetches N times and then answers, each result about 400 estimated tokens,
+and its REQUEST-LOG provider."
+  (let* ((p (make-instance 'request-log
+                           :script (append (loop for i from 1 to n
+                                                 collect (%call (format nil "c~D" i) "fetch" "n" i))
+                                           (list (llm:make-completion :text "answer" :stop-reason :end)))))
+         (agent (apply #'actor:make-agent :provider p :system-prompt "brief" agent-args)))
+    (actor:register-means agent "fetch" "fetches"
+                          (lambda (args)
+                            (format nil "result ~D ~A" (gethash "n" args)
+                                    (make-string 1600 :initial-element #\y))))
+    (values agent p)))
+
+(test each-request-marks-its-latest-message-once-when-asked
+  "#1317. Over a turn of four tool steps and an answer, with CACHE-MESSAGES, every request marks
+the last part of its latest message, and that is the only marked part in its messages. The
+history is not marked: the mark is on what is sent. The retrieved facts come after the mark.
+
+THE CONTROL is the same turn without CACHE-MESSAGES: no message part is marked, and the system
+prompt still is, as before #1317."
+  (multiple-value-bind (agent p) (%fetching-agent 4 :cache-system t :cache-messages t)
+    (ctx:add-item (actor:agent-context agent)
+                  (ctx:make-ctx-item :content "a retrieved fact" :tokens 5 :value 1 :valid-time 1))
+    (actor:run-turn agent "go" :max-steps 8)
+    (let ((requests (request-log-requests p)))
+      (is (= 5 (length requests)))
+      (loop for request in requests
+            for i from 1
+            for marks = (%marked-parts request)
+            for last = (car (last request))
+            for parts = (llm:content last)
+            do (is (= 1 (length marks)) "request ~D carries one message mark: ~S" i marks)
+               (is (= (1- (length request)) (car (first marks)))
+                   "request ~D's mark is on its latest message" i)
+               (is (search "a retrieved fact" (getf (car (last parts)) :text))
+                   "request ~D's facts are its latest message's last part" i)
+               (is (eq (cdr (first marks)) (car (last (butlast parts))))
+                   "and the marked part is the one just before them"))
+      (is (eq :tool-result (getf (cdr (first (%marked-parts (second requests)))) :type))
+          "after a tool step, the mark is on the tool result")
+      (is (null (%marked-parts (actor:agent-history agent))) "the history carries no mark")))
+  (multiple-value-bind (agent p) (%fetching-agent 2 :cache-system t)
+    (actor:run-turn agent "go" :max-steps 8)
+    (is (every #'null (mapcar #'%marked-parts (request-log-requests p)))
+        "control: without CACHE-MESSAGES no message is marked")
+    (is-true (llm:cache-boundary-p (first (actor:agent-system-parts agent)))
+             "while the system prompt is")))
+
+(test the-messages-before-the-mark-change-only-when-a-batch-is-cleared
+  "#1317 with OFFLOAD-TOOL-RESULTS clearing. Between batches, each request begins with every
+message of the request before it, up to and including the one that request marked, unchanged
+apart from the mark itself; so the next request finds that prefix in the cache. A batch changes
+them, and the comparison sees it, which is its control."
+  (multiple-value-bind (agent p) (%fetching-agent 8 :cache-messages t)
+    (let ((batches '()) (step 0))
+      (actor:offload-tool-results agent (res:make-memory-result-store) :conversation "c"
+                                  :threshold nil :clear-budget 1500 :keep-recent 1)
+      (evt:with-observer ((lambda (e)
+                            (case (evt:event-type e)
+                              (:deliberating (setf step (length (request-log-requests p))))
+                              (:results-cleared (push step batches)))))
+        (actor:run-turn agent "go" :max-steps 12))
+      (let* ((requests (request-log-requests p))
+             (n (length requests)))
+        (is (= 9 n))
+        (is (<= 1 (length batches) 2) "a batch was cleared, and not on every step: ~S" batches)
+        (loop for i from 0 below (1- n)
+              for before = (nth i requests)
+              for after = (nth (1+ i) requests)
+              for upto = (1+ (car (first (%marked-parts before))))
+              do (is (= 1 (length (%marked-parts after))) "request ~D has one message mark" (1+ i))
+                 (if (member (1+ i) batches)
+                     (is (not (%prefix-p (%unmarked (subseq before 0 upto)) (%unmarked after)))
+                         "request ~D, the batch, changed the messages before the earlier mark" (1+ i))
+                     (is (%prefix-p (%unmarked (subseq before 0 upto)) (%unmarked after))
+                         "request ~D begins with request ~D's messages up to its mark" (1+ i) i)))))))
+
+(test the-latest-message-is-not-marked-past-the-provider-s-limit
+  "#1317. Anthropic accepts four cache breakpoints in a request. With the system prompt's and two
+in the messages, the latest message is marked as the fourth; with three in the messages, or a
+marked tool spec as well, it is not. A message that is already marked, or empty, is not marked
+again."
+  (let* ((system (list (llm:text-part "brief" :cache t)))
+         (marked (lambda (text) (llm:msg "user" (list (llm:text-part text :cache t)))))
+         (two (list (funcall marked "a") (llm:msg "assistant" "b") (funcall marked "c")
+                    (llm:msg "assistant" "d") (llm:msg "user" "latest")))
+         (three (append (butlast two) (list (funcall marked "e") (llm:msg "assistant" "f")
+                                           (llm:msg "user" "latest")))))
+    (is (= 3 (length (%marked-parts (actor::%with-latest-message-marked two system))))
+        "three marks in the messages, four with the system prompt's")
+    (is-true (llm:cache-boundary-p
+              (first (llm:content (car (last (actor::%with-latest-message-marked two system)))))))
+    (is (= 3 (length (%marked-parts (actor::%with-latest-message-marked three system))))
+        "no fifth mark")
+    (is (equal "latest" (getf (first (llm:content (car (last (actor::%with-latest-message-marked
+                                                               three system)))))
+                              :text)))
+    (is (= 1 (length (%marked-parts (actor::%with-latest-message-marked
+                                     (list (funcall marked "x")) system))))
+        "an already marked latest message is left as it is")
+    (is (null (%marked-parts (actor::%with-latest-message-marked
+                              (list (llm:msg "user" "")) system)))
+        "an empty text is not marked")
+    (is (= 2 (length (%marked-parts
+                      (actor::%with-latest-message-marked
+                       two system (list (llm:make-tool-spec :name "t" :description "d" :cache t))))))
+        "a marked tool spec counts too: with it, the two marks in the messages make four")))
+
+(defun %near-budget-turn (cache-messages)
+  "A turn of six tool steps on an agent whose history of ten earlier exchanges is near its budget
+of 700 estimated tokens. Returns the requests sent, oldest first, and the steps (1-based request
+numbers) at which more exchanges were dropped than on the step before."
+  (let* ((p (make-instance 'request-log
+                           :script (append (loop for i from 1 to 6
+                                                 collect (%call (format nil "c~D" i) "fetch" "n" i))
+                                           (list (llm:make-completion :text "answer" :stop-reason :end)))))
+         (agent (actor:make-agent :provider p :history-budget 700 :cache-messages cache-messages))
+         (dropped 0)
+         (trims '()))
+    (setf (actor:agent-history agent)
+          (loop for i from 1 to 10
+                append (list (llm:msg "user" (format nil "q~D ~A" i (make-string 200 :initial-element #\q)))
+                             (llm:msg "assistant" (format nil "a~D" i)))))
+    (actor:register-means agent "fetch" "fetches"
+                          (lambda (args) (format nil "result ~D ~A" (gethash "n" args)
+                                                 (make-string 250 :initial-element #\y))))
+    (evt:with-observer ((lambda (e)
+                          (when (eq :context-trimmed (evt:event-type e))
+                            (let ((now (evt:event-get e :dropped-exchanges)))
+                              (when (> now dropped)
+                                (push (1+ (length (request-log-requests p))) trims))
+                              (setf dropped now)))))
+      (actor:run-turn agent "go" :max-steps 8))
+    (values (request-log-requests p) (reverse trims))))
+
+(test near-the-budget-the-history-is-trimmed-in-steps-when-messages-are-cached
+  "#1317, the cold review of #1321. PROMPT:TRIM-HISTORY keeps the newest exchanges that fit, so
+on an agent near its history budget a growing turn drops the oldest exchange on almost every
+step, and the messages before the cache mark change each time: every such step misses the cache
+and writes the history to it again. With CACHE-MESSAGES the history is trimmed to half the budget
+when it no longer fits, and then sent from the same first exchange until it no longer fits again.
+
+Over six tool steps, each request begins with the one before it, marks aside, except at a step
+that dropped more exchanges, and there are at most two such steps. Every request stays within
+the budget.
+
+THE CONTROL is the same turn without CACHE-MESSAGES, trimmed one exchange at a time: the
+request changes what came before it on at least four steps."
+  (multiple-value-bind (requests trims) (%near-budget-turn t)
+    (is (= 7 (length requests)))
+    (is (<= 1 (length trims) 2) "trimmed once or twice, not on every step: ~S" trims)
+    (loop for i from 0 below (1- (length requests))
+          for before = (%unmarked (nth i requests))
+          for after = (%unmarked (nth (1+ i) requests))
+          unless (member (+ 2 i) trims)
+            do (is (%prefix-p before after) "request ~D begins with request ~D" (+ 2 i) (1+ i)))
+    (is (every (lambda (r) (or (<= (prompt:messages-tokens r) 700)
+                               (= 1 (length (prompt:exchanges r)))))
+               requests)
+        "every request within the budget, or only the turn's own exchange: ~S"
+        (mapcar #'prompt:messages-tokens requests)))
+  (let ((requests (%near-budget-turn nil)))
+    (is (<= 4 (loop for i from 0 below (1- (length requests))
+                    count (not (%prefix-p (%unmarked (nth i requests))
+                                          (%unmarked (nth (1+ i) requests))))))
+        "control: one exchange at a time, the earlier messages change on most steps")))
+
+(test a-trim-point-that-is-not-in-the-history-is-not-used
+  "#1317. TRIM-FROM is where the last trim left the history. When the history is replaced by a
+shorter one, that index is not the start of an exchange in it, and the trim starts again from
+the beginning rather than sending nothing or a broken exchange."
+  (let* ((p (make-instance 'request-log :script nil))
+         (agent (actor:make-agent :provider p :history-budget 700 :cache-messages t)))
+    (setf (actor:agent-trim-from agent) (llm:msg "user" "a message of another conversation")
+          (actor:agent-history agent) (list (llm:msg "user" "q1") (llm:msg "assistant" "a1")))
+    (actor:run-turn agent "q2")
+    (is (= 3 (length (first (request-log-requests p)))) "the whole short history was sent")
+    (is (eq (first (actor:agent-history agent)) (actor:agent-trim-from agent))
+        "and the trim point is now its first message")))
+
+(defun %conversation (tag n)
+  "N exchanges of fresh messages, each user message about 55 estimated tokens."
+  (loop for i from 1 to n
+        append (list (llm:msg "user" (format nil "~A q~D ~A" tag i (make-string 200 :initial-element #\q)))
+                     (llm:msg "assistant" (format nil "~A a~D" tag i)))))
+
+(test a-workflow-merge-carries-back-the-child-s-trim-point-when-it-is-further
+  "#1317, the hub's re-review of #1321. A child's turn runs on a copy of the agent, and trimming
+moves the copy's TRIM-FROM. The merge appends the child's messages and takes the child's trim
+point when it is further into the merged history than the agent's own, so the next turn on the
+agent sends from where the child's did. When the child's is earlier, the agent keeps its own."
+  (let* ((old (%conversation "old" 4))
+         (original (actor:make-agent :provider (make-instance 'request-log :script nil)))
+         (view nil))
+    (setf (actor:agent-history original) old
+          (actor:agent-trim-from original) (nth 2 old)
+          view (copy-structure original))
+    (let ((added (%conversation "child" 2)))
+      (setf (actor:agent-history view) (append old added)
+            (actor:agent-trim-from view) (first added))
+      (praxeon/workflow::%merge-child-history original view (length old))
+      (is (= 12 (length (actor:agent-history original))) "the child's messages were appended")
+      (is (eq (first added) (actor:agent-trim-from original)) "and its further trim point taken"))
+    (let ((ours (actor:agent-trim-from original)))
+      (setf view (copy-structure original)
+            (actor:agent-trim-from view) (first old))
+      (praxeon/workflow::%merge-child-history original view 12)
+      (is (eq ours (actor:agent-trim-from original)) "an earlier trim point is not taken"))))
+
+(defclass %locked-request-log (llm:provider)
+  ((lock :initform (bt:make-lock "px-locked-request-log") :reader locked-request-log-lock)
+   (requests :initform '() :accessor locked-request-log-requests))
+  (:documentation "Answers every request with \"done\" and keeps the messages of each, under a
+lock, so the children of a parallel group can share it."))
+
+(defmethod llm:supports-tool-choice-p ((p %locked-request-log)) t)
+
+(defmethod llm:complete ((p %locked-request-log) messages
+                         &key system tools max-tokens temperature tool-choice)
+  (declare (ignore system tools max-tokens temperature tool-choice))
+  (bt:with-lock-held ((locked-request-log-lock p))
+    (setf (locked-request-log-requests p)
+          (append (locked-request-log-requests p) (list messages))))
+  (llm:make-completion :text "done" :stop-reason :end))
+
+(defun %said-p (request text)
+  "True when a message of REQUEST has TEXT in its content."
+  (some (lambda (m) (search text (format nil "~A" (llm:content m)))) request))
+
+(test a-parallel-sibling-s-turn-is-still-sent-after-another-child-trimmed-into-its-own-turn
+  "#1317, the hub's cold review of #1324. Two children of one WF:PARALLEL group share an agent
+near its history budget. The first child's turn is short and trims nothing. The second's is long
+enough that its trim drops the whole history it started from, so its trim point is its own
+prompt. After the merge, the first child's turn sits between the old history and the second
+child's turn. The step after the group must still send the first child's turn, which fits.
+
+Before this fix, the merge took the second child's trim point as it was, and every later request
+started at the second child's prompt."
+  (let* ((p (make-instance '%locked-request-log))
+         (agent (actor:make-agent :provider p :history-budget 700 :cache-messages t))
+         (long (format nil "second child ~A" (make-string 1600 :initial-element #\l)))
+         (flow (wf:make-workflow
+                :fan "fan out"
+                (wf:parallel (wf:step :first agent "first child, short")
+                             (wf:step :second agent long))
+                (wf:step :after agent "after the group"))))
+    (setf (actor:agent-history agent) (%conversation "old" 10))
+    (wf:run-workflow flow)
+    (let* ((requests (locked-request-log-requests p))
+           (second-child (find-if (lambda (r) (%said-p r "second child")) requests))
+           (after (car (last requests))))
+      (is (= 3 (length requests)) "one request per step: ~D" (length requests))
+      (is (not (%said-p second-child "old q10"))
+          "the second child's own trim dropped the history it started from")
+      (is (%said-p after "after the group") "the last request is the step after the group")
+      (is (%said-p after "second child") "it sends the second child's turn")
+      (is (%said-p after "first child, short")
+          "and the first child's turn, which the second child never saw")
+      (is (<= (prompt:messages-tokens after) 700) "within the budget: ~D"
+          (prompt:messages-tokens after)))))
+
+(test a-history-replaced-by-another-conversation-of-the-same-length-is-sent-whole
+  "#1317, the hub's re-review of #1321. The trim point is a message, compared with EQ, not an
+index. An app that replaces the history with another conversation of the same length gets every
+message of it sent when it fits, although the old trim point's index is the start of an exchange
+in the new history too.
+
+THE CONTROL keeps the first conversation: there the trim point is used, and the messages before
+it are not sent."
+  (flet ((first-request (replace)
+           (let* ((p (make-instance 'request-log :script nil))
+                  (agent (actor:make-agent :provider p :history-budget 700 :cache-messages t))
+                  (old (%conversation "old" 6)))
+             (setf (actor:agent-history agent) old
+                   (actor:agent-trim-from agent) (nth 4 old))
+             (when replace
+               (setf (actor:agent-history agent) (%conversation "new" 6)))
+             (actor:run-turn agent "go")
+             (first (request-log-requests p)))))
+    (is (= 13 (length (first-request t))) "the new conversation is sent whole, with the question")
+    (is (= 9 (length (first-request nil)))
+        "control: the same conversation is sent from its trim point, the third exchange")))
+
+
+
 (test stored-results-are-erased-with-their-conversation
   (let* ((agent (actor:make-agent :provider (make-instance 'request-log)))
          (store (res:make-memory-result-store)))
@@ -5544,12 +5927,46 @@ ANSWERS times. Means a and c return their name; b signals an error."
     (is (equal "done" (actor:run-turn ag "again")))))
 
 (test a-call-to-an-unregistered-means-is-answered-as-not-run
-  (let ((ag (%step-agent '(("1" "ghost")))))
-    (signals cnd:means-failure (actor:run-turn ag "go"))
-    (is-true (search "no such tool" (%result-for ag "1")))
+  "Since #1196 the turn goes on: the model is told the call was not run and which tools exist, and
+answers. Before, ACT signalled MEANS-FAILURE and the turn failed."
+  (let ((ag (%step-agent '(("1" "ghost")) :answers 2)))
+    (is (equal "done" (actor:run-turn ag "go")) "the turn goes on")
+    (is (equal "Not run: there is no tool named \"ghost\". The tools available are: a, b, c."
+               (%result-for ag "1")))
     (is-true (%error-for ag "1"))
     (is-true (%every-call-answered-p ag))
     (is (equal "done" (actor:run-turn ag "again")))))
+
+(test the-not-run-answer-lists-only-the-tools-the-turn-offered
+  "#1196. The list in the answer is the turn's own offer, AGENT-MEANS-FOR under its PERMIT, so a
+means the caller may not use is never named there, and the answer cannot be used to discover it.
+With the capability, the same means is listed."
+  (let ((ag (%step-agent '(("1" "ghost")))))
+    (actor:register-means ag "admin" "needs a capability" (lambda (in) (declare (ignore in)) "ran")
+                          :capability "admin")
+    (actor:run-turn ag "go")
+    (is-false (search "admin" (%result-for ag "1")) "not offered, not listed: ~S" (%result-for ag "1")))
+  (let ((ag (%step-agent '(("1" "ghost")))))
+    (actor:register-means ag "admin" "needs a capability" (lambda (in) (declare (ignore in)) "ran")
+                          :capability "admin")
+    (actor:run-turn ag "go" :permit (lambda (capability) (equal capability "admin")))
+    (is-true (search "admin" (%result-for ag "1")) "control: offered, listed: ~S" (%result-for ag "1"))))
+
+(test calls-to-unknown-tools-past-the-limit-fail-the-turn-as-before
+  "#1196. Up to *MAX-UNKNOWN-TOOL-CALLS* calls in a turn that name a tool it cannot call are
+answered as not run. The next one goes to ACT, which signals MEANS-FAILURE, so a model that keeps
+inventing tools cannot spend the whole turn on them. Here the limit is 3 and the model asks for
+four unknown tools in one step: the first three are answered, and the fourth fails the turn."
+  (let ((ag (%step-agent '(("1" "x1") ("2" "x2") ("3" "x3") ("4" "x4")))))
+    (is (= 3 praxeon/actor::*max-unknown-tool-calls*))
+    (signals cnd:means-failure (actor:run-turn ag "go"))
+    (dolist (id '("1" "2" "3"))
+      (is-true (search "Not run: there is no tool named" (%result-for ag id))
+               "call ~A was answered: ~S" id (%result-for ag id)))
+    (is-true (%every-call-answered-p ag) "the history stays well formed"))
+  ;; The control: three are within the limit, and the turn goes on.
+  (let ((ag (%step-agent '(("1" "x1") ("2" "x2") ("3" "x3")))))
+    (is (equal "done" (actor:run-turn ag "go")))))
 
 (test a-failure-after-a-hold-in-the-same-step-wins
   "The step holds s1 and then the means b fails. The failure reaches the caller, no held turn
@@ -5661,16 +6078,22 @@ caller, the first call keeps its result, and the second and third are written as
 
 (test a-call-the-permit-does-not-allow-is-refused-like-an-unknown-means
   "#90: the refusal of a means the permit does not allow looks the same as the refusal of a means
-that is not registered."
-  (let ((ag (%step-agent '(("1" "admin"))))
-        (unknown (%step-agent '(("1" "ghost"))))
+that is not registered. Since #1196 neither fails the turn: both are answered as not run, and the
+model goes on. Both agents call the same name, \"admin\", one where it is registered under a
+capability the turn lacks and one where it is not registered at all, and the model is told exactly
+the same thing, which lists only the tools the turn offered."
+  (let ((ag (%step-agent '(("1" "admin")) :answers 2))
+        (unknown (%step-agent '(("1" "admin"))))
         (events '()))
     (actor:register-means ag "admin" "needs a capability" (lambda (in) (declare (ignore in)) "ran")
                           :capability "admin")
     (evt:with-observer ((lambda (e) (push e events)))
-      (signals cnd:means-failure (actor:run-turn ag "go")))
-    (signals cnd:means-failure (actor:run-turn unknown "go"))
-    (is (equal (%result-for unknown "1") (%result-for ag "1")))
+      (is (equal "done" (actor:run-turn ag "go")) "the turn goes on"))
+    (is (equal "done" (actor:run-turn unknown "go")))
+    (is (equal (%result-for unknown "1") (%result-for ag "1"))
+        "the same text for both: ~S" (%result-for ag "1"))
+    (is-false (search "admin\"." (%result-for ag "1") :start2 (or (search "available" (%result-for ag "1")) 0))
+              "the means the permit does not allow is not listed as available")
     (is-true (%error-for ag "1"))
     (is (eq :not-run (getf (find :tool-result events :key #'evt:event-type) :outcome)))
     (is (equal "done" (actor:run-turn ag "again")))))
@@ -9189,6 +9612,88 @@ them; for a condensed observation, its sources'."
     (is (equal '("Lives in Lisbon.") (mapcar #'mem:observation-content (mem:observations-of store "member-1" :thread "conv-7"))))
     (is (= 2 (obs:observer-mark observer)))))
 
+(defun %breakdown-sum (b)
+  "The parts of breakdown B that PRAXEON/PROMPT:MESSAGES-TOKENS counts, summed: all but :SYSTEM."
+  (+ (getf b :observations) (getf b :facts) (getf b :context) (getf b :tool-results)
+     (getf b :messages)))
+
+(test the-prompt-breakdown-names-each-source-and-adds-up-to-the-estimate
+  "#317, step D: REQUEST-MESSAGES's third value splits the estimate by source. The system prompt,
+the observations sent in place of observed messages, the subject facts and the rest of the context
+block are each measured from the text that was sent, and the parts other than :SYSTEM add up to the
+estimate exactly."
+  (multiple-value-bind (ag store) (%memory-agent :history (%history 13))
+    (setf (actor:agent-system-prompt ag) "You answer briefly.")
+    (remember* store "member-1" "Prefers mornings.")
+    (ctx:add-item (actor:agent-context ag)
+                  (ctx:make-ctx-item :content "a note retrieved this turn"
+                                     :tokens 10 :value 100 :role :note))
+    (multiple-value-bind (sent estimate b) (actor:request-messages ag)
+      (is (= estimate (%breakdown-sum b)) "~S against ~D" b estimate)
+      (is (= (prompt:estimate-tokens "You answer briefly.") (getf b :system)))
+      (is (= (prompt:estimate-tokens (getf (%first-part sent) :text)) (getf b :observations)))
+      (is (plusp (getf b :observations)))
+      (is (= (prompt:estimate-tokens "Prefers mornings.") (getf b :facts)))
+      (is (plusp (getf b :context)) "the retrieved note and the block's framing")
+      (is (zerop (getf b :tool-results)))
+      (is (plusp (getf b :messages)) "the unobserved messages"))))
+
+(test the-prompt-breakdown-counts-tool-results-apart-from-messages
+  "Without a thread memory or context, a history holding a tool call and its result: the result
+is :TOOL-RESULTS, the rest :MESSAGES, and nothing else is counted."
+  (let ((ag (actor:make-agent :provider (%provider-returning)))
+        (history (%history-with-a-tool-call 5)))
+    (setf (actor:agent-history ag) history)
+    (multiple-value-bind (sent estimate b) (actor:request-messages ag)
+      (declare (ignore sent))
+      (is (= (prompt:part-tokens (first (getf (third history) :content))) (getf b :tool-results)))
+      (is (plusp (getf b :tool-results)))
+      (is (= 0 (getf b :system) (getf b :observations) (getf b :facts) (getf b :context)))
+      (is (= estimate (%breakdown-sum b))))))
+
+(test each-step-logs-its-prompt-breakdown-and-the-usage-event-carries-it
+  "Every deliberation step logs the breakdown beside the provider's counts, and the :USAGE event
+carries it, with parts that add up to its :ESTIMATED-INPUT. The log line has counts only: the
+user's words are not in it."
+  (let ((out (make-string-output-stream))
+        (ag (actor:make-agent :name "metered" :provider (make-instance 'capturing)))
+        (events '()))
+    (unwind-protect
+         (progn
+           (aion/log:setup :env :dev :level :info :stream out)
+           (evt:with-observer ((lambda (e) (push e events)))
+             (actor:run-turn ag "a question about tides")))
+      (aion/log:setup :env :dev :level :warn :stream *standard-output*))
+    (let* ((usage (find :usage events :key #'evt:event-type))
+           (b (and usage (evt:event-get usage :breakdown)))
+           (lines (remove-if-not (lambda (line) (search "prompt tokens" line))
+                                 (uiop:split-string (get-output-stream-string out)
+                                                    :separator '(#\Newline)))))
+      (is-true b)
+      (is (= (evt:event-get usage :estimated-input) (%breakdown-sum b)))
+      (is (= 1 (length lines)) "one line for the one step: ~S" lines)
+      (is (every (lambda (key) (search key (first lines)))
+                 '("agent=metered" "estimated-input=" "messages=" "observations="
+                   "tool-results=" "input=700"))
+          "~S" lines)
+      (is (null (search "tides" (first lines))) "no payload"))))
+
+(test the-meter-records-a-breakdown-and-charges-nothing-for-it
+  "METER's BREAKDOWN-FN goes onto the usage line as :BREAKDOWN, and the charge is the provider's
+counts alone. Control: without BREAKDOWN-FN the line has no :BREAKDOWN."
+  (let* ((l (%ledger :token-cap 100000 :call-cap 10))
+         (b (list :system 1 :observations 2 :facts 3 :context 4 :tool-results 5 :messages 6)))
+    (turn:run-chain (list (ceiling:meter l :model "m" :input-fn (lambda () 50)
+                                           :breakdown-fn (lambda () b)))
+                    (%counting-effect (list 0)) (turn:make-turn "hi" "en"))
+    (turn:run-chain (list (ceiling:meter l :model "m" :input-fn (lambda () 50)))
+                    (%counting-effect (list 0)) (turn:make-turn "hi" "en"))
+    (destructuring-bind (without with) (ceiling::ledger-usage l)
+      (is (equal b (getf with :breakdown)))
+      (is (= 50 (getf with :charged)))
+      (is (null (getf without :breakdown)))
+      (is (= 100 (- 100000 (ceiling:remaining-tokens l)))))))
+
 (test attach-thread-memory-checks-its-settings
   (let ((store (mem:make-in-memory-store))
         (ag (actor:make-agent :name "x" :provider (%provider-returning))))
@@ -9322,3 +9827,638 @@ comes after the correction."
           (is (search "Has a dog called Rui." text) "~A" text)
           (is (null (search "Lives in Porto." text)) "the replaced value is gone: ~A" text)
           (is (= 0 (obs:observer-failures second))))))))
+
+;;; --- a private agent keeps content out of logs and events (#983) ---------------------------
+;;;
+;;; The test must be able to see a leak, so it runs the same agent twice: private, and as the
+;;; control, not private. Each run captures every log record at the most verbose level with
+;;; AION/LOG:*LOG-CONDITION-DETAILS* on, which makes EXCEPTION print a condition's report and the
+;;; backtrace's arguments, and records every event. Handlers inside the turn log each failure
+;;; with LOG:EXCEPTION, as an app's middleware does. The control finds every marker; the private
+;;; run finds none.
+;;;
+;;; EACH MARKER HAS A ROUTE IN THE CONTROL, or its absence from the private run would prove
+;;; nothing (the hub's review of #1027). The prompt reaches a log through the failing provider,
+;;; whose report quotes the messages it was sent, as providers' errors do. The refused repair
+;;; reply reaches one through a validator whose problem quotes it and a handler that logs each
+;;; rejection.
+
+(defparameter +983-markers+
+  '("MARK983PROMPT" "MARK983ARG" "MARK983RESULT" "MARK983REPLY"
+    "MARK983FAIL" "MARK983PROVIDER" "MARK983REPAIR")
+  "One string per kind of content: the user's prompt, a tool argument, a tool result, the reply,
+a failing means' report, a provider error's report, and a reply the structured-output repair
+refused.")
+
+(defclass %983-failing-provider (llm:provider) ()
+  (:documentation "A provider whose every request fails with a report that quotes content."))
+
+(defmethod llm:complete ((p %983-failing-provider) messages &key system tools max-tokens temperature tool-choice)
+  (declare (ignore system tools max-tokens temperature tool-choice))
+  (error "the provider refused the request about MARK983PROVIDER: ~S" messages))
+
+(defun %983-spec ()
+  "%SPEC with a validator whose problem quotes the headline it refuses, so a refused reply reaches
+the report of STRUCTURED-RESULT-REJECTED."
+  (let ((spec (%spec)))
+    (llm:make-tool-spec :name (llm:tool-spec-name spec) :description (llm:tool-spec-description spec)
+                        :schema (llm:tool-spec-schema spec)
+                        :validators (list (lambda (arguments)
+                                            (let ((h (gethash "headline" arguments)))
+                                              (when (and (stringp h) (search "REPAIR" h))
+                                                (format nil "headline ~S is not allowed" h))))))))
+
+(defun %983-printable (x)
+  "X with each hash table turned into an alist, so printing an event shows what an observer that
+prints it, such as the studio's STATUS-OBSERVER, would show of a tool call's arguments."
+  (typecase x
+    (hash-table (loop for k being the hash-keys of x using (hash-value v)
+                      collect (cons k (%983-printable v))))
+    (cons (cons (%983-printable (car x)) (%983-printable (cdr x))))
+    (t x)))
+
+(defun %983-run (&key private)
+  "Run the scenario with an agent made with PRIVATE. Returns everything a log sink or an event
+observer received, as one string."
+  (let* ((repairing (make-instance 'recording
+                                   :script (list (%call-completion "draft_copy" (%args "headline" "MARK983REPAIR" "characters" 13))
+                                                 (%call-completion "draft_copy" (%args "headline" "MARK983RESULT"
+                                                                                       "characters" 13)))))
+         (script (list (llm:make-completion
+                        :tool-calls (list (llm:make-tool-call :id "t1" :name "lookup"
+                                                              :arguments (%args "query" "MARK983ARG"))
+                                          (llm:make-tool-call :id "t2" :name "boom" :arguments (%args)))
+                        :stop-reason :tool-use)
+                       (llm:make-completion :text "the reply is MARK983REPLY" :stop-reason :end)))
+         (agent (actor:make-agent :name "writer" :private private
+                                  :provider (make-instance 'scripted :script script)))
+         (events '())
+         (out (make-string-output-stream)))
+    ;; A means whose result comes from a structured-output repair, and one that fails.
+    (actor:register-means agent "lookup" "looks something up"
+                          (lambda (in)
+                            (declare (ignore in))
+                            ;; An app that logs each rejected attempt, as the structured-output
+                            ;; documentation suggests for watching rejections.
+                            (handler-bind ((llm:structured-result-rejected
+                                             (lambda (c) (aion/log:exception c "structured reply rejected"))))
+                              (gethash "headline" (llm:generate-structured
+                                                   repairing '((:role :user :content "brief")) (%983-spec)
+                                                   :attempts 3)))))
+    (actor:register-means agent "boom" "always fails"
+                          (lambda (in) (declare (ignore in)) (error "the means failed on MARK983FAIL")))
+    (unwind-protect
+         (progn
+           (aion/log:setup :env :prod :level :trace :stream out)
+           (let ((aion/log:*log-condition-details* t))
+             (evt:with-observer ((lambda (e) (push e events)))
+               ;; A normal turn, with a tool call and a failing means.
+               (handler-bind ((cnd:means-failure
+                                (lambda (c)
+                                  (aion/log:exception c "means failed")
+                                  (cnd:substitute-result "recovered" c))))
+                 (actor:run-turn agent "my prompt is MARK983PROMPT"))
+               ;; A provider error, on the same agent.
+               (setf (actor:agent-provider agent) (make-instance '%983-failing-provider))
+               (handler-case
+                   (handler-bind ((error (lambda (c) (aion/log:exception c "turn failed"))))
+                     (actor:run-turn agent "again"))
+                 (error () nil)))))
+      (aion/log:setup :env :dev :level :warn :stream *standard-output*))
+    (format nil "~A~%~{~S~%~}" (get-output-stream-string out) (mapcar #'%983-printable (reverse events)))))
+
+(test a-private-agent-keeps-every-marker-out-of-logs-and-events
+  (let ((private (%983-run :private t))
+        (control (%983-run :private nil)))
+    (dolist (marker +983-markers+)
+      (is (search marker control) "control: ~A reaches a log or an event when the agent is not private" marker))
+    (dolist (marker +983-markers+)
+      (is (null (search marker private)) "~A reached a log record or an event of a private agent" marker))
+    (is (search ":WITHHELD" private) "the events still arrive, with their content withheld")
+    (is (search "SIMPLE-ERROR" private) "and the failures are still logged, by type")))
+
+(defun %983-retaining-run (&key private)
+  "A turn of an agent made with PRIVATE and :RETAIN-CONTENT T whose means fails with a report
+holding MARK983FAIL, logged with details on by a handler inside the turn, then replies
+MARK983REPLY. Returns (values EVENTS-TEXT LOG-TEXT)."
+  (let* ((events '())
+         (out (make-string-output-stream))
+         (agent (actor:make-agent :private private :retain-content t
+                                  :provider (make-instance
+                                             'scripted
+                                             :script (list (llm:make-completion
+                                                            :tool-calls (list (llm:make-tool-call
+                                                                               :id "t1" :name "boom"
+                                                                               :arguments (%args)))
+                                                            :stop-reason :tool-use)
+                                                           (llm:make-completion
+                                                            :text "MARK983REPLY" :stop-reason :end))))))
+    (actor:register-means agent "boom" "always fails"
+                          (lambda (in) (declare (ignore in)) (error "the means failed on MARK983FAIL")))
+    (unwind-protect
+         (progn (aion/log:setup :env :prod :level :trace :stream out)
+                (let ((aion/log:*log-condition-details* t))
+                  (evt:with-observer ((lambda (e) (push e events)))
+                    (handler-bind ((cnd:means-failure
+                                     (lambda (c)
+                                       (aion/log:exception c "means failed")
+                                       (cnd:substitute-result "recovered" c))))
+                      (actor:run-turn agent "MARK983PROMPT")))))
+      (aion/log:setup :env :dev :level :warn :stream *standard-output*))
+    (values (format nil "~S" events) (get-output-stream-string out))))
+
+(test a-private-agent-that-retains-content-gets-it-in-events-and-never-in-logs
+  "The failing means would put MARK983FAIL in the log, with details on; for a private agent it
+does not, even one that retains content in events. The control is the same turn with an agent
+that is not private, whose log holds it."
+  (multiple-value-bind (events log) (%983-retaining-run :private t)
+    (is (search "MARK983REPLY" events) "the app asked for content in events")
+    (is (null (search "MARK983" log)) "logs stay without it: ~A" log))
+  (multiple-value-bind (events log) (%983-retaining-run :private nil)
+    (declare (ignore events))
+    (is (search "MARK983FAIL" log) "control: without privacy the failure's report is logged")))
+
+(test unless-withheld-withholds-content-outside-the-content-keys
+  "A delegation's task text, a host and a resource name are withheld by UNLESS-WITHHELD, since
+:TASK is not a content key (the hub's review of #1027)."
+  (is (eq :withheld (let ((evt:*withhold-content* t)) (evt:unless-withheld "the task text"))))
+  (is (equal "the task text" (evt:unless-withheld "the task text")) "control: not withheld")
+  (is (null (member :task evt:+content-keys+)) ":task is not a content key"))
+
+(test withholding-replaces-only-the-content-fields-of-an-event
+  (let ((seen nil))
+    (let ((evt:*withhold-content* t))
+      (evt:with-observer ((lambda (e) (setf seen e)))
+        (evt:emit :tool-call :name "lookup" :id "t1" :arguments "secret")))
+    (is (equal '(:type :tool-call :name "lookup" :id "t1" :arguments :withheld) seen))))
+;;; --- moving a conversation to a rebuilt agent (#67, #1011's review) ---------------------
+
+(in-suite praxeon)
+
+(defparameter +moved-agent-slots+
+  '("CONTEXT" "RESULT-STORE" "CONVERSATION" "RESULT-INDEX" "CLEARED" "GUARD" "UNTRUSTED-INPUTS"
+    "UNTRUSTED-CALLS" "CONVERSATION-TAINT" "THREAD-MEMORY" "HISTORY" "TRIM-FROM"
+    ;; Moved one way only: TO is private when either agent is (#983).
+    "PRIVATE"))
+
+(defparameter +kept-agent-slots+
+  '("NAME" "PROVIDER" "SYSTEM-PROMPT" "CACHE-SYSTEM" "CACHE-MESSAGES" "MEANS" "HISTORY-BUDGET" "MAX-TOKENS"
+    "OFFLOAD-THRESHOLD" "CLEAR-BUDGET" "CLEAR-TARGET" "KEEP-RECENT" "NEVER-CLEAR" "TAINT-SCOPE"
+    "RETAIN-CONTENT"))
+
+(test every-agent-slot-is-either-moved-or-kept-by-move-conversation
+  "A slot added to the agent fails this test until it is listed here as conversation state, which
+MOVE-CONVERSATION must then copy, or as configuration."
+  (let ((slots (mapcar (lambda (d) (symbol-name (sb-mop:slot-definition-name d)))
+                       (sb-mop:class-slots (find-class 'praxeon/actor::agent)))))
+    (is (null (set-difference slots (append +moved-agent-slots+ +kept-agent-slots+)
+                              :test #'string=))
+        "slots in neither list: ~S"
+        (set-difference slots (append +moved-agent-slots+ +kept-agent-slots+) :test #'string=))))
+
+(test move-conversation-carries-the-conversation-and-keeps-the-new-configuration
+  (let ((from (actor:make-agent :name "from" :system-prompt "old"))
+        (to (actor:make-agent :name "to" :system-prompt "new")))
+    (setf (actor:agent-history from) (list "m1" "m2")
+          (praxeon/actor::agent-context from) (ctx:make-context)
+          (praxeon/actor::agent-result-store from) (list :store)
+          (praxeon/actor::agent-conversation from) "conv-1"
+          (praxeon/actor::agent-guard from) (list :guard)
+          (praxeon/actor::agent-untrusted-inputs from) (list "task")
+          (praxeon/actor::agent-conversation-taint from) :untrusted
+          (praxeon/actor::agent-thread-memory from) (list :memory))
+    (setf (gethash "c1" (praxeon/actor::agent-untrusted-calls from)) t
+          (gethash "c2" (praxeon/actor::agent-result-index from)) :described
+          (gethash "c3" (praxeon/actor::agent-cleared from)) t)
+    (is (eq to (actor:move-conversation from to)))
+    (dolist (name +moved-agent-slots+)
+      (let ((reader (find-symbol (format nil "AGENT-~A" name) :praxeon/actor)))
+        (is (eq (funcall reader from) (funcall reader to)) "~A was not moved" name)))
+    (is (string= "to" (actor:agent-name to)))
+    (is (string= "new" (actor:agent-system-prompt to)) "the new agent's configuration was replaced")))
+
+(test move-conversation-keeps-a-private-conversation-private
+  "#983, from the hub's review of #1027: an app that rebuilds the agent with a factory that
+leaves out :PRIVATE does not make the conversation public. The new agent is private when either
+agent was; RETAIN-CONTENT stays the new agent's own."
+  (flet ((moved (&key from to)
+           (actor:move-conversation (apply #'actor:make-agent :name "from" from)
+                                    (apply #'actor:make-agent :name "to" to))))
+    (is-true (actor:agent-private (moved :from '(:private t) :to '()))
+             "a private conversation moved onto an agent built without :private stays private")
+    (is-true (actor:agent-private (moved :from '() :to '(:private t)))
+             "a new agent built private stays private")
+    (is (null (actor:agent-private (moved :from '() :to '())))
+        "control: neither private, the new agent is not")
+    (is (null (praxeon/actor::agent-retain-content
+               (moved :from '(:private t :retain-content t) :to '())))
+        "retain-content is the new agent's own")))
+
+(test move-conversation-gives-the-new-agent-the-higher-taint
+  "The new agent's conversation taint is the higher of the two, so moving a conversation does not
+lower a value the app recorded on the new agent. NIL, not recorded, is lower than any value."
+  (flet ((moved (from-taint to-taint)
+           (let ((from (actor:make-agent :name "from"))
+                 (to (actor:make-agent :name "to")))
+             (setf (praxeon/actor::agent-conversation-taint from) from-taint
+                   (praxeon/actor::agent-conversation-taint to) to-taint)
+             (praxeon/actor::agent-conversation-taint (actor:move-conversation from to)))))
+    (is (eq :untrusted (moved :clean :untrusted)) "a recorded :untrusted on the new agent stays")
+    (is (eq :untrusted (moved :untrusted :clean)))
+    (is (eq :delegated (moved :clean :delegated)))
+    (is (eq :untrusted (moved :untrusted :delegated)))
+    (is (eq :clean (moved :clean nil)) "a new agent that recorded nothing takes the old value")
+    (is (eq :delegated (moved nil :delegated)))
+    (is (null (moved nil nil)))))
+
+;;; --- a turn can wrap up when its steps run out (#1182) ---------------------------------
+
+(defclass %recording-provider (llm:provider)
+  ((script :initarg :script :accessor %recording-script)
+   (requests :initform '() :accessor %recording-requests)
+   (tool-choice-p :initarg :tool-choice-p :initform nil :reader %recording-tool-choice-p))
+  (:documentation "A provider that answers from SCRIPT and records, for each request, the system
+prompt, the tools and the tool choice it was sent, oldest first in %RECORDING-REQUESTS once
+reversed. With TOOL-CHOICE-P it says it can honour a tool choice, as Anthropic does (#1318)."))
+
+(defmethod llm:supports-tool-choice-p ((p %recording-provider))
+  (%recording-tool-choice-p p))
+
+(defmethod llm:complete ((p %recording-provider) messages
+                         &key system tools max-tokens temperature tool-choice)
+  (declare (ignore messages max-tokens temperature))
+  (push (list :system system :tools tools :tool-choice tool-choice) (%recording-requests p))
+  (pop (%recording-script p)))
+
+(defun %looks (n)
+  "N completions, each asking for the means \"look\", with ids l1, l2, ..."
+  (loop for i from 1 to n
+        collect (llm:make-completion
+                 :text "" :stop-reason :tool-use :input-tokens 10 :output-tokens 2
+                 :tool-calls (list (llm:make-tool-call :id (format nil "l~D" i) :name "look"
+                                                       :arguments (make-hash-table :test #'equal))))))
+
+(defun %looking-agent (script &key tool-choice-p)
+  "An agent whose provider answers from SCRIPT, with a means \"look\" that counts its runs.
+TOOL-CHOICE-P is passed to the %RECORDING-PROVIDER. Returns the agent, the provider, and a
+function answering how many times \"look\" ran."
+  (let* ((runs 0)
+         (provider (make-instance '%recording-provider :script script
+                                                       :tool-choice-p tool-choice-p))
+         (ag (actor:make-agent :name "looker" :system-prompt "You look things up."
+                               :provider provider)))
+    (actor:register-means ag "look" "Look something up."
+                          (lambda (args) (declare (ignore args)) (incf runs) "Found a fact."))
+    (values ag provider (lambda () runs))))
+
+(defun %system-text (system)
+  (if (stringp system)
+      system
+      (format nil "~{~A~^~%~}" (mapcar (lambda (p) (getf p :text)) system))))
+
+(test a-turn-wraps-up-on-its-last-step-and-says-so
+  "#1182. With :ON-STEP-LIMIT :WRAP-UP, the last of MAX-STEPS calls no tool and asks for the
+best answer from what was gathered. RUN-TURN returns that answer with :WRAPPED-UP, the wrap-up
+counted within MAX-STEPS, and a :USAGE event for it. The instruction goes to the system prompt
+for that call only: the history gains the answer and nothing else.
+
+THE CONTROL is the same turn without the option, whose model keeps asking for tools: it runs out
+of steps and signals DELIBERATION-FAILURE, as before."
+  (multiple-value-bind (ag provider runs)
+      (%looking-agent (append (%looks 2)
+                              (list (llm:make-completion :text "Here is what I found."
+                                                         :stop-reason :end
+                                                         :input-tokens 30 :output-tokens 5)))
+                      :tool-choice-p t)
+    (let ((usage 0) (before nil))
+      (multiple-value-bind (text how)
+          (evt:with-observer ((lambda (e) (when (eq :usage (evt:event-type e)) (incf usage))))
+            (multiple-value-prog1
+                (actor:run-turn ag "What do you know?" :max-steps 3 :on-step-limit :wrap-up)
+              (setf before (length (actor:agent-history ag)))))
+        (is (equal "Here is what I found." text))
+        (is (eq :wrapped-up how) "the answer is marked as a wrap-up")
+        (let ((requests (reverse (%recording-requests provider))))
+          (is (= 3 (length requests)) "three calls, within :max-steps 3")
+          (is-true (and (getf (first requests) :tools) (getf (second requests) :tools))
+                   "the gathering steps were offered tools")
+          (is (equalp (getf (second requests) :tools) (getf (third requests) :tools))
+              "the wrap-up was sent the same tools as the step before it (#1318)")
+          (is-true (search "used every step" (%system-text (getf (third requests) :system)))
+                   "and was told to answer from what it gathered")
+          (is-false (search "used every step" (%system-text (getf (first requests) :system)))
+                    "the earlier steps were not"))
+        (is (= 2 (funcall runs)) "\"look\" ran on the two gathering steps, and no tool on the wrap-up")
+        (is (= 3 usage) "a :usage event for every step, the wrap-up included")
+        (let ((last-message (car (last (actor:agent-history ag)))))
+          (is (equal "assistant" (getf last-message :role)) "the history ends with the answer")
+          (is-false (search "used every step" (format nil "~S" (actor:agent-history ag)))
+                    "and holds no trace of the instruction"))
+        (is (= before (length (actor:agent-history ag)))))))
+  (let ((ag (%looking-agent (%looks 3))))
+    (signals cnd:deliberation-failure
+      (actor:run-turn ag "What do you know?" :max-steps 3))))
+
+(test a-wrap-up-keeps-the-tools-and-forbids-a-call-where-the-provider-can
+  "#1318. A provider renders its prompt as tools, then system, then messages, so a wrap-up sent
+without the tools could not read the cached prefix of the steps before it. Where the provider
+can honour a tool choice, the wrap-up is sent the same tools with the choice :NONE, and only the
+wrap-up: the gathering steps send no tool choice, so they are built as before. The Anthropic
+request built from the recorded arguments carries tools identical to the previous step's and
+tool_choice none.
+
+THE CONTROL is the same turn on a provider that cannot honour a tool choice: its wrap-up is sent
+no tools and no tool choice, as before #1318."
+  (flet ((turn (tool-choice-p)
+           (multiple-value-bind (ag provider runs)
+               (%looking-agent (append (%looks 1)
+                                       (list (llm:make-completion :text "Done." :stop-reason :end)))
+                               :tool-choice-p tool-choice-p)
+             (multiple-value-bind (text how)
+                 (actor:run-turn ag "What do you know?" :max-steps 2 :on-step-limit :wrap-up)
+               (is (equal "Done." text))
+               (is (eq :wrapped-up how))
+               (is (= 1 (funcall runs)) "no tool ran on the wrap-up"))
+             (reverse (%recording-requests provider)))))
+    (destructuring-bind (gather wrap) (turn t)
+      (is-true (getf gather :tools))
+      (is (null (getf gather :tool-choice)) "a gathering step sends no tool choice")
+      (is (equalp (getf gather :tools) (getf wrap :tools)) "the wrap-up keeps the same tools")
+      (is (eq :none (getf wrap :tool-choice)) "and forbids a call")
+      (let ((anthropic (make-instance 'llm:anthropic :api-key "k" :model "m")))
+        (flet ((body (request)
+                 (llm:anthropic-request-body anthropic '((:role :user :content "hi"))
+                                             :tools (getf request :tools)
+                                             :tool-choice (getf request :tool-choice))))
+          (is (equal (%json-of (gethash "tools" (body gather)))
+                     (%json-of (gethash "tools" (body wrap))))
+              "the tools Anthropic is sent are the same bytes on both steps")
+          (is (search "\"type\":\"none\"" (%json-of (gethash "tool_choice" (body wrap)))))
+          (is (null (gethash "tool_choice" (body gather)))))))
+    (destructuring-bind (gather wrap) (turn nil)
+      (is-true (getf gather :tools))
+      (is (null (getf wrap :tools)) "control: no tool choice, so the wrap-up is sent no tools")
+      (is (null (getf wrap :tool-choice)) "and no tool choice"))))
+
+(defclass %body-recording-openai (llm:openai-compatible)
+  ((script :initarg :script :accessor %body-script)
+   (bodies :initform '() :accessor %body-bodies))
+  (:documentation "An OpenAI-compatible provider that records, oldest first, the request body each
+call would send, and replies from SCRIPT without sending anything."))
+
+(defmethod llm:complete ((p %body-recording-openai) messages
+                         &key system tools max-tokens temperature tool-choice)
+  (declare (ignore max-tokens temperature))
+  (setf (%body-bodies p)
+        (append (%body-bodies p)
+                (list (llm:openai-request-body p messages :system system :tools tools
+                                                          :tool-choice tool-choice))))
+  (pop (%body-script p)))
+
+(test an-openai-compatible-wrap-up-keeps-the-tools-only-where-none-is-honoured
+  "#1318. On an OpenAI-compatible backend that honours tool_choice none (OpenRouter here), the
+wrap-up request body carries the same tools as the step before it, as the same bytes, and
+tool_choice \"none\".
+
+Ollama accepts \"none\" and lets the model call a tool anyway (measured: 3 of 3 calls with
+qwen3.5:9b on Ollama 0.40.16), so for the \"ollama\" backend, and for the \"openai\" backend on
+Ollama's default URL, the wrap-up is sent no tools and no tool_choice, as before #1318. That is
+the control: had the tools been kept there, the model could call one and the turn would fail
+instead of returning a :WRAPPED-UP answer."
+  (flet ((turn (&rest initargs)
+           (let* ((provider (apply #'make-instance '%body-recording-openai :model "m" :api-key "k"
+                                   :script (append (%looks 1)
+                                                   (list (llm:make-completion :text "Done."
+                                                                              :stop-reason :end)))
+                                   initargs))
+                  (runs 0)
+                  (ag (actor:make-agent :name "looker" :system-prompt "You look things up."
+                                        :provider provider)))
+             (actor:register-means ag "look" "Look something up."
+                                   (lambda (args) (declare (ignore args)) (incf runs) "Found a fact."))
+             (multiple-value-bind (text how)
+                 (actor:run-turn ag "What do you know?" :max-steps 2 :on-step-limit :wrap-up)
+               (is (equal "Done." text))
+               (is (eq :wrapped-up how)))
+             (is (= 1 runs))
+             (%body-bodies provider))))
+    (destructuring-bind (gather wrap)
+        (turn :impl "openrouter" :base-url "https://openrouter.ai/api/v1")
+      (is-true (gethash "tools" gather))
+      (is (equal (%json-of (gethash "tools" gather)) (%json-of (gethash "tools" wrap)))
+          "the wrap-up body carries the same tools as the step before it")
+      (is (equal "none" (gethash "tool_choice" wrap)) "with tool_choice none")
+      (is (null (gethash "tool_choice" gather)) "and only the wrap-up sends a tool choice"))
+    (dolist (initargs (list (list :impl "ollama" :base-url "http://localhost:11434/v1")
+                            (list :impl "openai" :base-url "http://localhost:11434/v1")
+                            (list :impl "openai" :base-url "http://gpu-box:11434/v1/")))
+      (destructuring-bind (gather wrap) (apply #'turn initargs)
+        (is-true (gethash "tools" gather) "~S: the gathering step is offered tools" initargs)
+        (is (null (gethash "tools" wrap)) "~S: the wrap-up is sent no tools" initargs)
+        (is (null (gethash "tool_choice" wrap)) "~S: and no tool choice" initargs)))
+    (is-false (llm:supports-tool-choice-p (make-instance 'llm:openai-compatible :impl "ollama"
+                                                         :model "m" :api-key "k"))
+              "Ollama ignores a forced choice as well (#1323), so it cannot force one either")))
+
+(test ollama-is-recognised-by-backend-or-port-and-cannot-force-a-tool-choice
+  "#1323. Ollama ignores every tool_choice, so an OPENAI-COMPATIBLE that talks to it cannot force
+a tool call or forbid one, and GENERATE-STRUCTURED asks it through response_format instead. It
+is recognised by its backend, compared without regard to case, or by a base URL on port 11434.
+A forced choice signals TOOL-CHOICE-UNSUPPORTED before anything is sent. The base URL in that
+case is a closed port, so a request would have failed differently.
+
+THE CONTROL is OpenRouter, and an \"openai\" backend on another port: both still force a choice
+and are not asked through response_format."
+  (flet ((make (&rest initargs)
+           (apply #'make-instance 'llm:openai-compatible :model "m" :api-key "k" initargs)))
+    (dolist (initargs (list (list :impl "ollama" :base-url "https://ollama.example.com/v1")
+                            (list :impl "Ollama" :base-url "https://ollama.example.com/v1")
+                            (list :impl "openai" :base-url "http://localhost:11434/v1")
+                            (list :impl "openai" :base-url "http://gpu-box:11434")
+                            ;; The port is read through userinfo, IPv6 brackets and a query.
+                            (list :impl "openai" :base-url "http://user:pw@gpu-box:11434/v1")
+                            (list :impl "openai" :base-url "http://[::1]:11434/v1")
+                            (list :impl "openai" :base-url "http://gpu-box:11434/v1?key=x")))
+      (let ((p (apply #'make initargs)))
+        (is-false (llm:supports-tool-choice-p p) "~S cannot force a choice" initargs)
+        (is-false (llm:honours-tool-choice-none-p p) "~S cannot forbid a call" initargs)
+        (is-true (llm:supports-response-format-p p) "~S is asked through response_format" initargs)))
+    (let ((p (make :impl "ollama" :base-url "http://127.0.0.1:1/v1")))
+      (is (typep (nth-value 1 (ignore-errors
+                               (llm:complete p '((:role :user :content "hi"))
+                                             :tools (list (%spec)) :tool-choice '(:tool "draft_copy"))))
+                 'cnd:tool-choice-unsupported)
+          "a forced choice signals before sending"))
+    (dolist (initargs (list (list :impl "openrouter" :base-url "https://openrouter.ai/api/v1")
+                            (list :impl "openai" :base-url "http://localhost:8080/v1")
+                            (list :impl "openai" :base-url "https://proxy.example.com/v1")
+                            ;; 11434 elsewhere in the URL is not its port.
+                            (list :impl "openai" :base-url "http://[::1]/v1?port=11434")
+                            (list :impl "openai" :base-url "http://user:11434@gpu-box/v1")))
+      (let ((p (apply #'make initargs)))
+        (is-true (llm:supports-tool-choice-p p) "control: ~S forces a choice" initargs)
+        (is-false (llm:supports-response-format-p p) "control: ~S is asked through a tool call"
+                  initargs)))))
+
+(test generate-structured-on-ollama-asks-through-response-format
+  "#1323. On Ollama, GENERATE-STRUCTURED sends the spec's schema as response_format json_schema,
+offers no tools and sends no tool_choice, and returns the JSON object in the reply's text."
+  (multiple-value-bind (port server)
+      (%serve-replies (list (%meta-text-reply "{\"headline\":\"Spring\",\"characters\":6}")))
+    (let* ((p (make-instance 'llm:openai-compatible :impl "ollama" :api-key "k" :model "m"
+                                                    :base-url (format nil "http://127.0.0.1:~D/v1" port)))
+           (result (llm:generate-structured p '((:role :user :content "Write a headline."))
+                                            (%spec)))
+           (request (first (aion/test-threads:join server :timeout 10)))
+           (sent (jzon:parse (third request))))
+      (is (string= "json_schema" (gethash "type" (gethash "response_format" sent))))
+      (is (null (nth-value 1 (gethash "tools" sent))) "no tools are offered")
+      (is (null (nth-value 1 (gethash "tool_choice" sent))) "and no tool_choice is sent")
+      (is (equal "Spring" (gethash "headline" result))))))
+
+(test a-turn-that-answers-before-its-last-step-is-not-wrapped-up
+  "#1182. :WRAP-UP changes only the last step. A turn that answers on its first step was offered
+tools as usual, and returns its text with no :WRAPPED-UP."
+  (multiple-value-bind (ag provider)
+      (%looking-agent (list (llm:make-completion :text "I already know." :stop-reason :end)))
+    (multiple-value-bind (text how)
+        (actor:run-turn ag "What do you know?" :max-steps 3 :on-step-limit :wrap-up)
+      (is (equal "I already know." text))
+      (is (null how) "no second value")
+      (is-true (getf (first (%recording-requests provider)) :tools) "tools were offered"))))
+
+(test a-wrap-up-that-asks-for-tools-fails-without-running-or-recording-them
+  "#1182. The wrap-up forbids a tool call, but a model can still return one. It is not run and
+not appended, because the turn has no step left for its result and a call without a result would
+break the next turn. The turn fails as it did without the option. The same holds whether the
+wrap-up was sent no tools or the same tools with the choice :NONE (#1318)."
+  (dolist (tool-choice-p '(nil t))
+    (multiple-value-bind (ag provider runs) (%looking-agent (%looks 2) :tool-choice-p tool-choice-p)
+      (declare (ignore provider))
+      (signals cnd:deliberation-failure
+        (actor:run-turn ag "What do you know?" :max-steps 2 :on-step-limit :wrap-up))
+      (is (= 1 (funcall runs)) "only the gathering step's call ran")
+      (is-false (search "l2" (format nil "~S" (actor:agent-history ag)))
+                "the wrap-up's call is not in the history"))))
+
+(test on-step-limit-is-checked-before-anything-is-recorded
+  "#1182. :ON-STEP-LIMIT takes NIL or :WRAP-UP, and :WRAP-UP needs at least two steps, one to
+gather and one to answer. A wrong value signals before the user's message is recorded."
+  (let ((ag (%looking-agent '())))
+    (signals error (actor:run-turn ag "Hi" :on-step-limit :summarise))
+    (signals error (actor:run-turn ag "Hi" :max-steps 1 :on-step-limit :wrap-up))
+    (is (null (actor:agent-history ag)) "nothing was recorded")))
+
+(test continue-turn-passes-on-step-limit-to-the-steps-the-held-turn-had-left
+  "#1182. CONTINUE-TURN takes :ON-STEP-LIMIT again, like PERMIT and ON-HOLD. A turn of two steps
+held on its first has one left, which with :WRAP-UP is the wrap-up."
+  (let* ((provider (make-instance
+                    '%recording-provider
+                    :script (list (llm:make-completion
+                                   :text "" :stop-reason :tool-use
+                                   :tool-calls (list (llm:make-tool-call
+                                                      :id "p1" :name "pay"
+                                                      :arguments (make-hash-table :test #'equal))))
+                                  (llm:make-completion :text "Paid, and here is the summary."
+                                                       :stop-reason :end))))
+         (ag (actor:make-agent :name "payer" :provider provider)))
+    (actor:register-means ag "pay" "Pay." (lambda (args) (declare (ignore args)) "Paid.")
+                          :confirm t)
+    (let ((held (nth-value 2 (actor:run-turn ag "Pay for it" :principal "u1" :max-steps 2
+                                                             :on-hold :hold
+                                                             :on-step-limit :wrap-up))))
+      (is-true held "the call was held")
+      (multiple-value-bind (text how)
+          (actor:continue-turn ag held :approve :principal "u1" :on-step-limit :wrap-up)
+        (is (equal "Paid, and here is the summary." text))
+        (is (eq :wrapped-up how) "the remaining step was the wrap-up")
+        (is (null (getf (first (%recording-requests provider)) :tools))
+            "and was offered no tools")))))
+
+;;; --- a decline can carry the app's own reason (#1191) ----------------------------------
+
+(defun %paying-agent (&optional (n 1))
+  "An agent whose model asks for the means \"pay\", held for confirmation, N times in one step,
+then answers. Returns the agent and a function answering how many times \"pay\" ran."
+  (let* ((runs 0)
+         (ag (actor:make-agent
+              :name "payer"
+              :provider (make-instance
+                         'scripted
+                         :script (list (llm:make-completion
+                                        :text "" :stop-reason :tool-use
+                                        :tool-calls (loop for i from 1 to n
+                                                          collect (llm:make-tool-call
+                                                                   :id (format nil "p~D" i) :name "pay"
+                                                                   :arguments (make-hash-table :test #'equal))))
+                                       (llm:make-completion :text "Done." :stop-reason :end))))))
+    (actor:register-means ag "pay" "Pay." (lambda (args) (declare (ignore args)) (incf runs) "Paid.")
+                          :confirm t)
+    (values ag (lambda () runs))))
+
+(defun %decided-and-results (thunk)
+  "Run THUNK under an observer. Returns the :TOOL-DECIDED events as (decision reason) lists and
+the :TOOL-RESULT contents, oldest first."
+  (let ((decided '()) (results '()))
+    (evt:with-observer ((lambda (e)
+                          (case (evt:event-type e)
+                            (:tool-decided (push (list (evt:event-get e :decision)
+                                                       (evt:event-get e :reason))
+                                                 decided))
+                            (:tool-result (push (evt:event-get e :content) results)))))
+      (funcall thunk))
+    (values (reverse decided) (reverse results))))
+
+(test a-hold-policy-can-decline-with-its-own-reason
+  "#1191. A blocking :ON-HOLD function may return (:DECLINE text). The call is not run, the model
+is told TEXT, and :TOOL-DECIDED records :DECLINE with TEXT as :REASON, so an app that refuses a
+call itself, here over its own limit, no longer has to approve it and refuse inside the means.
+
+THE CONTROLS: plain :DECLINE still gives the usual sentence and no reason, and a malformed value
+such as (:DECLINE 42) counts as no confirmation available, as any unknown value does."
+  (flet ((turn (policy)
+           (multiple-value-bind (ag runs) (%paying-agent)
+             (multiple-value-bind (decided results)
+                 (%decided-and-results
+                  (lambda () (actor:run-turn ag "Pay" :principal "u1"
+                                                      :on-hold (lambda (call) (declare (ignore call))
+                                                                 policy))))
+               (list decided results (funcall runs))))))
+    (destructuring-bind (decided results runs) (turn '(:decline "Not run: over this turn's limit of 3 confirmations."))
+      (is (equal '((:decline "Not run: over this turn's limit of 3 confirmations.")) decided)
+          "the event records the decline and its reason: ~S" decided)
+      (is (equal '("Not run: over this turn's limit of 3 confirmations.") results)
+          "the model is told the reason: ~S" results)
+      (is (= 0 runs) "and the call did not run"))
+    (destructuring-bind (decided results runs) (turn :decline)
+      (is (equal '((:decline nil)) decided) "control: plain :decline has no reason")
+      (is (equal (list praxeon/actor::+declined+) results) "and the usual sentence")
+      (is (= 0 runs)))
+    (destructuring-bind (decided results runs) (turn '(:decline 42))
+      (is (equal '((:no-confirmation nil)) decided) "control: a malformed decline is no confirmation")
+      (is (equal (list praxeon/actor::+no-confirmation+) results))
+      (is (= 0 runs)))))
+
+(test continue-turn-can-decline-with-a-reason-for-all-calls-or-one
+  "#1191. CONTINUE-TURN takes (:DECLINE text) as the whole decision, or as one call's in the alist,
+with the same effect as a policy's: not run, the model told TEXT, and :REASON on :TOOL-DECIDED."
+  (multiple-value-bind (ag runs) (%paying-agent)
+    (let ((held (nth-value 2 (actor:run-turn ag "Pay" :principal "u1" :on-hold :hold))))
+      (multiple-value-bind (decided results)
+          (%decided-and-results
+           (lambda () (actor:continue-turn ag held '(:decline "Not run: the budget is spent.")
+                                          :principal "u1")))
+        (is (equal '((:decline "Not run: the budget is spent.")) decided) "whole decision: ~S" decided)
+        (is (equal '("Not run: the budget is spent.") results))
+        (is (= 0 (funcall runs))))))
+  (multiple-value-bind (ag runs) (%paying-agent 2)
+    (let ((held (nth-value 2 (actor:run-turn ag "Pay twice" :principal "u1" :on-hold :hold))))
+      (multiple-value-bind (decided results)
+          (%decided-and-results
+           (lambda () (actor:continue-turn ag held '(("p1" . :approve)
+                                                    ("p2" . (:decline "Not run: one is enough.")))
+                                          :principal "u1")))
+        (is (equal '((:approve nil) (:decline "Not run: one is enough.")) decided)
+            "per call: ~S" decided)
+        (is (equal '("Paid." "Not run: one is enough.") results) "per call results: ~S" results)
+        (is (= 1 (funcall runs)) "only the approved call ran")))))

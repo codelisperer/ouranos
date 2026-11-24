@@ -12,6 +12,9 @@ bin/
 /.lem/
 .vscode/alive/
 
+# Local databases (cons init --db sqlite keeps its file here)
+data/
+
 # Local secrets / config -- never commit (.env.example IS tracked)
 .env
 .env.*

@@ -20,7 +20,7 @@
    #:+shim-version+
    ;; errors
    #:tls-error #:tls-error-code #:tls-error-operation #:tls-error-description
-   #:tls-verify-error #:tls-verify-error-flags
+   #:tls-verify-error #:tls-verify-error-flags #:unsupported-private-key
    #:tls-truncated #:treat-as-end-of-file
    ;; keys and certificates
    #:private-key #:make-private-key #:generate-private-key #:private-key-pem

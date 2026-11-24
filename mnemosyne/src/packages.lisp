@@ -73,7 +73,8 @@
    #:FT-String #:FT-Text #:FT-Integer #:FT-Float #:FT-Boolean #:FT-Uuid #:FT-Timestamp #:FT-Date
    #:field-type-name #:field-type-sql #:field-type-from #:field-type-width
    #:FT-Vector
-   #:Dialect #:D-Sqlite #:D-Postgres #:D-Xtdb #:dialect-name #:dialect-from #:dialect-known? #:dialect-required
+   #:Dialect #:D-Sqlite #:D-Postgres #:D-Xtdb #:D-Jet
+   #:dialect-name #:dialect-from #:dialect-known? #:dialect-required
    #:Sql-Type #:Native #:Emulated #:Unsupported #:sql-type-tag #:sql-type-text
    #:field-type-support))
 
@@ -173,6 +174,9 @@
     that takes either.")
   (:export #:connect #:disconnect #:with-connection #:call-with-connection
            #:*sqlite-busy-timeout-ms*
+           #:*postgres-connect-timeout-seconds* #:*postgres-statement-timeout-ms*
+           #:db-connect-timeout #:db-connect-timeout-host #:db-connect-timeout-port
+           #:db-connect-timeout-seconds #:db-statement-timeout
            #:exec #:query #:map-query #:with-transaction
            #:db-error #:db-error-message #:db-error-cause
            ;; the connection pool (#325)
@@ -224,6 +228,9 @@
            #:invalid-identifier-clause
            ;; LIKE patterns that match a user's %, _ and backslash literally (#862)
            #:like-escape #:like-contains
+           ;; a clause the dialect cannot express, such as OFFSET on Jet (#1061)
+           #:unsupported-query #:unsupported-query-dialect #:unsupported-query-clause
+           #:unsupported-query-detail
            #:+vector-distance-ops+ #:vector-distance-opclass
            #:*warn-unindexed-vector-distance* #:unindexed-vector-distance
            #:unindexed-vector-distance-operator #:unindexed-vector-distance-opclass))

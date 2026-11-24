@@ -268,6 +268,8 @@ hand-written twice. XTDB 2 is schemaless -- it has no DDL, so this does not appl
   (let ((dialect (fldsh:dialect-for dialect)))
     (when (eq dialect fld:D-Xtdb)
       (error "mnemosyne/schema: XTDB 2 is schemaless -- no CREATE TABLE. See docs/xtdb-notes.md."))
+    (when (eq dialect fld:D-Jet)
+      (error "mnemosyne/schema: the jet dialect renders queries only; it has no CREATE TABLE."))
     (format nil "CREATE TABLE ~:[~;IF NOT EXISTS ~]~A (~%~{  ~A~^,~%~}~%)"
             if-not-exists (schema-table schema)
             (mapcar (lambda (f) (%column-ddl f dialect)) (schema-fields schema)))))

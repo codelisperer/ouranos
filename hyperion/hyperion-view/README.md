@@ -68,8 +68,8 @@ xcode-select --install     # if `xcode-select -p` prints nothing
 ./build.sh                 # clang++ -std=c++17 -O2 … -framework WebKit
 ```
 
-Verified on Apple clang 21 / Apple silicon → a native `arm64` Mach-O. (Three harmless
-`-Wdeprecated-literal-operator` warnings from the vendored `webview.h`; the binary is fine.)
+Verified on Apple clang 21 / Apple silicon → a native `arm64` Mach-O, with no warnings (#1214
+removed the three `-Wdeprecated-literal-operator` warnings the vendored `webview.h` caused).
 
 ### Windows — WebView2  ✅ *(verified — MSVC and mingw-w64)*
 
@@ -111,7 +111,7 @@ What it does, and why:
 | **mingw discovery** | UCRT64/MINGW64/CLANG64, choco, scoop, `$CXX`, `PATH`. Each candidate is vetted with `g++ -dumpmachine`: **`x86_64-w64-mingw32` is accepted, `x86_64-pc-msys` is rejected** — MSYS2's `/usr/bin/g++` targets the POSIX-emulation runtime (`msys-2.0.dll`) and cannot build a native Win32 GUI binary, and it is usually the one first on `PATH`. |
 | **WebView2 SDK headers** | A `.nupkg` is a zip, so `Invoke-WebRequest` + `Expand-Archive` (NuGet v3 flat container, v2 as fallback) into gitignored `.webview2-sdk/`. The version and the SHA-256 of the `.nupkg` are pinned in `scripts/versions.env` (`WEBVIEW2_SDK_VERSION`, `WEBVIEW2_SDK_SHA256`); a download that does not match the checksum is deleted and the build stops. `.webview2-sdk/.pin` records the pin the headers came from, and headers from any other pin are fetched again. Microsoft-licensed, hence fetched, never committed. |
 | **WebView2 runtime** | Probed in the registry (`EdgeUpdate\Clients\{F3017226-…}`, per-machine and per-user). Missing is a **warning**, not an error: the build still succeeds, but no window will open at run time. |
-| **compile (MSVC)** | `cl /std:c++17 /EHsc /O2 /MT … /link /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup oleaut32.lib`. `/MT` = static CRT, so **no VC++ redistributable** on target machines; `/SUBSYSTEM:WINDOWS` + `mainCRTStartup` = a GUI app (no console window) with an ordinary `main()`. `webview.h` `#pragma`-links advapi32/ole32/shell32/shlwapi/user32/version itself; `oleaut32` is the one it does not. → ~170 KB. |
+| **compile (MSVC)** | `cl /std:c++17 /EHsc /O2 /MT … /link /SUBSYSTEM:WINDOWS /ENTRY:mainCRTStartup oleaut32.lib uuid.lib bcrypt.lib`. `/MT` = static CRT, so **no VC++ redistributable** on target machines; `/SUBSYSTEM:WINDOWS` + `mainCRTStartup` = a GUI app (no console window) with an ordinary `main()`. `webview.h` `#pragma`-links advapi32/ole32/shell32/shlwapi/user32/version itself; `oleaut32` is the one it does not. `uuid` (the file dialogs' interface ids) and `bcrypt` (the dialogs' per-launch token) came with #986. → ~170 KB. |
 | **compile (mingw)** | `-std=c++17 -O2 -mwindows -static` + the same libs. The compiler's own `bin\` is prepended to `PATH` first: a full-path mingw `g++` needs it to find `cc1plus`/`as`/`ld`, and **fails silently (exit 1, no message)** without it. → ~1 MB. |
 
 Either way the result is standalone (static CRT + `webview.h`'s built-in WebView2 loader, so no
@@ -175,5 +175,8 @@ is a design item, not yet built — tracked for `cons desktop`.
 
 ## Provenance
 
-- `webview.h` — webview/webview **v0.10.0**, MIT (license header intact in the file).
+- `webview.h` — webview/webview **v0.10.0**, MIT (license header intact in the file). One local
+  change: the three string-literal operators `_cls`, `_sel` and `_str` are declared as
+  `operator""_cls` rather than `operator"" _cls`, because clang 21 warns that the form with a
+  space is deprecated (#1214). Keep this change when the file is updated from upstream.
 - **WebView2 SDK headers** — fetched at build time on Windows, **not committed** (Microsoft license).

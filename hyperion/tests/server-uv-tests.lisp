@@ -802,9 +802,11 @@ Ignoring it is the tempting reading and it deadlocks the peer."
 ;;; neither the other way round.
 
 (defmacro with-hyperion-server ((port &rest start-args) &body body)
-  "Start through HYPERION/SERVER (not SRV:START) and always stop through it."
+  "Start through HYPERION/SERVER (not SRV:START) and always stop through it. These tests are
+about the transport and send `Host: x', so the request guard is off unless START-ARGS name one;
+the guard has its own tests (#1037)."
   (let ((h (gensym "HANDLER")))
-    `(let ((,h (hsrv:start ,@start-args :server :uv :port 0)))
+    `(let ((,h (hsrv:start ,@start-args :server :uv :port 0 :request-guard :none)))
        (unwind-protect (let ((,port (srv:server-port ,h))) ,@body)
          (hsrv:stop ,h)))))
 
@@ -815,6 +817,14 @@ test, so the native server must be both the only option and the chosen one."
   (is (equal '(:uv) (hsrv:available-servers))
       "no Clack HANDLER is loaded here -- clack itself being present must not count")
   (is (eq :uv (hsrv:default-server))))
+
+(test default-server-says-why-it-chose-uv
+  "Here libuv loads, so the reason is :PREFERRED and there is no libuv error (#710)."
+  (let ((env (uiop:getenv "HYPERION_SERVER")))
+    (unwind-protect
+         (progn (setf (uiop:getenv "HYPERION_SERVER") "")
+                (is (equal '(:uv :preferred nil) (multiple-value-list (hsrv:default-server)))))
+      (setf (uiop:getenv "HYPERION_SERVER") (or env "")))))
 
 (test hyperion-server-start-runs-the-native-backend
   "Chosen, started and served through the framework's own entry point."
@@ -844,7 +854,7 @@ Clack's, so `it works under the other backend' is not evidence about this one."
 (test stop-through-hyperion-server-actually-stops-it
   "STOP dispatches on the handler, because the handler is what callers hold. If it guessed
 Clack it would signal here rather than stopping anything."
-  (let* ((h (hsrv:start (const-app 200 +ok+ '("x")) :server :uv :port 0 :log nil))
+  (let* ((h (hsrv:start (const-app 200 +ok+ '("x")) :server :uv :port 0 :log nil :request-guard :none))
          (port (srv:server-port h)))
     (is (= 200 (status-of (get* port "GET / HTTP/1.1" "Host: h"))))
     (finishes (hsrv:stop h))
@@ -863,7 +873,8 @@ Accepting it silently would let an operator believe it did something."
          (progn
            (handler-bind ((warning (lambda (c) (setf warned t) (muffle-warning c))))
              (setf handler (hsrv:start (const-app 200 +ok+ '("x"))
-                                       :server :uv :port 0 :log nil :debug t)))
+                                       :server :uv :port 0 :log nil :debug t
+                                       :request-guard :none)))
            (is-true warned ":debug t must warn on a native backend"))
       (when handler (hsrv:stop handler)))))
 
@@ -1074,8 +1085,29 @@ exists to make possible, and the thing that was impossible before M2."
     (is (eq srv:*dispatch* dispatch-before)
         "and the global *DISPATCH* was not changed by either server"))))
 
+(test start-gives-uv-two-workers-unless-told-otherwise
+  "START with no :WORKERS runs the handler on a pool of two, as HYPERION/DESKTOP:RUN-APP and
+HYPERION/DEV:SERVE do (#710). Control: :WORKERS NIL, given explicitly, runs it inline."
+  (flet ((serve-once (&rest workers)
+           (let* ((ran-on nil) (threads 0)
+                  (h (apply #'hsrv:start
+                            (lambda (env)
+                              (declare (ignore env))
+                              (setf ran-on (sb-thread:thread-name sb-thread:*current-thread*)
+                                    threads (length (%worker-threads)))
+                              (list 200 +ok+ (list "x")))
+                            :server :uv :port 0 :log nil :request-guard :none workers)))
+             (unwind-protect (get* (srv:server-port h) "GET / HTTP/1.1" "Host: x")
+               (hsrv:stop h))
+             (values ran-on threads))))
+    (multiple-value-bind (ran-on threads) (serve-once)
+      (is (search "server-uv-worker" (or ran-on "")) "no :workers: the handler ran on the pool")
+      (is (= 2 threads) "and the pool has two threads"))
+    (is (not (search "server-uv-worker" (or (serve-once :workers nil) "")))
+        "control: :workers nil ran it on the loop thread")))
+
 (test stop-ends-the-worker-threads-start-made
-  (let ((h (hsrv:start (const-app 200 +ok+ '("x")) :server :uv :port 0 :log nil :workers 3)))
+  (let ((h (hsrv:start (const-app 200 +ok+ '("x")) :server :uv :port 0 :log nil :workers 3 :request-guard :none)))
     (is (= 200 (status-of (get* (srv:server-port h) "GET / HTTP/1.1" "Host: x"))))
     (is (= 3 (length (%worker-threads))) "control: the server made three worker threads")
     (hsrv:stop h)
@@ -1105,7 +1137,7 @@ exists to make possible, and the thing that was impossible before M2."
                                  (sb-thread:signal-semaphore entered)
                                  (sb-thread:wait-on-semaphore gate :timeout 30)
                                  (list 200 +ok+ (list "late")))
-                               :server :uv :port 0 :log nil :workers 1))
+                               :server :uv :port 0 :log nil :workers 1 :request-guard :none))
                 (port (srv:server-port h))
                 ;; THREAD-LIFETIME: scoped -- its request fails once the server stops, and it
                 ;; is joined below.
@@ -1207,6 +1239,58 @@ whole, which is the failure -- a silent truncation the application believes it d
       (is-true (search "partial" (body-of r)))
       (is-false (search (concatenate 'string +crlf+ "0" +crlf+ +crlf+) (body-of r))
                 "NO terminator -- the client must see this as truncated, not complete"))))
+
+;;; --- a streamed body to an HTTP/1.0 client (#1244) -------------------------------------
+;;;
+;;; HTTP/1.0 has no chunked transfer coding, so an HTTP/1.0 client reads chunk-size lines as
+;;; part of the body. Its streamed body is sent with no Transfer-Encoding and no
+;;; Content-Length, and its end is the connection closing (RFC 9112 6.3, rule 8). Each test
+;;; reads to end of stream, which is how an HTTP/1.0 client reads such a body.
+
+(test an-http-1-0-request-for-a-streamed-body-gets-no-transfer-encoding
+  "The body arrives exactly as written, with no chunk-size lines in it, and the connection
+closes after it, because closing is the only end an HTTP/1.0 client can recognise."
+  (with-server (port (stream-app "alpha" "" "beta" (string (code-char 233))))
+    (let ((r (raw-exchange port (req "GET / HTTP/1.0"))))
+      (is (= 200 (status-of r)) "~S" r)
+      (is-false (header-of r "Transfer-Encoding")
+                "an HTTP/1.0 client cannot decode chunked framing: ~S" r)
+      (is-false (header-of r "Content-Length")
+                "a streamed body has no length to declare")
+      (is (string-equal "close" (header-of r "Connection")))
+      (is (string= (sb-ext:octets-to-string
+                    (sb-ext:string-to-octets (format nil "alphabeta~C" (code-char 233))
+                                             :external-format :utf-8)
+                    :external-format :latin-1)
+                   (body-of r))
+          "the body is the written octets and nothing else: ~S" (body-of r)))))
+
+(test an-http-1-0-keep-alive-request-for-a-streamed-body-is-still-closed
+  "An HTTP/1.0 client that asks for keep-alive still has no way to find the end of a body of
+unknown length except the connection closing, so the server closes it. Before #1244 the
+body was chunked and the connection stayed open after it until the idle timeout."
+  (with-server (port (stream-app "alpha" "beta"))
+    (let ((r (raw-exchange port (req "GET / HTTP/1.0" "Connection: keep-alive"))))
+      (is (= 200 (status-of r)) "~S" r)
+      (is-false (header-of r "Transfer-Encoding") "~S" r)
+      (is (string-equal "close" (header-of r "Connection")))
+      (is (string= "alphabeta" (body-of r)) "~S" (body-of r)))))
+
+(test an-http-1-0-head-request-to-a-streamed-body-gets-no-transfer-encoding
+  "HEAD gets the head a GET would get, and over HTTP/1.0 that head has no Transfer-Encoding."
+  (with-server (port (stream-app "never"))
+    (let ((r (raw-exchange port (req "HEAD / HTTP/1.0"))))
+      (is (= 200 (status-of r)) "~S" r)
+      (is-false (header-of r "Transfer-Encoding") "~S" r)
+      (is (string= "" (body-of r)) "the HEAD response carried a body: ~S" r))))
+
+(test an-http-1-1-request-for-a-streamed-body-is-still-chunked
+  "The control for the three tests above: the same apps over HTTP/1.1 are chunked, so those
+tests are about the request's version and not about the app."
+  (with-server (port (stream-app "alpha" "beta"))
+    (let ((r (raw-exchange port (req "GET / HTTP/1.1" "Host: x" "Connection: close"))))
+      (is (string-equal "chunked" (header-of r "Transfer-Encoding")) "~S" r)
+      (is (equal '(5 4 0) (chunk-sizes r))))))
 
 (test a-streamed-response-refuses-a-header-it-would-not-send
   "Response splitting does not become safe because the body is streamed, and refusing is
@@ -2372,7 +2456,7 @@ REASON, the way the signal handler calls it. The installer is replaced, so no si
          (runner (bt:make-thread
                   (lambda ()
                     (hsrv:serve-forever (const-app 200 +ok+ '("ok"))
-                                        :server :uv :port 0 :log nil :banner nil
+                                        :server :uv :port 0 :log nil :banner nil :request-guard :none
                                         :drain-seconds drain-seconds :drain-timeout 1
                                         :on-ready (lambda (s) (declare (ignore s))
                                                     (sb-thread:signal-semaphore ready))))
@@ -2418,7 +2502,7 @@ is sent."
          (runner (bt:make-thread
                   (lambda ()
                     (hsrv:serve-forever (const-app 200 +ok+ '("ok"))
-                                        :server :uv :port 0 :log nil :banner nil :loops 1
+                                        :server :uv :port 0 :log nil :banner nil :loops 1 :request-guard :none
                                         :drain-seconds 1 :drain-timeout 1
                                         :on-ready (lambda (session)
                                                     (setf port (srv:server-port
@@ -3119,3 +3203,34 @@ stubbed out, as in aion/uv's control for #877."
     (is (eq :freed (uv:loop-freed-p loop)) "a later STOP frees it")
     (is (null (srv::server-shards server)))
     (cffi:foreign-free handle)))
+
+;;; --- the request guard on :port 0 (#1037) ------------------------------------------------
+
+(in-suite server-uv)
+
+(test hyperion-start-on-port-0-guards-with-the-port-it-bound
+  "HYPERION/SERVER:START guards by default since #1037. With :PORT 0 the origins depend on the
+port the operating system chooses, so the guard is built once the server is listening: its own
+Host passes, another Host is refused, and so is a cross-site POST. Control: with :REQUEST-GUARD
+:NONE the other Host is answered."
+  (flet ((status (port method host &rest more)
+           (status-of (apply #'get* port (format nil "~A / HTTP/1.1" method)
+                             (format nil "Host: ~A" host) "Content-Length: 0" more))))
+    (let ((old (uiop:getenv "HYPERION_ORIGINS")))
+      (unwind-protect
+           (progn
+             (setf (uiop:getenv "HYPERION_ORIGINS") "")
+             (let* ((h (hsrv:start (const-app 200 +ok+ '("x")) :server :uv :port 0 :log nil))
+                    (port (srv:server-port h)))
+              (unwind-protect
+               (let ((own (format nil "127.0.0.1:~D" port)))
+                 (is (= 200 (status port "GET" own)) "the bound port is the server's own")
+                 (is (= 200 (status port "GET" (format nil "localhost:~D" port))))
+                 (is (= 403 (status port "GET" (format nil "attacker.example:~D" port))))
+                 (is (= 403 (status port "POST" own "Sec-Fetch-Site: cross-site")))
+                 (is (= 200 (status port "POST" own "Sec-Fetch-Site: same-origin"))))
+               (hsrv:stop h)))
+             (with-hyperion-server (port (const-app 200 +ok+ '("x")) :log nil :request-guard :none)
+               (is (= 200 (status port "GET" (format nil "attacker.example:~D" port)))
+                   "control: without the guard another Host is answered")))
+        (setf (uiop:getenv "HYPERION_ORIGINS") (or old ""))))))

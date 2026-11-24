@@ -116,21 +116,72 @@ keys: (interpolate \"Hi {name}!\" '(:name \"Bob\")) => \"Hi Bob!\"."
                     :supported (loop for k being the hash-keys of data
                                      collect (intern (string-upcase k) :keyword))))
 
+(define-condition empty-dictionary (error)
+  ((directory :initarg :directory :reader empty-dictionary-directory)
+   (given :initarg :given :reader empty-dictionary-given))
+  (:report (lambda (c stream)
+             (let* ((dir (empty-dictionary-directory c))
+                    (given (pathname (empty-dictionary-given c)))
+                    (exists (uiop:directory-exists-p dir)))
+               ;; One line each: a FORMAT ~<newline> continuation breaks on a CRLF checkout.
+               (format stream "No <locale>.json files in ~A~:[, which does not exist~;~]."
+                       (uiop:native-namestring dir) exists)
+               (when (pathname-name given)
+                 (format stream " ~S names a file, not a directory: end it with a slash."
+                         (namestring given)))
+               (unless (uiop:absolute-pathname-p given)
+                 (format stream " It is relative, so it was resolved against ~A."
+                         (uiop:native-namestring *default-pathname-defaults*))))))
+  (:documentation "LOAD-DICTIONARY found no locale files (#294). Signalled rather than
+returning a dictionary with no locales, because then every string renders as its
+\"[section/key]\" marker, and the page does not say why. DIRECTORY is the absolute
+directory that was searched; GIVEN is what the caller passed."))
+
+(define-condition default-locale-not-loaded (warning)
+  ((default :initarg :default :reader default-locale-not-loaded-default)
+   (locales :initarg :locales :reader default-locale-not-loaded-locales)
+   (directory :initarg :directory :reader default-locale-not-loaded-directory))
+  (:report (lambda (c stream)
+             (format stream (concatenate 'string
+                                         "There is no ~(~A~).json, for the default locale, in ~A, "
+                                         "which has ~{~(~A~)~^, ~}. A key missing from the "
+                                         "request's locale renders as its [section/key] marker.")
+                     (default-locale-not-loaded-default c)
+                     (uiop:native-namestring (default-locale-not-loaded-directory c))
+                     (default-locale-not-loaded-locales c))))
+  (:documentation "LOAD-DICTIONARY loaded locales, but not the one passed as :DEFAULT, which
+is the fallback for a key the request's locale lacks (#294)."))
+
 (defun load-dictionary (dir &key (default *default-locale*))
   "Load a dictionary from DIR, a directory of `<locale>.json` files -- each file is one
 locale, the file name is the locale code. Adding a language is just adding a file; the
-supported locales follow from what's present."
-  (let ((data (make-hash-table :test 'equal)))
-    (dolist (file (directory (merge-pathnames "*.json" dir)))
+supported locales follow from what's present.
+
+Signals EMPTY-DICTIONARY, naming the absolute directory it searched, when DIR holds no
+`.json` file: DIR is wrong, missing or empty, often a relative path resolved against another
+working directory, as in a dumped image (#294). Warns DEFAULT-LOCALE-NOT-LOADED when DEFAULT
+is not among the locales found."
+  (let* ((pattern (merge-pathnames "*.json" (merge-pathnames dir)))
+         (directory (uiop:pathname-directory-pathname pattern))
+         (data (make-hash-table :test 'equal)))
+    (dolist (file (directory pattern))
       (setf (gethash (string-downcase (pathname-name file)) data)
             (jzon:parse file)))
-    (make-dictionary data :default default)))
+    (when (zerop (hash-table-count data))
+      (error 'empty-dictionary :directory directory :given dir))
+    (let ((dictionary (make-dictionary data :default default)))
+      (unless (member (intern (string-upcase (string default)) :keyword)
+                      (dictionary-supported dictionary))
+        (warn 'default-locale-not-loaded :default default :directory directory
+                                         :locales (dictionary-supported dictionary)))
+      dictionary)))
 
 (defun make-json-source (dir &key (default *default-locale*))
   "The built-in JSON translation source: per-locale `<code>.json` files under DIR. An
 alias for LOAD-DICTIONARY -- the DICTIONARY *is* the JSON source (implements the
 translation-source protocol). Swap it for an app-supplied DB source later; only this
-call changes."
+call changes. Like LOAD-DICTIONARY, it signals EMPTY-DICTIONARY when DIR holds no locale
+files, and warns DEFAULT-LOCALE-NOT-LOADED when DEFAULT has no file (#294)."
   (load-dictionary dir :default default))
 
 (defun %walk (data locale-string path)

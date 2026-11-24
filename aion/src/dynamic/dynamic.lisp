@@ -163,3 +163,31 @@ the same on every platform."
   (when *unblock-deferrable-signals*
     (funcall *unblock-deferrable-signals*))
   nil)
+
+;;; --- threads that must not block (#79) -----------------------------------------
+
+(defvar *blocking-forbidden* nil
+  "NIL, or a string naming why the current thread must not block, such as \"an aion/uv loop\".
+
+Bound, never set, by code that runs callbacks on a thread other work is waiting for: aion/uv's
+RUN binds it around every callback. Code that would block for a while, such as aion/retry's
+wait between attempts, checks it and signals instead of stalling every connection the loop
+serves. It is not inheritable (see REGISTER-INHERITABLE): a thread a callback starts is its
+own thread, and may block.")
+
+;;; --- a timed condition wait that keeps its mutex (#1267) ----------------------------------
+
+(defun timed-wait (queue mutex seconds)
+  "Wait on QUEUE for at most SECONDS, with MUTEX held by the caller, and return holding MUTEX.
+Returns true when woken, which may be a spurious wakeup, and NIL when SECONDS ran out.
+
+USE THIS INSTEAD OF SB-THREAD:CONDITION-WAIT WITH :TIMEOUT. When that times out it returns NIL
+without taking MUTEX back, on every platform: on macOS 2000 of 2000 timed-out waits returned
+without it. A loop that then reads the state MUTEX guards, or waits again, does so without the
+mutex, and the second wait signals \"The current thread is not holding\" the mutex. aion/cdp's
+waits did this and failed CI on Linux and Windows (#1266). The sweep in aion/dynamic's tests
+fails on a CONDITION-WAIT with :TIMEOUT anywhere else in the tree."
+  (or (sb-thread:condition-wait queue mutex :timeout seconds)
+      (progn (unless (sb-thread:holding-mutex-p mutex)
+               (sb-thread:grab-mutex mutex))
+             nil)))

@@ -65,6 +65,22 @@ sbcl --dynamic-space-size 4096 --script scripts/build-libuv.lisp
 sbcl --dynamic-space-size 4096 --script scripts/verify-tree.lisp
 ```
 
+### Which tree the steps use: the drop-in or `CL_SOURCE_REGISTRY`
+
+A runner starts with no ASDF drop-in, so bootstrap's refusal to change a drop-in naming
+another checkout (#955) cannot fire there. The legs still differ on purpose:
+
+- **Linux** bootstraps with `OURANOS_BOOTSTRAP_LOCAL=1`. Bootstrap writes no drop-in, and the
+  next step puts `CL_SOURCE_REGISTRY=$GITHUB_WORKSPACE//:` in `$GITHUB_ENV`, so every later
+  step finds the tree the same way bootstrap's own child processes did. This keeps tree-local
+  mode in use by a real build, not only by the checkers tests.
+- **macOS and Windows** write the drop-in, as a person's first bootstrap does, so that path
+  is exercised too.
+
+Use tree-local mode for any job or script that bootstraps on a machine where another
+checkout may already own the drop-in, such as a self-hosted runner or a scratch build. Use
+the drop-in for a runner that is thrown away after the job.
+
 ### `resolve` is not `fetch` — the step the first CI run proved is not optional
 
 `asdf:load-system` **resolves** dependencies; `ql:quickload` **fetches** them.
@@ -141,8 +157,8 @@ Pins live in [`scripts/versions.env`](../scripts/versions.env) and the repo-root
 `coalton.pin` — one set for CI and dev machines both.
 
 - **Linux** — the official SBCL binary tarball at the pinned version. That pin sets a
-  **glibc floor**: SBCL 2.6.9's Linux binary needs `GLIBC_2.38`, which `ubuntu-22.04`
-  (2.35) does not have. The test matrix runs `ubuntu-26.04` (glibc 2.43), and
+  **glibc floor**: SBCL 2.6.10's Linux binary needs `GLIBC_2.38` (as 2.6.9's did), which
+  `ubuntu-22.04` (2.35) does not have. The test matrix runs `ubuntu-26.04` (glibc 2.43), and
   `desktop-release.yml` builds on `ubuntu-24.04` (glibc 2.39), so the bundles it produces
   run on Ubuntu 24.04 and later; a build on 26.04 would need glibc 2.43 (#766). Lowering the
   floor below 2.39 means building SBCL from source.
@@ -274,10 +290,13 @@ onto another port is fragility bought for nothing.
   VM. The shared design is ADR-0013.
   `desktop-release.yml`'s `sqlite-probe` job builds `praxeon/examples/sqlite-probe` on all
   three, runs praxeon's retrieval on SQLite inside the bundle, and checks that the probe
-  called the bundle's pinned libsqlite3 (#899). On macOS it reads the dyld log for libsqlite3
-  alone, through `check-dyld-log.lisp carried`, rather than running
-  `verify-bundle-macos.sh`, because praxeon loads cl+ssl and the runner's Homebrew OpenSSL,
-  which that script's OpenSSL rule fails. On Linux it runs on the runner, not in a clean room.
+  called the bundle's pinned libsqlite3 (#899). On macOS it also reads the dyld log for
+  libsqlite3 through `check-dyld-log.lisp carried`, and then runs the whole of
+  `verify-bundle-macos.sh` on the probe with `--https https://example.com/` (#905). That run
+  makes one https request through `aion/http-client`, which on macOS goes over `aion/tls` and
+  opens Security.framework. The script accepts Apple's `/usr/lib` libssl and libcrypto, prints
+  a WAIVED line for Apple's libsqlite3 beside Security.framework, and fails unless the probe's
+  `SQLITE-LIBRARY` line names the bundle's copy. On Linux it runs on the runner, not in a clean room.
 - **`elenchon/tests`.** Deliberately unwired — a `:perform` over an empty suite relocates
   the dishonesty rather than removing it.
 - **Anything on a `+known-warnings+` line** in `scripts/compile-warnings.lisp`, **or a `+known-empty+` line** in `verify-tree.lisp`. Those

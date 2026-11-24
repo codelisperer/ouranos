@@ -33,13 +33,29 @@ The test is: **would you want this line in production, forever?**
 | Level | For | Examples in the tree |
 |---|---|---|
 | `:trace` | Machine traffic on a timer — available on demand, invisible by default (see **Quiet paths** below). | the dev hot-reload poller; health checks |
-| `:info` | One line per meaningful unit of work. Readable at a glance in prod. | one line per HTTP request (method, path, status, ms); a migration applied |
+| `:info` | One line per meaningful unit of work. Readable at a glance in prod. | one line per HTTP request (method, route template, status, ms); a migration applied |
 | `:debug` | The detail you turn on to diagnose something. Off by default. | each SQL statement + row count + ms; LLM request/response metadata; connect/disconnect |
 | `:warn` | Recoverable, but somebody should know. | an LLM provider call failed (the caller may retry or fail over); a rollback target missing from the known set |
-| `:error` | Use `log:exception` — it attaches the condition report **and a backtrace**. | an unhandled error in a request |
+| `:error` | Use `log:exception`. It attaches the condition's type (`error-type`) and a backtrace of frame names, with no arguments. The condition's report is not written, because it can quote outside data; see **Conditions** below. | an unhandled error in a request |
 
 Two habits that keep this honest: don't log at `:info` inside a loop, and don't log the same
 event twice at two layers — the outer seam usually owns it.
+
+## Conditions
+
+A condition's report can quote outside data: a database driver's error can hold row values, and
+an HTTP error can hold a response body. A backtrace that prints each frame's arguments can hold a
+request body. So a log line names a condition by its type, never by its report (#1013):
+
+```lisp
+(log:exception e "request failed")                                ; type and frame names
+(log:warn "provider call failed" :condition (log:condition-type e)) ; yes
+(log:warn "provider call failed" :error (princ-to-string e))      ; no: the report
+```
+
+`aion/log:*log-condition-details*`, NIL by default, makes `log:exception` also write the report,
+as `error`, and the frames' arguments. Turn it on for a development run only. Nothing turns it on
+for you, and the `:debug` level does not imply it.
 
 ## Structured fields, not string interpolation
 
@@ -59,6 +75,25 @@ The **category is automatic** — `aion/log` derives it from the call-site packa
 ```lisp
 (log:level! :debug "mnemosyne")   ; just the SQL, leave everything else at :info
 ```
+
+## The path on a request line is the route's template
+
+A path can carry a token: `/reset/<token>`, `/invite/<code>`. The request log records the
+template of the route that answered instead, such as `/reset/:token`, so the token is never
+written (#1036). A request no route answered has no template; its path is cut to
+`hyperion/logging:+max-logged-path-length+` characters, so a token in an unmatched path is
+still logged up to that length. The `request start` line has no path at all, because no route
+has been chosen when it is written; its request id ties it to the `request` line.
+
+A route whose parameters are not secret, and whose log is read by value, keeps the concrete
+path:
+
+```lisp
+(rt:route :get "/items/:id" #'show-item :log-path :path)
+```
+
+Middleware that logs the path itself calls `(hyperion/logging:logged-path env)` rather than
+reading `:path-info`; the CSRF and rate-limit refusals do.
 
 ## Quiet paths — machine traffic on a timer
 

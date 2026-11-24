@@ -403,6 +403,82 @@ default), then rebuild the agent:
 (defparameter *e* (praxeon/elise:make-elise))
 ```
 
+### Retrying a provider that is busy (`praxeon/llm:*retry*`)
+
+A model, embedding or rerank service sometimes answers 429 (too many requests), 503 or, for
+Anthropic, 529 (overloaded). By default praxeon sends each request once and signals
+`praxeon/conditions:provider-request-failed`, which now carries the service's `Retry-After` in
+seconds (`provider-request-failed-retry-after`). To have such requests tried again, set
+`praxeon/llm:*retry*` to an `aion/retry` policy (#79):
+
+```lisp
+(setf praxeon/llm:*retry* (aion/retry:make-retry-policy :name "llm" :max-attempts 4))
+```
+
+Then `complete`, `embed`, `embed-batch`, `embed-documents`, `embed-query` and `rerank` retry a
+failure the policy finds retryable. With the default `:retryable`, that is a 408, 425, 429, 503
+or 529, or a connection that failed before the request was sent. Each retry waits at least the
+service's `Retry-After`. A `Retry-After` longer than the policy's `:max-delay` stops the retrying
+instead of waiting that long. Each retry is logged at info.
+
+- The wait sleeps the calling thread, so do not set it for code that runs on a libuv loop
+  thread; `aion/retry` refuses to start there.
+- A call made inside another retried call is not retried again, so the attempts do not multiply.
+- A streamed completion is retried only while none of its text has reached `*on-text*`, because
+  a second attempt would send the same text again.
+- It is a variable rather than a key on `complete`, because a key on `complete` would oblige every
+  provider's method to accept it, providers outside this tree included. Bind it around a call to
+  retry only that call.
+
+### Vendor-specific request fields (`:extra-body`, `praxeon/llm:*extra-body*`)
+
+Some request settings exist for one vendor only. Two that apps ask for are OpenAI's
+`"store": false`, which asks OpenAI not to store the request, and OpenRouter's
+`"provider": {"data_collection": "deny"}`, which routes the request only to upstream providers
+that do not collect data (OpenRouter also has `"zdr": true` in the same object, for endpoints
+with zero data retention). praxeon adds such fields to the JSON body it sends (#1172).
+
+The fields are a JSON object, given as a string of JSON or as an `equal` hash-table with string
+keys. There are three places to set them:
+
+```lisp
+;; 1. On the provider, for every request it sends.
+(make-instance 'praxeon/llm:openai-compatible :impl "openrouter"
+               :extra-body "{\"provider\": {\"data_collection\": \"deny\"}}")
+
+;; 2. Around the calls that need them. A field here replaces the provider's field of the same name.
+(let ((praxeon/llm:*extra-body* "{\"store\": false}"))
+  (praxeon/llm:complete provider messages))
+```
+
+```sh
+# 3. In the environment, for a provider made by make-provider-from-env. Read like the other
+#    settings: PRAXEON_<ROLE>_EXTRA_BODY, then PRAXEON_<IMPL>_EXTRA_BODY, then
+#    PRAXEON_LLM_EXTRA_BODY when <IMPL> is the backend PRAXEON_LLM_IMPL names.
+PRAXEON_OPENROUTER_EXTRA_BODY='{"provider": {"data_collection": "deny"}}'
+PRAXEON_OPENAI_EXTRA_BODY='{"store": false}'
+```
+
+- A field the provider builds itself (`model`, `messages`, `max_tokens`, `temperature`, `tools`,
+  `tool_choice`, `stream`, and for Anthropic `system`, for OpenAI-compatible backends
+  `response_format` and `stream_options`) is refused with
+  `praxeon/conditions:invalid-extra-body`. Set those through `complete`'s arguments.
+- Fields that are not a JSON object with string keys signal the same condition, when the provider
+  is made for `:extra-body` and the environment, and at the request for `*extra-body*`. The
+  message names the problem and never quotes the value.
+- The Anthropic and OpenAI-compatible providers add the fields
+  (`praxeon/llm:supports-extra-body-p` is true for both). A provider class that does not say it
+  can makes `complete` signal `praxeon/conditions:extra-body-unsupported` when `*extra-body*` has
+  fields, before anything is sent, instead of sending the request without them.
+- A thread started through `aion/dynamic:inheriting`, as an agent's parallel children are,
+  carries `*extra-body*`.
+- praxeon logs only whether `*extra-body*` was set, never the fields.
+- praxeon does not check the fields against what the vendor accepts. A field the vendor does not
+  know may be ignored or refused by the vendor; read its documentation. When OpenRouter finds no
+  upstream provider that meets a routing restriction, the request fails as any refused request
+  does, with `praxeon/conditions:provider-request-failed`, whose status, error code and body say
+  why. praxeon has no separate condition for that case.
+
 ### The output limit (`:max-tokens`)
 
 Each model call of a turn may generate at most a set number of output tokens. The text, the
@@ -443,6 +519,40 @@ and says it is incomplete:
       (format nil "~A~%~%(The answer was too long and was cut off.)" text)
       text))
 ```
+
+**When a turn runs out of steps.** `:max-steps`, 8 by default, bounds how many times a turn asks
+the model. A turn that uses every step without an answer signals `deliberation-failure` ("no final
+answer within N steps"), and what it read is not turned into an answer. Pass
+`:on-step-limit :wrap-up` to `run-turn`, `run-turn-through` or `continue-turn` to make the last
+step a wrap-up instead (#1182). That step offers the model no tools and asks for the best answer
+from what the turn gathered. `run-turn` returns the answer with a second value, `:wrapped-up`, so
+the app can tell it from an ordinary answer, for example to say it may be incomplete. The
+wrap-up is one of the `:max-steps`, so the limit stays the ceiling, and it emits a `:usage` event
+like any step. A turn that answers before its last step is not affected.
+
+- `:wrap-up` needs `:max-steps` of at least 2, one to gather and one to answer. Any other value,
+  or `:wrap-up` with fewer steps, signals an error before anything is recorded.
+- The instruction goes in the system prompt for that one call only, after any cached prefix. The
+  history gains the answer and nothing else.
+- A model that asks for tools in the wrap-up anyway is not obeyed: the calls are not run or
+  recorded, and the turn signals `deliberation-failure` as it would without the option.
+
+```lisp
+(multiple-value-bind (text mark)
+    (praxeon/actor:run-turn agent "Compare the three reports." :max-steps 6 :on-step-limit :wrap-up)
+  (if (eq mark :wrapped-up)
+      (format nil "~A~%~%(I ran out of steps; this is what I found so far.)" text)
+      text))
+```
+
+**When the model calls a tool the agent does not have.** Models invent tool names, or call one
+from another agent's set. Such a call is answered as not run, and the turn goes on (#1196): the
+model is told `Not run: there is no tool named "x". The tools available are: ...`, and can try
+again within the turn's `:max-steps`. The same answer is given for a means the turn's `:permit`
+does not allow, and the list holds only the tools the turn offered the model, so the answer cannot
+be used to find out what else is registered. At most `praxeon/actor:*max-unknown-tool-calls*`
+such calls, 3, are answered in one turn; the next signals `means-failure` and the turn fails, as
+every such call did before.
 
 ### Embeddings
 
@@ -801,8 +911,15 @@ naming the database, when it is absent.
 A sync makes the corpus hold exactly the sections it was given, and removes the rest in its
 scope. Unchanged sections are not touched, so running it at every boot is cheap. It needs no
 embedder. `embed-pending` embeds whatever has no embedding from the current model, which
-includes everything after a model change. Syncs and `embed-pending` on one corpus run one at a
-time, across processes as well (a Postgres advisory lock; on SQLite, SQLite's own write lock).
+includes everything after a model change. Syncs on one corpus run one at a time, across processes
+as well (a Postgres advisory lock; on SQLite, SQLite's own write lock). `embed-pending` and
+`contextualize-pending` take that lock only to read a batch and to write it, and call the
+provider with it released, so a sync of a document does not wait for a rebuild that takes
+minutes (#1194). A chunk a sync changes during the call is not written, and is done on the next
+run. Two runs of `embed-pending` or `contextualize-pending` on one corpus still run one at a time,
+under a second lock that syncs do not take, so they never pay for the same chunks twice. Do not
+call either inside `with-corpus-lock`: that takes the two locks in the opposite order to a run,
+which could deadlock, so it signals an error (#1200).
 
 **On SQLite** the store takes a SQLite connection the same way, and every function above behaves
 the same, with these differences:
@@ -881,6 +998,16 @@ strategy (`:similar`, `:keyword`, `:hybrid`) how often that section is in the to
 `passage->ctx-item` turns a passage into a context item, and takes a function that writes the
 text the model reads, so the app decides how a citation looks.
 
+**A corpus is untrusted by default (#907).** A document can carry text written to steer the
+model, so `make-corpus` takes `:untrusted`, default T. Every passage a retrieve function returns
+carries its corpus's value in `passage-untrusted`, and `passage->ctx-item` copies it to the
+context item (pass `:untrusted` to override it). While an untrusted item is in the prompt, the
+agent refuses a means registered `:requires-user-intent t` (a means held for confirmation can be
+held with a warning instead; see [`confirm.md`](confirm.md), "After untrusted content"), and
+`register-corpus-search`
+registers its means `:untrusted` for such a corpus, so a search refuses those means for the rest
+of the turn. For a corpus of the app's own documents, pass `:untrusted nil` to `make-corpus`.
+
 **Whole or searched, by the corpus's size (#316).** `retrieve` is the call to make when the app
 does not care how a corpus is searched. It follows the corpus's `:strategy`:
 
@@ -936,6 +1063,18 @@ written. The passage a reader or the model sees is still the chunk's own text; t
   kept, and the next run carries on.
 - `contextualize-pending` returns the number written and, as a second value, `:done`,
   `:no-contextualizer`, `:whole` or `:backfill-not-started`.
+- **An app's own prompt, or its own contexts (#1195).** The built-in prompt gives the model the
+  document and the chunk's text only, so two identical chunks in one document get the same
+  question. `make-contextualizer` takes `:context-function`, a function of the document's text
+  and a plist describing the chunk: `:document-id`, `:locale`, `:section-id`, `:locator`,
+  `:sub-locator`, `:section-index`, `:chunk-index`, `:position` (its place in the document, from
+  0) and `:text`. It returns either the context itself, a string, written without calling the
+  model, or a list of messages, sent to the provider in place of the built-in ones. Anything
+  else, or an empty context, signals `deliberation-failure` and writes nothing for that chunk.
+  `:version` is required with it: a string the app changes whenever the function's output would
+  change. It goes into `contextualizer-id`, so a new version makes every context stale. A
+  function cannot be fingerprinted, so a changed function under an unchanged version leaves the
+  old contexts looking current.
 
 **When an `:auto` corpus grows past its limit**, the next `contextualize-pending` has every chunk
 to do, and every chunk is embedded again. That backfill is the one large cost of this design. An
@@ -1224,6 +1363,14 @@ praxeon stops asking for more. Your function still reads each image it returns, 
 stored size first and return NIL for an image over 50 MB rather than reading it. Without
 `:resolve-reference` the model can only create images from a prompt, as before.
 
+With `:resolve-reference` and a provider that takes a mask (OpenAI's), the schema also offers
+`mask`: one reference, resolved by the same function, to a PNG with transparency the size of the
+first image in `reference_images`, whose transparent pixels mark the part to change (#946). The
+checks on a mask passed to `generate-image` apply to it, and a mask that fails them is refused
+with the reason. The `:image-usage` event of a request with a mask carries `:mask t`. Google's
+provider takes no mask, so it is not offered one, and a mask the model gives anyway is refused
+before any request with a result telling it to describe the part to change in the prompt.
+
 **Google as the provider.** `register-google-image` takes the same arguments as
 `register-openai-image` and sends requests to Google's Gemini API:
 
@@ -1267,7 +1414,286 @@ sent to Google. The OpenAI provider reads `PRAXEON_OPENAI_API_KEY`, and then
 for: a Google key put there would be sent to OpenAI. It still works, logs a warning once, and
 will be removed in a later release; move its value to `PRAXEON_OPENAI_API_KEY`.
 
-## 15. Run the tests
+## 15. Send traces to a collector (`praxeon/trace`, #1225)
+
+`praxeon/trace` records each turn as OpenTelemetry spans and sends them to a collector, so you
+can see which model calls and tool calls a turn made, in what order, how long each took and how
+many tokens each used. It is opt-in: load the system and wrap the code that runs turns.
+
+```lisp
+(ql:quickload :praxeon/trace)
+
+(defparameter *exporter* (praxeon/trace:make-otlp-exporter-from-env))
+(defparameter *tracer* (praxeon/trace:make-tracer :exporter *exporter*))
+
+(praxeon/trace:with-tracing (*tracer*)
+  (praxeon/actor:run-turn agent "What is on my calendar tomorrow?"))
+
+;; when the app stops, so the last batch is sent
+(praxeon/trace:shutdown-exporter *exporter*)
+```
+
+`with-tracing` adds an observer for the tracer on top of any observer already bound, so a
+progress display keeps working. An app that binds its own observer for every turn can compose
+the tracer's into it with `(praxeon/trace:tracer-observer *tracer* its-observer)` instead.
+
+### What a turn looks like
+
+Each turn is one span tree:
+
+| Span | Kind | What it records |
+|---|---|---|
+| `invoke_agent <agent>` | internal | the agent's name, the model and provider, the conversation id, how the turn ended (`praxeon.turn.outcome`: answered, cancelled, held, abandoned, failed or incomplete), and the `aion/log` correlation id |
+| `chat <model>` | client | one per model call: the step, the input, output and cache token counts the provider reported, and the finish reason |
+| `execute_tool <means>` | internal | one per tool call: the means' name, the call id, the outcome and the duration in milliseconds; status ERROR when the means reported an error |
+
+A sub-agent called through `register-agent-as-means` appears as a child `invoke_agent` span of
+the `execute_tool` span that delegated to it, with its own `chat` and `execute_tool` children.
+
+Attribute names follow the OpenTelemetry GenAI semantic conventions (`gen_ai.operation.name`,
+`gen_ai.request.model`, `gen_ai.usage.input_tokens`, `gen_ai.tool.name` and the rest). Those
+conventions are still marked as in development, so every name is defined once, in
+`praxeon/src/trace/attributes.lisp`; praxeon's own additions start with `praxeon.`.
+
+**Joining logs and traces.** The turn span records the `aion/log` context fields named in
+`praxeon/trace:*correlation-keys*` (`:request-id`, `:job-id`, `:conversation-id`), as
+`praxeon.log.request_id` and so on. Behind `hyperion/server`, every request has a request id, so
+the log lines of a request and its trace carry the same id.
+
+**The finish reason is worked out from the events**, because no event carries the provider's
+stop reason: a model call followed by tool calls is `tool_calls`, one followed by the answer is
+`stop`, one cut off at the output limit is `length`, and one a cancel stopped is `cancelled`.
+
+**A turn that signals an error** out of `with-tracing` ends with status ERROR, outcome `failed`
+and the condition's type in `error.type`, never its report.
+
+**Threads.** Spans are kept per thread. A turn that runs on another thread, such as each
+parallel step of a `praxeon/workflow`, starts a trace of its own rather than joining its
+caller's.
+
+### No content unless you ask for it
+
+Spans carry names, ids, counts and durations. They do not carry the prompt, a tool call's
+arguments, a tool result or the answer, for the same reason logs do not (`docs/logging.md`):
+traces are shipped to third-party services and kept for a long time. To record content, for
+example while debugging locally, make the tracer with `:capture-content t`. That adds
+`gen_ai.tool.call.arguments`, `gen_ai.tool.call.result`, `gen_ai.output.messages` and the task a
+coordinator delegated. A private agent's turn (`make-agent :private t`) binds
+`praxeon/event:*withhold-content*`, and then no content is recorded whatever the tracer says.
+
+### Choosing a collector
+
+`make-otlp-exporter` sends OTLP over HTTP with the JSON encoding, to the full URL of a
+collector's `/v1/traces`. Anything that accepts OTLP/HTTP works: the OpenTelemetry Collector,
+Jaeger (1.35 or later, with OTLP enabled) and Langfuse among them. The default port for OTLP/HTTP
+is 4318.
+
+```lisp
+;; an OpenTelemetry Collector or Jaeger on this machine
+(praxeon/trace:make-otlp-exporter :endpoint "http://localhost:4318/v1/traces")
+
+;; a collector that wants an API key in a header
+(praxeon/trace:make-otlp-exporter
+ :endpoint "https://collector.example.com/v1/traces"
+ :headers '(("authorization" . "Basic <base64 of public-key:secret-key>")))
+```
+
+`make-otlp-exporter-from-env` reads the standard OpenTelemetry variables instead:
+
+```sh
+OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4318      # /v1/traces is added
+# or OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=http://localhost:4318/v1/traces, used as given
+OTEL_EXPORTER_OTLP_HEADERS=authorization=Basic%20...    # comma-separated key=value, percent-encoded
+OTEL_SERVICE_NAME=my-app                                # service.name; default praxeon
+```
+
+For Langfuse, the endpoint is the Langfuse host followed by `/api/public/otel/v1/traces`, and the
+header is `Authorization: Basic` with the base64 of `public-key:secret-key`, as Langfuse's
+OpenTelemetry documentation describes.
+
+### What the exporter does with a slow or failing collector
+
+`export-spans` only queues a finished turn's spans; it never waits for the network. A thread of
+the exporter's own, started the first time it is used, sends a batch every `:interval` seconds
+(5 by default) or as soon as `:batch-size` spans (512) are waiting. Each request is limited to
+`:timeout` seconds (10). A batch that fails, because the collector cannot be reached or answers
+with a status other than 2xx, is dropped, not retried, and logged at warn through `aion/log`:
+
+```
+praxeon/trace: export failed spans=5 failed-batches=1 status=500 condition=AION/HTTP-CLIENT::HTTP-ERROR
+```
+
+The line carries counts and the condition's type, never span content. The turn is not delayed
+and does not fail. When `:max-queue` spans (2048) are already waiting, new ones are dropped and
+logged with a count. `otlp-exporter-sent-spans`, `otlp-exporter-failed-batches`,
+`otlp-exporter-failed-spans` and `otlp-exporter-dropped-spans` read the counts.
+`flush-exporter` waits for the queue to be sent, and `shutdown-exporter` sends it and stops the
+thread.
+
+### In the REPL and in tests
+
+`make-tracer` without `:exporter` keeps spans in the image, in a `memory-exporter`:
+
+```lisp
+(let ((tracer (praxeon/trace:make-tracer)))
+  (praxeon/trace:with-tracing (tracer)
+    (praxeon/actor:run-turn agent "hello"))
+  (mapcar #'praxeon/trace:span-name
+          (praxeon/trace:exported-spans (praxeon/trace:tracer-exporter tracer))))
+;; => ("chat claude-..." "invoke_agent elise")
+```
+
+`praxeon/trace:otlp-json` turns a list of spans into the body the exporter would send.
+## 16. Evaluate an agent (`praxeon/eval`, #1224)
+
+`praxeon/eval` runs an agent against a fixed set of cases, grades every run, and tells you
+whether the agent got worse than the last report you saved. It is opt-in: load
+`praxeon/eval`, which core `praxeon` does not.
+
+```lisp
+(asdf:load-system "praxeon/eval")
+```
+
+### A case
+
+A case is data: a name, the input (one user message, or a list of messages sent as successive
+turns of one conversation), a function that returns a fresh agent, and the graders. The
+function is called once per run, so runs never share history.
+
+```lisp
+(praxeon/eval:make-case "refund-delivered-order"
+  :input "My order A1 arrived broken. Please refund it."
+  :agent (lambda () (make-support-agent))
+  :repeats 3        ; run it three times
+  :pass-rate 2/3    ; the case is met when at least two of the three runs pass
+  :graders (list (praxeon/eval:trajectory '("lookup-order"
+                                             ("issue-refund" :arguments (("order_id" "A1")))))
+                 (praxeon/eval:contains "25.00")
+                 (praxeon/eval:rubric "The reply confirms the refund and states the amount.")))
+```
+
+A run passes when every grader passes. A case's pass rate is the fraction of its runs that
+passed; the case is met when that rate is at least `:pass-rate` (1 by default, so every run).
+`:max-steps` bounds each turn, as `run-turn`'s argument of that name does.
+
+### Graders
+
+Each grader returns a grade: passed or failed, a score from 0 to 1, and a reason that the
+report prints when the grade failed.
+
+| Grader | Passes when |
+|---|---|
+| `(exact-match text &key ignore-case)` | the answer equals `text`, both trimmed of whitespace |
+| `(contains text &key ignore-case)` | the answer contains `text` |
+| `(matches-regex pattern &key ignore-case)` | the Perl-syntax `pattern` (CL-PPCRE) matches somewhere in the answer; a pattern that does not parse is refused when the grader is made |
+| `(trajectory steps &key (order :in-order))` | the means the agent called match `steps` |
+| `(rubric text &key (threshold 0.7))` | a judge model scores the answer at least `threshold` against `text` |
+| `(make-grader name function)` | your `function` of a run returns a passing grade (`passing-grade`, `failing-grade`) |
+
+**Trajectory.** Each step is a means name, or `(name :arguments check)`, where `check` is a
+list of `(key value)` pairs the call's arguments must hold (keys are argument names, as
+strings) or a function of the arguments hash table. `:order` is `:in-order` (the steps happen
+in this order, with other calls allowed before, between and after them), `:exact` (the calls
+are exactly these steps, in this order) or `:set` (each step matches a different call, in any
+order, and other calls are allowed). The calls are read from the `:tool-call` and
+`:tool-result` events through an observer (`praxeon/event:*observer*`), so the actor loop is
+unchanged, and an observer you already have still receives every event. Only the calls of the
+case's own agent are counted, not those of a sub-agent it delegates to. A private agent's
+arguments are withheld from the event stream, so an argument check on one of its calls fails.
+
+**Rubric.** The judge is a provider of its own, with the role `:judge`, so it is configured
+apart from the agent it grades:
+
+```sh
+PRAXEON_JUDGE_IMPL=anthropic
+PRAXEON_JUDGE_MODEL=claude-opus-5-5
+# PRAXEON_JUDGE_API_KEY=... , PRAXEON_JUDGE_BASE_URL=... ; otherwise PRAXEON_LLM_* as for any role
+```
+
+The judge is asked for a structured answer, a score and its reasoning, through
+`praxeon/llm:generate-structured`. A judge that fails or returns a score outside 0 to 1 gives a
+failing grade that says so; it does not stop the run. To pass a provider yourself, give
+`run-eval` `:judge (praxeon/eval:make-judge :provider p)`.
+
+### A dataset file
+
+`load-dataset` reads cases from an s-expression file. Agents are named in the file and given
+as functions by the caller:
+
+```lisp
+((:name "status-of-shipped-order"
+  :agent "support"
+  :input "Where is my order B2?"
+  :graders ((:trajectory ("lookup-order") :order :exact)
+            (:regex "\\bshipped\\b" :ignore-case t)))
+ (:name "two-turn-question"
+  :agent "support"
+  :input ("Hi, I have a question about order C3." "How much did it cost?")
+  :graders ((:trajectory ("lookup-order") :order :set)
+            (:contains "120.00"))))
+```
+
+```lisp
+(praxeon/eval:load-dataset #p"evals/support.sexp"
+                           :agents (list (cons "support" (lambda () (make-support-agent)))))
+```
+
+The graders in a file are `(:exact text)`, `(:contains text)` and `(:regex pattern)`, each
+with `:ignore-case`; `(:trajectory steps)` with `:order`; and `(:rubric text)` with
+`:threshold`. The file is read with `aion/sexp:read-data`, which accepts plain data only and
+creates no symbol. A malformed case signals `praxeon/eval:invalid-case`, naming the case and
+what is wrong with it.
+
+### Running, reporting and gating
+
+```lisp
+(let ((report (praxeon/eval:run-eval cases :name "support"
+                                           :baseline #p"evals/baseline.json")))
+  (praxeon/eval:summary report)                           ; text, to *standard-output*
+  (praxeon/eval:write-report report #p"evals/latest.json")
+  (multiple-value-bind (ok reasons) (praxeon/eval:gate report :min-pass-rate 0.9)
+    (unless ok
+      (format *error-output* "~{~A~%~}" reasons)
+      (uiop:quit 1))))
+```
+
+The report holds each case's pass rate and whether it was met, and each run's answer, calls,
+grades, input and output tokens (summed from the `:usage` events, so absent when the provider
+reports none) and duration in milliseconds, with the same totals for the whole report. The
+total pass rate is the mean of the cases' pass rates. `write-report` writes it as JSON;
+`load-report` reads a saved report back for use as a baseline (`run-eval` also accepts the path
+directly). The JSON holds the answers and the call arguments, so it holds whatever the inputs
+led the agent to write; keep it where you would keep the agent's transcripts.
+
+With a baseline, each case is marked `regressed` (met in the baseline, not met now), `fixed`,
+`met`, `not met` or `new`, and cases the baseline had that the run did not are listed as
+removed. `gate` returns true or false and, as a second value, one sentence per threshold not
+met:
+
+- `:min-pass-rate` (default 0): the lowest total pass rate allowed;
+- `:max-regressions` (default 0): the most cases allowed to regress from the baseline;
+- `:max-cases-not-met` (default 0): the most cases allowed to miss their own `:pass-rate`.
+
+So by default a build fails when any case misses its required pass rate or any case regressed.
+
+The grade type and the aggregation (pass rates, which cases are met, regressions, the gate's
+decision) are Coalton, in `praxeon/eval/core`; running agents and calling the judge are the CL
+shell.
+
+### The example
+
+`praxeon/examples/eval` is an order-support agent with two means, and `support.sexp` beside it
+is a three-case dataset that uses every grader except `exact-match`:
+
+```lisp
+(asdf:load-system "praxeon/examples/eval")
+(praxeon/examples/eval:run-example)   ; calls the models PRAXEON_LLM_* and PRAXEON_JUDGE_* name
+```
+
+`praxeon/eval/tests` runs the same dataset with stub providers for the agent and the judge,
+and no network.
+
+## 17. Run the tests
 
 Network-free (uses a scripted provider, no API key needed):
 

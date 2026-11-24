@@ -51,7 +51,17 @@
   ;; credential means the same thing for a payment provider as for an email one, and two
   ;; conditions with one meaning is exactly the vocabulary split docs/vocabulary-and-layers
   ;; warns about. Re-exported so a caller need not know which package it came from.
-  (:import-from #:hermes #:configuration-error #:configuration-error-missing)
+  (:import-from #:hermes #:configuration-error #:configuration-error-missing
+                ;; The URL rule and the ordering around it are hermes' own, imported for the same
+                ;; reason as the condition: a credential sent to a configured URL means the same
+                ;; thing for a payment provider as for a messaging one, and the rule had already
+                ;; grown three holes while it existed in two copies (#1106).
+                #:%check-credential-url #:%call-with-url-check)
+  ;; CALL-WITH-APPROVED-LOCAL-HOST is not exported from aion/http-client -- a plaintext request
+  ;; may only skip a proxy on a verdict the framework reached, never on one a caller asserts
+  ;; (#1091) -- so it is imported by name here rather than reached with a double colon at the
+  ;; call site.
+  (:import-from #:aion/http-client #:call-with-approved-local-host)
   (:documentation
    "A neutral payments protocol: hosted checkout, subscriptions, and normalized webhooks
     (pre-publication issue 48). Stripe is one implementation of this protocol and never the protocol itself.

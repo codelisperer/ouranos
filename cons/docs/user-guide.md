@@ -76,6 +76,7 @@ rlwrap sbcl
 
 ```sh
 cons init my-app --template web    # scaffold a project (lib | cli | web | agent)
+cons init my-app --template web --db sqlite   # ... with a database (sqlite | postgres)
 cons conform                       # install the AI-conformance pack into a project
 cons setup                         # write this project's ASDF (:tree) drop-in, per-OS
 cons env                           # which config keys does this project need?
@@ -98,8 +99,10 @@ cons --strict test         # recompile the project's own systems first; use this
 ```
 
 A full compile `WARNING` in the project's own code fails `cons build` and `cons test`, and
-is printed; a `STYLE-WARNING` is printed and does not fail. The project's own systems are
-the ones whose `.asd` is under the directory holding `cons.lisp`. Libraries, and the
+is printed; a `STYLE-WARNING` is printed and does not fail. The one exception is a call to a
+function that does not exist: SBCL reports it as a `STYLE-WARNING`, and it fails the build
+too (#1083). The project's own systems are the ones whose `.asd` is under the directory
+holding `cons.lisp`. Libraries, and the
 framework when you are building an app, are loaded with their warnings muffled, because a
 warning inside a library is not yours to fix (#303).
 
@@ -113,7 +116,36 @@ is loaded, such as a toplevel `warn`, fails the load in the same way.
 A fasl that is already current is loaded without compiling, so a warning in it is not seen
 again. That happens when the fasl was compiled while warnings were muffled, for example by
 a `cons` from before #303 or by `ql:quickload` at the REPL. `--strict` recompiles the
-project's own systems every time, so CI should use it.
+project's own systems every time, so CI should use it. That includes fasls written outside
+`cons`, by a plain ASDF or Quicklisp build step that ran first.
+
+`--strict` judges only what a target loads with `:load` or `:test`. A target that does its work
+with `:eval`, `:call` or `:sh` and has neither, such as one whose `:eval` calls
+`asdf:load-system`, would run with nothing checked, so `cons --strict` refuses it with exit
+code 1 and names it, and names each such step of a `:steps` target (#960). A target with `:sh`
+is refused too, whatever else it has, because cons runs `:sh` in place of its `:load` and
+`:test`. Give the target a `:load` clause naming the systems it builds, and put shell work in a
+target of its own. A strict load whose project directory holds none of the systems it loads is
+refused for the same reason, so under `--strict` every `:load` entry must be one of the
+project's systems: load an outside library, such as `swank`, through the project's own system's
+`:depends-on`.
+
+`--strict` also fails the load when a `defun`, `defmacro`, `defgeneric`, or a `defmethod` with
+the same qualifiers and specializers, replaces one that another file of the project already
+defined (#1121). SBCL reports that only as a `STYLE-WARNING`, and the program then runs with
+whichever file loaded last. The error names the kind of definition, its name and both files.
+A definition replaced from the same file, such as a file loaded twice, is not counted, nor is
+one in a library outside the project. A method on other specializers adds to its generic
+function and is not counted either. `defparameter`, `defvar`, `defstruct` and `defclass` are not
+checked, because SBCL signals nothing when they are repeated in another file. Without
+`--strict`, `cons build` and `cons test` do not count these.
+
+Only a definition that the same build made is counted as replaced. An image that has built
+the project before, such as `bin/cons` or a REPL, still holds the earlier build's definitions,
+so after you move a function from one file to another, the next build in that image is not
+failed for replacing the old copy. The check also applies when an app has set
+`uiop:*uninteresting-conditions*` to `uiop:*usual-uninteresting-conditions*`, which lists these
+warnings: the strict load leaves them out of that list while it runs.
 
 **Still ahead:** dependency management — `cons add`, Quicklisp/ocicl backends, a native
 resolver + lockfiles (see
@@ -174,22 +206,78 @@ Ordinary ways to get here: an SBCL upgrade that removed the tree a wrapper still
 a runtime copied out of its install tree, or a checkout whose environment was set up for a
 different install.
 
-### The quieter version: a stale `bin/cons`
+### After an SBCL upgrade: a stale `bin/cons`
 
-`bin/cons` is a **dumped image** — it carries its own runtime and its own contribs — so an
-SBCL upgrade leaves it working rather than broken, which is precisely why it goes unnoticed:
+`bin/cons` is a **dumped image**. It carries its own runtime, and the contribs `bootstrap.lisp`
+bakes in (`sb-cltl2`, `sb-bsd-sockets`, `sb-posix`, `sb-rotate-byte`, `sb-md5`,
+`sb-introspect`, `sb-concurrency`). Any other contrib, `sb-sprof` for example, it loads from
+a contrib directory when something first requires it.
+
+**Which contrib directory, if any, depends on `SBCL_HOME`.** SBCL takes as its home the first
+of these that has a `contrib/` directory, in this order (`sb-impl::%sbcl-homedir-pathname`,
+SBCL 2.6.9):
+
+1. `SBCL_HOME`;
+2. the executable's own directory;
+3. `<executable's directory>/../lib/sbcl/`;
+4. the current directory;
+5. when the executable was started through a symbolic link, the directory of the file the link
+   points to, and then that directory's `../lib/sbcl/`.
+
+With none, it has no home. So an `SBCL_HOME` without `contrib/` is ignored, not reported. For
+`bin/cons`, places 2, 3 and 5 are in the tree, not where SBCL was installed, so its home is
+normally `SBCL_HOME` or nothing. The exception is place 4: run from a directory that holds a
+`contrib/` directory, `bin/cons` takes that directory as its home. The Windows installer sets
+`SBCL_HOME` for every process. On macOS and Linux it is usually not exported:
+Homebrew's `sbcl` command sets it for its own process only. So:
+
+- **With no `SBCL_HOME`**, the usual case on macOS and Linux, `bin/cons` can load only the
+  contribs it baked in, whatever SBCL is installed, and it cannot check anything on disk.
+- **With `SBCL_HOME` set**, the usual case on Windows, `bin/cons` loads other contribs from
+  `$SBCL_HOME/contrib/`, and checks at startup which SBCL compiled them. It reads the version
+  from the header of `sb-posix.fasl` there, without loading it.
+
+When an upgrade changes the `sbcl` on `PATH`, `cons` warns, and says what it could check:
 
 ```
 cons: this cons was built by SBCL 2.6.5, but SBCL 2.6.7 is now on PATH.
-cons: It still runs -- a dumped image carries its own runtime and contribs -- but `--fresh`
-cons: targets run under the PATH sbcl, so one build can span two compilers.
+cons: cons has no SBCL home (SBCL_HOME is not set or has no contrib/ directory, and neither has <executable's directory>/../lib/sbcl), so it cannot check the contribs on disk and can load only the ones it baked in.
+cons: `--fresh` targets run under the PATH sbcl, so one build can span two compilers.
 cons: Rebuild: sbcl --dynamic-space-size 4096 --script bootstrap.lisp
 ```
 
-This is a **warning, not a refusal**: the image genuinely works, and refusing would block you
-over a mismatch that often bites nothing — including the rebuild, which `cons` itself is not
-the tool for. It matters for `--fresh` targets, which run in a subprocess `sbcl` taken from
-`PATH` rather than in cons's warm image.
+With `SBCL_HOME` pointing at the old install, the second sentence instead says the contribs
+there are still SBCL 2.6.5's. This is a **warning, not a refusal**: the image works, and
+`--fresh` targets, which run in a subprocess `sbcl` taken from `PATH`, are the ones it affects.
+
+**When `SBCL_HOME` points at an install that was replaced in place** (the Windows installer
+over the same directory), the contrib directory holds the new version's fasls, and SBCL refuses
+a fasl compiled by another version. `cons` refuses to run a target (#701):
+
+```
+cons: this cons runs SBCL 2.6.8, but the contribs in C:\Program Files\SBCL\contrib\ were compiled by SBCL 2.6.9.
+cons: The SBCL install it was built from has been replaced. SBCL 2.6.8 cannot load another version's fasls, so the first REQUIRE of a contrib it did not bake in (sb-sprof, sb-simple-streams, ...) fails.
+cons: Rebuild: sbcl --dynamic-space-size 4096 --script bootstrap.lisp
+cons: not running build until the problem above is fixed, since build would run in cons's own image.
+```
+
+The built-in commands (`cons version`, `cons help`, `cons setup`, ...) still run. So does a target
+whose work runs in a subprocess, which uses the `sbcl` on `PATH` and its own contribs: a Lisp
+target run with `--fresh` or marked `:isolate t`, and an `:sh` target. A `:steps` target is
+refused when any of its steps does Lisp work, with or without `--fresh`, because `cons` performs
+the steps in its own image; the message names those steps.
+
+**When a contrib fails to load during a target** for any other reason, `cons` says where it
+loads contribs from before the error itself. With no SBCL home:
+
+```
+cons: a contrib could not be loaded: System "sb-sprof" not found
+cons: This cons has no SBCL home: SBCL_HOME is not set or has no contrib/ directory, and neither has <executable's directory>/../lib/sbcl. It can load only the contribs bootstrap.lisp baked in.
+cons: Export SBCL_HOME as the directory holding contrib/ of the SBCL that built cons (its lib/sbcl), or add the contrib to the list bootstrap.lisp bakes in and rebuild.
+cons build: System "sb-sprof" not found
+```
+
+A rebuild alone does not help in that case, since the rebuilt image has no SBCL home either.
 
 `cons version` reports both, so you can check without re-reading the scrollback:
 

@@ -236,6 +236,37 @@ because for a final response framing is exactly what it is for."
         (Encoded (<> (status-line status) crlf))
         (Refused (<> "not an interim (1xx) status: " (the String (into status))))))
 
+  (declare names-header? (String * (List (Tuple String String)) -> Boolean))
+  (define (names-header? wanted headers)
+    "Whether HEADERS has a field named WANTED, which is lowercase, compared without case."
+    (match headers
+      ((Nil) False)
+      ((Cons h rest)
+       (match h
+         ((Tuple name _)
+          (if (== (str:downcase name) wanted)
+              True
+              (names-header? wanted rest)))))))
+
+  (declare encode-switching-protocols ((List (Tuple String String)) -> Encode-Result))
+  (define (encode-switching-protocols headers)
+    "The head of a 101 Switching Protocols response with HEADERS (#376). After it the
+connection carries the protocol the Upgrade header names, so there is no body and no
+Content-Length, and the Connection header is written here as `Connection: Upgrade'.
+
+HEADERS are checked as ENCODE-HEAD checks them, and Content-Length, Transfer-Encoding and
+Connection are dropped from them. A 101 without an Upgrade header is refused, because RFC
+9110 section 15.2.2 requires one: the client would not know what the connection now carries."
+    (match (check-headers headers)
+      ((Some why) (Refused why))
+      ((None)
+       (if (not (names-header? "upgrade" headers))
+           (Refused "a 101 response needs an Upgrade header")
+           (Encoded
+            (<> (status-line 101)
+                (<> (render-headers headers)
+                    (<> "Connection: Upgrade" (<> crlf crlf)))))))))
+
   ;;; --- chunked framing, for a body whose length is not known up front (M2) ---
   ;;;
   ;;; ENCODE-HEAD frames by counting the bytes, which is the right answer whenever the bytes
@@ -319,6 +350,39 @@ desynchronised connection, not a malformed response, so it must not reach the wi
                             (<> (<> "Connection: "
                                     (<> (if keep-alive "keep-alive" "close") crlf))
                                 crlf))))))))))
+
+  (declare encode-head-close-delimited (UFix * (List (Tuple String String)) -> Encode-Result))
+  (define (encode-head-close-delimited status headers)
+    "The response head for a STREAMED body sent to an HTTP/1.0 client (#1244): no
+Transfer-Encoding, no Content-Length, and Connection: close.
+
+HTTP/1.0 has no chunked transfer coding, so an HTTP/1.0 client reads chunk-size lines as
+part of the body. A body whose length is not known in advance is therefore delimited by the
+server closing the connection (RFC 9112 6.3, rule 8), and this head says so. It takes no
+KEEP-ALIVE because closing is how the body ends, whatever the request asked for.
+
+Content-Length, Transfer-Encoding and Connection are dropped from HEADERS and written from
+here, as ENCODE-HEAD-CHUNKED does. REFUSED for a status that cannot carry a body, for the
+same reason."
+    (if (not (status-ok? status))
+        (Refused (<> "status is not a three-digit HTTP status: " (the String (into status))))
+        (if (body-forbidden? status)
+            (Refused (<> "status cannot carry a body, so it cannot be streamed: "
+                         (the String (into status))))
+            (match (check-headers headers)
+              ((Some why) (Refused why))
+              ((None)
+               (Encoded
+                (<> (status-line status)
+                    (<> (render-headers headers)
+                        (<> (<> "Connection: close" crlf) crlf)))))))))
+
+  (declare encode-head-close-delimited-flat (UFix * (List String) -> Encode-Result))
+  (define (encode-head-close-delimited-flat status flat)
+    "ENCODE-HEAD-CLOSE-DELIMITED taking headers as a flat (\"name\" \"value\" ...) list."
+    (match (pairs-from-flat flat Nil)
+      ((None) (Refused "header list has an odd number of elements"))
+      ((Some pairs) (encode-head-close-delimited status pairs))))
 
   (declare encode-chunk-header (UFix -> Encode-Result))
   (define (encode-chunk-header n)
@@ -410,6 +474,13 @@ trailing name would send a response missing the header the caller believed it se
       ((None) (Refused "header list has an odd number of elements"))
       ((Some pairs) (encode-head status pairs body-length keep-alive))))
 
+
+  (declare encode-switching-protocols-flat ((List String) -> Encode-Result))
+  (define (encode-switching-protocols-flat flat)
+    "ENCODE-SWITCHING-PROTOCOLS taking headers as a flat (\"name\" \"value\" ...) list."
+    (match (pairs-from-flat flat Nil)
+      ((None) (Refused "header list has an odd number of elements"))
+      ((Some pairs) (encode-switching-protocols pairs))))
 
   (declare encode-ok? (Encode-Result -> Boolean))
   (define (encode-ok? r)

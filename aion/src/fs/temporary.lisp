@@ -47,8 +47,12 @@ name, with no path separator, colon or wildcard."
   (%check-prefix prefix)
   (loop
     (let* ((n (sb-thread:with-mutex (*temporary-lock*) (incf *temporary-count*)))
-           (dir (uiop:ensure-directory-pathname
-                 (merge-pathnames (format nil "~A-~D-~D" prefix (%process-id) n)
-                                  (uiop:ensure-directory-pathname in)))))
+           ;; IN as AION/PATH:DIRECTORY-PATHNAME makes it, so a string is not parsed as a Lisp
+           ;; namestring, and the new name is added as a directory component, so it is not
+           ;; parsed either (#1103).
+           (dir (merge-pathnames
+                 (make-pathname :directory
+                                (list :relative (format nil "~A-~D-~D" prefix (%process-id) n)))
+                 (path:directory-pathname in))))
       (multiple-value-bind (path created) (ensure-directories-exist dir)
         (when created (return path))))))

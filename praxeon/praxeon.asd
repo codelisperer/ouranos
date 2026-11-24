@@ -32,6 +32,11 @@
 ;;; clack-handler-hunchentoot must list "hyperion" before it, or push the feature itself.
 (pushnew :hunchentoot-no-ssl *features*)
 
+;;; dexador without cl+ssl on macOS (#905): see the same form at the top of aion/aion.asd. It is
+;;; repeated here because this file names dexador, and ASDF may resolve that dependency before it
+;;; reads aion.asd.
+#+os-macosx (pushnew :dexador-no-ssl *features*)
+
 (defsystem "praxeon"
   :description "A praxeological framework for agentic AI in Common Lisp + Coalton."
   :author "Bob <eternal.recursion@proton.me>"
@@ -42,6 +47,7 @@
                "aion/interceptor"  ; the typed pipeline a turn is threaded through (pre-publication issue 130)
                "aion/boundary"     ; RUN-TURN-THROUGH checks its CHAIN before it enters Coalton (#110)
                "aion/http-client"  ; the shared outbound client (pre-publication issue 202)
+               "aion/retry"        ; *RETRY* and PROVIDER-REQUEST-FAILED's TRANSIENCE (#79)
                "aion/random"       ; a held turn's id (#531)
                "coalton"
                "alexandria"
@@ -50,6 +56,8 @@
                "dexador"          ; HTTP client for LLM providers
                "com.inuoe.jzon"   ; JSON reader/writer
                "ironclad"         ; Ed25519 verification of signed grants (pre-publication issue 172)
+               "aion/signature"   ; signs and verifies a grant token (#67)
+               "cl-base64"        ; a grant token's two base64url parts (#67)
                "bordeaux-threads")  ; the session ledger is shared across a turn
   :serial t
   :components ((:module "src"
@@ -150,7 +158,7 @@
   :in-order-to ((test-op (test-op "praxeon/claude-code/tests"))))
 
 (defsystem "praxeon/claude-code/tests"
-  :description "praxeon/claude-code's rules, summary check, hook and report, with no model call (#452)."
+  :description "praxeon/claude-code's rules, replacement, hook and report, with no model call (#452, #465)."
   :depends-on ("praxeon/claude-code" "praxeon" "com.inuoe.jzon" "fiveam" "aion/log"
                "aion/fs"      ; the tests' temporary directories are removed with delete-tree (#347)
                (:feature :unix (:require "sb-posix")))  ; chmod for the stand-in programs
@@ -197,7 +205,8 @@
   :description "Clean-room probe: praxeon retrieval on the SQLite a desktop bundle carries (#899)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
-  :depends-on ("praxeon" "praxeon/retrieval" "mnemosyne")
+  ;; aion/http-client for the optional --https request (#905); praxeon already loads it.
+  :depends-on ("praxeon" "praxeon/retrieval" "mnemosyne" "aion/http-client")
   :components ((:module "examples/sqlite-probe"
                 :components ((:file "app")))))
 
@@ -210,7 +219,8 @@
   ;; aion/windows on Windows only, for the job object each local server runs in (#599).
   :depends-on ("praxeon" "aion/http-client" "aion/log" "aion/oauth" "com.inuoe.jzon" "cl-base64"
                (:feature :win32 "aion/windows")
-               "aion/dynamic")   ; unblock-interrupts, first in each thread it starts (#541)
+               "aion/dynamic"    ; unblock-interrupts, first in each thread it starts (#541)
+               "aion/retry")     ; a failed task poll's backoff is RETRY-DELAY's (#79)
   :serial t
   :components ((:module "src/mcp"
                 :serial t
@@ -241,6 +251,79 @@
                (:static-file "tests/mcp-stdio-server.lisp"))
   :perform (test-op (o c) (uiop:symbol-call :praxeon/mcp/tests :run-tests)))
 
+;;; OpenTelemetry spans for every turn, model call and tool call (#1225). Opt-in: an app loads
+;;; it and wraps its turns in WITH-TRACING. It reads the event stream praxeon already emits, and
+;;; sends to a collector through aion/http-client, so it adds no dependency to praxeon's core.
+(defsystem "praxeon/trace"
+  :description "OpenTelemetry spans built from praxeon's event stream, exported in memory or over OTLP/HTTP JSON (#1225)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.1.0"
+  :depends-on ("praxeon"
+               "aion/log"          ; an export failure is logged with a count, never a payload
+               "aion/random"       ; trace and span ids, from the OS generator
+               "aion/dynamic"      ; unblock-interrupts, first in the exporter's thread (#541)
+               "aion/http-client"  ; the POST to the collector, on dexador (pre-publication issue 202)
+               "com.inuoe.jzon"    ; the OTLP JSON encoding
+               "quri"              ; percent-decoding OTEL_EXPORTER_OTLP_HEADERS' values
+               "bordeaux-threads") ; the exporter's thread, lock and condition variable
+  :serial t
+  :components ((:module "src/trace"
+                :serial t
+                :components ((:file "packages")
+                             (:file "attributes")  ; every attribute name, in one place
+                             (:file "tracer")      ; events -> spans
+                             (:file "export"))))   ; in memory, and OTLP/HTTP JSON
+  :in-order-to ((test-op (test-op "praxeon/trace/tests"))))
+
+(defsystem "praxeon/trace/tests"
+  :description "praxeon/trace: span trees from stub-provider turns, content withheld by default, and OTLP export to a stub collector on 127.0.0.1 (#1225)."
+  :depends-on ("praxeon/trace" "praxeon" "aion/log" "aion/test-http" "com.inuoe.jzon"
+               "bordeaux-threads" "fiveam")
+  :components ((:module "tests" :components ((:file "trace-tests"))))
+  :perform (test-op (o c) (symbol-call :praxeon/trace/tests '#:run-tests)))
+;;; Evals (#1224): run agents against fixed cases, grade the runs, compare with a baseline and
+;;; decide whether a build passes. Opt-in, outside core. The grade type and the aggregation are
+;;; Coalton (src/eval/core.lisp); running agents and calling the judge are the CL shell.
+(defsystem "praxeon/eval"
+  :description "Run agents against fixed cases, grade them, and fail a build when results get worse (#1224)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  :depends-on ("praxeon"
+               "coalton"           ; core.lisp is Coalton
+               "aion/boundary"     ; the case counts are checked before they enter core.lisp (#110)
+               "aion/sexp"         ; a dataset file is read as plain data (#972)
+               "com.inuoe.jzon"    ; the report is JSON
+               "cl-ppcre")         ; the regular-expression grader; dexador already loads it
+  :serial t
+  :components ((:module "src/eval"
+                :serial t
+                :components ((:file "packages")
+                             (:file "core")
+                             (:file "eval")
+                             (:file "report"))))
+  :in-order-to ((test-op (test-op "praxeon/eval/tests"))))
+
+;;; The example agent and dataset for praxeon/eval (#1224).
+(defsystem "praxeon/examples/eval"
+  :description "An order-support agent and a dataset that grades it with praxeon/eval (#1224)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("praxeon" "praxeon/eval")
+  :components ((:module "examples/eval"
+                :components ((:file "support")
+                             (:static-file "support.sexp")))))
+
+(defsystem "praxeon/eval/tests"
+  :description "praxeon/eval with stub providers for the agent and the judge, so no network (#1224)."
+  :depends-on ("praxeon/eval" "praxeon/examples/eval" "praxeon" "aion/boundary"
+               "aion/sexp"         ; a dataset with code in it is refused with UNSAFE-DATA
+               "com.inuoe.jzon" "fiveam")
+  :components ((:module "tests" :components ((:file "eval-tests"))))
+  :perform (test-op (o c)
+             (uiop:symbol-call :fiveam :run! (uiop:find-symbol* :eval :praxeon/eval/tests))))
+
 (defsystem "praxeon/web-search"
   :description "A web-search Means (Tavily-backed) for Praxeon agents."
   :author "Bob <eternal.recursion@proton.me>"
@@ -270,7 +353,8 @@
   :license "MIT"
   :depends-on ("praxeon" "aion/http-client" "aion/log" "com.inuoe.jzon"
                "cl-base64"            ; the provider sends each image as base64
-               "aion/random")         ; the multipart boundary of an edit, from the OS generator
+               "aion/random"          ; the multipart boundary of an edit, from the OS generator
+               "aion/retry")          ; IMAGE-REQUEST-FAILED's TRANSIENCE and RETRY-AFTER (#79)
   :serial t
   :components ((:file "src/image")
                (:file "src/image-google")))  ; Google's Gemini API as a second provider (#758)
@@ -328,10 +412,14 @@
   :depends-on ("praxeon" "praxeon/web-search" "praxeon/translate" "aion/boundary" "aion/log"
                "log4cl"               ; the #807 test puts the log's setup back after capturing it
                "praxeon/image" "cl-base64"   ; the #758 tests encode the image the stub sends
+               "aion/signature"       ; the #67 tests mint grant tokens
                "praxeon/web-page" "aion/test-http"  ; the #757 tests serve pages from 127.0.0.1
                "aion/http-client"     ; the #719 tests build an http-error to stand for a refused connection
+               "aion/retry"           ; the #79 tests set a retry policy and record its waits
+               "quri"                 ; the #1034 tests read a provider's request URL as the request does
                "fiveam"
                "aion/test-threads"    ; the #531 tests continue a held turn on another thread
+               "aion/dynamic"         ; the #1172 test starts a thread through INHERITING
                ;; The #678 tests answer the meta impl from a server on 127.0.0.1. An SBCL
                ;; contrib, declared because it otherwise arrives only through usocket.
                (:require "sb-bsd-sockets"))
@@ -344,9 +432,19 @@
                              (:file "image-tests")
                              ;; #758: the Google provider, after image-tests, whose image helpers it uses
                              (:file "image-google-tests")
+                             ;; #1034: where each provider sends, after image-tests, whose
+                             ;; providers it makes
+                             (:file "endpoint-tests")
                              (:file "web-page-tests")
                              ;; #827: untrusted content in a turn, using the stub reader pattern
-                             (:file "reader-guard-tests"))))
+                             (:file "reader-guard-tests")
+                             ;; #984: streaming a completion from stub servers, and cancelling it
+                             (:file "stream-tests")
+                             ;; #1293: a provider set to stay local, after stream-tests
+                             (:file "stay-local-tests")
+                             ;; #1172: vendor-specific request fields, after stream-tests,
+                             ;; whose stub servers it uses
+                             (:file "extra-body-tests"))))
   :perform (test-op (op c)
              (uiop:symbol-call :fiveam :run! (uiop:find-symbol* :praxeon :praxeon/tests))))
 
@@ -364,7 +462,11 @@
 (defsystem "praxeon/web/tests"
   :description "Test suite for praxeon/web: the blocking entry, and the surface."
   :depends-on ("praxeon/web" "praxeon" "hyperion"   ; web-tests.lisp calls actor: and server:
-               "clack-handler-hunchentoot" "fiveam" "aion/test-threads" "aion/log")
+               "praxeon/chat-ui" "hyperion/assets"  ; the bubble and embed tests (#67)
+               "hyperion/assets/tests" "hyperion/test-ports"  ; the embed test's headless browser
+               "aion/cdp"                    ; FIND-BROWSER names that browser (#1028)
+               "clack-handler-hunchentoot" "fiveam" "aion/test-threads" "aion/log"
+               "aion/signature" "com.inuoe.jzon")  ; the #67 tests mint grants and read JSON
   :serial t
   :components ((:module "tests"
                 :serial t
@@ -372,6 +474,16 @@
   :perform (test-op (op c)
              (uiop:symbol-call :fiveam :run!
                                (uiop:find-symbol* :praxeon-web :praxeon/web/tests))))
+
+;;; The chat widget's parts: the stylesheet, bubbles, composer, gate and scripts that the full
+;;; chat page and the embed panel are both made of (#67).
+(defsystem "praxeon/chat-ui"
+  :description "The chat widget's parts, shared by praxeon/web's page and its embed panel."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion"                    ; js helpers, markdown, output style
+               "spinneret" "parenscript")
+  :components ((:file "src/chat-ui")))
 
 ;;; A Clack-based web + REST surface for Praxeon agents (HTMX UI). The server backend is
 ;;; the APPLICATION's choice and is declared by the application -- this system deliberately
@@ -382,9 +494,11 @@
   :license "MIT"
   :depends-on ("praxeon" "hyperion"          ; server, hot-reload, request utils, JS
                "aion/dynamic"                ; web.lisp wraps the turn thread in INHERITING
+               "aion/random"                 ; a session id (web-session.lisp, #67)
                "hyperion/assets"             ; vendored htmx/Bulma, embedded (no CDN)
+               "praxeon/chat-ui"             ; the page's parts, shared with the embed panel
                "spinneret" "com.inuoe.jzon"  ; still used directly by the chat UI
-               (:require "sb-concurrency")   ; thread-safe mailbox for the SSE channel
+               "parenscript"                 ; the page's stream client (#67)
                ;; The HTTP backend is the APP's choice, not hyperion's (pre-publication issue 139) -- and it is
                ;; declared as the CLACK HANDLER system, not the bare server, because that
                ;; is what `clackup` resolves :woo / :hunchentoot through. Depending on the
@@ -417,7 +531,7 @@
                ;; and is why nothing is substituted here.
                )
   :serial t
-  :components ((:file "src/web"))
+  :components ((:file "src/web-session") (:file "src/web"))
   ;; An unregistered suite, an unrun suite and a passing suite are identical at the exit
   ;; code, so the suite is wired to the system it tests rather than left to be remembered.
   :in-order-to ((test-op (test-op "praxeon/web/tests"))))

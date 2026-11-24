@@ -250,23 +250,33 @@ UTF-8 sequence -- because that is the case the old contract silently destroyed."
 (defun server-heads (server) (aion/test-http:server-heads server))
 
 (defparameter +tls-certificate+
-  #+os-windows "pinned-test-ec.crt" #-os-windows "pinned-test.crt"
-  "The test server's certificate: an EC one on Windows, where aion/tls serves TLS and cannot
-present the RSA one (see fixtures/http-client/README.md), the RSA one elsewhere.")
-(defparameter +tls-key+ #+os-windows "pinned-test-ec.key" #-os-windows "pinned-test.key")
+  #+(or os-windows os-macosx) "pinned-test-ec.crt" #-(or os-windows os-macosx) "pinned-test.crt"
+  "The test server's certificate: an EC one on Windows and macOS, where aion/tls serves TLS and
+cannot present the RSA one (see fixtures/http-client/README.md), the RSA one on Linux.")
+(defparameter +tls-key+
+  #+(or os-windows os-macosx) "pinned-test-ec.key" #-(or os-windows os-macosx) "pinned-test.key")
 
 (defun %start-server (handler &key tls)
   "A server on 127.0.0.1 answering with HANDLER, a function of (path head stream) that writes
 the response. Records every request head. TLS T presents the certificate for pinned.test
-(+TLS-CERTIFICATE+, an EC one on Windows); TLS :IP presents the one whose names are the addresses
-127.0.0.1 and ::1."
-  (aion/test-http:start-server
-   (lambda (request stream)
-     (funcall handler (aion/test-http:request-path request)
-              (aion/test-http:request-head request) stream))
-   :tls-certificate (and tls (%fixture (if (eq tls :ip) "ip-test.crt" +tls-certificate+)))
-   :tls-key (and tls (%fixture (if (eq tls :ip) "ip-test.key" +tls-key+)))
-   :name "http-client test server"))
+(+TLS-CERTIFICATE+, an EC one on Windows and macOS); TLS :IP presents the one whose names are the
+addresses 127.0.0.1 and ::1; a string names another fixture pair, \"cn-only-test\" for one such
+pair. On Windows and macOS, where aion/tls serves, an RSA pair's key is its PKCS#1 copy, because
+mbedTLS refuses an RSA key in PKCS#8 form (#914, fixtures/http-client/README.md)."
+  (multiple-value-bind (certificate key)
+      (flet ((rsa-key (name)
+               #+(or os-windows os-macosx) (format nil "~A-pkcs1.key" name)
+               #-(or os-windows os-macosx) (format nil "~A.key" name)))
+        (cond ((stringp tls) (values (format nil "~A.crt" tls) (rsa-key tls)))
+              ((eq tls :ip) (values "ip-test.crt" (rsa-key "ip-test")))
+              (t (values +tls-certificate+ +tls-key+))))
+    (aion/test-http:start-server
+     (lambda (request stream)
+       (funcall handler (aion/test-http:request-path request)
+                (aion/test-http:request-head request) stream))
+     :tls-certificate (and tls (%fixture certificate))
+     :tls-key (and tls (%fixture key))
+     :name "http-client test server")))
 
 (defun %stop-server (server) (aion/test-http:stop-server server))
 
@@ -324,6 +334,45 @@ IPv4 list."
   (is (equalp #(10 0 0 5) (http:parse-address "10.0.0.5")))
   (is (string= "0:0:0:0:0:0:0:1" (http:address-string (http:parse-address "::1")))))
 
+;;; --- aion/test-http :concurrent (#999) ---------------------------------------------------
+
+(defun %answered-past-an-idle-connection-p (concurrent)
+  "Whether a server started with CONCURRENT answers a request while another connection to it is
+open and has sent nothing: true when the answer's first byte arrives within two seconds."
+  (aion/test-http:with-server (s (lambda (request stream)
+                                   (declare (ignore request))
+                                   (aion/test-http:write-response stream 200 '() "answered"))
+                                 :concurrent concurrent)
+    (let ((idle (usocket:socket-connect "127.0.0.1" (aion/test-http:server-port s)
+                                        :element-type '(unsigned-byte 8)))
+          (asking nil))
+      (unwind-protect
+           (progn
+             (sleep 0.3)                ; the server takes the idle connection first
+             (setf asking (usocket:socket-connect "127.0.0.1" (aion/test-http:server-port s)
+                                                  :element-type '(unsigned-byte 8)))
+             (let ((out (usocket:socket-stream asking)))
+               (write-sequence (sb-ext:string-to-octets
+                                (format nil "GET / HTTP/1.1~C~CHost: x~C~C~C~C"
+                                        #\Return #\Newline #\Return #\Newline #\Return #\Newline)
+                                :external-format :latin-1)
+                               out)
+               (finish-output out))
+             (and (usocket:wait-for-input asking :timeout 2 :ready-only t) t))
+        ;; Closing the idle connection lets a server that serves one at a time go on, so its
+        ;; thread can be stopped.
+        (ignore-errors (usocket:socket-close idle))
+        (when asking (ignore-errors (usocket:socket-close asking)))))))
+
+(test a-concurrent-test-server-answers-while-another-connection-is-idle
+  "#999, from the hub's review: aion/test-http's :CONCURRENT serves each connection on its own
+thread, so a connection that sends nothing does not hold up the next request. The control is the
+default server, which serves one connection at a time and does not answer meanwhile. A browser
+opens such connections, and the window test that needs this runs only on CI."
+  (is-true (%answered-past-an-idle-connection-p t) "with :concurrent, the request is answered")
+  (is-false (%answered-past-an-idle-connection-p nil)
+            "control: one connection at a time, the request waits behind the idle one"))
+
 ;;; --- redirect control and the body cap (every platform) ------------------------------
 
 (defun %redirecting (path head stream)
@@ -348,7 +397,13 @@ the 3xx it stopped at; the default follows to the end."
       (is (= 3 (%requests s))))
     (let ((all (http:send-request (http:make-request :url (%local s "/") :read-timeout 5) '())))
       (is (= 200 (http:response-status all)))
-      (is (string= "the end" (http:response-body all))))))
+      (is (string= "the end" (http:response-body all))))
+    ;; #1063: a pinned request follows none, whatever FOLLOW-REDIRECTS says, as MAKE-REQUEST's
+    ;; docstring says; its 3xx is the response.
+    (let ((pinned (http:send-request (http:make-request :url (%local s "/") :connect-address "127.0.0.1"
+                                                        :read-timeout 5)
+                                     '())))
+      (is (= 302 (http:response-status pinned)) "a pinned request with the default of 5"))))
 
 (test a-body-over-the-cap-is-refused-with-or-without-content-length
   "A declared Content-Length over the cap is refused before the body is read. Without one, the
@@ -415,8 +470,8 @@ address there, and verifies the certificate against ::1, the address without the
 puts round it. The certificate's names are the addresses 127.0.0.1 and ::1. Before the fix the name
 verified was \"[::1]\", which no certificate holds, so this request was refused. Controls: [::2],
 an address the certificate does not name, is refused; the IPv4 literal is accepted; the host name
-other.test is refused. (cl+ssl also accepts the common name, ip.test, even though the certificate
-has subject alternative names, which RFC 6125 does not allow. That is unchanged here.)"
+other.test and ip.test are refused. ip.test is the certificate's common name, which cl+ssl's own
+check accepts; since #917 a certificate with alternative names must match one of them."
   (skip-on-windows "ip-test.key is a PKCS#8 RSA key, which the aion/tls test server refuses (#914)"
     (with-server (s (lambda (path head stream)
                       (declare (ignore path head))
@@ -433,7 +488,44 @@ has subject alternative names, which RFC 6125 does not allow. That is unchanged 
         (is (string= "over tls" (http:response-body (get-as "127.0.0.1"))))
         (signals http:http-error (get-as "[::2]"))
         (signals http:http-error (get-as "127.0.0.2"))
-        (signals http:http-error (get-as "other.test"))))))
+        (signals http:http-error (get-as "other.test"))
+        (signals http:http-error (get-as "ip.test"))))))
+
+(defun %get-pinned-as (server host ca)
+  "A GET of https://HOST:port/ from SERVER, pinned to 127.0.0.1 and trusting the fixture CA."
+  (http:send-request (http:make-request :url (%local server "/" host "https")
+                                        :connect-address "127.0.0.1"
+                                        :ca-path (%fixture ca) :read-timeout 5)
+                     '()))
+
+(test a-certificate-with-alternative-names-is-not-matched-by-its-common-name
+  "#917: the certificate's common name is cn.test and its only alternative name is san.test.
+https://san.test/ is accepted and https://cn.test/ is refused, because a certificate with
+alternative names must match one of them (RFC 6125 section 6.4.4). cl+ssl's own check accepts
+cn.test through the common name; before #917 nothing else was checked, so it was accepted."
+  (skip-on-windows "a pinned connection is not available on Windows (WinHTTP)"
+    (with-server (s (lambda (path head stream)
+                      (declare (ignore path head))
+                      (%write-response stream 200 '() "over tls"))
+                    :tls "cn-and-san-test")
+      (is (string= "over tls"
+                   (http:response-body (%get-pinned-as s "san.test" "cn-and-san-test.crt"))))
+      (is (string= "over tls"
+                   (http:response-body (%get-pinned-as s "SAN.test" "cn-and-san-test.crt")))
+          "matched as cl+ssl matches, ignoring case")
+      (signals http:http-error (%get-pinned-as s "cn.test" "cn-and-san-test.crt")))))
+
+(test a-certificate-without-alternative-names-is-matched-by-its-common-name
+  "#917: a certificate with no alternative names, whose common name is cn-only.test, is accepted
+for https://cn-only.test/. Control: it is refused for other.test."
+  (skip-on-windows "a pinned connection is not available on Windows (WinHTTP)"
+    (with-server (s (lambda (path head stream)
+                      (declare (ignore path head))
+                      (%write-response stream 200 '() "over tls"))
+                    :tls "cn-only-test")
+      (is (string= "over tls"
+                   (http:response-body (%get-pinned-as s "cn-only.test" "cn-only-test.crt"))))
+      (signals http:http-error (%get-pinned-as s "other.test" "cn-only-test.crt")))))
 
 (test tls-names-gives-no-sni-name-for-an-ip-literal
   "#915: the SNI name and the name verified, for each kind of host."
@@ -449,11 +541,126 @@ OpenSSL 4 removed ASN1_STRING_data, which cl+ssl calls to read a certificate's n
 when the patch is missing, and when a later load of cl+ssl has put the old definition back. On a
 host whose libcrypto is OpenSSL 4, the pinned test above fails as well. Remove the patch and this
 test once the pinned cl+ssl contains cl-plus-ssl pull request 202."
-  (skip-on-windows "cl+ssl is not used on Windows"
-    ;; Read only off Windows: there is no CL+SSL package on Windows.
-    #-os-windows
+  #+(or os-windows os-macosx) (skip "cl+ssl is not used on Windows or macOS (#905)")
+  ;; Read only on Linux: there is no CL+SSL package on Windows or macOS.
+  #-(or os-windows os-macosx)
+  (progn
     (is (eq (fdefinition 'cl+ssl::asn1-string-get0-data) (fdefinition 'cl+ssl::asn1-string-data))
         "cl+ssl::asn1-string-data is the call to ASN1_STRING_get0_data")))
+
+;;; --- a saved image that makes only plain-http requests starts without OpenSSL (#1173) -------
+
+(defun %mapped-file (name)
+  "The path of the file named NAME that this process has mapped, read from /proc/self/maps, or
+NIL where there is no such file."
+  (with-open-file (in "/proc/self/maps" :if-does-not-exist nil)
+    (and in
+         (loop for line = (read-line in nil)
+               while line
+               do (let ((slash (position #\/ line)))
+                    (when (and slash (string= name (file-namestring (subseq line slash))))
+                      (return (subseq line slash))))))))
+
+(defun %cl+ssl-library-files ()
+  "The files this image opened for cl+ssl's libcrypto and libssl, in that order, as absolute
+paths, or NIL when either cannot be found."
+  (let ((files (loop for name in '("LIBCRYPTO" "LIBSSL")
+                     for path = (namestring (cffi:foreign-library-pathname
+                                             (cffi::get-foreign-library (find-symbol name "CL+SSL"))))
+                     collect (if (uiop:absolute-pathname-p path)
+                                 (and (probe-file path) path)
+                                 (%mapped-file (file-namestring path))))))
+    (and (every #'identity files) files)))
+
+(defun %saved-plain-http-image (directory files core &key without-save-hook)
+  "Save, from a fresh image, an executable CORE that loads aion/http-client with cl+ssl pointed at
+copies of FILES (libcrypto, libssl) in DIRECTORY. Run with a URL, it makes one plain-http GET and
+prints \"STATUS <code>\", then asks cl+ssl to initialise and prints \"TLS ok\" or
+\"TLS <condition type>: <message>\". WITHOUT-SAVE-HOOK removes the hook that keeps SBCL from
+reopening OpenSSL at startup, for the control. Returns the child's output."
+  (let ((crypto (namestring (merge-pathnames (file-namestring (first files)) directory)))
+        (ssl (namestring (merge-pathnames (file-namestring (second files)) directory))))
+    (uiop:run-program
+     (list (uiop:native-namestring sb-ext:*runtime-pathname*)
+           "--noinform" "--no-userinit" "--no-sysinit" "--non-interactive"
+           "--eval" "(require :asdf)"
+           "--eval" (format nil "(load ~S)"
+                            (uiop:native-namestring
+                             (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname))))
+           "--eval" "(let ((*standard-output* (make-broadcast-stream))) (asdf:load-system :cl+ssl/config))"
+           "--eval" (format nil "(eval (list (find-symbol \"DEFINE-LIBCRYPTO-PATH\" \"CL+SSL/CONFIG\") ~S))" crypto)
+           "--eval" (format nil "(eval (list (find-symbol \"DEFINE-LIBSSL-PATH\" \"CL+SSL/CONFIG\") ~S))" ssl)
+           "--eval" "(let ((*standard-output* (make-broadcast-stream))) (asdf:load-system :aion/http-client))"
+           "--eval" (if without-save-hook
+                        "(setf sb-ext:*save-hooks* (remove 'aion/http-client::%openssl-dont-save sb-ext:*save-hooks*))"
+                        "t")
+           "--eval" (format nil "(sb-ext:save-lisp-and-die ~S :executable t :toplevel (lambda () (let ((url (second sb-ext:*posix-argv*))) (format t \"~~&STATUS ~~A~~%\" (aion/http-client:response-status (aion/http-client:send-request (aion/http-client:make-request :url url :read-timeout 10) '()))) (format t \"~~&TLS ~~A~~%\" (handler-case (progn (funcall (find-symbol \"ENSURE-INITIALIZED\" \"CL+SSL\")) \"ok\") (error (e) (format nil \"~~A: ~~A\" (type-of e) e)))) (finish-output) (sb-ext:exit :code 0))))"
+                            (uiop:native-namestring core)))
+     :output :string :error-output :output :ignore-error-status t)))
+
+(defun %run-saved-image (core url)
+  "Run CORE with URL. Returns (values OUTPUT EXIT-CODE)."
+  (multiple-value-bind (out err code)
+      (uiop:run-program (list (uiop:native-namestring core) url)
+                        :output :string :error-output :string :ignore-error-status t)
+    (values (concatenate 'string out err) code)))
+
+(defun %output-line (prefix output)
+  (find-if (lambda (line) (uiop:string-prefix-p prefix line))
+           (uiop:split-string output :separator '(#\Newline #\Return))))
+
+(test a-saved-plain-http-image-starts-without-openssl
+  "#1173: an image saved with aion/http-client, and so with cl+ssl, starts and makes a plain-http
+request on a machine without the OpenSSL it was built against, and its first TLS use signals
+HTTP-ERROR naming the library. cl+ssl is pointed at copies of this machine's libcrypto and libssl,
+and the copies are deleted after the image is saved. Control: the same image saved without
+aion/http-client's save hook exits at startup, because SBCL reopens every shared object an image
+had open when it was saved."
+  (let ((files (and (find-package "CL+SSL") (%cl+ssl-library-files))))
+    (cond
+      ((not (find-package "CL+SSL"))
+       (skip "cl+ssl is not loaded on this platform, so there is no OpenSSL to start without"))
+      ((null files)
+       (skip "the files cl+ssl opened could not be found, so there is nothing to copy"))
+      (t
+       (let* ((directory (uiop:ensure-directory-pathname
+                          (merge-pathnames (format nil "aion-1173-~D-~D/" (get-universal-time)
+                                                   (random 1000000000 (make-random-state t)))
+                                           (uiop:temporary-directory))))
+              (core (merge-pathnames "plain-http" directory))
+              (control (merge-pathnames "plain-http-control" directory)))
+         (unwind-protect
+              (progn
+                (ensure-directories-exist directory)
+                (dolist (file files)
+                  (uiop:copy-file file (merge-pathnames (file-namestring file) directory)))
+                (%saved-plain-http-image directory files core)
+                (%saved-plain-http-image directory files control :without-save-hook t)
+                (is (and (probe-file core) (probe-file control)) "both images were saved")
+                (with-server (s (lambda (path head stream)
+                                  (declare (ignore path head))
+                                  (%write-response stream 200 '() "plain")))
+                  (let ((url (%local s "/")))
+                    (multiple-value-bind (out code) (%run-saved-image core url)
+                      (is (equal "TLS ok" (%output-line "TLS " out))
+                          "with OpenSSL present the image opens it as before: ~A" out)
+                      (is (eql 0 code)))
+                    (dolist (file files)
+                      (delete-file (merge-pathnames (file-namestring file) directory)))
+                    (multiple-value-bind (out code) (%run-saved-image core url)
+                      (is (eql 0 code) "without OpenSSL the image starts: ~A" out)
+                      (is (equal "STATUS 200" (%output-line "STATUS " out))
+                          "and makes its plain-http request: ~A" out)
+                      (let ((tls (%output-line "TLS " out)))
+                        (is (and tls (search "HTTP-ERROR" tls)
+                                 (search (file-namestring (first files)) tls :test #'char-equal))
+                            "its first TLS use signals HTTP-ERROR naming the library: ~A" tls)))
+                    (multiple-value-bind (out code) (%run-saved-image control url)
+                      (is (not (eql 0 code))
+                          "control: without the save hook the image exits at startup: ~A" out)
+                      (is (null (%output-line "STATUS " out))
+                          "control: and makes no request: ~A" out)))))
+           (uiop:delete-directory-tree directory :validate t :if-does-not-exist :ignore)))))))
 
 ;;; --- fetch-public ---------------------------------------------------------------------
 
@@ -1103,12 +1310,14 @@ machine trusts. And the chain is judged for the name it is given."
     (aion/windows:verify-server-certificate-chain
      (list (make-array 8 :element-type '(unsigned-byte 8) :initial-element 1)) "x.test")))
 
-#+os-windows
+#+(or os-windows os-macosx)
 (test a-pinned-connection-on-windows-asks-windows-and-honours-its-answer
   "Without CA-PATH, the pinned TLS connection gives the server's chain and the URL's host to the
 verifier and obeys it. A verifier that accepts gets the response; one that answers :EXPIRED
 makes the request signal CERTIFICATE-EXPIRED with Windows' code; and the real verifier refuses
-the self-signed test certificate as CERTIFICATE-UNTRUSTED-ROOT."
+the self-signed test certificate: Windows as CERTIFICATE-UNTRUSTED-ROOT, macOS as
+CERTIFICATE-REJECTED, because the most serious problem macOS reports for it is its 100-year
+validity period (errSecCertificateValidityPeriodTooLong, -67901), which has no subclass (#905)."
   (with-server (s (lambda (path head stream)
                     (declare (ignore path head))
                     (%write-response stream 200 '() "verified by the caller"))
@@ -1128,23 +1337,166 @@ the self-signed test certificate as CERTIFICATE-UNTRUSTED-ROOT."
           (http:certificate-expired (e)
             (is (string= "pinned.test" (http:certificate-rejected-host e)))
             (is (= #x800B0101 (http:certificate-rejected-code e))))))
-      (signals http:certificate-untrusted-root (get-it)))))
+      #+os-windows (signals http:certificate-untrusted-root (get-it))
+      #+os-macosx (handler-case (progn (get-it) (fail "macOS trusted the self-signed certificate"))
+                    (http:certificate-rejected (e)
+                      (is (= -67901 (http:certificate-rejected-code e))
+                          "macOS's reason: ~D" (http:certificate-rejected-code e)))))))
+
+#+os-macosx
+(defun %call-with-make-ssl-stream (function thunk)
+  "Call THUNK with dexador's MAKE-SSL-STREAM set to FUNCTION, and put back what was there."
+  (let* ((name (find-symbol "MAKE-SSL-STREAM" "DEXADOR.BACKEND.USOCKET"))
+         (saved (fdefinition name)))
+    (setf (fdefinition name) function)
+    (unwind-protect (funcall thunk)
+      (setf (fdefinition name) saved))))
+
+#+os-macosx
+(test on-macos-dexadors-https-goes-over-aion-tls-and-loads-no-cl+ssl
+  "#905: on macOS an https request that is not pinned goes through DEX:REQUEST, and the stream
+dexador reads and writes is an AION/TLS:TLS-STREAM made by aion/http-client, whose verdict comes
+from *SERVER-CERTIFICATE-VERIFIER*. No CL+SSL package exists in the image, so no OpenSSL was
+opened. CONTROL: with dexador's own MAKE-SSL-STREAM put back, the one compiled with
+:DEXADOR-NO-SSL, the same request makes no aion/tls stream and fails, so the replacement in
+macos-tls.lisp is what makes https work, not something else in the image."
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "over aion/tls"))
+                  :tls t)
+    (let ((made '())
+          (asked '()))
+      (flet ((recording (inner)
+               (lambda (&rest args)
+                 (let ((stream (apply inner args)))
+                   (push (type-of stream) made)
+                   stream)))
+             (get-it ()
+               ;; :STAY-LOCAL so that no proxy from the environment is used, and no connection
+               ;; dexador pooled earlier can answer instead of a new one.
+               (http:send-request (http:make-request :url (%local s "/" "127.0.0.1" "https")
+                                                     :stay-local t :read-timeout 5)
+                                  '())))
+        (let ((http::*server-certificate-verifier*
+                (lambda (chain host) (push (list (length chain) host) asked) :trusted)))
+          ;; Whatever loading aion/http-client installed, observed, not replaced: a test that
+          ;; put %DEXADOR-TLS-STREAM in place itself would pass with the installation missing.
+          (%call-with-make-ssl-stream
+              (recording (fdefinition (find-symbol "MAKE-SSL-STREAM" "DEXADOR.BACKEND.USOCKET")))
+            (lambda ()
+              (is (string= "over aion/tls" (http:response-body (get-it))))))
+          (is (equal '(aion/tls:tls-stream) made) "dexador's https stream was ~S" made)
+          (is (equal '((1 "127.0.0.1")) asked) "the verifier was asked ~S" asked)
+          (is (null (find-package "CL+SSL")) "CL+SSL is a package in this image")
+          ;; The control.
+          (setf made '())
+          (%call-with-make-ssl-stream (recording http::*%dexador-own-make-ssl-stream*)
+            (lambda ()
+              (signals error (get-it))))
+          (is (null made) "control: dexador's own function made ~S" made))))))
 
 ;;; --- the opt-in check against public servers (GitHub Actions only) ------------------------
+
+(defun %runner-network-failure-p (condition)
+  "Whether CONDITION is a failure of the runner's network rather than of this client: the host
+did not resolve, a socket could not connect or timed out, or the fetch ran past its deadline. A
+TLS error, a refused certificate or a malformed response is not one of these, and still fails the
+test below (#931).
+
+The client wraps a transport failure, such as a USOCKET:TIMEOUT-ERROR, in an HTTP:HTTP-ERROR
+whose HTTP-ERROR-PHASE is :CONNECT or :RESPONSE, and that counts too (#976). It failed the
+Windows leg of train 78 when only the unwrapped types were matched. An HTTP-ERROR with a status,
+or one the client raised itself before sending, has no phase and does not count."
+  (or (and (typep condition 'http:fetch-refused)
+           (eq :unresolvable (http:fetch-refused-reason condition)))
+      ;; A MALFORMED-RESPONSE carries :RESPONSE too, when the connection ended early or WinHTTP
+      ;; refused the reply (12152), and it is this client's or the server's doing, not the
+      ;; network's (the hub's review of #979).
+      (and (typep condition 'http:http-error)
+           (not (typep condition 'http:malformed-response))
+           (member (http:http-error-phase condition) '(:connect :response))
+           t)
+      (typep condition '(or http:fetch-deadline-exceeded usocket:socket-condition
+                         usocket:ns-condition sb-sys:io-timeout))))
 
 (test public-https-through-the-pinned-path
   "Against servers on the internet: a public https page is fetched through FETCH-PUBLIC's pinned
 connection, and on Windows an expired certificate is refused as CERTIFICATE-EXPIRED by Windows'
 own policy. It needs the network, so it runs only on GitHub's runners (GITHUB_ACTIONS), never
-by default on a developer's machine."
+by default on a developer's machine.
+
+ANY HTTP STATUS PASSES. A response of any status means the TLS handshake, the verification of
+the server's certificate and the reading of an HTTP response all happened through the pinned
+connection, which is what this test is for. example.com once answered a runner with 503, and
+requiring 200 failed a run whose change could not have caused it (#931).
+
+A FAILURE OF THE RUNNER'S NETWORK IS A SKIP, with the condition as its reason: a host that does
+not resolve, a connection that fails or times out, or the deadline passing
+(%RUNNER-NETWORK-FAILURE-P). Those are not this client's doing. Every other condition fails the
+test."
   (if (not (uiop:getenvp "GITHUB_ACTIONS"))
       (skip "Runs only on GitHub Actions (GITHUB_ACTIONS is not set here): it uses the network")
-      (progn
-        (let ((r (http:fetch-public "https://example.com/" :read-timeout 30 :deadline 60)))
-          (is (= 200 (http:response-status r))))
-        #+os-windows
-        (signals http:certificate-expired
-          (http:fetch-public "https://expired.badssl.com/" :read-timeout 30 :deadline 60)))))
+      (block network
+        (handler-bind ((error (lambda (e)
+                                (when (%runner-network-failure-p e)
+                                  (skip "~A" (format nil "the runner's network failed: ~A" e))
+                                  (return-from network)))))
+          (let* ((r (http:fetch-public "https://example.com/" :read-timeout 30 :deadline 60))
+                 (status (http:response-status r)))
+            (is (and (integerp status) (<= 100 status 599)) "the status was ~S" status))
+          #+(or os-windows os-macosx)
+          (signals http:certificate-expired
+            (http:fetch-public "https://expired.badssl.com/" :read-timeout 30 :deadline 60))))))
+
+(test the-runner-network-failures-are-told-apart-from-this-clients
+  "#931: what PUBLIC-HTTPS-THROUGH-THE-PINNED-PATH skips and what it fails on. A host that does
+not resolve and a passed deadline are the runner's network; a refused certificate, a malformed
+response and a refused private address are not."
+  (is-true (%runner-network-failure-p
+            (make-condition 'http:fetch-refused :url "https://x.test/" :reason :unresolvable)))
+  (is-true (%runner-network-failure-p
+            (make-condition 'http:fetch-deadline-exceeded :url "https://x.test/" :deadline 1)))
+  (is-false (%runner-network-failure-p
+             (make-condition 'http:fetch-refused :url "https://x.test/" :reason :private)))
+  (is-false (%runner-network-failure-p
+             (make-condition 'http:certificate-expired :host "x.test" :verdict :expired :code 0)))
+  (is-false (%runner-network-failure-p (make-condition 'http:malformed-response :detail "x")))
+  (is-false (%runner-network-failure-p
+             (make-condition 'http:malformed-response :detail "the connection ended" :phase :response))
+            "a malformed response is not the network's, though it carries :RESPONSE")
+  (is-true (%runner-network-failure-p
+            (make-condition 'http:http-error :detail "transport error" :phase :response))
+           "control: another :RESPONSE transport failure is")
+  #+os-windows
+  (is (eq 'http::malformed-response
+          (http::%transport-error-class (make-condition 'winhttp::win-error :code 12152)))
+      "WinHTTP's 12152 is signalled as a MALFORMED-RESPONSE")
+  #+os-windows
+  (is (eq 'http:http-error
+          (http::%transport-error-class (make-condition 'winhttp::win-error :code 12002)))
+      "control: a WinHTTP timeout is not"))
+
+(test a-wrapped-transport-failure-is-a-runner-network-failure
+  "#976: the client wraps a socket timeout in an HTTP-ERROR, \"transport error\". A refused
+connection on 127.0.0.1 comes back that way, wrapping USOCKET:TIMEOUT-ERROR on Linux, which is
+the condition from the Windows leg of train 78."
+  (let* ((port (let ((s (usocket:socket-listen "127.0.0.1" 0)))
+                 (prog1 (usocket:get-local-port s) (usocket:socket-close s))))
+         (wrapped (handler-case (progn (http:send-request
+                                        (http:make-request :url (format nil "http://127.0.0.1:~D/" port)
+                                                           :connect-timeout 2 :read-timeout 2)
+                                        '())
+                                       nil)
+                    (http:http-error (e) e))))
+    (is (typep wrapped 'http:http-error) "control: the failure arrived wrapped: ~S" wrapped)
+    (is-true (%runner-network-failure-p wrapped)))
+  (is-true (%runner-network-failure-p (make-condition 'http:http-error :phase :response
+                                                                       :detail "transport error: read timed out"))
+           "a failure after the request was sent, such as a read timeout, counts too")
+  (is-false (%runner-network-failure-p (make-condition 'http:http-error :status 503 :body "busy"))
+            "an HTTP status is the server's answer, not the runner's network")
+  (is-false (%runner-network-failure-p (make-condition 'http:http-error :detail "not a header name: \"a b\""))
+            "nor is a failure the client raised before sending"))
 
 ;;; --- the hub's review of #913 ---------------------------------------------------------------
 
@@ -1191,18 +1543,2002 @@ control character and no DEL."
     (is (= 200 status))
     (is (string= (format nil "a~Cb~Cc" #\Tab (code-char #xE9)) (gethash "x-a" fields)))))
 
-#+os-windows
+#+(or os-windows os-macosx)
 (test a-pinned-connection-to-an-ipv6-literal-asks-about-the-bare-address
   "F3: QURI keeps the brackets of https://[::1]/; the verifier is asked about ::1, the name a
-certificate's IP address entry holds."
+certificate's IP address entry holds. The same address written out in full, [0:0:0:0:0:0:0:1], is
+also asked about as ::1, the form %TLS-NAMES gives and the one Linux and macOS verify (#921)."
   (with-server (s (lambda (path head stream)
                     (declare (ignore path head))
                     (%write-response stream 200 '() "v6"))
                   :tls t)
-    (let* ((seen '())
-           (http::*server-certificate-verifier*
-             (lambda (chain host) (declare (ignore chain)) (push host seen) :trusted)))
-      (http:send-request (http:make-request :url (format nil "https://[::1]:~D/" (server-port s))
-                                            :connect-address "127.0.0.1" :read-timeout 5)
+    (dolist (host '("[::1]" "[0:0:0:0:0:0:0:1]"))
+      (let* ((seen '())
+             (http::*server-certificate-verifier*
+               (lambda (chain host) (declare (ignore chain)) (push host seen) :trusted)))
+        (http:send-request (http:make-request :url (format nil "https://~A:~D/" host (server-port s))
+                                              :connect-address "127.0.0.1" :read-timeout 5)
+                           '())
+        (is (equal '("::1") seen) "for ~A the verifier was asked about ~S" host seen)))))
+
+;;; --- what aion/retry reads from an HTTP-ERROR (#79) ------------------------------
+
+(defun %refusal (status &optional retry-after)
+  "The HTTP-ERROR ENSURE-2XX signals for a response with STATUS and, when given, a Retry-After
+header RETRY-AFTER."
+  (let ((headers (make-hash-table :test #'equal)))
+    (when retry-after (setf (gethash "retry-after" headers) retry-after))
+    (handler-case (progn (http:send-request (http:make-request :url "u") (list (http:ensure-2xx))
+                                            :perform (%ok :status status :headers headers))
+                         nil)
+      (http:http-error (e) e))))
+
+(test ensure-2xx-reads-retry-after
+  (is (eql 30 (http:http-error-retry-after (%refusal 429 "30"))))
+  (is (eql 30 (aion/retry:retry-after (%refusal 429 "30"))) "and AION/RETRY:RETRY-AFTER reads it")
+  (is (null (http:http-error-retry-after (%refusal 429))) "no header is NIL")
+  (is (null (http:http-error-retry-after (%refusal 503 "later"))) "nor is one it cannot read"))
+
+(test transience-of-an-http-error-follows-its-status
+  (dolist (status '(408 425 429 503 529))
+    (is (eq :transient (aion/retry:transience (%refusal status))) "~D" status))
+  (dolist (status '(500 502 504))
+    (is (eq :unknown (aion/retry:transience (%refusal status))) "~D" status))
+  (dolist (status '(400 401 403 404 409 422))
+    (is (null (aion/retry:transience (%refusal status))) "~D" status)))
+
+(test transience-of-a-transport-failure-follows-how-far-it-got
+  (is (eq :transient (aion/retry:transience (make-condition 'http:http-error :phase :connect))))
+  (is (eq :unknown (aion/retry:transience (make-condition 'http:http-error :phase :response))))
+  (is (null (aion/retry:transience (make-condition 'http:http-error :detail "a refused header")))
+      "a failure this client raised before sending is not transient"))
+
+(test a-refused-connection-is-a-connect-phase-failure
+  ;; A port nothing listens on: bound, then closed, so nothing can answer. The connect timeout
+  ;; is well above the time the refusal takes to arrive. Windows retries a refused connect to
+  ;; 127.0.0.1 for about two seconds before it reports the refusal, so with a two-second
+  ;; timeout WinHTTP reported 12002 (a timeout) on the CI Windows leg, not 12029 (#974, run
+  ;; 40653707988), and the test measured a timeout instead of a refusal.
+  (let ((port (let ((s (usocket:socket-listen "127.0.0.1" 0)))
+                (prog1 (usocket:get-local-port s) (usocket:socket-close s)))))
+    ;; A POST, which never uses dexador's connection pool (the hub's review of #974), so a
+    ;; refusal shows the request was not sent. A GET's refusal may have followed a send on a
+    ;; pooled connection, and is :RESPONSE on the dexador path.
+    (let ((e (handler-case (progn (http:send-request
+                                   (http:make-request :method :post
+                                                      :url (format nil "http://127.0.0.1:~D/" port)
+                                                      :content "x"
+                                                      :connect-timeout 15 :read-timeout 15)
+                                   (list (http:ensure-2xx)))
+                                  nil)
+               (http:http-error (e) e))))
+      ;; Each message names the failure, so a platform whose transport signals a type the
+      ;; classifier does not know shows which one (#974: WinHTTP's 12029 on Windows).
+      (is (typep e 'http:http-error) "got ~S" e)
+      (is (eq :connect (and e (http:http-error-phase e))) "phase ~S for: ~A"
+          (and e (http:http-error-phase e)) e)
+      (is (aion/retry:transient-p e) "so the default policy retries it: ~A" e))))
+
+;;; --- where a pinned connection failed, from the call that failed (review of #974) -------
+
+(defun %pinned-failure (port &key (scheme "http") (read-timeout 2))
+  "The HTTP-ERROR a pinned request to 127.0.0.1:PORT signals."
+  (handler-case (progn (http:send-request
+                        (http:make-request :url (format nil "~A://pinned.test:~D/" scheme port)
+                                           :connect-address "127.0.0.1"
+                                           :connect-timeout 2 :read-timeout read-timeout)
+                        '())
+                       nil)
+    (http:http-error (e) e)))
+
+(defmacro with-silent-listener ((port-var &key reply) &body body)
+  "Run BODY with PORT-VAR bound to a port on 127.0.0.1 whose server accepts one connection,
+writes REPLY (a string) when given, and then sends nothing more until BODY ends."
+  (let ((listener (gensym)) (thread (gensym)))
+    `(let* ((,listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t))
+            (,port-var (usocket:get-local-port ,listener))
+            (,thread (bt:make-thread
+                      (lambda ()
+                        (ignore-errors
+                         (let ((c (usocket:socket-accept ,listener :element-type '(unsigned-byte 8))))
+                           (when ,reply
+                             (write-sequence (sb-ext:string-to-octets ,reply)
+                                             (usocket:socket-stream c))
+                             (finish-output (usocket:socket-stream c)))
+                           (sleep 5)
+                           (usocket:socket-close c)))))))
+       (unwind-protect (progn ,@body)
+         (ignore-errors (bt:destroy-thread ,thread))
+         (usocket:socket-close ,listener)))))
+
+(test a-pinned-connection-that-was-refused-is-a-connect-failure
+  (let* ((port (let ((s (usocket:socket-listen "127.0.0.1" 0)))
+                 (prog1 (usocket:get-local-port s) (usocket:socket-close s))))
+         (e (%pinned-failure port)))
+    (is (typep e 'http:http-error))
+    (is (eq :connect (and e (http:http-error-phase e))))))
+
+(test a-pinned-failure-after-connecting-is-a-response-failure-whatever-its-type
+  ;; The connection is made and the request sent; the server never answers, and the read times
+  ;; out. It happened after the connection was made, so it is :RESPONSE, and a POST is not
+  ;; resent. Before #985 the condition that arrived here was dexador's attempt to reconnect by
+  ;; resolving pinned.test, a USOCKET:NS-HOST-NOT-FOUND-ERROR, which by its type is :CONNECT.
+  (with-silent-listener (port)
+    (let ((e (%pinned-failure port :read-timeout 1)))
+      (is (typep e 'http:http-error) "got ~S" e)
+      (is (eq :response (and e (http:http-error-phase e))) "got ~S: ~A" (and e (http:http-error-phase e)) e)
+      (is (not (aion/retry:transient-p e)) "the default policy does not resend it"))))
+
+#-os-windows
+(test a-tls-failure-on-a-pinned-connection-has-no-phase
+  ;; A server that answers the TLS handshake with plain text. Retrying cannot fix that, so it
+  ;; must not be classed as a transport failure either way.
+  (with-silent-listener (port :reply (format nil "HTTP/1.1 400 Bad Request~C~C~C~C" #\Return #\Linefeed #\Return #\Linefeed))
+    (let ((e (%pinned-failure port :scheme "https")))
+      (is (typep e 'http:http-error) "got ~S" e)
+      (is (null (and e (http:http-error-phase e))) "got ~S: ~A" (and e (http:http-error-phase e)) e)
+      (is (not (aion/retry:transient-or-unknown-p e))))))
+
+;;; --- a pinned request uses one connection (#985) -----------------------------------------
+
+(defmacro with-counting-listener ((port-var count-var) &body body)
+  "Run BODY with PORT-VAR bound to a port on 127.0.0.1 whose server accepts every connection and
+never answers, and COUNT-VAR to a function returning how many connections it accepted."
+  (let ((listener (gensym)) (thread (gensym)) (accepted (gensym)) (held (gensym)))
+    `(let* ((,listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t :backlog 8))
+            (,port-var (usocket:get-local-port ,listener))
+            (,accepted 0)
+            (,held '())
+            (,thread (bt:make-thread
+                      (lambda ()
+                        (ignore-errors
+                         (loop (let ((c (usocket:socket-accept ,listener)))
+                                 (incf ,accepted)
+                                 (push c ,held)))))))
+            (,count-var (lambda () ,accepted)))
+       (unwind-protect (progn ,@body)
+         (ignore-errors (bt:destroy-thread ,thread))
+         (dolist (c ,held) (ignore-errors (usocket:socket-close c)))
+         (usocket:socket-close ,listener)))))
+
+(test a-read-that-returns-after-the-timer-fired-is-not-a-timeout
+  "#1063: on Windows a pinned request's read timeout is a timer that closes the socket
+(%IDLE-WATCHED-STREAM). A read that returned its data was reported as SB-SYS:IO-TIMEOUT when the
+timer fired before the read's own clean-up unscheduled it. The window is forced here with a read
+that keeps going past the timeout and then returns without touching the socket: it must return
+its value. The control is a read that fails once the timer has closed the socket, as a real
+blocked read does, which must still signal the timeout."
+  #-os-windows (skip "the watched stream is Windows-only; elsewhere the socket's receive timeout ends a read")
+  #+os-windows
+  (flet ((watched ()
+           ;; An inner stream with nothing to LISTEN to, so the read is watched; no socket, so
+           ;; the timer's close does nothing here.
+           (make-instance 'aion/http-client::%idle-watched-stream
+                          :inner (make-string-input-stream "") :socket nil :seconds 0.2)))
+    (let ((s (watched)))
+      (is (eql 42 (aion/http-client::%call-watched s (lambda () (sleep 0.6) 42)))
+          "a read that returned after the timer fired returns its value")
+      (is-true (aion/http-client::%timed-out s) "the timer did fire, so the window was reached"))
+    ;; Control: a read the timer's close ended is still a timeout.
+    (let ((s (watched)))
+      (signals sb-sys:io-timeout
+        (aion/http-client::%call-watched
+         s (lambda ()
+             (loop until (aion/http-client::%timed-out s) do (sleep 0.02))
+             (error "the socket was closed")))))
+    (let ((s (watched)))
+      (is (eql 7 (aion/http-client::%call-watched s (lambda () 7))))
+      (sleep 0.4)
+      (is (null (aion/http-client::%timed-out s))
+          "a read that finished first leaves the timer nothing to do"))))
+
+(test a-timer-that-fires-after-the-read-finished-does-nothing
+  "#1063, from the review of #1070: the other half of the window. The timer can fire after the
+read has recorded that it finished and before the read unschedules it. Its callback,
+%WATCH-FIRE, is called here with the read's state already :DONE, which is that moment: it must
+neither mark the stream timed out nor close the socket. The control calls it with the state
+still :READING, when it must do both. The socket is a real listening socket, which signals once
+it is closed."
+  #-os-windows (skip "the watched stream is Windows-only; elsewhere the socket's receive timeout ends a read")
+  #+os-windows
+  (flet ((watched (socket)
+           (make-instance 'aion/http-client::%idle-watched-stream
+                          :inner (make-string-input-stream "") :socket socket :seconds 60))
+         (open-p (socket)
+           (handler-case (progn (usocket:get-local-port socket) t)
+             (error () nil))))
+    (let* ((socket (usocket:socket-listen "127.0.0.1" 0))
+           (s (watched socket))
+           (state (list :done)))
+      (unwind-protect
+           (progn
+             (aion/http-client::%watch-fire s state)
+             (is (eq :done (car state)))
+             (is (null (aion/http-client::%timed-out s)) "a finished read is not marked timed out")
+             (is-true (open-p socket) "and its socket is not closed"))
+        (ignore-errors (usocket:socket-close socket))))
+    (let* ((socket (usocket:socket-listen "127.0.0.1" 0))
+           (s (watched socket))
+           (state (list :reading)))
+      (unwind-protect
+           (progn
+             (aion/http-client::%watch-fire s state)
+             (is (eq :fired (car state)))
+             (is-true (aion/http-client::%timed-out s) "control: a read still waiting is timed out")
+             (is (null (open-p socket)) "control: and its socket is closed"))
+        (ignore-errors (usocket:socket-close socket))))))
+
+(test a-pinned-request-that-times-out-uses-one-connection
+  "#985: the URL names localhost, which resolves, and the request is pinned to 127.0.0.1. The
+server accepts and never answers. Before #985, dexador reconnected through DNS after the read
+timed out and sent the request again, and this server counted two connections."
+  (with-counting-listener (port accepted)
+    (let ((e (handler-case
+                 (progn (http:send-request
+                         (http:make-request :url (format nil "http://localhost:~D/" port)
+                                            :connect-address "127.0.0.1"
+                                            :connect-timeout 2 :read-timeout 1)
                          '())
-      (is (equal '("::1") seen) "the verifier was asked about ~S" seen))))
+                        nil)
+               (http:http-error (e) e))))
+      (sleep 0.5)                       ; a second connection, if one were made, has arrived
+      (is (= 1 (funcall accepted)) "the server accepted ~D connections" (funcall accepted))
+      (is (typep e 'http:http-error))
+      (is (eq :response (and e (http:http-error-phase e))))
+      (is (search "timeout" (string-downcase (or (and e (http:http-error-detail e)) "")))
+          "the caller gets the read timeout: ~A" (and e (http:http-error-detail e))))))
+
+(test fetch-public-stops-at-its-deadline-when-the-server-never-answers
+  "#985: a real socket, not a stub. The server accepts and never answers, and there is no read
+timeout, so only the deadline can end the fetch. On Windows the deadline used to shut the socket
+down, which did not wake the read: the fetch was still waiting after 20 seconds. An outer limit
+of 30 seconds makes that a failure here rather than a hang."
+  (with-counting-listener (port accepted)
+    (let* ((start (get-internal-real-time))
+           (result (handler-case
+                       (sb-ext:with-timeout 30
+                         (handler-case
+                             (progn (http:fetch-public (format nil "http://silent.test:~D/" port)
+                                                       :resolve (%resolver '(("silent.test" "127.0.0.1")))
+                                                       :address-policy #'%loopback-allowed
+                                                       :deadline 2)
+                                    :returned)
+                           (http:fetch-deadline-exceeded () :deadline)))
+                     (sb-ext:timeout () :still-waiting)))
+           (seconds (/ (- (get-internal-real-time) start) internal-time-units-per-second)))
+      (is (eq :deadline result) "got ~S after ~,1F s" result seconds)
+      (is (< seconds 10) "and within a few seconds of the deadline: ~,1F s" seconds)
+      (is (= 1 (funcall accepted)) "on one connection: ~D" (funcall accepted)))))
+
+(test a-pinned-request-sends-dexadors-user-agent-and-accept-unless-given
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "ok")))
+    (http:send-request (http:make-request :url (%local s "/" "pinned.test")
+                                          :connect-address "127.0.0.1" :read-timeout 5)
+                       '())
+    (http:send-request (http:make-request :url (%local s "/" "pinned.test")
+                                          :connect-address "127.0.0.1" :read-timeout 5
+                                          :headers '(("User-Agent" . "probe/1")
+                                                     ("Accept" . "text/html")))
+                       '())
+    (destructuring-bind (second first) (server-heads s)
+      (is (string= dexador.util:*default-user-agent* (%head-header first "User-Agent"))
+          "as a request through dexador sent")
+      (is (string= "*/*" (%head-header first "Accept")))
+      (is (string= "probe/1" (%head-header second "User-Agent")) "a caller's own wins")
+      (is (string= "text/html" (%head-header second "Accept"))))))
+
+(test a-pinned-request-frames-its-body-as-dexador-did
+  "#985: string content without a Content-Type is text/plain, and a POST with no content says
+Content-Length: 0, as dexador wrote them; a GET with no content says neither."
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "ok")))
+    (flet ((send (&rest args)
+             (http:send-request (apply #'http:make-request :url (%local s "/" "pinned.test")
+                                       :connect-address "127.0.0.1" :read-timeout 5 args)
+                                '())
+             (first (server-heads s))))
+      (let ((head (send :method :post :content "hello")))
+        (is (string= "text/plain" (%head-header head "Content-Type")))
+        (is (string= "5" (%head-header head "Content-Length"))))
+      (let ((head (send :method :post :content "{}" :headers '(("Content-Type" . "application/json")))))
+        (is (string= "application/json" (%head-header head "Content-Type")) "a caller's own wins"))
+      (let ((head (send :method :post)))
+        (is (string= "0" (%head-header head "Content-Length")))
+        (is (null (%head-header head "Content-Type"))))
+      (let ((head (send :method :get)))
+        (is (null (%head-header head "Content-Length")))))))
+
+;;; --- a pooled request's failure to connect is not known to be before the send (#974 review) --
+
+(test a-request-that-may-have-used-a-pooled-connection-does-not-fail-in-the-connect-phase
+  "dexador pools connections, and a request it sent on a pooled connection that then dropped is
+sent again by dexador on a new one. A refusal of that new connection does not show the request
+was not acted on. So on the dexador path a failure to connect is :CONNECT only for a request
+that could not have used the pool, and a request that is not idempotent never uses it."
+  (let ((refused (make-condition 'usocket:connection-refused-error :socket nil)))
+    (is (eq :response (http::%transport-phase refused nil :pooled t))
+        "a pooled request's refused reconnect is :RESPONSE")
+    (is (eq :connect (http::%transport-phase refused nil :pooled nil))
+        "control: a request on a new connection is :CONNECT"))
+  (flet ((args (method) (http::%dex-args (http:make-request :method method :url "http://x.test/"))))
+    (is (and (member :use-connection-pool (args :post))
+             (null (getf (args :post) :use-connection-pool))
+             (null (getf (args :post) :keep-alive)))
+        "a POST gets a new connection: ~S" (args :post))
+    (is (null (member :use-connection-pool (args :get)))
+        "control: a GET may use the pool: ~S" (args :get))))
+;;; --- a response read as it arrives, and cancelling it (#984) --------------------------------
+
+(defun %octets-of (string) (sb-ext:string-to-octets string :external-format :utf-8))
+
+(defun %events-of (text)
+  "Every event READ-EVENT finds in TEXT, as lists (DATA EVENT ID)."
+  (let ((in (make-instance 'http::%octets-input :octets (%octets-of text))))
+    (loop for (data event id) = (multiple-value-list (http:read-event in))
+          while data collect (list data event id))))
+
+(test read-event-reads-data-event-and-id-and-skips-comments
+  "Data lines are joined with newlines; a comment, an event with no data and a CR before the LF are
+dropped; the event and id fields belong to their own event only."
+  (is (equal '(("one" "start" "7") ("two" nil nil) ("a
+b" nil nil) ("é" nil nil))
+             (%events-of (concatenate
+                          'string
+                          (format nil ": hello~%event: start~%id: 7~%data: one~%~%data:two~%~%")
+                          (format nil "event: empty~%~%data: a~C~%data: b~C~%~C~%data: é~%~%"
+                                  #\Return #\Return #\Return))))))
+
+(test read-event-discards-an-event-the-stream-ends-in
+  "An event with no blank line after it when the stream ends is not returned, whether the stream
+ends after a whole data line or in the middle of one: the connection dropped before the event was
+finished. The events before it are returned."
+  (is (equal '(("whole" nil nil)) (%events-of (format nil "data: whole~%~%data: cut~%"))))
+  (is (equal '(("whole" nil nil)) (%events-of (format nil "data: whole~%~%data: {\"a\":"))))
+  (is (null (%events-of (format nil "event: x~%data: only~%")))))
+
+(test read-event-refuses-an-event-over-its-limit
+  "An event longer than *MAX-EVENT-OCTETS* signals HTTP-ERROR rather than being read whole."
+  (let ((http:*max-event-octets* 16))
+    (signals http:http-error (%events-of (format nil "data: ~A~%~%" (make-string 40 :initial-element #\x))))
+    (is (equal '(("short" nil nil)) (%events-of (format nil "data: short~%~%"))))))
+
+(defun %sse-server-handler (first-sent next-allowed)
+  "A handler that sends one event, sets FIRST-SENT's car, waits until NEXT-ALLOWED's car is true
+(at most 10 seconds), then sends a second event and ends the stream."
+  (lambda (path head stream)
+    (declare (ignore path head))
+    (ignore-errors
+     (aion/test-http:write-head stream 200 '(("Content-Type" . "text/event-stream")
+                                             ("Connection" . "close")))
+     (write-sequence (%octets-of (format nil "data: first~%~%")) stream)
+     (finish-output stream)
+     (setf (car first-sent) t)
+     (loop repeat 100 until (car next-allowed) do (sleep 0.1))
+     (write-sequence (%octets-of (format nil "data: second~%~%")) stream)
+     (finish-output stream))))
+
+(test a-streamed-response-gives-each-event-before-the-next-is-sent
+  "OPEN-RESPONSE-STREAM returns once the head has arrived, and READ-EVENT returns the first event
+while the server is still holding back the second."
+  (let ((first-sent (list nil)) (next-allowed (list nil)))
+    (with-server (s (%sse-server-handler first-sent next-allowed))
+      (multiple-value-bind (body status headers)
+          (http:open-response-stream (http:make-request :url (%local s "/events") :read-timeout 15))
+        (unwind-protect
+             (progn
+               (is (= 200 status))
+               (is (equal "text/event-stream" (http:header-value headers "content-type")))
+               (is (equal "first" (http:read-event body)))
+               (is (null (car next-allowed)) "the second event had not been allowed yet")
+               (setf (car next-allowed) t)
+               (is (equal "second" (http:read-event body)))
+               (is (null (http:read-event body)) "then the stream ends"))
+          (setf (car next-allowed) t)
+          (close body)))
+      (is (search "Accept-Encoding: identity" (first (server-heads s)))
+          "the request asks for an uncompressed body"))))
+
+(test a-streamed-error-response-is-returned-with-its-body
+  "A non-2xx is returned with its status, and its body can be read."
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 429 '() "{\"error\":\"slow down\"}")))
+    (multiple-value-bind (body status)
+        (http:open-response-stream (http:make-request :url (%local s "/") :read-timeout 5))
+      (unwind-protect
+           (progn
+             (is (= 429 status))
+             (is (equal "{\"error\":\"slow down\"}"
+                        (sb-ext:octets-to-string
+                         (coerce (loop for b = (read-byte body nil nil) while b collect b)
+                                 '(vector (unsigned-byte 8)))
+                         :external-format :utf-8))))
+        (close body)))))
+
+(defun %silent-handler (closed-at)
+  "A handler that sends one event and then sends nothing, the way a provider's connection is quiet
+while the model thinks, for at most 10 seconds. A thread of its own reads the connection, and
+when the read returns, because the client closed the connection or shut it down, stores the time
+in CLOSED-AT's car. The handler returns once that happens or the 10 seconds pass."
+  (lambda (path head stream)
+    (declare (ignore path head))
+    (ignore-errors
+     (aion/test-http:write-head stream 200 '(("Content-Type" . "text/event-stream")
+                                             ("Connection" . "close")))
+     (write-sequence (%octets-of (format nil "data: first~%~%")) stream)
+     (finish-output stream)
+     (let* ((ending (list nil))
+            ;; THREAD-LIFETIME: blocks reading the connection until the client closes it, or
+            ;; until this handler returns and the server closes it. The JOIN below waits for it.
+            (watcher (bt:make-thread
+                      (lambda ()
+                        (ignore-errors (read-byte stream nil nil))
+                        (unless (car ending) (setf (car closed-at) (get-internal-real-time))))
+                      :name "test server close watcher")))
+       (loop repeat 100 until (car closed-at) do (sleep 0.1))
+       (setf (car ending) t)
+       (unless (car closed-at)
+         ;; The client has not closed it: close it from here, so the watcher's read returns.
+         (ignore-errors (close stream :abort t)))
+       (aion/test-threads:join watcher :timeout 15)))))
+
+(test cancelling-a-streamed-request-closes-its-connection
+  "A thread blocked reading a stream that the server keeps open is woken by CANCEL-REQUEST from
+another thread, with REQUEST-CANCELLED, and the server sees the connection close within two
+seconds of the cancel. The server sends nothing after the first event, so the reader is blocked
+in a read when the cancel comes: a cancel that only marked the request would leave it there, and
+the connection open, until the server gave up after 10 seconds."
+  (let ((closed-at (list nil))
+        (cancel (http:make-request-cancel)))
+    (with-server (s (%silent-handler closed-at))
+      (let* ((outcome (list nil))
+             (first (list nil))
+             ;; THREAD-LIFETIME: reads the stream until the cancel below wakes it with
+             ;; REQUEST-CANCELLED, or until the server ends the stream after 10 seconds; it then
+             ;; closes the body and returns. The JOIN waits for it.
+             (reader (bt:make-thread
+                      (lambda ()
+                        (multiple-value-bind (body)
+                            (http:open-response-stream
+                             (http:make-request :url (%local s "/") :read-timeout 30)
+                             :cancel cancel)
+                          (unwind-protect
+                               (handler-case
+                                   (progn (setf (car first) (http:read-event body))
+                                          (http:read-event body)
+                                          (setf (car outcome) :ended))
+                                 (http:request-cancelled () (setf (car outcome) :cancelled)))
+                            (close body))))
+                      :name "streamed request reader")))
+        (loop repeat 50 until (car first) do (sleep 0.1))
+        (is (equal "first" (car first)) "the first event arrived before the cancel")
+        (sleep 0.3)
+        (is (null (car closed-at)) "the connection was open before the cancel")
+        (let ((cancelled-at (get-internal-real-time)))
+          (http:cancel-request cancel)
+          (is (http:request-cancelled-p cancel))
+          (aion/test-threads:join reader :timeout 15)
+          (is (eq :cancelled (car outcome)) "the reader was woken with REQUEST-CANCELLED")
+          (loop repeat 30 until (car closed-at) do (sleep 0.1))
+          (is-true (car closed-at) "the server saw the connection close")
+          (when (car closed-at)
+            (is (< (/ (- (car closed-at) cancelled-at) internal-time-units-per-second) 2)
+                "within two seconds of the cancel")))))))
+
+(defun %cancellable-reader (server cancel first outcome)
+  "A thread that opens a stream to SERVER with CANCEL, stores its first event in FIRST's car, then
+reads on and stores :CANCELLED or :ENDED in OUTCOME's car."
+  ;; THREAD-LIFETIME: reads the stream until a cancel wakes it with REQUEST-CANCELLED, or until
+  ;; the server ends the stream after 10 seconds; it then closes the body and returns. The caller
+  ;; joins it.
+  (bt:make-thread
+   (lambda ()
+     (multiple-value-bind (body)
+         (http:open-response-stream (http:make-request :url (%local server "/") :read-timeout 30)
+                                    :cancel cancel)
+       (unwind-protect
+            (handler-case
+                (progn (setf (car first) (http:read-event body))
+                       (http:read-event body)
+                       (setf (car outcome) :ended))
+              (http:request-cancelled () (setf (car outcome) :cancelled)))
+         (close body))))
+   :name "streamed request reader"))
+
+(test one-cancel-stops-every-request-opened-with-it
+  "Two threads each have a stream open with the same REQUEST-CANCEL, the way two calls made under
+one turn's cancel would. One CANCEL-REQUEST wakes both with REQUEST-CANCELLED, and both servers
+see their connection close. When both bodies are closed the handle holds no request."
+  (let ((closed-a (list nil)) (closed-b (list nil))
+        (cancel (http:make-request-cancel)))
+    (with-server (sa (%silent-handler closed-a))
+      (with-server (sb (%silent-handler closed-b))
+        (let* ((first-a (list nil)) (first-b (list nil))
+               (outcome-a (list nil)) (outcome-b (list nil))
+               (reader-a (%cancellable-reader sa cancel first-a outcome-a))
+               (reader-b (%cancellable-reader sb cancel first-b outcome-b)))
+          (loop repeat 50 until (and (car first-a) (car first-b)) do (sleep 0.1))
+          (is (equal '("first" "first") (list (car first-a) (car first-b)))
+              "both first events arrived before the cancel")
+          (http:cancel-request cancel)
+          (aion/test-threads:join reader-a :timeout 15)
+          (aion/test-threads:join reader-b :timeout 15)
+          (is (equal '(:cancelled :cancelled) (list (car outcome-a) (car outcome-b)))
+              "both readers were woken with REQUEST-CANCELLED")
+          (loop repeat 30 until (and (car closed-a) (car closed-b)) do (sleep 0.1))
+          (is-true (car closed-a) "the first server saw its connection close")
+          (is-true (car closed-b) "the second server saw its connection close")
+          (is (null (http::request-cancel-watches cancel))
+              "the closed bodies took their requests back from the handle"))))))
+
+(test a-request-cancelled-before-it-is-opened-never-connects
+  "OPEN-RESPONSE-STREAM with a handle that was already cancelled signals REQUEST-CANCELLED and
+sends nothing."
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "x")))
+    (let ((cancel (http:make-request-cancel)))
+      (http:cancel-request cancel)
+      (signals http:request-cancelled
+        (http:open-response-stream (http:make-request :url (%local s "/") :read-timeout 5)
+                                   :cancel cancel))
+      (sleep 0.2)
+      (is (zerop (%requests s)) "no request reached the server"))))
+
+(test closing-a-streamed-body-closes-its-connection
+  "Closing the body before the response has ended closes the connection, so the server stops."
+  (let ((closed-at (list nil)))
+    (with-server (s (%silent-handler closed-at))
+      (multiple-value-bind (body)
+          (http:open-response-stream (http:make-request :url (%local s "/") :read-timeout 5))
+        (is (equal "first" (http:read-event body)))
+        (close body))
+      (loop repeat 30 until (car closed-at) do (sleep 0.1))
+      (is-true (car closed-at) "the server saw the connection close"))))
+
+;;; --- one rule for whether a host may be sent requests in the clear (#1082) ---------------
+
+(test local-host-p-answers-for-names-literals-and-the-forms-that-look-local
+  "#1082: hermes core and hermes/blob each wrote this rule, for a Twilio API base and an S3
+endpoint, and the two copies acquired different holes -- see #1089 and the review of #1084. It
+lives here now, next to the primitives it uses, so there is one implementation to get right."
+  ;; Local: the name, and every literal whose category says so.
+  (dolist (host '("localhost" "LOCALHOST" "127.0.0.1" "127.1.2.3" "::1" "10.0.0.5"
+                  "172.17.0.2" "192.168.1.9" "169.254.1.2" "fc00::1" "fe80::1"))
+    (is-true (http:local-host-p host) "~A is local" host))
+  ;; Not local: public literals, and a name that does not resolve.
+  (dolist (host '("8.8.8.8" "93.184.216.34" "2606:2800:220:1:248:1893:25c8:1946"
+                  "nothing-here.invalid" "a.b.c.invalid"))
+    (is-false (http:local-host-p host) "~A is not local" host))
+  ;; 6TO4 IS NOT LOCAL, whatever address it carries. ADDRESS-CATEGORY answers about it by the
+  ;; IPv4 address inside, which is the right conservative answer for a guard deciding whether a
+  ;; destination may be reached at all, and the wrong answer for this question: 6to4 reaches its
+  ;; destination through a public relay (the review of #1084).
+  (dolist (host '("2002:7f00:1::" "2002:a00:5::" "2002:c0a8:109::"))
+    (is-true (member (http:address-category host) '(:loopback :private))
+             "control: ~A still reports a non-public category, which the SSRF guard needs" host)
+    (is-false (http:local-host-p host) "but ~A is not local, because 6to4 goes over a relay" host))
+  ;; NAT64 IS NOT LOCAL either, and for the same reason: reaching the IPv4 address means going
+  ;; through a gateway that is often the carrier's (the review of #1094). Both the well-known
+  ;; prefix and RFC 8215's local-use one.
+  (dolist (host '("64:ff9b::7f00:1" "64:ff9b::a00:5"))
+    (is-true (member (http:address-category host) '(:loopback :private))
+             "control: ~A still reports a non-public category for the SSRF guard" host)
+    (is-false (http:local-host-p host) "but ~A is not local, because NAT64 goes through a gateway" host))
+  ;; RFC 8215's local-use prefix, 64:ff9b:1::/48, is NOT one ADDRESS-CATEGORY recognises:
+  ;; %EMBEDDED-IPV4 handles only the well-known /96, so 64:ff9b:1::7f00:1 reports :PUBLIC and was
+  ;; never local. Measured, after a control of mine asserted it was :LOOPBACK and failed. The
+  ;; LOCAL-HOST-P exclusion covers it anyway, so the answer does not depend on which of the two
+  ;; reasons applies.
+  (is (eq :public (http:address-category "64:ff9b:1::7f00:1"))
+      "the local-use NAT64 prefix is not read as carrying an IPv4 address")
+  (is-false (http:local-host-p "64:ff9b:1::7f00:1"))
+  ;; An IPv4-mapped loopback address IS local: there is no relay or gateway, it is the same stack.
+  (is-true (http:local-host-p "::ffff:127.0.0.1"))
+  ;; A LEADING ZERO IN A DOTTED QUAD IS NOT LOCAL, whatever the octets say. This is the one IPv4
+  ;; spelling where PARSE-ADDRESS and the system resolver can disagree, and the connection
+  ;; follows the resolver. 010.8.8.8 is the case that matters: PARSE-ADDRESS reads it as
+  ;; 10.8.8.8 and calls it private (the review of #1094).
+  (dolist (host '("010.8.8.8" "010.0.0.1" "0127.0.0.1" "127.000.0.1"))
+    (is-false (http:local-host-p host) "~A is not local: its spelling is ambiguous" host))
+  (is (eq :private (http:address-category "010.8.8.8"))
+      "control: PARSE-ADDRESS does read 010.8.8.8 as a private address, which is the disagreement")
+  ;; THE OTHER NON-CANONICAL SPELLINGS ARE KEPT, deliberately: they fail PARSE-ADDRESS, so they
+  ;; go to RESOLVE-HOST -- the same resolver the connection uses -- and there is no second parser
+  ;; to disagree with. If the resolver says loopback, the connection goes to loopback.
+  ;;
+  ;; ASSERTED UNCONDITIONALLY, AGAINST WHAT THE RESOLVER SAYS. An earlier version of this ran the
+  ;; assertion only (WHEN RESOLVED), so a platform whose resolver declined these spellings turned
+  ;; the check into nothing rather than into a failure -- the same shape as the empty-host case
+  ;; above, which passed on three legs and failed on Windows for a reason unrelated to the
+  ;; property it names. The expectation is now derived from the resolver's own answer, so it holds
+  ;; whichever way a platform goes and still fails if LOCAL-HOST-P disagrees with it.
+  ;;
+  ;; %LOCAL-ADDRESS-P is the function LOCAL-HOST-P itself uses, not a copy of the rule written
+  ;; here: what is being asserted is that LOCAL-HOST-P is RESOLVE-HOST composed with that
+  ;; predicate, which is its contract. A control that re-derived locality would be checking a
+  ;; copy of the thing under test.
+  (dolist (host '("127.1" "0x7f.0.0.1" "2130706433" "localhost"))
+    (let* ((addresses (http:resolve-host host))
+           (expected (and addresses (every #'http::%local-address-p addresses) t)))
+      (is (eq expected (and (http:local-host-p host) t))
+          "~A: this resolver answers ~S, so LOCAL-HOST-P must be ~S" host addresses expected)))
+  (is-false (http:local-host-p nil) "no host is not a local host")
+  ;; AN EMPTY OR BLANK HOST IS REFUSED ON EVERY PLATFORM, which it was not before. On Linux
+  ;; usocket:get-hosts-by-name "" signals NS-HOST-NOT-FOUND-ERROR, so the answer was NIL by
+  ;; accident; on Windows getaddrinfo resolves an empty node name to the loopback address, so the
+  ;; answer was T. This check passed on three legs and failed on Windows, which is the shape of a
+  ;; test that is really asking what the local resolver does (#1082).
+  (dolist (host (list "" " " "   " (format nil "~C" #\Tab)))
+    (is-false (http:local-host-p host) "~S is not a local host" host))
+  ;; The control: a name that does resolve locally is still local, so the refusal above is about
+  ;; the host being empty and not about names having stopped working.
+  (let ((resolved (http:resolve-host "localhost")))
+    (is-true (and resolved (http:local-host-p "localhost"))
+             "control: localhost is still local")))
+
+(test local-host-p-requires-every-resolved-address-to-be-local
+  "The review of #1094, and the sharpest finding in it: nothing exercised a name with more than
+one resolved address, so changing EVERY to SOME in LOCAL-HOST-P passed the whole suite.
+Measured before writing this -- 493 checks, Fail 0, with SOME in place.
+
+That is the property that matters. A name resolving to one private address AND one public one
+must NOT be local: the connection may go to either, so approving it would allow plaintext to a
+public host on the strength of a loopback entry beside it.
+
+RESOLUTION IS STUBBED rather than arranged in DNS, because the cases that matter -- mixed,
+public-only, a resolution error -- cannot be conjured from a real resolver on a build machine,
+and a test that waits for the network to produce them is a test that silently stops running."
+  (let ((original (fdefinition 'http:resolve-host)))
+    (unwind-protect
+         (flet ((answering (addresses)
+                  ;; ADDRESSES is a list, or :ERROR to make resolution signal.
+                  (setf (fdefinition 'http:resolve-host)
+                        (lambda (host)
+                          (declare (ignore host))
+                          (if (eq addresses :error)
+                              (error "aion/http-client/tests: the resolver failed")
+                              addresses)))))
+           (dolist (case '((:all-local ((127 0 0 1)) t)
+                           (:all-local-several ((127 0 0 1) (10 0 0 5) (192 168 1 9)) t)
+                           (:public-only ((8 8 8 8)) nil)
+                           (:public-several ((8 8 8 8) (93 184 216 34)) nil)
+                           ;; THE CASE THAT KILLS "SOME": one local, one public. EVERY says no,
+                           ;; SOME says yes, and the connection may use either address.
+                           (:mixed-local-first ((127 0 0 1) (8 8 8 8)) nil)
+                           (:mixed-public-first ((8 8 8 8) (127 0 0 1)) nil)
+                           (:mixed-private-and-public ((10 0 0 5) (93 184 216 34)) nil)
+                           (:empty () nil)))
+             (destructuring-bind (name octet-lists expected) case
+               (answering (mapcar (lambda (o) (coerce o 'vector)) octet-lists))
+               (is (eq expected (and (http:local-host-p "a-name.invalid") t))
+                   "~A: a name resolving to ~S is ~:[not ~;~]local"
+                   name octet-lists expected)))
+           ;; 6to4 among the answers: not local, however local the address it carries looks.
+           (answering (list (http:parse-address "2002:7f00:1::")))
+           (is-false (http:local-host-p "a-name.invalid")
+                     "a name resolving only to 6to4 is not local")
+           (answering (list (http:parse-address "127.0.0.1") (http:parse-address "2002:7f00:1::")))
+           (is-false (http:local-host-p "a-name.invalid")
+                     "nor is one resolving to a loopback address and a 6to4 address")
+           ;; NAT64 likewise.
+           (answering (list (http:parse-address "64:ff9b::7f00:1")))
+           (is-false (http:local-host-p "a-name.invalid")
+                     "nor one resolving only to NAT64")
+           ;; A resolution error is not a local answer. LOCAL-HOST-P swallows it, so the point is
+           ;; that it swallows it to NIL and not to T.
+           (answering :error)
+           (is-false (http:local-host-p "a-name.invalid")
+                     "a name whose resolution signals is not local"))
+      (setf (fdefinition 'http:resolve-host) original)))
+  ;; The control: with resolution restored, a name that really does resolve locally is local
+  ;; again, so the cases above were about the fixture and not about the stub being left in place.
+  (is-true (http:local-host-p "localhost") "control: resolution is restored"))
+
+(test url-host-reads-the-host-quri-would-connect-to
+  "#1082: both callers had written this, and both got it wrong in their own way. QURI is used
+because it is the parser dexador parses a request URL with, and the brackets come off because
+every caller feeds the result to PARSE-ADDRESS or ADDRESS-CATEGORY."
+  (dolist (case '(("http://localhost:9000/x" . "localhost")
+                  ("http://127.0.0.1:9000" . "127.0.0.1")
+                  ("http://[::1]:9000/x" . "::1")
+                  ("https://[2606:2800::1]/x" . "2606:2800::1")
+                  ("http://minio:9000" . "minio")
+                  ;; The bypass that started #1089: a bracketed IPv6 in the userinfo. A parser
+                  ;; that stripped brackets returned "::1" here and the request went elsewhere.
+                  ("http://[::1]@evil.invalid/x" . "evil.invalid")
+                  ("http://[::1]:80@evil.invalid/x" . "evil.invalid")
+                  ("http://user:pw@evil.invalid" . "evil.invalid")))
+    (is (equal (cdr case) (http:url-host (car case)))
+        "~A has the host ~A" (car case) (cdr case)))
+  (is-false (http:url-host "not a url at all") "a value with no host reads as none")
+  ;; A bare authority has no scheme, and QURI reads the host as a scheme: callers prepend one.
+  (is-false (equal "localhost" (http:url-host "localhost:9000"))
+            "control: a bare host:port is NOT a URL, which is why callers add a scheme first"))
+
+(test proxy-arguments-decides-without-resolving-a-name
+  "The review of #1094. This decision used to call LOCAL-HOST-P, which resolves a name, on every
+plaintext request. Two problems: a blocking lookup on the send path that CONNECT-TIMEOUT does not
+cover, and a rebinding window -- a name that answers private now can answer public at connect
+time, and the request would then skip a configured egress proxy on the strength of a resolution
+that no longer holds. The decision is made for \"localhost\" and IP literals only; deciding by
+name belongs at configuration time, where a wrong answer is a refusal rather than a silently
+unproxied request."
+  (let ((looked-up '())
+        (original (fdefinition 'http:resolve-host)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'http:resolve-host)
+                 (lambda (host) (push host looked-up) (funcall original host)))
+           (dolist (url '("http://127.0.0.1:9000/x" "http://localhost/x" "http://[::1]/x"
+                          "http://10.0.0.5/x" "http://a-name.invalid/x" "https://a-name.invalid/x"
+                          "http://8.8.8.8/x"))
+             (http:proxy-arguments url))
+           (is (null looked-up)
+               "no name was resolved to decide how to proxy: ~S" looked-up)
+           ;; THE APPROVAL PATH RESOLVES NOTHING EITHER, and nothing asserted that until the
+           ;; review of #1134. The whole point of carrying a recorded verdict is that the send
+           ;; path does no lookup; a lookup added to this branch alone would have satisfied every
+           ;; assertion above, because none of them set an approval. Both schemes, because the
+           ;; https case takes a different exit and could resolve on the way to it.
+           (dolist (url '("http://approved.invalid/x" "https://approved.invalid/x"
+                          "http://other.invalid/x"))
+             (http::call-with-approved-local-host "approved.invalid"
+                                                  (lambda () (http:proxy-arguments url))))
+           (is (null looked-up)
+               "no name was resolved with an approval set either: ~S" looked-up)
+           ;; The control: the stub does fire when something asks LOCAL-HOST-P about a name, so
+           ;; the assertions above are about this path and not about an unreachable stub.
+           (http:local-host-p "another-name.invalid")
+           (is-true (member "another-name.invalid" looked-up :test #'string=)
+                    "control: LOCAL-HOST-P does resolve a name: ~S" looked-up))
+      (setf (fdefinition 'http:resolve-host) original)))
+  ;; A DNS name keeps whatever proxy is configured, local-looking or not.
+  (dolist (url '("http://a-name.invalid/x" "http://minio/x"))
+    (is (null (http:proxy-arguments url))
+        "~A is a name, so its proxy is left alone" url)))
+
+(test a-plaintext-request-to-a-local-host-is-not-sent-through-a-proxy
+  "#1091: dexador sets *DEFAULT-PROXY* from HTTPS_PROXY or HTTP_PROXY when it loads and honours
+no NO_PROXY, and %DEX-ARGS never passed :PROXY. So a caller that had checked its destination was
+local -- hermes for a Twilio API base, hermes/blob for an S3 endpoint -- could still have its
+credentials carried off the machine in the clear, because the bytes went to the proxy instead of
+to the host that was checked.
+
+The assertion is on what dexador is given, not on what a request returns: a fixture whose proxy
+is unreachable would pass for the wrong reason."
+  (flet ((proxy-arg (url)
+           ;; Through %DEX-ARGS, which is the path AION/HTTP-CLIENT:SEND-REQUEST takes. The
+           ;; decision itself is PROXY-ARGUMENTS, which hermes/blob's direct dexador call uses
+           ;; too -- when it lived only here, that backend was not covered (the review of #1094).
+           (let ((args (http::%dex-args (http:make-request :method :get :url url))))
+             (if (member :proxy args) (list :passed (getf args :proxy)) :not-passed))))
+    ;; Exempted: plaintext to a local host, by name or by address.
+    (dolist (url '("http://127.0.0.1:9000/x" "http://localhost/x" "http://[::1]:9000/x"
+                   "http://10.0.0.5/x" "http://169.254.1.2/x"))
+      (is (equal '(:passed nil) (proxy-arg url))
+          "~A is sent with :proxy nil, so no proxy can see it" url))
+    ;; Not exempted: https anywhere, because a proxied https request is a CONNECT tunnel and the
+    ;; credentials are inside TLS; and plaintext to a host that is not local, where whoever
+    ;; configured it is already sending in the clear.
+    (dolist (url '("https://127.0.0.1/x" "https://api.example.invalid/x" "http://8.8.8.8/x"
+                   ;; A NAME keeps its proxy now, even one that might resolve locally: see
+                   ;; PROXY-ARGUMENTS-DECIDES-WITHOUT-RESOLVING-A-NAME.
+                   "http://api.example.invalid/x" "http://minio/x"))
+      (is (eq :not-passed (proxy-arg url))
+          "~A keeps whatever proxy is configured" url))
+    ;; 6to4 is not local, so it is not exempted either.
+    (is (eq :not-passed (proxy-arg "http://2002:7f00:1::/x"))
+        "a 6to4 address is not local, so its request is not exempted")))
+
+(test an-approval-exempts-only-its-own-host-and-follows-no-redirect
+  "The review of #1134, which found two ways the recorded approval reached a request it was not
+about.
+
+THE APPROVAL IS A HOST, NOT A BOOLEAN. As a boolean it said only that something had been
+approved, which is not a statement about the request being sent: a provider whose URL had moved
+on, or a verdict recorded for one host and read while another sat in the slot, exempted a request
+to a host nothing had approved. It now has to equal the URL's host.
+
+AN EXEMPTED REQUEST FOLLOWS NO REDIRECT. dexador follows a redirect to a DIFFERENT host by
+recursing with the same arguments and the same headers -- it prepends a new Host and keeps the
+rest, in the cross-host branch of its redirect handling in src/backend/usocket.lisp -- so a 307
+from the approved host to http://public.example/ would be fetched with :PROXY NIL AND with the
+Authorization header built for the approved host. That is the credential leaving the machine, not
+merely a proxy being skipped. The exemption is about a destination this machine reaches by
+itself, and a redirect leaves that destination, so :MAX-REDIRECTS 0 travels with it.
+
+THE LITERAL PATH KEEPS FOLLOWING REDIRECTS. It has the same hazard in principle -- a 307 from
+127.0.0.1 can name a public host just as easily -- but the cause is dexador carrying headers
+across a cross-host redirect rather than anything about this rule, the literal rule is what every
+caller of this client gets, and following a redirect to a local server is behaviour this client
+documents and tests. Turning it off here broke REDIRECTS-CAN-BE-REFUSED-CAPPED-OR-FOLLOWED, which
+follows redirects against a test server at 127.0.0.1. APPROVED-LOCAL, by contrast, is passed only
+by a configuration step about to send a credential, and none of those callers follows redirects."
+  ;; The host has to match.
+  (flet ((with-approval (host url)
+           (http::call-with-approved-local-host host (lambda () (http:proxy-arguments url)))))
+    (is (null (with-approval "approved.invalid" "http://other.invalid/x"))
+        "an approval for one host does not exempt a request to another")
+    (is (equal '(:proxy nil :max-redirects 0)
+               (with-approval "approved.invalid" "http://approved.invalid/x"))
+        "and does exempt its own host, with redirects off")
+    (is (null (with-approval "approved.invalid" "https://approved.invalid/x"))
+        "https is never exempted, approval or not")
+    ;; T is not a host, so the old boolean shape grants nothing rather than everything.
+    (is (null (with-approval t "http://approved.invalid/x"))
+        "T is not a host and grants no exemption"))
+
+  ;; And what a request actually hands dexador.
+  (flet ((args (url &key approved-local)
+           (http::call-with-approved-local-host
+            approved-local
+            (lambda ()
+              (http::%dex-args (http:make-request :method :get :url url
+                                                  :follow-redirects 5))))))
+    (let ((exempt (args "http://approved.invalid/x" :approved-local "approved.invalid"))
+          (literal (args "http://127.0.0.1:9000/x"))
+          (ordinary (args "http://public.invalid/x"))
+          (mismatched (args "http://other.invalid/x" :approved-local "approved.invalid")))
+      (is (eql 0 (getf exempt :max-redirects))
+          "an exempted request is given :max-redirects 0: ~S" exempt)
+      (is (= 1 (count :max-redirects exempt))
+          ":max-redirects is passed once, so the value cannot depend on argument order: ~S"
+          exempt)
+      (is (eql 5 (getf literal :max-redirects))
+          "while one exempted by an IP literal still follows redirects: ~S" literal)
+      (is (equal '(:proxy nil) (http:proxy-arguments "http://127.0.0.1:9000/x"))
+          "the literal rule exempts the proxy and says nothing about redirects")
+      ;; The controls: a request that is not exempt keeps the redirect budget it asked for.
+      (is (eql 5 (getf ordinary :max-redirects))
+          "control: an ordinary request still follows redirects: ~S" ordinary)
+      (is-false (member :proxy ordinary)
+                "control: and is not given :proxy at all: ~S" ordinary)
+      (is (eql 5 (getf mismatched :max-redirects))
+          "control: a mismatched approval changes neither argument: ~S" mismatched)
+      (is-false (member :proxy mismatched)
+                "control: and leaves the proxy alone: ~S" mismatched))))
+
+(test the-exported-surface-cannot-claim-a-host-is-local
+  "The re-review of #1134. The approval used to be :APPROVED-LOCAL, a keyword on MAKE-REQUEST and
+on PROXY-ARGUMENTS, both of which are exported -- so any caller could assert it for any host:
+
+  (make-request :url \"http://public.example/x\" :approved-local \"public.example\"
+                :headers <an Authorization header>)
+
+got :PROXY NIL and :MAX-REDIRECTS 0 for a public host, which is the same door that was closed by
+taking the initarg off hermes/blob's slot, left open one layer down. The approval is now
+*APPROVED-LOCAL-HOST*, which is not exported and is not an argument to anything exported.
+
+THIS TEST IS ABOUT THE EXPORTED SURFACE, so it uses only exported symbols to try to produce the
+exemption, and asserts that it cannot. The framework's own senders reach the internal binder with
+a double colon, which is the line this codebase draws around anything a caller is not meant to
+use; that path has its own tests."
+  ;; PROXY-ARGUMENTS takes one argument, so passing the old keyword to it is a PROGRAM-ERROR.
+  (signals program-error
+    (funcall (fdefinition 'http:proxy-arguments)
+             "http://public.example/x" :approved-local "public.example"))
+  ;; MAKE-REQUEST REJECTS IT TOO. SBCL signals SB-EXT:UNKNOWN-KEYWORD-ARGUMENT, which is a
+  ;; subtype of PROGRAM-ERROR: (subtypep (quote sb-ext:unknown-keyword-argument)
+  ;; (quote program-error)) answers T, measured rather than assumed, and the behaviour is the
+  ;; same compiled or interpreted.
+  ;;
+  ;; A COMMENT HERE ONCE CLAIMED THE OPPOSITE -- that the constructor accepted the keyword and
+  ;; ignored it -- on the strength of a script that printed "RETURNED NORMALLY". That script had
+  ;; loaded a STALE FASL, built before the keyword was removed, so what it measured was the old
+  ;; constructor accepting its own keyword. THE SUITE AGREED WITH THE SCRIPT for the same reason,
+  ;; in a worktree whose fasls were equally stale, and the first thing to disagree was a CI leg,
+  ;; which always builds cold. A measurement taken outside a cold build is worth only as much as
+  ;; the build it ran against -- and so is one taken inside a warm one.
+  (signals program-error
+    (funcall (fdefinition 'http:make-request)
+             :method :get :url "http://public.example/x" :approved-local "public.example"))
+  ;; And nothing an exported call can do produces the exemption for a public host.
+  (is (null (http:proxy-arguments "http://public.example/x"))
+      "a public host is not exempted")
+  (let ((args (http::%dex-args (http:make-request :method :get :url "http://public.example/x"
+                                                  :headers '(("Authorization" . "Bearer x"))))))
+    (is-false (member :proxy args)
+              "and a request built through the exported surface is given no :proxy: ~S" args)
+    ;; 5 is MAKE-REQUEST's default FOLLOW-REDIRECTS, so this asserts the redirect cap is left
+    ;; exactly as the caller's request asked for it.
+    (is (eql 5 (getf args :max-redirects))
+        "with its own redirect setting untouched: ~S" args))
+  ;; The control: the internal binder DOES produce it, so the assertions above are about the
+  ;; exported surface and not about the exemption having been removed altogether.
+  (is (equal '(:proxy nil :max-redirects 0)
+             (http::call-with-approved-local-host
+              "public.example"
+              (lambda () (http:proxy-arguments "http://public.example/x"))))
+      "control: the internal binding still grants it"))
+
+(defun %hops-for (url target &key (headers '(("Authorization" . "Bearer secret")
+                                             ("Cookie" . "session=secret")
+                                             ("Content-Type" . "application/json")))
+                                  (method :post) (follow 5) content)
+  "Send one request that is answered with a 307 to TARGET, and return what dexador was given for
+each hop: a list of (url . headers), in order.
+
+THE STUB ANSWERS DEXADOR'S OWN CONVENTION -- (values body status headers) with a hash-table of
+lowercased header names -- because that is what %HTTP-ONCE reads. The assertion downstream is on
+the SECOND entry: the first hop is identical whatever the fix does."
+  (let ((seen '())
+        (original (fdefinition 'dex:request)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'dex:request)
+                 (lambda (u &rest args)
+                   (push (cons u (getf args :headers)) seen)
+                   (if (= 1 (length seen))
+                       (values "" 307 (let ((h (make-hash-table :test #'equal)))
+                                        (setf (gethash "location" h) target)
+                                        h))
+                       (values "done" 200 (make-hash-table :test #'equal)))))
+           (http:send-request (http:make-request :method method :url url :headers headers
+                                                 :content content :follow-redirects follow)
+                              '()))
+      (setf (fdefinition 'dex:request) original))
+    (reverse seen)))
+
+(defun %carried (hop name)
+  (cdr (assoc name (cdr hop) :test #'string-equal)))
+
+(test a-cross-origin-redirect-does-not-carry-the-credential
+  "#1139. dexador follows a redirect to a DIFFERENT host by recursing into its own REQUEST with
+the same arguments and the same headers -- it prepends a new Host and keeps the rest, in the
+cross-host branch of src/backend/usocket.lisp -- so an Authorization header built for one host
+was delivered to whatever a 3xx named. Nothing in this tree would have noticed: the configuration
+checks in #1077, #1092 and #1106 check the base a request is sent TO, which is the right thing to
+check and a different thing from where a redirect then leads.
+
+THE ASSERTION IS ON WHAT THE SECOND REQUEST CARRIED, not on whether the request succeeded. A
+fixture whose redirect target is unreachable would pass for the wrong reason, because the first
+hop looks identical either way.
+
+BOTH DIRECTIONS, and the same-origin one is why this is not simply `stop following redirects': an
+API that renames a path answers 301 and expects the credential to follow it. Origin is scheme,
+host and port, so a change in any of the three drops the headers -- including a hop from https to
+http on the same host, which is the one a reader is most likely to assume is safe."
+  ;; A hop to another host: the credential headers are gone, the others stay.
+  (let ((hops (%hops-for "https://api.example.com/v1/x" "https://evil.example/collect")))
+    (is (= 2 (length hops)) "both hops reached dexador: ~S" hops)
+    (is (equal "Bearer secret" (%carried (first hops) "authorization"))
+        "the first hop carries the credential, as it must: ~S" (first hops))
+    (is-false (%carried (second hops) "authorization")
+              "and the second does not: ~S" (second hops))
+    (is-false (%carried (second hops) "cookie")
+              "nor the cookie: ~S" (second hops))
+    (is (equal "application/json" (%carried (second hops) "content-type"))
+        "while a header that is not a credential survives: ~S" (second hops))
+    (is (equal "https://evil.example/collect" (car (second hops)))
+        "and the hop went where the Location said: ~S" (second hops)))
+  ;; A hop within the same origin keeps them.
+  (let ((hops (%hops-for "https://api.example.com/v1/x" "https://api.example.com/v2/x")))
+    (is (equal "Bearer secret" (%carried (second hops) "authorization"))
+        "a same-origin redirect keeps the credential: ~S" (second hops))
+    (is (equal "session=secret" (%carried (second hops) "cookie"))
+        "and the cookie: ~S" (second hops)))
+  ;; A relative Location is resolved against the URL it came from, and stays same-origin.
+  (let ((hops (%hops-for "https://api.example.com/v1/x" "/v2/x")))
+    (is (equal "https://api.example.com/v2/x" (car (second hops)))
+        "a relative Location is merged with the URL it came from: ~S" (second hops))
+    (is (equal "Bearer secret" (%carried (second hops) "authorization"))
+        "and is still the same origin, so the credential follows: ~S" (second hops)))
+  ;; THE THREE PARTS OF AN ORIGIN, each on its own. The scheme and port cases are the ones a
+  ;; reader is most likely to think safe, because the host has not changed.
+  (dolist (case '(("https://api.example.com/v1/x" . "http://api.example.com/v1/x")
+                  ("https://api.example.com/v1/x" . "https://api.example.com:8443/v1/x")
+                  ("https://api.example.com/v1/x" . "https://other.example.com/v1/x")))
+    (let ((hops (%hops-for (car case) (cdr case))))
+      (is-false (%carried (second hops) "authorization")
+                "~A -> ~A is a different origin, so the credential is dropped: ~S"
+                (car case) (cdr case) (second hops))))
+  ;; A request with no credential is left on dexador's own path: one call, with the redirect
+  ;; followed inside dexador rather than here.
+  (let ((hops (%hops-for "https://api.example.com/v1/x" "https://evil.example/collect"
+                         :headers '(("Content-Type" . "application/json")))))
+    (is (= 1 (length hops))
+        "a request carrying no credential is not followed hop by hop here: ~S" hops))
+  ;; And FOLLOW-REDIRECTS NIL still returns the 3xx itself rather than following it.
+  (let ((hops (%hops-for "https://api.example.com/v1/x" "https://evil.example/collect"
+                         :follow nil)))
+    (is (= 1 (length hops)) "follow-redirects NIL follows nothing: ~S" hops)))
+
+(test a-redirect-chain-is-bounded-and-changes-method-as-dexador-does
+  "#1139, the two properties the hop loop has to preserve now that it is this client's loop
+rather than dexador's.
+
+THE CAP IS THE REQUEST'S OWN FOLLOW-REDIRECTS, counted in hops, so a server answering a redirect
+for ever cannot keep this going. THE METHOD CHANGES ON 301, 302 AND 303 and is kept on 307 and
+308, which is what dexador does, what browsers do, and the entire reason 307 and 308 exist; a
+loop that silently turned a POST into a GET on a 307, or kept a POST on a 303, would be a
+different client than the one every caller was written against."
+  (let ((seen '())
+        (original (fdefinition 'dex:request)))
+    (unwind-protect
+         (progn
+           ;; A server that always redirects, to a new path each time.
+           (setf (fdefinition 'dex:request)
+                 (lambda (u &rest args)
+                   (push (list u (getf args :method)) seen)
+                   (values "" 307 (let ((h (make-hash-table :test #'equal)))
+                                    (setf (gethash "location" h)
+                                          (format nil "https://api.example.com/~D" (length seen)))
+                                    h))))
+           (http:send-request
+            (http:make-request :method :post :url "https://api.example.com/start"
+                               :headers '(("Authorization" . "Bearer secret"))
+                               :follow-redirects 3)
+            '()))
+      (setf (fdefinition 'dex:request) original))
+    (is (= 4 (length seen))
+        "a cap of 3 makes 4 requests in all -- the first and three hops: ~D" (length seen))
+    (is (every (lambda (call) (eq :post (second call))) seen)
+        "and a 307 keeps the method throughout: ~S" (reverse seen)))
+  ;; 303 turns a POST into a GET; 307 does not. Asserted on what the second hop was given.
+  (dolist (case '((303 . :get) (302 . :get) (301 . :get) (307 . :post) (308 . :post)))
+    (let ((seen '())
+          (original (fdefinition 'dex:request)))
+      (unwind-protect
+           (progn
+             (setf (fdefinition 'dex:request)
+                   (lambda (u &rest args)
+                     (push (list u (getf args :method)) seen)
+                     (if (= 1 (length seen))
+                         (values "" (car case)
+                                 (let ((h (make-hash-table :test #'equal)))
+                                   (setf (gethash "location" h) "https://api.example.com/next")
+                                   h))
+                         (values "done" 200 (make-hash-table :test #'equal)))))
+             (http:send-request
+              (http:make-request :method :post :url "https://api.example.com/start"
+                                 :headers '(("Authorization" . "Bearer secret"))
+                                 :follow-redirects 5)
+              '()))
+        (setf (fdefinition 'dex:request) original))
+      (is (eq (cdr case) (second (second (reverse seen))))
+          "a ~D sends the next hop as ~S: ~S" (car case) (cdr case) (reverse seen)))))
+
+(test every-credential-header-this-tree-sends-is-dropped-across-an-origin
+  "The review of #1141. The first version of this decided the path and stripped the headers from
+two lists written separately -- Authorization and Cookie -- so Anthropic's x-api-key
+(praxeon/src/llm.lisp) and Google's x-goog-api-key (praxeon/src/image-google.lisp), both of which
+go through SEND-REQUEST, were still forwarded to whatever a cross-host 307 named. PRINT-OBJECT
+had named all four since #844, one screen away.
+
++CREDENTIAL-HEADERS+ is the one list now, read by both.
+
+THE NAMES ARE WRITTEN OUT HERE, not read from that list. A first version of this test walked
++CREDENTIAL-HEADERS+, which made it VACUOUS IN THE DIRECTION THAT MATTERS: shrinking the list
+back to Authorization and Cookie shrank the test with it and still passed, so it could not have
+caught the defect it was written for. My own control is what showed that. The four names are a
+claim about what this tree sends -- Authorization and Cookie anywhere, x-api-key in
+praxeon/src/llm.lisp, x-goog-api-key in praxeon/src/image-google.lisp -- and a claim about the
+tree has to be written down, not derived from the thing under test. The list-walk is kept as a
+second loop, so a name added to the list without being handled fails too.
+
+x-amz-security-token was added in #1156: hermes/blob sends it beside an AWS Authorization
+signature, and an AWS request sent through SEND-REQUEST would otherwise have lost Authorization on
+a cross-origin redirect while still forwarding the session token."
+  (dolist (name '("authorization" "cookie" "x-api-key" "x-goog-api-key" "x-amz-security-token"))
+    (let ((hops (%hops-for "https://api.example.com/v1/x" "https://evil.example/collect"
+                           :headers (list (cons name "secret")
+                                          (cons "Content-Type" "application/json")))))
+      (is (= 2 (length hops))
+          "a request carrying ~A is followed hop by hop here: ~S" name hops)
+      (is (equal "secret" (%carried (first hops) name))
+          "~A is sent on the first hop, as it must be: ~S" name (first hops))
+      (is-false (%carried (second hops) name)
+                "~A does not reach the other origin: ~S" name (second hops))
+      (is (equal "application/json" (%carried (second hops) "content-type"))
+          "while a header that is not a credential survives: ~S" (second hops))))
+  ;; Every name the list holds, so one added there without being handled fails as well. This is
+  ;; the loop that cannot catch a name MISSING from the list, which is why the names above are
+  ;; written out.
+  (dolist (name http::+credential-headers+)
+    (let ((hops (%hops-for "https://api.example.com/v1/x" "https://evil.example/collect"
+                           :headers (list (cons name "secret")))))
+      (is (= 2 (length hops)) "~A is recognised as a credential header: ~S" name hops)
+      (is-false (%carried (second hops) name)
+                "~A does not reach the other origin: ~S" name (second hops))))
+  ;; The control: a header that is NOT on the list is carried across, so the assertions above
+  ;; are about the list and not about every header being stripped.
+  (let ((hops (%hops-for "https://api.example.com/v1/x" "https://evil.example/collect"
+                         :headers '(("Authorization" . "Bearer s")
+                                    ("X-Request-Id" . "abc123")))))
+    (is (equal "abc123" (%carried (second hops) "x-request-id"))
+        "control: a header that identifies nobody is still carried: ~S" (second hops))))
+
+(test a-body-is-not-repeated-to-another-origin
+  "The review of #1141, and the half that stripping headers says nothing about: A CREDENTIAL CAN
+BE IN THE BODY. Facebook's POST carries access_token in the form body, so a 307 or 308 across
+origin would have handed it over with every header correctly removed.
+
+307 and 308 repeat the request as it was, body included. There is no way to follow such a hop
+safely -- the body is the caller's to re-send or not -- so the 3xx is returned and the caller
+decides. 301, 302 and 303 turn a non-GET into a GET, and the body goes with the method: a GET
+carrying the old form body and its Content-Type is neither what the server will read nor what the
+caller sent."
+  ;; A cross-origin 307 with a body: not followed, and the 3xx is the answer.
+  (let ((hops (%hops-for "https://api.example.com/v1/x" "https://evil.example/collect"
+                         :content "access_token=secret&message=hi")))
+    (is (= 1 (length hops))
+        "a cross-origin 307 carrying a body is not followed: ~S" hops))
+  ;; The control: the same hop WITHIN the origin is followed, with the body intact, because
+  ;; nothing leaves the origin that sent it.
+  (let ((hops (%hops-for "https://api.example.com/v1/x" "https://api.example.com/v2/x"
+                         :content "access_token=secret&message=hi")))
+    (is (= 2 (length hops))
+        "control: a same-origin 307 with a body is still followed: ~S" hops)
+    (is (equal "Bearer secret" (%carried (second hops) "authorization"))
+        "control: and still carries the credential: ~S" (second hops)))
+  ;; And a cross-origin 307 with NO body is followed, headers stripped -- so the refusal above is
+  ;; about the body and not about 307 itself.
+  (let ((hops (%hops-for "https://api.example.com/v1/x" "https://evil.example/collect"
+                         :content nil)))
+    (is (= 2 (length hops))
+        "control: a cross-origin 307 with no body is followed: ~S" hops)
+    (is-false (%carried (second hops) "authorization")
+              "control: with the credential dropped: ~S" (second hops))))
+
+(test a-redirect-that-becomes-a-get-drops-the-body-and-its-content-type
+  "The review of #1141. The loop turned a POST into a GET on 301, 302 and 303 -- which is right,
+and what dexador and every browser do -- and kept the content and the Content-Type, which is
+not. A GET carrying the previous request's form body is neither what the server will read nor
+what the caller sent, and when the body holds a credential it is one more place for it to go."
+  (dolist (status '(301 302 303))
+    (let ((seen '())
+          (original (fdefinition 'dex:request)))
+      (unwind-protect
+           (progn
+             (setf (fdefinition 'dex:request)
+                   (lambda (u &rest args)
+                     (push (list u (getf args :method) (getf args :content)
+                                 (getf args :headers))
+                           seen)
+                     (if (= 1 (length seen))
+                         (values "" status
+                                 (let ((h (make-hash-table :test #'equal)))
+                                   (setf (gethash "location" h) "https://api.example.com/next")
+                                   h))
+                         (values "done" 200 (make-hash-table :test #'equal)))))
+             (http:send-request
+              (http:make-request :method :post :url "https://api.example.com/start"
+                                 :headers '(("Authorization" . "Bearer secret")
+                                            ("Content-Type" . "application/x-www-form-urlencoded"))
+                                 :content "access_token=secret"
+                                 :follow-redirects 5)
+              '()))
+        (setf (fdefinition 'dex:request) original))
+      (let ((second (second (reverse seen))))
+        (is (eq :get (second second)) "a ~D sends the next hop as a GET: ~S" status second)
+        (is-false (third second) "with no body: ~S" status second)
+        (is-false (cdr (assoc "content-type" (fourth second) :test #'string-equal))
+                  "and no Content-Type: ~S" second))))
+  ;; The control: a 307 keeps the method, the body and the Content-Type, within the origin.
+  (let ((seen '())
+        (original (fdefinition 'dex:request)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'dex:request)
+                 (lambda (u &rest args)
+                   (push (list u (getf args :method) (getf args :content)) seen)
+                   (if (= 1 (length seen))
+                       (values "" 307 (let ((h (make-hash-table :test #'equal)))
+                                        (setf (gethash "location" h)
+                                              "https://api.example.com/next")
+                                        h))
+                       (values "done" 200 (make-hash-table :test #'equal)))))
+           (http:send-request
+            (http:make-request :method :post :url "https://api.example.com/start"
+                               :headers '(("Authorization" . "Bearer secret"))
+                               :content "x=1" :follow-redirects 5)
+            '()))
+      (setf (fdefinition 'dex:request) original))
+    (let ((second (second (reverse seen))))
+      (is (eq :post (second second)) "control: a 307 keeps the method: ~S" second)
+      (is (equal "x=1" (third second)) "control: and the body: ~S" second))))
+
+(test an-approved-local-request-still-follows-no-redirect
+  "The review of #1141, and a rule of #1134's that this loop bypassed. PROXY-ARGUMENTS answers
+:MAX-REDIRECTS 0 for a request to a host a configuration step approved as local, because dexador
+carries both the proxy exemption and the credential across a cross-host redirect. dexador obeyed
+that -- and then %HTTP-FOLLOWING-REDIRECTS followed the 3xx itself, so the rule held for every
+request except the ones it was written for. The docstring in fetch.lisp saying a 3xx is the
+response for such a request was false while that was so.
+
+The dispatch sends an approved request down the single-shot path instead, which keeps the rule
+where it already lives rather than restating it here, so the two cannot drift.
+
+THE ASSERTION GOES THROUGH SEND-REQUEST, not through PROXY-ARGUMENTS: the bypass was in the
+layer above it, so asking PROXY-ARGUMENTS would have answered correctly while the request was
+still followed."
+  (let ((seen '())
+        (original (fdefinition 'dex:request)))
+    (unwind-protect
+         (progn
+           ;; THE STUB TERMINATES, answering 200 once the redirect has been taken. Answering 307
+           ;; to everything made the control follow until its budget ran out, and an assertion on
+           ;; the number of calls then measured the budget rather than the approval.
+           (setf (fdefinition 'dex:request)
+                 (lambda (u &rest args)
+                   (push (list u (getf args :max-redirects)) seen)
+                   (if (search "collect" u)
+                       (values "done" 200 (make-hash-table :test #'equal))
+                       (values "" 307 (let ((h (make-hash-table :test #'equal)))
+                                        (setf (gethash "location" h)
+                                              "http://evil.example/collect")
+                                        h)))))
+           ;; Under an approval for this host.
+           (http::call-with-approved-local-host
+            "approved.invalid"
+            (lambda ()
+              (http:send-request
+               (http:make-request :method :get :url "http://approved.invalid/v1/x"
+                                  :headers '(("Authorization" . "Bearer secret"))
+                                  :follow-redirects 5)
+               '())))
+           ;; And the control, with no approval: the same 3xx IS followed, hop by hop.
+           (http:send-request
+            (http:make-request :method :get :url "http://other.invalid/v1/x"
+                               :headers '(("Authorization" . "Bearer secret"))
+                               :follow-redirects 5)
+            '()))
+      (setf (fdefinition 'dex:request) original))
+    (let ((calls (reverse seen)))
+      (is (equal '("http://approved.invalid/v1/x" 0) (first calls))
+          "an approved request is sent once, with :max-redirects 0: ~S" (first calls))
+      (is (equal "http://other.invalid/v1/x" (first (second calls)))
+          "control: an unapproved request starts the same way: ~S" (second calls))
+      (is (= 3 (length calls))
+          "and is followed, so the approval is what stopped the first: ~S" calls))))
+
+(defun %body-hops (method headers content status target)
+  "Send one request answered with STATUS and a Location of TARGET, and return what dexador was
+given for each hop: (url max-redirects body-sent-p).
+
+THE BODY AND :MAX-REDIRECTS ARE BOTH RECORDED, because they answer two different questions. The
+body says whether it reached the next hop. :MAX-REDIRECTS says who was following redirects: 0
+means this client's own loop, 5 means dexador -- and with DEX:REQUEST stubbed, dexador's own
+redirect handling does not run, so a request left on dexador's path shows up as a single call
+whatever dexador would really have done. :MAX-REDIRECTS is what tells the two apart."
+  (let ((seen '())
+        (original (fdefinition 'dex:request)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'dex:request)
+                 (lambda (u &rest args)
+                   (push (list u (getf args :max-redirects) (and (getf args :content) t)) seen)
+                   (if (= 1 (length seen))
+                       (values "" status (let ((h (make-hash-table :test #'equal)))
+                                           (setf (gethash "location" h) target)
+                                           h))
+                       (values "done" 200 (make-hash-table :test #'equal)))))
+           (http:send-request (http:make-request :method method :url "https://api.example.com/x"
+                                                 :headers headers :content content
+                                                 :follow-redirects 5)
+                              '()))
+      (setf (fdefinition 'dex:request) original))
+    (reverse seen)))
+
+(test a-get-with-a-body-does-not-take-it-to-another-origin
+  "Copilot's review of #1141. The loop refused a cross-origin hop only for a 307 or 308 with a
+body, reasoning that 301, 302 and 303 discard the body. They discard it only by CHANGING THE
+METHOD TO GET, and a request that was already a GET keeps its method -- so a credential-bearing
+GET with a body followed a cross-origin 301 and took the body with it. Measured at e8d8987e:
+
+  (api.example.com/x 0 T) (evil.example/collect 0 T)
+
+The second entry is the body arriving at the other origin. The loop now works out the body the
+next hop would actually carry instead of inferring it from the status."
+  (dolist (status '(301 302 303))
+    (let ((hops (%body-hops :get '(("Authorization" . "Bearer s")) "q=1" status
+                            "https://evil.example/collect")))
+      (is (= 1 (length hops))
+          "a GET with a body is not followed across origins on a ~D: ~S" status hops)))
+  ;; The controls: the same GET within the origin is followed with its body, and a POST across
+  ;; origins on a 303 is followed with the body DROPPED -- the change to GET takes it away.
+  (let ((hops (%body-hops :get '(("Authorization" . "Bearer s")) "q=1" 301
+                          "https://api.example.com/y")))
+    (is (= 2 (length hops)) "control: within the origin it is followed: ~S" hops)
+    (is-true (third (second hops)) "control: with its body: ~S" hops))
+  (let ((hops (%body-hops :post '(("Authorization" . "Bearer s")) "q=1" 303
+                          "https://evil.example/collect")))
+    (is (= 2 (length hops)) "control: a POST on a cross-origin 303 is followed: ~S" hops)
+    (is-false (third (second hops)) "control: with the body dropped by the change to GET: ~S"
+              hops)))
+
+(test a-credential-in-the-body-is-not-sent-to-another-origin
+  "Copilot's review of #1141, and a token leak. Facebook's POST carries access_token in the form
+body and sends no credential header (hermes/src/facebook.lisp), and the dispatch chose the safe
+path by headers alone -- so that POST went down dexador's own path, where dexador re-sends the
+body on a cross-origin 307 or 308 and delivered the token to whatever the redirect named.
+Measured at e8d8987e: the request was handed to dexador with :MAX-REDIRECTS 5, so dexador was in
+charge of following it.
+
+Any request with a body now follows its redirects through this client's loop, where a body is
+never sent to another origin. The assertion is on :MAX-REDIRECTS as well as on the number of
+calls, because a stubbed DEX:REQUEST does not follow redirects itself: a request left on
+dexador's path would also show one call, and only the 5 says who would have followed."
+  (dolist (status '(307 308))
+    (let ((hops (%body-hops :post '() "access_token=secret&message=hi" status
+                            "https://evil.example/collect")))
+      (is (eql 0 (second (first hops)))
+          "a body with no credential header is followed by this client, not dexador, on a ~D: ~S"
+          status hops)
+      (is (= 1 (length hops))
+          "and is not sent to the other origin: ~S" hops)))
+  ;; The control: a request with neither a body nor a credential header is left on dexador's own
+  ;; path, as before, so the dispatch change is about bodies and not about every request.
+  (let ((hops (%body-hops :get '() nil 307 "https://evil.example/collect")))
+    (is (eql 5 (second (first hops)))
+        "control: a plain GET still lets dexador follow its redirects: ~S" hops)))
+
+;;; --- redirects followed by this client, against real servers (#1156) -------------------
+;;;
+;;; Every test #1141 added for the redirect loop stubs DEX:REQUEST, and the real-server redirect
+;;; test above has neither a credential nor a body, so it never enters the loop. The tests below
+;;; go through SEND-REQUEST to servers on real sockets. They run on every leg, so on Windows
+;;; they go through dexador's WinHTTP backend and elsewhere through its usocket backend.
+
+(defun %received (server path)
+  "Every request SERVER received for PATH, oldest first."
+  (remove-if-not (lambda (r) (string= path (aion/test-http:request-path r)))
+                 (reverse (aion/test-http:server-requests server))))
+
+(defparameter +credential-test-headers+
+  '(("Authorization" . "Bearer secret-token")
+    ("X-Api-Key" . "secret-key")
+    ("X-Amz-Security-Token" . "secret-session")
+    ("X-Trace" . "not-a-credential"))
+  "One header of each credential kind the redirect loop strips, and one ordinary header it keeps.")
+
+(test a-redirect-body-over-the-cap-does-not-fail-the-request
+  "#1156, a regression from #1141. The redirect loop read every hop's body under MAX-BODY-BYTES,
+so a 3xx whose own body was over the cap failed the request with RESPONSE-TOO-LARGE, where
+dexador had followed it. Measured before the fix with a 5-byte cap and a 302 carrying the
+10-byte body \"Moved here\":
+
+  no credential header   (dexador follows)    (:STATUS 200 :BODY \"ok\")
+  Authorization header   (the loop follows)   (:SIGNALLED RESPONSE-TOO-LARGE)
+
+The loop now decides from the status and headers, before the body is read, and closes a
+followed hop's body unread. The cap still applies to the response the caller gets."
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore head))
+                    (cond ((string= path "/moved")
+                           (%write-response stream 302 '(("Location" . "/end")) "Moved here"))
+                          ((string= path "/moved-to-big")
+                           (%write-response stream 302 '(("Location" . "/big")) "Moved here"))
+                          ((string= path "/big") (%write-response stream 200 '() "0123456789"))
+                          (t (%write-response stream 200 '() "ok")))))
+    (flet ((send (path &rest args)
+             (handler-case
+                 (let ((r (http:send-request
+                           (apply #'http:make-request :url (%local s path) :max-body-bytes 5
+                                                      :read-timeout 10 args)
+                           '())))
+                   (list (http:response-status r) (http:response-body r)))
+               (http:response-too-large () :too-large))))
+      (is (equal '(200 "ok")
+                 (send "/moved" :headers '(("Authorization" . "Bearer s"))))
+          "a credential-bearing request follows a 302 whose body is over the cap")
+      (is (equal '(200 "ok")
+                 (send "/moved" :method :post :content "a=1"))
+          "so does a request with a body, which also takes the loop")
+      ;; The controls. The same request with no credential and no body, on dexador's own path,
+      ;; gives the same answer, so the two paths now agree. And the cap still applies to the
+      ;; response that is returned: a followed redirect to a 10-byte body is refused.
+      (is (equal '(200 "ok") (send "/moved"))
+          "control: dexador's own path gives the same answer")
+      (is (eq :too-large (send "/moved-to-big" :headers '(("Authorization" . "Bearer s"))))
+          "control: the cap still applies to the response the caller gets"))))
+
+(test a-real-cross-origin-redirect-receives-no-credential-and-no-body
+  "#1156, items 3 and 5. Two servers on different ports are two origins. The first redirects to
+the second, and the test reads what the second actually RECEIVED -- the headers and body on the
+socket -- rather than what a stub was handed.
+
+It also checks that the backend did not follow the redirect itself. The loop sends each hop
+with :MAX-REDIRECTS 0. If dexador ignored that and followed on its own, the second server would
+receive a request carrying the credential before the loop could remove it. So the second server
+must receive EXACTLY ONE request, and that one without any credential header. This is the
+property Copilot asked to be checked on both backends, usocket and WinHTTP: this test runs on
+every leg, so the Windows leg checks WinHTTP."
+  (with-server (b (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "landed")))
+    (let ((landing (%local b "/landing")))
+      (with-server (a (lambda (path head stream)
+                        (declare (ignore head))
+                        (cond ((string= path "/away")
+                               (%write-response stream 302 `(("Location" . ,landing)) ""))
+                              ((string= path "/away-307")
+                               (%write-response stream 307 `(("Location" . ,landing)) ""))
+                              ((string= path "/same")
+                               (%write-response stream 302 '(("Location" . "/here")) ""))
+                              ((string= path "/same-307")
+                               (%write-response stream 307 '(("Location" . "/here")) ""))
+                              (t (%write-response stream 200 '() "here")))))
+        (flet ((send (path &rest args)
+                 (http:send-request (apply #'http:make-request :url (%local a path)
+                                                               :read-timeout 10 args)
+                                    '())))
+          ;; Credential headers across origins: dropped, and the ordinary header kept.
+          (let ((r (send "/away" :headers +credential-test-headers+)))
+            (is (= 200 (http:response-status r)) "the cross-origin redirect is followed")
+            (let ((got (%received b "/landing")))
+              (is (= 1 (length got))
+                  "the other origin received exactly one request, so the backend did not follow the redirect itself: ~D"
+                  (length got))
+              (dolist (h '("Authorization" "X-Api-Key" "X-Amz-Security-Token"))
+                (is (null (and got (aion/test-http:request-header (first got) h)))
+                    "the other origin did not receive ~A" h))
+              (is (equal "not-a-credential"
+                         (and got (aion/test-http:request-header (first got) "X-Trace")))
+                  "and did receive the ordinary header")))
+          ;; A body across origins on a 307: not sent at all; the 307 is the answer.
+          (let ((before (length (%received b "/landing")))
+                (r (send "/away-307" :method :post :content "access_token=secret")))
+            (is (= 307 (http:response-status r))
+                "a cross-origin 307 for a request with a body is returned, not followed")
+            (is (= before (length (%received b "/landing")))
+                "and the other origin received nothing"))
+          ;; The controls, within one origin: the credential and the body are both kept.
+          (let ((r (send "/same" :headers +credential-test-headers+)))
+            (is (= 200 (http:response-status r)) "control: a same-origin redirect is followed")
+            (let ((got (%received a "/here")))
+              (is (equal "Bearer secret-token"
+                         (and got (aion/test-http:request-header (first got) "Authorization")))
+                  "control: and keeps the credential")))
+          (let ((r (send "/same-307" :method :post :content "access_token=secret")))
+            (is (= 200 (http:response-status r))
+                "control: a same-origin 307 with a body is followed")
+            (let ((got (%received a "/here")))
+              (is (equal "access_token=secret"
+                         (and got (aion/test-http:request-body-string (car (last got)))))
+                  "control: and the body arrives"))))))))
+
+;;; --- SEND-REQUEST's deadline (#1162) ----------------------------------------------------
+
+(defun %slow-send (server &rest options)
+  "SEND-REQUEST to SERVER's /, a server that sends a byte every 2 seconds, with a 5-second read
+timeout that no single read reaches. OPTIONS go to SEND-REQUEST."
+  (apply #'http:send-request (http:make-request :url (%local server "/") :read-timeout 5)
+         '() options))
+
+(test send-request-stops-at-its-deadline-while-a-call-without-one-is-still-reading
+  "#1162. A server that sends a byte every 2 seconds never trips a 5-second read timeout, and the
+read timer starts again on every read, so without a deadline SEND-REQUEST has no bound on such a
+call. With :DEADLINE 3 it signals REQUEST-DEADLINE-EXCEEDED after about 3 seconds, which a
+handler for FETCH-DEADLINE-EXCEEDED also catches.
+
+THE CONTROL is the same call to the same kind of server with no :DEADLINE, on a second thread: it
+is still reading when the call with a deadline has ended. That is what shows the deadline, and
+not some timeout this client already had, ended the first call."
+  (let ((done nil))
+    (with-server (slow (%slow-handler (lambda () done)))
+      (with-server (other (%slow-handler (lambda () done)))
+        ;; THREAD-LIFETIME: reads OTHER until the cleanup below sets DONE, which ends the handler
+        ;; and closes the connection, so the call returns or fails and the thread ends; the JOIN
+        ;; waits for that.
+        (let ((control (bt:make-thread (lambda () (ignore-errors (%slow-send other)))
+                                       :name "send-request without a deadline")))
+          (unwind-protect
+               (let* ((start (get-internal-real-time))
+                      (c (handler-case (progn (%slow-send slow :deadline 3) nil)
+                           (http:fetch-deadline-exceeded (c) c)))
+                      (seconds (/ (- (get-internal-real-time) start)
+                                  internal-time-units-per-second)))
+                 (is (typep c 'http:request-deadline-exceeded)
+                     "the call signals REQUEST-DEADLINE-EXCEEDED: ~S" c)
+                 (is (< 2.5 seconds 6) "it ended after ~,1F seconds" seconds)
+                 (is (eql 3 (and c (http:fetch-deadline-exceeded-deadline c))))
+                 (is (equal (%local slow "/") (and c (http:fetch-deadline-exceeded-url c)))
+                     "and names the URL it was on")
+                 (is (bt:thread-alive-p control)
+                     "control: the call without a deadline is still reading"))
+            (setf done t)
+            (aion/test-threads:join control)))))))
+
+(defun %send-deadline-timers ()
+  (remove "send-request deadline" (sb-ext:list-all-timers)
+          :key #'sb-ext:timer-name :test-not #'equal))
+
+(test a-send-request-that-ends-before-its-deadline-returns-and-leaves-no-timer
+  "#1162. A call that finishes in time returns its response as it would without a deadline, and
+its timer is unscheduled whether the call returns or signals, so nothing fires later."
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "on time")))
+    (is (null (%send-deadline-timers)) "none before")
+    (let ((r (http:send-request (http:make-request :url (%local s "/") :read-timeout 5) '()
+                                :deadline 30)))
+      (is (= 200 (http:response-status r)))
+      (is (equal "on time" (http:response-body r))))
+    (is (null (%send-deadline-timers)) "none after a call that returned")
+    (signals http:http-error
+      (http:send-request (http:make-request :url "http://does-not-resolve.invalid/") '()
+                         :deadline 30))
+    (is (null (%send-deadline-timers)) "none after a call that signalled")))
+
+(test a-send-request-with-a-deadline-follows-redirects-and-drops-credentials-across-origins
+  "#1162. With a deadline every hop goes over a connection this client opens, so redirects are
+followed by this client's own loop, for every request. A hop that changes origin must still drop
+the credential headers. Two servers on different ports; the second must receive exactly one
+request, without the Authorization header, and with an ordinary header kept. The control is a
+same-origin redirect, which keeps the credential."
+  (with-server (b (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "landed")))
+    (let ((landing (%local b "/landing")))
+      (with-server (a (lambda (path head stream)
+                        (declare (ignore head))
+                        (cond ((string= path "/away")
+                               (%write-response stream 302 `(("Location" . ,landing)) ""))
+                              ((string= path "/same")
+                               (%write-response stream 302 '(("Location" . "/here")) ""))
+                              (t (%write-response stream 200 '() "here")))))
+        (flet ((send (path)
+                 (http:send-request (http:make-request :url (%local a path) :read-timeout 5
+                                                       :headers '(("Authorization" . "Bearer s")
+                                                                  ("X-Trace" . "kept")))
+                                    '() :deadline 30)))
+          (let ((r (send "/away")))
+            (is (equal "landed" (http:response-body r)) "the cross-origin redirect is followed")
+            (let ((got (%received b "/landing")))
+              (is (= 1 (length got)) "the other origin received one request: ~D" (length got))
+              (is (null (and got (aion/test-http:request-header (first got) "Authorization")))
+                  "without the credential")
+              (is (equal "kept" (and got (aion/test-http:request-header (first got) "X-Trace")))
+                  "and with the ordinary header")))
+          (let ((r (send "/same")))
+            (is (equal "here" (http:response-body r)) "control: a same-origin redirect is followed")
+            (let ((got (%received a "/here")))
+              (is (equal "Bearer s"
+                         (and got (aion/test-http:request-header (first got) "Authorization")))
+                  "control: and keeps the credential"))))))))
+
+(test a-send-request-with-a-deadline-is-refused-rather-than-sent-around-a-proxy
+  "#1162. A request with a deadline goes over a connection this client opens directly, so it
+cannot go through the proxy dexador would have used. Sending it around the proxy would be a
+decision the machine's configuration did not make, so it is refused, before anything is sent.
+The control: a plaintext request to a local host is not proxied in the first place (#1091), so
+the same proxy setting does not stop it."
+  (let ((dexador.util:*default-proxy* "http://127.0.0.1:9"))
+    (let ((e (handler-case (progn (http:send-request
+                                   (http:make-request :url "https://api.example.invalid/x")
+                                   '() :deadline 30)
+                                  nil)
+               (http:http-error (e) e))))
+      (is (typep e 'http:http-error) "a request that would be proxied is refused")
+      (is-true (and e (search "proxy" (princ-to-string e)))
+               "and the refusal says why: ~A" e))
+    (with-server (s (lambda (path head stream)
+                      (declare (ignore path head))
+                      (%write-response stream 200 '() "direct")))
+      (is (equal "direct"
+                 (http:response-body
+                  (http:send-request (http:make-request :url (%local s "/") :read-timeout 5) '()
+                                     :deadline 30)))
+          "control: a local plaintext request, which no proxy applies to, is sent"))))
+
+(test a-deadline-is-checked-when-a-substituted-perform-returns
+  "#1162. A PERFORM other than the default opens no socket the watch can wake, so the deadline is
+checked when it returns: a stub that takes 1.5 seconds under :DEADLINE 1 signals
+REQUEST-DEADLINE-EXCEEDED, and the same stub with no deadline returns its response."
+  (flet ((slow-stub (req)
+           (declare (ignore req))
+           (sleep 1.5)
+           (http:make-response :status 200 :body "late")))
+    (signals http:request-deadline-exceeded
+      (http:send-request (http:make-request :url "https://api.example.com/x") '()
+                         :perform #'slow-stub :deadline 1))
+    (is (equal "late"
+               (http:response-body
+                (http:send-request (http:make-request :url "https://api.example.com/x") '()
+                                   :perform #'slow-stub)))
+        "control: without a deadline the same stub's response is returned")))
+
+(test a-deadline-report-hides-the-credentials-in-its-url
+  "Copilot's review of #1163. A deadline condition's report is what reaches a log, and it printed
+the URL as given, so a query-string key or a password in the URL went with it. Both reports, the
+new one and FETCH-PUBLIC's, now print the URL as a request prints it (#844). The reader still
+returns the URL as given, since a handler may need it."
+  (let ((url "https://user:hunter2@api.example.com/v1/x?key=SECRET-KEY&page=2"))
+    (dolist (type '(http:request-deadline-exceeded http:fetch-deadline-exceeded))
+      (let* ((c (make-condition type :url url :deadline 3))
+             (text (princ-to-string c)))
+        (is-false (search "SECRET-KEY" text) "~A's report hides the query value: ~A" type text)
+        (is-false (search "hunter2" text) "~A's report hides the password: ~A" type text)
+        (is-true (search "api.example.com/v1/x" text) "~A's report keeps the host and path: ~A"
+                 type text)
+        (is (equal url (http:fetch-deadline-exceeded-url c))
+            "~A's reader returns the URL as given" type)))))
+
+(test the-proxy-refusal-hides-the-credentials-in-both-urls
+  "Copilot's review of #1163. The refusal for a request that would be proxied named the request's
+URL and the proxy's as given, and a proxy URL often carries a user and password."
+  (let ((dexador.util:*default-proxy* "http://proxyuser:proxypass@127.0.0.1:9"))
+    (let ((text (handler-case (progn (http:send-request
+                                      (http:make-request
+                                       :url "https://api.example.invalid/x?key=SECRET-KEY")
+                                      '() :deadline 30)
+                                     nil)
+                  (http:http-error (e) (princ-to-string e)))))
+      (is-true text "the request is refused")
+      (is-false (and text (search "SECRET-KEY" text)) "the request's query value is hidden: ~A" text)
+      (is-false (and text (search "proxypass" text)) "the proxy's password is hidden: ~A" text)
+      (is-true (and text (search "proxy" text)) "and the refusal still says why: ~A" text))))
+
+(test a-deadline-names-the-hop-it-found-the-call-on
+  "Copilot's review of #1163. The condition's URL is documented as the hop the call was on, and
+it was the URL the call started from, because the deadline recorded that once. A redirect from
+/start to a slow /slow must be reported as /slow."
+  (let ((done nil))
+    (with-server (s (let ((slow (%slow-handler (lambda () done))))
+                      (lambda (path head stream)
+                        (if (string= path "/start")
+                            (%write-response stream 302 '(("Location" . "/slow")) "")
+                            (funcall slow path head stream)))))
+      (unwind-protect
+           (let ((c (handler-case
+                        (progn (http:send-request (http:make-request :url (%local s "/start")
+                                                                     :read-timeout 5)
+                                                  '() :deadline 3)
+                               nil)
+                      (http:request-deadline-exceeded (c) c))))
+             (is-true c "the deadline is reached on the slow hop")
+             (is (equal (%local s "/slow") (and c (http:fetch-deadline-exceeded-url c)))
+                 "and the condition names that hop: ~A"
+                 (and c (http:fetch-deadline-exceeded-url c))))
+        (setf done t)))))
+
+(test a-deadline-that-passes-while-resolving-does-not-wait-for-a-connect
+  "Copilot's review of #1163. Resolving a name and opening the connection cannot be interrupted,
+so a deadline that passed during the lookup used to be noticed only after the connect returned,
+adding a whole connect timeout to the wait. The deadline is now checked between the two.
+
+The lookup is replaced with one that takes 2 seconds and answers 192.0.2.1, an address reserved
+for documentation that nothing answers, so a connect to it waits for CONNECT-TIMEOUT, here 10
+seconds. With :DEADLINE 1 the call must end shortly after the lookup returns."
+  (let ((original (fdefinition 'http::resolve-host)))
+    (unwind-protect
+         (progn
+           (setf (fdefinition 'http::resolve-host)
+                 (lambda (host) (declare (ignore host)) (sleep 2) (list #(192 0 2 1))))
+           (let* ((start (get-internal-real-time))
+                  (c (handler-case
+                         (progn (http:send-request (http:make-request :url "http://slow-dns.test/"
+                                                                      :connect-timeout 10
+                                                                      :read-timeout 5)
+                                                   '() :deadline 1)
+                                nil)
+                       (http:http-error (c) c)))
+                  (seconds (/ (- (get-internal-real-time) start) internal-time-units-per-second)))
+             (is (typep c 'http:request-deadline-exceeded) "the deadline is reported: ~A" c)
+             (is (< seconds 5) "and the call ended after ~,1F seconds, not after a connect timeout"
+                 seconds)))
+      (setf (fdefinition 'http::resolve-host) original))))
+
+;;; --- SEND-REQUEST :DEADLINE sends a multipart alist as multipart (#1178) ----------------
+
+(defun %multipart-shape (request)
+  "What a server can check about a multipart REQUEST it received: the Content-Type's type and
+whether it has a boundary, and whether the body holds each field as its own part."
+  (let ((type (aion/test-http:request-header request "Content-Type"))
+        (body (aion/test-http:request-body-string request)))
+    (list :type (and type (subseq type 0 (or (position #\; type) (length type))))
+          :boundary (and type (search "boundary=" type) t)
+          :name-part (and (search "Content-Disposition: form-data; name=\"name\"" body) t)
+          :value (and (search "Ada Lovelace" body) t)
+          :note-part (and (search "Content-Disposition: form-data; name=\"note\"" body) t)
+          :form-encoded (and (search "name=Ada" body) t))))
+
+(test a-multipart-alist-under-a-deadline-arrives-as-multipart
+  "#1178, from Copilot's review of #1177. With :DEADLINE the request goes over this client's own
+connection, whose writer form-encoded every alist and kept the caller's multipart/form-data
+header, so the server received name=Ada+Lovelace under a multipart type. It now makes dexador's
+decision and writes the same multipart body dexador writes.
+
+THE CONTROL is the same request with no deadline, which dexador sends: the server must see the
+same shape from both, field by field, so the two paths cannot drift apart again."
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "ok")))
+    (flet ((send (&rest options)
+             (apply #'http:send-request
+                    (http:make-request :method :post :url (%local s "/upload") :read-timeout 5
+                                       :headers '(("Content-Type" . "multipart/form-data"))
+                                       :content '(("name" . "Ada Lovelace") ("note" . "first")))
+                    '() options)
+             (first (aion/test-http:server-requests s))))
+      (let ((with-deadline (%multipart-shape (send :deadline 30)))
+            (through-dexador (%multipart-shape (send))))
+        (is (equal "multipart/form-data" (getf with-deadline :type))
+            "the type is multipart/form-data: ~S" with-deadline)
+        (is-true (getf with-deadline :boundary) "with a boundary: ~S" with-deadline)
+        (is-true (and (getf with-deadline :name-part) (getf with-deadline :note-part)
+                      (getf with-deadline :value))
+                 "each field arrives as its own part: ~S" with-deadline)
+        (is-false (getf with-deadline :form-encoded) "and the body is not form-encoded: ~S"
+                  with-deadline)
+        (is (equal through-dexador with-deadline)
+            "control: dexador's path delivers the same shape: ~S and ~S"
+            through-dexador with-deadline)))))
+
+(test a-redirect-whose-body-stalls-is-followed-under-a-deadline
+  "#1178, from Copilot's review of #1177. With :DEADLINE and no MAX-BODY-BYTES, the pinned
+connection read a response's whole body before the redirect loop saw its headers. A 302 that
+declares a body and then sends none held the call until the read timeout, and then failed it,
+without the Location ever being requested. Every body under a deadline now comes back as a
+stream, and a followed redirect's body is closed unread.
+
+The 302 declares 100 bytes and sends nothing until the test ends; the read timeout is 4 seconds.
+The call must reach the target and return its body well inside that. The target is on a second
+server because the test server answers one connection at a time, and the first is busy stalling."
+  (let ((done nil))
+    (with-server (target (lambda (path head stream)
+                           (declare (ignore path head))
+                           (%write-response stream 200 '() "the end")))
+      (let ((end (%local target "/end")))
+        (with-server (s (lambda (path head stream)
+                          (declare (ignore path head))
+                          (ignore-errors
+                           (aion/test-http:write-head stream 302 `(("Location" . ,end)
+                                                                   ("Content-Length" . 100)))
+                           (loop until done do (sleep 0.1)))))
+          (unwind-protect
+               (let* ((start (get-internal-real-time))
+                      (r (handler-case
+                             (http:send-request (http:make-request :url (%local s "/")
+                                                                   :read-timeout 4)
+                                                '() :deadline 30)
+                           (http:http-error (e) e)))
+                      (seconds (/ (- (get-internal-real-time) start)
+                                  internal-time-units-per-second)))
+                 ;; Two steps: fiveam's IS evaluates every argument of an AND form, so a
+                 ;; condition in R would reach RESPONSE-BODY.
+                 (is (typep r 'http:response) "the redirect is followed: ~A" r)
+                 (is (equal "the end" (and (typep r 'http:response) (http:response-body r)))
+                     "and its target's body is returned")
+                 (is (< seconds 3) "in ~,1F seconds, without waiting on the 302's body" seconds)
+                 (is (= 1 (length (%received target "/end"))) "and the target was requested once"))
+            (setf done t)))))))
+
+(test a-multipart-content-type-under-a-deadline-is-checked-and-has-one-boundary
+  "Copilot's review of #1180, two defects in the multipart fix for #1178.
+
+THE CALLER'S TYPE IS CHECKED. The generated Content-Type carries the caller's value, and skipping
+the caller's header in the header loop also skipped its CR/LF check, so a type with CR LF in it
+would have injected a header. It signals HTTP-ERROR again, before anything is sent.
+
+THE ADVERTISED BOUNDARY IS THE ONE THE BODY USES. A caller's boundary=old was kept and a second
+appended, so a receiver taking the first value could not find the parts. The caller's boundary
+is replaced and its other parameters kept; the test reads the boundary the server received and
+finds it as the body's delimiter."
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "ok")))
+    (flet ((send (type)
+             (http:send-request
+              (http:make-request :method :post :url (%local s "/upload") :read-timeout 5
+                                 :headers (list (cons "Content-Type" type))
+                                 :content '(("name" . "Ada")))
+              '() :deadline 30)))
+      (signals http:http-error
+        (send (format nil "multipart/form-data~C~CX-Injected: 1" #\Return #\Newline)))
+      ;; The connection is opened before the request is written, so the server records one with
+      ;; an empty head; what matters is that no byte of the request reached it.
+      (is (every (lambda (r) (string= "" (aion/test-http:request-head r)))
+                 (aion/test-http:server-requests s))
+          "and no byte of the request reached the server")
+      (send "multipart/form-data; boundary=old; charset=utf-8")
+      (let* ((r (first (aion/test-http:server-requests s)))
+             (type (aion/test-http:request-header r "Content-Type"))
+             (body (aion/test-http:request-body-string r))
+             (at (search "boundary=" type))
+             (boundary (and at (let ((v (subseq type (+ at 9))))
+                                 (subseq v 0 (or (position #\; v) (length v)))))))
+        (is (= 1 (loop for i = (search "boundary=" type) then (search "boundary=" type :start2 (1+ i))
+                       while i count t))
+            "one boundary is advertised: ~A" type)
+        (is-false (search "boundary=old" type) "and it is not the caller's: ~A" type)
+        (is-true (search "charset=utf-8" type) "the caller's other parameter is kept: ~A" type)
+        (is-true (and boundary (search (format nil "--~A" boundary) body))
+                 "the advertised boundary delimits the body: ~A" type)))))
+
+;;; --- a read timeout on dexador's path (#537) ------------------------------------------------
+
+(defun %late-answer (path head stream)
+  "A handler that waits 6 seconds and then answers 200."
+  (declare (ignore path head))
+  (sleep 6)
+  (%write-response stream 200 '() "late"))
+
+(defun %timed-send (request)
+  "Send REQUEST and return two values: the HTTP-ERROR it signalled, or :ANSWERED when it returned
+a response, and the seconds it took. An outer limit of 20 seconds turns a hang into a result."
+  (let* ((start (get-internal-real-time))
+         (outcome (handler-case
+                      (sb-ext:with-timeout 20
+                        (progn (http:send-request request '()) :answered))
+                    (http:http-error (e) e)
+                    (sb-ext:timeout () :hung))))
+    (values outcome (/ (- (get-internal-real-time) start) internal-time-units-per-second))))
+
+(test a-read-timeout-ends-a-request-the-server-answers-too-late
+  "#537: a request with :READ-TIMEOUT 1, sent through dexador (no CONNECT-ADDRESS and no DEADLINE),
+to a server that waits 6 seconds before writing anything. It must fail as a :RESPONSE failure
+before the server answers. It is sent once with a connect timeout and once without, because
+dexador's WinHTTP backend sets WinHTTP's timeouts only when it has a connect timeout; without one
+it uses its own default of 10 seconds.
+
+ON WINDOWS THE BOUND IS THE READ TIMEOUT PLUS 4 SECONDS. WinHTTP checks its receive timeout every
+4 seconds, so a request fails at the first multiple of 4 seconds after the timeout: measured on
+Windows 11, a timeout from 0.25 to 3 seconds ended the request at 4 seconds, 4 to 6 seconds at 8,
+and 8 seconds at 12, each over one connection. On the Windows leg of #530 the server answered at 3
+seconds, before that, and the request succeeded. Elsewhere the bound is the read timeout itself."
+  (with-server (s #'%late-answer)
+    (dolist (connect '(2 nil))
+      (multiple-value-bind (outcome seconds)
+          (%timed-send (http:make-request :url (%local s "/") :connect-timeout connect
+                                          :read-timeout 1))
+        (is (typep outcome 'http:http-error)
+            "with connect timeout ~A: the request failed rather than ~S after ~,2F s"
+            connect outcome seconds)
+        (is (< seconds #+os-windows 5.5 #-os-windows 2.5)
+            "with connect timeout ~A: it failed within its bound, not after ~,2F s"
+            connect seconds)
+        (is (eq :response (and (typep outcome 'http:http-error) (http:http-error-phase outcome)))
+            "with connect timeout ~A: after the request was sent: ~A" connect outcome)))))
+
+;;; --- a request that stays on this machine (#1212) -----------------------------------
+;;;
+;;; :STAY-LOCAL T on MAKE-REQUEST. The host has to be loopback by LOOPBACK-HOST-P, decided from
+;;; the text with no lookup; no proxy is used, for http or https; and a redirect to a host that
+;;; is not loopback signals STAY-LOCAL-REFUSED instead of being followed.
+
+(test loopback-host-p-decides-from-the-text-and-excludes-6to4-and-nat64
+  "#1211's rule. localhost and loopback literals count, including an IPv4-mapped one, which does
+not leave the machine. 6to4 and NAT64 addresses that carry 127.0.0.1 do not, because their
+traffic goes through a relay or gateway. A name other than localhost does not count, whatever it
+resolves to, because nothing is resolved."
+  (dolist (host '("localhost" "LOCALHOST" "127.0.0.1" "127.8.9.10" "::1" "::ffff:127.0.0.1"))
+    (is-true (http:loopback-host-p host) "~A is loopback" host))
+  (dolist (host '("64:ff9b::7f00:1" "64:ff9b:1::7f00:1" "2002:7f00:1::"
+                  "10.0.0.1" "192.168.1.1" "8.8.8.8" "0.0.0.0" "::"
+                  "localhost.example" "127.0.0.1.nip.io" "minio" "0127.0.0.1" "" "  " nil))
+    (is-false (http:loopback-host-p host) "~S is not loopback" host)))
+
+(test a-stay-local-https-request-to-loopback-does-not-go-through-the-proxy
+  "An https request to 127.0.0.1 with a proxy configured, as HTTPS_PROXY would configure it, goes
+straight to the server. The proxy is a second local server that records what it receives. The
+control: the same request without :STAY-LOCAL goes to the proxy as a CONNECT, which is the
+current default and stays so. Skipped on Windows, where dexador's WinHTTP backend never uses
+*DEFAULT-PROXY* and the test server cannot present the IP-address certificate (#914)."
+  (skip-on-windows "WinHTTP ignores *DEFAULT-PROXY*; ip-test.key is refused there (#914)"
+    (with-server (proxy (lambda (path head stream)
+                          (declare (ignore path head))
+                          (%write-response stream 502 '() "proxy")))
+      (with-server (s (lambda (path head stream)
+                        (declare (ignore path head))
+                        (%write-response stream 200 '() "direct"))
+                      :tls :ip)
+        (let ((dexador.util:*default-proxy* (%local proxy "")))
+          (flet ((send (&rest args)
+                   (handler-case
+                       (http:send-request
+                        (apply #'http:make-request :url (%local s "/x" "127.0.0.1" "https")
+                                                   :ca-path (%fixture "ip-test.crt")
+                                                   :read-timeout 5 args)
+                        '())
+                     (http:http-error (e) e))))
+            (let ((r (send :stay-local t)))
+              (is (equal "direct" (and (typep r 'http:response) (http:response-body r)))
+                  "the request reached the server: ~A" r)
+              (is (= 0 (%requests proxy)) "the proxy received ~D requests" (%requests proxy)))
+            ;; The control counts from here, so it holds whether or not the request above
+            ;; also went to the proxy.
+            (let ((before (%requests proxy)))
+              (send)
+              (is (= (1+ before) (%requests proxy))
+                  "control: without :STAY-LOCAL the request goes to the proxy")
+              (is-true (search "CONNECT" (or (first (server-heads proxy)) ""))
+                       "as a CONNECT: ~S" (first (server-heads proxy))))))))))
+
+(test a-stay-local-request-refuses-a-redirect-off-the-machine
+  "A 302 from 127.0.0.1 to a host that is not loopback signals STAY-LOCAL-REFUSED, naming the
+target and the URL that redirected, on each path a request can take: dexador's own following (no
+credential and no body), this client's loop (a credential header), and a deadline. The targets
+are a name and a NAT64 address carrying 127.0.0.1, neither of which is connected to. Control: a
+redirect to another path on 127.0.0.1 is followed."
+  (dolist (target '("http://api.example.invalid/x" "http://[64:ff9b::7f00:1]:9/x"))
+    (with-server (s (lambda (path head stream)
+                      (declare (ignore head))
+                      (if (string= path "/away")
+                          (%write-response stream 302 `(("Location" . ,target)) "")
+                          (%write-response stream 200 '() "here"))))
+      (dolist (variant '(:plain :credential :deadline))
+        (let ((e (handler-case
+                     (progn
+                       (http:send-request
+                        (http:make-request :url (%local s "/away") :read-timeout 5 :stay-local t
+                                           :headers (and (eq variant :credential)
+                                                         '(("Authorization" . "Bearer s"))))
+                        '() :deadline (and (eq variant :deadline) 30))
+                       nil)
+                   (error (e) e))))
+          (is (typep e 'http:stay-local-refused) "~A, ~A: ~S" target variant e)
+          (when (typep e 'http:stay-local-refused)
+            (is (equal target (http:stay-local-refused-url e)) "~A: names the target" variant)
+            (is (equal (%local s "/away") (http:stay-local-refused-from e))
+                "~A: names the URL that redirected" variant))))
+      (let ((r (http:send-request (http:make-request :url (%local s "/same") :read-timeout 5
+                                                     :stay-local t)
+                                  '())))
+        (is (equal "here" (http:response-body r)) "control: a request that is not redirected")))
+    (with-server (s (lambda (path head stream)
+                      (declare (ignore head))
+                      (if (string= path "/same")
+                          (%write-response stream 302 '(("Location" . "/here")) "")
+                          (%write-response stream 200 '() "here"))))
+      (is (equal "here"
+                 (http:response-body
+                  (http:send-request (http:make-request :url (%local s "/same") :read-timeout 5
+                                                        :stay-local t)
+                                     '())))
+          "control: a redirect that stays on 127.0.0.1 is followed"))))
+
+(test a-stay-local-request-to-a-host-that-is-not-loopback-is-refused-before-connecting
+  "Refused before any connection and without a lookup, through SEND-REQUEST, with and without a
+deadline, and through OPEN-RESPONSE-STREAM. A pinned CONNECT-ADDRESS that is not loopback is
+refused too, whatever the URL's host. Each URL here would fail or hang differently if it were
+sent: a name that does not exist, an unroutable private address, and the NAT64 and 6to4 forms of
+127.0.0.1. Control: the same option with 127.0.0.1 reaches the server."
+  (let ((resolved '()))
+    (dolist (url '("http://api.example.invalid/x" "https://10.255.255.1/x"
+                   "http://[64:ff9b::7f00:1]:9/x" "https://[2002:7f00:1::]/x"))
+      (dolist (deadline '(nil 30))
+        (let ((e (handler-case
+                     (progn (http:send-request
+                             (http:make-request :url url :stay-local t :connect-timeout 2)
+                             '() :deadline deadline)
+                            nil)
+                   (error (e) e))))
+          (is (typep e 'http:stay-local-refused) "~A (deadline ~A): ~S" url deadline e)
+          (when (typep e 'http:stay-local-refused)
+            (is (equal url (http:stay-local-refused-url e)))
+            (is (null (http:stay-local-refused-from e))))))
+      (let ((e (handler-case
+                   (progn (http:open-response-stream
+                           (http:make-request :url url :stay-local t)
+                           :resolve (lambda (host) (push host resolved) (list #(127 0 0 1))))
+                          nil)
+                 (error (e) e))))
+        (is (typep e 'http:stay-local-refused) "open-response-stream ~A: ~S" url e)))
+    (is (null resolved) "open-response-stream resolved ~S" resolved))
+  (with-server (s (lambda (path head stream)
+                    (declare (ignore path head))
+                    (%write-response stream 200 '() "local")))
+    (is (typep (handler-case
+                   (progn (http:send-request
+                           (http:make-request :url (%local s "/") :stay-local t
+                                              :connect-address "10.255.255.1" :connect-timeout 2)
+                           '())
+                          nil)
+                 (error (e) e))
+               'http:stay-local-refused)
+        "a loopback URL pinned to an address that is not loopback is refused")
+    (is (equal 0 (%requests s)) "nothing refused above reached the server")
+    (is (equal "local"
+               (http:response-body
+                (http:send-request (http:make-request :url (%local s "/") :stay-local t
+                                                      :read-timeout 5)
+                                   '())))
+        "control: 127.0.0.1 is sent")
+    (is (null (http:request-stay-local (http:make-request :url "http://x/")))
+        "the default is NIL, so every other caller is unchanged")))

@@ -31,6 +31,11 @@
 ;;; clack-handler-hunchentoot must list "hyperion" before it, or push the feature itself.
 (pushnew :hunchentoot-no-ssl *features*)
 
+;;; dexador without cl+ssl on macOS (#905): see the same form at the top of aion/aion.asd. It is
+;;; repeated here because this file names dexador, and ASDF may resolve that dependency before it
+;;; reads aion.asd.
+#+os-macosx (pushnew :dexador-no-ssl *features*)
+
 (defsystem "hyperion"
   :description "A full-stack, HTMX-first web framework for Common Lisp (Coalton core)."
   :author "Bob <eternal.recursion@proton.me>"
@@ -108,6 +113,8 @@
                              (:file "i18n")     ; locale dictionaries + negotiation
                              (:file "page-meta") ; Open Graph + Twitter-card tags (#821); after i18n
                              (:file "consent")  ; cookie/tracking consent (GDPR/ePrivacy)
+                             (:file "notice")   ; in-page notices; htmx error responses shown (#980)
+                             (:file "appearance") ; theme, contrast and look, and the --hy-* tokens (#981)
                              (:file "static")   ; static asset serving
                              (:file "markdown") ; Markdown -> HTML (safe by default)
                              (:file "js")       ; Parenscript (poller + helpers)
@@ -220,12 +227,36 @@
   :components ((:file "src/server-uv"))
   :in-order-to ((test-op (test-op "hyperion/server-uv/tests"))))
 
+;;; WebSockets on server-uv (#376): the frames are parsed by aion/websocket, the connection
+;;; is server-uv's after a 101. A system of its own so server-uv does not depend on the
+;;; WebSocket code, and an application that does not use WebSockets does not load it.
+(defsystem "hyperion/server-uv/websocket"
+  :description "WebSockets (RFC 6455) on hyperion/server-uv (#376)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion/server-uv" "aion/websocket" "aion/log")
+  :serial t
+  :components ((:file "src/server-uv-websocket"))
+  :in-order-to ((test-op (test-op "hyperion/server-uv/websocket/tests"))))
+
+(defsystem "hyperion/server-uv/websocket/tests"
+  :description "WebSockets on server-uv over real sockets, with a minimal client written in the suite (#376)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion/server-uv/websocket" "hyperion/server-uv" "aion/websocket"
+               "hyperion/test-ports" "aion/pool" "fiveam" (:require "sb-bsd-sockets"))
+  :serial t
+  :components ((:module "tests/websocket"
+                :components ((:file "server-uv-websocket-tests"))))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/server-uv/websocket/tests :run-tests)))
+
 (defsystem "hyperion/clack-handler-uv"
   :description "A Clack handler for hyperion/server-uv: (clack:clackup app :server :uv) (#373, ADR-0020)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :depends-on ("hyperion/server-uv" "bordeaux-threads"
-               "aion/dynamic") ; the delayed-response thread inherits the request's bindings (#158)
+               "aion/dynamic" ; the delayed-response thread inherits the request's bindings (#158)
+               "clack-socket") ; the protocol the :CLACK.IO socket implements, for websocket-driver (#376)
   :serial t
   :components ((:file "src/clack-handler-uv"))
   :in-order-to ((test-op (test-op "hyperion/clack-handler-uv/tests"))))
@@ -239,9 +270,14 @@
   ;; those three were already in the tree. aion/uv for uv-error, which tells a taken port
   ;; from other listen failures (#519).
   :depends-on ("hyperion/clack-handler-uv" "hyperion/server-uv" "aion/uv" "clack" "dexador"
-               "usocket" "fiveam")
+               "usocket" "fiveam"
+               ;; websocket-driver's server, run on :uv through the :CLACK.IO socket, and the
+               ;; minimal WebSocket client of server-uv's WebSocket suite (#376). Test-only:
+               ;; no system an app loads depends on websocket-driver.
+               "websocket-driver-server" "hyperion/server-uv/websocket/tests")
   :serial t
-  :components ((:file "tests/clack-handler-uv-tests"))
+  :components ((:file "tests/clack-handler-uv-tests")
+               (:file "tests/clack-handler-uv-websocket-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/clack-handler-uv/tests :run-tests)))
 
 (defsystem "hyperion/server-uv/tests"
@@ -287,7 +323,8 @@
                              (:static-file "bulma.min.css")))
                ;; The tree's own component stylesheets (#489), embedded the same way.
                (:module "assets/components"
-                :components ((:static-file "calendar.css")))
+                :components ((:static-file "calendar.css")
+                             (:static-file "kit.css")))
                (:file "src/assets"))
   :in-order-to ((test-op (test-op "hyperion/assets/tests"))))
 
@@ -310,6 +347,39 @@
   :depends-on ("hyperion/calendar" "hyperion" "aion/tz" "spinneret" "fiveam")
   :components ((:file "tests/calendar-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/calendar/tests :run-tests)))
+
+(defsystem "hyperion/kit"
+  :description "Generic collection-page components: page header, breadcrumbs, empty state, segmented control, toggle group, dialogs, the destructive confirm, the undo notice, the list toolbar, the properties panel, the appearance picker (#981), and the dock panel (#67)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; Its stylesheet is served by hyperion/assets, which this system does not depend on, the
+  ;; same arrangement as hyperion/calendar.
+  ;; hyperion for hyperion/output, which compiles the components' Parenscript the way
+  ;; hyperion/js does. hyperion/list for the toolbar, which reads a list's spec and state.
+  :depends-on ("hyperion" "hyperion/list" "spinneret" "parenscript")
+  :serial t
+  :components ((:module "src/kit"
+                :serial t
+                :components ((:file "page")
+                             (:file "toggle")
+                             (:file "dialog")
+                             (:file "toolbar")
+                             (:file "panel")
+                             (:file "dock")
+                             (:file "appearance"))))
+  :in-order-to ((test-op (test-op "hyperion/kit/tests"))))
+
+(defsystem "hyperion/kit/tests"
+  :description "Tests for hyperion/kit: each component's roles, names and pressed state, read from the markup it writes."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  ;; plump parses the markup, so a test reads elements and attributes, not strings.
+  ;; com.inuoe.jzon reads the HX-Trigger header back as JSON.
+  :depends-on ("hyperion" "hyperion/kit" "hyperion/list" "spinneret" "plump" "fiveam"
+               "com.inuoe.jzon")
+  :components ((:file "tests/kit-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/kit/tests :run-tests)))
 
 (defsystem "hyperion/list"
   :description "Paging, sorting and filtering a list from the query string, against a spec the app declares: the state, the mnemosyne clauses, links, and the pager and sort-heading components (#488)."
@@ -347,6 +417,45 @@
   :components ((:file "tests/list-db-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/list-db/tests :run-tests)))
 
+(defsystem "hyperion/notifications"
+  :description "In-app notifications: a store protocol and a memory store, NOTIFY with per-kind delivery to the list or the app's email function, the bell and list components, their router, and a prune job (#792)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; hyperion for hyperion/http, i18n, router and csrf. aion/clock for the ids, aion/log for a
+  ;; failed email. No database (hyperion/notifications-db) and no hermes: email is the app's
+  ;; function, because nothing in the line depends on a satellite.
+  :depends-on ("hyperion" "spinneret" "bordeaux-threads" "aion/clock" "aion/log")
+  :components ((:file "src/notifications"))
+  :in-order-to ((test-op (test-op "hyperion/notifications/tests"))))
+
+(defsystem "hyperion/notifications/tests"
+  :description "Tests for hyperion/notifications: the store protocol on the memory store, collapsing by group key, delivery per kind, the link check, the components' markup and the routes."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion/notifications" "hyperion" "spinneret" "flexi-streams" "fiveam"
+               "aion/schedule")   ; the prune job is run the way the docs define it
+  :components ((:file "tests/notifications-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/notifications/tests :run-tests)))
+
+(defsystem "hyperion/notifications-db"
+  :description "A mnemosyne store for hyperion/notifications, with the DDL for the app's migrations and a check that its tables exist (#792)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; mnemosyne is to hyperion's left in the DAG; bordeaux-threads for the one-connection lock.
+  :depends-on ("hyperion/notifications" "mnemosyne" "bordeaux-threads" "aion/log")
+  :components ((:file "src/notifications-db"))
+  :in-order-to ((test-op (test-op "hyperion/notifications-db/tests"))))
+
+(defsystem "hyperion/notifications-db/tests"
+  :description "Tests for hyperion/notifications-db against SQLite in memory, and Postgres when MNEMOSYNE_TEST_PG_URL is set."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion/notifications-db" "hyperion/notifications" "mnemosyne" "fiveam")
+  :components ((:file "tests/notifications-db-tests"))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/notifications-db/tests :run-tests)))
+
 (defsystem "hyperion/sidecar"
   :description "Dev sidecars: helper processes, such as a webhook forwarder, started and stopped with a dev server (#700)."
   :author "Bob <eternal.recursion@proton.me>"
@@ -354,7 +463,8 @@
   ;; aion/windows on Windows starts each sidecar suspended in a kill-on-close job object with no
   ;; console window (#700). Nothing here depends on hyperion, so hyperion can depend on this.
   :depends-on ("aion/log" "aion/secret" (:feature :win32 "aion/windows")
-               "aion/dynamic")   ; unblock-interrupts, first in each sidecar thread (#541)
+               "aion/dynamic"    ; unblock-interrupts, first in each sidecar thread (#541)
+               "aion/retry")     ; the restart schedule is RETRY-DELAY's (#79)
   :components ((:file "src/sidecar"))
   :in-order-to ((test-op (test-op "hyperion/sidecar/tests"))))
 
@@ -388,10 +498,17 @@
   ;; the consumer -- here the consumer is the test).
   :depends-on ("hyperion/assets" "hyperion"   ; assets-tests.lisp calls router: and server:
                "hyperion/test-ports" "fiveam" "ironclad" "clack-handler-hunchentoot"
+               ;; kit-browser-tests runs hyperion/kit's dialogs in the smoke page's browser (#981).
+               "hyperion/kit" "hyperion/list" "spinneret"
+               ;; The browser the smoke pages run in is found by aion/cdp's FIND-BROWSER (#1028).
+               "aion/cdp"
                (:require "sb-bsd-sockets"))
   :serial t
   :components ((:file "tests/assets-tests")
-               (:file "tests/htmx-smoke-tests"))
+               (:file "tests/htmx-smoke-tests")
+               ;; after htmx-smoke-tests, whose browser helpers it uses (#980)
+               (:file "tests/notice-smoke-tests")
+               (:file "tests/kit-browser-tests"))   ; uses the smoke page's browser helpers
   :perform (test-op (o c) (uiop:symbol-call :hyperion/assets/tests :run-tests)))
 
 ;;; Durable session store, backed by mnemosyne. A separate system so hyperion core keeps
@@ -409,7 +526,8 @@
   ;; DEPENDS ON hyperion/desktop, not on nothing: the suite resolves the launcher through
   ;; desktop:default-launcher rather than rebuilding that logic, so if resolution moves
   ;; the suite moves with it instead of quietly testing a path nobody uses.
-  :depends-on ("aion/fs" "aion/platform" "hyperion/desktop" "fiveam")   ; view-tests.lisp compares with aion/platform (#416)
+  :depends-on ("aion/fs" "aion/platform" "hyperion/desktop" "fiveam"   ; view-tests.lisp compares with aion/platform (#416)
+               "aion/test-http")   ; the pages a real window with --dialogs loads, on CI (#986)
   :serial t
   :components ((:file "tests/view-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/view/tests :run-tests)))
@@ -422,7 +540,9 @@
                ;; ShellExecuteW for the :browser shell, so no URL passes through cmd (#851)
                (:feature :win32 "aion/windows"))
   :serial t
-  :components ((:file "src/desktop")))
+  :components ((:file "src/desktop")
+               ;; #986: the native dialogs' request, checked and rendered for a page
+               (:file "src/desktop-dialogs")))
 
 ;;; The desktop self-updater (ADR-0010, pre-publication issue 76). An aux system: only a desktop app pulls it,
 ;;; and hyperion core stays free of crypto and of an HTTP client.
@@ -722,6 +842,8 @@
                              (:file "same-origin-tests")
                              (:file "desktop-window-tests")
                              (:file "browser-tests")   ; the :browser shell opens no shell (#851)
+                             (:file "notice-tests")    ; after i18n-tests, whose %HT it uses (#980)
+                             (:file "desktop-dialogs-tests")   ; the dialog call a page renders (#986)
                              (:file "ratelimit-tests")
                              (:file "proxy-tests")   ; after ratelimit-tests, whose helpers it uses (#381)
                              (:file "entropy-tests")
@@ -733,5 +855,6 @@
                              (:file "import-tests")
                              (:file "markdown-tests")
                              (:file "html-attributes-tests")
-                             (:file "page-meta-tests"))))  ; after i18n-tests, whose %ATTR-P it uses
+                             (:file "page-meta-tests")  ; after i18n-tests, whose %ATTR-P it uses
+                             (:file "appearance-tests"))))
   :perform (test-op (op c) (uiop:symbol-call :hyperion/tests :run-tests)))

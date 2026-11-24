@@ -23,6 +23,23 @@
    (secret-key :initarg :secret-key :reader s3-secret-key)
    (session-token :initarg :session-token :initform nil :reader s3-session-token)
    (secure :initarg :secure :initform t :reader s3-secure-p)
+   (endpoint-approved-local
+    :initform nil :reader s3-endpoint-approved-local
+    :documentation
+    "THE HOST of this store's endpoint, when the endpoint is plaintext and that host resolves to
+a loopback, private or link-local address, and NIL otherwise. A plaintext request to it is then
+sent with no proxy and follows no redirect (#1091); see PROXY-ARGUMENTS for why this is a
+recorded verdict rather than a lookup on the send path, and for why it is a host rather than T.
+
+NO INITARG, AND RECOMPUTED ON EVERY INITIALIZATION. It had an initarg, and S3-STORE is exported,
+so a caller could hand this slot a host of their choosing:
+
+  (make-instance 'hermes/blob:s3-store :endpoint \"public.example:80\" :secure nil
+                 :path-style t :endpoint-approved-local \"public.example\" ...)
+
+sent signed requests to a public host in plaintext with :PROXY NIL, which is the leak this slot
+exists to prevent. Recomputing also means REINITIALIZE-INSTANCE cannot leave a verdict standing
+that belonged to an endpoint the store no longer has (the review of #1134).")
    (path-style :initarg :path-style :initform nil :reader s3-path-style-p
                :documentation
                "Address the bucket as a PATH (endpoint/bucket/key) rather than as a
@@ -40,38 +57,368 @@ MAKE-S3-STORE."))
       value
       (error 'blob-configuration-error :missing name)))
 
+(defun %normalize-endpoint (endpoint)
+  "ENDPOINT with surrounding whitespace removed: the one normalisation applied before anything
+checks or stores an endpoint. MAKE-S3-STORE and REINITIALIZE-INSTANCE both call it, so a store
+holds the same value whichever way it got its endpoint (#1151)."
+  (string-trim '(#\Space #\Tab #\Newline #\Return) endpoint))
+
 (defun make-s3-store (&key endpoint region access-key secret-key session-token
-                           (secure t) path-style public-base-url upload-acl)
+                           (secure t secure-p) path-style public-base-url upload-acl)
   "An S3-STORE, defaulting every setting from the environment.
 
 ENDPOINT is MNEMOSYNE_S3_ENDPOINT (default \"s3.amazonaws.com\"), REGION is MNEMOSYNE_S3_REGION
 (default \"us-east-1\"), ACCESS-KEY and SECRET-KEY are MNEMOSYNE_S3_ACCESS_KEY and
 MNEMOSYNE_S3_SECRET_KEY, SESSION-TOKEN is MNEMOSYNE_S3_SESSION_TOKEN, PATH-STYLE is
 MNEMOSYNE_S3_PATH_STYLE=true and PUBLIC-BASE-URL is MNEMOSYNE_S3_PUBLIC_BASE_URL.
+SECURE, whether requests and signed URLs use https, is MNEMOSYNE_S3_SECURE, and true when that
+is unset; see %SECURE-SETTING (#124). A local S3 double such as MinIO on localhost:9000 is
+reached with MNEMOSYNE_S3_SECURE=false and MNEMOSYNE_S3_PATH_STYLE=true.
 UPLOAD-ACL is :NONE (the default) or :PRIVATE, or MNEMOSYNE_S3_UPLOAD_ACL: whether UPLOAD-URL
 signs `x-amz-acl: private'. Set :PRIVATE for a bucket that honours ACLs, such as DigitalOcean
 Spaces or an AWS bucket with ACLs enabled, and leave :NONE for an AWS bucket with ACLs disabled
 or Cloudflare R2; see %UPLOAD-ACL-SETTING (#796).
 
 Credentials are checked HERE rather than at first use, so a deploy missing a secret dies
-at boot with the variable's name instead of on the first upload a member attempts."
-  (let ((endpoint (or endpoint (uiop:getenv "MNEMOSYNE_S3_ENDPOINT") "s3.amazonaws.com"))
-        (region (or region (uiop:getenv "MNEMOSYNE_S3_REGION") "us-east-1"))
-        (access-key (or access-key (uiop:getenv "MNEMOSYNE_S3_ACCESS_KEY")))
-        (secret-key (or secret-key (uiop:getenv "MNEMOSYNE_S3_SECRET_KEY"))))
-    (make-instance 's3-store
-                   :endpoint (%require-setting endpoint "MNEMOSYNE_S3_ENDPOINT")
-                   :region region
-                   :access-key (%require-setting access-key "MNEMOSYNE_S3_ACCESS_KEY")
-                   :secret-key (%require-setting secret-key "MNEMOSYNE_S3_SECRET_KEY")
-                   :session-token (or session-token (uiop:getenv "MNEMOSYNE_S3_SESSION_TOKEN"))
-                   :secure secure
-                   :path-style (or path-style
-                                   (let ((v (uiop:getenv "MNEMOSYNE_S3_PATH_STYLE")))
-                                     (and v (string-equal v "true"))))
-                   :public-base-url (or public-base-url
-                                        (uiop:getenv "MNEMOSYNE_S3_PUBLIC_BASE_URL"))
-                   :upload-acl (%upload-acl-setting upload-acl))))
+at boot with the variable's name instead of on the first upload a member attempts.
+
+The MNEMOSYNE_ prefix on these variables is historical: the blob store began in mnemosyne and
+moved to hermes, and the deployed names were kept rather than renamed. They are hermes settings."
+  (let ((endpoint (or endpoint (%setting "MNEMOSYNE_S3_ENDPOINT") "s3.amazonaws.com"))
+        (region (or region (%setting "MNEMOSYNE_S3_REGION") "us-east-1"))
+        (access-key (or access-key (%setting "MNEMOSYNE_S3_ACCESS_KEY")))
+        (secret-key (or secret-key (%setting "MNEMOSYNE_S3_SECRET_KEY"))))
+    ;; The endpoint is required FIRST, so an empty one is reported as the missing setting it is,
+    ;; naming MNEMOSYNE_S3_ENDPOINT on its own. Only then is its shape judged: an empty value is
+    ;; a setting nobody filled in, and a malformed one is a setting filled in wrongly, and the
+    ;; two deserve different sentences (the review of #1090).
+    ;; TRIMMED ONCE, HERE, and the trimmed value is what is both checked and stored. The checks
+    ;; used to trim their own copy while the store kept the raw string, so " 127.0.0.1" passed
+    ;; the checks and then every request was built from a URL with a space in it (the review of
+    ;; #1090). One normalisation, before anything looks at the value.
+    (let* ((endpoint (%normalize-endpoint (%require-setting endpoint "MNEMOSYNE_S3_ENDPOINT")))
+           (path-style (or path-style
+                           (let ((v (%setting "MNEMOSYNE_S3_PATH_STYLE")))
+                             (and v (string-equal v "true"))))))
+      ;; THE SHAPE AND USERINFO CHECKS RUN BEFORE ANYTHING RESOLVES A NAME. They were below
+      ;; %SECURE-SETTING, which calls %LOCAL-ENDPOINT-P and so performs a DNS lookup, meaning a
+      ;; malformed endpoint was looked up before being refused. The store was never built, so it
+      ;; failed safe, but a value this code is about to reject should not be sent to a resolver
+      ;; first (the review of #1090).
+      (%check-endpoint-shape endpoint)
+      (%check-endpoint-url endpoint)
+      (let ((secure (%secure-setting secure secure-p endpoint path-style)))
+        (make-instance 's3-store
+                       :endpoint endpoint
+                       :region region
+                       :access-key (%require-setting access-key "MNEMOSYNE_S3_ACCESS_KEY")
+                       :secret-key (%require-setting secret-key "MNEMOSYNE_S3_SECRET_KEY")
+                       :session-token (or session-token (%setting "MNEMOSYNE_S3_SESSION_TOKEN"))
+                       :secure secure
+                       :path-style path-style
+                       :public-base-url (or public-base-url
+                                            (%setting "MNEMOSYNE_S3_PUBLIC_BASE_URL"))
+                       :upload-acl (%upload-acl-setting upload-acl))))))
+
+(defparameter +endpoint-forbidden+ '("://" "/" "?" "#" "@")
+  "Substrings an S3 endpoint may not contain (#1089). An endpoint is an authority -- a host with
+an optional port -- and nothing else. Each of these either moves the host somewhere this check
+would not look, or makes the request URL mean something other than what the setting appears to
+say.")
+
+(defun %check-endpoint-shape (endpoint)
+  "Signal BLOB-CONFIGURATION-ERROR unless ENDPOINT is a bare host with an optional port (#1089).
+
+WHY THE SHAPE IS CHECKED AND NOT ONLY THE HOST. The request URL is built as the scheme, then
+\"://\", then the endpoint as it stands (%S3-URL through %S3-HOST), so whatever the endpoint
+contains lands in the middle of a URL. The first fix for #1089 read the endpoint with QURI, the
+parser dexador uses, but read the ENDPOINT rather than the URL the request is built from, and
+the adversarial review found that these are not the same string:
+
+  evil.com://127.0.0.1        the check read the scheme \"evil.com\" and the host 127.0.0.1 and
+                              allowed plaintext, while the request URL was
+                              http://evil.com://127.0.0.1/bkt/k and dexador connected to
+                              evil.com:80
+  bucket.evil.com://localhost the same thing through the virtual-host form
+  http://127.0.0.1:9000       the request URL became http://http://127.0.0.1:9000/..., whose
+                              host is \"http\" -- an endpoint carrying a scheme never worked,
+                              although an earlier docstring of mine said it did
+
+Using dexador's parser was not enough, because it was handed a different string. Two things hold
+now: an endpoint may not contain the pieces that make a URL mean something else, and the host is
+read from the shape a PATH-STYLE request is built from. Both matter -- the shape check is what
+keeps the host check's input honest -- so a later reader should not drop either as redundant.
+
+PATH-STYLE IS PART OF THAT CLAIM AND NOT AN ASIDE. In virtual-host style %S3-HOST builds
+\"BUCKET.ENDPOINT\", which is a different DNS name from the endpoint and resolves wherever its
+resolver says, so no check here can speak for it. That is why %SECURE-SETTING requires path-style
+for a plaintext store. An earlier version of this docstring said the host was read from the shape
+the request is built from without that qualification, which was false for virtual-host style."
+  (let ((endpoint (and endpoint (string-trim " " endpoint))))
+    ;; NO REFUSAL HERE REPEATS THE VALUE. An endpoint may carry a password -- that is one of the
+    ;; things being refused -- and these reports reach logs and terminals. Every branch printed
+    ;; it with ~S until the review of #1094, so "AKIA:PASSWORD@127.0.0.1:9000" put the password
+    ;; in the report. The same mistake was fixed in hermes core's Twilio check one review
+    ;; earlier, and this copy was missed.
+    (flet ((refuse (why)
+             (error 'blob-configuration-error
+                    :missing (format nil "MNEMOSYNE_S3_ENDPOINT to be a host with an optional port, such as s3.amazonaws.com or localhost:9000. ~A" why))))
+      (when (or (null endpoint) (zerop (length endpoint)))
+        (refuse "The value is empty."))
+      (when (some (lambda (c) (member c '(#\Space #\Tab #\Newline #\Return) :test #'char=))
+                  endpoint)
+        (refuse "The value contains whitespace."))
+      (when (search "://" endpoint)
+        (refuse "The value contains \"://\". The scheme comes from MNEMOSYNE_S3_SECURE and is put in front of this value, so a scheme here would appear twice in the request URL and the host would not be the one named."))
+      (let ((bad (find-if (lambda (piece) (search piece endpoint)) +endpoint-forbidden+)))
+        (when bad
+          (refuse (format nil "The value contains ~S, which belongs to the rest of a URL rather than to a host." bad))))
+      ;; AN IPv6 LITERAL CANNOT BE AN ENDPOINT AT ALL, in either spelling. This branch catches the
+      ;; unbracketed form and %CHECK-ENDPOINT-URL catches the bracketed one, and the advice this
+      ;; message used to give -- write it as [::1]:9000 -- produced a store that could not send a
+      ;; request. Measured against a listener genuinely accepting on [::1]:
+      ;;
+      ;;   dex:request "http://[::1]:37753/"  ->  USOCKET:NS-HOST-NOT-FOUND-ERROR
+      ;;
+      ;; quri hands usocket the host with its brackets still attached and no such name exists, so
+      ;; the connection is never attempted. That is also why hermes core refuses a bracketed host
+      ;; for a credential URL, and it is the same rule here now (#1106).
+      ;;
+      ;; A BARE IPv6 ADDRESS IS REFUSED, WHATEVER THE MODE. An endpoint of "::1" passed every
+      ;; check when MNEMOSYNE_S3_SECURE was unset, because the plaintext rule never ran, and
+      ;; produced the request URL "https://::1/bkt/k" -- which QURI reads as the host ":" with
+      ;; port 1, so it could never have connected. The plaintext path already refused it for a
+      ;; different reason, which is why this went unnoticed (the review of #1094). Two or more
+      ;; colons and no leading bracket is an IPv6 address written without its brackets.
+      (when (and (not (char= #\[ (char endpoint 0)))
+                 (let ((first (position #\: endpoint)))
+                   (and first (position #\: endpoint :start (1+ first)))))
+        (refuse "The value looks like an IPv6 address written without brackets. A request URL built from it has no usable host. Writing it WITH brackets does not work either -- see %CHECK-ENDPOINT-URL -- so use a name that resolves to the address, or an IPv4 address.")))))
+
+(defun %endpoint-url (endpoint)
+  "ENDPOINT as the URL a request would be built from: the scheme, \"://\", then the endpoint.
+
+THE SCHEME IS ALWAYS PREPENDED, never conditionally. A blob endpoint is a bare authority such as
+\"localhost:9000\", and QURI reads that as the scheme \"localhost\" with no host at all, so an
+endpoint has to be given a scheme before it is parsed. An earlier version prepended one only
+when the endpoint had no \"://\" of its own, which is exactly how evil.com://127.0.0.1 got past
+the check: see %CHECK-ENDPOINT-SHAPE, which now refuses such an endpoint."
+  (let ((endpoint (and endpoint (string-trim " " endpoint))))
+    (and endpoint (concatenate 'string "http://" endpoint))))
+
+(defun %endpoint-host (endpoint)
+  "ENDPOINT's host, without a port, as QURI reads it out of the URL the request is built from:
+\"localhost:9000\" gives \"localhost\" and \"[::1]:9000\" gives \"::1\". NIL when there is no host.
+
+THIS USED TO PARSE THE ENDPOINT ITSELF, AND THAT WAS THE FIRST DEFECT IN #1089. It took the text
+up to the first slash and, when that began with \"[\", returned what was inside the brackets. An
+endpoint may carry userinfo before an \"@\", and when the userinfo was a bracketed IPv6 address,
+stripping the brackets consumed the \"@\" with it: for \"[::1]@example.com\" it returned \"::1\",
+which %LOCAL-ENDPOINT-P allowed as loopback while dexador connected to example.com."
+  (http:url-host (%endpoint-url endpoint)))
+(defun %check-endpoint-url (endpoint)
+  "Signal BLOB-CONFIGURATION-ERROR unless ENDPOINT, read as the URL a request is built from, is
+one this store may send its signed requests to (#1106). Returns the parsed URI.
+
+THE RULE IS AION/HTTP-CLIENT:CREDENTIAL-URL-REFUSAL, shared with every hermes provider that sends
+a credential to a configured URL. It replaces the copy that lived here: a userinfo check written
+out in this file, beside hermes core's own. The two copies of this rule acquired three different
+holes between them, each a case the other's fix had already closed (#1089, and the reviews of
+#1084 and #1090), which is why the rule now has one home. The condition stays this file's,
+because hermes/blob does not depend on hermes core and must not start to -- that is what
+CREDENTIAL-URL-REFUSAL returning a reason rather than signalling is for.
+
+WHAT IT CONTRIBUTES HERE: the parse, userinfo before an at-sign, a scheme inside the endpoint, a
+control character, a bracketed IPv6 host, and a missing host. Of those, userinfo is the one worth
+naming -- dexador connects to the host AFTER the at-sign, so an endpoint of that shape sends this
+store's signed requests, and any session token, to that host, over TLS if the store is secure,
+which hides the redirection rather than preventing it.
+
+THE SCHEME PASSED IS HTTPS, DELIBERATELY, so that the shared rule's plaintext branch does not
+fire here. Whether this store may use plaintext is decided by %SECURE-SETTING, and that decision
+has an exception the shared rule knows nothing about: :SECURE NIL passed in code is allowed
+without a locality check at all, because it is a deliberate choice written by whoever owns the
+code and it is the workaround #124 was filed with. Letting the shared rule judge plaintext here
+would refuse that case and take the workaround away. %SECURE-SETTING keeps the locality refusal,
+with the message that names the environment variable.
+
+%CHECK-ENDPOINT-SHAPE still runs first, and still belongs here: it is about the BARE AUTHORITY
+form -- no scheme, no path, no at-sign, brackets on an IPv6 address -- which is a rule about what
+this setting is allowed to look like rather than about URLs in general, and the shared rule cannot
+express it."
+  (let ((url (and endpoint (concatenate 'string "https://" (string-trim " " endpoint)))))
+    (multiple-value-bind (reason uri)
+        (credential-url-refusal url
+                                :setting "MNEMOSYNE_S3_ENDPOINT"
+                                :example "s3.amazonaws.com"
+                                :credential "this store's signed requests and any session token"
+                                :appends-path t)
+      (when reason
+        (error 'blob-configuration-error :missing reason))
+      uri)))
+
+(defun %local-endpoint-p (endpoint)
+  "Whether ENDPOINT names something only this machine or this network can reach, so sending it
+requests in plaintext does not put them on the public internet.
+
+THE RULE IS AION/HTTP-CLIENT:LOCAL-HOST-P, not a copy written here. It was a copy until #1082,
+and so was hermes core's for a Twilio API base, and the two acquired different holes: a
+bracketed IPv6 userinfo got past one, a scheme inside the endpoint got past the other, and a
+bucket label in front of the host got past both (#1089, the review of #1084). A rule that
+decides whether credentials may travel in the clear is the last rule that should exist twice.
+
+The host comes from %ENDPOINT-HOST, which reads the URL a request is built from with the parser
+dexador parses it with. An endpoint whose host cannot be determined is not local (#1089)."
+  (let ((host (%endpoint-host endpoint)))
+    (and host (http:local-host-p host))))
+
+(defun %secure-setting (value supplied-p endpoint path-style)
+  "The store's SECURE: VALUE when :SECURE was passed, else MNEMOSYNE_S3_SECURE, else T.
+
+
+The variable is read as true or false without regard to case, and unset means true, so plaintext
+http has to be asked for. Any other value signals BLOB-CONFIGURATION-ERROR rather than picking a
+default, so a misspelling cannot quietly change the store to http, and cannot quietly leave a
+local double unreachable either.
+
+MNEMOSYNE_S3_SECURE=false IS REFUSED FOR AN ENDPOINT THAT IS NOT LOCAL (the hub's review of
+#970). Without that, one environment variable turned a store still aimed at the default
+s3.amazonaws.com into one that sent its signed requests, and any session token, in plaintext
+across the internet. See %LOCAL-ENDPOINT-P. A caller that passes :SECURE NIL in code is not
+checked: that is a deliberate choice written by whoever owns the code, and it is the workaround
+#124 was filed with; the environment is the surface an operator changes without one.
+
+This reads oppositely from MNEMOSYNE_S3_PATH_STYLE beside it, where unset means NIL. That is
+deliberate: for path-style the safe default is off, and for secure it is on."
+  (if supplied-p
+      (and value t)
+      (let ((v (%setting "MNEMOSYNE_S3_SECURE")))
+        (cond ((null v) t)
+              ((string-equal v "true") t)
+              ((string-equal v "false")
+               ;; PLAINTEXT REQUIRES PATH-STYLE, because in virtual-host style the request does
+               ;; not go to the endpoint at all: %S3-HOST builds "BUCKET.ENDPOINT", a different
+               ;; DNS name, and nothing here can say where that resolves. The check approved
+               ;; 127.0.0.1 while the request went to bkt.127.0.0.1, and 10.1.2.3, LOCALHOST and
+               ;; a Compose name behaved the same way -- whoever controls the resolver or the
+               ;; search domain chooses where that name points. This has been so since #970 and
+               ;; was found in the review of #1090. Path-style sends the request to the endpoint
+               ;; itself, which is the host this check is about, so the two agree again.
+               (unless path-style
+                 (error 'blob-configuration-error
+                        :missing (format nil "MNEMOSYNE_S3_PATH_STYLE=true when MNEMOSYNE_S3_SECURE=false. In virtual-host style the request goes to the DNS name BUCKET.~A rather than to ~S, and nothing can say where that name resolves, so a plaintext store must address the endpoint itself. A local S3 double such as MinIO wants path-style anyway"
+                                         endpoint endpoint)))
+               (unless (%local-endpoint-p endpoint)
+                 (error 'blob-configuration-error
+                        :missing (format nil "MNEMOSYNE_S3_SECURE=false, which sends every request in plaintext, and MNEMOSYNE_S3_ENDPOINT is ~S, which is not a loopback, private or link-local address. Plaintext is for a local S3 double; point the endpoint at one, or pass :secure nil in code if this is really what you want"
+                                         endpoint)))
+               nil)
+              (t (error 'blob-configuration-error
+                        :missing (format nil "MNEMOSYNE_S3_SECURE must be true or false, not ~S" v)))))))
+
+(defun %slot-snapshot (object)
+  "Every slot of OBJECT as (NAME . (VALUE)) when bound and (NAME) when unbound, for
+%RESTORE-SLOTS. Read through the MOP so that a slot added to the class later is covered without
+anyone remembering to add it here.
+
+THERE IS A SECOND COPY in hermes core's protocol.lisp, deliberately: this system does not depend
+on hermes core and must not start to, and this is eight lines of mechanism rather than a rule
+about where a credential may go."
+  (mapcar (lambda (slot)
+            (let ((name (sb-mop:slot-definition-name slot)))
+              (if (slot-boundp object name)
+                  (cons name (list (slot-value object name)))
+                  (list name))))
+          (sb-mop:class-slots (class-of object))))
+
+(defun %restore-slots (object snapshot)
+  "Put OBJECT's slots back as %SLOT-SNAPSHOT recorded them, unbinding the ones that were unbound."
+  (dolist (entry snapshot)
+    (if (cdr entry)
+        (setf (slot-value object (car entry)) (second entry))
+        (slot-makunbound object (car entry)))))
+
+(defmethod shared-initialize :around ((s s3-store) slot-names &rest initargs
+                                     &key &allow-other-keys)
+  "Recompute ENDPOINT-APPROVED-LOCAL from the endpoint the store actually ends up with (#1091).
+
+THIS IS THE ONLY PLACE THE SLOT IS SET, which is what makes it a verdict rather than a value a
+caller can assert. It had an initarg and S3-STORE is exported, so a caller could pass a host of
+their choosing and have signed requests sent to a public host in plaintext with no proxy; and a
+REINITIALIZE-INSTANCE that moved the endpoint left the old verdict behind. Both are closed by
+computing it here, after CALL-NEXT-METHOD has assigned the slots, on every initialization (the
+review of #1134).
+
+A SECURE STORE RESOLVES NOTHING. The verdict is only consulted for a plaintext request, so there
+is no reason to look up the endpoint of a store that will not send one, and the common case pays
+nothing for this.
+
+IT ALSO REFUSES AN ENDPOINT, on every initialization, which this docstring used to deny: the
+shape check and the shared URL rule run here as well as in MAKE-S3-STORE (Copilot's review of
+#1140), so MAKE-INSTANCE and REINITIALIZE-INSTANCE both signal BLOB-CONFIGURATION-ERROR for an
+endpoint the constructor would refuse. What MAKE-INSTANCE still does not do is the constructor's
+reading of the environment and its credential requirements; those stay in MAKE-S3-STORE.
+
+A store whose endpoint is accepted but not local simply gets NIL and keeps whatever proxy is
+configured.
+
+A REFUSAL LEAVES EVERY SLOT AS IT WAS, not only the endpoint and the verdict. CALL-NEXT-METHOD
+assigns all the initargs before the checks run, so a refused
+(reinitialize-instance store :secure nil :endpoint \"u:pw@x\") had already made the store
+plaintext; restoring only the endpoint and the verdict left a plaintext store at a local name with
+no approval, whose signed requests then went through HTTP_PROXY in the clear (#1091, the hub's
+review of #1140). Every slot is snapshotted before CALL-NEXT-METHOD and all of them are put back."
+  (declare (ignore slot-names initargs))
+  ;; THE ENDPOINT CHECKS RUN HERE TOO, not only in MAKE-S3-STORE, because REINITIALIZE-INSTANCE
+  ;; does not go through the constructor. A store built with a good endpoint could be moved to a
+  ;; refused one afterwards:
+  ;;
+  ;;   (reinitialize-instance store :endpoint "[::1]:9000")
+  ;;
+  ;; assigned a bracketed IPv6 endpoint -- which #1106 refuses, because a URL built from it
+  ;; cannot be connected to -- with no refusal at all, because this method only recomputed
+  ;; locality (Copilot's review of #1140).
+  ;;
+  ;; THEY ALSO STAY IN THE CONSTRUCTOR, deliberately, and that is not a duplicate for the sake
+  ;; of it: MAKE-S3-STORE runs them BEFORE %SECURE-SETTING, which resolves a name, so a malformed
+  ;; endpoint is refused without being sent to a resolver first (#1090, and the test
+  ;; THE-ENDPOINT-IS-JUDGED-BEFORE-ANY-NAME-IS-LOOKED-UP). Running them only here would put them
+  ;; after that lookup and lose the ordering. They are idempotent and neither resolves a name --
+  ;; %CHECK-ENDPOINT-URL asks about an https URL, so the locality branch does not fire -- so the
+  ;; second run costs nothing.
+  ;;
+  ;; A REFUSAL LEAVES THE STORE AS IT WAS, which is #1129's property for the providers and the
+  ;; same reasoning here: a caller may handle the error and carry on, and the next request would
+  ;; go wherever the slot now points. The previous endpoint and verdict are put back by a
+  ;; HANDLER-BIND that then declines, so the condition reaches the caller unchanged.
+  ;; EVERY SLOT, NOT A LIST OF THEM. The first version restored the endpoint and the verdict by
+  ;; name, and SECURE -- assigned by the same CALL-NEXT-METHOD -- was not on the list. Naming
+  ;; the slots to restore is a list someone has to keep complete as the class grows, and the
+  ;; slot it missed was the one that decides plaintext.
+  (let ((snapshot (%slot-snapshot s)))
+    (setf (slot-value s 'endpoint-approved-local) nil)
+    (handler-bind ((error (lambda (c)
+                            (declare (ignore c))
+                            (%restore-slots s snapshot))))
+      (let ((instance (call-next-method)))
+        ;; THE ENDPOINT IS STORED TRIMMED BEFORE IT IS CHECKED, as MAKE-S3-STORE does. This
+        ;; method used to check trimmed copies and leave the slot as given, so
+        ;; (reinitialize-instance store :endpoint " 127.0.0.1:9000 ") passed both checks and every
+        ;; URL was then built with the spaces in it (Copilot's review of #1150, #1151). The
+        ;; local-endpoint approval below reads the slot, so it sees the trimmed value too.
+        (when (and (slot-boundp s 'endpoint) (stringp (s3-endpoint s)))
+          (setf (slot-value s 'endpoint) (%normalize-endpoint (s3-endpoint s))))
+        (when (slot-boundp s 'endpoint)
+          (%check-endpoint-shape (s3-endpoint s))
+          (%check-endpoint-url (s3-endpoint s)))
+        (setf (slot-value s 'endpoint-approved-local)
+              (let* ((secure (or (not (slot-boundp s 'secure)) (s3-secure-p s)))
+                     (endpoint (and (not secure)
+                                    (slot-boundp s 'endpoint)
+                                    (s3-endpoint s)))
+                     (host (and endpoint (%endpoint-host endpoint))))
+                (and host (http:local-host-p host) host)))
+        instance))))
 
 (defun %upload-acl-setting (value)
   "The store's UPLOAD-ACL: VALUE when given, else MNEMOSYNE_S3_UPLOAD_ACL, else :NONE.
@@ -82,7 +429,7 @@ with ACLs enabled. Leave it :NONE for an AWS bucket with ACLs disabled, the defa
 AWS bucket, which refuses an upload naming `private' with 400 AccessControlListNotSupported,
 and for Cloudflare R2, which does not implement the header (the maintainer's ruling on #796)."
   (let ((value (or value
-                   (let ((v (uiop:getenv "MNEMOSYNE_S3_UPLOAD_ACL")))
+                   (let ((v (%setting "MNEMOSYNE_S3_UPLOAD_ACL")))
                      (and v (plusp (length v))
                           (cond ((string-equal v "private") :private)
                                 ((string-equal v "none") :none)
@@ -257,9 +604,26 @@ body that cannot be read becomes a DETAIL saying so (#796)."
          (url (%s3-url store bucket key (and query (plusp (length query)) query))))
     (multiple-value-bind (body status resp-headers)
         (handler-case
-            (dex:request url :method method :headers headers :content content
-                             :want-stream want-stream :force-binary t
-                             :keep-alive nil)
+            ;; THE PROXY DECISION COMES FROM AION, not from dexador's default. This backend
+            ;; calls dexador directly rather than through AION/HTTP-CLIENT:SEND-REQUEST, so it
+            ;; does not pick up what %DEX-ARGS passes, and when #1091 was first fixed there this
+            ;; path was left sending plaintext requests for a LOCAL endpoint to whatever
+            ;; HTTPS_PROXY named -- the signed Authorization header and any session token with
+            ;; them -- while a comment and the CHANGELOG said hermes/blob was covered (the
+            ;; review of #1094).
+            ;;
+            ;; APPROVED-LOCAL carries the verdict this store recorded when it was made, which is
+            ;; what covers an endpoint that is a NAME: PROXY-ARGUMENTS resolves nothing, so
+            ;; without this a plaintext store at a Compose service name such as "minio:9000" was
+            ;; approved for plaintext at configuration time and then still sent its signed
+            ;; requests, and any session token, to HTTP_PROXY in the clear (#1091).
+            (call-with-approved-local-host
+             (s3-endpoint-approved-local store)
+             (lambda ()
+               (apply #'dex:request url :method method :headers headers :content content
+                                        :want-stream want-stream :force-binary t
+                                        :keep-alive nil
+                                        (http:proxy-arguments url))))
           (dex:http-request-failed (e)
             (let ((status (dex:response-status e))
                   ;; With WANT-STREAM the error's body is an open stream on the connection.

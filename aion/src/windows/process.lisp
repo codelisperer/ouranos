@@ -11,12 +11,22 @@
 ;;;; same pipes RUN-PROGRAM makes, and the image's ends are SBCL fd-streams. On Windows an SBCL
 ;;;; fd-stream's descriptor is the Windows handle itself, so no C runtime descriptor is involved.
 ;;;;
-;;;; The child inherits only its three standard handles. They are named in a
+;;;; The child inherits only its three standard handles, and the handles given as
+;;;; :INHERIT-HANDLES. They are named in a
 ;;;; PROC_THREAD_ATTRIBUTE_HANDLE_LIST, so a pipe end that another thread has made inheritable
 ;;;; for its own child at the same moment is not inherited here. The reverse case is not covered:
 ;;;; a RUN-PROGRAM call in another thread, between a pipe end being made inheritable here and
 ;;;; CreateProcessW returning, inherits that end, because RUN-PROGRAM passes no list. The pipe
 ;;;; then stays open until that other process exits.
+;;;;
+;;;; A handle in :INHERIT-HANDLES becomes the child's C runtime descriptor 3, 4 and so on (#1028).
+;;;; The Microsoft C runtime passes descriptors to a child in STARTUPINFO's lpReserved2, and the
+;;;; child's runtime reads them before main runs, so a program finds descriptor 3 with
+;;;; _get_osfhandle(3). Chrome and Edge read the two pipes of --remote-debugging-pipe this way,
+;;;; as descriptors 3 and 4, which is how the browser stays inside its job on Windows with no
+;;;; debugging port open. aion/uv/process could pass the same descriptors through libuv, but it
+;;;; starts the process running, and a job assigned after that misses what the browser starts
+;;;; first.
 ;;;;
 ;;;; Batch files are refused. CreateProcessW runs a .bat or .cmd file through cmd.exe, which
 ;;;; parses the command line by different rules from the ones QUOTE-WINDOWS-ARGUMENT follows, so
@@ -81,7 +91,7 @@ quoted by QUOTE-WINDOWS-ARGUMENT and separated by one space."
 
 (defun %candidates (name)
   "NAME as given when it has an extension, otherwise NAME with .exe and then .com."
-  (if (pathname-type (pathname name))
+  (if (pathname-type (uiop:parse-native-namestring name))
       (list name)
       (list (concatenate 'string name ".exe") (concatenate 'string name ".com"))))
 
@@ -89,9 +99,11 @@ quoted by QUOTE-WINDOWS-ARGUMENT and separated by one space."
   "The native namestring of the .exe or .com file NAME names, or NIL. A NAME with a directory in
 it is looked for there. A bare NAME is looked for in each directory of PATH in turn. A NAME
 without an extension is tried with .exe and then .com. Batch files are not looked for, and a NAME
-that ends in .bat or .cmd is returned as it is found, for SPAWN-IN-JOB to refuse."
+that ends in .bat or .cmd is returned as it is found, for SPAWN-IN-JOB to refuse. NAME and
+each directory of PATH are native names, not Lisp namestrings, so [ ] in them are ordinary
+characters."
   (flet ((existing (candidate)
-           (let ((found (probe-file candidate)))
+           (let ((found (probe-file (uiop:parse-native-namestring candidate))))
              (and found
                   (pathname-name found)
                   (or (%executable-type-p (pathname-type found))
@@ -239,8 +251,38 @@ string followed by a NUL, and one more NUL at the end. Freed with CFFI:FOREIGN-S
    (format nil "~{~A~C~}" (loop for e in environment collect e collect (code-char 0)))
    :encoding :utf-16le))
 
+;;; The C runtime's descriptor block. Kept apart from CreateProcessW so that its layout can be
+;;; checked without starting a process.
+
+(defun %crt-descriptor-block (entries &optional (pointer-size 8))
+  "The octets of the block the Microsoft C runtime reads from a child's STARTUPINFO lpReserved2.
+ENTRIES is a list of (HANDLE . FLAGS), one for each descriptor from 0, where HANDLE is a raw handle
+as an integer and FLAGS is the runtime's flag byte. The block is a 32-bit count, then the flag
+bytes, then the handles, POINTER-SIZE octets each, all little-endian and packed with no padding."
+  (let* ((n (length entries))
+         (octets (make-array (+ 4 n (* n pointer-size)) :element-type '(unsigned-byte 8)
+                                                        :initial-element 0)))
+    (flet ((put (value at size)
+             (dotimes (i size)
+               (setf (aref octets (+ at i)) (ldb (byte 8 (* 8 i)) value)))))
+      (put n 0 4)
+      (loop for (handle . flags) in entries
+            for i from 0
+            do (put flags (+ 4 i) 1)
+               (put handle (+ 4 n (* i pointer-size)) pointer-size)))
+    octets))
+
+(defun %crt-flags (raw)
+  "The C runtime's flags for the open handle RAW: open, and a pipe or a device as GetFileType says."
+  (logior ffi:+crt-fopen+
+          (let ((type (ffi:get-file-type (cffi:make-pointer raw))))
+            (cond ((= type ffi:+file-type-pipe+) ffi:+crt-fpipe+)
+                  ((= type ffi:+file-type-char+) ffi:+crt-fdev+)
+                  (t 0)))))
+
 (defun spawn-in-job (program arguments &key environment directory
                                             (input nil) (output nil) (error nil)
+                                            (inherit-handles '())
                                             (element-type :default)
                                             (external-format :utf-8)
                                             (job-function 'default-job-function)
@@ -252,12 +294,22 @@ or the condition JOB-FUNCTION signalled when IF-NO-JOB is :CONTINUE.
 PROGRAM is found by FIND-EXECUTABLE. PROCESS-NOT-STARTED is signalled when it is not found or is
 a batch file. ENVIRONMENT is a list of \"NAME=VALUE\" strings that replaces this image's
 environment, or NIL to inherit it. DIRECTORY is the working directory, or NIL for this image's.
+A string given as DIRECTORY or as ERROR is taken as a native name and not parsed as a Lisp
+namestring.
 
 INPUT and OUTPUT are :STREAM, for a pipe whose other end becomes JOB-PROCESS-INPUT or
 JOB-PROCESS-OUTPUT, or NIL, for the NUL device. ERROR is :STREAM, NIL, or a pathname or string
 naming a file the process's standard error is appended to. The streams are SBCL fd-streams with
 ELEMENT-TYPE and EXTERNAL-FORMAT; the default ELEMENT-TYPE, :DEFAULT, reads both characters and
 octets.
+
+INHERIT-HANDLES is a list of raw handles, as integers, that the process gets as its C runtime
+descriptors 3, 4 and so on, in that order: for example pipe ends from SB-UNIX:UNIX-PIPE, whose
+descriptors are Windows handles. They are passed in STARTUPINFO's lpReserved2, which a program
+built with the Microsoft C runtime reads at startup and finds with _get_osfhandle, and they are
+added to the list of handles the process inherits. Each is made inheritable for the call and not
+inheritable again afterwards. The caller still owns them, and closes its copies once the process
+has started, so that the process holds the only ones.
 
 JOB-FUNCTION is called with the suspended process's pid and returns a job HANDLE. When it signals
 and IF-NO-JOB is :ERROR, the process is ended before it has run and the condition is resignalled.
@@ -268,7 +320,7 @@ When IF-NO-JOB is :CONTINUE, the process runs outside any job."
          (parent-ends (list :input nil :output nil :error nil))
          (process nil) (job nil) (job-error nil) (thread nil)
          (done nil))
-    (when (%batch-type-p (pathname-type (pathname path)))
+    (when (%batch-type-p (pathname-type (uiop:parse-native-namestring path)))
       (cl:error 'process-not-started :program program :reason :batch-file))
     (flet ((pipe (slot child-reads)
              (multiple-value-bind (r w) (sb-unix:unix-pipe)
@@ -280,7 +332,7 @@ When IF-NO-JOB is :CONTINUE, the process runs outside any job."
                  child)))
            (nul (access) (let ((h (%open-inheritable "NUL" access))) (push h child-ends) h))
            (file (spec)
-             (let ((h (%open-inheritable (uiop:native-namestring (pathname spec))
+             (let ((h (%open-inheritable (path:native-name spec)
                                          ffi:+file-append-data+)))
                (push h child-ends)
                h)))
@@ -295,8 +347,13 @@ When IF-NO-JOB is :CONTINUE, the process runs outside any job."
                                ((null error) (nul ffi:+generic-write+))
                                (t (file error)))))
              (multiple-value-setq (process thread)
-               (%create-suspended path (windows-command-line path arguments)
-                                  environment directory (list stdin stdout stderr)))
+               (unwind-protect
+                    (progn
+                      (dolist (h inherit-handles) (%set-inheritable h t))
+                      (%create-suspended path (windows-command-line path arguments)
+                                         environment directory
+                                         (list* stdin stdout stderr inherit-handles)))
+                 (dolist (h inherit-handles) (ignore-errors (%set-inheritable h nil)))))
              (dolist (h child-ends) (%close-raw h))
              (setf child-ends '())
              (handler-case (setf job (funcall job-function (job-process-pid process)))
@@ -331,13 +388,14 @@ When IF-NO-JOB is :CONTINUE, the process runs outside any job."
           (when job (close-handle job)))))))
 
 (defun %create-suspended (path command-line environment directory std-handles)
-  "CreateProcessW for PATH, suspended and with no console window, inheriting only STD-HANDLES, the
-raw stdin, stdout and stderr handles. Returns a JOB-PROCESS with no job or streams yet, and the
-HANDLE of its main thread."
+  "CreateProcessW for PATH, suspended and with no console window, inheriting only STD-HANDLES: the
+raw stdin, stdout and stderr handles, and after them any handles that become C runtime
+descriptors 3 and up, passed in lpReserved2. Returns a JOB-PROCESS with no job or streams yet, and
+the HANDLE of its main thread."
   (cffi:with-foreign-objects ((size :size)
                               (info '(:struct ffi:startupinfoex-w))
                               (pi-out '(:struct ffi:process-information))
-                              (handles :pointer 3))
+                              (handles :pointer (length std-handles)))
     ;; The first call fails by design and only reports the size.
     (setf (cffi:mem-ref size :size) 0)
     (ffi:initialize-proc-thread-attribute-list (cffi:null-pointer) 1 0 size)
@@ -346,7 +404,13 @@ HANDLE of its main thread."
           (command (cffi:foreign-string-alloc command-line :encoding :utf-16le))
           (app (lisp-to-wide-string path))
           (env (and environment (%environment-block environment)))
-          (cwd (and directory (lisp-to-wide-string (uiop:native-namestring directory)))))
+          (cwd (and directory (lisp-to-wide-string (path:native-name directory))))
+          (crt (and (> (length std-handles) 3)
+                    (let ((octets (%crt-descriptor-block
+                                   (mapcar (lambda (raw) (cons raw (%crt-flags raw))) std-handles)
+                                   (cffi:foreign-type-size :pointer))))
+                      (cons (cffi:foreign-alloc :uint8 :initial-contents octets)
+                            (length octets))))))
       (unwind-protect
            (progn
              (check-win32 (ffi:initialize-proc-thread-attribute-list attributes 1 0 size)
@@ -356,7 +420,7 @@ HANDLE of its main thread."
                    do (setf (cffi:mem-aref handles :pointer i) (cffi:make-pointer raw)))
              (check-win32 (ffi:update-proc-thread-attribute
                            attributes 0 ffi:+proc-thread-attribute-handle-list+ handles
-                           (* 3 (cffi:foreign-type-size :pointer))
+                           (* (length std-handles) (cffi:foreign-type-size :pointer))
                            (cffi:null-pointer) (cffi:null-pointer))
                           :operation :update-proc-thread-attribute :predicate #'%true-p)
              (dotimes (i (cffi:foreign-type-size '(:struct ffi:startupinfoex-w)))
@@ -372,7 +436,12 @@ HANDLE of its main thread."
                      (cffi:foreign-slot-value si '(:struct ffi:startupinfo-w) 'ffi:h-std-output)
                      (cffi:make-pointer (second std-handles))
                      (cffi:foreign-slot-value si '(:struct ffi:startupinfo-w) 'ffi:h-std-error)
-                     (cffi:make-pointer (third std-handles))))
+                     (cffi:make-pointer (third std-handles)))
+               (when crt
+                 (setf (cffi:foreign-slot-value si '(:struct ffi:startupinfo-w) 'ffi:cb-reserved2)
+                       (cdr crt)
+                       (cffi:foreign-slot-value si '(:struct ffi:startupinfo-w) 'ffi:lp-reserved2)
+                       (car crt))))
              (setf (cffi:foreign-slot-value info '(:struct ffi:startupinfoex-w)
                                             'ffi:lp-attribute-list)
                    attributes)
@@ -395,4 +464,5 @@ HANDLE of its main thread."
         (cffi:foreign-string-free command)
         (free-wide-string app)
         (when env (cffi:foreign-string-free env))
-        (when cwd (free-wide-string cwd))))))
+        (when cwd (free-wide-string cwd))
+        (when crt (cffi:foreign-free (car crt)))))))

@@ -120,9 +120,114 @@ a streaming response owns its own headers."
              (cddr response))
       response))
 
+;;; --- the query's parameter names, never its values (#1007) ----------------------------
+
+(defparameter +max-query-keys+ 20
+  "The most parameter names the request start line records.")
+
+(defparameter +max-query-key-length+ 40
+  "The most characters of one parameter name the request start line records.")
+
+(defun %decode-name (text)
+  "TEXT, a query parameter name, with + read as a space and %XX escapes decoded as UTF-8, or NIL
+when an escape is malformed or the octets are not UTF-8."
+  (let ((octets (make-array (length text) :element-type '(unsigned-byte 8) :fill-pointer 0))
+        (i 0) (n (length text)))
+    (loop while (< i n)
+          do (let ((c (char text i)))
+               (cond ((char= c #\%)
+                      (let ((hi (and (< (+ i 2) n) (digit-char-p (char text (+ i 1)) 16)))
+                            (lo (and (< (+ i 2) n) (digit-char-p (char text (+ i 2)) 16))))
+                        (unless (and hi lo) (return-from %decode-name nil))
+                        (vector-push (+ (* 16 hi) lo) octets)
+                        (incf i 3)))
+                     ((> (char-code c) 127) (return-from %decode-name nil))
+                     (t (vector-push (if (char= c #\+) 32 (char-code c)) octets)
+                        (incf i)))))
+    (handler-case (sb-ext:octets-to-string (coerce octets '(simple-array (unsigned-byte 8) (*)))
+                                           :external-format '(:utf-8 :replacement nil))
+      (error () nil))))
+
+(defun %query-keys (query)
+  "The parameter names of QUERY, a raw query string, for the request start line, and how many of
+its parts have no = at all: (values NAMES BARE-PARTS).
+
+NAMES are in the order they first appear, each once, at most +MAX-QUERY-KEYS+ of them, each cut
+to +MAX-QUERY-KEY-LENGTH+ characters. Never a value: a query string is a payload, and can carry
+tokens and personal data (#1007). NIL for no query; :UNPARSED, with no text from it, when a name
+has a malformed escape or is not UTF-8.
+
+A part with no value is counted in BARE-PARTS and never named, because such a part is usually
+a token rather than a name (the hub's reviews of #1017): one with no = at all, as in
+/reset?3f9a..., and one whose value is empty or only = signs, as in ?abc123secret= or a base64
+token with its padding, ?dGhpcyBpcyBhIHNlY3JldCB0b2tlbg==. An empty part, as in a&&b, is
+neither."
+  (if (and (stringp query) (plusp (length query)))
+      (let ((names '()) (bare 0) (full nil))
+        (dolist (part (uiop:split-string query :separator "&"))
+          (let ((equals (position #\= part)))
+            (cond ((zerop (length part)))
+                  ((or (null equals)
+                       (every (lambda (c) (char= c #\=)) (subseq part equals)))
+                   (incf bare))
+                  (full)
+                  (t (let ((name (%decode-name (subseq part 0 equals))))
+                       (cond ((null name) (return-from %query-keys (values :unparsed bare)))
+                             ((zerop (length name)))
+                             (t (let ((cut (subseq name 0 (min (length name) +max-query-key-length+))))
+                                  (unless (member cut names :test #'string=)
+                                    (push cut names)
+                                    (when (>= (length names) +max-query-keys+)
+                                      (setf full t)))))))))))
+        (values (nreverse names) bare))
+      (values nil 0)))
+
+;;; --- the path a log line records (#1036) ---------------------------------------------
+
+(defparameter +max-logged-path-length+ 32
+  "The most characters of a request's path that a log line records when no route matched it.")
+
+(defvar *%route-note* nil
+  "NIL outside WRAP. Inside it, a one-element list whose element is what NOTE-ROUTE was last told
+for this request: a route's template, :PATH, or NIL when no route has matched yet.")
+
+(defun note-route (what)
+  "Tell the request log which route answers this request. WHAT is the route's full template, such
+as \"/reset/:token\", or :PATH for a route declared with :LOG-PATH :PATH. HYPERION/ROUTER calls
+it when a route matches; outside WRAP it does nothing."
+  (when *%route-note*
+    (setf (car *%route-note*) what)))
+
+(defun %cut-path (path)
+  (cond ((not (stringp path)) path)
+        ((<= (length path) +max-logged-path-length+) path)
+        (t (concatenate 'string (subseq path 0 +max-logged-path-length+) "..."))))
+
+(defun logged-path (env)
+  "The path a log line records for the request ENV (#1036).
+
+  - A request a route answered: the route's template, such as /reset/:token, with any mount
+    prefix in front. Not the concrete path, because a path can carry a token, such as
+    /reset/<token>, and a log never records a payload (docs/logging.md).
+  - A route declared with :LOG-PATH :PATH: the concrete path, whole.
+  - A request no route answered, or one asked about before routing (the CSRF and rate-limit
+    refusals): the concrete path cut to +MAX-LOGGED-PATH-LENGTH+ characters, with \"...\" when
+    it was cut. A token in such a path is still recorded up to that length.
+
+The query string is never part of it: Clack's :PATH-INFO does not carry it."
+  (let ((noted (and *%route-note* (car *%route-note*)))
+        (path (getf env :path-info)))
+    (cond ((stringp noted) noted)
+          ((eq noted :path) path)
+          (t (%cut-path path)))))
+
 (defun wrap (app)
   "Clack middleware: give each request an id, bind it into the logging context so every
 framework's events correlate, and log the request's arrival, outcome, and latency.
+
+The path each line records is LOGGED-PATH's (#1036): the template of the route that answered,
+or the path cut short when none did. The arrival line, written before any route is chosen,
+records no path; its request id ties it to the completion line, which does.
 
 Errors are logged with a backtrace and then **re-signalled** -- this observes the request,
 it does not swallow failures, so Clack's own debug/500 handling still decides what the
@@ -132,27 +237,36 @@ client sees."
            (start (get-internal-real-time))
            (method (getf env :request-method))
            (path (getf env :path-info))
-           (quiet (quiet-path-p path)))
+           (quiet (quiet-path-p path))
+           ;; Filled in by the router when a route matches (#1036).
+           (*%route-note* (list nil)))
       (log:with-context (:request-id id)
         (let ((*request-id* id))
           ;; The arrival line is redundant for quiet traffic -- the completion line already
           ;; says everything, and doubling the volume is the complaint.
           (unless quiet
-            (log:debug "request start" :method method :path path
-                                       :query (getf env :query-string)
-                                       ;; The client, behind a trusted proxy too (#381).
-                                       :remote (proxy:client-address env)))
+            (multiple-value-bind (query-keys bare-parts) (%query-keys (getf env :query-string))
+              ;; No path: no route has been chosen yet, and the concrete path can carry a
+              ;; token (#1036). The completion line, with the same request id, has it.
+              (log:debug "request start" :method method
+                                         ;; The names only, never the values (#1007), and only
+                                         ;; a count of the parts with no value (the reviews of
+                                         ;; #1017).
+                                         :query-keys query-keys
+                                         :bare-parts (and (plusp bare-parts) bare-parts)
+                                         ;; The client, behind a trusted proxy too (#381).
+                                         :remote (proxy:client-address env))))
           (handler-bind
               ((cl:error (lambda (c)
                            ;; Never quieted, whatever the path.
                            (log:exception c "request failed"
-                                          :method method :path path
+                                          :method method :path (logged-path env)
                                           :ms (%elapsed-ms start)))))
             (let* ((response (funcall app env))
                    (status (%status-of response)))
               (if quiet
-                  (log:trace "request" :method method :path path
+                  (log:trace "request" :method method :path (logged-path env)
                                        :status status :ms (%elapsed-ms start))
-                  (log:info "request" :method method :path path
+                  (log:info "request" :method method :path (logged-path env)
                                       :status status :ms (%elapsed-ms start)))
               (%with-echoed-id response id))))))))

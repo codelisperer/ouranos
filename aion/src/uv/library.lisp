@@ -47,8 +47,13 @@ close it by.")
        (format stream "  ~A~%" place))
      (when (libuv-not-found-reason c)
        (format stream "~%Last error: ~A~%" (libuv-not-found-reason c)))
-     (format stream "~%Build the pinned libuv (needs only a C compiler):~%")
-     (format stream "  sbcl --script scripts/build-libuv.lisp~%~%")
+     ;; The commands run from the Ouranos checkout, not from an app's directory, so the
+     ;; report names that directory when it can find it (#504).
+     (let ((root (%tree-root)))
+       (format stream "~%Build the pinned libuv (needs a C compiler)~@[ in the Ouranos checkout at ~A~]:~%"
+               (and root (string-right-trim "/\\" (uiop:native-namestring root))))
+       (format stream "  ./scripts/setup.sh          (setup.ps1 on Windows; builds it as part of setup)~%")
+       (format stream "  sbcl --script scripts/build-libuv.lisp   (builds only libuv)~%~%"))
      (format stream "Or point AION_UV_LIBRARY at an existing one.~%")))
   (:documentation "Signalled on first use when no libuv could be loaded."))
 
@@ -79,11 +84,15 @@ in the directory the running executable lives in."
       (mapcar (lambda (name) (namestring (merge-pathnames name dir)))
               *library-names*))))
 
+(defun %tree-root ()
+  "The Ouranos checkout aion was loaded from (the directory holding aion/), or NIL."
+  (ignore-errors
+   (uiop:pathname-parent-directory-pathname
+    (asdf:system-source-directory :aion))))
+
 (defun %vendored-candidates ()
   "The paths scripts/build-libuv.lisp would have written to, if aion is loadable."
-  (let ((root (ignore-errors
-               (uiop:pathname-parent-directory-pathname
-                (asdf:system-source-directory :aion)))))
+  (let ((root (%tree-root)))
     (when root
       (mapcar (lambda (name)
                 (namestring (merge-pathnames (concatenate 'string "vendor/libuv/lib/" name)
@@ -110,6 +119,14 @@ in the directory the running executable lives in."
 
 (defun libuv-loaded-p () *loaded*)
 
+(defvar *abi-verified* nil
+  "True once VERIFY-ABI has passed against the libuv now loaded. Separate from *LOADED*, which
+LOAD-LIBUV sets as soon as the library loads and before anything checks it: a libuv that loads but
+fails the check is loaded and not verified, and AION/UV:ENSURE-AVAILABLE keeps checking it, and
+keeps signalling, until one passes (#940). Cleared when VERIFY-ABI fails and by UNLOAD-LIBUV.")
+
+(defun abi-verified-p () *abi-verified*)
+
 (defun load-libuv (&key force)
   "Load libuv, trying each candidate in turn. Returns the loaded path.
 Signals LIBUV-NOT-FOUND if none worked. Idempotent unless FORCE."
@@ -129,6 +146,7 @@ Signals LIBUV-NOT-FOUND if none worked. Idempotent unless FORCE."
               ;; path with a generated symbol (LIBUV.SO.1-459), so the path is not a handle
               ;; you can close it by -- and UNLOAD-LIBUV has to be able to close it.
               (setf *libuv-library* (cffi:load-foreign-library candidate)
+                    *abi-verified* nil
                     *loaded* t
                     *libuv-path* candidate)
               (return-from load-libuv candidate))
@@ -152,6 +170,7 @@ string (CFFI cannot close a library by path) inside an IGNORE-ERRORS."
   (when *loaded*
     (cffi:close-foreign-library *libuv-library*)
     (setf *loaded* nil
+          *abi-verified* nil
           *libuv-path* nil
           *libuv-library* nil))
   (values))

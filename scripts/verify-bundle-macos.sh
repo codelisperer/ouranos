@@ -177,6 +177,13 @@ for m in $MACHOS; do
   fi
 done
 
+# --- check 1b: carried libraries keep no build-machine install name (#957) -------------
+# check-install-names.sh has the rule and prints a line per dylib; it fails on a dylib whose
+# install name cannot be read or that has none (#1131).
+echo
+echo "--- check 1b: carried libraries have no absolute install name outside the bundle ---"
+"$(cd "$(dirname "$0")" && pwd)/check-install-names.sh" "$DIR" || FAILED=1
+
 # --- check 2: run it, and confirm the libraries came from the bundle -------------------
 echo
 echo "--- check 2: the bundle runs, loading ITS OWN libraries ---"
@@ -270,11 +277,21 @@ for lib in $CARRIED; do
 done
 
 # No process the bundle starts may have a libssl or libcrypto loaded that the bundle does not
-# carry (#783). The app's Lisp image loads OpenSSL only through cl+ssl, and a bundle that does
-# so reopens the build machine's copy at startup, which a Mac without it does not have (#191).
-# The one exception is Apple's /usr/lib copy in hyperion-view: WebKit loads it through Apple's
-# libcurl, and the app has no say in that.
+# carry (#783), except Apple's own. The app's Lisp image loads OpenSSL only through cl+ssl, and
+# a bundle that does so reopens the build machine's copy at startup, which a Mac without it
+# does not have (#191). Apple's copy, exactly /usr/lib/libssl.*.dylib or
+# /usr/lib/libcrypto.*.dylib, is accepted in any process: WebKit loads it in hyperion-view, and
+# Security.framework, which aion/http-client uses to check certificates on macOS (#905), loads
+# it through Apple's libcurl. Every Mac has it. Whether the image holds cl+ssl at all is checked
+# when the bundle is built, by build-desktop-app.lisp, which refuses a macOS image that has a
+# CL+SSL package (#905).
 sbcl --script "$DYLD_CHECK" openssl "$LOG" "$DIR" || FAILED=1
+
+# What the app itself reports about the library it calls (#905). praxeon/examples/sqlite-probe
+# prints `SQLITE-LIBRARY: <version> <path>', the library whose sqlite3_open its image calls. The
+# rule above that waives Apple's libsqlite3 when Security.framework is loaded relies on this:
+# the report must name the bundle's copy. An app that prints no such line passes this check.
+sbcl --script "$DYLD_CHECK" reported "$LOG" "$DIR" || FAILED=1
 
 # --- check 3: the control, for linked libraries only -----------------------------------
 # Decisive on any machine: @executable_path has no fallback. Skipped for dlopen'd libraries,

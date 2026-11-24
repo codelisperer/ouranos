@@ -31,7 +31,8 @@
                                                              :element-type 'character
                                                              :external-format :latin-1
                                                              :timeout 30)))
-             (write-string (concatenate 'string "GET / HTTP/1.1" crlf "Host: 127.0.0.1" crlf
+             (write-string (concatenate 'string "GET / HTTP/1.1" crlf
+                                        "Host: 127.0.0.1:" (princ-to-string port) crlf
                                         "Connection: close" crlf crlf)
                            stream)
              (finish-output stream)
@@ -49,7 +50,9 @@
 ;; The backend is printed before START, and a START that fails is printed rather than left to
 ;; end the process, so a template on another server still reports what it chose. (Hunchentoot,
 ;; the template's server before #472, does not start on port 0 at all: START times out.)
-(format t "~&TEMPLATE-BACKEND ~A~%" (funcall (template-symbol "DEFAULT-SERVER" "HYPERION/SERVER")))
+(multiple-value-bind (backend reason)
+    (funcall (template-symbol "DEFAULT-SERVER" "HYPERION/SERVER"))
+  (format t "~&TEMPLATE-BACKEND ~A~%TEMPLATE-REASON ~A~%" backend reason))
 (finish-output)
 
 (let* ((package (string-upcase *project-name*))

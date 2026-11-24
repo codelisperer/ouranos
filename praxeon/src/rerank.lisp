@@ -63,7 +63,9 @@ PRAXEON/CONDITIONS:DELIBERATION-FAILURE."))
   (if (null documents)
       '()
       (let ((start (get-internal-real-time))
-            (ranking (%check-ranking (call-next-method) (length documents))))
+            ;; Under *RETRY* when an app set one (#79).
+            (ranking (%check-ranking (%with-retry (lambda () (call-next-method)))
+                                     (length documents))))
         ;; Counts only, never the query or the documents, as for a completion.
         (log:debug "rerank" :reranker (string (type-of r)) :model (reranker-model-of r)
                             :documents (length documents) :ms (%ms-since start))
@@ -120,9 +122,15 @@ as a generic function so that a test can answer in its place without a network."
           (gethash "truncation" body) nil)
     body))
 
+(defun %rerank-url (r)
+  (concatenate 'string (reranker-base-url r) "/rerank"))
+
+(defmethod provider-endpoint ((r voyage-reranker))
+  (parse-endpoint (reranker-base-url r)))
+
 (defmethod rerank-post ((r voyage-reranker) body)
   (let* ((payload (jzon:stringify body))
-         (url (concatenate 'string (reranker-base-url r) "/rerank"))
+         (url (%rerank-url r))
          (headers (append '(("content-type" . "application/json"))
                           (when (reranker-api-key r)
                             (list (cons "authorization"

@@ -367,6 +367,35 @@ Handle the `Result`, or, when ignoring the error is intended, bind it to `_`:
 `(let _ = (check x))`, which compiles with no warning. Before `024d0a17` such a form compiled
 silently and its error was lost. When the tree moved to `024d0a17`, no file in it had one.
 
+**A constructor field may name only the type variables the type's head declares, since Coalton
+`a07305a5`** (upstream `30c9eb00`, adopted in #1326). This applies to `define-type`,
+`define-exception` and `define-resumption`. Compiling
+
+```lisp
+(coalton-toplevel
+  (define-type (Box :a)
+    (Box :a :b)))
+```
+
+prints this, and `compile-file` returns `failure-p` true:
+
+```
+; caught COMMON-LISP:ERROR:
+;   error: Unknown type variable
+;     --> <macroexpansion>:3:12
+;      |
+;    2 |    (DEFINE-TYPE (BOX :A)
+;      |                 -------- in this type definition
+;    3 |      (BOX :A :B)))
+;      |              ^^ Unknown type variable :B
+```
+
+Declare the variable in the head, `(define-type (Box :a :b) ...)`. Before `a07305a5` such a field
+was not reported as a mistake: the variable escaped as a free variable and the compiler failed
+later with an internal error. In the same adoption, an unmatched close paren in a
+`coalton-toplevel` form became an error (upstream `cd15e48d`); before, the forms after it were
+dropped without a message. When the tree moved to `a07305a5`, no file in it hit either.
+
 **Two things make this bite far harder than it should.**
 
 - **`ql:quickload` hides it — with no muffling at all.** This is stronger than it first

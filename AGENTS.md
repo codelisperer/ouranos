@@ -9,8 +9,8 @@ history behind every rule below: [`docs/evidence-catalogue.md`](docs/evidence-ca
 ## Dependency DAG
 
 `aion → cons → mnemosyne → elenchon → hyperion → praxeon`, plus the satellites `hermes`,
-`hades` and `klio`. **A satellite depends leftward into the line and nothing in the line
-depends on it** — that is the whole rule. `hermes` and `hades` attach at `aion`; `klio`
+`hades`, `klio` and `dokimasia`. **A satellite depends leftward into the line and nothing in the line
+depends on it** — that is the whole rule. `hermes`, `hades` and `dokimasia` attach at `aion`; `klio`
 attaches at `hyperion`, which is allowed for the same reason and was the case that forced
 this sentence to be widened from "depend only on `aion`". A framework never depends on one
 to its right; aux systems may reach right if acyclic. Combined examples live in the highest
@@ -192,7 +192,8 @@ ends, rather than running until something interrupts it.
 1. `scripts/board.sh` — read the whole board before touching anything.
 2. **Rule on `Blocked` first.** A lane blocked on a decision is the only thing that cannot
    proceed without the hub. Everything else can wait a pass.
-3. **Merge what is green.** `In Review` + evidence in the issue → verify cold, merge, close.
+3. **Merge what is green.** `scripts/pr-runs.sh` first, so a head with no run is found before
+   it is read as green. `In Review` + evidence in the issue → verify cold, merge, close.
 4. **File what arrived as a message.** A finding, defect or proposal a lane *sent* is filed
    before the pass ends, or it dies with that session. The hub is the last place to catch it.
 5. **Set the next `Todo`** and name who takes it.
@@ -213,7 +214,10 @@ issue — a message is read once by one session, an issue outlives it.
 - Every lane works in its own worktree on `work/<track>`. Two agents on one machine still
   need two trees.
 - The ASDF drop-in names one tree. Set `CL_SOURCE_REGISTRY=<worktree>//:` (`//;` on
-  Windows — a colon is read as part of the drive letter).
+  Windows — a colon is read as part of the drive letter). To bootstrap in a worktree, also
+  set `OURANOS_BOOTSTRAP_LOCAL=1`: bootstrap then leaves the drop-in naming the main checkout
+  and builds against the worktree. Without it, bootstrap stops with exit code 3, because the
+  drop-in names another tree (#955).
 - Gitignored build output (`vendor/libuv/`, `dist/`) does not travel; run
   `scripts/build-libuv.lisp` if needed. A suite failing that your diff cannot reach is an
   environment result, not a code one.
@@ -349,6 +353,43 @@ not about an expression inside it; an `ok` line is about failures, not about cov
   unregistered suite, an unrun suite and a passing suite are identical at the exit code.
 - A cold-cache test must assert it was cold (fasl count, compile count). Clear the fasl
   cache after a control run — a stale fasl reproduces a false failure across runs.
+- **Clearing means deleting the cached fasl, not touching the source.** ASDF rebuilds only when
+  the source is newer than its fasl, and a touch that lands in the same second as the control
+  run's build is not newer — so restoring a file and touching it leaves the control's code
+  loaded.
+  **A correct file on disk is not evidence that the image loaded it.** Delete the cached fasls or
+  force the rebuild, then read the count back:
+  - **Where the fasls are** depends on the OS and on ASDF's output translations, so ask ASDF
+    rather than assuming: `asdf:*user-cache*` is the cache root, and
+    `(asdf:apply-output-translations (asdf:system-source-directory :NAME))` is the directory for
+    one system. The usual default is `~/.cache/common-lisp/` on Linux and macOS and
+    `~/AppData/Local/cache/common-lisp/` on Windows — the two paths `verify.yml`'s matrix caches —
+    with a subdirectory for the implementation and platform under it, such as
+    `sbcl-2.6.9-linux-x64/`, and then the source tree's own absolute path. A path written out by
+    hand without that subdirectory points nowhere, which is why asking ASDF beats remembering.
+  - **`:force t` rebuilds only the system named in the call, not its dependencies.** Measured
+    here: `(asdf:load-system :hermes :force t)` recompiled 11 hermes files and **none** of
+    `aion/http-client`, the system hermes depends on. The usual stale-fasl case is the other way
+    round — the change is in a dependency, and the system loaded is the one that uses it — so
+    `:force t` on the system you are testing leaves the stale build in place. Name every system
+    you changed instead: `(asdf:load-system :hermes :force '(:hermes :aion/http-client))`
+    recompiled both. `:force :all` is not usable in this tree: it rebuilds every library,
+    Quicklisp's included, and recompiling cl+ssl from scratch fails.
+- **A stale fasl can make a local suite PASS for a tree whose suite fails**, which is the half of
+  this that costs the most. The rule above and the sentence before it describe a stale fasl
+  turning a passing suite red; it does the opposite just as easily, because the code the image
+  holds can be a build in which the suite really did pass. **So a local `Fail: 0` is evidence only
+  when the fasls were deleted first, or the worktree is new enough not to have any yet** — the
+  cache path contains the worktree's own path, so a fresh worktree is cold on its first run and
+  warm after it.
+  The case: #1134 at `77d23085` was reported here as `Fail: 0` across every suite while **all four
+  CI legs failed**, on one check — a test calling `make-request` with a keyword that commit had
+  removed. The local script and the local suite had both loaded a build from before the removal,
+  so both agreed that the constructor accepted it. CI disagreed because CI always builds cold.
+  The same stale build had already produced a false claim about that keyword which reached a
+  commit message, a CHANGELOG line and a report to the hub.
+  The rule above has said *clear* since it was written; these two say what clear has to mean and
+  why a green local run is not a substitute for it.
 - The test harness must be able to see the failure before the failure can be asserted;
   the fixture must not be easier than reality (read the real artefact the generator writes).
 - A fixture that cleans up after itself is **relying** on cleanup; one with a genuinely
@@ -458,6 +499,20 @@ not about an expression inside it; an `ok` line is about failures, not about cov
   Windows and 10x for macOS; standard runners are free for public repositories. A leg that fails
   for a reason your change cannot reach is still red, so read its failing-suite list (the rule
   above) before deciding whether the pull request is green.
+- **A push to a pull request that conflicts with `main` gets no CI run, so confirm a run exists
+  for every head you push.** A `pull_request` run checks out `refs/pull/N/merge`, and GitHub
+  cannot create that ref while the branch conflicts, so the push queues nothing and reports
+  nothing. Checks belong to a commit, so the new head has none, and the checks still shown in the
+  pull request's conversation belong to an earlier head. On 2026-10-28 seven pull requests' fix
+  pushes got no run this way (#1025). After pushing, run
+  `gh run list --branch <branch> --json headSha,databaseId` and look for the head you pushed.
+  If no run has it and the pull request conflicts with `main`, run
+  `gh workflow run verify.yml --ref <branch>`, which runs the branch head without a merge ref.
+  A conflict in `CHANGELOG.md` alone does not need a merge from `main`, because the hub resolves
+  those when it builds a train; a conflict in code does.
+  `scripts/pr-runs.sh` does this check for every open pull request at once: it prints each head
+  with the verify run for that commit, prints NO RUN where there is none, and exits 1 if any
+  head has no run.
 - **A marker that identifies a tree must be older than the change that reads it.** When a script
   locates its own root by looking for landmark files, a landmark introduced by that same change
   makes every older checkout read as "not a checkout at all", and the refusal then blames the

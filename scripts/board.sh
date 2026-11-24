@@ -63,18 +63,41 @@ if [ "$WANT" = "mine" ]; then
   echo "board: $WANT"
 fi
 
+# EVERY ITEM, NOT THE FIRST N (#1107). `item-list' stops at --limit, and this used a fixed 300
+# until the project passed it: at 428 items the newest 128 were missing, with nothing in the
+# output to say so, and a lane's In Review item and another lane's whole queue were not shown.
+# A bigger fixed number fails the same way later, so the limit is the project's own item
+# count, read first, plus room for items added between the two calls. The first line of the
+# output then compares what was read with the count `item-list' reports, and says so when
+# items were left out.
+TOTAL="$(gh project view "$PROJECT" --owner "$OWNER" --format json --jq '.items.totalCount')" || {
+  echo "board: cannot read how many items the project has" >&2; exit 2; }
+case "$TOTAL" in
+  ''|*[!0-9]*) echo "board: the project's item count is not a number: '$TOTAL'" >&2; exit 2 ;;
+esac
+LIMIT=$((TOTAL + 100))
+
+# The first line of either listing below: `board: read all N items', or a warning naming how
+# many were read out of how many.
+COVERAGE='(.items | length) as $n | .totalCount as $t
+  | if $n < $t
+    then "board: WARNING: read \($n) of \($t) items; the other items are NOT shown (#1107)"
+    else "board: read all \($n) items"
+    end'
+
 if [ -n "$WANT" ]; then
-  gh project item-list "$PROJECT" --owner "$OWNER" --limit 300 --format json --jq \
-    "[.items[] | select(.status != \"Done\") | select((.agent // \"unassigned\") == \"$WANT\")]
+  gh project item-list "$PROJECT" --owner "$OWNER" --limit "$LIMIT" --format json --jq \
+    "($COVERAGE),
+     ([.items[] | select(.status != \"Done\") | select((.agent // \"unassigned\") == \"$WANT\")]
      | if length == 0 then \"  (nothing open for $WANT)\"
        else sort_by(.priority // \"zz\")[] | \"  \((.priority // \"--    \")[0:2])  #\(.content.number // \"-\")  \(.status // \"-\")  \(.content.title // .title | .[0:60])\"
-       end"
+       end)"
   exit 0
 fi
 
-gh project item-list "$PROJECT" --owner "$OWNER" --limit 300 --format json --jq '
-  [.items[] | select(.status != "Done")]
+gh project item-list "$PROJECT" --owner "$OWNER" --limit "$LIMIT" --format json --jq "($COVERAGE),"'
+  ([.items[] | select(.status != "Done")]
   | group_by(.agent // "unassigned")
   | .[]
   | ("\n" + (.[0].agent // "unassigned")),
-    (sort_by(.priority // "zz")[] | "  \((.priority // "--    ")[0:2])  #\(.content.number // "-")  \(.status // "-")  \(.content.title // .title | .[0:60])")'
+    (sort_by(.priority // "zz")[] | "  \((.priority // "--    ")[0:2])  #\(.content.number // "-")  \(.status // "-")  \(.content.title // .title | .[0:60])"))'

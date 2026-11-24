@@ -1,0 +1,3 @@
+id,name,email,role,error
+blank-name,,nobody@example.com,Nobody,Name can't be blank
+malformed-email,Kurt Godel,kurt.at.ias,Logic,Email is not an email address

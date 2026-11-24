@@ -48,6 +48,22 @@
  :where ((:env "scripts/versions.env" "SBCL_VERSION"))
  :upstream (:github-tag "sbcl/sbcl" "sbcl-"))
 
+;; The SBCL release Ouranos builds its own binaries from (#1251). It can differ from SBCL_VERSION
+;; above until setup installs these builds instead of the SourceForge binary. sbcl.pin also pins
+;; the commit the tag points to, and scripts/build-sbcl.sh refuses any other commit.
+(:name "SBCL (Ouranos build source)" :category :toolchain
+ :where ((:field "sbcl.pin" "version")
+         (:text "sbcl.pin" "tag     sbcl-" nil))
+ :upstream (:github-tag "sbcl/sbcl" "sbcl-"))
+
+;; The zstd release whose libzstd.a is linked into Ouranos's SBCL builds on macOS and Windows
+;; (#1251, ruling of 2026-11-17). The version is written twice in sbcl.pin, once on its own line
+;; and once in the URL, and both must agree.
+(:name "zstd (static, in Ouranos's SBCL builds)" :category :native
+ :where ((:field "sbcl.pin" "zstd-version")
+         (:text "sbcl.pin" "zstd/releases/download/v" "/"))
+ :upstream (:github-release "facebook/zstd"))
+
 (:name "Coalton" :category :toolchain
  :where ((:field "coalton.pin" "sha"))
  :upstream (:github-commit "coalton-lang/coalton"))
@@ -77,7 +93,11 @@
 
 (:name "libuv" :category :native
  :where ((:field "libuv.pin" "version")
-         (:text "libuv.pin" "url     https://dist.libuv.org/dist/v" "/"))
+         (:text "libuv.pin" "url     https://dist.libuv.org/dist/v" "/")
+         ;; The prebuilt Windows DLL setup.ps1 downloads without MSVC is built from libuv.pin's
+         ;; release, so its pin moves with libuv.pin (#1247).
+         (:field "libuv-prebuilt.pin" "version")
+         (:text "libuv-prebuilt.pin" "/releases/download/libuv-v" "/"))
  :upstream (:github-release "libuv/libuv"))
 
 (:name "mbedTLS" :category :native
@@ -126,6 +146,12 @@
  :where ((:field "hyperion/assets/vendor/ASSETS.pin" "bulma")
          (:text "hyperion/src/assets.lisp" "(%asset :key :bulma :version \"" "\""))
  :upstream (:npm "bulma"))
+
+(:name "axe-core" :category :asset
+ :where ((:field "dokimasia/vendor/ASSETS.pin" "axe-core"))
+ :upstream (:npm "axe-core")
+ :held (:reason "4.14.1 was published on 2026-11-16, one day before this was vendored; the hub kept 4.14.0 (2026-10-05) so that a bad publish has time to be found and pulled. 4.14.1 can be taken after 2026-12-01"
+        :issue 1028))
 
 ;;; --- external APIs -----------------------------------------------------------------------
 
@@ -244,7 +270,9 @@
  :reviewed "2026-10-23")
 
 (:name "Twilio API version" :category :api
- :where ((:text "hermes/src/twilio.lisp" "https://api.twilio.com/" "/"))
+ ;; The version now ends the API-BASE default rather than sitting between two slashes in a
+ ;; longer URL, so the end marker is the string's closing quote (#1077).
+ :where ((:text "hermes/src/twilio.lisp" "https://api.twilio.com/" "\""))
  :upstream (:manual "https://www.twilio.com/docs/usage/api")
  :reviewed "2026-10-17")
 
@@ -274,47 +302,60 @@
  :where ((:text ".github/workflows/verify.yml" "uses: actions/checkout@" nil)
          (:text ".github/workflows/desktop-release.yml" "uses: actions/checkout@" nil)
          (:text ".github/workflows/windows-arm64-probe.yml" "uses: actions/checkout@" nil)
-         (:text ".github/workflows/upstream.yml" "uses: actions/checkout@" nil))
+         (:text ".github/workflows/libuv-prebuilt.yml" "uses: actions/checkout@" nil)
+         (:text ".github/workflows/upstream.yml" "uses: actions/checkout@" nil)
+         (:text ".github/workflows/sbcl-build.yml" "uses: actions/checkout@" nil))
  :upstream (:github-release "actions/checkout"))
 
 (:name "actions/cache" :category :ci
  :where ((:text ".github/workflows/verify.yml" "uses: actions/cache@" nil)
          (:text ".github/workflows/desktop-release.yml" "uses: actions/cache@" nil)
          (:text ".github/workflows/windows-arm64-probe.yml" "uses: actions/cache@" nil)
+         (:text ".github/workflows/libuv-prebuilt.yml" "uses: actions/cache@" nil)
          (:text ".github/workflows/upstream.yml" "uses: actions/cache@" nil))
  :upstream (:github-release "actions/cache"))
 
 (:name "actions/upload-artifact" :category :ci
- :where ((:text ".github/workflows/desktop-release.yml" "uses: actions/upload-artifact@" nil)
-         (:text ".github/workflows/windows-arm64-probe.yml" "uses: actions/upload-artifact@" nil))
+ :where ((:text ".github/workflows/verify.yml" "uses: actions/upload-artifact@" nil)
+         (:text ".github/workflows/desktop-release.yml" "uses: actions/upload-artifact@" nil)
+         (:text ".github/workflows/windows-arm64-probe.yml" "uses: actions/upload-artifact@" nil)
+         (:text ".github/workflows/libuv-prebuilt.yml" "uses: actions/upload-artifact@" nil)
+         (:text ".github/workflows/sbcl-build.yml" "uses: actions/upload-artifact@" nil))
  :upstream (:github-release "actions/upload-artifact"))
 
 (:name "actions/download-artifact" :category :ci
- :where ((:text ".github/workflows/desktop-release.yml" "uses: actions/download-artifact@" nil))
+ :where ((:text ".github/workflows/desktop-release.yml" "uses: actions/download-artifact@" nil)
+         (:text ".github/workflows/libuv-prebuilt.yml" "uses: actions/download-artifact@" nil)
+         (:text ".github/workflows/sbcl-build.yml" "uses: actions/download-artifact@" nil))
  :upstream (:github-release "actions/download-artifact"))
 
 (:name "Linux runner image" :category :ci
  :where ((:text ".github/workflows/verify.yml" "- os: ubuntu-" nil)
          (:text ".github/workflows/verify.yml" "runs-on: ubuntu-" nil)
-         (:text ".github/workflows/upstream.yml" "runs-on: ubuntu-" nil))
+         (:text ".github/workflows/upstream.yml" "runs-on: ubuntu-" nil)
+         (:text ".github/workflows/libuv-prebuilt.yml" "runs-on: ubuntu-" nil)
+         (:text ".github/workflows/sbcl-build.yml" "runs-on: ubuntu-" nil))
  :upstream (:manual "https://github.com/actions/runner-images")
  :reviewed "2026-10-24")
 
 (:name "Linux desktop build image" :category :ci
  :where ((:text ".github/workflows/desktop-release.yml" "- os: ubuntu-" nil)
-         (:text ".github/workflows/desktop-release.yml" "runs-on: ubuntu-" nil))
+         (:text ".github/workflows/desktop-release.yml" "runs-on: ubuntu-" nil)
+         (:text ".github/workflows/sbcl-build.yml" "- os: ubuntu-" nil))
  :upstream (:manual "https://github.com/actions/runner-images")
  :reviewed "2026-10-24"
  :held (:reason "a Linux bundle needs at least the glibc of its build image; ubuntu-26.04 has glibc 2.43 and Ubuntu 24.04 desktops have 2.39, so the maintainer kept the desktop build on ubuntu-24.04 while verify.yml tests on ubuntu-26.04"
         :issue 766))
 
 (:name "macOS runner image" :category :ci
- :where ((:text ".github/workflows/verify.yml" "- os: macos-" nil))
+ :where ((:text ".github/workflows/verify.yml" "- os: macos-" nil)
+         (:text ".github/workflows/sbcl-build.yml" "runs-on: macos-" nil))
  :upstream (:manual "https://github.com/actions/runner-images")
  :reviewed "2026-10-18")
 
 (:name "macOS desktop build image" :category :ci
- :where ((:text ".github/workflows/desktop-release.yml" "- os: macos-" nil))
+ :where ((:text ".github/workflows/desktop-release.yml" "- os: macos-" nil)
+         (:text ".github/workflows/sbcl-build.yml" "- os: macos-" nil))
  :upstream (:manual "https://github.com/actions/runner-images")
  :reviewed "2026-10-18"
  :held (:reason "the macOS app needs the macOS of its build image or later, because Homebrew's sbcl and libzstd in the bundle target it; the maintainer chose macos-15 so the app runs on macOS 15, while verify.yml tests on macos-26"
@@ -322,12 +363,14 @@
 
 (:name "Windows runner image" :category :ci
  :where ((:text ".github/workflows/verify.yml" "- os: windows-" nil)
-         (:text ".github/workflows/desktop-release.yml" "- os: windows-" nil))
+         (:text ".github/workflows/desktop-release.yml" "- os: windows-" nil)
+         (:text ".github/workflows/libuv-prebuilt.yml" "runs-on: windows-" nil))
  :upstream (:manual "https://github.com/actions/runner-images")
  :reviewed "2026-10-17")
 
 (:name "Windows on Arm runner image" :category :ci
- :where ((:text ".github/workflows/windows-arm64-probe.yml" "runs-on: windows-" nil))
+ :where ((:text ".github/workflows/windows-arm64-probe.yml" "runs-on: windows-" nil)
+         (:text ".github/workflows/libuv-prebuilt.yml" "- os: windows-" nil))
  ;; Listed in actions/runner-images as "Windows 11 Arm64 ... windows-11-arm" (read 2026-10-23).
  ;; actions/partner-runner-images, which listed it before, is archived.
  :upstream (:manual "https://github.com/actions/runner-images")
@@ -338,12 +381,13 @@
  :upstream (:github-tag "pgvector/pgvector" "v"))
 
 ;; The commit the Windows leg checks out for PGVECTOR_VERSION's tag. It must be that tag's commit:
-;; on 2026-10-23, v0.8.6 pointed at 8ee86c96f0fd72390f890aa8a336fda6d3ab4c6c, which is the pin.
+;; on 2026-10-24, v0.8.7 pointed at f37c13f68b57d2c3472b2214fbcff699d6d34876, which is the pin
+;; (gh api repos/pgvector/pgvector/git/ref/tags/v0.8.7: a lightweight tag, object type commit).
 ;; Moving PGVECTOR_VERSION means moving this too, and reviewing it.
 (:name "pgvector commit (Windows CI)" :category :ci
  :where ((:text ".github/workflows/verify.yml" "PGVECTOR_COMMIT: \"" "\""))
  :upstream (:manual "https://github.com/pgvector/pgvector/tags")
- :reviewed "2026-10-23")
+ :reviewed "2026-10-24")
 
 ;;; --- containers --------------------------------------------------------------------------
 

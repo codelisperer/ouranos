@@ -80,11 +80,14 @@ that is a non-negative number."
              (or (not poll-p) (ms-p poll)))))))
 
 (defun %task-event (type task &rest more)
-  (apply #'evt:emit type :id (task-call-id task) :key (task-key task)
-                         :connection (task-connection task) :tool (task-tool task)
-                         :source (task-source task) :principal (task-principal task)
-                         :agent (task-agent task) :conversation (task-conversation task)
-                         more))
+  ;; Withheld by the task's own agent, recorded when it started, not by the turn that happens
+  ;; to be polling: POLL-TASKS usually runs outside any turn (the hub's review of #1027).
+  (let ((evt:*withhold-content* (task-private task)))
+    (apply #'evt:emit type :id (task-call-id task) :key (task-key task)
+                           :connection (task-connection task) :tool (task-tool task)
+                           :source (task-source task) :principal (task-principal task)
+                           :agent (task-agent task) :conversation (task-conversation task)
+                           more)))
 
 (defun %start-task (client tool result principal origin started)
   "Record the task RESULT starts, a CreateTaskResult, and return the ACTOR:STARTED-RESULT the
@@ -101,7 +104,9 @@ call returns."
                              :source (getf origin :source) :agent (getf origin :agent)
                              :conversation (getf origin :conversation)
                              :call-id actor:*tool-call-id* :started started :seen now
-                             :status (gethash "status" result))))
+                             :status (gethash "status" result)
+                             ;; The starting turn's privacy, which the task's events follow.
+                             :private evt:*withhold-content*)))
       (%task-timing task result now (connection-task-lifetime connection))
       (handler-case (save-task (client-task-store client) task)
         (error ()
@@ -466,13 +471,16 @@ finish by its deadline."
 
 (defun %backoff (interval failures cap)
   "The seconds to wait after the FAILURESth failed poll in a row: INTERVAL, doubled for each
-failure after the first, and no more than CAP, unless INTERVAL itself is more."
-  (let ((wait interval))
-    ;; Doubling stops at CAP, so a long run of failures does not compute a large power of two.
-    (loop repeat (1- failures)
-          while (and (plusp wait) (< wait cap))
-          do (setf wait (* 2 wait)))
-    (max interval (min cap wait))))
+failure after the first, and no more than CAP, unless INTERVAL itself is more.
+
+The doubling is AION/RETRY:RETRY-DELAY's, with no jitter, so the schedule is the shared code's and
+not a second copy of it (#79). It is the same schedule as before, by the hub's ruling on #79: the
+first failure is RETRY-DELAY's attempt 2, and an INTERVAL above CAP is kept, as it was."
+  (max interval
+       (aion/retry:retry-delay
+        (aion/retry:make-retry-policy :name "mcp task poll" :base-delay interval :multiplier 2
+                                      :max-delay cap :jitter :none)
+        (1+ failures) 0)))
 
 (defun %failed-poll (client task kind now)
   "Record a failed poll of TASK, of KIND :SIGN-IN or :ERROR, and set its next poll by %BACKOFF,

@@ -42,7 +42,9 @@
 (defpackage #:praxeon/event
   (:use #:cl)
   (:export #:*observer* #:emit #:with-observer
-           #:event-type #:event-get #:event-plist))
+           #:event-type #:event-get #:event-plist
+           #:*withhold-content* #:+content-keys+ #:unless-withheld
+           #:*withhold-from-logs* #:unless-withheld-from-logs))
 
 (defpackage #:praxeon/conditions
   (:use #:cl)
@@ -53,14 +55,20 @@
    #:deliberation-failure
    #:provider-request-failed #:provider-request-failed-status
    #:provider-request-failed-error-type #:provider-request-failed-error-code
-   #:provider-request-failed-body
+   #:provider-request-failed-body #:provider-request-failed-retry-after #:provider-request-failed-phase
    #:unknown-tool-choice #:unknown-tool-choice-value #:value-shape
+   #:completion-cancelled #:completion-cancelled-input-tokens #:completion-cancelled-output-tokens
+   #:completion-cancelled-cache-read-tokens #:completion-cancelled-cache-write-tokens
+   #:completion-cancelled-estimated-output #:completion-cancelled-text
+   #:completion-cancelled-estimated-input
    #:output-limit-reached #:output-limit-reached-max-tokens
    #:output-truncated #:output-truncated-step #:output-truncated-max-tokens
    #:translation-truncated #:translation-truncated-text
    #:output-truncated-text #:output-truncated-tool-calls
    #:tool-choice-unsupported #:tool-choice-unsupported-provider
    #:tool-choice-unsupported-requested
+   #:invalid-extra-body #:invalid-extra-body-source #:invalid-extra-body-reason
+   #:extra-body-unsupported #:extra-body-unsupported-provider #:extra-body-unsupported-fields
    #:missing-provenance #:missing-provenance-operation #:missing-provenance-subject
    #:embedding-dimension-mismatch #:embedding-dimension-mismatch-provider
    #:embedding-dimension-mismatch-expected #:embedding-dimension-mismatch-actual
@@ -143,6 +151,13 @@
   (:export
    ;; protocol
    #:provider #:complete
+   ;; streaming and cancelling a completion (#984)
+   #:*on-text* #:*cancel* #:supports-streaming-p
+   ;; where a provider sends its requests (#1034)
+   #:endpoint #:endpoint-p #:endpoint-scheme #:endpoint-host #:endpoint-port
+   #:parse-endpoint #:provider-endpoint #:endpoint-loopback-p
+   ;; a provider whose requests must stay on this machine (#1293)
+   #:provider-stay-local
    ;; the embedding seam (#138, #150) -- a SEPARATE hierarchy, not a capability on PROVIDER
    #:embedding-provider #:embed #:embed-batch #:embed-documents #:embed-query
    #:embedding-dimensions #:embedding-model-of
@@ -166,7 +181,7 @@
    #:msg #:role #:content
    #:text-part #:tool-use-part #:tool-result-part
    ;; neutral tools + completions
-   #:tool-choice #:supports-tool-choice-p #:check-tool-choice
+   #:tool-choice #:supports-tool-choice-p #:honours-tool-choice-none-p #:check-tool-choice
    #:supports-response-format-p #:complete-with-schema
    #:anthropic-request-body #:openai-request-body
    #:generate-structured #:validate-arguments #:validate-against-schema
@@ -197,9 +212,11 @@
    #:anthropic #:anthropic-model #:anthropic-api-key
    #:openai-compatible #:model-of
    #:*default-model* #:*default-max-tokens*
-   #:*connect-timeout* #:*read-timeout*
+   #:*connect-timeout* #:*read-timeout* #:*retry*
    ;; environment-driven provider selection
    #:make-provider-from-env #:register-provider-impl #:env-setting
+   ;; vendor-specific fields in a provider's request body (#1172)
+   #:*extra-body* #:supports-extra-body-p #:provider-extra-body
    ;; #758: the #719 mapping of a failed HTTP request, for a module that calls a service itself
    #:request-failure))
 
@@ -290,6 +307,7 @@
   (:local-nicknames (#:cnd #:praxeon/conditions)
                     (#:turn #:praxeon/turn)
                     (#:jzon #:com.inuoe.jzon)
+                    (#:sig #:aion/signature)
                     (#:bt #:bordeaux-threads))
   (:documentation
    "What a caller may spend, and refusing before it is spent (pre-publication issue 172). Two ceilings, not
@@ -306,13 +324,15 @@
   (:export #:grant #:grant-p #:grant-principal #:grant-group #:grant-capabilities
            #:grant-token-cap #:grant-call-cap #:grant-expires-at #:grant-audience
            #:grant-permits-p #:grant-permit-fn
-           #:verify-grant #:ed25519-verifier #:make-ed25519-verifier
+           #:verify-grant #:ed25519-verifier #:make-ed25519-verifier #:ed25519-verifier-public-key
+           #:*clock*
+           #:encode-grant-token #:decode-grant-token
            #:grant-invalid #:grant-invalid-reason
            #:budget-exhausted #:budget-exhausted-principal
            #:budget-exhausted-requested #:budget-exhausted-remaining
            #:ledger #:make-ledger #:ledger-grant #:ledger-tokens #:ledger-calls
            #:remaining-tokens #:remaining-calls #:affordable-p
-           #:record-usage #:usage-report
+           #:record-usage #:record-usage-event #:usage-report
            #:chargeable-tokens #:*token-weights*
            #:budget-guard #:capability-guard #:meter))
 
@@ -329,6 +349,7 @@
                     (#:llm #:praxeon/llm)
                     (#:prompt #:praxeon/prompt)
                     (#:evt #:praxeon/event)
+                    (#:http #:aion/http-client)
                     (#:turn #:praxeon/turn)
                     (#:res #:praxeon/results)
                     (#:jzon #:com.inuoe.jzon)
@@ -340,8 +361,10 @@
    #:agent-clear-target #:agent-keep-recent #:agent-never-clear
    #:agent #:make-agent #:agent-name #:agent-provider #:agent-means
    #:agent-context #:agent-history #:agent-history-budget #:agent-system-prompt
-   #:agent-cache-system #:agent-system-parts #:agent-max-tokens
-   #:request-messages
+   #:move-conversation
+   #:agent-cache-system #:agent-cache-messages #:agent-trim-from
+   #:agent-system-parts #:agent-max-tokens #:agent-private
+   #:request-messages #:prompt-breakdown
    #:means-entry #:means-entry-source #:register-means #:means-permitted-p #:agent-means-for
    ;; untrusted content in a turn (#827)
    #:means-entry-untrusted #:means-entry-requires-user-intent #:means-entry-allow
@@ -352,12 +375,17 @@
    #:thread-memory #:attach-thread-memory #:agent-thread-memory #:thread-memory-observer
    #:thread-memory-replace-at #:*read-observed-messages-means* #:thread-observations-text
    #:agent-taint-scope
+   ;; the recorded taint of a conversation, for an app that stores text transcripts (#948)
+   #:agent-conversation-taint #:conversation-taint-unrecorded
+   #:conversation-taint-unrecorded-agent
    ;; The accessors of what AGENT-MEANS-FOR returns. NAME and DESCRIPTION were missing, so an
    ;; app could enumerate the means it may use and not read them -- which is the
    ;; knowable-blast-radius property of ADR-0002 being exported in a form nobody can consume.
    #:means-entry-name #:means-entry-description #:means-entry-capability #:agent-tool-specs #:register-agent-as-means
    #:deliberate #:act #:run-turn #:converse-repl
    #:run-turn-through #:*principal*
+   ;; cancelling a turn (#984)
+   #:turn-cancel #:make-turn-cancel #:cancel-turn #:turn-cancelled-p #:*turn-cancel*
    ;; work that finishes after the call that started it (#532)
    #:started-result #:started-result-p #:started-result-text #:*tool-call-id*
    ;; holding a call until the user decides (#531)

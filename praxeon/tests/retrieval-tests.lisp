@@ -987,6 +987,117 @@ chunk."
         (is (search "More passages matched than are shown here." text))
         (is (= 1 (count #\[ text)) "one passage, as :limit 1 asks")))))
 
+;;; --- passages are outside content unless the corpus is the app's own (#907) --------------
+
+(defclass %script (llm:provider)
+  ((steps :initarg :steps :accessor script-steps))
+  (:documentation "A provider that hands back queued completions in order, then ends the turn."))
+
+(defmethod llm:complete ((p %script) messages &key system tools max-tokens temperature tool-choice)
+  (declare (ignore messages system tools max-tokens temperature tool-choice))
+  (or (pop (script-steps p)) (llm:make-completion :text "Done." :stop-reason :end)))
+
+(defun %calling (&rest calls)
+  "An agent whose model makes CALLS, each a list (NAME ARG-PAIRS), one completion per call."
+  (actor:make-agent
+   :provider (make-instance
+              '%script
+              :steps (loop for (name pairs) in calls
+                           for i from 1
+                           collect (llm:make-completion
+                                    :text "" :stop-reason :tool-use
+                                    :tool-calls (list (llm:make-tool-call
+                                                       :id (format nil "c~D" i) :name name
+                                                       :arguments (apply #'%args pairs))))))))
+
+(defun %buyer (agent)
+  "Register \"buy\", a means that spends for the user, on AGENT. Returns a function that answers
+how many times it ran."
+  (let ((runs 0))
+    (actor:register-means agent "buy" "Buy something."
+                          (lambda (args) (declare (ignore args)) (incf runs) "Bought.")
+                          :requires-user-intent t)
+    (lambda () runs)))
+
+(test a-corpus-is-untrusted-by-default-and-its-passages-carry-the-flag
+  (with-store (store)
+    (let ((embedder (make-instance 'word-embedder))
+          (outside (rt:make-corpus store "outside" :strategy :hybrid))
+          (own (rt:make-corpus store "own" :strategy :hybrid :untrusted nil)))
+      (is-true (rt:corpus-untrusted outside))
+      (is-false (rt:corpus-untrusted own))
+      (rt:ingest outside +policy+ embedder)
+      (rt:ingest own +policy+ embedder)
+      ;; Called directly, not through the search means.
+      (dolist (result (list (rt:retrieve-similar outside embedder "refund")
+                            (rt:retrieve-hybrid outside embedder "refund")))
+        (is (= 3 (length (rt:retrieval-result-passages result))))
+        (is (every #'rt:passage-untrusted (rt:retrieval-result-passages result))))
+      (dolist (result (list (rt:retrieve-similar own embedder "refund")
+                            (rt:retrieve-hybrid own embedder "refund")))
+        (is (= 3 (length (rt:retrieval-result-passages result))))
+        (is (notany #'rt:passage-untrusted (rt:retrieval-result-passages result))))
+      (let ((from-outside (first (rt:retrieval-result-passages
+                                  (rt:retrieve-similar outside embedder "refund"))))
+            (from-own (first (rt:retrieval-result-passages
+                              (rt:retrieve-similar own embedder "refund")))))
+        (is-true (ctx:ctx-item-untrusted (rt:passage->ctx-item from-outside #'%render)))
+        (is-false (ctx:ctx-item-untrusted (rt:passage->ctx-item from-own #'%render)))
+        (is-false (ctx:ctx-item-untrusted
+                   (rt:passage->ctx-item from-outside #'%render :untrusted nil))
+                  ":untrusted nil overrides the passage's flag")
+        (is-true (ctx:ctx-item-untrusted
+                  (rt:passage->ctx-item from-own #'%render :untrusted t))
+                 ":untrusted t overrides the passage's flag")))))
+
+(defun %buy-with-passage-in-context (store corpus-untrusted)
+  "Retrieve a passage from a corpus in STORE made with :UNTRUSTED CORPUS-UNTRUSTED, put it in an
+agent's context as the app would, and let the model call \"buy\". Returns how many times it
+ran."
+  (let* ((embedder (make-instance 'word-embedder))
+         (corpus (rt:make-corpus store "policy" :untrusted corpus-untrusted))
+         (agent (%calling (list "buy" '("item" "x"))))
+         (buyer (%buyer agent)))
+    (rt:ingest corpus +policy+ embedder)
+    (ctx:add-item (actor:agent-context agent)
+                  (rt:passage->ctx-item
+                   (first (rt:retrieval-result-passages
+                           (rt:retrieve-similar corpus embedder "refund")))
+                   #'%render))
+    (actor:run-turn agent "Buy x")
+    (funcall buyer)))
+
+(test a-passage-from-an-untrusted-corpus-in-the-context-refuses-a-spending-means
+  (with-store (store)
+    (is (= 0 (%buy-with-passage-in-context store t)))))
+
+(test a-passage-from-a-trusted-corpus-in-the-context-leaves-a-spending-means-alone
+  "The control for the test above."
+  (with-store (store)
+    (is (= 1 (%buy-with-passage-in-context store nil)))))
+
+(defun %buy-after-search (store corpus-untrusted)
+  "An agent whose model searches a corpus in STORE made with :UNTRUSTED CORPUS-UNTRUSTED and
+then calls \"buy\" in the same turn. Returns how many times \"buy\" ran."
+  (let* ((embedder (make-instance 'word-embedder))
+         (corpus (rt:make-corpus store "policy" :untrusted corpus-untrusted))
+         (agent (%calling (list "search-documents" '("query" "refund"))
+                          (list "buy" '("item" "x"))))
+         (buyer (%buyer agent)))
+    (rt:ingest corpus +policy+ embedder)
+    (rt:register-corpus-search agent corpus embedder #'%render)
+    (actor:run-turn agent "Buy x")
+    (funcall buyer)))
+
+(test a-search-of-an-untrusted-corpus-refuses-a-spending-means-later-in-the-turn
+  (with-store (store)
+    (is (= 0 (%buy-after-search store t)))))
+
+(test a-search-of-a-trusted-corpus-leaves-a-spending-means-alone
+  "The control for the test above."
+  (with-store (store)
+    (is (= 1 (%buy-after-search store nil)))))
+
 (test (every-truncation-reason-gets-a-sentence-for-the-model :suite chunkers)
   ;; Checked directly, with a TRUNCATED value built for each reason, so every reason has a
   ;; sentence whether or not a test's corpus can be brought into that state.
@@ -1832,3 +1943,274 @@ later chunk could be found nearer than it."
                                 nan corrupt-text)))
             (let ((after (%similar-ranking corpus embedder "which item" 3)))
               (is (equal expected after) "expected ~S, got ~S" expected after)))))))
+
+;;; --- the provider is called outside the corpus lock (#1194) ----------------------------
+
+(defun %thread (name fn)
+  "Start FN on a thread called NAME and return the thread."
+  (sb-thread:make-thread fn :name name))
+
+(defun %finished-within-p (thread seconds)
+  "Whether THREAD ends within SECONDS. Its value is not looked at."
+  (not (eq :timed-out (sb-thread:join-thread thread :default :timed-out :timeout seconds))))
+
+(test a-sync-completes-while-embed-pending-is-calling-the-provider
+  "#1194. EMBED-PENDING used to hold the corpus lock across every provider call, so a sync of any
+document in the corpus waited for the whole rebuild. Now each batch is read and written under the
+lock and the call between holds none. The embedder here pauses inside its call; a sync from
+another thread must finish while it is paused. The guarded write still applies: the chunk the
+sync replaced is not given the old text's vector, and is embedded on the next run."
+  (with-store (store)
+    (let* ((corpus (rt:make-corpus store "policy"))
+           (in-call (sb-thread:make-semaphore))
+           (release (sb-thread:make-semaphore))
+           (embedder (make-instance 'word-embedder
+                                    :before-documents
+                                    (lambda ()
+                                      (sb-thread:signal-semaphore in-call)
+                                      (sb-thread:wait-on-semaphore release :timeout 20)))))
+      (rt:sync-corpus corpus (list (sec "1" "A payout is sent monthly.")))
+      ;; THREAD-LIFETIME: the run returns once RELEASE is signalled below, or after 20 seconds;
+      ;; the JOIN at the end waits for it. The sync returns as soon as it has the corpus lock,
+      ;; and is joined too, before the store is dropped: when the property fails, the sync is
+      ;; still waiting when the test moves on, and a thread left running into a dropped table
+      ;; would end the process before the result is reported. Both catch their own errors.
+      (let ((run (%thread "embed-pending" (lambda () (ignore-errors (rt:embed-pending corpus embedder)))))
+            (sync nil))
+        (unwind-protect
+             (progn
+               (is-true (sb-thread:wait-on-semaphore in-call :timeout 10)
+                        "the provider call started")
+               (setf sync (%thread "sync" (lambda ()
+                                            (ignore-errors
+                                             (rt:sync-document corpus "doc-1"
+                                                               (list (sec "1" "A payout is sent weekly."))))))))
+               (is-true (%finished-within-p sync 5)
+                        "the sync finished while the provider call was still running"))
+          (sb-thread:signal-semaphore release)
+          (sb-thread:join-thread run :default nil :timeout 30)
+          (when sync (sb-thread:join-thread sync :default nil :timeout 30)))
+        (is (= 0 (%column-count store "embedding IS NOT NULL"))
+            "the vector for the replaced text was not written")
+        (is (= 1 (rt:embed-pending corpus (make-instance 'word-embedder)))
+            "the new text is embedded on the next run"))))
+
+(test a-second-embed-pending-run-does-not-call-the-provider-for-the-same-chunks
+  "#1194. The corpus lock also kept two runs from reading the same pending batch and paying for it
+twice. With the provider called outside it, WITH-CORPUS-RUN-LOCK keeps one run per corpus at a
+time, and syncs do not take it. The first run pauses in its call; a second run started then must
+not reach the provider. Once the first finishes, the second finds nothing pending."
+  (with-store (store)
+    (let* ((corpus (rt:make-corpus store "policy"))
+           (in-call (sb-thread:make-semaphore))
+           (release (sb-thread:make-semaphore))
+           (entered 0)
+           (lock (sb-thread:make-mutex))
+           (embedder (make-instance 'word-embedder
+                                    :before-documents
+                                    (lambda ()
+                                      (sb-thread:with-mutex (lock) (incf entered))
+                                      (sb-thread:signal-semaphore in-call)
+                                      (sb-thread:wait-on-semaphore release :timeout 20))))
+           (results (make-array 2 :initial-element nil)))
+      (rt:sync-corpus corpus (list (sec "1" "A payout is sent monthly.")
+                                   (sec "2" "A refund takes a week.")))
+      ;; THREAD-LIFETIME: both runs return once RELEASE is signalled, or after 20 seconds per
+      ;; call; the JOINs below wait for them.
+      (let ((first (%thread "first run" (lambda () (setf (aref results 0)
+                                                         (ignore-errors
+                                                          (rt:embed-pending corpus embedder)))))))
+        (is-true (sb-thread:wait-on-semaphore in-call :timeout 10) "the first run is in its call")
+        (let ((second (%thread "second run" (lambda () (setf (aref results 1)
+                                                             (ignore-errors
+                                                              (rt:embed-pending corpus embedder)))))))
+          (unwind-protect
+               (progn
+                 (sleep 1)
+                 (is (= 1 (sb-thread:with-mutex (lock) entered))
+                     "the second run has not reached the provider"))
+            (sb-thread:signal-semaphore release 4)
+            (sb-thread:join-thread first :default nil :timeout 30)
+            (sb-thread:join-thread second :default nil :timeout 30))
+          (is (= 1 (sb-thread:with-mutex (lock) entered)) "and never did")
+          (is (equal '(2 0) (coerce results 'list))
+              "the first run embedded both chunks and the second found none: ~S" results))))))
+
+(test a-sync-completes-while-contextualize-pending-is-calling-the-model
+  "#1194, for CONTEXTUALIZE-PENDING: it held the corpus lock across every chat call. The model
+here pauses inside its call; a sync from another thread must finish meanwhile."
+  (with-store (store)
+    (let* ((in-call (sb-thread:make-semaphore))
+           (release (sb-thread:make-semaphore))
+           (writer (make-instance 'context-writer
+                                  :answer (lambda (document)
+                                            (declare (ignore document))
+                                            (sb-thread:signal-semaphore in-call)
+                                            (sb-thread:wait-on-semaphore release :timeout 20)
+                                            "  A context.")))
+           (corpus (%contextual store "policy" :writer writer)))
+      (%sync-handbook corpus)
+      ;; THREAD-LIFETIME: the run returns once RELEASE is signalled below, or after 20 seconds
+      ;; per call; the sync as soon as it has the corpus lock. Both are joined before the store
+      ;; is dropped, and catch their own errors, for the reason given in the embedding test.
+      (let ((run (%thread "contextualize-pending"
+                          (lambda () (ignore-errors (rt:contextualize-pending corpus)))))
+            (sync nil))
+        (unwind-protect
+             (progn
+               (is-true (sb-thread:wait-on-semaphore in-call :timeout 10) "the model call started")
+               (setf sync (%thread "sync" (lambda ()
+                                            (ignore-errors
+                                             (rt:sync-document corpus "doc-2"
+                                                               (list (sec "3" "Refund rules, revised."
+                                                                          :document-id "doc-2"))))))))
+               (is-true (%finished-within-p sync 5)
+                        "the sync finished while the model call was still running"))
+          (sb-thread:signal-semaphore release 10)
+          (sb-thread:join-thread run :default nil :timeout 30)
+          (when sync (sb-thread:join-thread sync :default nil :timeout 30))))))
+
+;;; --- a context function receives where the chunk is (#1195) ----------------------------
+
+(defun %stored-contexts (store)
+  "Each chunk's (section-id context), in section order."
+  (mapcar (lambda (r) (list (param:row-value r :section_id) (param:row-value r :context)))
+          (conn:query (rt:store-connection store)
+                      (format nil "SELECT section_id, context FROM ~A ORDER BY section_id"
+                              (rt:store-table store)))))
+
+(defparameter +repeated+
+  (list (sec "1" "Payout rules.")
+        (sec "2" "See the table below.")
+        (sec "3" "Refund rules.")
+        (sec "4" "See the table below."))
+  "A document whose second and fourth chunks are the same text under different sections.")
+
+(test a-context-function-can-tell-repeated-chunks-apart
+  "#1195. The built-in prompt gives the model the document and the chunk's text only, so two
+identical chunks in one document get the same question. A :CONTEXT-FUNCTION receives where the
+chunk is as well: its section, locator, indexes and position in the document. Here it returns the
+context itself, from the section, so the two repeated chunks get different contexts and the model
+is never called."
+  (with-store (store)
+    (let* ((seen '())
+           (writer (make-instance 'context-writer))
+           (corpus (rt:make-corpus store "policy" :strategy :hybrid
+                                   :contextualizer
+                                   (rt:make-contextualizer
+                                    writer :version "by-section/1"
+                                    :context-function
+                                    (lambda (document chunk)
+                                      (declare (ignore document))
+                                      (push chunk seen)
+                                      (format nil "From section ~A, chunk ~D of the document."
+                                              (getf chunk :section-id) (getf chunk :position)))))))
+      (rt:sync-corpus corpus +repeated+)
+      (is (= 4 (rt:contextualize-pending corpus)))
+      (is (equal '(("1" "From section 1, chunk 0 of the document.")
+                   ("2" "From section 2, chunk 1 of the document.")
+                   ("3" "From section 3, chunk 2 of the document.")
+                   ("4" "From section 4, chunk 3 of the document."))
+                 (%stored-contexts store))
+          "the repeated chunks have different contexts: ~S" (%stored-contexts store))
+      (is (null (writer-calls writer)) "the model was not called")
+      (let ((fourth (find "4" seen :key (lambda (c) (getf c :section-id)) :test #'equal)))
+        (is (equal "See the table below." (getf fourth :text)))
+        (is (equal "§4" (getf fourth :locator)) "the locator is passed")
+        (is (equal "doc-1" (getf fourth :document-id)))
+        (is (equal "en" (getf fourth :locale)))
+        (is (integerp (getf fourth :section-index)) "and the section index")
+        (is (integerp (getf fourth :chunk-index)) "and the chunk index")))))
+
+(test a-context-function-can-return-messages-for-the-model
+  "#1195. A :CONTEXT-FUNCTION may return messages instead of a context. They are sent to the
+contextualizer's provider in place of the built-in prompt, and its answer is the context."
+  (with-store (store)
+    (let* ((writer (make-instance 'context-writer :answer (lambda (document) (declare (ignore document))
+                                                            "  A context from the app's prompt.")))
+           (corpus (rt:make-corpus store "policy" :strategy :hybrid
+                                   :contextualizer
+                                   (rt:make-contextualizer
+                                    writer :version "own-prompt/1"
+                                    :context-function
+                                    (lambda (document chunk)
+                                      (list (llm:msg "user"
+                                                     (list (llm:text-part document)
+                                                           (llm:text-part
+                                                            (format nil "Section ~A: ~A"
+                                                                    (getf chunk :section-id)
+                                                                    (getf chunk :text)))))))))))
+      (rt:sync-corpus corpus (list (sec "1" "Payout rules.")))
+      (is (= 1 (rt:contextualize-pending corpus)))
+      (is (equal '(("1" "A context from the app's prompt.")) (%stored-contexts store)))
+      (is (= 1 (length (writer-calls writer))) "the model was called once")
+      (is (equal "Section 1: Payout rules."
+                 (getf (second (getf (first (writer-calls writer)) :parts)) :text))
+          "with the app's messages"))))
+
+(test a-context-function-needs-a-version-that-goes-into-the-id
+  "#1195. A function cannot be fingerprinted, so :CONTEXT-FUNCTION requires :VERSION, which goes
+into CONTEXTUALIZER-ID. Changing it makes every context stale; keeping it keeps them current.
+Without it, a changed function would leave every context looking current."
+  (let ((writer (make-instance 'context-writer))
+        (fn (lambda (document chunk) (declare (ignore document chunk)) "A context.")))
+    (signals error (rt:make-contextualizer writer :context-function fn))
+    (signals error (rt:make-contextualizer writer :context-function fn :version ""))
+    (signals error (rt:make-contextualizer writer :version "1") "a version with no function")
+    (let ((plain (rt:contextualizer-id (rt:make-contextualizer writer)))
+          (v1 (rt:contextualizer-id (rt:make-contextualizer writer :context-function fn :version "1")))
+          (v1-again (rt:contextualizer-id (rt:make-contextualizer writer :context-function fn :version "1")))
+          (v2 (rt:contextualizer-id (rt:make-contextualizer writer :context-function fn :version "2"))))
+      (is (search "/fn-" v1) "the id names the function's version: ~A" v1)
+      (is-false (search "/fn-" plain) "control: the built-in prompt's id does not")
+      (is (equal v1 v1-again) "the same version, the same id")
+      (is (not (equal v1 v2)) "another version, another id")))
+  (with-store (store)
+    (flet ((corpus (version)
+             (rt:make-corpus store "policy" :strategy :hybrid
+                             :contextualizer
+                             (rt:make-contextualizer
+                              (make-instance 'context-writer) :version version
+                              :context-function (lambda (document chunk)
+                                                  (declare (ignore document))
+                                                  (format nil "v~A ~A" version (getf chunk :section-id)))))))
+      (rt:sync-corpus (corpus "1") (list (sec "1" "Payout rules.")))
+      (is (= 1 (rt:contextualize-pending (corpus "1"))))
+      (is (= 0 (rt:contextualize-pending (corpus "1"))) "the same version: nothing is stale")
+      (is (= 1 (rt:contextualize-pending (corpus "2"))) "a new version: written again")
+      (is (equal '(("1" "v2 1")) (%stored-contexts store))))))
+
+(test a-context-function-that-returns-something-else-writes-nothing
+  "#1195. A :CONTEXT-FUNCTION that returns neither a context string nor messages, or an empty
+context, signals DELIBERATION-FAILURE and writes nothing for that chunk."
+  (dolist (returned (list 42 "   " (list "not a message")))
+    (with-store (store)
+      (let ((corpus (rt:make-corpus store "policy" :strategy :hybrid
+                                    :contextualizer
+                                    (rt:make-contextualizer
+                                     (make-instance 'context-writer) :version "1"
+                                     :context-function (lambda (document chunk)
+                                                         (declare (ignore document chunk))
+                                                         returned)))))
+        (rt:sync-corpus corpus (list (sec "1" "Payout rules.")))
+        (signals cnd:deliberation-failure (rt:contextualize-pending corpus))
+        (is (equal '(("1" nil)) (%stored-contexts store)) "nothing was written for ~S" returned)))))
+
+(test a-background-run-inside-the-corpus-lock-is-refused
+  "#1200. A run takes the run lock first and the corpus lock second (#1194). Called inside the
+app's own WITH-CORPUS-LOCK, EMBED-PENDING or CONTEXTUALIZE-PENDING would take them the other way
+round and could deadlock with a concurrent run, depending on timing, so it is refused every time
+with an error, before the provider is called or anything is written.
+
+THE CONTROL is the same calls outside the lock, which run as usual."
+  (with-store (store)
+    (let* ((embedder (make-instance 'word-embedder))
+           (corpus (%contextual store "policy")))
+      (%sync-handbook corpus)
+      (rt:with-corpus-lock (corpus)
+        (signals error (rt:embed-pending corpus embedder))
+        (signals error (rt:contextualize-pending corpus)))
+      (is (null (recorded-calls embedder)) "the provider was not called")
+      (is (= 4 (%column-count store "context IS NULL")) "and nothing was written")
+      (is (= 4 (rt:contextualize-pending corpus)) "control: outside the lock it runs")
+      (is (= 4 (rt:embed-pending corpus embedder)) "control: and so does embedding"))))

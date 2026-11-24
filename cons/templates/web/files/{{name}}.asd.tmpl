@@ -15,8 +15,14 @@
 
 (defsystem "{{name}}/tests"
   :description "Test suite for {{name}}."
-  :depends-on ("{{name}}" "fiveam")
+  :depends-on ("{{name}}" "fiveam" (:require "sb-bsd-sockets"))
   :serial t
   :components ((:module "tests"
                 :serial t
-                :components ())))
+                :components ((:file "{{name}}-tests"))))
+  :perform (test-op (o c)
+             (declare (ignore o c))
+             (unless (uiop:symbol-call :fiveam :run!
+                                       (uiop:find-symbol* (string-upcase "{{name}}")
+                                                          (string-upcase "{{name}}/tests")))
+               (error "{{name}}: tests failed"))))

@@ -25,7 +25,7 @@ libuv's own portable structs, not the platform's, which is what makes hand-writi
 them safe.")
   (:export
    ;; library management
-   #:load-libuv #:unload-libuv #:libuv-loaded-p #:libuv-not-found #:*libuv-path*
+   #:load-libuv #:unload-libuv #:libuv-loaded-p #:abi-verified-p #:libuv-not-found #:*libuv-path*
    ;; The sonames a shipped bundle must present. EXPORTED because the bundler has to
    ;; agree with them: it copies a library in under a name, and this is the list of
    ;; names anything looking for it will ask for (pre-publication issue 329). It was reachable only by
@@ -100,7 +100,7 @@ benefit of the decoding having been checked.")
 
 (cl:defpackage #:aion/uv
   (:use #:cl)
-  (:local-nicknames (#:ffi #:aion/uv/ffi))
+  (:local-nicknames (#:ffi #:aion/uv/ffi) (#:path #:aion/path))
   (:documentation
    "libuv for Common Lisp: an event loop, asynchronous and synchronous filesystem
 operations, timers, and filesystem watching.
@@ -138,7 +138,7 @@ safe to call from any thread even while another thread runs a loop.")
    #:future #:await #:future-finished-p #:future-value #:future-error
    ;; synchronous fs
    #:read-file #:write-file #:file-info #:list-directory
-   #:make-directory #:delete-file* #:delete-directory #:rename-path #:real-path
+   #:make-directory #:delete-file* #:delete-directory #:rename-path #:real-path #:native-path
    ;; file-info accessors
    #:file-info-size #:file-info-kind #:file-info-mode #:file-info-mtime
    #:file-info-atime #:file-info-ctime #:file-info-inode #:file-info-nlink

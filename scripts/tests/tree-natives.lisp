@@ -368,3 +368,126 @@ the number the earlier step passes in."
         "with one carried earlier:~%~A" one)
     (is (search "build-desktop-app: 0 of this tree's native libraries carried into the bundle." none)
         "with none carried earlier:~%~A" none)))
+
+(test the-bundle-check-asks-the-stamp-about-a-vendored-libuv
+  "#1001: VERIFY-NATIVES-WILL-BE-CARRIED refuses a vendored libuv whose BUILT-FROM stamp does not
+name libuv.pin, because a checkout that pulled a pin bump without rebuilding would otherwise ship
+the old build. It asks STAMP-REFUSAL with the tree's libuv.pin, beside vendor/. A library from a
+build script that writes no stamp is not asked."
+  (let* ((tree (%fresh-tree))
+         (ouranos-tree-natives:*vendor* (merge-pathnames "vendor/" tree))
+         (library (merge-pathnames "vendor/libuv/lib/libuv.so" tree))
+         (sha "cb0d6dd2128d5a95bd242c6cc982a24fe608fa93da57b6b4ec763b0018c53e64"))
+    (ensure-directories-exist library)
+    (with-open-file (out library :direction :output) (write-string "x" out))
+    (with-open-file (out (merge-pathnames "libuv.pin" tree) :direction :output)
+      (format out "version 1.53.0~%sha256 ~A~%" sha))
+    (ouranos-built-from:write-stamp (merge-pathnames "vendor/libuv/" tree) "1.52.1" sha)
+    (let ((refusal (ouranos-tree-natives::%stamp-refusal-for library "build-libuv.lisp")))
+      (is (and refusal (search "1.52.1" refusal) (search "1.53.0" refusal)) "stale: ~S" refusal))
+    (is (null (ouranos-tree-natives::%stamp-refusal-for library "build-libgit2.lisp"))
+        "a build script that writes no stamp is not asked")
+    (ouranos-built-from:write-stamp (merge-pathnames "vendor/libuv/" tree) "1.53.0" sha)
+    (is (null (ouranos-tree-natives::%stamp-refusal-for library "build-libuv.lisp"))
+        "control: a current stamp is carried")))
+
+(defun %bundle-check-run (tree)
+  "Run VERIFY-NATIVES-WILL-BE-CARRIED in a child image, as build-desktop-app.lisp does, with one
+lazy native: a package whose loader records TREE's vendor/libuv/lib/libuv.so, built by
+build-libuv.lisp. A child, because the check refuses by exiting. Returns (values exit-code
+output)."
+  (let ((script (merge-pathnames "bundle-check.lisp" tree)))
+    (%write script
+            (format nil "(require :asdf)
+(load ~S)
+(defpackage #:fake-uv (:use #:cl))
+(defvar fake-uv::*path* nil)
+(defun fake-uv::load-it () (setf fake-uv::*path* ~S))
+(setf ouranos-tree-natives:*vendor* (pathname ~S))
+(setf ouranos-tree-natives::*lazy-natives*
+      '((\"FAKE-UV\" \"LOAD-IT\" \"UNLOAD-IT\" \"*PATH*\" \"NAMES\" \"build-libuv.lisp\" \"fake\")))
+(fake-uv::load-it)
+(ouranos-tree-natives:verify-natives-will-be-carried)
+(format t \"~~&RETURNED~~%\")
+"
+                    (uiop:native-namestring (merge-pathnames "tree-natives.lisp" *scripts*))
+                    (uiop:native-namestring (merge-pathnames "vendor/libuv/lib/libuv.so" tree))
+                    (uiop:native-namestring (merge-pathnames "vendor/" tree))))
+    (%run script)))
+
+(test the-bundle-check-itself-refuses-a-libuv-whose-stamp-names-another-release
+  "#1001, from the hub's review: VERIFY-NATIVES-WILL-BE-CARRIED, the function build-desktop-app
+and the generated build scripts call, refuses a vendored libuv whose stamp names another release
+than libuv.pin, with exit code 3 and both versions. The control is the same tree with the stamp
+for the pin, which the check accepts and returns from."
+  (let* ((tree (%fresh-tree))
+         (library (merge-pathnames "vendor/libuv/lib/libuv.so" tree))
+         (sha "cb0d6dd2128d5a95bd242c6cc982a24fe608fa93da57b6b4ec763b0018c53e64"))
+    (%write library "not a library; the check reads only where it is and its stamp")
+    (%write (merge-pathnames "libuv.pin" tree) (format nil "version 1.53.0~%sha256 ~A~%" sha))
+    (ouranos-built-from:write-stamp (merge-pathnames "vendor/libuv/" tree) "1.52.1" sha)
+    (multiple-value-bind (code output) (%bundle-check-run tree)
+      (is (eql 3 code) "refused with exit code 3: ~A~%~A" code output)
+      (is (and (search "will not be carried" output) (search "1.52.1" output)
+               (search "1.53.0" output))
+          "the refusal names both versions: ~A" output)
+      (is (null (search "RETURNED" output)) "and the check did not return"))
+    (ouranos-built-from:write-stamp (merge-pathnames "vendor/libuv/" tree) "1.53.0" sha)
+    (multiple-value-bind (code output) (%bundle-check-run tree)
+      (is (eql 0 code) "control: a current stamp passes: ~A~%~A" code output)
+      (is (and (search "will carry" output) (search "RETURNED" output))
+          "control: the library will be carried: ~A" output))))
+
+;;; --- a carried tree library gets a relative install name on macOS (#957) ------------------
+
+(defun %tree-carry-install-name (stamp)
+  "Build the carry-natives fixture's dylibs under a fresh vendor/fix/lib/, then, in a child
+image with CFFI, open libfixb.dylib from there and run CARRY-NATIVE-LIBRARIES with that vendor/
+into a fresh bundle, with OURANOS-CARRY::*STAMP* bound to STAMP. Returns the carried copy's
+install name and the child's output, or NIL when the fixture could not be built. A child image,
+because CARRY-NATIVE-LIBRARIES carries what CFFI has open, and this suite does not load CFFI."
+  (let* ((tree (%fresh-tree))
+         (lib (ensure-directories-exist (merge-pathnames "vendor/fix/lib/" tree)))
+         (bundle (ensure-directories-exist (merge-pathnames "bundle/" tree))))
+    (unwind-protect
+         (when (%dylib-pair lib)
+           (let* ((forms
+                    (list "(require :asdf)"
+                          "(load (merge-pathnames \"quicklisp/setup.lisp\" (user-homedir-pathname)))"
+                          "(let ((*standard-output* (make-broadcast-stream))) (asdf:load-system :cffi))"
+                          (format nil "(load ~S)" (uiop:native-namestring
+                                                   (merge-pathnames "tree-natives.lisp" *scripts*)))
+                          (format nil "(setf ouranos-tree-natives:*vendor* (pathname ~S))"
+                                  (uiop:native-namestring (merge-pathnames "vendor/" tree)))
+                          (format nil "(cffi:load-foreign-library ~S)"
+                                  (uiop:native-namestring (merge-pathnames "libfixb.dylib" lib)))
+                          (format nil "(let ((ouranos-tree-natives:*bundle* (pathname ~S)) (ouranos-tree-natives::*carried-list* nil) (ouranos-tree-natives::*lazy-natives* nil) (ouranos-tree-natives::*label* \"test\") (ouranos-tree-natives::*product* \"the bundle\") (ouranos-carry::*stamp* ~S)) (ouranos-tree-natives:carry-native-libraries))"
+                                  (uiop:native-namestring bundle) stamp)))
+                  (out (uiop:run-program
+                        (append (list (uiop:native-namestring sb-ext:*runtime-pathname*)
+                                      "--noinform" "--no-userinit" "--no-sysinit" "--non-interactive")
+                                (loop for f in forms append (list "--eval" f)))
+                        :output :string :error-output :output :ignore-error-status t))
+                  (carried (merge-pathnames "libfixb.dylib" bundle)))
+             (values (and (probe-file carried)
+                          (second (uiop:split-string
+                                   (string-trim '(#\Newline)
+                                                (uiop:run-program (list "otool" "-D" (uiop:native-namestring carried))
+                                                                  :output :string :ignore-error-status t))
+                                   :separator '(#\Newline))))
+                     out)))
+      (aion/fs:delete-tree tree :if-does-not-exist :ignore))))
+
+(test a-carried-tree-library-is-stamped-with-a-relative-install-name
+  "#957: the tree's libuv was carried with the install name it was built with, an absolute path
+under vendor/. CARRY-NATIVE-LIBRARIES now stamps a carried library @executable_path/<name>.
+Control: with the stamp off, the carried copy keeps the path under the fixture's vendor/."
+  (let ((why (%relink-skip-reason)))
+    (if why
+        (skip why)
+        (progn
+          (multiple-value-bind (name out) (%tree-carry-install-name t)
+            (is (equal "@executable_path/libfixb.dylib" name) "install name ~S:~%~A" name out))
+          (multiple-value-bind (name out) (%tree-carry-install-name nil)
+            (is (and name (char= #\/ (char name 0)) (search "/vendor/fix/lib/libfixb.dylib" name))
+                "control: without the stamp, the vendor/ path, got ~S:~%~A" name out))))))

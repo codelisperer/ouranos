@@ -228,7 +228,10 @@ stays within TARGET characters. A span longer than TARGET is a run on its own."
    (db-lock :initform (bt:make-recursive-lock "praxeon-retrieval-db") :reader store-db-lock)
    (corpus-locks :initform (make-hash-table :test #'equal) :reader %corpus-locks)
    (corpus-locks-guard :initform (bt:make-lock "praxeon-retrieval-corpora")
-                       :reader %corpus-locks-guard))
+                       :reader %corpus-locks-guard)
+   ;; One lock per corpus for its background runs, EMBED-PENDING and CONTEXTUALIZE-PENDING,
+   ;; which syncs do not take (#1194). Guarded by CORPUS-LOCKS-GUARD.
+   (run-locks :initform (make-hash-table :test #'equal) :reader %run-locks))
   (:documentation "One chunk table on one connection. Every corpus that shares an embedding
 width can live in it.
 
@@ -319,14 +322,16 @@ still paid for at the cache-read price on every call, so MAKE-CORPUS takes :WHOL
    (whole-limit :initarg :whole-limit :reader corpus-whole-limit)
    (expected-tokens :initarg :expected-tokens :reader corpus-expected-tokens)
    (contextualizer :initarg :contextualizer :reader corpus-contextualizer)
-   (backfill :initarg :backfill :reader corpus-backfill))
+   (backfill :initarg :backfill :reader corpus-backfill)
+   (untrusted :initarg :untrusted :reader corpus-untrusted))
   (:documentation "A named set of documents searched together. Its rows are in its store's
 table, marked with its NAME. Creating one writes nothing: a corpus exists once it has rows.
 MAKE-CORPUS describes the other slots."))
 
 (defun make-corpus (store name &key (chunker (make-instance 'section-chunker))
                                     (strategy :auto) (whole-limit *whole-limit*)
-                                    expected-tokens contextualizer (backfill :automatic))
+                                    expected-tokens contextualizer (backfill :automatic)
+                                    (untrusted t))
   "The corpus NAME (a non-empty string) in STORE. Cheap, and runs no SQL.
 
 STRATEGY is how RETRIEVE answers a query (#316):
@@ -348,7 +353,14 @@ searches the chunks' text alone.
 BACKFILL says when an :AUTO corpus that has grown past WHOLE-LIMIT gets its contexts written:
 :AUTOMATIC (the default) at the next CONTEXTUALIZE-PENDING, or :EXPLICIT only after the app calls
 START-BACKFILL. That backfill writes a context for every chunk and re-embeds every chunk, which
-is the one large cost of this design."
+is the one large cost of this design.
+
+UNTRUSTED, true by default, says the corpus's documents came from outside the app: uploaded by
+its users, crawled, or sent by anyone else. Every passage retrieved from it is then
+PASSAGE-UNTRUSTED, its context item is CTX:CTX-ITEM-UNTRUSTED (PASSAGE->CTX-ITEM), and
+REGISTER-CORPUS-SEARCH registers its search means :UNTRUSTED, so while such content is in a turn
+a means that spends or writes for the user is refused or held (#827, #906, #907). Pass NIL for a
+corpus of the app's own text, such as its help pages, that nobody outside the app can change."
   (unless (and (stringp name) (plusp (length name)))
     (error "praxeon/retrieval: a corpus name must be a non-empty string, not ~S" name))
   (unless (member strategy '(:auto :whole :hybrid))
@@ -362,7 +374,8 @@ is the one large cost of this design."
     (error "praxeon/retrieval: :backfill must be :AUTOMATIC or :EXPLICIT, not ~S" backfill))
   (make-instance 'corpus :store store :name name :chunker chunker :strategy strategy
                          :whole-limit whole-limit :expected-tokens expected-tokens
-                         :contextualizer contextualizer :backfill backfill))
+                         :contextualizer contextualizer :backfill backfill
+                         :untrusted (and untrusted t)))
 
 (defun corpus-where (corpus &rest clauses)
   "The WHERE clause restricting a query to CORPUS, ANDed with CLAUSES.
@@ -559,12 +572,14 @@ every result is complete; an index would let the database drop rows after the co
 
 ;;; --- serialising ingest ----------------------------------------------------------
 
-(defun %advisory-key (store corpus)
-  "A signed 64-bit lock key for (table, corpus)."
+(defun %advisory-key (store corpus &optional purpose)
+  "A signed 64-bit lock key for (table, corpus), or for (table, corpus, PURPOSE) when PURPOSE is
+given: the background-run lock uses \"run\", so it never shares a key with the ingest lock."
   (let* ((digest (ironclad:digest-sequence
                   :sha256 (sb-ext:string-to-octets
-                           (der:frame-inputs (list "praxeon/retrieval" (store-table store)
-                                                   (corpus-name corpus)))
+                           (der:frame-inputs (append (list "praxeon/retrieval" (store-table store)
+                                                           (corpus-name corpus))
+                                                     (when purpose (list purpose))))
                            :external-format :utf-8)))
          (n (loop for i below 8 for b = (aref digest i) sum (ash b (* 8 i)))))
     (if (>= n (expt 2 63)) (- n (expt 2 64)) n)))
@@ -600,6 +615,49 @@ process does that."
 
 (defmacro with-corpus-lock ((corpus) &body body)
   `(call-with-corpus-lock ,corpus (lambda () ,@body)))
+
+(defun %run-lock (store corpus)
+  (bt:with-lock-held ((%corpus-locks-guard store))
+    (or (gethash (corpus-name corpus) (%run-locks store))
+        (setf (gethash (corpus-name corpus) (%run-locks store))
+              (bt:make-recursive-lock (format nil "corpus run ~A" (corpus-name corpus)))))))
+
+(defun call-with-corpus-run-lock (corpus thunk)
+  "Call THUNK holding CORPUS's background-run lock (#1194), in this process and, on Postgres,
+across every process that uses the same database: the same two locks as CALL-WITH-CORPUS-LOCK,
+under a different key.
+
+EMBED-PENDING and CONTEXTUALIZE-PENDING take it for their whole run, and the corpus lock only
+around each read and each write, so the provider is called with no corpus lock held and a sync
+does not wait for a rebuild. This lock keeps one run per corpus at a time: a second run waits for
+the first, and then finds the first's chunks done, so nothing is paid for twice. Syncs never take
+it. When both are taken, this one is taken first.
+
+THAT ORDER IS ENFORCED (#1200). A thread that already holds CORPUS's ingest lock, such as app code
+calling EMBED-PENDING inside its own WITH-CORPUS-LOCK, would take the two locks the other way
+round, and could wait forever on a concurrent run that holds this lock and waits for the ingest
+lock to write a batch. Whether that happens depends on timing, so it is refused every time
+instead: this signals an error, before taking anything, naming the two locks and the order. The
+check is on the in-process lock, which is what two threads of one process share; on Postgres, two
+processes that took the advisory locks in opposite orders are stopped by Postgres's own deadlock
+detection."
+  (let ((store (corpus-store corpus)))
+    (when (sb-thread:holding-mutex-p (%corpus-lock store corpus))
+      (error "praxeon/retrieval: a background run of corpus ~S (EMBED-PENDING or CONTEXTUALIZE-PENDING) was started while this thread holds the corpus's ingest lock (WITH-CORPUS-LOCK). A run takes its run lock first and the ingest lock second, so starting it inside the ingest lock takes them the other way round and can deadlock with a concurrent run. Call it outside WITH-CORPUS-LOCK."
+             (corpus-name corpus))))
+  (let* ((store (corpus-store corpus))
+         (key (%advisory-key store corpus "run")))
+    (bt:with-recursive-lock-held ((%run-lock store corpus))
+      (if (%sqlite-p store)
+          (funcall thunk)
+          (progn
+            (with-db (store) (conn:query (store-connection store) "SELECT pg_advisory_lock(?)" key))
+            (unwind-protect (funcall thunk)
+              (with-db (store)
+                (conn:query (store-connection store) "SELECT pg_advisory_unlock(?)" key))))))))
+
+(defmacro with-corpus-run-lock ((corpus) &body body)
+  `(call-with-corpus-run-lock ,corpus (lambda () ,@body)))
 
 ;;; --- sync --------------------------------------------------------------------------
 
@@ -992,8 +1050,9 @@ BM25 score from RETRIEVE-KEYWORD, the reciprocal-rank-fusion score from RETRIEVE
 reranker's score when a reranker ordered the result. They are on different scales, so compare
 scores only within one result. CONTEXT is the context the
 corpus's contextualizer wrote for the chunk, or NIL (#316). TEXT is always the chunk's own text,
-without the context."
-  text provenance distance score context)
+without the context. UNTRUSTED is the corpus's CORPUS-UNTRUSTED when the passage was retrieved
+(#907)."
+  text provenance distance score context untrusted)
 
 (defstruct (complete (:constructor make-complete))
   "Every chunk of the corpus was a candidate, and nothing was cut off.")
@@ -1069,6 +1128,7 @@ list of scores parallel to ROWS."
               (%make-passage
                :text (param:row-value row :text)
                :context (param:row-value row :context)
+               :untrusted (corpus-untrusted corpus)
                :score (and score (coerce score 'double-float))
                :distance (and with-distance
                               (let ((d (param:row-value row :distance :if-missing nil)))
@@ -1090,10 +1150,14 @@ list of scores parallel to ROWS."
             rows
             (or scores (make-list (length rows) :initial-element nil)))))
 
-(defun passage->ctx-item (passage render)
+(defun passage->ctx-item (passage render &key (untrusted (passage-untrusted passage)))
   "PASSAGE as a context item. RENDER is required: a function from the passage to the string
 the model reads. The item's SOURCE is the passage itself, which is the provenance the caller
-keeps. praxeon does not choose how a citation is written, so there is no default RENDER (#138)."
+keeps. praxeon does not choose how a citation is written, so there is no default RENDER (#138).
+
+The item is CTX:CTX-ITEM-UNTRUSTED when UNTRUSTED is true, which defaults to PASSAGE-UNTRUSTED:
+the corpus's MAKE-CORPUS :UNTRUSTED when the passage was retrieved (#907). An app that has
+checked a passage itself may pass NIL."
   (unless (functionp render)
     (error "praxeon/retrieval: PASSAGE->CTX-ITEM needs RENDER, a function from a passage to the text the model reads; ~S is not one"
            render))
@@ -1102,7 +1166,8 @@ keeps. praxeon does not choose how a citation is written, so there is no default
     (ctx:make-ctx-item :content content
                        :tokens (max 1 (ceiling (length content) 4))
                        :role :note
-                       :source passage)))
+                       :source passage
+                       :untrusted (and untrusted t))))
 
 ;;; --- exact retrieval ---------------------------------------------------------------
 

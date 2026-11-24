@@ -180,6 +180,21 @@
   (type dword)
   (flags dword))
 
+(cffi:defcfun ("CredEnumerateW" cred-enumerate-w) :int32
+  ;; Filter is "SERVICE/*" or NULL for everything; Count and Credentials are out parameters, and
+  ;; Windows allocates the array, which the caller frees with CredFree (#1035).
+  ;;
+  ;; EVERY MATCHING CREDENTIAL ARRIVES WITH ITS VALUE. For a generic credential the CREDENTIALW
+  ;; that Windows allocates includes CredentialBlob, the plaintext after DPAPI decryption, so a
+  ;; caller cannot ask for target names alone. hades reads TARGET-NAME and USER-NAME, writes
+  ;; zeros over each blob, and only then calls CredFree; an earlier version of this comment said
+  ;; the blob is never touched, which was wrong in both directions -- Windows had already
+  ;; decrypted it, and the caller must write to it to erase it (the review of #1066).
+  (filter :pointer)
+  (flags dword)
+  (count :pointer)                      ; DWORD*
+  (credentials :pointer))               ; PCREDENTIALW** -- Windows allocates
+
 (cffi:defcfun ("CredFree" cred-free) :void
   (buffer :pointer))
 
@@ -365,6 +380,7 @@
           (lp-reserved  :offset (:x86 4  :x64 8))
           (dw-flags     :offset (:x86 44 :x64 60))
           (w-show-window :offset (:x86 48 :x64 64))
+          (cb-reserved2 :offset (:x86 50 :x64 66))
           (lp-reserved2 :offset (:x86 52 :x64 72))
           (h-std-input  :offset (:x86 56 :x64 80))
           (h-std-output :offset (:x86 60 :x64 88))
@@ -453,6 +469,22 @@
 (cffi:defcfun ("GetExitCodeProcess" get-exit-code-process) :int32
   (h-process :pointer)
   (lp-exit-code :pointer))
+
+;;; A child's C runtime descriptors beyond the standard three (#1028). The Microsoft C runtime
+;;; passes its descriptors to a child in STARTUPINFO's lpReserved2, and the child's runtime
+;;; reads them at startup: a 32-bit count, then one flag byte per descriptor, then one handle
+;;; per descriptor, packed with no padding. A descriptor is open when its flags have FOPEN.
+;;; FPIPE and FDEV say it is a pipe or a character device, as the runtime's own _pipe and
+;;; _open would mark it. GetFileType tells which.
+
+(defconstant +crt-fopen+ #x01)
+(defconstant +crt-fpipe+ #x08)
+(defconstant +crt-fdev+ #x40)
+(defconstant +file-type-char+ 2)
+(defconstant +file-type-pipe+ 3)
+
+(cffi:defcfun ("GetFileType" get-file-type) dword
+  (h-file :pointer))
 
 ;;; --- a message box before any window exists (#819) --------------------------
 ;;;

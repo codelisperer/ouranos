@@ -36,16 +36,18 @@ claude-sonnet-5-5 (*DEFAULT-MODEL*) and claude-opus-5-5 allow up to 128,000 outp
 the model card of qwen2.5 (the default model of OPENAI-COMPATIBLE) gives its generation length
 as 8,192 tokens. For a model whose maximum is lower, pass :max-tokens or bind this lower.
 
-A reply that uses most of the limit takes correspondingly long to generate, and this client
-reads a response only when it is complete, so a long reply can take longer than
-*READ-TIMEOUT*. Bind that higher too if it does.")
+A reply that uses most of the limit takes correspondingly long to generate. Without streaming
+this client reads a response only when it is complete, so a long reply can take longer than
+*READ-TIMEOUT*; bind that higher too if it does. A streamed completion (*ON-TEXT*, #984) is read
+as it arrives, so the timeout applies to the wait for each piece instead.")
 
 (defparameter *connect-timeout* 10
   "Seconds to wait for the provider TCP/TLS connect before failing. A short bound:
 a connect that doesn't complete quickly won't complete.")
 
 (defparameter *read-timeout* 120
-  "Seconds to wait for the provider *response* before failing. Turns a stalled or
+  "Seconds to wait for the provider *response* before failing. For a streamed completion
+(*ON-TEXT*, #984) it is the wait for each piece of the response, not for the whole of it. Turns a stalled or
 half-open connection into a surfaced error (caught by the loop and shown to the
 user) instead of an infinite hang that leaves the agent 'thinking' forever. Bind
 higher for slow reasoning models if a legitimate long turn ever trips it.")
@@ -195,6 +197,105 @@ A provider that cannot honour a forced choice must SIGNAL rather than fall back 
 :auto. A silent downgrade returns prose to a caller that is about to treat it as a
 record, and nothing downstream can tell the difference until the data is stored."))
 
+;;; --------------------------------------------------------------------------
+;;; Where a provider sends its requests (#1034)
+;;; --------------------------------------------------------------------------
+;;;
+;;; An app that must keep a request on this machine checks where the request will go. It asks
+;;; PROVIDER-ENDPOINT, which every provider here answers from the same setting its requests are
+;;; built from, so the answer cannot differ from the address the request uses. The egress hook
+;;; (#988) is to be given the same value, so an app's check and the hook agree.
+
+(defgeneric provider-stay-local (provider)
+  (:documentation "True when every request PROVIDER sends must stay on this machine (#1293). Set
+with :STAY-LOCAL T when the provider is made; the default is NIL, and a provider class without
+the setting answers NIL.
+
+Each request is then sent with aion/http-client's :STAY-LOCAL (#1212): it uses no proxy, it is
+refused before anything connects when the endpoint's host is not loopback by
+AION/HTTP-CLIENT:LOOPBACK-HOST-P, and a redirect to a host that is not loopback is refused
+instead of followed. A refusal is signalled as AION/HTTP-CLIENT:STAY-LOCAL-REFUSED, NOT WRAPPED
+IN PROVIDER-REQUEST-FAILED: it means the configuration was broken, not that the provider failed,
+so code that retries or falls back to another provider on a provider failure does not do either
+on it. Falling back to a remote provider would send the request where the setting forbids.")
+  (:method ((provider t)) nil))
+
+(defstruct (endpoint (:constructor %make-endpoint (scheme host port)))
+  "Where a provider's requests go: SCHEME (\"http\" or \"https\", lowercase), HOST (lowercase,
+an IPv6 address without its brackets) and PORT (an integer, the scheme's default when the URL
+names none)."
+  (scheme "" :type string)
+  (host "" :type string)
+  (port 0 :type (integer 1 65535)))
+
+(defun parse-endpoint (url)
+  "The ENDPOINT of URL, an http or https URL such as a provider's base URL. Signals an error when
+URL is not one, has no host, or names a port that is not a whole number from 1 to 65535. It also
+signals for an authority that HTTP clients read in different ways: one that contains a
+backslash, whitespace, a control character or more than one @, or a host outside brackets that
+contains [ or ]. Some clients treat a backslash as the start of the path, so
+\"http://evil.com\\@127.0.0.1/\" goes to evil.com there, while reading the text after the @ as
+the host would call it a loopback address."
+  (flet ((refuse (why)
+           (error "praxeon/llm: ~S is not an http or https URL with a host: ~A." url why)))
+    (unless (stringp url) (refuse "it is not a string"))
+    (let* ((sep (or (search "://" url) (refuse "it has no scheme")))
+           (scheme (string-downcase (subseq url 0 sep)))
+           (start (+ sep 3))
+           (end (or (position-if (lambda (c) (find c "/?#")) url :start start) (length url)))
+           (whole (subseq url start end))
+           ;; Userinfo, if any, ends at the last @ of the authority.
+           (authority (let ((at (position #\@ url :start start :end end :from-end t)))
+                        (subseq url (if at (1+ at) start) end)))
+           (default (cond ((string= scheme "http") 80)
+                          ((string= scheme "https") 443)
+                          (t (refuse "its scheme is not http or https")))))
+      (when (find-if (lambda (c) (or (char= c #\\) (<= (char-code c) 32) (= (char-code c) 127)))
+                     whole)
+        (refuse "its authority contains a backslash, whitespace or a control character"))
+      (when (> (count #\@ whole) 1)
+        (refuse "its authority contains more than one @"))
+      (multiple-value-bind (host port-text)
+          (if (and (plusp (length authority)) (char= #\[ (char authority 0)))
+              (let ((close (or (position #\] authority) (refuse "an IPv6 address has no ]"))))
+                (values (subseq authority 1 close)
+                        (let ((rest (subseq authority (1+ close))))
+                          (cond ((string= rest "") nil)
+                                ((char= #\: (char rest 0)) (subseq rest 1))
+                                (t (refuse "text follows the IPv6 address"))))))
+              (let ((colon (position #\: authority :from-end t)))
+                (when (find-if (lambda (c) (find c "[]")) authority)
+                  (refuse "a host outside brackets contains [ or ]"))
+                (if colon
+                    (values (subseq authority 0 colon) (subseq authority (1+ colon)))
+                    (values authority nil))))
+        (when (string= host "") (refuse "it has no host"))
+        (let ((port (cond ((or (null port-text) (string= port-text "")) default)
+                          ((and (<= (length port-text) 5) (every #'digit-char-p port-text)
+                                (<= 1 (parse-integer port-text) 65535))
+                           (parse-integer port-text))
+                          (t (refuse "its port is not a number from 1 to 65535")))))
+          (%make-endpoint scheme (string-downcase host) port))))))
+
+(defgeneric provider-endpoint (provider)
+  (:documentation "The ENDPOINT PROVIDER's requests go to, read from the same setting the request
+URL is built from, with defaults applied: an anthropic, openai-compatible, embedding, reranker or
+image provider. NIL when where it sends is not known: a provider that runs in this process, or
+a provider class that defines no method. A caller deciding whether a request stays on this
+machine treats NIL as not on this machine.")
+  (:method ((provider t)) nil))
+
+(defun endpoint-loopback-p (endpoint)
+  "True when ENDPOINT's host is a loopback address: localhost, an address in 127.0.0.0/8, ::1,
+or an IPv6 address carrying an IPv4 loopback address, such as ::ffff:127.0.0.1. Decided from
+the text, with no DNS lookup, so another name that resolves to a loopback address is answered
+NIL. NIL for NIL."
+  (and endpoint
+       (let ((host (endpoint-host endpoint)))
+         (or (string= host "localhost")
+             (and (http:parse-address host)
+                  (eq :loopback (http:address-category host)))))))
+
 (defgeneric supports-tool-choice-p (provider)
   (:documentation "True when PROVIDER can honour a TOOL-CHOICE other than :auto.
 
@@ -202,6 +303,16 @@ Defaults to NIL so a provider that has not said it can do this is refused rather
 silently downgraded. A new backend opts in by defining this, which is a decision someone
 makes rather than a default they inherit.")
   (:method ((p provider)) nil))
+
+(defgeneric honours-tool-choice-none-p (provider)
+  (:documentation "True when PROVIDER, sent tools with the tool choice :NONE, keeps the model from
+calling one (#1318). The actor's wrap-up step relies on this to keep the tools in the request.
+
+A provider that accepts a tool choice does not always apply it, so this is a separate question
+from SUPPORTS-TOOL-CHOICE-P. The default is that answer, and a backend that honours a forced
+choice but not :NONE says so by defining this. Ollama applies neither, so it answers NIL to
+both (#1323).")
+  (:method ((p provider)) (supports-tool-choice-p p)))
 
 (defgeneric supports-response-format-p (provider)
   (:documentation "True when PROVIDER can be asked, through COMPLETE-WITH-SCHEMA, for a reply whose
@@ -262,6 +373,105 @@ identifier, not a value from a provider or a user.")
 ;;; whatever context was retrieved for them; that is exactly the data that must not be
 ;;; copied into a log aggregator. Sizes, model, stop reason, token usage and latency are
 ;;; what you need to diagnose a slow or expensive call, and none of them leak content.
+;;; --------------------------------------------------------------------------
+;;; Vendor-specific fields in a request body (#1172)
+;;;
+;;; Some settings exist for one vendor only: OpenAI's store, or OpenRouter's provider routing,
+;;; which can restrict a request to upstream providers that do not collect data. A provider
+;;; adds such fields to the JSON body it sends, from two places: its own :EXTRA-BODY, given when
+;;; it is made or read from PRAXEON_<IMPL>_EXTRA_BODY, and *EXTRA-BODY*, bound around the calls
+;;; that need it. A field in *EXTRA-BODY* replaces the provider's field of the same name.
+;;;
+;;; Fields are a JSON object, given as a string of JSON or as an EQUAL hash-table with string
+;;; keys, whose values COM.INUOE.JZON can write. A field that the provider builds itself, such
+;;; as model or messages, is refused, because it is set through COMPLETE's own arguments. A
+;;; provider that cannot add fields signals EXTRA-BODY-UNSUPPORTED rather than dropping them.
+;;; --------------------------------------------------------------------------
+
+(defvar *extra-body* nil
+  "NIL, or fields to add to the JSON body of each request COMPLETE sends (#1172): a string
+holding a JSON object, or an EQUAL hash-table with string keys. For example, to ask OpenAI not to
+store a request,
+  (let ((praxeon/llm:*extra-body* \"{\\\"store\\\": false}\")) (praxeon/llm:complete p messages))
+A field here replaces the provider's own PROVIDER-EXTRA-BODY field of the same name. A field the
+provider builds itself signals PRAXEON/CONDITIONS:INVALID-EXTRA-BODY. On a provider whose
+SUPPORTS-EXTRA-BODY-P is false, COMPLETE signals PRAXEON/CONDITIONS:EXTRA-BODY-UNSUPPORTED
+before sending anything.
+
+A child thread made through aion/dynamic inherits it, so the calls of an agent's parallel
+children carry the same fields. This is a variable, not a key on COMPLETE, for the reason given
+under *RETRY*.")
+
+(aion/dynamic:register-inheritable '*extra-body*)
+
+(defgeneric supports-extra-body-p (provider)
+  (:documentation "True when PROVIDER adds *EXTRA-BODY* and PROVIDER-EXTRA-BODY to the requests
+it sends (#1172). ANTHROPIC and OPENAI-COMPATIBLE do; a provider class that does not say answers
+NIL, and COMPLETE then refuses a call made with *EXTRA-BODY* set.")
+  (:method ((provider t)) nil))
+
+(defgeneric provider-extra-body (provider)
+  (:documentation "The fields PROVIDER adds to every request body, as an EQUAL hash-table, or NIL
+(#1172). Set with :EXTRA-BODY when the provider is made, or from PRAXEON_<IMPL>_EXTRA_BODY.")
+  (:method ((provider t)) nil))
+
+(defun %invalid-extra-body (source control &rest arguments)
+  (error 'praxeon/conditions:invalid-extra-body
+         :source source :reason (apply #'format nil control arguments)))
+
+(defun %extra-body-table (value source)
+  "VALUE, extra request fields as a string of JSON or a hash-table, as a new EQUAL hash-table,
+or NIL when VALUE is NIL or has no fields. SOURCE names where VALUE came from, for the error.
+Signals INVALID-EXTRA-BODY when VALUE is not a JSON object with string keys. The error never
+quotes VALUE."
+  (let ((table
+          (typecase value
+            (null nil)
+            (string
+             (let ((parsed (handler-case (jzon:parse value)
+                             (error () (%invalid-extra-body source "it is not valid JSON")))))
+               (unless (hash-table-p parsed)
+                 (%invalid-extra-body source "it is JSON, but not an object"))
+               parsed))
+            (hash-table value)
+            (t (%invalid-extra-body source "it is ~A, not a string of JSON or a hash-table"
+                                    (praxeon/conditions:value-shape value))))))
+    (when (and table (plusp (hash-table-count table)))
+      (let ((copy (make-hash-table :test #'equal)))
+        (maphash (lambda (k v)
+                   (unless (stringp k)
+                     (%invalid-extra-body source "a key is ~A, not a string"
+                                          (praxeon/conditions:value-shape k)))
+                   (setf (gethash k copy) v))
+                 table)
+        copy))))
+
+(defun %field-names (table)
+  (sort (loop for k being the hash-keys of table collect k) #'string<))
+
+(defun %add-extra-body (body provider reserved)
+  "BODY, a request body, with PROVIDER's PROVIDER-EXTRA-BODY fields and then *EXTRA-BODY*'s added
+to it (#1172). RESERVED lists the fields this backend builds itself; naming one signals
+INVALID-EXTRA-BODY."
+  (flet ((add (table source)
+           (when table
+             (dolist (name (%field-names table))
+               (when (member name reserved :test #'string=)
+                 (%invalid-extra-body source "~S is a field this provider builds itself; set it through COMPLETE's arguments"
+                                      name))
+               (setf (gethash name body) (gethash name table))))))
+    (add (provider-extra-body provider) "the provider's :EXTRA-BODY")
+    (add (%extra-body-table *extra-body* "PRAXEON/LLM:*EXTRA-BODY*") "PRAXEON/LLM:*EXTRA-BODY*")
+    body))
+
+(defun %check-extra-body-supported (provider)
+  "Signal EXTRA-BODY-UNSUPPORTED when *EXTRA-BODY* has fields and PROVIDER cannot add them."
+  (let ((table (%extra-body-table *extra-body* "PRAXEON/LLM:*EXTRA-BODY*")))
+    (when (and table (not (supports-extra-body-p provider)))
+      (error 'praxeon/conditions:extra-body-unsupported
+             :provider (string-downcase (class-name (class-of provider)))
+             :fields (%field-names table)))))
+
 (defmethod complete :around ((p provider) messages
                              &key system tools max-tokens temperature tool-choice)
   (declare (ignorable system))
@@ -271,11 +481,16 @@ identifier, not a value from a provider or a user.")
                              :messages (length messages) :tools (length tools)
                              :system (if system t nil)      ; presence, never the prompt
                              :max-tokens max-tokens :temperature temperature
+                             ;; #1172: whether extra fields are set, never their names or values
+                             :extra-body (if *extra-body* t nil)
                              ;; the SHAPE of the choice, never a tool name a prompt may have
                              ;; put there -- this log line is metadata only.
                              :tool-choice (cond ((null tool-choice) "auto")
                                                 ((keywordp tool-choice) (string-downcase tool-choice))
                                                 (t "forced")))
+    (%check-extra-body-supported p)
+    (%complete-with-retry
+     (lambda ()
     (handler-bind
         ((cl:error (lambda (c)
                      ;; :warn, not :error -- a provider failure is often retried or falls
@@ -284,17 +499,26 @@ identifier, not a value from a provider or a user.")
                      ;;
                      ;; The report of a PROVIDER-REQUEST-FAILED leaves the response body out,
                      ;; and its parts are logged as fields: never the body itself (#719).
-                     (if (typep c 'praxeon/conditions:provider-request-failed)
-                         (log:warn "llm request failed" :provider (string (type-of p))
-                                                        :model model :error (princ-to-string c)
-                                                        :status (praxeon/conditions:provider-request-failed-status c)
-                                                        :error-type (praxeon/conditions:provider-request-failed-error-type c)
-                                                        :error-code (praxeon/conditions:provider-request-failed-error-code c)
-                                                        :body-length (length (or (praxeon/conditions:provider-request-failed-body c) ""))
-                                                        :ms (%ms-since start))
-                         (log:warn "llm request failed" :provider (string (type-of p))
-                                                        :model model :error (princ-to-string c)
-                                                        :ms (%ms-since start))))))
+                     (cond
+                       ((typep c 'praxeon/conditions:completion-cancelled)
+                        ;; Not a failure: the caller asked for it (#984). Counts only.
+                        (log:info "llm request cancelled" :provider (string (type-of p))
+                                                          :model model
+                                                          :input-tokens (praxeon/conditions:completion-cancelled-input-tokens c)
+                                                          :estimated-output (praxeon/conditions:completion-cancelled-estimated-output c)
+                                                          :ms (%ms-since start)))
+                       ((typep c 'praxeon/conditions:provider-request-failed)
+                        (log:warn "llm request failed" :provider (string (type-of p))
+                                                       :model model :condition (log:condition-type c)
+                                                       :status (praxeon/conditions:provider-request-failed-status c)
+                                                       :error-type (praxeon/conditions:provider-request-failed-error-type c)
+                                                       :error-code (praxeon/conditions:provider-request-failed-error-code c)
+                                                       :body-length (length (or (praxeon/conditions:provider-request-failed-body c) ""))
+                                                       :ms (%ms-since start)))
+                       (t
+                        (log:warn "llm request failed" :provider (string (type-of p))
+                                                       :model model :condition (log:condition-type c)
+                                                       :ms (%ms-since start)))))))
       (let ((completion (call-next-method)))
         (log:debug "llm response" :model model
                                   :stop-reason (completion-stop-reason completion)
@@ -309,7 +533,7 @@ identifier, not a value from a provider or a user.")
                                   :tool-calls (length (completion-tool-calls completion))
                                   :text-length (length (completion-text completion))
                                   :ms (%ms-since start))
-        completion))))
+        completion))))))
 
 (defun %ms-since (start)
   "Milliseconds since START (an internal-real-time reading), rounded."
@@ -362,9 +586,13 @@ payloads out of log lines, and a response body can repeat the request."
         (multiple-value-bind (type code) (%provider-error-fields body)
           (make-condition 'praxeon/conditions:provider-request-failed
                           :status status :error-type type :error-code code :body body
+                          :retry-after (http:http-error-retry-after e)
+                          :phase (http:http-error-phase e)
                           :detail (format nil "~A: HTTP ~A~@[, ~A~]~@[, code ~A~], a response body of ~D characters"
                                           label status type code (length (or body ""))))))
       (make-condition 'praxeon/conditions:provider-request-failed
+                      ;; No status: a transport failure, whose phase says whether it was sent.
+                      :phase (and (typep e 'http:http-error) (http:http-error-phase e))
                       :detail (format nil "~A: ~A" label
                                       (if (typep e 'http:http-error)
                                           (or (http:http-error-detail e) "no response")
@@ -376,17 +604,220 @@ praxeon module that calls a service itself rather than through COMPLETE (#758). 
 with LABEL and carries the status, error type and code and the body's length, never the body."
   (%request-failure label e))
 
-(defun %post-json (url headers payload)
+(defun %post-json (url headers payload &key stay-local)
   "One JSON POST through the shared interceptor client, returning the response body.
 
 A non-2xx signals HTTP-ERROR carrying the provider's body, which is what the callers below
-turn into a DELIBERATION-FAILURE. Timeouts are the module's own, as before."
+turn into a DELIBERATION-FAILURE. Timeouts are the module's own, as before. STAY-LOCAL is the
+provider's PROVIDER-STAY-LOCAL, passed to the request (#1293)."
   (http:response-body
    (http:send-request
     (http:make-request :method :post :url url :headers headers :content payload
                        :connect-timeout *connect-timeout*
-                       :read-timeout *read-timeout*)
+                       :read-timeout *read-timeout*
+                       :stay-local stay-local)
     (list (http:ensure-2xx url)))))
+
+;;; --------------------------------------------------------------------------
+;;; Streaming and cancelling a completion (#984)
+;;;
+;;; With *ON-TEXT* or *CANCEL* bound, a provider that supports it asks for its reply as a
+;;; stream of Server-Sent Events. Each piece of text goes to *ON-TEXT* as it arrives, and the
+;;; events are put back together into the JSON the provider would have sent without streaming,
+;;; which the same parser reads. So the completion COMPLETE returns is the one it returned
+;;; before, tool calls and usage included, and a caller that binds neither sees no change.
+;;; --------------------------------------------------------------------------
+(defvar *on-text* nil
+  "NIL, or a function of one string, called on the calling thread with each piece of the model's
+text as it arrives. Binding it makes COMPLETE stream on a provider whose SUPPORTS-STREAMING-P is
+true. Pieces of a tool call's arguments are not text and are not passed.")
+
+(defvar *cancel* nil
+  "NIL, or an AION/HTTP-CLIENT:REQUEST-CANCEL. Binding it makes COMPLETE stream on a provider
+whose SUPPORTS-STREAMING-P is true, over a connection the handle can close: calling
+AION/HTTP-CLIENT:CANCEL-REQUEST on it from another thread closes the connection, so the provider
+stops generating, and COMPLETE signals PRAXEON/CONDITIONS:COMPLETION-CANCELLED.
+
+The condition carries the token counts the provider had reported, and ESTIMATED-OUTPUT, the
+number of UTF-8 octets of model output that had arrived: text, tool names and tool arguments,
+counted as each event is read, so a piece read but not yet passed to *ON-TEXT* is counted too.
+It is one token per octet. A model's tokenizer turns text into tokens of at least one octet
+each, so the octets that arrived are never fewer than the tokens they encode, and the estimate
+cannot come out low for them; it comes out about four times high for English text. Tokens the
+provider generated but had not sent when the connection closed are not in it, because nothing
+here can see them.")
+
+(defvar *retry* nil
+  "NIL, the default, or an AION/RETRY:RETRY-POLICY under which COMPLETE, EMBED, EMBED-BATCH,
+EMBED-DOCUMENTS, EMBED-QUERY and RERANK try a request again when it fails in a way the policy
+retries (#79). With MAKE-RETRY-POLICY's default RETRYABLE, that is a 408, 425, 429, 503 or 529, or
+a connection that failed before the request was sent; a service's Retry-After is honoured, and a
+wait longer than the policy's MAX-DELAY stops the retrying instead. Each attempt is logged.
+
+NIL makes no change: one request, as before. An app sets it, or binds it around the calls it
+wants retried, for example
+  (setf praxeon/llm:*retry* (aion/retry:make-retry-policy :max-attempts 4 :name \"llm\"))
+
+The wait sleeps the calling thread, so it must not be used on a libuv loop thread;
+AION/RETRY refuses to start there. A call made inside another retried call is not retried again,
+so the attempts do not multiply. A streamed completion is retried only while none of its text
+has reached *ON-TEXT*: once some has, a second attempt would send the caller the same text
+twice.
+
+This is a variable, not a key on COMPLETE, because a key added to COMPLETE's lambda list would
+oblige every provider's method to accept it, providers written outside this tree included.")
+
+(defvar *%retrying* nil
+  "True inside a call that *RETRY* is already retrying, so a call made inside it is not retried
+again.")
+
+(defun %with-retry (thunk)
+  "THUNK's values, under *RETRY* when it is set and this is not already inside a retried call."
+  (if (and *retry* (not *%retrying*))
+      (let ((*%retrying* t))
+        (aion/retry:call-with-retry *retry* thunk))
+      (funcall thunk)))
+
+(defun %complete-with-retry (thunk)
+  "THUNK, one attempt at a completion, under *RETRY*. While a stream's text is being passed to
+*ON-TEXT*, a retry is given up once any has been: the caller already has it."
+  (if (or (null *retry*) *%retrying* (null *on-text*))
+      (%with-retry thunk)
+      (let* ((delivered nil)
+             (on-text *on-text*)
+             (*on-text* (lambda (piece) (setf delivered t) (funcall on-text piece))))
+        (handler-bind ((aion/retry:retry-scheduled
+                         (lambda (c)
+                           (declare (ignore c))
+                           (when delivered
+                             (invoke-restart 'aion/retry:give-up)))))
+          (%with-retry thunk)))))
+
+(defgeneric supports-streaming-p (provider)
+  (:documentation "True when PROVIDER streams a completion when *ON-TEXT* or *CANCEL* is bound.
+A provider without it completes as usual: *ON-TEXT* receives nothing, and a cancel cannot stop
+a call in progress.")
+  (:method ((p provider)) nil))
+
+(defun %streaming-p (p)
+  (and (or *on-text* *cancel*) (supports-streaming-p p)))
+
+(defstruct (%tally (:constructor %make-tally ()))
+  "What a streamed completion has received so far: its text, the octets of model output, and
+the token counts the provider has reported, each NIL until it reports one."
+  (text (make-string-output-stream))
+  (octets 0)
+  (input nil) (output nil) (cache-read nil) (cache-write nil))
+
+(defun %count-output (tally string)
+  "Add STRING's UTF-8 octets to TALLY's count of model output."
+  (when (stringp string)
+    (incf (%tally-octets tally)
+          (length (sb-ext:string-to-octets string :external-format :utf-8)))))
+
+(defun %take-text (tally string)
+  "STRING, a piece of the model's text, is kept, counted, and passed to *ON-TEXT*."
+  (when (and (stringp string) (plusp (length string)))
+    (write-string string (%tally-text tally))
+    (%count-output tally string)
+    (when *on-text* (funcall *on-text* string))))
+
+(defun %cancelled (tally)
+  (error 'praxeon/conditions:completion-cancelled
+         :input-tokens (%tally-input tally) :output-tokens (%tally-output tally)
+         :cache-read-tokens (%tally-cache-read tally)
+         :cache-write-tokens (%tally-cache-write tally)
+         :estimated-output (%tally-octets tally)
+         :text (get-output-stream-string (%tally-text tally))))
+
+(defparameter *max-error-body-octets* (* 64 1024)
+  "The most octets of a streamed request's error body %READ-TEXT keeps. A provider's error body is
+a short JSON object; a server that sends more is not read further.")
+
+(defun %read-text (stream &optional (limit *max-error-body-octets*))
+  "STREAM, a binary stream, read to its end or to LIMIT octets, whichever comes first, decoded as
+UTF-8."
+  (let ((out (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+    (loop for b = (and (< (fill-pointer out) limit) (read-byte stream nil nil))
+          while b do (vector-push-extend b out))
+    (sb-ext:octets-to-string (coerce out '(vector (unsigned-byte 8)))
+                             :external-format '(:utf-8 :replacement #\?))))
+
+(defun %error-event (label data)
+  "The PROVIDER-REQUEST-FAILED for an error event in a stream, whose data is DATA. The stream's
+status was 200, so the failure has no status; its type and code come from DATA as from an error
+body, and the detail gives DATA's length, never DATA."
+  (multiple-value-bind (type code) (%provider-error-fields data)
+    (make-condition 'praxeon/conditions:provider-request-failed
+                    :error-type type :error-code code :body data
+                    :detail (format nil "~A: an error event in the stream~@[, ~A~]~@[, code ~A~], ~D characters"
+                                    label type code (length data)))))
+
+(defun %stream-failure (label detail &rest arguments)
+  "The PROVIDER-REQUEST-FAILED for a stream that went wrong after its 200: LABEL, then DETAIL
+formatted with ARGUMENTS."
+  (make-condition 'praxeon/conditions:provider-request-failed
+                  :detail (format nil "~A: ~?" label detail arguments)))
+
+(defun %event-json (label data)
+  "DATA, an event's data, parsed as JSON. Data that is not JSON signals PROVIDER-REQUEST-FAILED,
+whose report gives DATA's length, never DATA: an event the reader cannot parse may have carried
+text or a tool call, and dropping it would return a reply with a piece missing."
+  (handler-case (jzon:parse data)
+    (error ()
+      (error (%stream-failure label "an event in the stream is not JSON, ~D characters"
+                              (length data))))))
+
+(defun %ended-early (label tally)
+  "The PROVIDER-REQUEST-FAILED for a stream that ended before the provider's end event: the
+connection closed early, so the reply may be cut short. The report gives how much output had
+arrived, never the output."
+  (%stream-failure label "the stream ended before its end event, after ~D octets of output"
+                   (%tally-octets tally)))
+
+(defun %tool-input-json (label raw)
+  "RAW, a tool call's arguments as streamed, parsed as JSON. Arguments that are not JSON signal
+PROVIDER-REQUEST-FAILED with their length, never their text."
+  (handler-case (jzon:parse raw)
+    (error ()
+      (error (%stream-failure label "a tool call's streamed arguments are not JSON, ~D characters"
+                              (length raw))))))
+
+(defun %stream-events (url headers payload label tally stay-local on-event)
+  "POST PAYLOAD to URL asking for a stream, and call ON-EVENT with the data and event name of
+each event until the stream ends. A cancel through *CANCEL* signals COMPLETION-CANCELLED from
+TALLY. A failed request, or a status other than 2xx, signals PROVIDER-REQUEST-FAILED as COMPLETE
+does, with a report starting with LABEL. The connection is closed on every exit. STAY-LOCAL is
+the provider's PROVIDER-STAY-LOCAL, passed to the request (#1293)."
+  (multiple-value-bind (body status headers)
+      (handler-case
+          (http:open-response-stream
+           (http:make-request :method :post :url url :headers headers :content payload
+                              :connect-timeout *connect-timeout*
+                              :read-timeout *read-timeout*
+                              :stay-local stay-local)
+           :cancel *cancel*)
+        (http:request-cancelled () (%cancelled tally))
+        ;; A STAY-LOCAL refusal is signalled as itself, not as a provider failure (#1293).
+        (http:stay-local-refused (e) (error e))
+        (error (e) (error (%request-failure label e))))
+    (unwind-protect
+         (handler-case
+             (if (<= 200 status 299)
+                 (loop (multiple-value-bind (data event) (http:read-event body)
+                         (unless data (return))
+                         (funcall on-event data event)))
+                 (error (%request-failure label
+                                          (make-condition
+                                           'http:http-error
+                                           :status status :body (%read-text body)
+                                           ;; Kept, so a *RETRY* policy honours it (#79).
+                                           :retry-after (aion/retry:parse-retry-after
+                                                         (http:header-value headers
+                                                                            "retry-after"))))))
+           (http:request-cancelled () (%cancelled tally))
+           (http:http-error (e) (error (%request-failure label e))))
+      (close body))))
 
 ;;; --------------------------------------------------------------------------
 ;;; Anthropic
@@ -401,12 +832,32 @@ turn into a DELIBERATION-FAILURE. Timeouts are the module's own, as before."
    (endpoint :initarg :endpoint
              :initform "https://api.anthropic.com/v1/messages"
              :reader anthropic-endpoint)
-   (version :initarg :version :initform "2023-06-01" :reader anthropic-version))
+   (version :initarg :version :initform "2023-06-01" :reader anthropic-version)
+   (stay-local :initarg :stay-local :initform nil :reader provider-stay-local)
+   ;; #1172: a JSON string or a hash-table when given, an EQUAL hash-table or NIL once made.
+   (extra-body :initarg :extra-body
+               :initform (%env-for "anthropic" "EXTRA_BODY")
+               :reader provider-extra-body))
   (:documentation "The Anthropic Messages API as a Praxeon provider. Authenticates
 with an x-api-key from PRAXEON_ANTHROPIC_API_KEY (or PRAXEON_LLM_API_KEY when
 PRAXEON_LLM_IMPL is anthropic), billed to that key's API credits. (A
 Pro/Max subscription funds Claude.ai and Claude Code, not the raw Messages API, so
-there is no subscription-billed path here.)"))
+there is no subscription-billed path here.)
+
+EXTRA-BODY is fields added to every request body, a string of JSON or a hash-table, read from
+PRAXEON_ANTHROPIC_EXTRA_BODY when not passed (#1172). See *EXTRA-BODY*."))
+
+(defmethod provider-endpoint ((p anthropic))
+  (parse-endpoint (anthropic-endpoint p)))
+
+(defun %extra-body-source (impl)
+  (format nil ":EXTRA-BODY or PRAXEON_~:@(~A~)_EXTRA_BODY" impl))
+
+(defmethod initialize-instance :after ((p anthropic) &key)
+  (setf (slot-value p 'extra-body)
+        (%extra-body-table (slot-value p 'extra-body) (%extra-body-source "anthropic"))))
+
+(defmethod supports-extra-body-p ((p anthropic)) t)
 
 (defun %auth-headers (p)
   "Request headers for provider P: an x-api-key plus the API version."
@@ -432,6 +883,11 @@ property that makes every existing agent provably unaffected."
              (gethash "name" ht) (second tool-choice))
        ht))
     (t (error (%unknown-tool-choice tool-choice)))))
+
+(defparameter +anthropic-built-fields+
+  '("model" "max_tokens" "messages" "system" "tools" "temperature" "tool_choice" "stream")
+  "The request fields ANTHROPIC-REQUEST-BODY and the streaming path build, which extra fields may
+not name (#1172).")
 
 (defun anthropic-request-body (p messages &key system tools
                                             (max-tokens *default-max-tokens*)
@@ -463,7 +919,7 @@ translation happened."
       (setf (gethash "temperature" body) temperature))
     (let ((choice (%anthropic-tool-choice-json tool-choice)))
       (when choice (setf (gethash "tool_choice" body) choice)))
-    body))
+    (%add-extra-body body p +anthropic-built-fields+)))
 
 (defmethod supports-tool-choice-p ((p anthropic)) t)
 
@@ -475,13 +931,123 @@ translation happened."
                                                  :max-tokens max-tokens
                                                  :temperature temperature
                                                  :tool-choice tool-choice)))
-    (let* ((payload (jzon:stringify body))
-           (response
-             (handler-case
-                 (%post-json (anthropic-endpoint p) (%auth-headers p) payload)
-               (error (e)
-                 (error (%request-failure "Anthropic request failed" e))))))
-      (%parse-completion (jzon:parse response)))))
+    (if (%streaming-p p)
+        (%anthropic-stream p body)
+        (let* ((payload (jzon:stringify body))
+               (response
+                 (handler-case
+                     (%post-json (anthropic-endpoint p) (%auth-headers p) payload
+                                 :stay-local (provider-stay-local p))
+                   ;; A STAY-LOCAL refusal is signalled as itself,
+                   ;; not as a provider failure (#1293).
+                   (http:stay-local-refused (e) (error e))
+                   (error (e)
+                     (error (%request-failure "Anthropic request failed" e))))))
+          (%parse-completion (jzon:parse response))))))
+
+(defmethod supports-streaming-p ((p anthropic)) t)
+
+(defun %anthropic-stream (p body)
+  "COMPLETE for P with BODY sent as a stream (#984). The events are put back together into the
+response Anthropic sends without streaming, which %PARSE-COMPLETION reads:
+  message_start        the input and cache counts (its output count is not a final one);
+  content_block_start  a text or tool_use block at an index;
+  content_block_delta  text for a text block, or a piece of a tool_use block's input JSON;
+  message_delta        the stop reason and the output count;
+  error                a failure after the stream began.
+  message_stop         the end of the reply.
+Other events (ping, content_block_stop, thinking) carry nothing the completion keeps; a thinking
+block's text is counted as output for a cancel, since it is billed as output.
+
+A stream that ends without message_stop was cut off, and an event that is not JSON cannot be
+read; either signals PROVIDER-REQUEST-FAILED rather than returning what had arrived as the whole
+reply."
+  (setf (gethash "stream" body) t)
+  (let ((tally (%make-tally))
+        (blocks '())                    ; (index type id name input-json-stream text-stream start-input)
+        (stop-reason nil)
+        (stopped nil)
+        (label "Anthropic request failed"))
+    (flet ((block-at (index) (find index blocks :key #'first)))
+      (%stream-events
+       (anthropic-endpoint p) (%auth-headers p) (jzon:stringify body) label tally
+       (provider-stay-local p)
+       (lambda (data event)
+         (declare (ignore event))
+         (let* ((ev (%event-json label data))
+                (type (and (hash-table-p ev) (gethash "type" ev))))
+           (cond
+             ((equal type "message_stop") (setf stopped t))
+             ((equal type "message_start")
+              (let* ((message (gethash "message" ev))
+                     (usage (and (hash-table-p message) (gethash "usage" message))))
+                (when (hash-table-p usage)
+                  (setf (%tally-input tally) (gethash "input_tokens" usage)
+                        (%tally-cache-read tally) (gethash "cache_read_input_tokens" usage)
+                        (%tally-cache-write tally) (gethash "cache_creation_input_tokens" usage)))))
+             ((equal type "content_block_start")
+              (let ((cb (gethash "content_block" ev)))
+                (push (list (gethash "index" ev) (gethash "type" cb) (gethash "id" cb)
+                            (gethash "name" cb) (make-string-output-stream)
+                            (make-string-output-stream) (gethash "input" cb))
+                      blocks)
+                (%count-output tally (gethash "name" cb))))
+             ((equal type "content_block_delta")
+              (let ((delta (gethash "delta" ev))
+                    (b (block-at (gethash "index" ev))))
+                (a:switch ((gethash "type" delta) :test #'equal)
+                  ("text_delta"
+                   (let ((text (gethash "text" delta)))
+                     (when b (write-string text (sixth b)))
+                     (%take-text tally text)))
+                  ("input_json_delta"
+                   (let ((piece (gethash "partial_json" delta)))
+                     (when b (write-string piece (fifth b)))
+                     (%count-output tally piece)))
+                  ("thinking_delta" (%count-output tally (gethash "thinking" delta))))))
+             ((equal type "message_delta")
+              (let ((delta (gethash "delta" ev))
+                    (usage (gethash "usage" ev)))
+                (when (hash-table-p delta)
+                  (setf stop-reason (gethash "stop_reason" delta)))
+                (when (hash-table-p usage)
+                  (setf (%tally-output tally) (gethash "output_tokens" usage))
+                  ;; A message_delta may repeat the input and cache counts; the later report wins.
+                  (a:when-let ((in (gethash "input_tokens" usage))) (setf (%tally-input tally) in))
+                  (a:when-let ((r (gethash "cache_read_input_tokens" usage)))
+                    (setf (%tally-cache-read tally) r))
+                  (a:when-let ((w (gethash "cache_creation_input_tokens" usage)))
+                    (setf (%tally-cache-write tally) w)))))
+             ((equal type "error")
+              (error (%error-event label data))))))))
+    (unless stopped (error (%ended-early label tally)))
+    (let ((parsed (make-hash-table :test #'equal))
+          (usage (make-hash-table :test #'equal)))
+      (setf (gethash "content" parsed)
+            (coerce
+             (loop for (nil type id name json text start-input) in (sort (copy-list blocks) #'< :key #'first)
+                   for ht = (make-hash-table :test #'equal)
+                   do (setf (gethash "type" ht) type)
+                      (a:switch (type :test #'equal)
+                        ("text" (setf (gethash "text" ht) (get-output-stream-string text)))
+                        ("tool_use"
+                         (let ((raw (get-output-stream-string json)))
+                           (setf (gethash "id" ht) id
+                                 (gethash "name" ht) name
+                                 (gethash "input" ht)
+                                 (if (plusp (length raw))
+                                     (%tool-input-json label raw)
+                                     (or start-input (make-hash-table :test #'equal)))))))
+                   collect ht)
+             'vector))
+      (setf (gethash "stop_reason" parsed) stop-reason)
+      (loop for (key value) in `(("input_tokens" ,(%tally-input tally))
+                                 ("output_tokens" ,(%tally-output tally))
+                                 ("cache_read_input_tokens" ,(%tally-cache-read tally))
+                                 ("cache_creation_input_tokens" ,(%tally-cache-write tally)))
+            when value do (setf (gethash key usage) value))
+      (setf (gethash "usage" parsed) usage)
+      (%parse-completion parsed))))
 
 ;;; --- request translation: neutral -> Anthropic JSON ---------------------
 (defun %anthropic-system-json (system)
@@ -628,7 +1194,8 @@ qwen2.5. Meta's Model API serves only Meta's models, so qwen2.5 cannot be its de
   "The backends SUPPORTS-RESPONSE-FORMAT-P is true for: those that take response_format with type
 json_schema. Meta's Model API does (https://dev.meta.ai/docs/structured-output, #680). Others
 may too, but GENERATE-STRUCTURED prefers a forced tool call wherever one is supported, so a
-backend is listed here only when it cannot force one.")
+backend is listed here only when it cannot force one. Ollama is not listed by name, because it
+is also recognised by its port (%OLLAMA-ENDPOINT-P); SUPPORTS-RESPONSE-FORMAT-P adds it.")
 
 (defparameter +openai-compatible-no-recursive-schema-impls+
   '("meta")
@@ -640,6 +1207,34 @@ does (https://dev.meta.ai/docs/structured-output, #680). RESPONSE-FORMAT-SCHEMA-
   "The backends that accept only tool_choice \"auto\". Meta's Model API returns HTTP 400 for
 \"none\", \"required\" and a named function (https://dev.meta.ai/docs/tool-calling, #678), so
 SUPPORTS-TOOL-CHOICE-P is false for it and a forced choice signals before anything is sent.")
+
+(defparameter +openai-compatible-ignores-tool-choice-impls+
+  '("ollama")
+  "The backends that accept every tool_choice and apply none of them, so SUPPORTS-TOOL-CHOICE-P
+is false for them, and through it HONOURS-TOOL-CHOICE-NONE-P (#1318, #1323). Measured for
+Ollama 0.40.16 on 2026-11-21, POST /v1/chat/completions, three requests per setting:
+
+  - one tool and a request to use it: qwen3.5:9b called the tool in 3 of 3 requests with
+    tool_choice \"none\", as in 3 of 3 with \"auto\";
+  - one tool and a request that does not need it: qwen3.5:9b called it in 0 of 3 requests with
+    the tool named, 0 of 3 with \"required\", and 0 of 3 with no tool_choice; gpt-oss:20b in 0
+    of 1 with the tool named.
+
+Compared without regard to case. See %OLLAMA-ENDPOINT-P for the base URLs that count as Ollama.")
+
+(defparameter +ollama-port+ 11434
+  "The port Ollama listens on by default, and the one the \"openai\" and \"ollama\" backends'
+default base URL names.")
+
+(defun %ollama-endpoint-p (p)
+  "True when P, an OPENAI-COMPATIBLE, is taken to talk to Ollama: its backend is one of
++OPENAI-COMPATIBLE-IGNORES-TOOL-CHOICE-IMPLS+, or its base URL's port is +OLLAMA-PORT+, whatever
+the backend is called, because the \"openai\" backend points there by default. Ollama behind a
+proxy on another port, such as 80 or 443, is not recognised from its URL; make the provider with
+:IMPL \"ollama\" there."
+  (or (member (oai-impl p) +openai-compatible-ignores-tool-choice-impls+ :test #'string-equal)
+      (let ((endpoint (ignore-errors (parse-endpoint (oai-base-url p)))))
+        (and endpoint (= +ollama-port+ (endpoint-port endpoint))))))
 
 (defun %oai-default-model (impl)
   "The model OPENAI-COMPATIBLE uses for IMPL when none is configured."
@@ -655,7 +1250,10 @@ PRAXEON_LLM_IMPL names one this class serves, otherwise \"openai\"."
   ((impl :initarg :impl :initform (%default-oai-impl) :reader oai-impl)
    (model :initarg :model :reader oai-model)
    (base-url :initarg :base-url :reader oai-base-url)
-   (api-key :initarg :api-key :reader oai-api-key))
+   (api-key :initarg :api-key :reader oai-api-key)
+   (stay-local :initarg :stay-local :initform nil :reader provider-stay-local)
+   ;; #1172: a JSON string or a hash-table when given, an EQUAL hash-table or NIL once made.
+   (extra-body :initarg :extra-body :reader provider-extra-body))
   (:documentation "Any OpenAI-compatible chat endpoint as a Praxeon provider.
 BASE-URL selects the target (Ollama http://localhost:11434/v1, OpenRouter
 https://openrouter.ai/api/v1, ...); API-KEY is sent as a Bearer token when set
@@ -665,7 +1263,12 @@ IMPL is the backend these settings belong to: \"openai\", \"ollama\", \"openrout
 A MODEL, BASE-URL or API-KEY not passed is read for that backend as MAKE-PROVIDER-FROM-ENV
 reads it (%ENV-FOR), then defaulted. Unless given, IMPL is the backend PRAXEON_LLM_IMPL names
 when that is one of the four, so a direct MAKE-INSTANCE with PRAXEON_LLM_IMPL=openrouter uses
-the shared PRAXEON_LLM_* settings and OpenRouter's URL, as it did before #291."))
+the shared PRAXEON_LLM_* settings and OpenRouter's URL, as it did before #291.
+
+EXTRA-BODY is fields added to every request body, a string of JSON or a hash-table (#1172). When
+not passed it is read from PRAXEON_<IMPL>_EXTRA_BODY as %ENV-FOR reads a setting, so for
+OpenRouter, PRAXEON_OPENROUTER_EXTRA_BODY='{\"provider\": {\"data_collection\": \"deny\"}}'
+routes every request only to providers that do not collect data. See *EXTRA-BODY*."))
 
 (defmethod initialize-instance :after ((p openai-compatible) &key)
   (let ((impl (oai-impl p)))
@@ -677,7 +1280,20 @@ the shared PRAXEON_LLM_* settings and OpenRouter's URL, as it did before #291.")
                 (cdr (assoc impl +openai-compatible-impls+ :test #'string=))
                 "http://localhost:11434/v1")))
     (unless (slot-boundp p 'api-key)
-      (setf (slot-value p 'api-key) (%env-for impl "API_KEY")))))
+      (setf (slot-value p 'api-key) (%env-for impl "API_KEY")))
+    (setf (slot-value p 'extra-body)
+          (%extra-body-table (if (slot-boundp p 'extra-body)
+                                 (slot-value p 'extra-body)
+                                 (%env-for impl "EXTRA_BODY"))
+                             (%extra-body-source impl)))))
+
+(defmethod supports-extra-body-p ((p openai-compatible)) t)
+
+(defun %oai-chat-url (p)
+  (concatenate 'string (oai-base-url p) "/chat/completions"))
+
+(defmethod provider-endpoint ((p openai-compatible))
+  (parse-endpoint (oai-base-url p)))
 
 (defun %oai-tool-choice-json (tool-choice)
   "OpenAI's tool_choice value for a neutral TOOL-CHOICE, or NIL to send nothing.
@@ -720,6 +1336,12 @@ true would add rules of its own about the schema (https://dev.meta.ai/docs/struc
           (gethash "json_schema" response-format) json-schema)
     response-format))
 
+(defparameter +openai-built-fields+
+  '("model" "max_tokens" "messages" "tools" "temperature" "tool_choice" "response_format"
+    "stream" "stream_options")
+  "The request fields OPENAI-REQUEST-BODY and the streaming path build, which extra fields may not
+name (#1172).")
+
 (defun openai-request-body (p messages &key system tools
                                          (max-tokens *default-max-tokens*)
                                          temperature tool-choice response-format)
@@ -739,13 +1361,20 @@ through response_format (#680)."
       (when choice (setf (gethash "tool_choice" body) choice)))
     (when response-format
       (setf (gethash "response_format" body) (%oai-response-format-json response-format)))
-    body))
+    (%add-extra-body body p +openai-built-fields+)))
 
 (defmethod supports-tool-choice-p ((p openai-compatible))
-  (not (member (oai-impl p) +openai-compatible-auto-only-impls+ :test #'string=)))
+  (not (or (member (oai-impl p) +openai-compatible-auto-only-impls+ :test #'string=)
+           (%ollama-endpoint-p p))))
 
 (defmethod supports-response-format-p ((p openai-compatible))
-  (and (member (oai-impl p) +openai-compatible-response-format-impls+ :test #'string=) t))
+  (or (and (member (oai-impl p) +openai-compatible-response-format-impls+ :test #'string=) t)
+      ;; Ollama cannot force a tool call (+OPENAI-COMPATIBLE-IGNORES-TOOL-CHOICE-IMPLS+), and
+      ;; takes response_format with type json_schema on a model that supports structured output.
+      ;; Measured on Ollama 0.40.16 (#1323): gpt-oss:20b returned an object matching a
+      ;; two-field schema; qwen3.5:9b returned HTTP 501 \"structured output is unavailable\",
+      ;; which fails the first request instead of every attempt.
+      (and (%ollama-endpoint-p p) t)))
 
 (declaim (ftype function schema-recursion)) ; praxeon/structured, loaded after this file
 
@@ -773,18 +1402,109 @@ through response_format (#680)."
                                               :tool-choice tool-choice
                                               :response-format *oai-response-format*)))
     (let* ((payload (jzon:stringify body))
-           (url (concatenate 'string (oai-base-url p) "/chat/completions"))
+           (url (%oai-chat-url p))
            (headers (append '(("content-type" . "application/json"))
                             (when (oai-api-key p)
                               (list (cons "authorization"
                                           (format nil "Bearer ~A" (oai-api-key p)))))))
-           (response
-             (handler-case
-                 (%post-json url headers payload)
-               (error (e)
-                 (error (%request-failure
-                         (format nil "OpenAI-compatible request to ~A failed" url) e))))))
-      (%parse-openai (jzon:parse response)))))
+           (label (format nil "OpenAI-compatible request to ~A failed" url)))
+      (if (%streaming-p p)
+          (%openai-stream body url headers label :stay-local (provider-stay-local p))
+          (let ((response (handler-case (%post-json url headers payload
+                                                    :stay-local (provider-stay-local p))
+                            ;; A STAY-LOCAL refusal is signalled as itself,
+                            ;; not as a provider failure (#1293).
+                            (http:stay-local-refused (e) (error e))
+                            (error (e) (error (%request-failure label e))))))
+            (%parse-openai (jzon:parse response)))))))
+
+(defmethod supports-streaming-p ((p openai-compatible)) t)
+
+(defun %openai-stream (body url headers label &key stay-local)
+  "COMPLETE for an OpenAI-compatible server with BODY sent as a stream (#984). Each chunk's
+choices[0].delta carries a piece of the text or of a tool call, keyed by the call's index; the
+finish reason comes with the last of them, and with stream_options.include_usage the usage comes
+in a chunk of its own at the end. They are put back together into the response sent without
+streaming, which %PARSE-OPENAI reads. The data [DONE] ends the stream; a chunk carrying an
+error object is a failure after the stream began.
+
+A stream that ends with neither [DONE] nor a finish reason was cut off, and a chunk that is not
+JSON cannot be read; either signals PROVIDER-REQUEST-FAILED rather than returning what had arrived
+as the whole reply. A finish reason without [DONE] is accepted, because some OpenAI-compatible
+servers close the connection after it; the usage chunk may then be missing."
+  (let ((options (make-hash-table :test #'equal)))
+    (setf (gethash "include_usage" options) t
+          (gethash "stream" body) t
+          (gethash "stream_options" body) options))
+  (let ((tally (%make-tally))
+        (calls '())                     ; (index id name arguments-stream)
+        (finish nil)
+        (done nil)
+        (usage nil))
+    (%stream-events
+     url headers (jzon:stringify body) label tally stay-local
+     (lambda (data event)
+       (declare (ignore event))
+       (let ((chunk (if (equal data "[DONE]")
+                        (progn (setf done t) nil)
+                        (%event-json label data))))
+         (when (hash-table-p chunk)
+           (when (hash-table-p (gethash "error" chunk))
+             (error (%error-event label data)))
+           (let* ((choices (gethash "choices" chunk))
+                  (choice (and (vectorp choices) (plusp (length choices)) (aref choices 0)))
+                  (delta (and (hash-table-p choice) (gethash "delta" choice))))
+             (when (hash-table-p delta)
+               (%take-text tally (gethash "content" delta))
+               (let ((pieces (gethash "tool_calls" delta)))
+                 (when (vectorp pieces)
+                   (loop for tc across pieces
+                         for index = (or (gethash "index" tc) 0)
+                         for fn = (gethash "function" tc)
+                         for call = (or (find index calls :key #'first)
+                                        (let ((new (list index nil nil (make-string-output-stream))))
+                                          (push new calls)
+                                          new))
+                         do (a:when-let ((id (gethash "id" tc))) (setf (second call) id))
+                            (when (hash-table-p fn)
+                              (a:when-let ((name (gethash "name" fn)))
+                                (setf (third call) name)
+                                (%count-output tally name))
+                              (a:when-let ((args (gethash "arguments" fn)))
+                                (when (stringp args)
+                                  (write-string args (fourth call))
+                                  (%count-output tally args))))))))
+             (when (and (hash-table-p choice) (stringp (gethash "finish_reason" choice)))
+               (setf finish (gethash "finish_reason" choice))))
+           (let ((u (gethash "usage" chunk)))
+             (when (hash-table-p u)
+               (setf usage u
+                     (%tally-input tally) (gethash "prompt_tokens" u)
+                     (%tally-output tally) (gethash "completion_tokens" u)
+                     (%tally-cache-read tally)
+                     (let ((details (gethash "prompt_tokens_details" u)))
+                       (and (hash-table-p details) (gethash "cached_tokens" details))))))))))
+    (unless (or done finish) (error (%ended-early label tally)))
+    (let ((parsed (make-hash-table :test #'equal))
+          (choice (make-hash-table :test #'equal))
+          (message (make-hash-table :test #'equal)))
+      (setf (gethash "content" message) (get-output-stream-string (%tally-text tally)))
+      (when calls
+        (setf (gethash "tool_calls" message)
+              (coerce (loop for (nil id name args) in (sort (copy-list calls) #'< :key #'first)
+                            collect (let ((tc (make-hash-table :test #'equal))
+                                          (fn (make-hash-table :test #'equal)))
+                                      (setf (gethash "name" fn) name
+                                            (gethash "arguments" fn) (get-output-stream-string args)
+                                            (gethash "id" tc) id
+                                            (gethash "function" tc) fn)
+                                      tc))
+                      'vector)))
+      (setf (gethash "message" choice) message
+            (gethash "finish_reason" choice) finish
+            (gethash "choices" parsed) (vector choice))
+      (when usage (setf (gethash "usage" parsed) usage))
+      (%parse-openai parsed))))
 
 ;;; --- request translation: neutral -> OpenAI JSON ------------------------
 (defun %system-text (system)
@@ -885,10 +1605,17 @@ expand into one role:\"tool\" message each)."
 
 ;;; --- response translation: OpenAI JSON -> neutral -----------------------
 (defun %parse-json-args (s)
-  "Parse an OpenAI tool-call arguments JSON string into a hash-table."
+  "Parse an OpenAI tool-call arguments JSON string into a hash-table. No arguments, or an empty
+string, is an empty object. A string that is not JSON signals PROVIDER-REQUEST-FAILED, whose report
+gives its length and never its text: arguments cut off by the token limit (finish_reason
+\"length\") would otherwise reach the tool as an empty object, as if the model had asked for
+nothing, where an Anthropic reply cut off the same way signals."
   (if (and (stringp s) (plusp (length s)))
       (handler-case (jzon:parse s)
-        (error () (make-hash-table :test #'equal)))
+        (error ()
+          (error 'praxeon/conditions:provider-request-failed
+                 :detail (format nil "OpenAI-compatible response: a tool call's arguments are not JSON, ~D characters"
+                                 (length s)))))
       (make-hash-table :test #'equal)))
 
 (defun %parse-openai (parsed)
@@ -1035,7 +1762,7 @@ NAME, for PRAXEON_LLM_IMPL selection. Returns NAME."
   "Construct the provider for an agent ROLE (a string/keyword/symbol naming the agent,
 e.g. :translate or \"scribe\"), or the global default when ROLE is NIL. Resolution is
 per-role first: the impl comes from PRAXEON_<ROLE>_IMPL else PRAXEON_LLM_IMPL, and the
-chosen constructor then reads PRAXEON_<ROLE>_{MODEL,API_KEY,AUTH,BASE_URL}, then
+chosen constructor then reads PRAXEON_<ROLE>_{MODEL,API_KEY,AUTH,BASE_URL,EXTRA_BODY}, then
 PRAXEON_<IMPL>_*, then the shared PRAXEON_LLM_* when the role's backend is the shared one
 (see %ENV-FOR). So one process can run several agents, each on its
 own model/vendor; NIL role reproduces the old single-provider behavior."

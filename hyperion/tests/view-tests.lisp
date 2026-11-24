@@ -250,12 +250,12 @@ code when it did not exit 0."
 
 (test exercise-placement-takes-one-path
   ;; Refused before webview_create, so no window is made on any OS. With one path it would make
-  ;; a window, so under HYPERION_VIEW_NO_WINDOW=1 it exits 3 on Windows; elsewhere the mode is
-  ;; not supported and exits 1 before making one.
+  ;; a window, so under HYPERION_VIEW_NO_WINDOW=1 it exits 3 on Windows and macOS; on Linux the
+  ;; mode is not supported and exits 1 before making one.
   (with-launcher
     (is (eql 2 (run-launcher "--exercise-placement")) "no path")
     (is (eql 2 (run-launcher "--exercise-placement" "a" "b")) "two paths")
-    (is (eql #+win32 3 #-win32 1 (run-launcher "--exercise-placement" "a"))
+    (is (eql #+(or win32 darwin) 3 #-(or win32 darwin) 1 (run-launcher "--exercise-placement" "a"))
         "one path: no window here")))
 
 ;;; --- the placement on a real window, on CI only (review of train 20) ----------------------
@@ -625,6 +625,108 @@ when it did not exit 0."
                  "a frame width over 1000 is refused"))
         (aion/fs:delete-tree dir)))))
 
+;;; --restore-placement prints where macOS puts a saved frame back, given the screens' visible
+;;; frames, with no window, so the rule is checked here on every OS (#485). The frames are in
+;;; Cocoa's coordinates, measured upwards, each as left, bottom, right, top. The visible frame
+;;; 0 70 1512 949 is a 1512-point-wide screen less a Dock of 70 points and the menu bar.
+
+(defun %restore-placement (path &rest screens)
+  "What `hyperion-view --restore-placement PATH SCREENS' prints, trimmed, or the exit code when
+it did not exit 0."
+  (multiple-value-bind (code out)
+      (apply #'run-launcher "--restore-placement" (uiop:native-namestring path)
+             (mapcar #'princ-to-string screens))
+    (if (eql code 0) (string-trim '(#\Newline #\Return #\Space) out) code)))
+
+(test a-mac-restore-moves-the-frame-into-the-screen-it-overlaps-most
+  (with-launcher
+    (let ((dir (%fresh-dir)))
+      (unwind-protect
+           (flet ((restore (frame &rest screens)
+                    (apply #'%restore-placement
+                           (%write-placement dir "placement"
+                                             (format nil "hyperion-view-placement 1 ~A~%" frame))
+                           screens)))
+             (is (equal "use 100 200 1300 900 0 screen 0"
+                        (restore "100 200 1300 900 0" 0 70 1512 949))
+                 "a frame inside the visible frame is used as it is")
+             (is (equal "use 100 200 1300 900 1 screen 0"
+                        (restore "100 200 1300 900 1" 0 70 1512 949))
+                 "with its zoomed state")
+             (is (equal "use 0 70 1512 949 0 screen 0"
+                        (restore "-50 0 2000 1200 0" 0 70 1512 949))
+                 "a frame larger than the screen is shrunk to the visible frame")
+             (is (equal "use 712 200 1512 800 0 screen 0"
+                        (restore "1000 200 1800 800 0" 0 70 1512 949))
+                 "a frame partly off the right edge is moved left, by the least distance")
+             (is (equal "use 0 200 800 800 0 screen 0"
+                        (restore "-300 200 500 800 0" 0 70 1512 949))
+                 "a frame partly off the left edge is moved right")
+             (is (equal "use 100 70 900 570 0 screen 0"
+                        (restore "100 0 900 500 0" 0 70 1512 949))
+                 "a frame partly behind the Dock is moved up")
+             (is (equal "use 100 349 900 949 0 screen 0"
+                        (restore "100 400 900 1000 0" 0 70 1512 949))
+                 "a frame partly behind the menu bar is moved down")
+             (is (equal "use 1512 300 2512 900 0 screen 1"
+                        (restore "1200 300 2200 900 0" 0 70 1512 949 1512 0 3432 1055))
+                 "a frame across two screens goes to the one it overlaps most")
+             (is (equal "use 600 100 1000 500 0 screen 0"
+                        (restore "800 100 1200 500 0" 0 0 1000 800 1000 0 2000 800))
+                 "when it overlaps two screens equally, the first is chosen")
+             (is (equal "ignore off-screen"
+                        (restore "2000 300 2800 900 0" 0 70 1512 949))
+                 "a frame on a screen that is no longer there is ignored")
+             (is (equal "ignore off-screen"
+                        (restore "1512 200 2000 800 0" 0 70 1512 949))
+                 "and so is one that only touches a screen's edge")
+             (is (equal "use -1800 100 -600 900 0 screen 1"
+                        (restore "-1800 100 -600 900 0" 0 70 1512 949 -1920 0 0 1055))
+                 "on a screen to the left of the main screen, with negative x")
+             (is (equal "use 100 -600 900 0 0 screen 1"
+                        (restore "100 -300 900 300 0" 0 70 1512 949 -200 -1080 1720 0))
+                 "on a screen below the main screen, with negative y, moved down into it")
+             (is (equal "use 100 200 1300 900 0 screen 1"
+                        (restore "100 200 1300 900 0" 0 0 0 0 0 70 1512 949))
+                 "a screen with no area is passed over")
+             (is (equal "ignore too-small"
+                        (restore "100 200 299 400 0" 0 70 1512 949))
+                 "a frame narrower than 200 is ignored")
+             (is (equal "ignore too-small"
+                        (restore "100 200 400 349 0" 0 70 1512 949))
+                 "and one lower than 150")
+             (is (equal "use 100 200 300 350 0 screen 0"
+                        (restore "100 200 300 350 0" 0 70 1512 949))
+                 "200 by 150 is large enough")
+             (is (equal "ignore malformed"
+                        (apply #'%restore-placement
+                               (%write-placement dir "placement" "hyperion-view-placement 1 100 200")
+                               '(0 70 1512 949)))
+                 "a malformed line is ignored, as on Windows")
+             (is (equal "ignore unreadable"
+                        (%restore-placement (merge-pathnames "absent" dir) 0 70 1512 949))
+                 "and so is a file that is not there")
+             (let ((file (uiop:native-namestring
+                          (%write-placement dir "valid" "hyperion-view-placement 1 100 200 1300 900 0"))))
+               (is (eql 2 (run-launcher "--restore-placement" file)) "no screen is refused")
+               (is (eql 2 (run-launcher "--restore-placement" file "0" "70" "1512"))
+                   "three numbers are refused")
+               (is (eql 2 (run-launcher "--restore-placement" file "0" "70" "1512" "949" "0"))
+                   "five numbers are refused")
+               (is (eql 2 (run-launcher "--restore-placement" file "0" "70" "1512" "x"))
+                   "a word in place of a number is refused")
+               (is (eql 2 (run-launcher "--restore-placement" file "0" "70" "1512" "1000001"))
+                   "a coordinate over a million is refused")
+               (is (eql 2 (apply #'run-launcher "--restore-placement" file
+                                 (loop repeat 17 append (list "0" "70" "1512" "949"))))
+                   "seventeen screens are refused")
+               (is (equal "use 100 200 1300 900 0 screen 15"
+                          (apply #'%restore-placement (merge-pathnames "valid" dir)
+                                 (append (loop repeat 15 append (list 5000 5000 6000 6000))
+                                         (list 0 70 1512 949))))
+                   "and sixteen are taken")))
+        (aion/fs:delete-tree dir)))))
+
 (test placement-arguments-name-the-file-and-create-its-directory
   ;; %PLACEMENT-ARGUMENTS builds what run-app passes the launcher. This does not call run-app.
   (is (null (hyperion/desktop::%placement-arguments nil)) "no file, no arguments")
@@ -759,6 +861,148 @@ the file as it was. A start from a file that says MAXIMIZED 1 opens maximised (r
                        "and a file saying MAXIMIZED 1 opened maximised: ~S" out)))
             (aion/fs:delete-tree dir))))))
 
+;;; --- the last placement on a real macOS window, on a GitHub runner only (#485) -------------
+;;;
+;;; These show a window, as the macOS placement test above does, so they run only when
+;;; GITHUB_ACTIONS is set (#885). The visible frame is read from a launch without a placement
+;;; file, whose report starts with it.
+
+(defun %mac-visible-frame ()
+  "The visible frame of the screen a window opens on, as left, bottom, right, top, from
+`--report-placement 1280 860' on a real window; or NIL."
+  (multiple-value-bind (code out) (%run-shown-launcher 60 "--report-placement" "1280" "860")
+    (let ((line (and (eql code 0) (%report-line out "work "))))
+      (and line (subseq (%report-numbers line) 0 4)))))
+
+(defun %placement-line (frame zoomed)
+  (format nil "hyperion-view-placement 1 ~{~D~^ ~} ~D~%" frame zoomed))
+
+(test a-real-mac-window-is-restored-into-the-visible-frame-and-saves-it
+  "On a GitHub macOS runner: a saved frame inside the visible frame is restored as it is; one
+partly off the screen is moved into it, where --restore-placement says; each is saved back; and
+a frame on no screen is ignored, and the window is placed and saved as without a file."
+  #-darwin (skip "The macOS placement calls run on macOS only")
+  #+darwin
+  (with-launcher
+    (if (not (%real-window-allowed-p))
+        (skip "Runs only on GitHub Actions (GITHUB_ACTIONS is not set here): it shows a window")
+        (let ((dir (%fresh-dir))
+              (work (%mac-visible-frame)))
+          (unwind-protect
+               (progn
+                 (is-true work "the visible frame was reported")
+                 (when work
+                   (destructuring-bind (wl wb wr wt) work
+                     (declare (ignore wt))
+                     (let ((file (merge-pathnames "window-placement" dir)))
+                       (flet ((restored (frame expected)
+                                (%write-placement dir "window-placement" (%placement-line frame 0))
+                                (multiple-value-bind (code out)
+                                    (%run-shown-launcher 60 "--report-placement" "1280" "860"
+                                                         (uiop:native-namestring file))
+                                  (is (eql 0 code) "--report-placement with a file exited ~S: ~A"
+                                      code out)
+                                  (let ((line (%report-line out "restored ")))
+                                    (is-true line "the saved frame was restored: ~S" out)
+                                    (when line
+                                      (is (equal (append expected (list 0) expected)
+                                                 (%report-numbers line))
+                                          "at ~S, and macOS reports the window there: ~S"
+                                          expected line)))
+                                  (is-true (%report-line out "saved") "and it was saved: ~S" out))
+                                (is (equal (%placement-line expected 0)
+                                           (uiop:read-file-string file))
+                                    "the file holds the restored frame")))
+                         (let ((inside (list (+ wl 40) (+ wb 30) (+ wl 940) (+ wb 630))))
+                           (restored inside inside))
+                         ;; Partly off the right edge: where --restore-placement puts it on this
+                         ;; screen.
+                         (let* ((off (list (- wr 300) (+ wb 30) (+ wr 600) (+ wb 630)))
+                                (decision (apply #'%restore-placement
+                                                 (%write-placement dir "decision"
+                                                                   (%placement-line off 0))
+                                                 work))
+                                (expected (subseq (%report-numbers decision) 0 4)))
+                           (is (not (equal off expected)) "the decision moved it: ~S" decision)
+                           (restored off expected)))
+                       (%write-placement dir "window-placement"
+                                         (%placement-line '(-100000 -100000 -99000 -99300) 0))
+                       (multiple-value-bind (code out)
+                           (%run-shown-launcher 60 "--report-placement" "1280" "860"
+                                                (uiop:native-namestring file))
+                         (is (eql 0 code) "--report-placement exited ~S: ~A" code out)
+                         (is-true (%report-line out "restore-ignored off-screen")
+                                  "a frame on no screen is ignored: ~S" out)
+                         (let ((line (%report-line out "work ")))
+                           (is-true line "and the window is placed as without a file: ~S" out)
+                           (when line
+                             (is (equal (%placement-line (subseq (%report-numbers line) 11 15) 0)
+                                        (uiop:read-file-string file))
+                                 "and that frame is saved: ~S" line))))))))
+            (aion/fs:delete-tree dir))))))
+
+(test the-placement-is-saved-while-a-real-mac-window-is-open-and-a-zoomed-start-is-zoomed
+  "On a GitHub macOS runner, through --exercise-placement, which installs the observer a launch
+installs: a resize made between the live-resize notifications is saved once, when the live
+resize ends; zooming saves the same frame with ZOOMED 1; unzooming saves ZOOMED 0; closing leaves
+the file as it was. A start from a file that says ZOOMED 1 opens zoomed."
+  #-darwin (skip "The macOS placement calls run on macOS only")
+  #+darwin
+  (with-launcher
+    (if (not (%real-window-allowed-p))
+        (skip "Runs only on GitHub Actions (GITHUB_ACTIONS is not set here): it shows a window")
+        (let ((dir (%fresh-dir))
+              (work (%mac-visible-frame)))
+          (unwind-protect
+               (progn
+                 (is-true work "the visible frame was reported")
+                 (when work
+                   (let* ((file (merge-pathnames "window-placement" dir))
+                          (start (list (+ (first work) 50) (+ (second work) 50)
+                                       (+ (first work) 650) (+ (second work) 500))))
+                     (%write-placement dir "window-placement" (%placement-line start 0))
+                     (multiple-value-bind (code out)
+                         (%run-shown-launcher 60 "--exercise-placement" (uiop:native-namestring file))
+                       (is (eql 0 code) "--exercise-placement exited ~S: ~A" code out)
+                       (is (equal "start-zoomed 0" (%report-line out "start-zoomed"))
+                           "it started unzoomed: ~S" out)
+                       (let* ((line (%report-line out "moved "))
+                              (moved (and line (%report-numbers line))))
+                         (is (= 4 (length moved)) "it reported where the resize put the window: ~S"
+                             out)
+                         (when (= 4 (length moved))
+                           (is (not (equal moved start)) "and the resize changed the frame: ~S"
+                               moved)
+                           ;; Two frame changes between the live-resize notifications. Saving on
+                           ;; each resize would write the same final frame, so only the count of
+                           ;; writes tells the two apart, as on Windows.
+                           (is (equal "move-saves 1" (%report-line out "move-saves"))
+                               "the resize wrote the file once, when the live resize ended: ~S" out)
+                           (is (equal "zoomed 1" (%report-line out "zoomed "))
+                               "zoom: zoomed the window: ~S" out)
+                           (flet ((saved (zoomed)
+                                    (string-right-trim '(#\Newline) (%placement-line moved zoomed)))
+                                  (after (step)
+                                    (let ((l (%report-line out (format nil "~A " step))))
+                                      (and l (subseq l (1+ (length step)))))))
+                             (is (equal (saved 0) (after "after-move"))
+                                 "the resize was saved when the live resize ended: ~S" out)
+                             (is (equal (saved 1) (after "after-maximize"))
+                                 "zooming saved the same frame, zoomed: ~S" out)
+                             (is (equal (saved 0) (after "after-restore"))
+                                 "unzooming saved it unzoomed: ~S" out)
+                             (is (equal (saved 0) (after "after-close"))
+                                 "closing left the file as it was: ~S" out)))))
+                     (%write-placement dir "window-placement" (%placement-line start 1))
+                     (multiple-value-bind (code out)
+                         (%run-shown-launcher 60 "--exercise-placement" (uiop:native-namestring file))
+                       (is (eql 0 code) "--exercise-placement exited ~S: ~A" code out)
+                       (is-true (%report-line out "restored ") "the saved frame was restored: ~S"
+                                out)
+                       (is (equal "start-zoomed 1" (%report-line out "start-zoomed"))
+                           "and a file saying ZOOMED 1 opened zoomed: ~S" out)))))
+            (aion/fs:delete-tree dir))))))
+
 (defun run-tests ()
   (let ((results (run 'view)))
     (explain! results)
@@ -782,3 +1026,326 @@ the launcher, so it runs everywhere."
            (is-true (%real-window-allowed-p) "GITHUB_ACTIONS=true did not allow a window"))
       (setf (uiop:getenv "CI") (or ci "")
             (uiop:getenv "GITHUB_ACTIONS") (or gha "")))))
+
+;;; --- native dialogs (#986): the checks on a page's call, with no window ---------------------
+;;;
+;;; `hyperion-view --dialog-request TOKEN PARAMS' runs the checks the binding runs on every call
+;;; before a dialog is shown, and prints `ok KIND ...' or `refuse REASON'. They are the same on
+;;; every OS, so these run everywhere.
+
+(defun %json-quote (text)
+  "TEXT as a JSON string, escaping backslashes and double quotes."
+  (with-output-to-string (out)
+    (write-char #\" out)
+    (loop for c across text
+          do (when (find c "\\\"") (write-char #\\ out))
+             (write-char c out))
+    (write-char #\" out)))
+
+(defun %dialog-request (token params)
+  "The line `hyperion-view --dialog-request TOKEN PARAMS' prints. In PARAMS, ' stands for \"."
+  (multiple-value-bind (code out)
+      (run-launcher "--dialog-request" token (substitute #\" #\' params))
+    (is (eql 0 code) "--dialog-request ~S ~S exited ~S" token params code)
+    (string-right-trim '(#\Return #\Newline) out)))
+
+(test a-dialog-call-without-the-launchs-token-is-refused-natively
+  ;; The page's hyperionDialog holds the token in a closure. A script that calls the binding
+  ;; another way, without it, is refused here, before anything else is read.
+  (with-launcher
+    (is (equal "ok open" (%dialog-request "t0k3n" "['t0k3n',1,{'kind':'open'}]")) "the token")
+    (is (equal "refuse token" (%dialog-request "t0k3n" "['other',1,{'kind':'open'}]")) "another token")
+    (is (equal "refuse token" (%dialog-request "t0k3n" "['',1,{'kind':'open'}]")) "an empty token")
+    (is (equal "refuse token" (%dialog-request "t0k3n" "[{'kind':'open'},1]")) "no token at all")
+    (is (equal "refuse token" (%dialog-request "t0k3n" "[1,1,{'kind':'open'}]")) "a number")
+    (is (equal "refuse token" (%dialog-request "" "['',1,{'kind':'open'}]"))
+        "a launch with no token refuses every call")))
+
+(test a-good-dialog-request-is-read-whole
+  (with-launcher
+    (is (equal "ok save title=\"Save as\" folder=\"C:\\\\Users\" name=\"a.txt\" filter=\"Text\":*.txt;*.md filter=\"All files\":*"
+               (%dialog-request "t" "['t',1,{'kind':'save','title':'Save as','folder':'C:\\\\Users','name':'a.txt','filters':[['Text','*.txt;*.md'],['All files','*']]}]")))
+    (is (equal "ok open-many filter=\"Databases\":*.accdb;*.MDB"
+               (%dialog-request "t" "['t',2,{'kind':'open-many','filters':[['Databases','*.accdb;*.MDB']]}]")))
+    (is (equal "ok folder" (%dialog-request "t" "['t',123456789,{'kind':'folder'}]")))
+    (is (equal "ok open title=\"a\\\"b\\\\c\""
+               (%dialog-request "t" "['t',1,{'kind':'open','title':'a\\'b\\\\c'}]"))
+        "a quote and a backslash in a title come through escaped once")))
+
+(test each-bad-dialog-request-is-refused-with-its-reason
+  (with-launcher
+    (flet ((refused (reason request)
+             (is (equal (format nil "refuse ~A" reason)
+                        (%dialog-request "t" (format nil "['t',1,~A]" request)))
+                 "~A for ~A" reason request)))
+      (is (equal "refuse malformed" (%dialog-request "t" "{'kind':'open'}")) "not an array")
+      (is (equal "refuse malformed" (%dialog-request "t" "['t',1,{'kind':'open'},1]")) "a third value")
+      (is (equal "refuse malformed" (%dialog-request "t" "['t',1,'open']")) "a request that is not an object")
+      (dolist (id '("" "0" "-1" "1.5" "'1'" "1234567890" "01" "true"))
+        (is (equal "refuse id" (%dialog-request "t" (format nil "['t',~A{'kind':'open'}]"
+                                                           (if (string= id "") "" (format nil "~A," id)))))
+            "the call's id ~S" id))
+      (refused "kind" "{}")
+      (refused "kind" "{'kind':'delete'}")
+      (refused "kind" "{'kind':1}")
+      (refused "title" "{'kind':'open','title':'a\\u0001b'}")
+      (refused "title" "{'kind':'open','title':'a\\tb'}")
+      ;; A raw DEL, which is how JSON.stringify sends one, is refused before the title is checked:
+      ;; webview.h's JSON reader does not return the request at all.
+      (refused "malformed" (format nil "{'kind':'open','title':'a~Cb'}" (code-char 127)))
+      (refused "title" (format nil "{'kind':'open','title':'~A'}" (make-string 201 :initial-element #\a)))
+      (refused "folder" (format nil "{'kind':'open','folder':'~A'}" (make-string 4097 :initial-element #\a)))
+      ;; Only a local drive path: every other form a folder can take includes ones that reach a
+      ;; network share, which would send the user's credentials to its host.
+      (dolist (folder '("\\\\server\\share" "//server/share" "/\\server" "file://host/share"
+                        "FILE:///C:/x" "\\??\\UNC\\h\\s" "\\\\?\\C:\\x" "Users\\me" "/home/me"
+                        "C:" "C:x" "1:\\x" ""))
+        (refused "folder" (format nil "{'kind':'open','folder':~A}" (%json-quote folder))))
+      (is (equal "ok open folder=\"c:/data\""
+                 (%dialog-request "t" "['t',1,{'kind':'open','folder':'c:/data'}]"))
+          "a drive path with a slash is accepted")
+      (refused "name" "{'kind':'open','name':'a.txt'}")
+      (refused "name" "{'kind':'save','name':'dir/a.txt'}")
+      (refused "name" "{'kind':'save','name':'dir\\\\a.txt'}")
+      (refused "filters" "{'kind':'folder','filters':[['All','*']]}")
+      (refused "filters" "{'kind':'open','filters':'*.txt'}")
+      (refused "filters" "{'kind':'open','filters':['*.txt']}")
+      (refused "filters" "{'kind':'open','filters':[['All','*','x']]}")
+      (refused "filters" (format nil "{'kind':'open','filters':[~{~A~^,~}]}"
+                                 (loop repeat 33 collect "['All','*']")))
+      (refused "filter-label" "{'kind':'open','filters':[['','*']]}")
+      (refused "filter-label" "{'kind':'open','filters':[[1,'*']]}")
+      (refused "filter-patterns" "{'kind':'open','filters':[['All','']]}")
+      (refused "filter-patterns" (format nil "{'kind':'open','filters':[['Many','~{~A~^;~}']]}"
+                                         (loop for i below 33 collect (format nil "*.e~D" i))))
+      (dolist (pattern '("*." "a.txt" "*.t t" "*.*" "*.txt;" "*.12345678901234567"))
+        (refused "pattern" (format nil "{'kind':'open','filters':[['Odd','~A']]}" pattern))))))
+
+(test dialog-request-takes-a-token-and-params-and-nothing-else
+  (with-launcher
+    (is (eql 2 (run-launcher "--dialog-request" "t")) "no params")
+    (is (eql 2 (run-launcher "--dialog-request" "t" "[]" "x")) "a third value")
+    (is (eql 2 (run-launcher "http://127.0.0.1:1/" "--dialog-request" "t" "[]")) "after a URL")
+    (is (eql 2 (run-launcher "--dialog-origin")) "--dialog-origin with no URL")))
+
+(test the-dialogs-are-offered-to-the-origin-of-the-url-the-view-started-with
+  (with-launcher
+    (flet ((origin (url) (string-right-trim '(#\Return #\Newline)
+                                            (nth-value 1 (run-launcher "--dialog-origin" url)))))
+      (is (equal "http://127.0.0.1:8080" (origin "http://127.0.0.1:8080/app?x=1#y")))
+      (is (equal "http://localhost:1" (origin "HTTP://LocalHost:1")))
+      (is (equal "https://example.test" (origin "https://example.test?q")))
+      (is (equal "" (origin "127.0.0.1:8080/")) "no scheme, no origin, so no dialogs"))))
+
+(test exit-after-takes-seconds-from-1-to-3600
+  (with-launcher
+    (dolist (bad '("0" "3601" "x" "-1"))
+      (is (eql 2 (run-launcher "http://127.0.0.1:1/" "--exit-after" bad)) "--exit-after ~A" bad))
+    (is (eql 2 (run-launcher "http://127.0.0.1:1/" "--exit-after")) "--exit-after with nothing")
+    (is (eql 3 (run-launcher "http://127.0.0.1:1/" "--dialogs" "--exit-after" "5"))
+        "a good launch with --dialogs still makes no window under HYPERION_VIEW_NO_WINDOW=1")))
+
+(test dialogs-refuse-to-start-without-an-origin
+  ;; With --dialogs and a URL that has no origin, the view exits 2 before it would make a window,
+  ;; rather than running a window whose page has no dialog while RUN-APP says it has one. The
+  ;; check comes before HYPERION_VIEW_NO_WINDOW's, so this makes no window either way.
+  (with-launcher
+    (multiple-value-bind (code out err) (run-launcher "127.0.0.1:1/" "--dialogs")
+      (declare (ignore out))
+      (is (eql 2 code) "exit 2, got ~S" code)
+      (is (search "--dialogs" err) "and the reason names --dialogs: ~S" err))
+    (is (eql 3 (run-launcher "127.0.0.1:1/"))
+        "the same URL without --dialogs gets as far as the window, which is refused")))
+
+;;; --- native dialogs on a real window, on CI only (#986) ------------------------------------
+;;;
+;;; The view is started on a page served here, with --dialogs, and closes itself after a few
+;;; seconds. The page and its frames report what they can see to /report on the server, and the
+;;; test reads those requests.
+;;;
+;;; The first run checks: the app's top-level page has hyperionDialog and not the raw binding; a
+;;; frame from another origin, a frame from the app's own origin, and a top-level page from another
+;;; origin have neither; and a call made outside a user action is refused. No dialog is shown.
+;;;
+;;; The second run, on Windows only, sets HYPERION_VIEW_FAKE_DIALOG=1: a call needs no user action
+;;; and is answered {"path":"fake-path"} three seconds later, from a timer, with no dialog shown. It
+;;; checks: a direct call to the binding with the wrong token does not start a job, so the next
+;;; real call gets the path rather than "busy"; a second call while the first is open gets "busy";
+;;; and when the page goes to another origin while a call is open, the answer is not delivered
+;;; there, even to a page that defines the functions an answer would be handed to.
+
+(defun %percent-decode (text)
+  (let ((octets (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)))
+    (loop with i = 0 while (< i (length text))
+          do (let ((c (char text i)))
+               (cond ((and (char= c #\%) (<= (+ i 3) (length text)))
+                      (vector-push-extend (parse-integer text :start (1+ i) :end (+ i 3) :radix 16)
+                                          octets)
+                      (incf i 3))
+                     (t (vector-push-extend (char-code c) octets) (incf i)))))
+    (sb-ext:octets-to-string (coerce octets '(vector (unsigned-byte 8))) :external-format :utf-8)))
+
+(defparameter +dialog-send-js+
+  "function send(k,v){return fetch('/report?'+k+'='+encodeURIComponent(v));}")
+
+(defun %dialog-page (port path)
+  "The HTML the test server answers for PATH. The app's origin is 127.0.0.1:PORT, and the other
+origin is localhost:PORT."
+  (flet ((reporter (key)
+           ;; After its report has arrived, a frame tells the page holding it, which waits for
+           ;; both frames before it navigates away and so destroys them (run 40638207128 lost
+           ;; the cross-origin frame's report that way). postMessage works across origins.
+           (format nil "<!doctype html><script>~A send('~A',typeof window.hyperionDialog+','+typeof window.__hyperion_dialog_raw+','+location.origin).then(function(){if(window.parent!==window)window.parent.postMessage('~A','*');});</script>" +dialog-send-js+ key key)))
+    (cond
+      ;; The first run's top-level page.
+      ;; The listener for the frames' messages is registered before the frames exist, so a frame
+      ;; that reports quickly is not missed. It counts a message only when it comes from the frame
+      ;; whose data-key it names, so another page cannot stand in for a frame (the hub's review
+      ;; of #999).
+      ((string= path "/")
+       (format nil "<!doctype html><html><body><script>
+var framesIn=new Promise(function(resolve){var seen={};window.addEventListener('message',function(e){var fs=document.getElementsByTagName('iframe');for(var i=0;i<fs.length;i++){if(fs[i].contentWindow===e.source&&fs[i].getAttribute('data-key')===e.data)seen[e.data]=true;}if(seen.child&&seen.same)resolve();});setTimeout(resolve,10000);});
+</script><iframe data-key=\"child\" src=\"http://localhost:~D/child\"></iframe><iframe data-key=\"same\" src=\"/same\"></iframe><script>~A
+var sent=send('top',typeof window.hyperionDialog+','+typeof window.__hyperion_dialog_raw+','+location.origin);
+var noUser=(window.hyperionDialog?window.hyperionDialog({kind:'open'}):Promise.resolve({error:'absent'}))
+.then(function(r){return send('nouser',JSON.stringify(r));});
+Promise.all([sent,noUser,framesIn]).then(function(){return send('navigating','1');}).then(function(){setTimeout(function(){location.href='http://localhost:~D/away';},100);});
+</script></body></html>" port +dialog-send-js+ port))
+      ((string= path "/child") (reporter "child"))
+      ((string= path "/same") (reporter "same"))
+      ((string= path "/away") (reporter "away"))
+      ;; The second run's page, under HYPERION_VIEW_FAKE_DIALOG=1.
+      ((string= path "/fake")
+       (format nil "<!doctype html><html><body><script>~A
+window.external.invoke(JSON.stringify({id:1,method:'__hyperion_dialog_raw',params:['not-the-token',1,{kind:'open'}]}));
+setTimeout(function(){
+var a=window.hyperionDialog({kind:'open'});
+var b=window.hyperionDialog({kind:'open'});
+b.then(function(r){send('second',JSON.stringify(r));});
+a.then(function(r){
+send('first',JSON.stringify(r));
+window.hyperionDialog({kind:'open'}).then(function(r){send('lost',JSON.stringify(r));});
+setTimeout(function(){location.href='http://localhost:~D/trap';},200);
+});
+},500);
+</script></body></html>" +dialog-send-js+ port))
+      ;; A page on another origin that defines what an answer would be handed to, to catch one.
+      ((string= path "/trap")
+       (format nil "<!doctype html><script>~A
+var rpc={nextSeq:1};for(var i=1;i<100;i++){rpc[i]={resolve:function(r){send('trap',JSON.stringify(r));},reject:function(r){send('trap',JSON.stringify(r));}};}
+window._rpc=rpc;
+try{Object.defineProperty(window,'__hyperion_dialog_reply',{value:function(id,r){send('trap',JSON.stringify(r));}});}catch(e){send('trap','could not define: '+e);}
+send('trapready',location.origin);
+</script>" +dialog-send-js+))
+      (t nil))))
+
+(defun %dialog-reports (server)
+  "An alist of what the pages reported to SERVER, KEY to VALUE, oldest first."
+  (loop for request in (reverse (aion/test-http:server-requests server))
+        for path = (aion/test-http:request-path request)
+        when (and (> (length path) 8) (string= "/report?" path :end2 8))
+          collect (let* ((query (subseq path 8))
+                         (eq (position #\= query)))
+                    (cons (subseq query 0 eq) (%percent-decode (subseq query (1+ eq)))))))
+
+(defmacro %with-dialog-server ((server port &optional (requests (gensym "REQUESTS"))) &body body)
+  "Run BODY with SERVER serving %DIALOG-PAGE on 127.0.0.1, and PORT its port. REQUESTS is bound to
+a cons whose car lists every request the server answered, newest first, as \"SECONDS PATH\", with
+SECONDS counted from the server's start. A failure message prints it, so a missing report shows
+whether its page was ever requested. The handler runs on the server's threads, so the list is kept
+in this cons and not in a special variable bound on the test's thread.
+
+The server serves each connection on its own thread (:CONCURRENT). WebView2 can open a connection
+and send nothing on it until the window closes; served one at a time, the request for /away then
+waited behind that connection until the view exited, 38 seconds after the page asked for it, and
+its report never arrived (run 41333548687, which printed the requests and their times)."
+  (let ((start (gensym "START")))
+    `(let ((,port nil)
+           (,requests (list nil))
+           (,start (get-internal-real-time)))
+       (aion/test-http:with-server
+           (,server (lambda (request stream)
+                      (sb-ext:atomic-push
+                       (format nil "~,1Fs ~A"
+                               (/ (- (get-internal-real-time) ,start) internal-time-units-per-second)
+                               (aion/test-http:request-path request))
+                       (car ,requests))
+                      (let ((page (%dialog-page ,port (aion/test-http:request-path request))))
+                        (if page
+                            (aion/test-http:write-response
+                             stream 200 '(("Content-Type" . "text/html; charset=utf-8")) page)
+                            (aion/test-http:write-response stream 404 '() ""))))
+                    :concurrent t)
+         (setf ,port (aion/test-http:server-port ,server))
+         ,@body))))
+
+(defun %run-dialog-view (url)
+  "Start the view on URL with --dialogs, closing itself after 40 seconds, as a real window: hidden
+on Windows, shown on macOS. Returns its exit code. Forty, not twenty: on the Windows runner the
+first run's last report, from the page it navigates to, had not arrived by twenty seconds, while
+every earlier report had (run 40633167094)."
+  #+win32 (values (%run-hidden-launcher url "Dialogs" "--dialogs" "--exit-after" "40"))
+  #+darwin (values (%run-shown-launcher 80 url "Dialogs" "--dialogs" "--exit-after" "40"))
+  #-(or win32 darwin) (error "no real-window run for ~A here" url))
+
+(test a-dialog-binding-reaches-only-the-apps-own-top-level-page-on-a-real-window
+  "On a GitHub Actions runner, a real view started with --dialogs offers hyperionDialog to the app's
+top-level page only, and refuses a call made outside a user action."
+  #-(or win32 darwin) (skip "Linux shows no dialog yet, and its runner has no display for a window")
+  #+(or win32 darwin)
+  (with-launcher
+    (if (not (%real-window-allowed-p))
+        (skip "Runs only on GitHub Actions (GITHUB_ACTIONS is not set here): it creates a window")
+        (%with-dialog-server (server port requests)
+          (let* ((url (aion/test-http:server-url server "/"))
+                 (app (subseq url 0 (1- (length url))))
+                 (other (format nil "http://localhost:~D" port))
+                 (code (%run-dialog-view url))
+                 (reports (%dialog-reports server)))
+            (flet ((report (key) (cdr (assoc key reports :test #'string=))))
+              (is (eql 0 code) "the view exited ~S" code)
+              (is (equal (format nil "function,undefined,~A" app) (report "top"))
+                  "the app's page has hyperionDialog and not the raw binding: ~S" reports)
+              (is (equal (format nil "undefined,undefined,~A" other) (report "child"))
+                  "a frame from another origin has neither: ~S" reports)
+              (is (equal (format nil "undefined,undefined,~A" app) (report "same"))
+                  "a frame from the app's own origin has neither: ~S" reports)
+              (is (equal "{\"error\":\"no-user-action\"}" (report "nouser"))
+                  "a call outside a user action is refused: ~S" reports)
+              (is (equal "1" (report "navigating"))
+                  "the page started its navigation to the other origin: ~S" reports)
+              (is (equal (format nil "undefined,undefined,~A" other) (report "away"))
+                  "a top-level page from another origin has neither: ~S~%requests: ~S"
+                  reports (reverse (car requests)))))))))
+
+(test a-dialog-call-is-answered-once-at-a-time-and-only-to-the-apps-origin-on-a-real-window
+  "On a GitHub Actions Windows runner, with HYPERION_VIEW_FAKE_DIALOG=1: a call without the token
+starts nothing, a second call while one is open gets busy, and an answer is not delivered to a page
+on another origin. The fake dialog is a window timer, not a modal loop, so this does not show that
+a job posted while a real dialog's modal loop runs is kept; that rests on PostMessage to the window,
+which a modal loop dispatches."
+  #-win32 (skip "Only Windows answers a dialog call in this change; elsewhere every call is unavailable")
+  #+win32
+  (with-launcher
+    (if (not (%real-window-allowed-p))
+        (skip "Runs only on GitHub Actions (GITHUB_ACTIONS is not set here): it creates a window")
+        (%with-dialog-server (server port)
+          (let ((previous (uiop:getenv "HYPERION_VIEW_FAKE_DIALOG")))
+            (setf (uiop:getenv "HYPERION_VIEW_FAKE_DIALOG") "1")
+            (unwind-protect
+                 (let* ((code (%run-dialog-view (aion/test-http:server-url server "/fake")))
+                        (reports (%dialog-reports server)))
+                   (flet ((report (key) (cdr (assoc key reports :test #'string=))))
+                     (is (eql 0 code) "the view exited ~S" code)
+                     (is (equal "{\"path\":\"fake-path\"}" (report "first"))
+                         "the first call gets the path, so the call with the wrong token started no job: ~S"
+                         reports)
+                     (is (equal "{\"error\":\"busy\"}" (report "second"))
+                         "a second call while the first is open gets busy: ~S" reports)
+                     (is (equal (format nil "http://localhost:~D" port) (report "trapready"))
+                         "the page on another origin loaded and set its traps: ~S" reports)
+                     (is (null (report "trap"))
+                         "and received no answer: ~S" reports)
+                     (is (null (report "lost"))
+                         "the call left behind is not answered either: ~S" reports)))
+              (setf (uiop:getenv "HYPERION_VIEW_FAKE_DIALOG") (or previous ""))))))))

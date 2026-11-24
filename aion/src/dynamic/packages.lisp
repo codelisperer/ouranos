@@ -12,7 +12,9 @@
     declared set onto a thread it spawns.
 
     It owns no threading. The caller spawns; this only moves bindings, and UNBLOCK-INTERRUPTS
-    undoes the signal mask a new thread can inherit from the thread that created it (#541).")
+    undoes the signal mask a new thread can inherit from the thread that created it (#541).
+    TIMED-WAIT is SB-THREAD:CONDITION-WAIT with a timeout that always returns holding its
+    mutex (#1267).")
   (:export #:register-inheritable #:inheritable-variables #:unregister-inheritable
            #:capture #:call-with-captured #:inheriting #:with-captured
-           #:unblock-interrupts))
+           #:unblock-interrupts #:*blocking-forbidden* #:timed-wait))

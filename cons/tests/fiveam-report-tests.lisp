@@ -222,12 +222,12 @@ a suite as NO-RUN before it asks this; here it is not a pass either."
     (is-false (%fr every-report-passed-p out))))
 
 (test a-child-that-signalled-after-its-checks-still-shows-which-failed
-  "A test op that signals when a report failed, as aion/tests does since #605, ends its child
-with an error, and the gate reports it in the exit-code branch. That branch must still print
+  "A test op that signals when a report failed, as each aion sub-suite does since #992, ends its
+child with an error, and the gate reports it in the exit-code branch. That branch must still print
 which checks failed, from the report before the error."
   (%load-fiveam-report)
   (let* ((out (concatenate 'string +real-report+
-                           (format nil "Unhandled SIMPLE-ERROR in thread #<SB-THREAD:THREAD \"main thread\" RUNNING {1}>:~%  aion/tests: a sub-suite failed; the FiveAM reports above say which~%")))
+                           (format nil "Unhandled SIMPLE-ERROR in thread #<SB-THREAD:THREAD \"main thread\" RUNNING {1}>:~%  aion/csv/tests: a check failed; the FiveAM report above says which~%")))
          (printed (make-string-output-stream))
          (n (%fr print-failure-details out printed))
          (text (get-output-stream-string printed)))
@@ -301,8 +301,9 @@ must be the one the gate already gave."
 the first. Only the names differ; every other byte is FiveAM's.")
 
 (test failure-details-reads-every-failing-report
-  "aion/tests prints one FiveAM report per sub-suite. When two of them fail, the output holds
-two `Failure Details:' blocks, and the gate must name the failing checks of both, in order. The
+  "A test op that runs several FiveAM suites in one image without signalling between them prints
+one report per suite; aion/tests did until #992. When two of them fail, the output holds two
+`Failure Details:' blocks, and the gate must name the failing checks of both, in order. The
 two reports name different tests, so reading one block twice cannot pass for reading both
 (Copilot's review of #617)."
   (%load-fiveam-report)

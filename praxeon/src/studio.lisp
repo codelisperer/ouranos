@@ -110,8 +110,10 @@ AGENT."
 PRAXEON/EVENT:WITH-OBSERVER that renders a turn's activity as concise CLI status
 on STREAM: a transient \"thinking\" line while the model is called (erased when
 the next event arrives, on an interactive stream), and a line per tool call and
-result as they happen. It reads only the neutral event data, so a web client
-would render the same events its own way."
+result as they happen. A cancelled turn (#984) gets a line saying so, and a model call the
+cancel stopped gets one with its output tokens, marked (estimated) when the count is
+praxeon's estimate rather than the provider's. It reads only the neutral event data, so a web
+client would render the same events its own way."
   (let ((pending nil)
         (tty (interactive-stream-p stream)))
     (labels ((clear-pending ()
@@ -136,6 +138,15 @@ would render the same events its own way."
                  (%args->string (evt:event-get event :arguments))))
           (:tool-result
            (line "  ← ~A" (evt:event-get event :content)))
+          (:usage
+           ;; Only for a model call a cancel stopped (#984), whose output count is usually
+           ;; praxeon's estimate, shown as one.
+           (when (evt:event-get event :cancelled)
+             (let ((output (evt:event-get event :output)))
+               (line "  stopped call: ~A output token~:P~:[~; (estimated)~]"
+                     (or output (evt:event-get event :estimated-output) 0) (null output)))))
+          (:turn-ended
+           (line "  turn ~(~A~)" (evt:event-get event :reason)))
           (:answer
            (clear-pending))            ; the client prints the answer itself
           (t (clear-pending)))

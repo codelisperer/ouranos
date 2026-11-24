@@ -68,15 +68,20 @@ number, rather than one string a caller has to take apart again."
   ;; -- "postgers" -- silently took the non-Postgres branch: no error anywhere, and a
   ;; migration with SQLite affinities against a Postgres database. A String argument whose
   ;; only legal values are three known words is a closed type wearing an open one.
+  ;;
+  ;; D-JET IS MICROSOFT ACCESS (Jet/ACE) SQL, and it is a dialect for MNEMOSYNE/QUERY only
+  ;; (#1061): mnemosyne renders queries for it and has no backend that runs them, no column
+  ;; types and no DDL. The DDL entry points refuse it by name.
   (define-type Dialect
-    D-Sqlite D-Postgres D-Xtdb)
+    D-Sqlite D-Postgres D-Xtdb D-Jet)
 
   (declare dialect-name (Dialect -> String))
   (define (dialect-name d)
     (match d
       ((D-Sqlite) "sqlite")
       ((D-Postgres) "postgres")
-      ((D-Xtdb) "xtdb")))
+      ((D-Xtdb) "xtdb")
+      ((D-Jet) "jet")))
 
   ;; PARTIAL ON PURPOSE. The old code took any string and quietly meant "not postgres"; this
   ;; returns None so the caller has to decide what an unknown backend means. That is the
@@ -87,6 +92,7 @@ number, rather than one string a caller has to take apart again."
       ((== name "sqlite") (Some D-Sqlite))
       ((== name "postgres") (Some D-Postgres))
       ((== name "xtdb") (Some D-Xtdb))
+      ((== name "jet") (Some D-Jet))
       (True None)))
 
   ;; THE CL-FACING PAIR. `dialect-from' returns an Optional, which is right for a Coalton
@@ -160,6 +166,10 @@ precedent by accident."
       ;; year. Unsupported is what ADR-0001 says to return when a backend cannot carry a
       ;; type, and XTDB cannot carry any of them AS A COLUMN.
       ((D-Xtdb) Unsupported)
+      ;; NO COLUMN MAPPING FOR JET YET (#1061). The dialect renders queries only, and
+      ;; schema-ddl and every ddl form refuse it before asking for a type. Unsupported here
+      ;; means mnemosyne has no mapping, not that Access cannot store the value.
+      ((D-Jet) Unsupported)
       ((D-Postgres) (relational-column ty True))
       ((D-Sqlite) (relational-column ty False))))
 

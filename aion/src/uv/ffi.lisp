@@ -327,5 +327,6 @@ library instead of trusting that a header we read once still describes it."
         (push (format nil "uv_loop_size() = ~D, which is not credible" loop-size)
               problems)))
     (when problems
+      (setf *abi-verified* nil)
       (error 'libuv-abi-mismatch :details (nreverse problems)))
-    t))
+    (setf *abi-verified* t)))

@@ -32,7 +32,7 @@
    #:chunk-store #:make-chunk-store #:store-connection #:store-table #:store-dimensions
    #:ensure-schema #:check-vector-extension #:*table*
    #:corpus #:make-corpus #:corpus-name #:corpus-store #:corpus-chunker #:corpus-where
-   #:with-corpus-lock #:call-with-corpus-lock
+   #:with-corpus-lock #:call-with-corpus-lock #:with-corpus-run-lock #:call-with-corpus-run-lock
    ;; sync
    #:sync-document #:sync-corpus
    #:sync-report #:sync-report-added #:sync-report-replaced #:sync-report-updated
@@ -52,7 +52,7 @@
    #:retrieve-whole #:corpus-size #:corpus-effective-strategy #:start-backfill #:corpora-table
    #:*whole-limit* #:corpus-strategy #:corpus-whole-limit #:corpus-expected-tokens
    #:corpus-contextualizer #:corpus-backfill #:sync-report-size #:sync-report-strategy
-   #:passage-context
+   #:passage-context #:passage-untrusted #:corpus-untrusted
    ;; keyword retrieval, BM25 (#316)
    #:tokenize #:term-counts #:register-stop-words #:*stop-words* #:+tokenizer-id+
    #:terms-table #:index-pending #:retrieve-keyword #:*bm25-k1* #:*bm25-b* #:passage-score
@@ -84,7 +84,7 @@
    #:chunk-store #:make-chunk-store #:store-connection #:store-table #:store-dimensions
    #:ensure-schema #:check-vector-extension #:*table*
    #:corpus #:make-corpus #:corpus-name #:corpus-store #:corpus-chunker #:corpus-where
-   #:with-corpus-lock #:call-with-corpus-lock
+   #:with-corpus-lock #:call-with-corpus-lock #:with-corpus-run-lock #:call-with-corpus-run-lock
    #:sync-document #:sync-corpus
    #:sync-report #:sync-report-added #:sync-report-replaced #:sync-report-updated
    #:sync-report-unchanged #:sync-report-removed
@@ -101,7 +101,7 @@
    #:retrieve-whole #:corpus-size #:corpus-effective-strategy #:start-backfill #:corpora-table
    #:*whole-limit* #:corpus-strategy #:corpus-whole-limit #:corpus-expected-tokens
    #:corpus-contextualizer #:corpus-backfill #:sync-report-size #:sync-report-strategy
-   #:passage-context
+   #:passage-context #:passage-untrusted #:corpus-untrusted
    #:tokenize #:term-counts #:register-stop-words #:*stop-words* #:+tokenizer-id+
    #:terms-table #:index-pending #:retrieve-keyword #:*bm25-k1* #:*bm25-b* #:passage-score
    #:retrieval-error #:invalid-section #:invalid-section-section #:invalid-section-problem
@@ -147,7 +147,7 @@ argument.")
    #:chunk-store #:make-chunk-store #:store-connection #:store-table #:store-dimensions
    #:ensure-schema #:check-vector-extension #:*table*
    #:corpus #:make-corpus #:corpus-name #:corpus-store #:corpus-chunker #:corpus-where
-   #:with-corpus-lock #:call-with-corpus-lock
+   #:with-corpus-lock #:call-with-corpus-lock #:with-corpus-run-lock #:call-with-corpus-run-lock
    #:sync-document #:sync-corpus
    #:sync-report #:sync-report-added #:sync-report-replaced #:sync-report-updated
    #:sync-report-unchanged #:sync-report-removed
@@ -164,7 +164,7 @@ argument.")
    #:retrieve-whole #:corpus-size #:corpus-effective-strategy #:start-backfill #:corpora-table
    #:*whole-limit* #:corpus-strategy #:corpus-whole-limit #:corpus-expected-tokens
    #:corpus-contextualizer #:corpus-backfill #:sync-report-size #:sync-report-strategy
-   #:passage-context
+   #:passage-context #:passage-untrusted #:corpus-untrusted
    #:tokenize #:term-counts #:register-stop-words #:*stop-words* #:+tokenizer-id+
    #:terms-table #:index-pending #:retrieve-keyword #:*bm25-k1* #:*bm25-b* #:passage-score
    #:retrieval-error #:invalid-section #:invalid-section-section #:invalid-section-problem

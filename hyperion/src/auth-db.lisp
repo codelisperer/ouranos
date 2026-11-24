@@ -29,9 +29,10 @@
   (:documentation
    "A mnemosyne-backed identity store: users (email + optional phone), PBKDF2 password
     hashing, a temp-password flag (forced change at first login), and a serialized roles
-    field. MAKE-DB-AUTH over an open mnemosyne connection; :ensure t creates the table.")
+    field. MAKE-DB-AUTH over a mnemosyne pool, or over an open mnemosyne connection;
+    :ensure t creates the table.")
   (:export #:db-auth #:make-db-auth #:ensure-schema #:db-auth-ddl #:users-ddl #:*table*
-           #:hash-password #:verify-password
+           #:hash-password #:verify-password #:*pbkdf2-iterations*
            #:create-user #:find-user-by-email #:find-user-by-id #:authenticate #:set-password
            #:grant-role #:revoke-role #:users-with-role #:known-roles
            #:*role-update-attempts*
@@ -72,7 +73,13 @@
   "Default table name for the append-only log of address confirmations and changes (#690).")
 
 (defparameter *pbkdf2-iterations* 100000
-  "PBKDF2 iteration count for password hashing (raise over time as hardware allows).")
+  "PBKDF2 iteration count for password hashing (raise over time as hardware allows).
+HASH-PASSWORD reads it, and VERIFY-PASSWORD uses the count stored in each hash, so a hash made at
+one count still verifies after it changes.
+
+An app's test suite may lower it, for example to 1000 for the whole test run, because each hash
+or verify at 100000 takes about a quarter of a second (#1045). Production must not lower it: the
+count is what makes a stolen hash expensive to guess. hyperion's own auth-db suite runs at 1000.")
 
 ;;; --- schema (single source of truth for the DDL) --------------------------
 (schema:defschema hyperion-user (:table "hyperion_users")
@@ -214,6 +221,12 @@ HYPERION/DB-CONNECTION:WRAP-CONNECTION: each operation then borrows a connection
 a request is the request's own, and requests do not wait for each other's lookups. Over one
 connection every operation, reads included, takes turns on it under the store's lock; that is
 safe under :WORKERS and makes the store's operations run one at a time.
+
+DO NOT GIVE TWO STORES THE SAME CONNECTION (#711). The lock is this store's own, so it does not
+stop another store over that connection, a HYPERION/SESSION-DB store for example, from sending
+a statement on it at the same moment from another handler thread. That can happen under
+Hunchentoot, which runs each connection on its own thread, as well as under :WORKERS. Give every
+store the same mnemosyne pool instead, the one the app passes to WRAP-CONNECTION.
 
 THE ROLE-EVENT LOG IS CHECKED HERE, at construction (#139). GRANT-ROLE and REVOKE-ROLE write
 to it on every call, so a store without it fails the first time an operator changes a role,

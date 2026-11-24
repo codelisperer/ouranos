@@ -834,3 +834,34 @@ smaller)."
                (((,po git::callbacks) (,cb git::version t)) 1)
                (((,po git::proxy-opts) (,px git::version t)) 1))
              'git::remote-push-options))))
+
+(test a-directory-given-as-a-native-string-is-the-one-used
+  "#1096: a directory string was parsed as a Lisp namestring, which reads [ ] as wildcard syntax
+and, on Linux and macOS, drops a backslash."
+  (dolist (suffix (list "[1]" #-win32 (format nil "~Cx" #\\) #-win32 (format nil "y~C" #\\)))
+    (let* ((sep #+win32 "\\" #-win32 "/")
+           (dir (concatenate 'string (string-right-trim "/\\" (uiop:native-namestring (fresh-directory)))
+                             suffix)))
+      (is (string= dir (git::%directory-namestring dir)) "~S reaches libgit2 as written" dir)
+      (unwind-protect
+           (progn
+             (git:with-repository (repo (git:init-repository dir))
+               (is (equal (truename (uiop:parse-native-namestring (concatenate 'string dir sep)))
+                          (truename (uiop:parse-native-namestring (git:repository-workdir repo))))
+                   "init-repository made ~S" dir))
+             (is-true (uiop:directory-exists-p
+                       (uiop:parse-native-namestring (concatenate 'string dir sep ".git" sep))))
+             (git:with-repository (repo (git:open-repository dir))
+               (is (null (git:history repo)))
+               ;; STAGE, the hub's review of #1101: a[1].txt was a wild pathname, and in a
+               ;; directory with a backslash the file was not found and left out of the index.
+               (with-open-file (out (uiop:parse-native-namestring (concatenate 'string dir sep "a[1].txt"))
+                                    :direction :output)
+                 (write-string "one" out))
+               (git:stage repo (list "a[1].txt"))
+               (git:commit repo "first" :author "Aion Test" :email "aion@example.invalid")
+               (is (equal '("a[1].txt")
+                          (lines (uiop:run-program (list "git" "-C" dir "ls-files")
+                                                   :output :string :external-format :utf-8)))
+                   "a[1].txt is committed in ~S" dir)))
+        (fs:delete-tree dir :if-does-not-exist :ignore)))))

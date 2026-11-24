@@ -32,7 +32,7 @@ aion → cons → mnemosyne → elenchon → hyperion → praxeon
 **A framework to the LEFT must never depend on one to the RIGHT** (ASDF errors on
 cycles). The order binds **core** systems; a repo may ship an **auxiliary** system
 that reaches right (e.g. `praxeon/web → hyperion`, `elenchon/web → hyperion`,
-`hyperion/testing → elenchon`) as long as the *system-level* graph stays acyclic.
+`dokimasia/elenchon → elenchon`) as long as the *system-level* graph stays acyclic.
 Apps/examples combining frameworks live in the **highest** one they need.
 
 | Dir | Framework | Role | Status |
@@ -55,6 +55,7 @@ in the DAG depends on them):
 |---|---|---|---|
 | `hermes/` | **hermes** | **all the messaging an app needs** — one `deliver`/`send` protocol across every channel (email + SMS today; push/in-app next), plus other third-party services (payments) behind the same neutral-protocol doctrine | **alpha** — 434 checks; email/SMS shipped and payments (Stripe) shipped; push planned |
 | `hades/` | **Hades** | **the OS ergonomics layer** — makes each platform's own features pleasant to use and porting between them a non-event, over aion's raw bindings. Two contracts kept distinct: **portable facades** where every supported OS has a real counterpart, and **platform-scoped packages** (`hades/windows`, …) where one does not. **Windows first**, being furthest from POSIX | **planned** — no code; chartered in [hades ADR-0001](hades/docs/adr/0001-charter.md), over the binding in [aion ADR-0003](aion/docs/adr/0003-windows-platform-binding.md) |
+| `dokimasia/` | **dokimasia** | **acceptance tests for any app that runs in a browser** — cases as data (steps, plus rows of inputs, expected screens and stored values), run in a headless Chrome or Edge over `aion/cdp`, against an app it starts or a deployed URL. Attaches at `aion`; `dokimasia/hyperion`, `dokimasia/mnemosyne` and `dokimasia/elenchon` are aux systems that reach right. Designed in [dokimasia ADR-0001](dokimasia/docs/adr/0001-browser-driver-and-acceptance-harness.md) | **planned** — #1028 |
 
 **Consolidation is REVERSED (settled).** Older hyperion docs said it "absorbs aion/cons
 for now" — convenience under time pressure. The Ouranos monorepo settles it the other
@@ -107,7 +108,10 @@ design over convenience** unless the maintainer flags time pressure.
   `~/quicklisp/local-projects` and `(push … asdf:*central-registry*)`. A **consuming repo**
   (e.g. a consuming app, a separate repo) onboards the same way — its own
   `NN-<name>.conf` `(:tree <its-root>)` drop-in (`conf.d` is additive, so cross-repo deps
-  resolve). Generalizing that drop-in write is what `cons setup` does today.
+  resolve). Generalizing that drop-in write is what `cons setup` does today. Bootstrap does
+  not change a drop-in that names another checkout that still exists: it stops, and a second
+  checkout is built with `OURANOS_BOOTSTRAP_LOCAL=1` (through `CL_SOURCE_REGISTRY`) or takes
+  the drop-in over with `OURANOS_BOOTSTRAP_FORCE=1` (#955).
 - **Desktop apps = CL-native, out-of-process OS webview (not Tauri/Electron)** — a
   desktop app boots Hyperion on `127.0.0.1:<port>` in-process and `uiop:launch-program`s
   a small per-OS `webview.h` shim (WebView2/WKWebView/WebKitGTK) pointed at it;
@@ -300,7 +304,8 @@ design over convenience** unless the maintainer flags time pressure.
   makes it work on Windows). Cadence, triage classes, and the adoption record live in
   [`docs/coalton-upstream.md`](docs/coalton-upstream.md); build-time enforcement is
   [issue #83](https://github.com/codelisperer/ouranos/issues/83). **Currently pinned:
-  `024d0a17`** (adopted 2026-10-15 in #697; the whole gate, 12393 checks on Linux, 0 failures).
+  `a07305a5`** (adopted 2026-11-22 in #1326; on Linux under WSL, every suite's check count equal
+  to the previous pin's, 22965 checks).
 - **Publishing (future)** — **Ultralisp** (rolling, fast) for reach + **ocicl** (OCI,
   pinned/reproducible) for consumption. Independent per-lib release, if ever needed,
   via **`git subtree split`** mirrors (the monorepo layout is already split-ready).

@@ -67,7 +67,7 @@
    #:credential-w #:flags #:target-name #:comment #:last-written
    #:credential-blob-size #:credential-blob #:persist #:attribute-count #:attributes
    #:target-alias #:user-name
-   #:cred-write-w #:cred-read-w #:cred-delete-w #:cred-free
+   #:cred-write-w #:cred-read-w #:cred-enumerate-w #:cred-delete-w #:cred-free
    #:+cred-type-generic+ #:+cred-persist-local-machine+ #:+cred-max-credential-blob-size+
    #:+error-not-found+
    ;; job objects (#599)
@@ -80,6 +80,7 @@
    ;; starting a process (#700)
    #:security-attributes #:n-length #:lp-security-descriptor #:b-inherit-handle
    #:startupinfo-w #:cb #:dw-flags #:h-std-input #:h-std-output #:h-std-error
+   #:cb-reserved2 #:lp-reserved2
    #:startupinfoex-w #:startup-info #:lp-attribute-list
    #:process-information #:h-process #:h-thread #:dw-process-id #:dw-thread-id
    #:set-handle-information #:initialize-proc-thread-attribute-list
@@ -90,6 +91,9 @@
    #:+create-no-window+ #:+startf-usestdhandles+ #:+handle-flag-inherit+
    #:+proc-thread-attribute-handle-list+ #:+file-append-data+ #:+file-share-read+
    #:+file-share-write+ #:+wait-object-0+ #:+wait-timeout+ #:+infinite+ #:+still-active+
+   ;; a child's C runtime descriptors 3 and up (#1028)
+   #:+crt-fopen+ #:+crt-fpipe+ #:+crt-fdev+ #:+file-type-char+ #:+file-type-pipe+
+   #:get-file-type
    ;; a message box before any window exists (#819)
    #:message-box-w #:get-current-process-id #:process-id-to-session-id
    #:+mb-ok+ #:+mb-iconerror+ #:+mb-iconwarning+ #:+mb-iconinformation+
@@ -103,7 +107,7 @@
   (:use #:common-lisp)
   ;; Re-exported from aion/fs, which holds the one GetFileAttributesW binding (#349).
   (:import-from #:aion/fs #:file-attributes #:file-attributes-error #:file-attributes-error-code)
-  (:local-nicknames (#:ffi #:aion/windows/ffi))
+  (:local-nicknames (#:ffi #:aion/windows/ffi) (#:path #:aion/path))
   (:documentation "The Windows-specific API surface for Ouranos.")
   (:export
    ;; platform

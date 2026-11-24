@@ -124,6 +124,58 @@ output is not compared with an expected string."
            (is (equal '("before" "from child") (uiop:read-file-lines file))))
       (ignore-errors (delete-file file)))))
 
+;;; --- C runtime descriptors 3 and up (#1028) -----------------------------------------------
+
+(test the-c-runtime-descriptor-block-is-a-count-then-flags-then-handles
+  "The layout the Microsoft C runtime reads from lpReserved2: a 32-bit count, a flag byte per
+descriptor, then a handle per descriptor, little-endian and with no padding."
+  (is (equalp #(2 0 0 0  1 9
+                #x34 #x12 0 0 0 0 0 0
+                #x78 #x56 #x01 0 0 0 0 0)
+              (w::%crt-descriptor-block '((#x1234 . 1) (#x15678 . 9)) 8)))
+  (is (equalp #(1 0 0 0  #x41  #xFF #xFF #xFF #xFF)
+              (w::%crt-descriptor-block '((#xFFFFFFFF . #x41)) 4))))
+
+(defparameter +echo-descriptors-form+
+  "(let* ((osf (lambda (fd) (sb-alien:alien-funcall (sb-alien:extern-alien \"_get_osfhandle\" (function (sb-alien:signed #.sb-vm:n-word-bits) sb-alien:int)) fd))) (in (sb-sys:make-fd-stream (funcall osf 3) :input t :external-format :utf-8)) (out (sb-sys:make-fd-stream (funcall osf 4) :output t :external-format :utf-8))) (write-line (concatenate 'string \"echo \" (read-line in)) out) (finish-output out))"
+  "A child that finds its C runtime descriptors 3 and 4 with _get_osfhandle, reads a line from 3,
+and writes it back on 4.")
+
+(test inherited-handles-reach-the-child-as-c-runtime-descriptors-3-and-4
+  "The child finds the two handles through its own C runtime, as Chrome finds the pipes of
+--remote-debugging-pipe, and they are not inheritable in this image after the call."
+  (let ((err (uiop:tmpize-pathname (merge-pathnames "aion-spawn-fds.txt"
+                                                    (uiop:temporary-directory)))))
+    (multiple-value-bind (child-read our-write) (sb-unix:unix-pipe)
+      (multiple-value-bind (our-read child-write) (sb-unix:unix-pipe)
+        (let ((to (sb-sys:make-fd-stream our-write :output t :external-format :utf-8
+                                                   :auto-close t))
+              (from (sb-sys:make-fd-stream our-read :input t :external-format :utf-8
+                                                    :auto-close t)))
+          (unwind-protect
+               (with-child (p (%sbcl) (%child-args +echo-descriptors-form+)
+                            :error err :inherit-handles (list child-read child-write))
+                 (is-false (sb-win32::inheritable-handle-p child-read)
+                           "the child's read end is not inheritable again after the call")
+                 (is-false (sb-win32::inheritable-handle-p child-write)
+                           "the child's write end is not inheritable again after the call")
+                 (sb-unix:unix-close child-read)
+                 (sb-unix:unix-close child-write)
+                 (setf child-read nil child-write nil)
+                 (write-line "ping" to)
+                 (finish-output to)
+                 (let ((line (read-line from nil :eof)))
+                   (is-true (w:job-process-wait p 60))
+                   (is (equal "echo ping" line)
+                       "the child answered ~S on descriptor 4; its exit code was ~S and its standard error:~%~A"
+                       line (w:job-process-exit-code p)
+                       (ignore-errors (uiop:read-file-string err)))))
+            (close to :abort t)
+            (close from :abort t)
+            (when child-read (sb-unix:unix-close child-read))
+            (when child-write (sb-unix:unix-close child-write))
+            (ignore-errors (delete-file err))))))))
+
 (test the-child-has-no-console-window
   "CREATE_NO_WINDOW: the child is a console program with no console, so GetConsoleWindow returns
 NULL in it."
@@ -300,3 +352,41 @@ the job's last handle as the image ends, and that ends both."
              (is-true (%pid-alive-p child) "the child ended without a job to end it")
              (is-true (%pid-alive-p grandchild) "the grandchild ended without a job to end it")))
       (%end-image image log child grandchild))))
+
+(test a-directory-or-error-file-named-with-brackets-is-the-one-used
+  "#1096: DIRECTORY and an ERROR file given as strings were parsed as Lisp namestrings, which read
+[ ] as wildcard syntax, so a name with brackets named nothing."
+  (let* ((dir (concatenate 'string (string-right-trim "/\\" (uiop:native-namestring (uiop:temporary-directory)))
+                           "\\" (format nil "aion-spawn-~36R[1]" (random (expt 36 8) (make-random-state t)))))
+         (file (concatenate 'string dir "\\" "err[2].txt")))
+    (ensure-directories-exist (uiop:parse-native-namestring (concatenate 'string dir "\\")))
+    (unwind-protect
+         (progn
+           (with-child (p (%sbcl) (%child-args "(progn (prin1 (sb-ext:native-namestring *default-pathname-defaults*)) (terpri) (format *error-output* \"from child~%\") (finish-output) (finish-output *error-output*))")
+                        :output :stream :error file :directory dir)
+             (is (string-equal (concatenate 'string dir "\\")
+                               (read-from-string (read-line (w:job-process-output p))))
+                 "the child runs in ~S" dir)
+             (is-true (w:job-process-wait p 30)))
+           (is (equal '("from child") (uiop:read-file-lines (uiop:parse-native-namestring file)))))
+      (ignore-errors (delete-file (uiop:parse-native-namestring file)))
+      (ignore-errors (sb-ext:delete-directory (uiop:parse-native-namestring (concatenate 'string dir "\\")))))))
+
+(test find-executable-finds-a-program-named-with-brackets
+  "The hub's review of #1101: NAME was parsed as a Lisp namestring, so brackets in it, or in the
+directory it was looked for in, named nothing."
+  (let* ((dir (concatenate 'string (string-right-trim "/\\" (uiop:native-namestring (uiop:temporary-directory)))
+                           "\\" (format nil "aion-exe-~36R[1]" (random (expt 36 8) (make-random-state t)))))
+         (exe (concatenate 'string dir "\\" "tool[2].exe")))
+    (ensure-directories-exist (uiop:parse-native-namestring (concatenate 'string dir "\\")))
+    (unwind-protect
+         (progn
+           (uiop:copy-file (uiop:parse-native-namestring (%sbcl)) (uiop:parse-native-namestring exe))
+           ;; FIND-EXECUTABLE returns the truename, and a CI runner's temporary directory is
+           ;; spelled with a short name (RUNNER~1), so compare against the truename.
+           (setf exe (uiop:native-namestring (truename (uiop:parse-native-namestring exe))))
+           (is (string-equal exe (w:find-executable (concatenate 'string dir "\\" "tool[2]")))
+               "by its full name")
+           (is (string-equal exe (w:find-executable "tool[2]" :path dir)) "on PATH"))
+      (ignore-errors (delete-file (uiop:parse-native-namestring exe)))
+      (ignore-errors (sb-ext:delete-directory (uiop:parse-native-namestring (concatenate 'string dir "\\")))))))

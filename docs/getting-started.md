@@ -17,8 +17,8 @@ examples are under [`../praxeon/examples/`](../praxeon/examples) (Elise, ChatRBT
 
 ## 1. Prerequisites
 
-Three Lisp things, and **a script installs all of them** — you do not have to do this by
-hand:
+Three Lisp things and libuv, and **a script installs all of them** — you do not have to do
+this by hand:
 
 ```sh
 ./scripts/setup.sh          # macOS / Linux    (setup.ps1 on Windows)
@@ -34,9 +34,10 @@ refuses until they are there:
 | clone, download, unpack | `git`, `curl`, `tar`, **`bzip2`** | `git`, `curl`, `tar` |
 | **libev** — Woo binds it at *load* time (hyperion) | `libev-dev` | `brew install libev` |
 | **libsqlite3** — cl-sqlite binds it at *load* time (mnemosyne) | `libsqlite3-dev` | ships with macOS |
+| **a C compiler** — setup builds libuv with it (section "libuv" below) | `build-essential` | `xcode-select --install` |
 
-`setup.sh` installs the two libraries for you **when it already has root**; otherwise it
-prints the exact command. They are not optional: they are bound when the system *loads*, so
+`setup.sh` installs the two libraries and the compiler for you **when it already has root**;
+otherwise it prints the exact command. They are not optional: they are bound when the system *loads*, so
 without them `bootstrap.lisp` builds `bin/cons` and the tree still does not work.
 
 `bzip2` catches people out: the SBCL tarball is bz2-compressed and `tar` shells out to the
@@ -85,14 +86,48 @@ binary, `OURANOS_BOOTSTRAP_KEEP_HEAP=1` keeps it — and warns, because the cons
 permanent and otherwise invisible. `sbcl --script scripts/baked-heap.lisp bin/cons` answers the
 question at any time.
 
-**One extra, for libuv.** `aion/uv` (libuv: event loop, async and sync filesystem, timers,
-file watching) and `hyperion/server-uv`, the HTTP server built on it, need libuv, which
-`sbcl --script scripts/build-libuv.lisp` builds with **a C compiler — the one your OS already
-ships**: Xcode Command Line Tools on macOS, your distribution's gcc/clang on Linux, MSVC on
-Windows. Not MSYS2, not cmake, not make. A libuv installed on the system is enough to run code
-from source. An app made with `cons init --template web` serves on `hyperion/server-uv`, and
-`cons bin` copies the tree's own libuv beside the binary it dumps, so building that binary needs
-the one this script builds (#472, #513).
+**libuv, which setup builds.** `hyperion/server-uv`, the default HTTP server, runs on libuv,
+through `aion/uv` (libuv: event loop, async and sync filesystem, timers, file watching). After
+the Lisp prerequisites, `setup.sh` and `setup.ps1` build the pinned libuv into `vendor/libuv`
+with `scripts/build-libuv.lisp`, which takes a few seconds and is skipped when the build there
+is already of the pinned release. That needs **a C compiler — the one your OS already ships**:
+Xcode Command Line Tools on macOS, your distribution's gcc/clang on Linux, the MSVC Build Tools
+on Windows. Not MSYS2, not cmake, not make.
+
+Setup checks for the compiler before it installs anything. When there is none, it says what to
+install and how to run it again, and exits 1. On macOS:
+
+```
+  MISSING a C compiler (setup builds libuv with it; hyperion/server-uv, the default HTTP server, runs on libuv)
+       fix: xcode-select --install     (the Xcode Command Line Tools)
+            then run ./scripts/setup.sh again
+            or, to set up without libuv: ./scripts/setup.sh --without-uv
+```
+
+On Linux the fix line is `sudo apt install build-essential | sudo dnf install gcc | sudo pacman
+-S gcc`, and when setup can get root it installs the compiler itself. On Windows it is the
+`winget` command for the Build Tools (about 2 GB), and the opt-out is `.\scripts\setup.ps1
+-WithoutUv`.
+
+**On Windows, setup can download libuv instead of building it.** When the MSVC Build Tools are
+not installed, `setup.ps1` looks in [`libuv-prebuilt.pin`](../libuv-prebuilt.pin) for a
+`libuv.dll` pinned for your architecture (x64 or arm64). That DLL is built from `libuv.pin`'s
+release by this repository's `.github/workflows/libuv-prebuilt.yml` and attached to the release
+`libuv-v<version>`. setup downloads it, refuses it and deletes it if its SHA-256 or the
+architecture in its header does not match the pin, and otherwise installs it as
+`vendor\libuv\lib\libuv.dll`, the same place a build puts it. `vendor\libuv\BUILT-FROM` then
+records the version and the line `prebuilt <url>`, and `-Check` reports the library as
+`(prebuilt, downloaded from ...)`. When no DLL is pinned for your architecture (the pin says
+`none`, as it does until the first one is published), setup prints that reason and the Build
+Tools message above, and stops. With the Build Tools installed, setup always builds from source. With `--without-uv` (`-WithoutUv`) setup neither needs a compiler nor builds libuv,
+and `--check` reports libuv as skipped; `hyperion/server-uv` will not start until libuv is
+built, by running setup again without the flag or with `sbcl --script scripts/build-libuv.lisp`
+from the Ouranos checkout.
+
+A libuv installed on the system is enough to run code from source. An app made with
+`cons init --template web` serves on `hyperion/server-uv`, and `cons bin` copies the tree's own
+libuv beside the binary it dumps, so building that binary needs the one setup builds (#472,
+#513).
 No C toolchain is ever required merely to *load* anything here.
 
 ## 2. Install the frameworks
@@ -127,6 +162,36 @@ To check it took, ask a plain REPL — with no `CL_SOURCE_REGISTRY` set — wher
 (require :asdf)
 (asdf:system-source-file (asdf:find-system :aion))   ;; => your checkout's aion/aion.asd
 ```
+
+### A second checkout on the same machine
+
+The drop-in is read by every Lisp process you run, so it can name only one checkout. When
+it already names another checkout that still exists, bootstrap does not change it. It stops
+with exit code 3 before building anything, names both checkouts, and prints the command for
+each way forward on your OS:
+
+- `OURANOS_BOOTSTRAP_LOCAL=1` builds this checkout and leaves the drop-in as it is. Bootstrap
+  and the processes it starts use this checkout through `CL_SOURCE_REGISTRY`, and it prints
+  the value to set in each shell that should use this checkout afterwards, for example
+  `export CL_SOURCE_REGISTRY='/home/you/ouranos-scratch//:'` (on Windows, in PowerShell,
+  `$env:CL_SOURCE_REGISTRY='C:\Users\you\ouranos-scratch//;'`).
+- `OURANOS_BOOTSTRAP_FORCE=1` rewrites the drop-in to name this checkout, so every process
+  on the machine uses it from then on.
+
+Both are environment variables, and each is on only when its value is exactly `1`:
+
+```sh
+OURANOS_BOOTSTRAP_LOCAL=1 sbcl --dynamic-space-size 4096 --script bootstrap.lisp
+```
+
+```powershell
+$env:OURANOS_BOOTSTRAP_LOCAL='1'; sbcl --dynamic-space-size 4096 --script bootstrap.lisp; Remove-Item Env:OURANOS_BOOTSTRAP_LOCAL
+```
+
+If the checkout the drop-in names has been moved or deleted, bootstrap rewrites the drop-in
+and says which path it replaced, so moving your clone needs nothing more than running
+bootstrap again. A drop-in that is not a single `(:tree "...")` form, such as one edited by
+hand, is refused in the same way as one naming another checkout.
 
 Bootstrap also builds the native webview launcher, which a desktop app needs to open its
 window. It is gitignored, so a fresh clone does not have it. When the machine has a C++

@@ -100,6 +100,10 @@ CAPABILITY is passed to REGISTER-MEANS. ON-RESULT, a function of the query and t
 RETRIEVAL-RESULT, is called before the text is returned. RERANKER, a PRAXEON/LLM:RERANKER, is
 passed to RETRIEVE for a search by meaning (#316).
 
+The means is registered :UNTRUSTED when CORPUS is CORPUS-UNTRUSTED (#907): its result is the
+corpus's text, which then came from outside the app, so once it has run in a turn a means that
+spends or writes for the user is refused or held, as after reading a web page (#827).
+
 A failed search signals, as any means does, so ACT's restarts apply."
   (check-type corpus corpus)
   (unless (functionp render)
@@ -132,4 +136,5 @@ A failed search signals, as any means does, so ACT's restarts apply."
            (when on-result (funcall on-result query result))
            (%search-text result render))))
      :schema (%search-schema (and embedder t))
-     :capability capability)))
+     :capability capability
+     :untrusted (corpus-untrusted corpus))))

@@ -3,7 +3,7 @@
 ;;;; The command surface. Lives in its own system (cons/cli) so the core library
 ;;;; never pulls the CLI dep (clingon). Subcommands:
 ;;;;
-;;;;   cons init NAME [--template T]  scaffold a new project        (real)
+;;;;   cons init NAME [--template T] [--db D]  scaffold a new project  (real)
 ;;;;   cons template check [DIR]      generate a template and BUILD it (real)
 ;;;;   cons setup                     bootstrap the Lisp environment (planned)
 ;;;;   cons conform [--force]         install the AI-conformance pack (real)
@@ -77,14 +77,16 @@ dependency's source. Exits 1 when a REQUIRED key is missing, so it can gate a de
 
 (defun init/handler (cmd)
   (let ((name (first (clingon:command-arguments cmd)))
-        (template (clingon:getopt cmd :template)))
+        (template (clingon:getopt cmd :template))
+        (db (clingon:getopt cmd :db)))
     (unless name
       (format *error-output* "cons init: NAME required~%")
       (uiop:quit 1))
     (handler-case
         (progn
           (init:scaffold name
-                         :template (intern (string-upcase template) :keyword))
+                         :template (intern (string-upcase template) :keyword)
+                         :options (and db (list :db (intern (string-upcase db) :keyword))))
           (uiop:quit 0))
       (error (e)
         (format *error-output* "cons init: ~A~%" e)
@@ -148,7 +150,10 @@ manifest here means they probably meant the built-ins, so check those."
          :string :description (format nil "project template: ~{~(~A~)~^ | ~}"
                                       (init:template-names))
          :short-name #\t :long-name "template" :initial-value "lib"
-         :key :template)))
+         :key :template)
+        (clingon:make-option
+         :string :description "a database for the app, sqlite | postgres (templates: web)"
+         :long-name "db" :key :db)))
 
 (defun db-repl-options ()
   (list (clingon:make-option
@@ -188,7 +193,7 @@ manifest here means they probably meant the built-ins, so check those."
    :description "cons the magnificent: project & dev tooling for Common Lisp."
    :handler (lambda (cmd) (clingon:print-usage-and-exit cmd t))
    :sub-commands
-   (list (subcommand "init" "scaffold a new project (NAME [--template T])"
+   (list (subcommand "init" "scaffold a new project (NAME [--template T] [--db sqlite|postgres])"
                      #'init/handler (init-options))
          (template-command)
          (subcommand "setup" "put this project on the ASDF path (source-registry drop-in)"
@@ -232,23 +237,36 @@ forces the target to run in a subprocess sbcl instead of cons's warm image. A le
 fasl still fails the target (#303); use it in CI. With no
 `cons.lisp` and no built-in, clingon prints usage."
   ;; Early and once, before anything can meet a bare "Don't know how to REQUIRE SB-POSIX"
-  ;; (pre-publication issue 161). Reported, not fatal: `cons version` and `cons help` must still answer on a
-  ;; broken toolchain, since that is when you need them most.
-  (toolchain:check)
-  (project:ensure-source-registry)
-  (let ((argv (uiop:command-line-arguments)))
-    (multiple-value-bind (fresh rest) (%pop-flag "--fresh" argv)
-     (multiple-value-bind (strict rest) (%pop-flag "--strict" rest)
-      (let ((first (first rest)))
-        (cond
-          ((and first (member first *builtin-commands* :test #'string-equal))
-           (clingon:run (cons-command) rest))
-          (t
-           (let ((build-spec
-                   (handler-case (spec:load-spec)
-                     (error (e)
-                       (format *error-output* "cons: error reading cons.lisp: ~A~%" e)
-                       (uiop:quit 1)))))
-             (if build-spec
-                 (run:cli-run build-spec rest :fresh fresh :strict strict)
-                 (clingon:run (cons-command) argv))))))))))
+  ;; (pre-publication issue 161). The built-in commands still run on a fatal finding: `cons
+  ;; version` and `cons help` must answer on a broken toolchain, since that is when you need
+  ;; them most. A build-spec target does not (#701) when any of its work would run in this
+  ;; image: it would fail later, at a REQUIRE, with an error that does not name the cause.
+  ;; Work that runs in a subprocess, under the sbcl on PATH whose contribs are its own, is not
+  ;; refused. RUN:TOOLCHAIN-REFUSAL decides which work runs where with the runner's own
+  ;; predicate, so the two agree; deciding from --fresh alone refused an :isolate target and
+  ;; let a :steps target's steps run here (#1110).
+  (let ((toolchain-findings (toolchain:check)))
+    (project:ensure-source-registry)
+    (let ((argv (uiop:command-line-arguments)))
+      (multiple-value-bind (fresh rest) (%pop-flag "--fresh" argv)
+       (multiple-value-bind (strict rest) (%pop-flag "--strict" rest)
+        (let ((first (first rest)))
+          (cond
+            ((and first (member first *builtin-commands* :test #'string-equal))
+             (clingon:run (cons-command) rest))
+            (t
+             (let ((build-spec
+                     (handler-case (spec:load-spec)
+                       (error (e)
+                         (format *error-output* "cons: error reading cons.lisp: ~A~%" e)
+                         (uiop:quit 1)))))
+               (let ((in-image (and build-spec first
+                                    (run:toolchain-refusal build-spec first toolchain-findings
+                                                           :fresh fresh))))
+                 (cond ((null build-spec) (clingon:run (cons-command) argv))
+                       (in-image
+                        (format *error-output*
+                                "cons: not running ~A until the problem above is fixed, since ~{~A~^, ~} would run in cons's own image.~%"
+                                first in-image)
+                        (uiop:quit 1))
+                       (t (run:cli-run build-spec rest :fresh fresh :strict strict)))))))))))))

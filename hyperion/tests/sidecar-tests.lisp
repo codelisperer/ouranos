@@ -522,3 +522,14 @@ still runs the recorded program is ended; a record whose image still runs is lef
         (ignore-errors (sb-ext:process-wait p))
         (ignore-errors (sb-ext:process-close p)))
       (uiop:delete-directory-tree sc:*state-directory* :validate t :if-does-not-exist :ignore))))
+
+(test the-restart-delay-is-the-same-schedule-on-retry-delay
+  "#79: %RESTART-DELAY now uses AION/RETRY:RETRY-DELAY, with no jitter. The hub's ruling is that the
+move must not change the schedule, so it is compared with the formula it replaced, for launches 1
+to 40, with EQL so the type is the same as well as the size."
+  (let ((differences
+          (loop for attempt from 1 to 40
+                unless (eql (min 30 (expt 2 (max 0 (- attempt 2))))
+                            (sc::%restart-delay attempt))
+                  collect attempt)))
+    (is (null differences) "the schedule differs at launches ~S" differences)))

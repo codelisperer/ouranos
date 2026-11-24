@@ -16,8 +16,9 @@
 ;;;; output is judged by the gate's own functions, loaded from the same files:
 ;;;; WARNINGS-IN with +KNOWN-WARNINGS+ (compile-warnings.lisp), ERRORS-IN (caught-errors.lisp)
 ;;;; and REDEFINITIONS-IN (redefinitions.lisp). The child's load runs inside
-;;;; CALL-REPORTING-REDEFINITIONS, so a DEFUN in one file that replaces a function defined in
-;;;; another is reported (#577); the files counted are this tree's and the checked system's own.
+;;;; CALL-REPORTING-REDEFINITIONS, so a DEFUN, DEFMACRO, DEFGENERIC or DEFMETHOD in one file that
+;;;; replaces one from another file is reported (#577, #1121); the files counted are this tree's
+;;;; and the checked system's own.
 ;;;; A system passes only if the child exits 0 and all three find nothing.
 ;;;;
 ;;;; COLD FOR THIS TREE, EVERY RUN. The fasls of this tree's files, and of the checked system's
@@ -56,6 +57,23 @@
 (load (merge-pathnames "platform-packages.lisp" *scripts*))   ; which OS owns a system (#283)
 
 (defparameter *root* (tree-root:resolve-or-die *script* "check-compile"))
+
+(defparameter *tree-packages* (ouranos-compile-warnings:tree-packages *root*)
+  "Every package a .lisp file in this tree defines, for WARNINGS-IN (#1076).")
+
+(defun checked-packages (name)
+  "The packages in which an undefined function fails system NAME: this tree's, and those the
+checked system's own directory defines when it lies outside the tree, as the controls in
+cons/tests do. The same two places SCRIPTS/REDEFINITIONS.LISP counts as the checked code.
+An .asd this image cannot load, which the child has already reported as a failure, gives
+this tree's packages alone, so the error is not raised a second time here, where it would
+end the run before the system's FAIL line and the systems after it (review of #1078)."
+  (let* ((system (ignore-errors (asdf:find-system name nil)))
+         (dir (and system (asdf:system-source-directory system))))
+    (if (and dir (not (uiop:subpathp dir *root*)))
+        (union *tree-packages* (ouranos-compile-warnings:tree-packages dir) :test #'string=)
+        *tree-packages*)))
+
 (defparameter *quicklisp* (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))
 
 (defun die (fmt &rest args)
@@ -165,7 +183,7 @@
                                                 (remove-if (lambda (e) (uiop:string-prefix-p "CL_SOURCE_REGISTRY=" e))
                                                            (sb-ext:posix-environ))))))
          (text (get-output-stream-string out))
-         (warned (ouranos-compile-warnings:warnings-in text))
+         (warned (ouranos-compile-warnings:warnings-in text (checked-packages name)))
          (errors (ouranos-caught-errors:errors-in text))
          (redefined (ouranos-redefinitions:redefinitions-in text))
          (seconds (/ (- (get-internal-real-time) start) internal-time-units-per-second))
@@ -182,13 +200,14 @@
     (when warned
       ;; No count: WARNINGS-IN returns each warning with the lines around it, and two warnings
       ;; close together share lines, so counting markers here would count some twice.
-      (push "caught WARNINGs the gate fails on (as WARNINGS-IN reports them):" lines)
+      (push "warnings the gate fails on (as WARNINGS-IN reports them):" lines)
       (dolist (l warned) (push (format nil "  | ~A" (string-right-trim '(#\Return) l)) lines)))
     (when errors
       (push (format nil "~D caught ERROR~:P:" (length errors)) lines)
       (dolist (e errors) (dolist (l e) (push (format nil "  | ~A" l) lines))))
     (when redefined
-      (push (format nil "~D function~:P defined a second time in another file (#577):" (length redefined))
+      (push (format nil "~D definition~:P replaced by one in another file (#577, #1121):"
+                    (length redefined))
             lines)
       (dolist (r redefined) (push (format nil "  | ~A" r) lines)))
     (values (and (zerop code) (null warned) (null errors) (null redefined)) (nreverse lines) seconds)))

@@ -34,6 +34,10 @@
            #:request-connect-timeout #:request-read-timeout
            #:request-follow-redirects #:request-max-body-bytes
            #:request-connect-address #:request-ca-path
+           ;; a request that must not leave this machine (#1212)
+           #:request-stay-local #:loopback-host-p
+           #:stay-local-refused #:stay-local-refused-url #:stay-local-refused-from
+           #:stay-local-refused-address
            #:response #:make-response #:response-p
            #:response-status #:response-headers #:response-body #:response-bytes
            #:responsep
@@ -42,10 +46,14 @@
            #:add-header #:ensure-2xx
            #:send-request #:header-value
            #:http-error #:http-error-status #:http-error-body #:http-error-label
-           #:http-error-detail
+           #:http-error-detail #:http-error-retry-after #:http-error-phase
+           #:+transient-statuses+ #:+unknown-statuses+ #:status-transience
            ;; fetching a URL a user supplied (#295)
            #:fetch-public #:*fetch-public-max-body-bytes*
            #:address-category #:parse-address #:address-string #:resolve-host
+           ;; The one rule for whether a host may be sent requests in the clear, and the
+           ;; host-from-a-URL reading it takes, shared by hermes core and hermes/blob (#1082).
+           #:local-host-p #:url-host #:proxy-arguments #:credential-url-refusal
            #:response-too-large #:response-too-large-limit
            #:pinned-connect-unsupported
            ;; a pinned connection's certificate, refused by the OS (#536)
@@ -58,4 +66,9 @@
            #:fetch-refused-reason
            #:too-many-redirects #:too-many-redirects-url #:too-many-redirects-limit
            #:fetch-deadline-exceeded #:fetch-deadline-exceeded-url
-           #:fetch-deadline-exceeded-deadline))
+           #:fetch-deadline-exceeded-deadline
+           #:request-deadline-exceeded
+           ;; a response read as it arrives, and cancelling it (#984)
+           #:open-response-stream #:read-event #:*max-event-octets*
+           #:request-cancel #:make-request-cancel #:request-cancel-p
+           #:cancel-request #:request-cancelled-p #:request-cancelled))

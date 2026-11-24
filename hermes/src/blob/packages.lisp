@@ -41,7 +41,23 @@
   (:use #:cl)
   (:local-nicknames (#:k #:hermes/blob-key)
                     (#:clock #:aion/clock)
-                    (#:log #:aion/log))
+                    (#:log #:aion/log)
+                    ;; ADDRESS-CATEGORY and RESOLVE-HOST, to decide whether an endpoint a
+                    ;; plaintext store is aimed at is one only this machine or network can
+                    ;; reach (#970).
+                    ;; LOCAL-HOST-P and URL-HOST too since #1082: the rule for whether an
+                    ;; endpoint may be sent requests in the clear, and the host-from-a-URL
+                    ;; reading it takes, used to be written here and in hermes core both.
+                    (#:http #:aion/http-client))
+  ;; CALL-WITH-APPROVED-LOCAL-HOST is not exported from aion/http-client -- a plaintext request
+  ;; may only skip a proxy on a verdict the framework reached, never on one a caller asserts
+  ;; (#1091) -- so it is imported here by name, which puts this reach into aion's internals in
+  ;; this file rather than in a double colon at the call site (the final review of #1134).
+  (:import-from #:aion/http-client #:call-with-approved-local-host
+                ;; The URL rule itself, shared with hermes core's providers (#1106). It returns a
+                ;; reason rather than signalling, which is what lets this system use it without
+                ;; depending on hermes core for a condition.
+                #:credential-url-refusal)
   (:documentation
    "The neutral blob-store protocol and its backends. Bytes live in object storage; rows
     hold metadata and a storage key, never the bytes. STORE is a class, and PUT-BLOB /

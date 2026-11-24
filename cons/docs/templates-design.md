@@ -149,6 +149,22 @@ saas/
   files/               ; the tree, with substitution markers
 ```
 
+A manifest may also offer **options**, which `cons init` takes as flags. The web template's
+`:options` offers `--db sqlite` and `--db postgres` (#711):
+
+```lisp
+:options ((:db (:sqlite :dependencies ("mnemosyne" ...) :files "options/db/"
+                        :markers (("{{db-dialect}}" . ":sqlite") ...))
+               (:postgres ...)))
+```
+
+A choice's `:dependencies` are added to the template's. Its `:files` directory, beside
+`files/`, is copied after `files/`, and a file there replaces the `files/` file at the same
+path. Its `:markers` are filled before the template's own, so a value may contain `{{name}}`.
+An option the template does not offer, or a choice it does not list, is refused before
+anything is written. `cons template check` builds every template once with no options and
+once for each choice.
+
 A file under `files/` whose name ends in `.tmpl` is written without that suffix. Use it for
 any file a tool would otherwise find inside the template directory. The built-ins ship their
 system definition as `{{name}}.asd.tmpl`, because a file named `{{name}}.asd` is one ASDF

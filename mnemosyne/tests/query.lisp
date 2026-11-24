@@ -18,6 +18,7 @@
                     (#:fld #:mnemosyne/field)
                     (#:fldsh #:mnemosyne/field-shell)
                     (#:mig #:mnemosyne/migrate)
+                    (#:tmpl #:mnemosyne/test-template)
                     (#:der #:mnemosyne/derived))
   (:export #:run-tests))
 

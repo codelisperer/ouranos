@@ -73,6 +73,7 @@
 (require :asdf)
 (load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
 (load (merge-pathnames "fs.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; aion/fs:delete-tree (#347)
+(load (merge-pathnames "built-from.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; the BUILT-FROM stamp (#977)
 
 (defparameter *root*
   (uiop:pathname-parent-directory-pathname
@@ -183,11 +184,17 @@
     code))
 
 (defun which (&rest candidates)
-  "First of CANDIDATES that exists on PATH, or NIL."
+  "First of CANDIDATES that exists on PATH, or NIL.
+
+The probe's standard error is discarded. When `where.exe' finds nothing it writes `INFO: Could
+not find files for the given pattern(s).' to standard error, and that line used to appear in
+every Windows build log between the download and the checksum, where it reads like an error
+(#504). Finding nothing is an ordinary answer here, so nothing about it is printed."
   (loop for c in candidates
         when (ignore-errors
-              (zerop (run (if (uiop:os-windows-p) "where" "which") (list c)
-                          :on-error :return :output nil)))
+              (zerop (nth-value 2 (uiop:run-program
+                                   (list (if (uiop:os-windows-p) "where" "which") c)
+                                   :output nil :error-output nil :ignore-error-status t))))
           return c))
 
 (defun sha256-of (file)
@@ -271,10 +278,25 @@
                        "-C" (namestring (merge-pathnames "src/" *vendor*)))))
     srcdir))
 
+(defun xcode-tools-installed-p ()
+  "Whether the Xcode Command Line Tools (or Xcode) are installed. On macOS /usr/bin/cc exists
+even without them: it is a stub that opens the installer dialog and fails. So finding `cc' on
+PATH says nothing there, and `xcode-select -p', which exits non-zero without opening anything
+when no developer directory is set, is asked instead."
+  (ignore-errors
+   (zerop (nth-value 2 (uiop:run-program (list "xcode-select" "-p")
+                                         :output nil :error-output nil
+                                         :ignore-error-status t)))))
+
+(defun no-cc-error ()
+  "The refusal for a Unix machine with no usable C compiler, naming what to install."
+  (if (eq (platform) :macos)
+      (error "No C compiler: the Xcode Command Line Tools are not installed.~%Install them, then run this again:~%  xcode-select --install~%libuv is what hyperion/server-uv, the default HTTP server, runs on.")
+      (error "No C compiler found (looked for cc, gcc, clang).~%Install one, then run this again:~%  sudo apt install build-essential   |  sudo dnf install gcc   |  sudo pacman -S gcc~%libuv is what hyperion/server-uv, the default HTTP server, runs on.")))
+
 (defun compile-with-cc (srcdir sources defines libs output-name)
   "The Unix toolchains: one gcc-style invocation."
-  (let* ((cc (or (which "cc" "gcc" "clang")
-                 (error "No C compiler found (looked for cc, gcc, clang). aion/uv needs one; the rest of the tree does not.")))
+  (let* ((cc (or (which "cc" "gcc" "clang") (no-cc-error)))
          (libdir (merge-pathnames "lib/" *vendor*))
          (output (merge-pathnames output-name libdir))
          (args (append
@@ -298,7 +320,7 @@
 
 (defun no-msvc-error ()
   "The one copy of the refusal, so the early check and the late one cannot drift apart."
-  (error "No MSVC C++ toolchain found.~%Install the Build Tools (about 2 GB, no IDE):~%  winget install --id Microsoft.VisualStudio.2022.BuildTools --override \"--quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended\"~%aion/uv needs it, and so does building a Windows desktop app, whose launcher is compiled with it (#98).~%MSYS2/MinGW is deliberately NOT used here (ECOSYSTEM decisions log)."))
+  (error "No MSVC C++ toolchain found.~%Install the Build Tools (about 2 GB, no IDE):~%  winget install --id Microsoft.VisualStudio.2022.BuildTools --override \"--quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended\"~%libuv is what hyperion/server-uv, the default HTTP server, runs on, and building a Windows desktop app needs MSVC too, for its launcher (#98).~%MSYS2/MinGW is deliberately NOT used here (ECOSYSTEM decisions log)."))
 
 (defun require-toolchain ()
   "Refuse NOW if this machine cannot compile, BEFORE anything is downloaded (pre-publication issue 128).
@@ -316,8 +338,11 @@ immediately. Measured on a machine with Visual Studio made invisible:
 
 Nothing was wrong with the refusal; it simply arrived after the part that made it a waste
 of the user's time. A prerequisite is a thing to check before you begin."
-  (when (and (eq (toolchain) :msvc) (not (find-msvc)))
-    (no-msvc-error)))
+  (ecase (toolchain)
+    (:msvc (unless (find-msvc) (no-msvc-error)))
+    (:cc (unless (and (which "cc" "gcc" "clang")
+                      (or (not (eq (platform) :macos)) (xcode-tools-installed-p)))
+           (no-cc-error)))))
 
 (defun compile-with-msvc (srcdir sources defines libs output-name)
   "MSVC: the same sources and defines, cl.exe's vocabulary, one invocation.
@@ -443,18 +468,34 @@ and is only on PATH inside the toolchain environment, so it goes through vcvarsa
          (format t "~&libuv.pin is missing version/sha256/url.~%")
          (uiop:quit 1))
        (format t "~&libuv ~A (~A)~%" version (platform))
-       (let ((existing (probe-file (library-path))))
-         (when (and existing (not force))
-           (format t "~&  already built: ~A~%  (--force to rebuild)~%"
-                   (human-path:human-path (library-path)))
-           (uiop:quit 0)))
+       ;; An existing library is reused only when vendor/libuv/BUILT-FROM names this pin's
+       ;; version and sha256. Before, its existence was enough, so after the pin moved a
+       ;; checkout kept the old release and said "already built" (#977).
+       (ecase (ouranos-built-from:build-decision *vendor* (library-path) version sha :force force)
+         (:reuse
+          (format t "~&  already built: ~A~%  (--force to rebuild)~%"
+                  (human-path:human-path (library-path)))
+          (uiop:quit 0))
+         ((:forced :absent))
+         (:stale
+          (format t "~&  the library there was built from another release than libuv.pin's ~A (its BUILT-FROM says otherwise), so it is rebuilt~%"
+                  version))
+         (:missing
+          (format t "~&  the library there has no BUILT-FROM stamp, so which release it came from is unknown; it is rebuilt from libuv.pin's ~A~%"
+                  version)))
        (handler-case
            ;; BEFORE the fetch rather than inside the compile -- see `require-toolchain'.
            (progn
              (require-toolchain)
              (let* ((srcdir (ensure-source version url sha))
-                    (library (compile-library srcdir)))
+                    ;; The old stamp goes just before the compile: a compile that fails after
+                    ;; overwriting the library must not leave a stamp saying the library is
+                    ;; current (#1001). Not before the download, so a --force run that cannot
+                    ;; download leaves a current library and its stamp as they were.
+                    (library (progn (ouranos-built-from:delete-stamp *vendor*)
+                                    (compile-library srcdir))))
                (verify-built library)
+               (ouranos-built-from:write-stamp *vendor* version sha)
                (format t "~&OK. aion/uv will load this in preference to any system libuv.~%")
                (uiop:quit 0)))
          (error (e)

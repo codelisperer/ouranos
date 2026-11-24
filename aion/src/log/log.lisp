@@ -51,8 +51,10 @@ This is the decode point. JSON has four scalar shapes and CL has thousands of ty
 something has to choose -- and choosing here, once per field, is what lets the renderer be
 total. A real number and a boolean become JSON literals; everything else becomes a string,
 including symbols and keywords (downcased, as before) and any object at all via its printed
-representation. The result is opaque to this file: built by Coalton, handed straight back
-to it, never inspected."
+representation, except a condition, which becomes its type (CONDITION-TYPE), never its report.
+That rule is kept here so that it does not depend on every caller remembering it: a report can
+quote outside data (#1013). The result is opaque to this file: built by Coalton, handed
+straight back to it, never inspected."
   (let ((k (%name key)))
     (typecase value
       (null    (types:mk-field-raw k "false"))
@@ -67,6 +69,7 @@ to it, never inspected."
                      (types:mk-field-string k (princ-to-string value)))))
       (string  (types:mk-field-string k value))
       (symbol  (types:mk-field-string k (string-downcase (symbol-name value))))
+      (condition (types:mk-field-string k (condition-type value)))
       (t       (types:mk-field-string k (princ-to-string value))))))
 
 (defun %fields (extra)
@@ -133,24 +136,79 @@ list's elements, so the list is checked here (#110)."
 
 ;;; --- errors with backtraces -----------------------------------------------
 
-(defun %backtrace-string (condition)
-  "CONDITION's type + report, plus a backtrace where the implementation offers one."
+(defvar *log-condition-details* nil
+  "When true, EXCEPTION also writes the condition's report, as `error`, and a backtrace with
+each frame's arguments. NIL by default, and nothing sets it: an app turns it on for a
+development run, and the DEBUG level does not imply it (#1013).
+
+It is off because both can hold outside data. A database driver's report can quote row values,
+and a frame's printed arguments can hold a request body, so with them on, an unhandled error
+can put an app's client data in its log, which AGENTS.md and docs/logging.md forbid: log counts,
+ids and durations, never payloads.")
+
+(defparameter +backtrace-frames+ 40 "The most frames EXCEPTION's backtrace holds.")
+
+(defun %qualified-name (symbol)
+  "SYMBOL as PACKAGE::NAME, or its name alone when it has no package."
+  (let ((package (symbol-package symbol)))
+    (if package
+        (format nil "~A::~A" (package-name package) (symbol-name symbol))
+        (symbol-name symbol))))
+
+(defun condition-type (condition)
+  "CONDITION's type, fully qualified, such as \"SB-INT::SIMPLE-PROGRAM-ERROR\": what a log line
+records about a condition in place of its report, which can quote outside data (#1013).
+
+    (log:warn \"the call failed\" :condition (log:condition-type e))"
+  (%qualified-name (class-name (class-of condition))))
+
+(defun %frame-names ()
+  "The names of the innermost +BACKTRACE-FRAMES+ frames, one per line, with no arguments: the
+name of each frame's function, which comes from the code, never from the values it was called
+with."
+  (handler-case
+      (with-output-to-string (s)
+        #+sbcl
+        (let ((*package* (find-package '#:keyword))
+              (*print-length* 8) (*print-level* 4) (*print-readably* nil))
+          (sb-debug:map-backtrace
+           (lambda (frame)
+             (prin1 (sb-di:debug-fun-name (sb-di:frame-debug-fun frame)) s)
+             (terpri s))
+           :count +backtrace-frames+)))
+    ;; cl:error -- `error` is shadowed in this package (it's our log macro)
+    (cl:error () "")))
+
+(defun %backtrace-with-arguments (condition)
+  "CONDITION's type and report, then a backtrace that prints each frame's arguments. Written only
+under *LOG-CONDITION-DETAILS*."
   (handler-case
       (with-output-to-string (s)
         (format s "~A: ~A" (type-of condition) condition)
-        #+sbcl (progn (terpri s) (sb-debug:print-backtrace :stream s :count 40)))
-    ;; cl:error -- `error` is shadowed in this package (it's our log macro)
+        #+sbcl (progn (terpri s) (sb-debug:print-backtrace :stream s :count +backtrace-frames+)))
     (cl:error () (princ-to-string condition))))
 
+(defun %exception-fields (condition)
+  "The fields EXCEPTION adds for CONDITION: `error-type` and a backtrace of frame names, and,
+only under *LOG-CONDITION-DETAILS*, `error`, the report, with the backtrace's frame arguments."
+  (if *log-condition-details*
+      (list :error-type (condition-type condition)
+            :error (handler-case (princ-to-string condition)
+                     (cl:error () "(the condition's report could not be printed)"))
+            :backtrace (%backtrace-with-arguments condition))
+      (list :error-type (condition-type condition)
+            :backtrace (%frame-names))))
+
 (defmacro exception (condition &optional (message "unhandled condition") &rest fields)
-  "Log CONDITION at ERROR with MESSAGE, structured FIELDS, and two derived fields: `error`
-(the condition's report) and `backtrace` (a captured backtrace). Pass a live condition."
+  "Log CONDITION at ERROR with MESSAGE, structured FIELDS, and fields derived from CONDITION:
+`error-type`, its fully qualified type name, and `backtrace`, the names of up to 40 frames with
+no arguments. The condition's report is not written, because it can quote outside data; with
+*LOG-CONDITION-DETAILS* true, a development setting that is off by default, `error`, the report,
+is written too, and the backtrace prints each frame's arguments (#1013). Pass a live condition."
   (let ((cat (package-name *package*))
         (c (gensym "COND")))
     `(let* ((,c ,condition)
-            (*context* (list* :error     (princ-to-string ,c)
-                              :backtrace  (%backtrace-string ,c)
-                              *context*)))
+            (*context* (append (%exception-fields ,c) *context*)))
        (lm:error "~A" (render :error ,cat ,message (list ,@fields))))))
 
 ;;; --- configuration --------------------------------------------------------

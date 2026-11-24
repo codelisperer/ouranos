@@ -32,7 +32,7 @@
   ()
   (:report (lambda (c s)
              (format s "refusing to delete ~A: it is a link, not a directory tree, and deleting through it would remove what it points to"
-                     (uiop:native-namestring (file-error-pathname c)))))
+                     (%native (file-error-pathname c)))))
   (:documentation "Signalled by DELETE-TREE when the root it was given is a junction, reparse point
 or symbolic link."))
 
@@ -42,16 +42,18 @@ or symbolic link."))
   (:report (lambda (c s)
              (format s "delete-tree: ~A of ~A failed (error ~A)"
                      (delete-tree-error-operation c)
-                     (uiop:native-namestring (file-error-pathname c))
+                     (%native (file-error-pathname c))
                      (delete-tree-error-code c))))
   (:documentation "An entry DELETE-TREE could not remove. The tree is left partly removed."))
 
 (defun %native (path)
-  "PATH's native namestring without a trailing separator, which Windows and POSIX both need to
-name a directory, or a link to one, as the entry itself. A string is taken as a native path
-already and not parsed: parsing turns [ ] * ? into wildcard syntax, and a file named
-`a[1].txt' would then name nothing (#349)."
-  (string-right-trim "/\\" (if (stringp path) path (uiop:native-namestring path))))
+  "PATH's native name without a trailing separator, which Windows and POSIX both need to name a
+directory, or a link to one, as the entry itself. The name is AION/PATH:NATIVE-NAME's: a string
+is used as written, so [ ] * ? and, on Linux and macOS, a backslash are ordinary characters in it
+(#349, #1096). Only a separator is trimmed: / and \\ on Windows, / alone on Linux and macOS,
+where \\ is an ordinary character and a name may end in it. Trimming it there turned b\\ into b,
+another folder (the hub's review of #1101)."
+  (string-right-trim (path:separators) (path:native-name path)))
 
 ;;; --- asking the operating system -------------------------------------------------------
 
@@ -196,10 +198,12 @@ is still listed, as a subdirectory."
 
 #-win32
 (defun %entries (directory)
-  "Every entry in DIRECTORY, which is known not to be a link, as file pathnames; %DELETE-ENTRY
+  "Every entry in DIRECTORY, which is known not to be a link, as native strings; %DELETE-ENTRY
 asks %KIND what each one is. Read with readdir, because UIOP:DIRECTORY-FILES and CL:DIRECTORY
 both leave out a symbolic link whose target does not exist, and the RMDIR that follows then fails
-because the directory is not empty (measured on SBCL 2.6.8, Linux)."
+because the directory is not empty (measured on SBCL 2.6.8, Linux). Each entry stays a native
+string from here on: a name with [ ] * ? or a backslash, turned into a pathname and back, named
+another file or none (#1096)."
   (let ((dir (sb-posix:opendir (%native directory)))
         (entries '()))
     (unwind-protect
@@ -207,7 +211,7 @@ because the directory is not empty (measured on SBCL 2.6.8, Linux)."
                until (sb-alien:null-alien entry)
                do (let ((name (sb-posix:dirent-name entry)))
                     (unless (member name '("." "..") :test #'string=)
-                      (push (merge-pathnames (uiop:parse-native-namestring name) directory)
+                      (push (concatenate 'string (%native directory) "/" name)
                             entries))))
       (sb-posix:closedir dir))
     entries))
@@ -219,24 +223,36 @@ because the directory is not empty (measured on SBCL 2.6.8, Linux)."
     (:link-file (%remove-file path))               ; a file link, or any POSIX symbolic link
     (:file (%remove-file path))
     (:directory
-     (let ((dir (uiop:ensure-directory-pathname path)))
+     (let ((dir (if (stringp path) path (path:directory-pathname path))))
        (dolist (entry (%entries dir)) (%delete-entry entry))
        (%remove-directory dir)))))
+
+(defun %check-root (root)
+  "Signal an error unless ROOT, a directory pathname, is absolute, is not a filesystem root, and
+has no . or .. in it. A .. can name a filesystem root, as /.. does, and after a symbolic link it
+names the parent of the link's target, not of the link (the hub's review of #1101)."
+  (let ((components (rest (pathname-directory root))))
+    (unless (and (uiop:absolute-pathname-p root)
+                 components
+                 (notany (lambda (c) (member c '(:up :back "." "..") :test #'equal)) components))
+      (error "delete-tree: ~A must be an absolute directory that is not a filesystem root and has no . or .. in it"
+             (uiop:native-namestring root)))))
 
 (defun delete-tree (root &key (if-does-not-exist :error))
   "Delete the directory ROOT and everything in it, without following a link out of it.
 
 A link inside the tree -- a Windows junction or other reparse point, or a symbolic link -- is
 removed as a link, and nothing it points to is touched. A ROOT that is itself a link signals
-LINK-ROOT-REFUSED and deletes nothing. ROOT must be an absolute directory pathname that is not a
-filesystem root. IF-DOES-NOT-EXIST is :ERROR (the default) or :IGNORE.
+LINK-ROOT-REFUSED and deletes nothing. ROOT must be an absolute directory that is not a
+filesystem root and has no . or .. in it, given as a pathname or as a native string; a string
+is not parsed as a Lisp
+namestring, so [ ] * ? and, on Linux and macOS, a backslash are ordinary characters in it.
+IF-DOES-NOT-EXIST is :ERROR (the default) or :IGNORE.
 
 An entry that cannot be removed signals DELETE-TREE-ERROR, and the tree is left partly removed.
 Returns T when it removed the tree, NIL when ROOT did not exist and that was allowed."
-  (let ((root (uiop:ensure-directory-pathname root)))
-    (unless (and (uiop:absolute-pathname-p root)
-                 (rest (pathname-directory root)))
-      (error "delete-tree: ~A must be an absolute directory that is not a filesystem root" root))
+  (let ((root (path:directory-pathname root)))
+    (%check-root root)
     (ecase (%kind root)
       (:missing
        (ecase if-does-not-exist

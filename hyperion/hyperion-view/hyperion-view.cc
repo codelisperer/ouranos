@@ -17,18 +17,25 @@
 #include <cerrno>
 #include <climits>
 #include <cstdio>
+#include <chrono>
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
 #include <string>
+#include <thread>
 #include <vector>
 #include "webview.h"
 #include "window-placement.h"
+#include "dialog-request.h"
 
 #if defined(_WIN32)
 #include <windows.h>
 #include <shellapi.h>  // CommandLineToArgvW; webview.h includes windows.h in lean mode, without it
+#include <bcrypt.h>    // BCryptGenRandom, for the dialog binding's token (#986)
+#include <shobjidl.h>  // IFileOpenDialog, IFileSaveDialog (#986)
 #elif defined(__APPLE__)
+#include <dlfcn.h>
 #include <objc/objc-runtime.h>
 #else
 #include <gtk/gtk.h>
@@ -398,13 +405,13 @@ static bool place_window(webview_t w, int width, int height, std::FILE *report =
 //
 // --placement-file PATH puts the window back where it was last time, and keeps PATH up to date
 // while it is open. The line's format and the rule for when a saved rectangle is used are in
-// window-placement.h. Windows only for now: on macOS and Linux the option is accepted and does
-// nothing.
+// window-placement.h. Windows and macOS: on Linux the option is accepted and does nothing.
 //
 // The file is written when a move or resize made by dragging ends, when the window is
 // maximised or restored, and when it is closed, not only at the end: hyperion/desktop:run-app
-// ends this process with TerminateProcess when the app closes the window itself, and a save left
-// for the end would then never happen. A move made without dragging and without a change of
+// ends this process with TerminateProcess (on macOS, SIGKILL) when the app closes the window
+// itself, and a save left for the end would then never happen. On macOS the same events are
+// the window's notifications, and a move is saved when it is made (see watch_placement there). A move made without dragging and without a change of
 // size, such as Win+Shift+Arrow between two monitors at the same scaling, or a move made by
 // another program, is saved at the next of those, or not at all if the process is ended first. Each write goes to PATH.tmp and is renamed over PATH, so a process ended
 // part-way through leaves the previous line, not half of a new one.
@@ -466,27 +473,18 @@ static bool load_saved_placement(const char *path, saved_placement *out, const c
   return true;
 }
 
-#if defined(_WIN32)
-static std::wstring g_placement_path;
+#if defined(_WIN32) || defined(__APPLE__)
 static std::string g_placement_path_utf8;
 // A save that fails is reported on stderr once per run, so an app that asked for the placement
 // to be kept learns that it is not, without a line for every move (review of #521).
 static bool g_save_failure_reported = false;
-// The window's rectangle when it was last neither maximised nor minimised: what is saved while
-// it is maximised, so that restoring it un-maximises to the right place.
-static RECT g_normal_rect;
-static bool g_have_normal_rect = false;
-static bool g_in_size_move = false;
 // How many times the file has been written in this run. --exercise-placement prints it, so the
 // test can tell a move saved once, at the end of the move loop, from one saved on every WM_SIZE
-// inside it (review of #521).
+// inside it (review of #521). On macOS, at the end of a live resize rather than on every resize.
 static int g_save_count = 0;
-static WNDPROC g_previous_window_proc = nullptr;
-
-static void set_placement_path(const char *path) {
-  g_placement_path_utf8 = path;
-  if (!widen_utf8(path, &g_placement_path)) g_placement_path.clear();
-}
+// True from the start of a move or resize made by dragging to its end: WM_ENTERSIZEMOVE to
+// WM_EXITSIZEMOVE on Windows, NSWindowWillStartLiveResize to NSWindowDidEndLiveResize on macOS.
+static bool g_in_size_move = false;
 
 static bool save_failed(const char *step) {
   if (!g_save_failure_reported) {
@@ -496,6 +494,27 @@ static bool save_failed(const char *step) {
     std::fflush(stderr);
   }
   return false;
+}
+
+// Print STEP and the placement file's line, without its newline.
+static void print_placement_file(const char *step) {
+  std::string text = read_small_file(g_placement_path_utf8.c_str());
+  while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
+  std::printf("%s %s\n", step, text.c_str());
+}
+#endif
+
+#if defined(_WIN32)
+static std::wstring g_placement_path;
+// The window's rectangle when it was last neither maximised nor minimised: what is saved while
+// it is maximised, so that restoring it un-maximises to the right place.
+static RECT g_normal_rect;
+static bool g_have_normal_rect = false;
+static WNDPROC g_previous_window_proc = nullptr;
+
+static void set_placement_path(const char *path) {
+  g_placement_path_utf8 = path;
+  if (!widen_utf8(path, &g_placement_path)) g_placement_path.clear();
 }
 
 // Write where HWND is to the placement file. False when there is no file, the window is
@@ -689,13 +708,6 @@ static bool restore_placement(webview_t w, const char *path, std::FILE *report, 
   return true;
 }
 
-// Print STEP and the placement file's line, without its newline.
-static void print_placement_file(const char *step) {
-  std::string text = read_small_file(g_placement_path_utf8.c_str());
-  while (!text.empty() && (text.back() == '\n' || text.back() == '\r')) text.pop_back();
-  std::printf("%s %s\n", step, text.c_str());
-}
-
 // --exercise-placement: what a launch does with a placement file, on the window W, with the
 // window procedure that saves it, driven through a move, a maximise, a restore, a minimise and a
 // close, printing the file after each. For the CI-only test: until this mode, the saves made
@@ -750,11 +762,611 @@ static int exercise_placement(webview_t w, const char *path) {
 }
 #endif
 
+#if defined(__APPLE__)
+// --- the last placement on macOS (#485) ------------------------------------------------
+//
+// The saved frame is the window's frame in points, in Cocoa's global coordinates, and it is put
+// back with restore_into_screens (window-placement.h): on the screen whose visible frame it
+// overlaps most, shrunk and moved into that visible frame. NSWindow's own frame autosave is not
+// used: it keeps the frame in the user defaults of the running executable, which every
+// Hyperion desktop app shares, it does not shrink a window to the visible frame, and it does not
+// keep the zoomed state.
+
+// NSWindowStyleMaskFullScreen, spelled out for the reason given for kCmd above.
+static const unsigned long kFullScreenMask = 1UL << 14;
+
+// The window's frame when it was last saved while neither zoomed, miniaturised nor in full
+// screen: what is saved while it is zoomed, so that unzooming after a restore goes back there.
+static CGRect g_normal_frame;
+static bool g_have_normal_frame = false;
+
+static bool msg_bool(id object, const char *selector) {
+  return reinterpret_cast<BOOL (*)(id, SEL)>(objc_msgSend)(object, sel_registerName(selector));
+}
+
+static id msg_id(id object, const char *selector) {
+  return reinterpret_cast<id (*)(id, SEL)>(objc_msgSend)(object, sel_registerName(selector));
+}
+
+static void set_frame(id window, CGRect frame) {
+  reinterpret_cast<void (*)(id, SEL, CGRect, BOOL)>(objc_msgSend)(
+      window, sel_registerName("setFrame:display:"), frame, YES);
+}
+
+// A miniaturised window's frame is where it was before, but a full-screen window's is the whole
+// screen, and saving either would be saving a state the user did not arrange.
+static bool frame_saveable(id window) {
+  unsigned long mask = reinterpret_cast<unsigned long (*)(id, SEL)>(objc_msgSend)(
+      window, sel_registerName("styleMask"));
+  return !msg_bool(window, "isMiniaturized") && (mask & kFullScreenMask) == 0;
+}
+
+static saved_placement saved_from_frame(CGRect r, bool zoomed) {
+  long left = std::lround(r.origin.x), bottom = std::lround(r.origin.y);
+  return {left, bottom, left + std::lround(r.size.width), bottom + std::lround(r.size.height),
+          zoomed};
+}
+
+static void set_placement_path(const char *path) { g_placement_path_utf8 = path; }
+
+// Write where WINDOW is to the placement file. False when there is no file, the window is
+// miniaturised or in full screen, or the write failed. The line goes to PATH.tmp, which is
+// renamed over PATH.
+static bool save_placement(id window) {
+  if (g_placement_path_utf8.empty() || !frame_saveable(window)) return false;
+  bool zoomed = msg_bool(window, "isZoomed");
+  // A window that opens filling the visible frame, as place_window makes one larger than the
+  // screen, counts as zoomed to AppKit without having been zoomed. Until a frame has been
+  // recorded, the current one is the window's normal frame, and it is saved as not zoomed.
+  if (!zoomed || !g_have_normal_frame) {
+    g_normal_frame = rect_of(window, "frame");
+    g_have_normal_frame = true;
+    zoomed = false;
+  }
+  char line[128];
+  int n = format_saved_placement(saved_from_frame(g_normal_frame, zoomed), line, sizeof line);
+  if (n <= 0 || n >= static_cast<int>(sizeof line)) return save_failed("format");
+  std::string tmp = g_placement_path_utf8 + ".tmp";
+  std::FILE *f = std::fopen(tmp.c_str(), "wb");
+  if (f == nullptr) return save_failed("opening the temporary file");
+  bool ok = std::fwrite(line, 1, static_cast<size_t>(n), f) == static_cast<size_t>(n);
+  ok = (std::fclose(f) == 0) && ok;
+  if (!ok) {
+    std::remove(tmp.c_str());
+    return save_failed("writing the temporary file");
+  }
+  if (std::rename(tmp.c_str(), g_placement_path_utf8.c_str()) != 0) {
+    std::remove(tmp.c_str());
+    return save_failed("replacing the file");
+  }
+  g_save_count++;
+  return true;
+}
+
+// The observer's methods: each notification's object is the window.
+static void on_moved_or_resized(id, SEL, id note) {
+  if (!g_in_size_move) save_placement(msg_id(note, "object"));
+}
+static void on_live_resize_started(id, SEL, id) { g_in_size_move = true; }
+static void on_live_resize_ended(id, SEL, id note) {
+  g_in_size_move = false;
+  save_placement(msg_id(note, "object"));
+}
+static void on_will_close(id, SEL, id note) { save_placement(msg_id(note, "object")); }
+
+// The notification called NAME. AppKit exports each name as a constant of that name, whose value
+// has so far always been the same string; the constant is read when it can be.
+static id notification_name(const char *name) {
+  void *symbol = dlsym(RTLD_DEFAULT, name);
+  if (symbol != nullptr && *static_cast<id *>(symbol) != nullptr) return *static_cast<id *>(symbol);
+  return ns_string(name);
+}
+
+// Keep PATH up to date while the window of W is open. An observer class made at run time, as
+// webview.h makes its delegates, is told when the window moves, starts and ends a live resize,
+// is resized (which covers zoom: and unzooming), and closes. A resize made by dragging is saved
+// once, when it ends; so is a move made while resizing from the left or bottom edge. A move made
+// by dragging the title bar is saved as macOS reports it, which may be more than once per drag.
+static void watch_placement(webview_t w, const char *path) {
+  id window = static_cast<id>(webview_get_window(w));
+  if (window == nullptr) return;
+  set_placement_path(path);
+  if (!g_have_normal_frame && !msg_bool(window, "isZoomed") && frame_saveable(window)) {
+    g_normal_frame = rect_of(window, "frame");
+    g_have_normal_frame = true;
+  }
+  Class cls = objc_getClass("HyperionPlacementObserver");
+  if (cls == nullptr) {
+    cls = objc_allocateClassPair(objc_getClass("NSObject"), "HyperionPlacementObserver", 0);
+    class_addMethod(cls, sel_registerName("movedOrResized:"),
+                    reinterpret_cast<IMP>(on_moved_or_resized), "v@:@");
+    class_addMethod(cls, sel_registerName("liveResizeStarted:"),
+                    reinterpret_cast<IMP>(on_live_resize_started), "v@:@");
+    class_addMethod(cls, sel_registerName("liveResizeEnded:"),
+                    reinterpret_cast<IMP>(on_live_resize_ended), "v@:@");
+    class_addMethod(cls, sel_registerName("willClose:"), reinterpret_cast<IMP>(on_will_close),
+                    "v@:@");
+    objc_registerClassPair(cls);
+  }
+  id observer = msg_id(msg_id(reinterpret_cast<id>(cls), "alloc"), "init");
+  id center = msg_id(reinterpret_cast<id>(objc_getClass("NSNotificationCenter")), "defaultCenter");
+  auto observe = [center, observer, window](const char *selector, const char *name) {
+    reinterpret_cast<void (*)(id, SEL, id, SEL, id, id)>(objc_msgSend)(
+        center, sel_registerName("addObserver:selector:name:object:"), observer,
+        sel_registerName(selector), notification_name(name), window);
+  };
+  observe("movedOrResized:", "NSWindowDidMoveNotification");
+  observe("movedOrResized:", "NSWindowDidResizeNotification");
+  observe("liveResizeStarted:", "NSWindowWillStartLiveResizeNotification");
+  observe("liveResizeEnded:", "NSWindowDidEndLiveResizeNotification");
+  observe("willClose:", "NSWindowWillCloseNotification");
+}
+
+// Put the window of W where the file at PATH says, clamped into the visible frame of the screen
+// that frame overlaps most. False when it was not used, and the caller places the window
+// instead. With REPORT, one line is printed there: "restored L B R T ZOOMED window L B R T", or
+// "restore-ignored REASON". ZOOM false leaves a saved zoomed window unzoomed.
+static bool restore_placement(webview_t w, const char *path, std::FILE *report, bool zoom) {
+  auto ignored = [report](const char *why) {
+    if (report != nullptr) std::fprintf(report, "restore-ignored %s\n", why);
+    return false;
+  };
+  id window = static_cast<id>(webview_get_window(w));
+  if (window == nullptr) return ignored("webview_get_window");
+  saved_placement p;
+  const char *reason = nullptr;
+  if (!load_saved_placement(path, &p, &reason)) return ignored(reason);
+  id screens = msg_id(reinterpret_cast<id>(objc_getClass("NSScreen")), "screens");
+  unsigned long count = screens == nullptr
+                            ? 0
+                            : reinterpret_cast<unsigned long (*)(id, SEL)>(objc_msgSend)(
+                                  screens, sel_registerName("count"));
+  std::vector<span_rect> areas;
+  for (unsigned long i = 0; i < count && areas.size() < static_cast<size_t>(kMaxScreens); i++) {
+    id screen = reinterpret_cast<id (*)(id, SEL, unsigned long)>(objc_msgSend)(
+        screens, sel_registerName("objectAtIndex:"), i);
+    CGRect v = rect_of(screen, "visibleFrame");
+    span_rect a = {std::lround(v.origin.x), std::lround(v.origin.y),
+                   std::lround(v.origin.x + v.size.width), std::lround(v.origin.y + v.size.height)};
+    // A screen past the range the arithmetic is defined for is left out, as no display is there.
+    if (a.x0 < -kMaxCoordinate || a.y0 < -kMaxCoordinate || a.x1 > kMaxCoordinate ||
+        a.y1 > kMaxCoordinate)
+      continue;
+    areas.push_back(a);
+  }
+  clamped_placement c = restore_into_screens(p, areas.data(), static_cast<int>(areas.size()));
+  if (c.ignored != nullptr) return ignored(c.ignored);
+  CGRect frame = CGRectMake(c.x0, c.y0, c.x1 - c.x0, c.y1 - c.y0);
+  set_frame(window, frame);
+  g_normal_frame = frame;
+  g_have_normal_frame = true;
+  if (p.maximized && zoom && !msg_bool(window, "isZoomed"))
+    reinterpret_cast<void (*)(id, SEL, id)>(objc_msgSend)(window, sel_registerName("zoom:"),
+                                                          nullptr);
+  if (report != nullptr) {
+    CGRect placed = rect_of(window, "frame");
+    long left = std::lround(placed.origin.x), bottom = std::lround(placed.origin.y);
+    std::fprintf(report, "restored %ld %ld %ld %ld %d window %ld %ld %ld %ld\n", c.x0, c.y0,
+                 c.x1, c.y1, p.maximized ? 1 : 0, left, bottom,
+                 left + std::lround(placed.size.width), bottom + std::lround(placed.size.height));
+  }
+  return true;
+}
+
+// --exercise-placement on macOS: what a launch does with a placement file, then a resize made
+// as a drag makes it (the live-resize notifications are posted here, around two frame changes),
+// a zoom, an unzoom and a close, printing the file after each. For the GitHub-only test.
+static int exercise_placement(webview_t w, const char *path) {
+  id window = static_cast<id>(webview_get_window(w));
+  if (window == nullptr) {
+    std::printf("placement-failed webview_get_window\n");
+    return 1;
+  }
+  if (!restore_placement(w, path, stdout, true)) place_window(w, 800, 600);
+  watch_placement(w, path);
+  std::printf("start-zoomed %d\n", msg_bool(window, "isZoomed") ? 1 : 0);
+  if (msg_bool(window, "isZoomed")) {
+    std::fflush(stdout);
+    return 0;
+  }
+  CGRect r = rect_of(window, "frame");
+  id center = msg_id(reinterpret_cast<id>(objc_getClass("NSNotificationCenter")), "defaultCenter");
+  auto post = [center, window](const char *name) {
+    reinterpret_cast<void (*)(id, SEL, id, id)>(objc_msgSend)(
+        center, sel_registerName("postNotificationName:object:"), notification_name(name),
+        window);
+  };
+  int saves_before_move = g_save_count;
+  post("NSWindowWillStartLiveResizeNotification");
+  set_frame(window, CGRectMake(r.origin.x + 20, r.origin.y + 15, r.size.width - 10,
+                               r.size.height - 5));
+  set_frame(window, CGRectMake(r.origin.x + 40, r.origin.y + 30, r.size.width - 20,
+                               r.size.height - 10));
+  post("NSWindowDidEndLiveResizeNotification");
+  std::printf("move-saves %d\n", g_save_count - saves_before_move);
+  CGRect moved = rect_of(window, "frame");
+  long left = std::lround(moved.origin.x), bottom = std::lround(moved.origin.y);
+  std::printf("moved %ld %ld %ld %ld\n", left, bottom, left + std::lround(moved.size.width),
+              bottom + std::lround(moved.size.height));
+  print_placement_file("after-move");
+  reinterpret_cast<void (*)(id, SEL, id)>(objc_msgSend)(window, sel_registerName("zoom:"),
+                                                        nullptr);
+  std::printf("zoomed %d\n", msg_bool(window, "isZoomed") ? 1 : 0);
+  print_placement_file("after-maximize");
+  reinterpret_cast<void (*)(id, SEL, id)>(objc_msgSend)(window, sel_registerName("zoom:"),
+                                                        nullptr);
+  print_placement_file("after-restore");
+  // webview.h's delegate stops the application when its window closes, so W is not used after
+  // this.
+  reinterpret_cast<void (*)(id, SEL)>(objc_msgSend)(window, sel_registerName("close"));
+  print_placement_file("after-close");
+  std::fflush(stdout);
+  return 0;
+}
+#endif
+
+// --- native file dialogs (#986) --------------------------------------------
+//
+// With --dialogs, the app's page gets window.hyperionDialog(request), which shows a native open,
+// save-as or folder dialog owned by this window and resolves to {path}, {paths}, {cancelled} or
+// {error}. The page then sends the path to the app's own route.
+//
+// THE GATE, so a page on another origin cannot ask for a path from the user's machine or receive
+// one:
+// - The binding exists only in the top-level frame while it shows the app's own origin. The
+//   script below runs at the start of every document, deletes the raw binding webview.h defines
+//   everywhere, and defines hyperionDialog only when location.origin is the origin of the URL
+//   this view was started with. Any other origin, and any iframe, has neither. A URL with a user
+//   name or with its scheme's default port written out (http://h:80/) never matches
+//   location.origin, so the page there gets no function.
+// - The per-launch TOKEN is held only in that function's closure, and the native side refuses a
+//   call without it (PARSE-DIALOG-REQUEST), so a script that reaches window.external.invoke
+//   directly cannot open a dialog.
+// - A call made outside a user action is refused, through navigator.userActivation, whose getter
+//   is taken at document start so a page cannot replace it. WebView2 (Windows) and WebKit on macOS
+//   13.3 and later have it; where a WebKitGTK does not, only the origin rule and "busy" apply.
+// - THE REPLY GOES ONLY TO THE APP'S ORIGIN. webview.h's own reply (webview_return) runs
+//   window._rpc[seq].resolve in whatever document is on top when it is sent, so a page on another
+//   origin, navigated to while the dialog was open, could define window._rpc and receive the path.
+//   So the page's call carries an id, and every answer is sent by DIALOG_REPLY: a script that does
+//   nothing unless location.origin is still the app's, and then hands the answer to the function
+//   the guard defined for that id. webview_return is never called for this binding.
+// - One dialog at a time: a call while one is open is answered {"error": "busy"}.
+//
+// Every answer is sent with webview_eval, which on Windows calls ExecuteScript directly, and the
+// dialog itself is started by a message posted to the window. Nothing here uses webview.h's
+// dispatch, which posts a thread message: a modal loop, the dialog's own or the one Windows runs
+// while the window is moved or resized, discards thread messages, so a job or an answer sent that
+// way can be lost and leave "busy" set for good.
+//
+// HYPERION_VIEW_FAKE_DIALOG=1 is for the CI-only window tests. It skips the user-action check and
+// answers {"path":"fake-path"} three seconds after a call, from a window timer, without showing a
+// dialog, so a test can see "busy" and where the answer goes. It is honoured only when
+// GITHUB_ACTIONS is set too, and says so on stderr.
+//
+// Only Windows shows a dialog in this step. macOS and Linux answer {"error": "unavailable"} after
+// the same checks, and their dialogs follow in their own lanes' changes.
+
+static std::string g_dialog_token;
+static std::string g_app_origin;
+static bool g_fake_dialog = false;
+#if defined(_WIN32)
+static bool g_dialog_busy = false;  // only Windows shows a dialog in this change
+#endif
+
+// The origin of URL, as location.origin writes it: the scheme, "://", and the host with its port,
+// in lower case. "" when URL has no scheme.
+static std::string url_origin(const char *url) {
+  std::string u(url);
+  size_t scheme_end = u.find("://");
+  if (scheme_end == std::string::npos) return "";
+  size_t host_end = u.find_first_of("/?#", scheme_end + 3);
+  std::string origin = u.substr(0, host_end == std::string::npos ? u.size() : host_end);
+  for (char &c : origin)
+    if (c >= 'A' && c <= 'Z') c = static_cast<char>(c - 'A' + 'a');
+  return origin;
+}
+
+// 32 hexadecimal characters from the OS's random source, or "" when it cannot give them.
+static std::string random_token() {
+  unsigned char bytes[16];
+#if defined(_WIN32)
+  if (BCryptGenRandom(nullptr, bytes, sizeof bytes, BCRYPT_USE_SYSTEM_PREFERRED_RNG) != 0)
+    return "";
+#else
+  std::FILE *f = std::fopen("/dev/urandom", "rb");
+  if (f == nullptr) return "";
+  size_t got = std::fread(bytes, 1, sizeof bytes, f);
+  std::fclose(f);
+  if (got != sizeof bytes) return "";
+#endif
+  std::string out;
+  char buf[3];
+  for (unsigned char b : bytes) {
+    std::snprintf(buf, sizeof buf, "%02x", b);
+    out += buf;
+  }
+  return out;
+}
+
+// The script that defines window.hyperionDialog, run at the start of every document.
+static std::string dialog_guard_script() {
+  return std::string(
+             "(function(){var raw=window.__hyperion_dialog_raw;"
+             "try{delete window.__hyperion_dialog_raw;}catch(e){window.__hyperion_dialog_raw=undefined;}"
+             "if(typeof raw!=='function'||window.top!==window||location.origin!==") +
+         dialog_json_quote(g_app_origin) +
+         ")return;"
+         "var ua=null,isActive=null;"
+         "try{ua=navigator.userActivation;"
+         "var d=Object.getOwnPropertyDescriptor(Object.getPrototypeOf(ua),'isActive');"
+         "isActive=d&&d.get;}catch(e){}"
+         "var token=" +
+         dialog_json_quote(g_dialog_token) +
+         ",checkActivation=" + (g_fake_dialog ? "false" : "true") +
+         ",next=1,pending={};"
+         "Object.defineProperty(window,'__hyperion_dialog_reply',{value:function(id,r){"
+         "var p=pending[id];if(p){delete pending[id];p(r);}},writable:false,configurable:false});"
+         "Object.defineProperty(window,'hyperionDialog',{value:function(request){"
+         "if(checkActivation&&isActive&&!isActive.call(ua))return Promise.resolve({error:'no-user-action'});"
+         "var id=next++;"
+         "return new Promise(function(resolve){pending[id]=resolve;raw(token,id,request||{});});"
+         "},writable:false,configurable:false});"
+         "})();";
+}
+
+// Send RESULT, a JSON object, to the page's call ID, but only if the top-level document is still
+// on the app's origin. ID is the digits PARSE-DIALOG-REQUEST checked.
+static void dialog_reply(webview_t w, const std::string &id, const std::string &result) {
+  std::string js = "(function(){if(location.origin!==" + dialog_json_quote(g_app_origin) +
+                   ")return;var f=window.__hyperion_dialog_reply;"
+                   "if(typeof f==='function')f(" + id + "," + result + ");})();";
+  webview_eval(w, js.c_str());
+}
+
+#if defined(_WIN32)
+static std::string narrow_utf8(const wchar_t *wide) {
+  int len = WideCharToMultiByte(CP_UTF8, 0, wide, -1, nullptr, 0, nullptr, nullptr);
+  if (len <= 0) return "";
+  std::string out(static_cast<size_t>(len), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, wide, -1, &out[0], len, nullptr, nullptr);
+  out.resize(static_cast<size_t>(len - 1));
+  return out;
+}
+
+// The file-system path of ITEM, or "" when it has none.
+static std::string shell_item_path(IShellItem *item) {
+  PWSTR path = nullptr;
+  if (FAILED(item->GetDisplayName(SIGDN_FILESYSPATH, &path)) || path == nullptr) return "";
+  std::string out = narrow_utf8(path);
+  CoTaskMemFree(path);
+  return out;
+}
+
+// One client GUID for each kind, so Windows remembers the last folder for open, open-many, save
+// and folder separately, and starts in Documents the first time.
+static const GUID kDialogGuidOpen = {0x3c6e5c1a, 0x9b2d, 0x4f61, {0x8a, 0x10, 0x5e, 0x9a, 0x71, 0x0c, 0x98, 0x61}};
+static const GUID kDialogGuidOpenMany = {0x3c6e5c1a, 0x9b2d, 0x4f61, {0x8a, 0x10, 0x5e, 0x9a, 0x71, 0x0c, 0x98, 0x62}};
+static const GUID kDialogGuidSave = {0x3c6e5c1a, 0x9b2d, 0x4f61, {0x8a, 0x10, 0x5e, 0x9a, 0x71, 0x0c, 0x98, 0x63}};
+static const GUID kDialogGuidFolder = {0x3c6e5c1a, 0x9b2d, 0x4f61, {0x8a, 0x10, 0x5e, 0x9a, 0x71, 0x0c, 0x98, 0x64}};
+
+// Show the dialog R asks for, owned by OWNER, on this thread, and return the JSON the page gets.
+// Runs on the webview's UI thread, which webview.h has already made a COM single-threaded
+// apartment, from the window procedure, not inside WebView2's message handler: a modal loop
+// inside a WebView2 event handler is a reentrancy WebView2 documents as unsupported.
+static std::string show_file_dialog(HWND owner, const dialog_request &r) {
+  bool save = r.kind == "save";
+  IFileDialog *dialog = nullptr;
+  HRESULT hr = save ? CoCreateInstance(CLSID_FileSaveDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                       IID_IFileSaveDialog, reinterpret_cast<void **>(&dialog))
+                    : CoCreateInstance(CLSID_FileOpenDialog, nullptr, CLSCTX_INPROC_SERVER,
+                                       IID_IFileOpenDialog, reinterpret_cast<void **>(&dialog));
+  if (FAILED(hr) || dialog == nullptr) return "{\"error\":\"failed\"}";
+  DWORD options = 0;
+  dialog->GetOptions(&options);
+  options |= FOS_FORCEFILESYSTEM | FOS_PATHMUSTEXIST;
+  if (r.kind == "open") options |= FOS_FILEMUSTEXIST;
+  if (r.kind == "open-many") options |= FOS_FILEMUSTEXIST | FOS_ALLOWMULTISELECT;
+  if (r.kind == "folder") options |= FOS_PICKFOLDERS;
+  if (save) options |= FOS_OVERWRITEPROMPT;
+  dialog->SetOptions(options);
+  dialog->SetClientGuid(r.kind == "open"        ? kDialogGuidOpen
+                        : r.kind == "open-many" ? kDialogGuidOpenMany
+                        : save                  ? kDialogGuidSave
+                                                : kDialogGuidFolder);
+  std::wstring wide;
+  if (!r.title.empty() && widen_utf8(r.title.c_str(), &wide)) dialog->SetTitle(wide.c_str());
+  // The filter specs must outlive SetFileTypes, which copies them; kept here until it returns.
+  std::vector<std::wstring> names, specs;
+  for (const dialog_filter &f : r.filters) {
+    std::string spec;
+    for (size_t i = 0; i < f.patterns.size(); i++) spec += (i ? ";" : "") + f.patterns[i];
+    std::wstring wname, wspec;
+    widen_utf8(f.label.c_str(), &wname);
+    widen_utf8(spec.c_str(), &wspec);
+    names.push_back(wname);
+    specs.push_back(wspec);
+  }
+  if (!names.empty()) {
+    std::vector<COMDLG_FILTERSPEC> types;
+    for (size_t i = 0; i < names.size(); i++) types.push_back({names[i].c_str(), specs[i].c_str()});
+    dialog->SetFileTypes(static_cast<UINT>(types.size()), types.data());
+    dialog->SetFileTypeIndex(1);  // the first filter, counted from 1
+    // A save dialog adds an extension to a name typed without one: the first filter's first
+    // pattern's, when it names one, and the dialog follows the filter the user picks after that.
+    // Without it, a user who types "notes" under a "*.txt" filter saves a file named notes.
+    const std::string &first = r.filters.front().patterns.front();
+    std::wstring extension;
+    if (save && first.size() > 2 && first.compare(0, 2, "*.") == 0 &&
+        widen_utf8(first.substr(2).c_str(), &extension))
+      dialog->SetDefaultExtension(extension.c_str());
+  }
+  if (!r.folder.empty() && widen_utf8(r.folder.c_str(), &wide)) {
+    // A shell parsing name takes backslashes; a request may use forward slashes ("c:/data"),
+    // which the request checks accept, so they are turned into backslashes first.
+    std::replace(wide.begin(), wide.end(), L'/', L'\\');
+    IShellItem *folder = nullptr;
+    if (SUCCEEDED(SHCreateItemFromParsingName(wide.c_str(), nullptr, IID_IShellItem,
+                                              reinterpret_cast<void **>(&folder)))) {
+      dialog->SetFolder(folder);
+      folder->Release();
+    }
+  }
+  if (save && !r.name.empty() && widen_utf8(r.name.c_str(), &wide)) dialog->SetFileName(wide.c_str());
+  hr = dialog->Show(owner);
+  std::string result;
+  if (hr == HRESULT_FROM_WIN32(ERROR_CANCELLED)) {
+    result = "{\"cancelled\":true}";
+  } else if (FAILED(hr)) {
+    result = "{\"error\":\"failed\"}";
+  } else if (r.kind == "open-many") {
+    IFileOpenDialog *open = nullptr;
+    IShellItemArray *items = nullptr;
+    DWORD count = 0;
+    result = "{\"error\":\"failed\"}";
+    if (SUCCEEDED(dialog->QueryInterface(IID_IFileOpenDialog, reinterpret_cast<void **>(&open)))) {
+      if (SUCCEEDED(open->GetResults(&items)) && SUCCEEDED(items->GetCount(&count))) {
+        result = "{\"paths\":[";
+        bool first = true;  // the comma goes before every item written except the first
+        for (DWORD i = 0; i < count; i++) {
+          IShellItem *item = nullptr;
+          if (SUCCEEDED(items->GetItemAt(i, &item))) {
+            result += (first ? "" : ",") + dialog_json_quote(shell_item_path(item));
+            first = false;
+            item->Release();
+          }
+        }
+        result += "]}";
+      }
+      if (items != nullptr) items->Release();
+      open->Release();
+    }
+  } else {
+    IShellItem *item = nullptr;
+    if (SUCCEEDED(dialog->GetResult(&item))) {
+      result = "{\"path\":" + dialog_json_quote(shell_item_path(item)) + "}";
+      item->Release();
+    } else {
+      result = "{\"error\":\"failed\"}";
+    }
+  }
+  dialog->Release();
+  return result;
+}
+
+struct dialog_job {
+  std::string id;
+  dialog_request request;
+};
+
+static webview_t g_dialog_view = nullptr;
+static UINT g_dialog_message = 0;  // registered in INSTALL_DIALOGS; carries a DIALOG_JOB
+static WNDPROC g_dialog_previous_proc = nullptr;
+static dialog_job *g_fake_job = nullptr;
+static const UINT_PTR kFakeDialogTimer = 0x4859;
+
+static void finish_dialog_job(dialog_job *job, const std::string &result) {
+  g_dialog_busy = false;
+  dialog_reply(g_dialog_view, job->id, result);
+  delete job;
+}
+
+static LRESULT CALLBACK dialog_window_proc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
+  if (g_dialog_message != 0 && msg == g_dialog_message) {
+    dialog_job *job = reinterpret_cast<dialog_job *>(lp);
+    if (g_fake_dialog) {
+      g_fake_job = job;
+      SetTimer(hwnd, kFakeDialogTimer, 3000, nullptr);
+    } else {
+      finish_dialog_job(job, show_file_dialog(hwnd, job->request));
+    }
+    return 0;
+  }
+  if (msg == WM_TIMER && wp == kFakeDialogTimer) {
+    KillTimer(hwnd, kFakeDialogTimer);
+    if (g_fake_job != nullptr) {
+      dialog_job *job = g_fake_job;
+      g_fake_job = nullptr;
+      finish_dialog_job(job, "{\"path\":\"fake-path\"}");
+    }
+    return 0;
+  }
+  return CallWindowProcW(g_dialog_previous_proc, hwnd, msg, wp, lp);
+}
+#endif
+
+// The native end of the binding. Every call is checked first, on every OS: the token, then the
+// call's id and the request (PARSE-DIALOG-REQUEST). A call that fails the token or the id gets no
+// answer, since there is no id to send one to.
+static void dialog_binding(const char *seq, const char *req, void *arg) {
+  (void)seq;  // answered through DIALOG_REPLY, never webview_return; see the gate above
+  webview_t w = static_cast<webview_t>(arg);
+  dialog_request request;
+  std::string why = parse_dialog_request(req, g_dialog_token, &request);
+  if (!why.empty()) {
+    if (!request.id.empty())
+      dialog_reply(w, request.id, "{\"error\":" + dialog_json_quote(why) + "}");
+    return;
+  }
+#if defined(_WIN32)
+  if (g_dialog_busy) {
+    dialog_reply(w, request.id, "{\"error\":\"busy\"}");
+    return;
+  }
+  HWND hwnd = static_cast<HWND>(webview_get_window(w));
+  dialog_job *job = new dialog_job{request.id, request};
+  g_dialog_busy = true;
+  if (!PostMessageW(hwnd, g_dialog_message, 0, reinterpret_cast<LPARAM>(job))) {
+    delete job;
+    g_dialog_busy = false;
+    dialog_reply(w, request.id, "{\"error\":\"failed\"}");
+  }
+#else
+  dialog_reply(w, request.id, "{\"error\":\"unavailable\"}");
+#endif
+}
+
+// Make the launch's token, the app's origin from URL and, on Windows, the window message that
+// carries a dialog job, before any window exists. False when any of them cannot be made; the
+// view then refuses to start, so a running view started with --dialogs always has them, and
+// RUN-APP's DIALOGS-AVAILABLE-P is not true of a window that has none. Without the message,
+// PostMessage would send message 0, the job would be lost and "busy" would stay set.
+//
+// HYPERION_VIEW_FAKE_DIALOG=1 is honoured only when GITHUB_ACTIONS is also set, so a stray
+// variable on a user's machine cannot put a shipped app into fake mode.
+static bool prepare_dialogs(const char *url) {
+  g_dialog_token = random_token();
+  g_app_origin = url_origin(url);
+  const char *fake = std::getenv("HYPERION_VIEW_FAKE_DIALOG");
+  const char *ci = std::getenv("GITHUB_ACTIONS");
+  g_fake_dialog = fake != nullptr && std::strcmp(fake, "1") == 0 && ci != nullptr && ci[0] != '\0';
+  if (g_fake_dialog)
+    std::fprintf(stderr, "hyperion-view: HYPERION_VIEW_FAKE_DIALOG=1: no dialog is shown; calls get fake-path and need no user action\n");
+#if defined(_WIN32)
+  g_dialog_message = RegisterWindowMessageW(L"hyperion-view-dialog-job");
+  if (g_dialog_message == 0) return false;
+#endif
+  return !g_dialog_token.empty() && !g_app_origin.empty();
+}
+
+// Install the binding and its guard on W. After PREPARE_DIALOGS, before the first navigation.
+static void install_dialogs(webview_t w) {
+#if defined(_WIN32)
+  g_dialog_view = w;
+  HWND hwnd = static_cast<HWND>(webview_get_window(w));
+  g_dialog_previous_proc = reinterpret_cast<WNDPROC>(SetWindowLongPtrW(
+      hwnd, GWLP_WNDPROC, reinterpret_cast<LONG_PTR>(dialog_window_proc)));
+#endif
+  webview_bind(w, "__hyperion_dialog_raw", dialog_binding, w);
+  webview_init(w, dialog_guard_script().c_str());
+}
+
 // HYPERION_VIEW_NO_WINDOW=1 stops hyperion-view just before it would create a window, with exit
 // code 3 and a line on stderr. The view tests set it for every run they make on a developer's
 // machine, so a test that reaches webview_create by mistake fails there instead of opening a
 // window on someone's screen; only the CI-only real-window tests clear it (#521). The modes that
-// never create a window (--help, --placement, --saved-placement, and every refusal) ignore it.
+// never create a window (--help, --placement, --saved-placement, --restore-placement, and every
+// refusal) ignore it.
 static bool window_forbidden() {
   const char *value = std::getenv("HYPERION_VIEW_NO_WINDOW");
   if (value == nullptr || std::strcmp(value, "1") != 0) return false;
@@ -787,7 +1399,7 @@ static bool parse_positive_int(const char *text, int *out) {
 static void print_usage(std::FILE *out) {
   std::fprintf(out,
                "usage: hyperion-view URL [TITLE] [WIDTH] [HEIGHT] [--icon PATH]\n"
-               "                     [--placement-file PATH]\n"
+               "                     [--placement-file PATH] [--dialogs] [--exit-after SECONDS]\n"
                "\n"
                "  URL      the address to open      (default http://127.0.0.1:8080/)\n"
                "  TITLE    the window title         (default \"App\")\n"
@@ -795,8 +1407,22 @@ static void print_usage(std::FILE *out) {
                "  HEIGHT   window height in pixels  (default 800)\n"
                "  --icon   path to a window icon    (optional, may appear anywhere)\n"
                "  --placement-file PATH\n"
-               "           Windows: open the window where it was last time, if that still fits\n"
-               "           a monitor, and keep PATH up to date (optional, may appear anywhere)\n"
+               "           Windows and macOS: open the window where it was last time, and keep\n"
+               "           PATH up to date (optional, may appear anywhere). Windows uses it only\n"
+               "           if it still fits a monitor; macOS moves it onto the screen it overlaps\n"
+               "           most\n"
+               "  --dialogs\n"
+               "           give the page at URL's origin window.hyperionDialog, which shows a\n"
+               "           native open, save-as or folder dialog owned by this window (#986).\n"
+               "           Windows only so far; elsewhere it answers {\"error\":\"unavailable\"}\n"
+               "  --exit-after SECONDS\n"
+               "           close the window after SECONDS, for tests\n"
+               "\n"
+               "  --dialog-request TOKEN PARAMS\n"
+               "           print what a dialog call's PARAMS parse to, or why it is refused, with\n"
+               "           no window\n"
+               "  --dialog-origin URL\n"
+               "           print the origin --dialogs offers the dialog to, with no window\n"
                "\n"
                "  --help, -h   print this and exit\n"
                "\n"
@@ -812,8 +1438,7 @@ static void print_usage(std::FILE *out) {
                "               launch does, print the work area, DPI, frame, placement and the\n"
                "               window's rectangle, then exit without running it. On Windows,\n"
                "               start it hidden; on macOS the window is shown. With\n"
-               "               PLACEMENT-FILE (Windows), restore from it first and save to it\n"
-               "               after.\n"
+               "               PLACEMENT-FILE, restore from it first and save to it after.\n"
                "  --saved-placement PATH WL WT WR WB [BL BT BR BB [FROM TO]]\n"
                "               print \"use L T R B MAXIMIZED\" if the placement saved at PATH would\n"
                "               be restored into the work area WL,WT-WR,WB, else \"ignore REASON\".\n"
@@ -821,10 +1446,15 @@ static void print_usage(std::FILE *out) {
                "               100), by which the rectangle may pass the work area. FROM\n"
                "               and TO are the frame widths where the borders were measured\n"
                "               and on the rectangle's monitor; each border grows by TO-FROM\n"
+               "  --restore-placement PATH SL SB SR ST [SL SB SR ST ...]\n"
+               "               print \"use L B R T ZOOMED screen N\" for where macOS restores the\n"
+               "               placement saved at PATH, given the visible frames of up to 16\n"
+               "               screens, each as left, bottom, right, top; else \"ignore REASON\"\n"
                "  --exercise-placement PATH\n"
-               "               Windows, for CI: open the window as a launch with\n"
-               "               --placement-file PATH does, then move, maximise, restore,\n"
-               "               minimise and close it, printing the file after each step\n"
+               "               Windows and macOS, for CI: open the window as a launch with\n"
+               "               --placement-file PATH does, then move, maximise, restore and\n"
+               "               close it (on Windows, minimise it first), printing the file after\n"
+               "               each step\n"
                "\n"
                "Hyperion's native webview launcher. hyperion/desktop:run-app starts a\n"
                "server on localhost and launches this pointed at it.\n");
@@ -879,6 +1509,8 @@ int main(int argc, char **argv) {
 #endif
   const char *icon = nullptr;
   const char *placement_file = nullptr;
+  bool dialogs = false;
+  long exit_after = 0;
   const char *positional[4] = {nullptr, nullptr, nullptr, nullptr};
   int n = 0;
 
@@ -926,12 +1558,16 @@ int main(int argc, char **argv) {
       webview_set_size(rv, rw, rh, WEBVIEW_HINT_NONE);
       const char *file = argc == 5 ? argv[4] : nullptr;
       bool ok = true;
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__APPLE__)
       if (file == nullptr || !restore_placement(rv, file, stdout, false))
         ok = place_window(rv, rw, rh, stdout);
       if (ok && file != nullptr) {
         set_placement_path(file);
+#if defined(_WIN32)
         bool saved = save_placement(static_cast<HWND>(webview_get_window(rv)));
+#else
+        bool saved = save_placement(static_cast<id>(webview_get_window(rv)));
+#endif
         std::printf(saved ? "saved\n" : "save-failed\n");
         ok = saved;
       }
@@ -949,7 +1585,7 @@ int main(int argc, char **argv) {
         print_usage(stderr);
         return 2;
       }
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__APPLE__)
       if (window_forbidden()) return 3;
       webview_t ev = webview_create(0, nullptr);
       if (ev == nullptr) {
@@ -964,6 +1600,39 @@ int main(int argc, char **argv) {
       std::printf("placement-unsupported\n");
       return 1;
 #endif
+    } else if (std::strcmp(argv[i], "--restore-placement") == 0) {
+      // macOS's restore decision on its own, with no window, so the tests check it on every OS.
+      int count = argc - 3;
+      bool numbers = i == 1 && count >= 4 && count % 4 == 0 && count / 4 <= kMaxScreens;
+      span_rect screens[kMaxScreens];
+      for (int k = 0; numbers && k < count; k++) {
+        long v = 0;
+        numbers = parse_long(argv[3 + k], &v) && v >= -kMaxCoordinate && v <= kMaxCoordinate;
+        long *field[4] = {&screens[k / 4].x0, &screens[k / 4].y0, &screens[k / 4].x1,
+                          &screens[k / 4].y1};
+        if (numbers) *field[k % 4] = v;
+      }
+      if (!numbers) {
+        std::fprintf(stderr,
+                     "hyperion-view: --restore-placement takes a path and 1 to %d screens, each "
+                     "4 integers within %ld of 0, and nothing else\n\n",
+                     kMaxScreens, kMaxCoordinate);
+        print_usage(stderr);
+        return 2;
+      }
+      saved_placement p;
+      const char *reason = nullptr;
+      if (!load_saved_placement(argv[2], &p, &reason)) {
+        std::printf("ignore %s\n", reason);
+        return 0;
+      }
+      clamped_placement c = restore_into_screens(p, screens, count / 4);
+      if (c.ignored != nullptr)
+        std::printf("ignore %s\n", c.ignored);
+      else
+        std::printf("use %ld %ld %ld %ld %d screen %d\n", c.x0, c.y0, c.x1, c.y1,
+                    p.maximized ? 1 : 0, c.screen);
+      return 0;
     } else if (std::strcmp(argv[i], "--saved-placement") == 0) {
       // The restore decision on its own, with no window, so the tests check it on every OS.
       long work[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0};
@@ -1039,6 +1708,54 @@ int main(int argc, char **argv) {
         return 2;
       }
       icon = argv[++i];
+    } else if (std::strcmp(argv[i], "--dialogs") == 0) {
+      dialogs = true;
+    } else if (std::strcmp(argv[i], "--exit-after") == 0) {
+      // For the CI-only window tests (#986): close the window after SECONDS, so a test that
+      // starts the view and waits for it to exit does not wait forever.
+      long seconds = 0;
+      if (i + 1 >= argc || !parse_long(argv[i + 1], &seconds) || seconds < 1 || seconds > 3600) {
+        std::fprintf(stderr, "hyperion-view: --exit-after needs SECONDS from 1 to 3600\n\n");
+        print_usage(stderr);
+        return 2;
+      }
+      exit_after = seconds;
+      i++;
+    } else if (std::strcmp(argv[i], "--dialog-request") == 0) {
+      // The checks a page's dialog call passes before any dialog is shown, on their own, with no
+      // window: for the tests, which run them on every OS (#986). TOKEN stands for the launch's
+      // token; PARAMS is the JSON array the binding receives, [TOKEN, ID, REQUEST].
+      if (i != 1 || argc != 4) {
+        std::fprintf(stderr, "hyperion-view: --dialog-request takes TOKEN and PARAMS and nothing else\n\n");
+        print_usage(stderr);
+        return 2;
+      }
+      dialog_request r;
+      std::string why = parse_dialog_request(argv[3], argv[2], &r);
+      if (!why.empty()) {
+        std::printf("refuse %s\n", why.c_str());
+        return 0;
+      }
+      std::printf("ok %s", r.kind.c_str());
+      if (!r.title.empty()) std::printf(" title=%s", dialog_json_quote(r.title).c_str());
+      if (!r.folder.empty()) std::printf(" folder=%s", dialog_json_quote(r.folder).c_str());
+      if (!r.name.empty()) std::printf(" name=%s", dialog_json_quote(r.name).c_str());
+      for (const dialog_filter &f : r.filters) {
+        std::printf(" filter=%s:", dialog_json_quote(f.label).c_str());
+        for (size_t k = 0; k < f.patterns.size(); k++)
+          std::printf("%s%s", k ? ";" : "", f.patterns[k].c_str());
+      }
+      std::printf("\n");
+      return 0;
+    } else if (std::strcmp(argv[i], "--dialog-origin") == 0) {
+      // The origin the binding is offered to for URL, with no window (#986).
+      if (i != 1 || argc != 3) {
+        std::fprintf(stderr, "hyperion-view: --dialog-origin takes URL and nothing else\n\n");
+        print_usage(stderr);
+        return 2;
+      }
+      std::printf("%s\n", url_origin(argv[2]).c_str());
+      return 0;
     } else if (std::strcmp(argv[i], "--placement-file") == 0) {
       if (i + 1 >= argc) {
         std::fprintf(stderr, "hyperion-view: --placement-file needs a path\n\n");
@@ -1068,11 +1785,15 @@ int main(int argc, char **argv) {
   // the application name once, early.
   set_app_name(title);
 
+  if (dialogs && !prepare_dialogs(url)) {
+    std::fprintf(stderr, "hyperion-view: --dialogs: no random token, no origin in %s, or no window message for a dialog job\n", url);
+    return 2;
+  }
   if (window_forbidden()) return 3;
   webview_t w = webview_create(0, nullptr);
   webview_set_title(w, title);
   webview_set_size(w, width, height, WEBVIEW_HINT_NONE);
-#if defined(_WIN32)
+#if defined(_WIN32) || defined(__APPLE__)
   if (placement_file == nullptr || !restore_placement(w, placement_file, nullptr, true))
     place_window(w, width, height);
   if (placement_file != nullptr) watch_placement(w, placement_file);
@@ -1083,6 +1804,15 @@ int main(int argc, char **argv) {
   set_window_icon(w, icon);
   // After webview_create (NSApp exists), before webview_run ([NSApp run]).
   install_main_menu(title);
+  // Before the first navigation, so the guard runs at the start of the app's first page.
+  if (dialogs) install_dialogs(w);
+  if (exit_after > 0) {
+    // webview_dispatch is the one webview.h call that is safe from another thread.
+    std::thread([w, exit_after]() {
+      std::this_thread::sleep_for(std::chrono::seconds(exit_after));
+      webview_dispatch(w, [](webview_t view, void *) { webview_terminate(view); }, nullptr);
+    }).detach();
+  }
   webview_navigate(w, url);
   webview_run(w);
   webview_destroy(w);

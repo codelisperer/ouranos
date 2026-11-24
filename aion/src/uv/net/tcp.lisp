@@ -369,9 +369,9 @@ connection fails, the handle is closed for you and the future carries the error.
 (defun listen-pipe (loop path &key (backlog 128) on-connection)
   "Listen on a named pipe / unix domain socket at PATH."
   (%listen loop :pipe
-           (lambda (pointer) (ffi:uv-pipe-bind pointer (namestring path)))
+           (lambda (pointer) (ffi:uv-pipe-bind pointer (uv:native-path path)))
            :backlog backlog :on-connection on-connection :nodelay nil
-           :operation :listen-pipe :path (namestring path)))
+           :operation :listen-pipe :path (uv:native-path path)))
 
 (defun make-pipe-connection (loop &key ipc)
   "An initialised but UNCONNECTED uv_pipe_t, wrapped as a CONNECTION.
@@ -404,6 +404,6 @@ failure arrives through the future."
          (op (%make-connect-op :connection connection :future (uv:make-future)
                                :on-connect on-connect :on-error on-error :nodelay nil))
          (req (%new-request uv-ffi:+uv-connect+ op)))
-    (ffi:uv-pipe-connect req pointer (namestring path)
+    (ffi:uv-pipe-connect req pointer (uv:native-path path)
                          (cffi:callback %connect-callback))
     (connect-op-future op)))

@@ -69,11 +69,6 @@ trailing dotted IPv4 part."
               do (setf (aref v i) (ash w -8) (aref v (1+ i)) (logand w #xff)))
         v))))
 
-(defun %port-of (uri)
-  "URI's port, or its scheme's default when the URL gives none: QURI-PORT is NIL then."
-  (or (quri:uri-port uri)
-      (if (string-equal (quri:uri-scheme uri) "https") 443 80)))
-
 (defun parse-address (x)
   "X as an octet vector of 4 or 16 elements: X may already be one, or an IPv4 or IPv6 address
 in text, with or without the brackets a URL puts around IPv6. NIL if X is not an address."
@@ -162,6 +157,356 @@ address (IPv4-mapped, NAT64, 6to4) is classified by the IPv4 address it carries,
                         when (%in-prefix-p a prefix bits) return category)
                   :public))))))
 
+(defun %6to4-p (address)
+  "Whether ADDRESS is a 6to4 address, 2002::/16. Such an address carries an IPv4 address, and
+ADDRESS-CATEGORY classifies it by that inner address, so 2002:7f00:1:: reports :LOOPBACK. That
+is the conservative answer for a guard deciding whether a destination may be reached at all,
+which is what ADDRESS-CATEGORY is for. It is the WRONG answer for a decision about whether a
+destination is local, because 6to4 traffic reaches its destination through a public relay, so
+LOCAL-HOST-P excludes these (#1082, the review of #1084)."
+  (let ((a (parse-address address)))
+    (and a (= 16 (length a)) (%in-prefix-p a #(32 2 0 0 0 0 0 0 0 0 0 0 0 0 0 0) 16) t)))
+
+(defun url-host (url)
+  "URL's host, without brackets and without a port: \"http://[::1]:9000/x\" gives \"::1\". NIL when
+URL has no host or cannot be parsed.
+
+QURI is used because it is the parser dexador parses a request URL with, so a caller asking this
+asks the same question of the same parser rather than of one of its own. It returns an IPv6 host
+with its brackets, as the URL carries them, and every caller wants the address itself, because
+that is what PARSE-ADDRESS and ADDRESS-CATEGORY read.
+
+Both hermes core and hermes/blob had written this, and both had holes: see #1089 and the review
+of #1084. It is here because it belongs next to the primitives it feeds, and because one copy
+can be fixed once."
+  (let* ((uri (ignore-errors (quri:uri url)))
+         (host (and uri (quri:uri-host uri))))
+    (if (and host (> (length host) 1)
+             (char= #\[ (char host 0))
+             (char= #\] (char host (1- (length host)))))
+        (subseq host 1 (1- (length host)))
+        host)))
+
+(defun %nat64-p (address)
+  "Whether ADDRESS is NAT64: the well-known prefix 64:ff9b::/96, or the local-use 64:ff9b:1::/48
+of RFC 8215. Such an address carries an IPv4 address and ADDRESS-CATEGORY reports it by that, so
+64:ff9b::7f00:1 reads :LOOPBACK.
+
+EXCLUDED FROM LOCAL-HOST-P for the same reason as 6to4: reaching the IPv4 address means going
+through a NAT64 gateway, which is frequently the carrier's rather than this network's, so the
+bytes leave the machine and the network whatever the inner address says (#1082, the review of
+#1094). ADDRESS-CATEGORY is left alone, because a guard deciding whether a destination may be
+reached at all wants the conservative answer."
+  (let ((a (parse-address address)))
+    (and a (= 16 (length a))
+         (or (%in-prefix-p a #(0 100 255 155 0 0 0 0 0 0 0 0 0 0 0 0) 96)
+             (%in-prefix-p a #(0 100 255 155 0 1 0 0 0 0 0 0 0 0 0 0) 48))
+         t)))
+
+(defun %leading-zero-quad-p (host)
+  "Whether HOST is dotted-quad IPv4 with a leading zero in an octet, such as \"010.0.0.1\".
+
+REFUSED BY LOCAL-HOST-P, because this is the one IPv4 spelling where PARSE-ADDRESS and the
+system resolver can disagree: PARSE-ADDRESS reads 010.8.8.8 as 10.8.8.8 and calls it private,
+while a resolver reading the leading zero as octal gets something else, and the connection
+follows the resolver. Rather than decide which reading is right, a host spelled this way is not
+local (#1082, the review of #1094).
+
+THE OTHER NON-CANONICAL SPELLINGS ARE DELIBERATELY NOT REFUSED. \"127.1\", \"0x7f.0.0.1\" and
+\"2130706433\" all fail PARSE-ADDRESS, so LOCAL-HOST-P hands them to RESOLVE-HOST -- the same
+system resolver the connection will use -- and takes the answer it gives. There is no
+disagreement to guard against there, because only one parser is involved."
+  (and (stringp host)
+       (let ((parts '()) (start 0))
+         (loop for dot = (position #\. host :start start)
+               do (push (subseq host start (or dot (length host))) parts)
+                  (unless dot (return))
+                  (setf start (1+ dot)))
+         (let ((parts (nreverse parts)))
+           (and (= 4 (length parts))
+                (every (lambda (p) (and (plusp (length p)) (every #'digit-char-p p))) parts)
+                (some (lambda (p) (and (> (length p) 1) (char= #\0 (char p 0)))) parts))))))
+
+(defun %local-address-p (address)
+  "Whether ADDRESS, an octet vector or text, is one this machine or this network reaches by
+itself: loopback, private or link-local, and neither 6to4 nor NAT64."
+  (and (not (%6to4-p address))
+       (not (%nat64-p address))
+       (member (address-category address) '(:loopback :private :link-local))
+       t))
+
+(defun %loopback-address-p (address)
+  "Whether ADDRESS, an octet vector or text, is a loopback address of this machine: ADDRESS-CATEGORY
+says :LOOPBACK, and it is neither 6to4 nor NAT64, whose traffic goes through a relay or gateway
+whatever IPv4 address it carries (#1211). An IPv4-mapped loopback address counts."
+  (and (not (%6to4-p address))
+       (not (%nat64-p address))
+       (eq :loopback (ignore-errors (address-category address)))))
+
+(defun loopback-host-p (host)
+  "Whether HOST, as URL-HOST returns it, is this machine by its spelling alone: \"localhost\", or
+an IP address in text that %LOOPBACK-ADDRESS-P accepts, such as 127.0.0.1, ::1 or
+::ffff:127.0.0.1. A 6to4 or NAT64 address carrying 127.0.0.1 is not, and neither is a dotted
+quad with a leading zero, which a resolver may read differently (%LEADING-ZERO-QUAD-P).
+
+NOTHING IS RESOLVED, so any other name is NIL, even one that resolves to a loopback address. This
+is the rule a request made with :STAY-LOCAL is held to (#1212), and the one #1211 asks
+praxeon/llm's ENDPOINT-LOOPBACK-P to share."
+  (and (stringp host)
+       (not (%leading-zero-quad-p host))
+       (or (string-equal host "localhost")
+           (let ((literal (parse-address host)))
+             (and literal (%loopback-address-p literal))))
+       t))
+
+(defun local-host-p (host)
+  "Whether HOST names something only this machine or this network can reach, so sending it
+requests in plaintext does not put them on the public internet. HOST is a name or an IP address
+in text, without brackets or a port -- see URL-HOST.
+
+\"localhost\" counts, without a lookup. An IP address counts when ADDRESS-CATEGORY says
+:LOOPBACK, :PRIVATE or :LINK-LOCAL, except for a 6to4 (%6TO4-P) or NAT64 (%NAT64-P) address,
+each of which reaches its destination through a gateway or relay that need not be this
+network's, whatever IPv4 address it carries. A host spelled as dotted-quad IPv4 with a leading
+zero is refused outright (%LEADING-ZERO-QUAD-P), and so is an empty or blank HOST, whose
+meaning to a resolver is platform-dependent. Any other name is resolved,
+and counts only when it resolves and EVERY address it resolves to is one of those, so a Docker
+Compose service name works while a name pointing at the internet does not. A name that does not
+resolve does not count: a host that cannot be reached is not a host known to be local.
+
+THE NAME IS RESOLVED HERE AND NOW, once. A caller that asks this when it is configured, as
+hermes and hermes/blob do, has an answer about that moment and not a standing guarantee.
+
+WHY THIS IS IN AION RATHER THAN IN EACH CALLER. hermes core wrote it for a Twilio API base and
+hermes/blob for an S3 endpoint, and the two copies acquired different holes -- a bracketed IPv6
+userinfo got past one, a scheme in the endpoint got past the other, and a bucket label in front
+of the host got past both (#1089, the review of #1084). A rule that decides whether credentials
+may travel in the clear is the last rule that should exist twice (#1082)."
+  (and host
+       ;; A HOST HAS TO BE A HOST. An empty or blank string is refused before anything resolves
+       ;; it, because what a resolver makes of one differs by platform: on Linux
+       ;; usocket:get-hosts-by-name "" signals NS-HOST-NOT-FOUND-ERROR, so this answered NIL,
+       ;; while on Windows getaddrinfo resolves an empty node name to the loopback address, so
+       ;; this answered T -- truthfully about where Windows would connect, and wrongly about
+       ;; whether a caller has a host at all. Measured: the Windows leg of run 41388319932
+       ;; failed exactly this check while the other three legs passed (#1082).
+       (plusp (length (string-trim '(#\Space #\Tab #\Newline #\Return) host)))
+       (not (%leading-zero-quad-p host))
+       (or (string-equal host "localhost")
+           (let ((literal (parse-address host)))
+             (if literal
+                 (%local-address-p literal)
+                 (let ((addresses (ignore-errors (resolve-host host))))
+                   (and addresses (every #'%local-address-p addresses) t)))))))
+
+(defun credential-url-refusal (value &key setting example credential
+                                          (carried-in
+                                           "every request carries them in an Authorization header")
+                                          appends-path)
+  "NIL when VALUE is a URL a framework may send CREDENTIAL to, and otherwise the sentence to
+refuse it with (#1106). Second value: the parsed URI, or NIL when it did not parse. Third value:
+the host approved as LOCAL, or NIL.
+
+IT RETURNS A REASON RATHER THAN SIGNALLING, so each caller signals its own condition -- hermes
+signals CONFIGURATION-ERROR, hermes/blob signals BLOB-CONFIGURATION-ERROR -- and this function
+needs to know about neither. That is what lets the rule live here, beside LOCAL-HOST-P, with
+nothing new in anyone's :DEPENDS-ON: hermes/blob does not depend on hermes core and must not
+start to, and both already depend on aion/http-client.
+
+WHY THE RULE IS IN ONE PLACE. It was written twice -- once in hermes for a Twilio API base, once
+in hermes/blob for an S3 endpoint -- and the two copies acquired three different holes between
+them, each a case the other's fix had already closed: a bracketed IPv6 address in the userinfo, a
+scheme inside the endpoint, and a bucket label in front of the host (#1089, and the reviews of
+#1084 and #1090). Every one was found by someone running the check rather than reading it. Four
+more call sites deciding for themselves would have been the same bet four more times (#1106).
+
+SETTING names the value in the message (`Twilio API-BASE'), EXAMPLE is a URL that would be
+accepted, CREDENTIAL says what would travel (`the account SID and auth token', `the API key'),
+CARRIED-IN is the whole clause after `because', so a caller can say how its own credential
+travels in a sentence that reads correctly, and APPENDS-PATH says whether the caller appends a
+path to VALUE. It is the clause rather than a noun phrase because the default read
+`every request carries them in an Authorization header', and Telegram substituting into the tail
+of that produced `carries them in the path of every request' -- a plural pronoun for one token,
+and `every request' twice. Reading the output is what showed it.
+
+CARRIED-IN EXISTS BECAUSE NOT EVERY CREDENTIAL IS A HEADER. Telegram's bot token is in the PATH
+of every request, so a refusal reading `in an Authorization header' would tell the reader
+something false about their own configuration -- and a token in a path is the more exposed of the
+two, because it reaches any access log along the way.
+
+NO REFUSAL REPEATS VALUE, OR QURI'S ERROR TEXT. The value may carry a password -- that is one of
+the things refused -- and these reports reach logs and terminals. An earlier version printed it in
+every branch, and its parse-failure branch also appended quri's error, which quotes the URI
+again, so a password appeared twice (the review of #1084).
+
+What is refused, and why each is here rather than only the obvious one:
+
+  - anything QURI cannot parse. QURI is used because it is the parser dexador parses the request
+    URL with, so this asks the same question of the same parser;
+  - a scheme that is not http or https. Refusing only plaintext is not enough: for
+    `evil.example://127.0.0.1' quri reads the scheme `evil.example' and the host 127.0.0.1, which
+    a check looking for `http' lets through;
+  - any userinfo, whatever the scheme and host, including over https and including when the host
+    is local. No API here uses it, and its only effects are to hide the real host from a reader
+    and to defeat this check;
+  - no host;
+  - a query or a fragment, but only when APPENDS-PATH: the request's path would land inside them.
+    A caller that sends VALUE as it stands has no such problem, and refusing a query there would
+    turn away a legitimate local mock;
+  - a bracketed IPv6 host, which cannot be connected to -- usocket:socket-connect answers
+    NS-HOST-NOT-FOUND-ERROR for `[::1]' while `::1' resolves;
+  - plaintext http to a host this machine or this network cannot reach by itself, which is
+    LOCAL-HOST-P. That function also refuses a leading-zero IPv4 spelling, where its parser and
+    the system resolver can disagree.
+
+The host is resolved at the moment this runs, once. A provider made while a name resolved locally
+is not re-checked if that name later resolves elsewhere.
+
+THE THIRD VALUE COSTS NO SECOND LOOKUP, because it is already known here: a plaintext URL this
+function accepts is one whose host LOCAL-HOST-P approved, since the only other way out of that
+branch is a refusal. A caller records it and binds it around the send, so the plaintext request is
+not given to a proxy and does not follow redirects. It is NIL for an https URL, whose host is
+never resolved here, which matches PROXY-ARGUMENTS: the proxy decision is only made for
+plaintext. It is the host rather than T so that a recorded verdict cannot be read against a URL
+it was not about."
+  ;; CONTROL CHARACTERS ARE REFUSED FIRST, before the value is parsed. A newline in a URL is the
+  ;; shape of a header injection, and although the credential would still have gone only to the
+  ;; local host, a value that cannot appear in a URL has no reading worth arguing about. Refusing
+  ;; it removes the question rather than answering it (the review of #1104).
+  (when (and (stringp value)
+             (some (lambda (c) (let ((n (char-code c))) (or (< n 32) (= n 127)))) value))
+    (return-from credential-url-refusal
+      (format nil "a ~A without control characters in it. The value contains at least one, and it is not repeated here because it may contain a password"
+              setting)))
+  (let ((uri (ignore-errors (quri:uri value))))
+    (unless uri
+      (return-from credential-url-refusal
+        (format nil "a ~A that parses as a URL. The value given does not, and it is not repeated here because it may contain a password"
+                setting)))
+    (let ((scheme (quri:uri-scheme uri))
+          (host (quri:uri-host uri)))
+      (flet ((refuse (why)
+               (return-from credential-url-refusal
+                 (values (format nil "a ~A such as ~A. ~A" setting example why) uri nil))))
+        (when (quri:uri-userinfo uri)
+          (refuse (format nil "The value carries a user name or password before an at-sign, which this API does not use and which hides the host a request would reach. That host is ~S." host)))
+        (unless (and scheme (or (string-equal scheme "https") (string-equal scheme "http")))
+          (refuse (format nil "The scheme is ~S. Only http and https are sent, and another scheme means the host this check reads is not the host a request would reach." scheme)))
+        (unless host
+          (refuse "The value has no host."))
+        (when (and appends-path (or (quri:uri-query uri) (quri:uri-fragment uri)))
+          (refuse "The value carries a query or a fragment, and the rest of each request's path is appended to it, so the path would end up inside them."))
+        (when (and (plusp (length host)) (char= #\[ (char host 0)))
+          (refuse (format nil "The host ~S is a bracketed IPv6 address, which cannot be connected to: it is looked up as a name and no such name exists. Use a name that resolves to the address, or an IPv4 address. Writing the address without brackets is not a fix: an S3 endpoint in hermes/blob refuses that spelling too." host)))
+        (when (and (string-equal scheme "http") (not (local-host-p host)))
+          (refuse (format nil "The host ~S would receive ~A in the clear, because ~A. Use https, or a host only this machine or this network can reach."
+                          host credential carried-in))))
+      (values nil uri (and scheme (string-equal scheme "http") host)))))
+
+(defvar *approved-local-host* nil
+  "The host a configuration step resolved and approved as LOCAL, bound around a send by the code
+that holds that verdict (#1091).
+
+NOT EXPORTED, AND NOT AN ARGUMENT TO ANYTHING EXPORTED, which is the point of it. It was a
+:APPROVED-LOCAL keyword on MAKE-REQUEST and on PROXY-ARGUMENTS, both exported, so any caller
+could assert an approval for any host:
+
+  (make-request :url \"http://public.example/x\" :approved-local \"public.example\"
+                :headers <an Authorization header>)
+
+got :PROXY NIL and :MAX-REDIRECTS 0 for a public host -- the same door that was closed by taking
+the initarg off hermes/blob's slot, left open one layer down (the re-review of #1134). The
+exported surface can no longer express an approval at all; what a caller builds its own request
+with is the rule for an address or \"localhost\" and nothing else.
+
+Bound with CALL-WITH-APPROVED-LOCAL-HOST, by hermes's providers and hermes/blob's S3 backend.
+Reaching this symbol from outside takes a double-colon, which is the line this codebase draws
+around anything a caller is not meant to use.
+
+A DYNAMIC BINDING IS SAFE HERE BECAUSE OF THE HOST COMPARISON. The binding covers everything the
+send does, including an interceptor that issues a request of its own, but PROXY-ARGUMENTS grants
+nothing unless the URL's host equals this value, so the approval cannot spread to another host.")
+
+(defun call-with-approved-local-host (host thunk)
+  "Call THUNK with HOST bound as the approved local host (#1091). Not exported: see
+*APPROVED-LOCAL-HOST*."
+  (let ((*approved-local-host* host))
+    (funcall thunk)))
+
+(defun proxy-arguments (url)
+  "The dexador keyword arguments that say how URL is to be proxied: (:PROXY NIL) for a plaintext
+request to a host this machine reaches by itself, and no arguments otherwise (#1091).
+
+*APPROVED-LOCAL-HOST* IS THE HOST a configuration step resolved and approved as local -- the
+string, not a boolean -- and it grants the exemption only when it equals URL's host. A boolean
+said only that somebody had approved something, which is not a statement about the request being
+sent: a provider
+whose URL had moved on, or a verdict recorded for one host and read while another was in the
+slot, would have exempted a request to a host nothing had approved. Pass it from a recorded
+verdict, not from a resolution made now; see below for why that distinction is the whole point.
+
+AN APPROVED-LOCAL REQUEST ALSO STOPS FOLLOWING REDIRECTS, which is why :MAX-REDIRECTS 0 comes
+back with the exemption in that case. dexador follows a redirect to a DIFFERENT host by recursing
+with the same arguments and the same headers -- it prepends a new Host and keeps the rest
+(src/backend/usocket.lisp, the cross-host branch of its redirect handling) -- so a 307 from the
+approved host to http://public.example/ would be fetched with :PROXY NIL and with the
+Authorization header built for the approved host. That is the credential leaving the machine, not
+only a proxy being skipped. A 3xx is the response for such a request instead (the review of
+#1134).
+
+ONLY FOR AN APPROVED-LOCAL REQUEST, not for one exempted by the literal rule. The literal rule
+has the same hazard in principle, and the same cause, which is dexador carrying headers across a
+cross-host redirect; but it is the rule every caller of this client gets, redirect following to a
+local server is behaviour this client documents and tests, and turning it off here broke
+REDIRECTS-CAN-BE-REFUSED-CAPPED-OR-FOLLOWED, which follows redirects on a test server at
+127.0.0.1. APPROVED-LOCAL is passed only by a configuration step that is about to send a
+credential, and none of those three callers follows redirects, so the restriction costs them
+nothing. The general case is dexador's behaviour rather than this rule's and is filed separately.
+
+EVERY CALLER THAT SENDS A REQUEST MUST USE THIS, including one that calls dexador directly.
+dexador sets *DEFAULT-PROXY* from HTTPS_PROXY or HTTP_PROXY when it loads and honours no
+NO_PROXY, so a caller that has checked its destination is local can still have its credentials
+carried off the machine in the clear, because the bytes go to the proxy rather than to the host
+that was checked. The first version of this lived inside %DEX-ARGS, which meant hermes/blob's
+S3 backend was NOT covered -- it calls dexador directly -- while the CHANGELOG and a comment
+both said it was (the review of #1094).
+
+NO NAME IS RESOLVED HERE, in either case. Without APPROVED-LOCAL the decision is made for
+\"localhost\" and for IP literals only, and a DNS name keeps whatever proxy is configured. Two
+reasons. A lookup on this path would be a blocking resolution on every plaintext request, which
+CONNECT-TIMEOUT does not cover. And a name that answers private now can answer public at connect
+time, which would mean skipping a configured egress proxy on the strength of a resolution that no
+longer holds.
+
+THAT IS WHY APPROVED-LOCAL IS A RECORDED VERDICT RATHER THAN A LOOKUP. \"This host was approved as
+local when the configuration was built\" is a statement about the past, and it stays true; \"this
+name resolves locally right now\" is a guess about the present, made on the send path, and it is
+the thing the paragraph above refuses to do. A caller that has no configuration step passes
+nothing and gets the literal rule.
+
+Until a caller passed APPROVED-LOCAL the two answers disagreed for the same destination: a
+plaintext store or provider at a NAME that resolves to a loopback address was approved for
+plaintext at configuration time and then still sent its credentials to HTTP_PROXY in the clear,
+because this function would not decide by name. Measured on Linux before the fix, with a name
+/etc/hosts maps to a loopback address:
+
+  <a local name>  local-host-p=T  proxy-arguments=NIL
+  localhost       local-host-p=T  proxy-arguments=(:PROXY NIL)"
+  (let* ((uri (ignore-errors (quri:uri url)))
+         (scheme (and uri (quri:uri-scheme uri)))
+         (host (and uri (url-host url))))
+    (let ((approved (and (stringp *approved-local-host*) host
+                         (string-equal *approved-local-host* host)
+                         (and scheme (string-equal scheme "http")))))
+      (cond (approved (list :proxy nil :max-redirects 0))
+            ((and scheme (string-equal scheme "http") host
+                  (or (string-equal host "localhost")
+                      (let ((literal (parse-address host)))
+                        (and literal (not (%leading-zero-quad-p host))
+                             (%local-address-p literal)))))
+             (list :proxy nil))
+            (t '())))))
+
 (defun resolve-host (host)
   "The addresses HOST resolves to, as octet vectors; NIL when it does not resolve. A host that is
 an IP address in text resolves to itself."
@@ -188,97 +533,131 @@ is how cl+ssl writes a certificate's iPAddress entries before it compares them, 
         (values nil (usocket:host-to-hostname address))
         (values host host))))
 
-#-os-windows
+#-(or os-windows os-macosx)
 (defun %verify-peer-name (stream name)
-  "Verify the certificate the server on STREAM presented against NAME, with cl+ssl's own check,
-and free it. Used for an IP address, where the handshake sent no SNI, so cl+ssl verified the
-chain but not the name. Signals what CL+SSL:VERIFY-HOSTNAME signals on a mismatch.
+  "Verify the certificate the server on STREAM presented against NAME, and free it. Signals
+HTTP-ERROR when the certificate does not name NAME.
 
-cl+ssl compares the address with the text of the certificate's subject alternative names of
-either kind, iPAddress and dNSName, and with its common name when no alternative name matches,
-so a certificate whose dNSName or CN is the address text is accepted too. That is looser than
-RFC 6125, which matches an address only against iPAddress entries, and it is cl+ssl's rule for
-every name it verifies, here as for a host name."
+THE SUBJECT ALTERNATIVE NAMES FIRST (#917). When the certificate has any dNSName or iPAddress
+alternative name, NAME must match one of them, and its common name is not consulted, as RFC 6125
+section 6.4.4 requires. Only a certificate with no such name is checked against its common name.
+cl+ssl's own check, CL+SSL:VERIFY-HOSTNAME, falls back to the common name in both cases, so a
+certificate for other names whose common name is NAME passed it.
+
+Called for every pinned https connection: for a host name after cl+ssl's own check in the
+handshake, which this narrows, and for an IP address (#915) as the only check, since no SNI name
+was sent and cl+ssl verified the chain but not a name. Names are matched with cl+ssl's matcher,
+so case and wildcards are treated as there. cl+ssl gives dNSName and iPAddress entries as one
+list of text, so an address can match a dNSName entry that is the same text.
+
+ONLY THE PINNED PATH (:CONNECT-ADDRESS, which FETCH-PUBLIC always uses). A request without
+CONNECT-ADDRESS goes through dexador, where cl+ssl's own check is the only one, and a common name
+is still accepted on a certificate with alternative names. Changing that would mean patching
+cl+ssl for the whole image (#917)."
   (let ((certificate (cl+ssl:ssl-stream-x509-certificate stream)))
     (when (cffi:null-pointer-p certificate)
       (error 'http-error :detail "the server presented no certificate"))
-    (unwind-protect (cl+ssl:verify-hostname certificate name)
+    (unwind-protect
+         ;; Entries of other kinds, such as an email address, come back as NIL and do not count.
+         (let ((alternative-names (remove nil (cl+ssl::certificate-dns-alt-names certificate))))
+           (unless (if alternative-names
+                       (cl+ssl::try-match-hostnames alternative-names name)
+                       (ignore-errors (cl+ssl:verify-hostname certificate name)))
+             (error 'http-error
+                    :detail (format nil "the server's certificate does not name ~A" name))))
       (cl+ssl:x509-free certificate))))
 
-#-os-windows
+#-(or os-windows os-macosx)
 (defun %request-pinned (req)
-  "Run REQ over a connection to its CONNECT-ADDRESS, returning what DEX:REQUEST returns.
+  "Run REQ over a connection to its CONNECT-ADDRESS, returning (values BODY STATUS HEADERS).
 
-The socket is opened here, to that address. For https the TLS handshake uses the URL's host
-name, so the server is asked for that name (SNI) and its certificate is verified against that
-name, not against the address. When the URL's host is itself an IP address, no SNI is sent and
-the certificate is verified against the address without its brackets (%TLS-NAMES, #915).
-DEX:REQUEST then writes the request on this connection, so the Host header is the URL's too."
+The socket is opened here, to that address and nowhere else. For https the TLS handshake uses
+the URL's host name, so the server is asked for that name (SNI) and its certificate is verified
+against that name, not against the address. When the URL's host is itself an IP address, no SNI
+is sent and the certificate is verified against the address without its brackets (%TLS-NAMES,
+#915). In both cases a certificate with alternative names must match one of them; its common
+name counts only when it has none (%VERIFY-PEER-NAME, #917).
+
+The request is written and the response read by http1.lisp, as on Windows (#536), whose limits
+apply, and the Host header is the URL's. Until #985 this handed the connection to DEX:REQUEST,
+which after any failure on it reconnected by resolving the URL's host and sent the request
+again: a second connection that bypassed CONNECT-ADDRESS, and a request sent twice. Now a
+failure is signalled from the one connection, and no request is sent twice.
+
+The socket is lent to FETCH-PUBLIC's deadline watch, and the read timeout is the socket's
+receive timeout. A body read as a stream (MAX-BODY-BYTES) keeps the connection, and closing the
+body closes it; otherwise the body is read here and the connection closed. A non-2xx is returned
+like any other response, while the connection is open, so its body is kept (#527)."
   (let* ((uri (quri:uri (request-url req)))
          (host (quri:uri-host uri))
          (address (or (parse-address (request-connect-address req))
                       (error 'http-error
                              :detail (format nil "connect-address ~S is not an IP address"
                                              (request-connect-address req)))))
-         (socket (usocket:socket-connect address (%port-of uri)
-                                         :element-type '(unsigned-byte 8)
-                                         :timeout (request-connect-timeout req)))
+         (socket (prog1 (usocket:socket-connect address (%port-of uri)
+                                                :element-type '(unsigned-byte 8)
+                                                :timeout (request-connect-timeout req))
+                   ;; From here on a failure happened after the connection was made (#79).
+                   (setf *%connected* t)))
+         (stream nil)
          (body-owns-connection nil))
     (%lend-socket socket)
-    (unwind-protect
-         (let ((stream (usocket:socket-stream socket)))
-           (when (request-read-timeout req)
-             (setf (usocket:socket-option socket :receive-timeout) (request-read-timeout req)))
-           (when (string-equal (quri:uri-scheme uri) "https")
-             (cl+ssl:ensure-initialized)
-             (let ((context (cl+ssl:make-context
-                             :verify-mode cl+ssl:+ssl-verify-peer+
-                             :verify-location (if (request-ca-path req)
-                                                  (uiop:native-namestring (request-ca-path req))
-                                                  :default))))
-               (multiple-value-bind (sni name) (%tls-names host)
-                 (cl+ssl:with-global-context (context :auto-free-p t)
-                   ;; With no SNI name, cl+ssl verifies the chain but not a name, so the address is
-                   ;; verified here.
-                   (setf stream (cl+ssl:make-ssl-client-stream stream :hostname sni
-                                                                      :verify :required))
-                   (unless sni
-                     (%verify-peer-name stream name))))))
-           (multiple-value-bind (body status headers)
-               ;; A non-2xx is caught HERE, while the connection is open, and returned like any
-               ;; other response. Caught in %HTTP instead, the HANDLER-CASE there unwound
-               ;; through this UNWIND-PROTECT first, which closed the socket, and the body of
-               ;; every 4xx and 5xx fetched this way was lost -- such as an OAuth token
-               ;; endpoint's {"error":"invalid_grant"} (#527).
-               (handler-case
-                   (apply #'dex:request (request-url req) :stream stream
-                          :use-connection-pool nil :keep-alive nil (%dex-args req))
-                 (dexador.error:http-request-failed (e)
-                   (values (dexador.error:response-body e)
-                           (dexador.error:response-status e)
-                           (ignore-errors (dexador.error:response-headers e)))))
-             ;; A streamed body (MAX-BODY-BYTES) still needs the connection, and
-             ;; %READ-CAPPED closes it when it has read enough. Otherwise the connection is
-             ;; finished with here.
-             (setf body-owns-connection (streamp body))
-             (values body status headers)))
-      (unless body-owns-connection
-        (%take-back-socket)
-        (ignore-errors (usocket:socket-close socket))))))
+    (flet ((close-connection ()
+             (%take-back-socket)
+             (when stream (ignore-errors (close stream)))
+             (ignore-errors (usocket:socket-close socket))))
+      (unwind-protect
+           (progn
+             (setf stream (usocket:socket-stream socket))
+             (when (request-read-timeout req)
+               (setf (usocket:socket-option socket :receive-timeout) (request-read-timeout req)))
+             (when (string-equal (quri:uri-scheme uri) "https")
+               (cl+ssl:ensure-initialized)
+               (let ((context (cl+ssl:make-context
+                               :verify-mode cl+ssl:+ssl-verify-peer+
+                               :verify-location (if (request-ca-path req)
+                                                    (uiop:native-namestring (request-ca-path req))
+                                                    :default))))
+                 (multiple-value-bind (sni name) (%tls-names host)
+                   (cl+ssl:with-global-context (context :auto-free-p t)
+                     ;; With no SNI name, cl+ssl verifies the chain but not a name. Either way the
+                     ;; name is verified here, alternative names first (#917).
+                     (setf stream (cl+ssl:make-ssl-client-stream stream :hostname sni
+                                                                        :verify :required))
+                     (%verify-peer-name stream name)))))
+             (multiple-value-bind (body status headers)
+                 (http1-exchange stream (request-method req) uri (request-headers req)
+                                 (request-content req) :closer #'close-connection)
+               ;; A body is handed back as a stream when the caller caps it, or when a caller
+               ;; must see the headers before deciding to read it at all (#1178).
+               (if (or (request-max-body-bytes req) *%pinned-body-stream*)
+                   (progn (setf body-owns-connection t)
+                          (values body status headers))
+                   (let ((octets (let ((out (make-array 0 :element-type '(unsigned-byte 8)
+                                                          :adjustable t :fill-pointer 0)))
+                                   (loop for b = (read-byte body nil nil)
+                                         while b do (vector-push-extend b out))
+                                   (coerce out '(simple-array (unsigned-byte 8) (*))))))
+                     (values octets status headers)))))
+        (unless body-owns-connection (close-connection))))))
 
-#+os-windows
-(defvar *server-certificate-verifier* 'aion/windows:verify-server-certificate-chain
-  "The function that decides about a pinned connection's server certificate on Windows: called
+#+(or os-windows os-macosx)
+(defvar *server-certificate-verifier*
+  #+os-windows 'aion/windows:verify-server-certificate-chain
+  #+os-macosx 'aion/darwin:verify-server-certificate-chain
+  "The function that decides about an https server's certificate on Windows and macOS: called
 with the chain, DER and leaf first, and the URL's host, it returns (values VERDICT CODE) as
-AION/WINDOWS:VERIFY-SERVER-CERTIFICATE-CHAIN does. A test binds it; nothing else should.")
+AION/WINDOWS:VERIFY-SERVER-CERTIFICATE-CHAIN and AION/DARWIN:VERIFY-SERVER-CERTIFICATE-CHAIN do.
+On Windows it decides for a pinned connection; on macOS for every https connection, pinned or
+through dexador (#905). A test binds it; nothing else should.")
 
-#+os-windows
+#+(or os-windows os-macosx)
 (defvar *%verifying-config* nil
   "The aion/tls client config whose verifier is the one above, made once on first use.")
-#+os-windows
+#+(or os-windows os-macosx)
 (defvar *%verifying-config-lock* (sb-thread:make-mutex :name "aion/http-client tls config"))
 
-#+os-windows
+#+(or os-windows os-macosx)
 (defun %verifying-config ()
   (sb-thread:with-mutex (*%verifying-config-lock*)
     (or *%verifying-config*
@@ -291,13 +670,13 @@ AION/WINDOWS:VERIFY-SERVER-CERTIFICATE-CHAIN does. A test binds it; nothing else
                        (error (certificate-condition-class verdict)
                               :host host :verdict verdict :code code)))))))))
 
-#+os-windows
+#+(or os-windows os-macosx)
 (defun %ca-path-config (path)
   "A client config that trusts the CA certificates in the PEM file PATH, as cl+ssl's
-:VERIFY-LOCATION does on the other platforms, and the certificate chain it holds: (values CONFIG
+:VERIFY-LOCATION does on Linux, and the certificate chain it holds: (values CONFIG
 CHAIN), both for the caller to free. A directory is refused: aion/tls reads one file."
   (when (uiop:directory-exists-p path)
-    (error 'http-error :detail (format nil "ca-path ~A is a directory; on Windows give one PEM file" path)))
+    (error 'http-error :detail (format nil "ca-path ~A is a directory; on Windows and macOS give one PEM file" path)))
   (let ((octets (with-open-file (in path :element-type '(unsigned-byte 8))
                   (let* ((buffer (make-array (file-length in) :element-type '(unsigned-byte 8)))
                          (n (read-sequence buffer in)))
@@ -307,30 +686,147 @@ CHAIN), both for the caller to free. A directory is refused: aion/tls reads one 
                               (aion/tls:free-certificate-chain chain))))
         (values (aion/tls:make-client-config chain) chain)))))
 
+;;; --- the read timeout on Windows (#985) ------------------------------------------------
+;;;
+;;; On Windows neither the socket's receive timeout (SO_RCVTIMEO, which USOCKET:SOCKET-OPTION
+;;; :RECEIVE-TIMEOUT sets) nor SBCL's fd-stream timeout ends a read from a socket that receives
+;;; nothing: measured, a read with a timeout of one second was still waiting after twenty. So a
+;;; pinned request's read timeout is kept here instead: when a read has waited longer than the
+;;; timeout, a timer closes the socket, which wakes the read, and the read signals
+;;; SB-SYS:IO-TIMEOUT. It closes rather than shuts down: on Windows a shutdown from another thread
+;;; did not wake a blocked read within ten seconds, and a close woke it at once (measured, #985).
+;;; A read that does not have to wait (LISTEN is true) costs no timer.
+
 #+os-windows
+(defclass %idle-watched-stream (sb-gray:fundamental-binary-input-stream
+                                sb-gray:fundamental-binary-output-stream)
+  ((inner :initarg :inner :reader %inner)
+   (socket :initarg :socket :reader %watched-socket)
+   (seconds :initarg :seconds :reader %watch-seconds)
+   (timed-out :initform nil :accessor %timed-out)))
+
+#+os-windows
+(defun %watch-fire (s state)
+  "What %CALL-WATCHED's timer does when it fires: when STATE, a cons whose car is the read's
+state, is still :READING, claim it as :FIRED, mark S timed out and close its socket. When the
+read has already claimed it as :DONE, do nothing, so a timer that fires between the read's
+return and its unscheduling cannot end a read that finished (#1063)."
+  (when (eq :reading (sb-ext:compare-and-swap (car state) :reading :fired))
+    (setf (%timed-out s) t)
+    (ignore-errors (usocket:socket-close (%watched-socket s)))))
+
+#+os-windows
+(defun %call-watched (s thunk)
+  "Call THUNK, a read from S's inner stream. When the read would wait, a timer closes S's socket
+after S's seconds; a read woken that way signals SB-SYS:IO-TIMEOUT.
+
+A read that returns is never reported as a timeout (#1063). The read and the timer each try to
+move one state from :READING, with COMPARE-AND-SWAP, and only the one that moves it acts: a
+read that finishes first leaves the timer nothing to do, even if it fires before it is
+unscheduled; a timer that fires first closes the socket. When the read still returns after
+that, its result is returned, and the closed socket makes the next read signal the timeout."
+  (if (listen (%inner s))
+      (funcall thunk)
+      (let* ((state (list :reading))
+             ;; THREAD-LIFETIME: a timer made with :THREAD T starts its thread only when it
+             ;; fires. That thread claims the state, closes the socket and ends. A read that
+             ;; finishes first unschedules the timer below, and then no thread is made.
+             ;; INTERRUPTS: not needed -- SBCL makes the thread, which runs one socket close and
+             ;; ends.
+             (timer (sb-ext:make-timer (lambda () (%watch-fire s state))
+                                       :thread t :name "aion/http-client read timeout")))
+        (sb-ext:schedule-timer timer (%watch-seconds s))
+        (multiple-value-bind (result returned)
+            (unwind-protect (%unless-timed-out s thunk)
+              (sb-ext:compare-and-swap (car state) :reading :done)
+              (sb-ext:unschedule-timer timer))
+          (unless returned
+            (error 'sb-sys:io-timeout :stream s :direction :input :seconds (%watch-seconds s)))
+          result))))
+
+#+os-windows
+(defun %unless-timed-out (s thunk)
+  "Call THUNK and return (VALUES its-value T). When it fails because the timer closed the socket,
+on this read or an earlier one, return (VALUES NIL NIL), so the caller signals the timeout
+instead of whatever the closed socket reported."
+  (handler-case (values (funcall thunk) t)
+    (error (e) (if (%timed-out s) (values nil nil) (error e)))))
+
+#+os-windows
+(defmethod sb-gray:stream-read-byte ((s %idle-watched-stream))
+  (or (%call-watched s (lambda () (read-byte (%inner s) nil nil))) :eof))
+
+#+os-windows
+(defmethod sb-gray:stream-read-sequence ((s %idle-watched-stream) seq &optional (start 0) end)
+  (%call-watched s (lambda () (read-sequence seq (%inner s) :start start :end end))))
+
+#+os-windows
+(defmethod sb-gray:stream-listen ((s %idle-watched-stream))
+  (listen (%inner s)))
+
+#+os-windows
+(defmethod sb-gray:stream-write-byte ((s %idle-watched-stream) byte)
+  (write-byte byte (%inner s)))
+
+#+os-windows
+(defmethod sb-gray:stream-write-sequence ((s %idle-watched-stream) seq &optional (start 0) end)
+  (write-sequence seq (%inner s) :start start :end end)
+  seq)
+
+#+os-windows
+(defmethod sb-gray:stream-force-output ((s %idle-watched-stream))
+  (force-output (%inner s)))
+
+#+os-windows
+(defmethod sb-gray:stream-finish-output ((s %idle-watched-stream))
+  (finish-output (%inner s)))
+
+#+os-windows
+(defmethod stream-element-type ((s %idle-watched-stream))
+  '(unsigned-byte 8))
+
+#+os-windows
+(defmethod close ((s %idle-watched-stream) &key abort)
+  (close (%inner s) :abort abort)
+  (call-next-method))
+
+#+os-windows
+(defun %watch-reads (socket seconds)
+  "SOCKET's stream, with reads ended after SECONDS of waiting, or the stream itself when SECONDS
+is NIL."
+  (let ((stream (usocket:socket-stream socket)))
+    (if seconds
+        (make-instance '%idle-watched-stream :inner stream :socket socket :seconds seconds)
+        stream)))
+
+#+(or os-windows os-macosx)
 (defun %request-pinned (req)
   "Run REQ over a connection to its CONNECT-ADDRESS, returning (values BODY STATUS HEADERS) as
-DEX:REQUEST does (#536).
+DEX:REQUEST does (#536; on macOS since #905).
 
 The socket is opened here, to that address and nowhere else. For https, aion/tls does the
-handshake with the URL's host name, so the server is asked for that name (SNI), and Windows
-decides whether to trust the certificate, for that name, through *SERVER-CERTIFICATE-VERIFIER*:
-a refusal is a CERTIFICATE-REJECTED of the matching subclass. With the request's CA-PATH, the CA
-certificates in that file decide instead. The request is written and the response read by
-http1.lisp, whose limits apply, and the Host header is the URL's.
+handshake with the URL's host name, so the server is asked for that name (SNI), and the
+operating system decides whether to trust the certificate, for that name, through
+*SERVER-CERTIFICATE-VERIFIER*: a refusal is a CERTIFICATE-REJECTED of the matching subclass.
+With the request's CA-PATH, the CA certificates in that file decide instead. The request is
+written and the response read by http1.lisp, whose limits apply, and the Host header is the
+URL's.
 
-The socket is lent to FETCH-PUBLIC's deadline watch, and the read timeout is the socket's
-receive timeout. A body read as a stream (MAX-BODY-BYTES) keeps the connection, and closing the
-body closes it; otherwise the body is read here and the connection closed."
+The socket is lent to FETCH-PUBLIC's deadline watch. On Windows the read timeout is kept by
+%IDLE-WATCHED-STREAM, because Windows ignores the socket's receive timeout; on macOS it is the
+socket's receive timeout. A body read as a stream (MAX-BODY-BYTES) keeps the connection, and
+closing the body closes it; otherwise the body is read here and the connection closed."
   (let* ((uri (quri:uri (request-url req)))
          (host (quri:uri-host uri))
          (address (or (parse-address (request-connect-address req))
                       (error 'http-error
                              :detail (format nil "connect-address ~S is not an IP address"
                                              (request-connect-address req)))))
-         (socket (usocket:socket-connect address (%port-of uri)
-                                         :element-type '(unsigned-byte 8)
-                                         :timeout (request-connect-timeout req)))
+         (socket (prog1 (usocket:socket-connect address (%port-of uri)
+                                                :element-type '(unsigned-byte 8)
+                                                :timeout (request-connect-timeout req))
+                   ;; From here on a failure happened after the connection was made (#79).
+                   (setf *%connected* t)))
          (stream nil)
          (own-config nil)
          (own-chain nil)
@@ -345,20 +841,27 @@ body closes it; otherwise the body is read here and the connection closed."
              (when own-chain (ignore-errors (aion/tls:free-certificate-chain own-chain)))))
       (unwind-protect
            (progn
-             (setf stream (usocket:socket-stream socket))
-             (when (request-read-timeout req)
-               (setf (usocket:socket-option socket :receive-timeout) (request-read-timeout req)))
+             #+os-windows (setf stream (%watch-reads socket (request-read-timeout req)))
+             #-os-windows (progn
+                            (setf stream (usocket:socket-stream socket))
+                            (when (request-read-timeout req)
+                              (setf (usocket:socket-option socket :receive-timeout)
+                                    (request-read-timeout req))))
              (when (string-equal (quri:uri-scheme uri) "https")
                (when (request-ca-path req)
                  (multiple-value-setq (own-config own-chain) (%ca-path-config (request-ca-path req))))
-               ;; QURI keeps an IPv6 literal's brackets, as in [::1]; the name the certificate
-               ;; is judged for, and the one aion/tls decides SNI from, is the bare address.
+               ;; The name the certificate is judged for, and the one aion/tls decides SNI from:
+               ;; %TLS-NAMES's second value, as on Linux and macOS. For an IP address that is the
+               ;; address without the brackets QURI keeps, in one canonical form, so
+               ;; [0:0:0:0:0:0:0:1] is judged as ::1 on every platform (#921).
                (setf stream (aion/tls:make-tls-stream stream (or own-config (%verifying-config))
-                                                      :hostname (string-trim "[]" host))))
+                                                      :hostname (nth-value 1 (%tls-names host)))))
              (multiple-value-bind (body status headers)
                  (http1-exchange stream (request-method req) uri (request-headers req)
                                  (request-content req) :closer #'close-connection)
-               (if (request-max-body-bytes req)
+               ;; A body is handed back as a stream when the caller caps it, or when a caller
+               ;; must see the headers before deciding to read it at all (#1178).
+               (if (or (request-max-body-bytes req) *%pinned-body-stream*)
                    (progn (setf body-owns-connection t)
                           (values body status headers))
                    (let ((octets (let ((out (make-array 0 :element-type '(unsigned-byte 8)
@@ -373,16 +876,6 @@ body closes it; otherwise the body is read here and the connection closed."
 
 (defparameter *fetch-public-max-body-bytes* (* 10 1024 1024)
   "FETCH-PUBLIC's default body limit: 10 MiB.")
-
-(defun %origin (uri)
-  (list (string-downcase (or (quri:uri-scheme uri) ""))
-        (string-downcase (or (quri:uri-host uri) ""))
-        (%port-of uri)))
-
-(defun %without-credentials (headers)
-  (remove-if (lambda (h) (member (string (car h)) '("authorization" "cookie")
-                                 :test #'string-equal))
-             headers))
 
 (defun %checked-address (url uri resolve address-policy)
   "The address to connect to for URI, after refusing anything FETCH-PUBLIC must not reach."
@@ -403,12 +896,16 @@ body closes it; otherwise the body is read here and the connection closed."
       (first addresses))))
 
 (defun %fire (watch)
-  "The deadline has passed: record it, and shut down the socket the fetch is using, which wakes
-a read or write blocked on it."
+  "The deadline has passed: record it, and wake a read or write blocked on the socket the fetch
+is using. Elsewhere the socket is shut down. On Windows it is closed, because a shutdown from
+another thread did not wake a blocked read there: measured, a FETCH-PUBLIC with :DEADLINE 2 to a
+server that never answered was still waiting after 20 seconds (#985)."
   (sb-thread:with-mutex ((%watch-lock watch))
     (setf (%watch-fired watch) t)
     (let ((socket (%watch-socket watch)))
-      (when socket (ignore-errors (usocket:socket-shutdown socket :io))))))
+      (when socket
+        #+os-windows (ignore-errors (usocket:socket-close socket))
+        #-os-windows (ignore-errors (usocket:socket-shutdown socket :io))))))
 
 (defun %fired-p (watch)
   (and watch (sb-thread:with-mutex ((%watch-lock watch)) (%watch-fired watch))))

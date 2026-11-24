@@ -14,9 +14,18 @@ sbcl --dynamic-space-size 4096 --script bootstrap.lisp   # → bin/cons
 ```
 
 It builds `bin/cons` and writes `~/.config/common-lisp/source-registry.conf.d/50-ouranos.conf`
-— an ASDF `(:tree <repo-root>)` drop-in covering every framework in the tree (rewritten each
-bootstrap; self-heals if the repo moves). No symlinking into `~/quicklisp/local-projects`,
-no `asdf:*central-registry*`.
+— an ASDF `(:tree <repo-root>)` drop-in covering every framework in the tree. No symlinking
+into `~/quicklisp/local-projects`, no `asdf:*central-registry*`.
+
+Bootstrap rewrites the drop-in when it names this checkout or a checkout that no longer
+exists, so moving the repository needs only a second bootstrap. When it names another
+checkout that still exists, bootstrap stops with exit code 3 before building, because every
+process on the machine reads that file (#955). To bootstrap a worktree or a scratch clone,
+set `OURANOS_BOOTSTRAP_LOCAL=1`: bootstrap leaves the drop-in alone, builds against this
+checkout through `CL_SOURCE_REGISTRY`, and prints the value to export. To move the whole
+machine to this checkout instead, set `OURANOS_BOOTSTRAP_FORCE=1`. The refusal prints both
+commands for your OS. [Getting started](getting-started.md#a-second-checkout-on-the-same-machine)
+has the details.
 
 ## The one hard rule — the dependency DAG
 
@@ -26,7 +35,7 @@ aion → cons → mnemosyne → elenchon → hyperion → praxeon
 
 A **core** system never depends on one to its **right** (ASDF errors on cycles). An
 **auxiliary** system may reach right if the *system-level* graph stays acyclic (e.g.
-`praxeon/web → hyperion`, `hyperion/testing → elenchon`). Combined apps/examples live in
+`praxeon/web → hyperion`, `dokimasia/elenchon → elenchon`). Combined apps/examples live in
 the **highest** framework they need. ASDF errors on a cycle, so this is enforced rather than advisory — see
 [`../ECOSYSTEM.md`](../ECOSYSTEM.md).
 
@@ -74,7 +83,7 @@ container is one way to provide that server and a Postgres you already run is an
 nothing in the tree depends on Docker:
 
 ```sh
-scripts/test-postgres.sh up              # pgvector/pgvector:pg17 on :55432, waits until it answers
+scripts/test-postgres.sh up              # the pinned pgvector/pgvector image on :55432, waits until it answers
 eval "$(scripts/test-postgres.sh env)"   # exports MNEMOSYNE_TEST_PG_URL
 sbcl --dynamic-space-size 4096 --script scripts/verify-tree.lisp
 scripts/test-postgres.sh down
@@ -298,4 +307,7 @@ Per-framework `<framework>/docs/editor-setup.md` has more detail.
   (`--dynamic-space-size 4096`) and let it finish; cached after.
 - **A system isn't found** — re-run the seed once (it writes the drop-in); confirm
   `~/.config/common-lisp/source-registry.conf.d/50-ouranos.conf` exists and points at your
-  checkout.
+  checkout. If you bootstrapped with `OURANOS_BOOTSTRAP_LOCAL=1`, there is no drop-in for that
+  checkout: set the `CL_SOURCE_REGISTRY` value bootstrap printed.
+- **Bootstrap exits 3 and names two trees** — the drop-in names another checkout. Choose
+  `OURANOS_BOOTSTRAP_LOCAL=1` or `OURANOS_BOOTSTRAP_FORCE=1`, as the message says.

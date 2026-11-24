@@ -253,3 +253,289 @@ main at 3ab171b."
   (signals h:invalid-message (h:make-email :to "a" :from "b" :attachments (list "not an attachment")))
   (is (h:attachment-p (h:make-attachment :filename "a.txt" :content-type "text/plain" :content ""))
       "an empty file is still a file"))
+
+;;; --- extra email headers (#106) ----------------------------------------------
+
+(defun %sendgrid-headers (m)
+  "The headers object of the SendGrid request for M, or NIL when there is none."
+  (gethash "headers" (hermes::%sendgrid-body m)))
+
+(test list-unsubscribe-reaches-sendgrid-as-given
+  (let* ((value "<https://app.example/u/abc>, <mailto:unsubscribe@app.example?subject=u-abc>")
+         (headers (%sendgrid-headers
+                   (h:make-email :to "a@x.com" :from "b@x.com" :subject "News" :text "Hi"
+                                 :headers (list (cons "List-Unsubscribe" value))))))
+    (is (string= value (gethash "List-Unsubscribe" headers))
+        "the value is sent exactly as given, both URIs included")
+    (is (= 1 (hash-table-count headers)) "and nothing else is added")))
+
+(test list-unsubscribe-post-reaches-sendgrid-beside-list-unsubscribe
+  ;; RFC 8058: one-click needs both headers, and an https URI in List-Unsubscribe.
+  (let ((headers (%sendgrid-headers
+                  (h:make-email :to "a@x.com" :from "b@x.com" :subject "News" :text "Hi"
+                                :headers '(("List-Unsubscribe" . "<https://app.example/u/abc>")
+                                           ("List-Unsubscribe-Post" . "List-Unsubscribe=One-Click"))))))
+    (is (string= "List-Unsubscribe=One-Click" (gethash "List-Unsubscribe-Post" headers)))
+    (is (string= "<https://app.example/u/abc>" (gethash "List-Unsubscribe" headers)))))
+
+(test an-email-without-headers-sends-no-headers-object
+  (is (null (nth-value 1 (gethash "headers" (hermes::%sendgrid-body
+                                             (h:make-email :to "a@x.com" :from "b@x.com"
+                                                           :subject "Hi" :text "Body"))))))
+  (is (null (h:email-headers (h:make-email :to "a@x.com" :from "b@x.com")))))
+
+(test a-line-break-in-a-header-name-or-value-is-refused
+  ;; Header injection: a CR or LF would end the header and let the value add one of its own.
+  (dolist (break (list (string #\Return) (string #\Linefeed) (format nil "~C~C" #\Return #\Linefeed)))
+    (signals h:invalid-message
+      (h:make-email :to "a" :from "b"
+                    :headers (list (cons "List-Unsubscribe"
+                                         (format nil "<https://a.example/u>~ABcc: victim@example.com" break)))))
+    (signals h:invalid-message
+      (h:make-email :to "a" :from "b"
+                    :headers (list (cons (format nil "X-Campaign~ABcc" break) "x"))))))
+
+(test a-header-hermes-or-the-provider-sets-cannot-be-given
+  (dolist (name '("To" "from" "SUBJECT" "Reply-To" "Bcc" "Content-Type" "DKIM-Signature"))
+    (signals h:invalid-message
+      (h:make-email :to "a" :from "b" :headers (list (cons name "x"))))))
+
+(test other-bad-headers-are-refused-and-good-ones-kept
+  (signals h:invalid-message (h:make-email :to "a" :from "b" :headers '(("" . "x"))))
+  (signals h:invalid-message (h:make-email :to "a" :from "b" :headers '(("X Campaign" . "x"))))
+  (signals h:invalid-message (h:make-email :to "a" :from "b" :headers '(("X-Campaign:" . "x"))))
+  (signals h:invalid-message (h:make-email :to "a" :from "b" :headers '(("X-Campaign" . 42))))
+  (signals h:invalid-message (h:make-email :to "a" :from "b" :headers '(("X-A" . "1") ("x-a" . "2"))))
+  (signals h:invalid-message (h:make-email :to "a" :from "b" :headers '("X-A: 1")))
+  (signals h:invalid-message (h:make-email :to "a" :from "b" :headers "X-A: 1"))
+  (let ((headers (list (cons "X-Campaign" (format nil "spring~Csale" #\Tab)) (cons "X-Empty" ""))))
+    (is (equal headers (h:email-headers (h:make-email :to "a" :from "b" :headers headers)))
+        "a tab and an empty value are allowed, and the alist is kept as given")))
+
+(test a-header-value-outside-printable-ascii-is-refused
+  ;; NEL (U+0085) and the line separator (U+2028) end a line for some parsers; a non-ASCII
+  ;; letter is not valid in a raw header, and hermes does not RFC 2047-encode one.
+  (dolist (ch (list (code-char #x85) (code-char #x9B) (code-char #x2028) (code-char #xE9)
+                    (code-char 127) (code-char 0)))
+    (signals h:invalid-message
+      (h:make-email :to "a" :from "b"
+                    :headers (list (cons "X-Campaign" (format nil "spring~Csale" ch)))))))
+
+(test a-header-longer-than-an-email-line-is-refused
+  ;; "X-Long: " is 8 characters, so a 990-character value makes a 998-character line.
+  (is (h:email-headers (h:make-email :to "a" :from "b"
+                                     :headers (list (cons "X-Long" (make-string 990 :initial-element #\a)))))
+      "998 characters is allowed")
+  (signals h:invalid-message
+    (h:make-email :to "a" :from "b"
+                  :headers (list (cons "X-Long" (make-string 991 :initial-element #\a))))))
+
+(test the-reserved-header-list-cannot-be-changed-by-a-caller
+  (let ((list (h:reserved-email-headers)))
+    (setf (first list) "X-Not-Reserved")
+    (is (member "To" (h:reserved-email-headers) :test #'string=) "a fresh list each time")
+    (signals h:invalid-message (h:make-email :to "a" :from "b" :headers '(("To" . "x"))))))
+
+(test the-dev-transport-shows-the-headers-of-the-last-email
+  (let* ((out (make-string-output-stream))
+         (p (h:make-dev-transport :stream out)))
+    (h:deliver p (h:make-email :to "a@x.io" :from "b@y.io" :subject "News" :text "Hi"
+                               :headers '(("List-Unsubscribe" . "<https://app.example/u/abc>")
+                                          ("List-Unsubscribe-Post" . "List-Unsubscribe=One-Click"))))
+    (let ((s (get-output-stream-string out)))
+      (is (search "List-Unsubscribe: <https://app.example/u/abc>" s))
+      (is (search "List-Unsubscribe-Post: List-Unsubscribe=One-Click" s)))))
+
+(test an-email-s-headers-cannot-be-replaced-after-the-checks
+  "#969: the checks run in MAKE-EMAIL, so a header list that could be swapped in afterwards would
+reach SendGrid unchecked. The slot is read-only, and the body builder checks again for a struct
+made inside hermes without MAKE-EMAIL."
+  (is (not (fboundp '(setf h:email-headers)))
+      "there is no (SETF EMAIL-HEADERS), so the checked list cannot be replaced")
+  (let ((m (hermes::%make-email :to "a@x.com" :from "b@x.com" :subject "Hi" :text "Body"
+                                :headers (list (cons "List-Unsubscribe"
+                                                     (format nil "<https://a.example/u>~C~CBcc: victim@example.com"
+                                                             #\Return #\Linefeed))))))
+    (signals h:invalid-message (hermes::%sendgrid-body m))
+    "a struct built without MAKE-EMAIL is refused where it becomes a request")
+  (let ((m (hermes::%make-email :to "a@x.com" :from "b@x.com" :subject "Hi" :text "Body"
+                                :headers '(("Bcc" . "victim@example.com")))))
+    (signals h:invalid-message (hermes::%sendgrid-body m)))
+  (let ((m (h:make-email :to "a@x.com" :from "b@x.com" :subject "Hi" :text "Body"
+                         :headers '(("X-Campaign" . "spring")))))
+    (is (string= "spring" (gethash "X-Campaign" (gethash "headers" (hermes::%sendgrid-body m))))
+        "control: a checked header still reaches the request")))
+
+(test an-improper-headers-list-is-an-invalid-message-not-a-type-error
+  ;; #969: EVERY on an improper list signals TYPE-ERROR, which is not hermes's refusal protocol.
+  (signals h:invalid-message (h:make-email :to "a" :from "b" :headers '(("X-A" . "1") . "tail")))
+  (signals h:invalid-message (h:make-email :to "a" :from "b" :headers '("X-A" . "1"))))
+
+;;; --- what an app may send again, in aion/retry's vocabulary (#79 step two) ---------------
+
+(test a-rate-limit-from-any-backend-is-transient-and-carries-its-wait
+  "#79 step two: hermes classifies, and never sleeps or retries by itself. A 429 from SendGrid
+or Twilio used to
+arrive as a plain DELIVERY-FAILURE, so an app had to read the status to tell a rate limit from a
+rejection."
+  ;; AS-DELIVERY is the one place SendGrid's and Twilio's HTTP failures become hermes
+  ;; conditions, so the mapping is driven through it rather than over the network.
+  (let ((c (handler-case
+               (hermes::as-delivery :sendgrid
+                 (error 'aion/http-client:http-error :status 429 :body "too many requests"
+                                                     :retry-after 30))
+             (h:hermes-error (e) e))))
+    (is (typep c 'h:delivery-rate-limited) "a 429 is a rate limit, not a plain failure: ~S" c)
+    (is (eql 30 (h:delivery-rate-limited-retry-after c)) "with the response's Retry-After")
+    (is (eq :sendgrid (h:delivery-failure-provider c))))
+  (let ((c (handler-case
+               (hermes::as-delivery :twilio
+                 (error 'aion/http-client:http-error :detail "transport error" :phase :connect))
+             (h:hermes-error (e) e))))
+    (is (typep c 'h:delivery-failure))
+    (is (not (typep c 'h:delivery-rate-limited)))
+    (is (eq :connect (h:delivery-failure-phase c)) "and a transport failure keeps its phase"))
+  ;; The classification is asserted on the condition AS-DELIVERY produced, not on one built by
+  ;; hand: a hand-built DELIVERY-RATE-LIMITED proves the methods work on a shape the test chose,
+  ;; which is a weaker claim than hermes producing that shape from a provider's 429 (the review
+  ;; of #1067).
+  (let ((limited (handler-case
+                     (hermes::as-delivery :sendgrid
+                       (error 'aion/http-client:http-error :status 429 :body "too many requests"
+                                                           :retry-after 30))
+                   (h:hermes-error (e) e))))
+    (is (eq :transient (aion/retry:transience limited))
+        "a rate limit means the message was refused, so the same message may be sent later")
+    (is-true (aion/retry:transient-p limited))
+    (is (eql 30 (aion/retry:retry-after limited))
+        "and the provider's wait is what an app schedules by"))
+  ;; The control: a rejection through the same path is not worth sending again.
+  (let ((rejected (handler-case
+                      (hermes::as-delivery :sendgrid
+                        (error 'aion/http-client:http-error :status 400 :body "bad address"))
+                    (h:hermes-error (e) e))))
+    (is (null (aion/retry:transience rejected))
+        "control: a 400 through AS-DELIVERY is not transient, so the verdict follows the status")
+    (is-false (aion/retry:transient-p rejected))))
+
+(test a-delivery-failure-says-whether-the-message-may-have-been-sent
+  "#79: :CONNECT means nothing was sent, so sending again is safe; :RESPONSE means the provider
+may already have sent it, so only a caller that knows the send is safe to repeat should."
+  (flet ((failure (&rest args) (apply #'make-condition 'h:delivery-failure :provider :sendgrid args)))
+    (is (eq :transient (aion/retry:transience (failure :phase :connect))))
+    (is (eq :unknown (aion/retry:transience (failure :phase :response))))
+    (is (null (aion/retry:transience (failure)))
+        "a failure hermes raised itself is not worth sending again")
+    (is (null (aion/retry:transience (failure :status 400 :detail "bad address")))
+        "nor is a rejection")
+    (is (eq :transient (aion/retry:transience (failure :status 503))) "503 was not acted on")
+    (is (eq :unknown (aion/retry:transience (failure :status 502))) "502 may have been")
+    ;; The default policy resends only what was certainly not sent.
+    (is-true (aion/retry:transient-p (failure :phase :connect)))
+    (is-false (aion/retry:transient-p (failure :phase :response)))
+    (is-true (aion/retry:transient-or-unknown-p (failure :phase :response)))))
+
+(test the-facebook-rate-limit-codes-are-transient-with-their-wait
+  "#79's brief names Graph codes 4, 17, 32 and 613; 80001 is the Page-token one posting uses.
+Each becomes DELIVERY-RATE-LIMITED, so each is :TRANSIENT and carries the wait Facebook gave."
+  (dolist (code '(4 17 32 613 80001))
+    (let ((class (hermes::%facebook-failure-class code nil "limit reached" nil)))
+      (is (eq 'h:delivery-rate-limited class) "Graph code ~D is a rate limit" code)))
+  ;; A wait of 2 minutes in X-Business-Use-Case-Usage becomes 120 seconds.
+  (let ((headers (make-hash-table :test #'equal)))
+    (setf (gethash "x-business-use-case-usage" headers)
+          "{\"1234\":[{\"estimated_time_to_regain_access\":2}]}")
+    (is (eql 120 (hermes::%facebook-retry-after headers))))
+  ;; Through %FACEBOOK-REFUSAL, which is what the backend actually calls, so this asserts on a
+  ;; condition hermes produced from a Graph body and a usage header rather than on one built here
+  ;; to the shape the assertions want (the review of #1067).
+  (let* ((headers (make-hash-table :test #'equal))
+         (limited (progn
+                    (setf (gethash "x-business-use-case-usage" headers)
+                          "{\"1234\":[{\"estimated_time_to_regain_access\":2}]}")
+                    (hermes::%facebook-refusal
+                     400 "{\"error\":{\"code\":4,\"message\":\"User request limit reached\"}}"
+                     headers #'identity nil))))
+    (is (typep limited 'h:delivery-rate-limited)
+        "a Graph code 4 is produced as a rate limit, not a plain failure: ~S" limited)
+    (is (eq :transient (aion/retry:transience limited)))
+    (is (eql 120 (aion/retry:retry-after limited))
+        "which is what an app passes to its scheduler, not to a sleep")
+    ;; The control, through the same function: a refusal that is not a rate limit.
+    (let ((rejected (hermes::%facebook-refusal
+                     400 "{\"error\":{\"code\":100,\"message\":\"Invalid parameter\"}}"
+                     headers #'identity nil)))
+      (is-false (typep rejected 'h:delivery-rate-limited)
+                "control: Graph code 100 is not a rate limit: ~S" rejected)
+      (is (null (aion/retry:transience rejected))
+          "so it is not worth sending again, and the wait is not read"))))
+
+(defun %calls-p (text name)
+  "Whether TEXT contains a CALL to NAME: an open paren, an optional PACKAGE: or PACKAGE:: prefix,
+NAME, then whitespace or a close paren.
+
+One matcher, called by the sweep and by every control below, so a control cannot pass against a
+copy of the expression it is meant to be checking (the review of #1067). The prefix is the reason
+it exists: the first version searched for the literal strings \"(sleep \" and \"(with-retry\", and
+hermes imports neither name, so the calls a future change would actually write -- (cl:sleep 1),
+or (aion/retry:with-retry ...) -- would not have matched. Nor would (sleep) or a newline after
+the name. The character before NAME must be the open paren itself or the colon of a prefix, so
+NO-SLEEP and MY-SLEEP are not calls to SLEEP."
+  (let ((limit (length text))
+        (n (length name))
+        (i 0))
+    (loop
+      (let ((p (search name text :start2 i)))
+        (unless p (return nil))
+        (let* ((after (+ p n))
+               (next (if (< after limit) (char text after) #\Space))
+               (before (if (plusp p) (char text (1- p)) #\Space)))
+          (when (and (or (member next '(#\Space #\Tab #\Newline #\Return) :test #'char=)
+                         (char= next #\)))
+                     (or (char= before #\()
+                         ;; A package prefix: walk left over the colons and the package name,
+                         ;; which must itself begin right after an open paren.
+                         (and (char= before #\:)
+                              (let ((k (1- p)))
+                                (loop while (and (plusp k)
+                                                 (let ((c (char text (1- k))))
+                                                   (or (alphanumericp c)
+                                                       (member c '(#\: #\- #\/ #\. #\%)
+                                                               :test #'char=))))
+                                      do (decf k))
+                                (and (plusp k) (char= (char text (1- k)) #\())))))
+            (return t)))
+        (setf i (1+ p))))))
+
+(defun %waits-in-source-p (text)
+  "Whether TEXT calls either of the two things hermes must never call itself."
+  (or (%calls-p text "with-retry") (%calls-p text "sleep")))
+
+(test hermes-never-sleeps-to-retry
+  "#79 step two's rule, as a check on the source rather than a claim: hermes classifies and the
+app schedules, so no hermes source CALLS with-retry or sleep.
+
+It matches call syntax through %CALLS-P, not the bare names. The names appear in prose here and
+in DELIVERY-RATE-LIMITED's docstring on purpose, and a plain substring search over the file found
+those sentences and failed, which was this check answering about the wrong object. An offender is
+reported by its path under src/, because src/blob/ and src/payments/ have subdirectories and a
+bare file name does not say which of them a hit is in (the review of #1067)."
+  (let ((offenders '())
+        (root (merge-pathnames "src/" (asdf:system-source-directory "hermes"))))
+    (dolist (path (directory (merge-pathnames "**/*.lisp" root)))
+      (when (%waits-in-source-p (string-downcase (uiop:read-file-string path)))
+        (push (enough-namestring path root) offenders)))
+    (is (null offenders) "these hermes sources wait instead of letting the app schedule: ~S" offenders)
+    ;; The controls run through the same matcher the sweep uses. Every call form a future change
+    ;; could plausibly write must be found, the package-qualified ones included.
+    (dolist (source '("  (sleep 5)" "(cl:sleep 1)" "(sleep)" "  (sleep~%   2)"
+                      "(with-retry (p) (send))" "(aion/retry:with-retry (p) (send))"
+                      "(aion/retry::with-retry (p) (send))"))
+      (let ((text (string-downcase (format nil source))))
+        (is-true (%waits-in-source-p text) "control: ~S reads as a call" text)))
+    ;; And the other direction, so a matcher that simply said yes would fail here.
+    (dolist (source '("with-retry is deliberately not used inside hermes, because it sleeps"
+                      "  (no-sleep 5)" "(my-sleep)" "sleep" "(sleeper 1)"
+                      ";; a comment naming with-retry and sleep"))
+      (let ((text (string-downcase source)))
+        (is-false (%waits-in-source-p text) "control: ~S is not a call" text)))))

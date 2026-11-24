@@ -134,6 +134,10 @@ pointer and almost always what a build runner wants."
                                           '(:struct ffi:uv-stdio-container-t) 'ffi::flags))
         (data (cffi:foreign-slot-pointer container
                                          '(:struct ffi:uv-stdio-container-t) 'ffi::data)))
+    (when (integerp mode)
+      ;; A descriptor of ours, given to the child as this slot, such as a file opened for its
+      ;; standard error.
+      (setf fd mode mode :inherit))
     (ecase mode
       (:ignore
        (setf (cffi:mem-ref flags :int) ffi:+uv-ignore+))
@@ -152,11 +156,17 @@ pointer and almost always what a build runner wants."
 
 (defun spawn (loop program &key arguments cwd env
                                 (stdin :pipe) (stdout :pipe) (stderr :pipe)
-                                on-exit detached)
+                                inherit-fds on-exit detached)
   "Start PROGRAM with ARGUMENTS on LOOP, and return a PROCESS.
 
 STDIN, STDOUT and STDERR are each :PIPE (default -- a CONNECTION you read or write),
-:INHERIT (share ours) or :IGNORE. ON-EXIT is called with the process, on the loop thread.
+:INHERIT (share ours), :IGNORE, or a file descriptor of this process that the child gets in
+that slot, such as a file opened for appending its standard error. ON-EXIT is called with the process, on the loop thread.
+
+INHERIT-FDS is a list of this process's file descriptors that the child receives as its
+descriptors 3, 4 and so on, in order: a browser started with --remote-debugging-pipe reads
+commands on 3 and writes on 4. The caller keeps its own copies and closes them when it no
+longer needs them.
 
 DETACHED makes the child a process-group leader, so it outlives us and can be signalled
 as a group with KILL-PID on a negative pid -- the only process-group semantics libuv
@@ -182,20 +192,25 @@ which is the convention that surprises people who have passed argv straight thro
                    argv (%alloc-string-array args)
                    envc (length environment)
                    envp (when environment (%alloc-string-array environment)))
-             (cffi:with-foreign-object (stdio '(:struct ffi:uv-stdio-container-t) 3)
+             (cffi:with-foreign-object (stdio '(:struct ffi:uv-stdio-container-t)
+                                              (+ 3 (length inherit-fds)))
                (%fill-stdio (cffi:mem-aptr stdio '(:struct ffi:uv-stdio-container-t) 0)
                             stdin 0 in)
                (%fill-stdio (cffi:mem-aptr stdio '(:struct ffi:uv-stdio-container-t) 1)
                             stdout 1 out)
                (%fill-stdio (cffi:mem-aptr stdio '(:struct ffi:uv-stdio-container-t) 2)
                             stderr 2 err)
+               (loop for fd in inherit-fds
+                     for slot from 3
+                     do (%fill-stdio (cffi:mem-aptr stdio '(:struct ffi:uv-stdio-container-t) slot)
+                                     :inherit fd nil))
                (cffi:with-foreign-object (options '(:struct ffi:uv-process-options-t))
                  (dotimes (i (cffi:foreign-type-size
                               '(:struct ffi:uv-process-options-t)))
                    (setf (cffi:mem-aref options :unsigned-char i) 0))
                  (cffi:with-foreign-string (file (string program))
                    (let ((cwd-pointer (if cwd
-                                          (cffi:foreign-string-alloc (namestring cwd))
+                                          (cffi:foreign-string-alloc (uv:native-path cwd))
                                           (cffi:null-pointer))))
                      (unwind-protect
                           (progn
@@ -211,7 +226,7 @@ which is the convention that surprises people who have passed argv straight thro
                                     ffi::flags (if detached
                                                    ffi:+uv-process-detached+
                                                    0)
-                                    ffi::stdio-count 3
+                                    ffi::stdio-count (+ 3 (length inherit-fds))
                                     ffi::stdio stdio))
                             (let ((process (%make-process
                                             :pointer handle :loop loop

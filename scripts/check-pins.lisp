@@ -4,7 +4,8 @@
 ;;;;     sbcl --script scripts/check-pins.lisp            ; offline, deterministic
 ;;;;     sbcl --script scripts/check-pins.lisp --report   ; adds an age REPORT, still exit 0
 ;;;;
-;;;; Exit 0 if every *.pin carries the required fields, 1 if any does not, 2 if it cannot
+;;;; Exit 0 if every *.pin carries the required fields and every vendored asset's file hashes to
+;;;; its pin, 1 if not, 2 if it cannot
 ;;;; read a pin at all (so "I am misreading the format" is never reported as "the pin is
 ;;;; fine" -- the same reconciliation check-readme-counts.lisp makes against the gate log).
 ;;;;
@@ -23,8 +24,18 @@
 ;;;; The online question -- "is upstream ahead of us?" -- needs the network and belongs in a
 ;;;; scheduled job, not in a gate that must be reproducible offline. See
 ;;;; docs/versioning-and-pinning.md.
+;;;;
+;;;; THE BYTES OF A VENDORED ASSET. Each asset in an ASSETS.pin-style file names its `file',
+;;;; which sits next to the pin, and that file must hash to the sha256 or sha384 on the asset's
+;;;; first line. An asset without a `file' line fails, because its hash could not be checked.
+;;;; This came with dokimasia/vendor/ASSETS.pin (axe-core, #1028); the maintainer's condition
+;;;; for vendoring axe-core was that this script verifies its bytes. Hashing uses ironclad from
+;;;; the local Quicklisp, as scripts/check-assets.lisp does, and needs no network.
 
+(require :asdf)
 (require :uiop)
+(load (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))
+(funcall (read-from-string "ql:quickload") :ironclad :silent t)
 (load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
 (load (merge-pathnames "pin-files.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))    ; which *.pin files are read (#808)
 
@@ -80,13 +91,16 @@ checked and nothing said so."
                  (loop for line = (read-line in nil nil) while line collect line))))
     (if (notany #'asset-line-p lines)
         (list (cons (enough-namestring path *root*) (read-pin path)))
-        (let ((blocks '()))
+        (let ((blocks '())
+              (directory (uiop:pathname-directory-pathname path)))
           (dolist (line lines (nreverse (mapcar (lambda (b) (cons (car b) (reverse (cdr b)))) blocks)))
             (let ((head (asset-line-p line))
                   (trimmed (string-trim '(#\Space #\Tab #\Return) line)))
               (cond (head
                      (push (list (format nil "~A ~A" (enough-namestring path *root*) (first head))
-                                 (cons "version" (second head)))
+                                 (cons "version" (second head))
+                                 (list :hash (third head) (string-downcase (fourth head))
+                                       directory))
                            blocks))
                     ((or (zerop (length trimmed)) (char= #\# (char trimmed 0))))
                     ((or (null blocks) (not (member (char line 0) '(#\Space #\Tab))))
@@ -120,6 +134,38 @@ checked and nothing said so."
                                 (string-trim '(#\Space #\Tab) (subseq trimmed sp)))
                           (cons trimmed ""))))))
 
+(defun file-digest (algorithm path)
+  "The lowercase hex digest of PATH's bytes. ALGORITHM is \"sha256\" or \"sha384\"."
+  ;; ironclad's DIGEST-FILE, given no buffer, reads into a 128 KB buffer declared DYNAMIC-EXTENT,
+  ;; which SBCL allocates on the stack. On the Windows leg with SBCL 2.6.10 the process exited at
+  ;; that call with code 1 and no message, while hashing the same bytes from a heap array gave the
+  ;; right digest (#1214). Passing a heap buffer avoids the stack allocation.
+  (string-downcase
+   (with-output-to-string (s)
+     (loop for b across (funcall (read-from-string "ironclad:digest-file")
+                                 (if (string= algorithm "sha384") :sha384 :sha256)
+                                 path
+                                 :buffer (make-array 65536 :element-type '(unsigned-byte 8)))
+           do (format s "~2,'0x" b)))))
+
+(defun asset-bytes-problem (fields)
+  "Why an asset block's file does not match its pin, or NIL when it does, or when FIELDS are
+not an asset block's. The file is named by the block's `file' field, relative to the pin."
+  (let ((hash (cdr (assoc :hash fields)))
+        (file (cdr (assoc "file" fields :test #'string=))))
+    (when hash
+      (destructuring-bind (algorithm want directory) hash
+        (let ((path (and file (plusp (length file)) (merge-pathnames file directory))))
+          (cond ((null path)
+                 "no `file' line, so its bytes cannot be checked against its hash")
+                ((not (uiop:file-exists-p path))
+                 (format nil "its file ~A does not exist" file))
+                (t
+                 (let ((got (file-digest algorithm path)))
+                   (unless (string= got want)
+                     (format nil "~A does not match its ~A: pinned ~A, actual ~A"
+                             file algorithm want got))))))))))
+
 (defun days-since (iso)
   "Whole days from ISO (YYYY-MM-DD) to today, or NIL if it does not parse."
   (when (and (stringp iso) (= 10 (length iso)))
@@ -147,9 +193,12 @@ checked and nothing said so."
                                         (enough-namestring path *root*) e)
                                 (uiop:quit 2)))))
     (dolist (block pins)
+      ;; Flushed after each pin, so that a run that dies on a pin shows every pin before it.
+      (finish-output)
       (let* ((name (car block))
              (fields (cdr block))
              (malformed (cdr (assoc :malformed fields)))
+             (bytes (and (not malformed) (asset-bytes-problem fields)))
              (missing (append
                        (unless (some (lambda (f) (assoc f fields :test #'string=))
                                      *identity-fields*)
@@ -162,6 +211,9 @@ checked and nothing said so."
           (missing
            (incf bad)
            (format t "  FAIL  ~40A missing: ~{~A~^, ~}~%" name missing))
+          (bytes
+           (incf bad)
+           (format t "  FAIL  ~40A ~A~%" name bytes))
           (t
            (let* ((reviewed (cdr (assoc "reviewed" fields :test #'string=)))
                   (age (days-since reviewed)))
@@ -178,10 +230,21 @@ checked and nothing said so."
     (cond
       ((plusp bad)
        (format *error-output*
-               "check-pins: ~D pin~:P missing required fields.~%Every pin declares `advisories <url>' and `reviewed <YYYY-MM-DD>'.~%See docs/versioning-and-pinning.md.~%" bad)
+               "check-pins: ~D pin~:P failed.~%Every pin declares `advisories <url>' and `reviewed <YYYY-MM-DD>', and every vendored asset's file hashes to its pin.~%See docs/versioning-and-pinning.md.~%" bad)
        (uiop:quit 1))
       (t
-       (format t "All ~D pin~:P declare an advisory source and a review date.~%" (length pins))
+       (format t "All ~D pin~:P declare an advisory source and a review date, and every vendored asset's file matches its hash.~%" (length pins))
        (uiop:quit 0)))))
 
-(main)
+;;; An error this script does not handle is printed with its backtrace and exits 2, so a run that
+;;; fails says why. On the Windows leg with SBCL 2.6.10, the script exited 1 after its first pin
+;;; and printed nothing (#1214).
+(handler-bind ((error (lambda (e)
+                        ;; Standard error first: when the error is about standard output, writing
+                        ;; there again would fail before anything was said.
+                        (format *error-output* "~&check-pins: unhandled error: ~A~%" e)
+                        (sb-debug:print-backtrace :stream *error-output* :count 30)
+                        (finish-output *error-output*)
+                        (ignore-errors (finish-output))
+                        (uiop:quit 2))))
+  (main))

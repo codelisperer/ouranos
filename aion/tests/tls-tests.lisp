@@ -3,7 +3,8 @@
 ;;;;
 ;;;; NO OPENSSL, AND NO CERTIFICATE IN THE TREE. Every key and certificate here is made by the
 ;;;; mbedTLS under test, in memory, for this run, so nothing expires in the tree and no private
-;;;; key is committed.
+;;;; key is committed. The one exception is the RSA tests for #914: mbedTLS here generates only
+;;;; EC keys, so they read the RSA test pair aion/tests/fixtures/http-client already holds.
 ;;;;
 ;;;; BOTH DIRECTIONS OF EVERY CONTROL. A handshake that succeeds proves little by itself; each
 ;;;; success here has a refusal beside it that differs in one thing: a client trusting the
@@ -180,6 +181,75 @@ or signals whichever side's failure comes first."
   (let ((chain (tls:make-certificate-chain (getf (pki) :cert-pem))))
     (unwind-protect
          (signals error (tls:make-server-config chain (getf (pki) :ca-key)))
+      (tls:free-certificate-chain chain))))
+
+;;; --- RSA keys in PKCS#8 and PKCS#1 form (#914) --------------------------------------------
+
+(defun %fixture-octets (name)
+  "The octets of NAME in aion/tests/fixtures/http-client/."
+  (with-open-file (in (asdf:system-relative-pathname
+                       :aion (format nil "tests/fixtures/http-client/~A" name))
+                      :element-type '(unsigned-byte 8))
+    (let* ((octets (make-array (file-length in) :element-type '(unsigned-byte 8)))
+           (n (read-sequence octets in)))
+      (subseq octets 0 n))))
+
+(defmacro %with-rsa-pair ((chain key key-file) &body body)
+  "CHAIN, pinned-test.crt, and KEY, read from KEY-FILE, freed after BODY."
+  `(let ((,chain (tls:make-certificate-chain (%fixture-octets "pinned-test.crt")))
+         (,key (tls:make-private-key (%fixture-octets ,key-file))))
+     (unwind-protect (progn ,@body)
+       (tls:free-private-key ,key)
+       (tls:free-certificate-chain ,chain))))
+
+(test a-pkcs8-rsa-server-key-is-refused-with-a-condition-that-says-how-to-convert-it
+  "#914: mbedTLS 4.1.1 cannot check an RSA key in PKCS#8 form against its certificate, even the
+right key. Before, MAKE-SERVER-CONFIG said the key was not the certificate's, which was false;
+now it signals UNSUPPORTED-PRIVATE-KEY, whose message names the openssl command that converts it."
+  (is (eql 0 (search "-----BEGIN PRIVATE KEY-----" (text (%fixture-octets "pinned-test.key"))))
+      "pinned-test.key is in PKCS#8 form")
+  (%with-rsa-pair (chain key "pinned-test.key")
+    (let ((c (handler-case (progn (tls:make-server-config chain key) nil)
+               (tls:unsupported-private-key (c) c))))
+      (is-true c "make-server-config did not signal UNSUPPORTED-PRIVATE-KEY")
+      (when c
+        (is (search "openssl rsa -traditional" (princ-to-string c)) "~A" c)
+        (is (search "#914" (princ-to-string c)) "~A" c)))
+    (signals tls:unsupported-private-key (tls:certificate-chain-matches-key-p chain key))))
+
+(test the-same-rsa-key-in-pkcs1-form-serves-a-handshake
+  "#914, the control for the test above, differing only in the key's form: pinned-test-pkcs1.key
+is pinned-test.key converted with openssl rsa -traditional. It matches the certificate, makes a
+server config, and the server completes a handshake and carries data."
+  (is (eql 0 (search "-----BEGIN RSA PRIVATE KEY-----"
+                     (text (%fixture-octets "pinned-test-pkcs1.key"))))
+      "pinned-test-pkcs1.key is in PKCS#1 form")
+  (%with-rsa-pair (chain key "pinned-test-pkcs1.key")
+    (is-true (tls:certificate-chain-matches-key-p chain key))
+    (let* ((client (tls:make-engine (tls:make-verifying-client-config (constantly t))
+                                    :hostname "pinned.test"))
+           (server (tls:make-engine (tls:make-server-config chain key))))
+      (unwind-protect
+           (progn
+             (is-true (handshake client server))
+             (tls:engine-write client (octets "over an RSA key"))
+             (move client server)
+             (is (string= "over an RSA key" (text (tls:engine-read server)))))
+        (tls:free-engine client)
+        (tls:free-engine server)))))
+
+(test a-key-that-is-not-the-rsa-certificates-is-still-reported-as-not-matching
+  "#914: the new condition is for the PKCS#8 form only. A key that is not the RSA certificate's
+(here an EC key) still makes CERTIFICATE-CHAIN-MATCHES-KEY-P answer NIL, and MAKE-SERVER-CONFIG
+signals an error that is not UNSUPPORTED-PRIVATE-KEY."
+  (let ((chain (tls:make-certificate-chain (%fixture-octets "pinned-test.crt"))))
+    (unwind-protect
+         (progn
+           (is-false (tls:certificate-chain-matches-key-p chain (getf (pki) :key)))
+           (let ((c (handler-case (progn (tls:make-server-config chain (getf (pki) :key)) nil)
+                      (error (c) c))))
+             (is-true c)
+             (is-false (typep c 'tls:unsupported-private-key))))
       (tls:free-certificate-chain chain))))
 
 (test garbage-is-not-a-certificate

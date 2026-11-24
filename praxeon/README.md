@@ -132,7 +132,8 @@ troubleshooting — is in [`docs/user-guide.md`](docs/user-guide.md).
 ## Opt-in systems beside the core
 
 - **`praxeon/web`** — a Clack-based web + REST surface (HTMX chat UI, `POST /api/message`,
-  `GET /api/progress`), rendering the same event stream the CLI does.
+  `GET /api/progress`, or a Server-Sent Events stream at `GET /api/events` on a server that can
+  hold one), rendering the same event stream the CLI does.
 - **`praxeon/web-search`** — web search as a registered *means*, over the same
   provider-neutral protocol as the LLM layer.
 - **`praxeon/web-page`** — the `read-web-page` means: the model opens a URL the user gave
@@ -226,7 +227,12 @@ A refused call is not run, and the model is told why, so it can tell the user.
   `register-agent-as-means` that read untrusted content makes its coordinator's turn count too,
   and a sub-agent asked for something after the coordinator read untrusted content starts its
   turn that way. The means `register-agent-as-means` registers is itself `:untrusted` when the
-  sub-agent has an untrusted means at that point.
+  sub-agent has an untrusted means at that point. A context item marked `untrusted` counts as
+  well, for every turn whose prompt includes it: an observation condensed from untrusted
+  content, an MCP resource added with `add-resource`, and a passage from a corpus made with
+  `make-corpus`, unless the app passed `:untrusted nil` for its own server or documents (#906,
+  #907). `register-corpus-search` registers its means `:untrusted` unless the corpus was made
+  that way.
 - **`:requires-user-intent t`** marks a means that spends, writes or sends for the user. A call
   the model asks for after untrusted content entered the turn is refused for the rest of the
   turn. Calls the model asked for in the same step as the read, before it saw the result, are
@@ -251,6 +257,33 @@ The agent's `taint-scope` slot (`agent-taint-scope`) says how long untrusted con
   having read untrusted content. An app that must not let page text steer a later turn sets
   it, and accepts that the user is refused spending calls for the rest of the conversation
   after one page was read.
+
+**An app that rebuilds the agent from a stored text transcript** (#948) has no tool calls in
+the history it passes, so `:conversation` cannot find the earlier read there. Praxeon also
+records the conversation's taint as it happens, in `agent-conversation-taint`: `:untrusted`
+once the agent has read untrusted content, `:delegated` when the only such content is a task a
+coordinating agent gave it, `:clean` from a first turn until either, and `nil` when nothing was
+recorded. Any other value is an error, as an unknown `:taint-scope` is. Store that value
+beside the transcript after each turn, and pass it back when the agent is rebuilt:
+
+```lisp
+(praxeon/actor:make-agent :name "assistant" :taint-scope :conversation
+                          :conversation-taint (stored-taint conversation-id))
+```
+
+`:conversation` counts a turn untrusted when the recorded value is `:untrusted` or `:delegated`,
+or when the history holds an untrusted call. A sub-agent given a task by `register-agent-as-means`
+records `:delegated`, because the task is another model's text and stays in its history. Its
+later turns are untrusted, but they do not make the coordinator untrusted; a sub-agent that
+read a page does. Once recorded, the taint stays. An app that deliberately starts the
+conversation over sets it to `:clean` and also removes the untrusted calls from the history,
+because `:conversation` finds those there too.
+
+When an agent under `:conversation` has earlier turns, no tool calls in them and nothing
+recorded, praxeon cannot tell whether untrusted content came before. It then treats the turn as untrusted, records
+`:untrusted`, logs it once for that agent, and signals the warning
+`praxeon/actor:conversation-taint-unrecorded`, whose message names this fix. Muffling the
+warning does not make the turn trusted.
 
 `praxeon/web-page:user-or-search-urls` is a ready-made `:allow` for `read-web-page`:
 

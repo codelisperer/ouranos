@@ -44,6 +44,7 @@
 (require :uiop)
 (load (merge-pathnames "human-path.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; how a path is printed (#168)
 (load (merge-pathnames "fs.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; aion/fs:delete-tree (#347)
+(load (merge-pathnames "built-from.lisp" (uiop:pathname-directory-pathname (or *load-truename* *load-pathname*))))   ; the BUILT-FROM stamp (#977)
 ;;; Finding MSVC and running a command inside its environment, shared with the other build
 ;;; scripts (#410). Loaded before any form below is read, because those forms name
 ;;; FIND-MSVC and MSVC-COMMAND.
@@ -102,14 +103,14 @@ limit, so a hung command fails naming itself rather than at CI's job limit.")
     (if (> (length text) 160) (concatenate 'string (subseq text 0 160) " ...") text)))
 
 (defun %run-bounded (command &key directory capture (timeout *command-timeout*)
-                                  ignore-error-status)
+                                  ignore-error-status (error-output :interactive))
   "Run COMMAND, a list or a string cmd.exe runs, and return (values OUTPUT CODE). Signals on a
 non-zero exit unless IGNORE-ERROR-STATUS, and after TIMEOUT seconds, having stopped it."
   (uiop:with-temporary-file (:pathname out :type "txt")
     (let ((process (uiop:launch-program command :directory directory :input nil
                                                 :output (if capture out :interactive)
                                                 :if-output-exists :supersede
-                                                :error-output :interactive))
+                                                :error-output error-output))
           (deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second))))
       (loop while (uiop:process-alive-p process)
             do (when (> (get-internal-real-time) deadline)
@@ -132,7 +133,10 @@ non-zero exit unless IGNORE-ERROR-STATUS, and after TIMEOUT seconds, having stop
                   (%run-bounded (if (uiop:os-windows-p)
                                     (list "where" c)
                                     (list "sh" "-c" (format nil "command -v ~A" c)))
-                                :capture t :ignore-error-status t :timeout 30))))
+                                :capture t :ignore-error-status t :timeout 30
+                                ;; Discarded: where.exe reports finding nothing on standard
+                                ;; error, and in a build log that line reads like an error (#504).
+                                :error-output nil))))
       (when (and found (plusp (length found))) (return c)))))
 
 (defun run (program args &key (timeout *command-timeout*))
@@ -428,18 +432,9 @@ carry-natives.lisp) and where tree-natives.lisp's LICENSE-FILES would find it."
 ;;; so after a pin bump a checkout that still holds the old build rebuilds it instead of
 ;;; carrying the old version into bundles.
 
-(defun stamp-path () (merge-pathnames "BUILT-FROM" *vendor*))
+(defun write-stamp (version sha) (ouranos-built-from:write-stamp *vendor* version sha))
 
-(defun stamp-text (version sha)
-  (format nil "version ~A~%sha256 ~A~%" version (string-downcase sha)))
-
-(defun write-stamp (version sha)
-  (with-open-file (out (stamp-path) :direction :output :if-exists :supersede)
-    (write-string (stamp-text version sha) out)))
-
-(defun stamp-matches-p (version sha)
-  (let ((path (probe-file (stamp-path))))
-    (and path (string= (uiop:read-file-string path) (stamp-text version sha)))))
+(defun stamp-matches-p (version sha) (ouranos-built-from:stamp-matches-p *vendor* version sha))
 
 ;;; ------------------------------------------------------------------------- main
 

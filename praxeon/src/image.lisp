@@ -332,7 +332,23 @@ sent a date.
 
 It is a PROVIDER-REQUEST-FAILED, so a caller outside a turn handles it as before. Inside a turn
 the generate-image means turns it into a TOOL-ERROR-RESULT, so the model can tell the user to try
-again and the turn goes on. Praxeon does not retry the request."))
+again and the turn goes on. Praxeon does not retry the request. It answers AION/RETRY's
+TRANSIENCE and RETRY-AFTER (#79), so an app that wants a retry can run GENERATE-IMAGE under
+AION/RETRY:WITH-RETRY and have the service's Retry-After honoured."))
+
+(defmethod aion/retry:transience ((c image-request-failed))
+  "From KIND (#79): a 429 is :TRANSIENT, since the service refused the request without making
+anything; a 5xx is what AION/HTTP-CLIENT:STATUS-TRANSIENCE says of its status, so a 503 is
+:TRANSIENT and a 500 :UNKNOWN; and no answer at all is :UNKNOWN, since the service may have made
+the image, and charged for it, before the connection was lost."
+  (case (image-request-failed-kind c)
+    (:rate-limited :transient)
+    (:server-error (aion/http-client:status-transience (cnd:provider-request-failed-status c) nil))
+    (:no-answer :unknown)))
+
+(defmethod aion/retry:retry-after ((c image-request-failed))
+  "The seconds the service's Retry-After header asked for, or NIL (#79)."
+  (image-request-failed-retry-after c))
 
 (defun %refusal-text (provider code stage categories)
   (format nil "The ~A image provider refused to create this image under its content policy~@[ (code ~A)~]~@[ at the ~A stage~]~@[; categories: ~{~A~^, ~}~]. No image was made. Tell the user it was refused, and do not retry the same request."
@@ -408,6 +424,8 @@ failure."
                              :quality (or (getf reported :quality) (%size-name quality)))
                        ;; Present only for an edit, so a ledger can tell edits from generations.
                        (and references (list :references (length references)))
+                       ;; Present only when a mask was sent (#946).
+                       (and mask (list :mask t))
                        (loop for key in '(:input-tokens :output-tokens :cost :estimated)
                              for value = (getf reported key)
                              when value append (list key value))))
@@ -445,11 +463,17 @@ the wait is bounded. MAKE-OPENAI-IMAGES and REGISTER-OPENAI-IMAGE take :READ-TIM
    (base-url :initarg :base-url :initform *openai-images-base-url* :reader openai-images-base-url)
    (read-timeout :initarg :read-timeout :initform *openai-images-read-timeout*
                  :reader openai-images-read-timeout)
-   (connect-timeout :initarg :connect-timeout :initform 30 :reader openai-images-connect-timeout))
+   (connect-timeout :initarg :connect-timeout :initform 30 :reader openai-images-connect-timeout)
+   (stay-local :initarg :stay-local :initform nil :reader llm:provider-stay-local))
   (:documentation "OpenAI's Image API, POST BASE-URL/images/generations, as an image provider.
 API-KEY is sent as a bearer token. READ-TIMEOUT and CONNECT-TIMEOUT are in seconds; READ-TIMEOUT
 defaults to *OPENAI-IMAGES-READ-TIMEOUT*. A reply is read up to *MAX-BYTES-PER-IMAGE* for each
-image asked for; a longer one is PROVIDER-REQUEST-FAILED."))
+image asked for; a longer one is PROVIDER-REQUEST-FAILED.
+
+STAY-LOCAL true makes every request stay on this machine, as for the chat providers (#1293): it
+uses no proxy, is refused before anything connects when BASE-URL's host is not loopback, and a
+redirect off the machine is refused instead of followed. The refusal is
+AION/HTTP-CLIENT:STAY-LOCAL-REFUSED, signalled as itself and not as a provider failure."))
 
 (defparameter *max-bytes-per-image* (* 24 1024 1024)
   "The most bytes of reply read for each image requested. An image arrives as base64 inside JSON,
@@ -492,13 +516,19 @@ never falls back to the environment, because the app chose it."
   (let ((key (if api-key-p api-key (funcall env-key))))
     (and (stringp key) (plusp (length key)) key)))
 
-(defun make-openai-images (&key (api-key nil api-key-p) model base-url read-timeout)
+(defun %openai-images-url (p path)
+  (concatenate 'string (openai-images-base-url p) path))
+
+(defmethod llm:provider-endpoint ((p openai-images))
+  (llm:parse-endpoint (openai-images-base-url p)))
+
+(defun make-openai-images (&key (api-key nil api-key-p) model base-url read-timeout stay-local)
   "An OPENAI-IMAGES provider. An API-KEY that is given is used, NIL included; the environment
 is read only when none is given (PRAXEON_OPENAI_API_KEY, then the deprecated
 PRAXEON_IMAGE_API_KEY, which logs a warning once). A given key of NIL or \"\" is no key. MODEL defaults to PRAXEON_IMAGE_MODEL, then *OPENAI-IMAGE-MODEL*;
 BASE-URL to PRAXEON_IMAGE_BASE_URL, then *OPENAI-IMAGES-BASE-URL*; READ-TIMEOUT, in seconds, to
-*OPENAI-IMAGES-READ-TIMEOUT*. Signals MISSING-PROVIDER-KEY when there is no key, because every
-request would fail."
+*OPENAI-IMAGES-READ-TIMEOUT*. STAY-LOCAL is as for the class, default NIL (#1302). Signals
+MISSING-PROVIDER-KEY when there is no key, because every request would fail."
   (let ((key (%key api-key api-key-p)))
     (unless key
       (error 'cnd:missing-provider-key
@@ -511,14 +541,16 @@ request would fail."
                    :model (or model (%getenv "PRAXEON_IMAGE_MODEL") *openai-image-model*)
                    :base-url (or base-url (%getenv "PRAXEON_IMAGE_BASE_URL")
                                  *openai-images-base-url*)
-                   :read-timeout (or read-timeout *openai-images-read-timeout*))))
+                   :read-timeout (or read-timeout *openai-images-read-timeout*)
+                   :stay-local stay-local)))
 
-(defun openai-images-from-env (&key (api-key nil api-key-p) model base-url read-timeout)
+(defun openai-images-from-env (&key (api-key nil api-key-p) model base-url read-timeout
+                                     stay-local)
   "An OPENAI-IMAGES provider as MAKE-OPENAI-IMAGES builds it, or NIL when there is no key, so a
 caller can leave the means unregistered rather than register one that cannot work."
   (let ((key (%key api-key api-key-p)))
     (and key (make-openai-images :api-key key :model model :base-url base-url
-                                 :read-timeout read-timeout))))
+                                 :read-timeout read-timeout :stay-local stay-local))))
 
 (defun openai-image-request-body (provider request)
   "The JSON body, as a hash table, of the request for REQUEST. Separate from the POST so a test
@@ -693,15 +725,20 @@ multipart/form-data to /images/edits."
             (values octets type "/images/edits" (edit-body-count body)))
           (values (jzon:stringify body) "application/json" "/images/generations"
                   (gethash "n" body)))
-    (%image-post p (concatenate 'string (openai-images-base-url p) path)
+    (%image-post p (%openai-images-url p path)
                  content content-type count)))
 
 (defun %send (label url headers content &key read-timeout connect-timeout max-body-bytes
-                                              refusal)
+                                              refusal stay-local)
   "POST CONTENT to URL with HEADERS and return the reply parsed as JSON. LABEL names the provider
 in reports. A failed request signals IMAGE-REQUEST-FAILED when trying again later may help and
 PROVIDER-REQUEST-FAILED otherwise, unless REFUSAL, a function of that PROVIDER-REQUEST-FAILED,
-returns a condition to signal in its place, such as an IMAGE-REFUSED."
+returns a condition to signal in its place, such as an IMAGE-REFUSED.
+
+STAY-LOCAL is the provider's PROVIDER-STAY-LOCAL, passed to the request (#1302). Its refusal,
+AION/HTTP-CLIENT:STAY-LOCAL-REFUSED, is an HTTP-ERROR, so it is caught first and signalled as
+itself: it means the configuration was broken, and as an IMAGE-REQUEST-FAILED it would tell the
+agent to try again later."
   (let ((retry-after nil))
     (handler-case
         (%parse-reply
@@ -709,7 +746,7 @@ returns a condition to signal in its place, such as an IMAGE-REFUSED."
           (http:send-request
            (http:make-request :method :post :url url :headers headers :content content
                               :read-timeout read-timeout :connect-timeout connect-timeout
-                              :max-body-bytes max-body-bytes)
+                              :max-body-bytes max-body-bytes :stay-local stay-local)
            ;; Leave stages run last to first, so the header is read before ENSURE-2XX signals.
            (list (http:ensure-2xx label)
                  (http:make-interceptor
@@ -719,6 +756,7 @@ returns a condition to signal in its place, such as an IMAGE-REFUSED."
                                                                 "retry-after"))
                            resp)))))
          label)
+      (http:stay-local-refused (e) (error e))
       (http:http-error (e)
         (error (or (and refusal (funcall refusal (llm:request-failure label e)))
                    (%request-failed e retry-after label)))))))
@@ -742,7 +780,8 @@ refusal, otherwise NIL."
          :read-timeout (openai-images-read-timeout p)
          :connect-timeout (openai-images-connect-timeout p)
          :max-body-bytes (* *max-bytes-per-image* (max 1 (or count 1)))
-         :refusal #'%openai-refusal))
+         :refusal #'%openai-refusal
+         :stay-local (llm:provider-stay-local p)))
 
 (defun %media-type (format)
   (cond ((equal format "jpeg") "image/jpeg")
@@ -877,6 +916,10 @@ input schema lists.")
 reference in reference_images, exactly as you were told it, and say in the prompt what to
 change or keep.")
 
+(defparameter *mask-description*
+  " To change only part of the first reference image, give in mask the reference of a PNG the
+same size whose transparent pixels mark the part to change.")
+
 (defparameter *sizes* '(:square :portrait :landscape :auto)
   "The shapes the means can offer the model.")
 
@@ -905,10 +948,18 @@ change or keep.")
                   max-references))
     h))
 
-(defun %schema (qualities default-size default-quality &optional max-references)
+(defun %mask-property ()
+  (let ((h (make-hash-table :test 'equal)))
+    (setf (gethash "type" h) "string"
+          (gethash "description" h)
+          "The reference of a PNG image with transparency, the same size as the first image in reference_images, whose transparent pixels mark the part of that image to change. Only with reference_images. Leave out to let the prompt alone say what to change.")
+    h))
+
+(defun %schema (qualities default-size default-quality &optional max-references mask)
   "The JSON input schema: a required PROMPT, an optional SIZE, and an optional QUALITY offering
 only QUALITIES. Each description names the value used when the model gives none. With
-MAX-REFERENCES, an optional REFERENCE_IMAGES array of at most that many strings."
+MAX-REFERENCES, an optional REFERENCE_IMAGES array of at most that many strings, and with MASK
+as well, an optional MASK string (#946)."
   (let ((prompt (make-hash-table :test 'equal))
         (props (make-hash-table :test 'equal))
         (schema (make-hash-table :test 'equal)))
@@ -924,7 +975,9 @@ MAX-REFERENCES, an optional REFERENCE_IMAGES array of at most that many strings.
                  (format nil "Higher quality takes longer and costs more. Default: ~(~A~)."
                          default-quality)))
     (when max-references
-      (setf (gethash "reference_images" props) (%references-property max-references)))
+      (setf (gethash "reference_images" props) (%references-property max-references))
+      (when mask
+        (setf (gethash "mask" props) (%mask-property))))
     (setf (gethash "type" schema) "object"
           (gethash "properties" schema) props
           (gethash "required" schema) (vector "prompt"))
@@ -970,7 +1023,9 @@ prompt, so it needs only enough to see what changed; the whole of it is in the I
 (defun %resolve-references (args resolve max)
   "The REFERENCE-IMAGEs the tool ARGS name in reference_images, through RESOLVE, each reference
 once however often it is named, so a repeated reference is neither resolved nor sent twice, and
-each image once even when two references resolve to it. Refuses the call before any request, as
+each image once even when two references resolve to it. A second value pairs each reference with
+its image, so a mask naming one of them is not resolved again. Refuses the call before any
+request, as
 a :NOT-RUN error result, when the list is not a list of strings, names more than MAX different
 references, names one RESOLVE does not know, or RESOLVE returns something other than a
 REFERENCE-IMAGE for it.
@@ -991,13 +1046,14 @@ image's stored size before reading it."
              (let ((refs (remove-duplicates (coerce given 'list) :test #'string= :from-end t)))
                (when (> (length refs) max)
                  (refuse "reference_images must name at most ~D references." max))
-               (let ((images '()) (total 0))
-                 (dolist (ref refs (nreverse images))
+               (let ((images '()) (known '()) (total 0))
+                 (dolist (ref refs (values (nreverse images) (nreverse known)))
                    (let ((image (funcall resolve ref)))
                      (cond ((null image)
                             (refuse "~S is not an image reference you were given. Use a reference exactly as you were told it." ref))
                            ((not (reference-image-p image))
                             (refuse "the image ~S could not be read." ref)))
+                     (push (cons ref image) known)
                      ;; Two references to one stored image send it once.
                      (unless (find (reference-image-octets image) images
                                    :key #'reference-image-octets :test #'eq)
@@ -1007,10 +1063,47 @@ image's stored size before reading it."
                                  *max-reference-total-bytes*))
                        (push image images)))))))))))
 
+(defun %resolve-mask (args resolve provider references known)
+  "The REFERENCE-IMAGE the tool ARGS name in mask, through RESOLVE, the resolver reference_images
+uses, so the app decides which references a model may reach, as for reference images. NIL when
+ARGS name no mask. KNOWN pairs each reference already resolved for reference_images with its
+image (%RESOLVE-REFERENCES), and a mask naming one of them reuses that image instead of resolving
+it again (#946's review).
+
+Refused before RESOLVE is called, so the app reads no image for a call that cannot be sent: with
+IMAGE-INPUT-INVALID when PROVIDER takes no mask or REFERENCES is empty, and as a :NOT-RUN error
+result when mask is not a string. Refused after it, as a :NOT-RUN error result, when RESOLVE does
+not know the reference or returns something other than a REFERENCE-IMAGE. MAKE-REFERENCE-IMAGE,
+which made the image, has checked its byte length and that it is a PNG, JPEG or WebP file;
+GENERATE-IMAGE then checks that it is a PNG with an alpha channel, the same width and height as
+the first reference (#946)."
+  (let ((given (gethash "mask" args)))
+    (flet ((refuse (control &rest args)
+             (error 'cnd:tool-error-result
+                    :outcome :not-run
+                    :text (format nil "generate-image: ~? No image was made." control args))))
+      (cond ((null given) nil)
+            ((not (stringp given))
+             (refuse "mask must be one reference, as a string."))
+            ((not (image-provider-accepts-mask-p provider))
+             (%invalid "The ~A image provider takes no mask. Describe in the prompt which part to change, and leave the mask out."
+                       (image-provider-name provider)))
+            ((null references)
+             (%invalid "A mask marks part of a reference image to replace, and no reference image was given."))
+            ((assoc given known :test #'string=)
+             (cdr (assoc given known :test #'string=)))
+            (t
+             (let ((image (funcall resolve given)))
+               (cond ((null image)
+                      (refuse "~S is not an image reference you were given. Use a reference exactly as you were told it." given))
+                     ((not (reference-image-p image))
+                      (refuse "the image ~S could not be read." given))
+                     (t image))))))))
+
 (defun register (agent provider &key on-image (name "generate-image") capability source
                                      (qualities *qualities*) default-quality (default-size :auto)
-                                     resolve-reference (max-references 4)
-                                     (requires-user-intent t))
+                                     resolve-reference (max-references 4) confirm
+                                     (requires-user-intent nil requires-user-intent-p))
   "Register the generate-image means on AGENT, generating with PROVIDER, an IMAGE-PROVIDER.
 Returns NAME.
 
@@ -1029,7 +1122,11 @@ DEFAULT-QUALITY is used when the model names none; it must be in QUALITIES, and 
 When the service is busy, fails on its side or does not answer (IMAGE-REQUEST-FAILED), the
 model is told so in an error result and the turn goes on; the request is not retried.
 
-RESOLVE-REFERENCE lets the model edit an image or make a variation of it. It is a function of one
+RESOLVE-REFERENCE lets the model edit an image or make a variation of it, and, when PROVIDER
+takes a mask (IMAGE-PROVIDER-ACCEPTS-MASK-P), name a mask through the same resolver (#946): the
+schema then offers mask, the reference of a PNG with transparency the size of the first reference
+image. A provider that takes no mask is not offered it, and a mask the model gives anyway is
+refused with IMAGE-INPUT-INVALID before any request, telling the model why. It is a function of one
 string, a reference the model gives in reference_images, that returns a REFERENCE-IMAGE (see
 MAKE-REFERENCE-IMAGE) or NIL when the reference is not one this model may use. The references
 are the app's: the strings ON-IMAGE returned for images made earlier, or ids the app gave the
@@ -1046,6 +1143,13 @@ An image spends the user's allowance, so by default the means is registered with
 :REQUIRES-USER-INTENT (#827): a call the model makes after a web page or search result was read
 in the turn is refused as not run, because that content may have asked for it. Pass
 :REQUIRES-USER-INTENT NIL to allow such calls.
+
+CONFIRM is passed to ACTOR:REGISTER-MEANS (#1189): NIL, the default, runs each call as usual; T
+or a function of the arguments returning an estimate plist holds every call for the user's
+confirmation; :AFTER-UNTRUSTED holds a call only once untrusted content has entered the turn
+(#1185). REQUIRES-USER-INTENT then defaults as REGISTER-MEANS's does for that value: true, except
+with :AFTER-UNTRUSTED, where it defaults to NIL, because refusing the call would leave nothing to
+hold. Passing :REQUIRES-USER-INTENT true with :AFTER-UNTRUSTED signals an error.
 
 An app normally calls REGISTER-OPENAI-IMAGE, which registers nothing when there is no key."
   (check-type provider image-provider)
@@ -1066,15 +1170,20 @@ An app normally calls REGISTER-OPENAI-IMAGE, which registers nothing when there 
       (error "REGISTER's :DEFAULT-SIZE must be one of ~{~S~^, ~}, not ~S." *sizes* default-size))
     (%register agent provider on-image name capability source
                qualities default-quality default-size
-               resolve-reference (and resolve-reference max-references) requires-user-intent)))
+               resolve-reference (and resolve-reference max-references)
+               (if requires-user-intent-p
+                   requires-user-intent
+                   (not (eq confirm :after-untrusted)))
+               confirm)))
 
 (defun %register (agent provider on-image name capability source
                   qualities default-quality default-size resolve-reference max-references
-                  requires-user-intent)
+                  requires-user-intent &optional confirm)
   (actor:register-means
-   agent name (if resolve-reference
-                  (concatenate 'string *description* *reference-description*)
-                  *description*)
+   agent name (cond ((null resolve-reference) *description*)
+                    ((image-provider-accepts-mask-p provider)
+                     (concatenate 'string *description* *reference-description* *mask-description*))
+                    (t (concatenate 'string *description* *reference-description*)))
    (lambda (args)
      (let ((prompt (gethash "prompt" args)))
        ;; Refused before any request, as an error result the model can correct: an empty
@@ -1086,8 +1195,14 @@ An app normally calls REGISTER-OPENAI-IMAGE, which registers nothing when there 
                                        :text "generate-image needs a prompt describing the image."))
      (let* ((size (%choice args "size" *sizes* default-size))
             (quality (%choice args "quality" qualities default-quality))
+            (known '())
             (references (and resolve-reference
-                             (%resolve-references args resolve-reference max-references)))
+                             (multiple-value-bind (images pairs)
+                                 (%resolve-references args resolve-reference max-references)
+                               (setf known pairs)
+                               images)))
+            (mask (and resolve-reference
+                       (%resolve-mask args resolve-reference provider references known)))
             (results
               (handler-bind
                   ((image-request-failed
@@ -1100,18 +1215,22 @@ An app normally calls REGISTER-OPENAI-IMAGE, which registers nothing when there 
                                            :unknown)
                               :text (%retry-text c)))))
                 (generate-image provider prompt :size size :quality quality
-                                                :references references
+                                                :references references :mask mask
                                                 :agent (actor:agent-name agent)))))
        (format nil "~{~A~^~%~}"
                (mapcar (lambda (r) (%summary r (funcall on-image r))) results)))))
-   :schema (%schema qualities default-size default-quality max-references)
-   :capability capability :source source :requires-user-intent requires-user-intent))
+   :schema (%schema qualities default-size default-quality max-references
+                    (image-provider-accepts-mask-p provider))
+   :capability capability :source source :requires-user-intent requires-user-intent
+   :confirm confirm))
 
 (defun register-openai-image (agent &key on-image (api-key nil api-key-p) model base-url
-                                         read-timeout (name "generate-image") capability source
+                                         read-timeout stay-local (name "generate-image")
+                                         capability source
                                          (qualities *qualities*) default-quality
                                          (default-size :auto) resolve-reference
-                                         (max-references 4) (requires-user-intent t))
+                                         (max-references 4) confirm
+                                         (requires-user-intent nil requires-user-intent-p))
   "Register the generate-image means on AGENT with OpenAI's Image API, when there is a key.
 Returns NAME, or NIL when there is no key, in which case nothing is registered. This is the way
 to register it: a means without a key could only fail.
@@ -1119,22 +1238,26 @@ to register it: a means without a key could only fail.
 The key is API-KEY when given, NIL included, and otherwise PRAXEON_OPENAI_API_KEY, then the
 deprecated PRAXEON_IMAGE_API_KEY. A given key of NIL or \"\" is no key, and nothing is registered; an
 empty string is logged at warn, because it usually means the app's key setting is blank.
-ON-IMAGE, QUALITIES, DEFAULT-QUALITY, DEFAULT-SIZE, RESOLVE-REFERENCE, MAX-REFERENCES and
-REQUIRES-USER-INTENT are as for REGISTER. MODEL, BASE-URL and READ-TIMEOUT are as for
-MAKE-OPENAI-IMAGES."
+ON-IMAGE, QUALITIES, DEFAULT-QUALITY, DEFAULT-SIZE, RESOLVE-REFERENCE, MAX-REFERENCES, CONFIRM
+and REQUIRES-USER-INTENT are as for REGISTER. MODEL, BASE-URL, READ-TIMEOUT and STAY-LOCAL are
+as for MAKE-OPENAI-IMAGES."
   (when (and api-key-p (equal api-key ""))
     (log:warn "generate-image not registered: the :api-key given is the empty string"
               :name name))
   (let ((provider (if api-key-p
                       (openai-images-from-env :api-key api-key :model model :base-url base-url
-                                              :read-timeout read-timeout)
+                                              :read-timeout read-timeout :stay-local stay-local)
                       (openai-images-from-env :model model :base-url base-url
-                                              :read-timeout read-timeout))))
+                                              :read-timeout read-timeout :stay-local stay-local))))
     (and provider
-         (register agent provider :on-image on-image :name name
-                                  :capability capability :source source
-                                  :qualities qualities :default-quality default-quality
-                                  :default-size default-size
-                                  :resolve-reference resolve-reference
-                                  :max-references max-references
-                                  :requires-user-intent requires-user-intent))))
+         (apply #'register agent provider :on-image on-image :name name
+                                         :capability capability :source source
+                                         :qualities qualities :default-quality default-quality
+                                         :default-size default-size
+                                         :resolve-reference resolve-reference
+                                         :max-references max-references
+                                         :confirm confirm
+                                         ;; Only when given, so REGISTER decides the default
+                                         ;; from CONFIRM in one place (#1189).
+                                         (when requires-user-intent-p
+                                           (list :requires-user-intent requires-user-intent))))))

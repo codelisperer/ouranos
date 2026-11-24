@@ -91,7 +91,10 @@ both upcased for the standard readtable."
 ;;;
 ;;;   - The project's OWN systems, those whose .asd is under the project directory ROOT,
 ;;;     are loaded by ASDF directly. Nothing muffles them, so a WARNING is printed and fails
-;;;     the load; a STYLE-WARNING is printed and does not.
+;;;     the load; a STYLE-WARNING is printed and does not, except a call to an undefined
+;;;     function, which fails the load too (#1083). SBCL reports that as a STYLE-WARNING,
+;;;     but the call fails whenever it runs, and in a test that one machine skips it ran
+;;;     first on another (#1066).
 ;;;   - Everything else the own systems depend on (libraries, and on a consuming app the
 ;;;     framework) is loaded first with warnings muffled, as Quicklisp's quiet mode did. A
 ;;;     warning inside a library is not the app's to fix, and must not fail the app's build.
@@ -133,7 +136,12 @@ both upcased for the standard readtable."
                    (namestring (or (ignore-errors (truename r)) r))))
            (own '())
            (others '())
-           (seen (make-hash-table :test (function equal))))
+           (seen (make-hash-table :test (function equal)))
+           ;; Under --strict: every function, macro, generic function and method in the image
+           ;; before this load (an EQ set, made by the first OWN-LOAD), and a key for each
+           ;; definition this load has replaced so far. See CROSS-FILE-REDEFINITION (#1121).
+           (before nil)
+           (defined (make-hash-table :test (function equal))))
        (labels ((asdf (fn &rest args) (apply (function uiop:symbol-call) :asdf fn args))
                 (fetch (name) (uiop:symbol-call :ql :quickload name :silent t))
                 (quiet (name)
@@ -142,6 +150,123 @@ both upcased for the standard readtable."
                   (handler-bind ((warning (function muffle-warning)))
                     (with-compilation-unit (:override t)
                       (asdf :load-system name))))
+                (under-root-p (path)
+                  ;; Case-insensitive on Windows, as OWN-P below.
+                  (let ((p (namestring path)))
+                    (and (>= (length p) (length root))
+                         (if (uiop:os-windows-p)
+                             (string-equal root p :end2 (length root))
+                             (string= root p :end2 (length root))))))
+                (source-file (thing)
+                  ;; The truename of the file THING, a function or a method, was compiled
+                  ;; from, or NIL. sb-introspect is baked into bin/cons and required below.
+                  (let ((path (ignore-errors
+                               (uiop:symbol-call
+                                :sb-introspect :definition-source-pathname
+                                (uiop:symbol-call :sb-introspect :find-definition-source
+                                                  thing)))))
+                    (and path (ignore-errors (probe-file path)))))
+                (snapshot ()
+                  ;; The definitions already in the image, before this load makes any. A warm
+                  ;; image, such as bin/cons or a REPL that built the project once, holds the
+                  ;; project's own definitions from an earlier build, with the files they came
+                  ;; from then.
+                  (let ((set (make-hash-table :test (function eq))))
+                    (flet ((add (fn)
+                             (setf (gethash fn set) t)
+                             (when (typep fn 'generic-function)
+                               (dolist (m (ignore-errors
+                                           (uiop:symbol-call :sb-mop :generic-function-methods
+                                                             fn)))
+                                 (setf (gethash m set) t)))))
+                      (do-all-symbols (sym)
+                        (when (fboundp sym)
+                          (let ((fn (or (macro-function sym)
+                                        (ignore-errors (fdefinition sym)))))
+                            (when fn (add fn))))
+                        (let ((setf-name (list 'setf sym)))
+                          (when (ignore-errors (fboundp setf-name))
+                            (add (fdefinition setf-name))))))
+                    set))
+                (uninteresting (list)
+                  ;; LIST, one of UIOP's lists of conditions that ASDF muffles, made to match
+                  ;; no redefinition warning. UIOP:*USUAL-UNINTERESTING-CONDITIONS* holds
+                  ;; them, and when an app sets UIOP:*UNINTERESTING-CONDITIONS* to it, ASDF's
+                  ;; own handlers muffle every redefinition before the handler below sees it.
+                  ;; Each entry is wrapped rather than the redefinition ones removed, because
+                  ;; one of them, SB-KERNEL:UNINTERESTING-REDEFINITION, is a type made of
+                  ;; SATISFIES tests, which SUBTYPEP cannot place under REDEFINITION-WARNING.
+                  (let ((parent (uiop:find-symbol* :redefinition-warning :sb-kernel nil)))
+                    (if parent
+                        (mapcar (lambda (entry)
+                                  (lambda (c)
+                                    (and (not (typep c parent))
+                                         (uiop:match-condition-p entry c))))
+                                list)
+                        list)))
+                (cross-file-redefinition (w)
+                  ;; #1121: under --strict, a DEFUN, DEFMACRO, DEFGENERIC or DEFMETHOD that
+                  ;; replaces a definition from another file of the project is counted. SBCL
+                  ;; signals each as a STYLE-WARNING, a REDEFINITION-WARNING, and the load
+                  ;; went ahead with whichever file loaded last. Returns a line naming the
+                  ;; kind, the name and both files, or NIL. Same-file redefinitions, such as a
+                  ;; macro defined while its file compiles and again when it loads, and
+                  ;; definitions outside ROOT, are not counted. SBCL's names are looked up by
+                  ;; string so the printed form holds no SBCL symbol.
+                  (flet ((sb (name package) (uiop:find-symbol* name package nil)))
+                    (let ((kind (loop for (class . text)
+                                        in '((:redefinition-with-defun . "defun")
+                                             (:redefinition-with-defmacro . "defmacro")
+                                             (:redefinition-with-defgeneric . "defgeneric")
+                                             (:redefinition-with-defmethod . "defmethod"))
+                                      for type = (sb class :sb-kernel)
+                                      when (and type (typep w type)) return text)))
+                      (when (and kind (uiop:find-package* :sb-introspect nil))
+                        (let* ((name (slot-value w (sb :name :sb-kernel)))
+                               (new-function (sb :new-function :sb-kernel))
+                               (new-location (sb :new-location :sb-kernel))
+                               (new (if (and (slot-exists-p w new-function)
+                                             (slot-boundp w new-function))
+                                        (source-file (slot-value w new-function))
+                                        (let ((l (and (slot-boundp w new-location)
+                                                      (slot-value w new-location))))
+                                          (and l (ignore-errors
+                                                  (probe-file
+                                                   (uiop:symbol-call
+                                                    :sb-c :definition-source-location-namestring
+                                                    l)))))))
+                               ;; The handler runs before the replacement, so the old
+                               ;; definition is still in place.
+                               (old-object (cond ((string= kind "defmethod")
+                                                  (slot-value w (sb :old-method :sb-kernel)))
+                                                 ((string= kind "defmacro")
+                                                  (and (symbolp name) (macro-function name)))
+                                                 (t (and (fboundp name) (fdefinition name)))))
+                               (key (if (string= kind "defmethod")
+                                        (list kind name
+                                              (slot-value w (sb :qualifiers :sb-kernel))
+                                              (slot-value w (sb :specializers :sb-kernel)))
+                                        (list kind name)))
+                               ;; Counted only when the definition replaced was made by this
+                               ;; load. One that was in the image before it (see SNAPSHOT) is
+                               ;; from an earlier build, and its file may no longer define it,
+                               ;; as when a function moved to another file. It counts once this
+                               ;; load has defined the name itself, as when two files both
+                               ;; define it.
+                               (this-load (or (gethash key defined)
+                                              (not (and before old-object
+                                                        (gethash old-object before)))))
+                               (old (and this-load old-object (source-file old-object))))
+                          (setf (gethash key defined) t)
+                          (when (and new old (under-root-p new) (under-root-p old)
+                                     (not (funcall (if (uiop:os-windows-p)
+                                                       (function string-equal)
+                                                       (function string=))
+                                                   (namestring new) (namestring old))))
+                            (let ((*package* (find-package :keyword)))
+                              (format nil "~A ~S in ~A replaces the one in ~A"
+                                      kind name (uiop:native-namestring new)
+                                      (uiop:native-namestring old)))))))))
                 (own-load (name)
                   ;; ASDF fails the load itself on a WARNING that COMPILE-FILE reports. The
                   ;; handler is for the ones it does not fail on: those deferred to the end of
@@ -151,16 +276,40 @@ both upcased for the standard readtable."
                   ;; not counted: COMPILE-WARNED-WARNING reports that a file compiled with
                   ;; style-warnings only, and RECURSIVE-OPERATE that the loader was called from
                   ;; inside an ASDF operation, as it is when cons's own tests run under
-                  ;; ASDF:TEST-SYSTEM.
+                  ;; ASDF:TEST-SYSTEM. A STYLE-WARNING is counted only when it reports an
+                  ;; undefined function (#1083). SBCL signals that as a SIMPLE-STYLE-WARNING
+                  ;; printed as `undefined function: PKG::NAME', at the end of the unit, and
+                  ;; matching the printed text keeps this form free of SBCL's own symbols.
                   (let ((caught '())
                         (recursive (uiop:find-symbol* :recursive-operate :asdf/operate nil)))
+                    (when force-own
+                      (ignore-errors (require :sb-introspect))
+                      (unless before (setf before (snapshot))))
                     (handler-bind ((warning (lambda (w)
-                                              (unless (or (typep w '(or style-warning
-                                                                     uiop:compile-warned-warning))
+                                              (let ((redefined (and force-own
+                                                                    (cross-file-redefinition w))))
+                                                (when redefined (push redefined caught)))
+                                              (unless (or (typep w 'uiop:compile-warned-warning)
+                                                          (and (typep w 'style-warning)
+                                                               (not (uiop:string-prefix-p
+                                                                     "undefined function: "
+                                                                     (princ-to-string w))))
                                                           (and recursive (typep w recursive)))
                                                 (push w caught)))))
-                      (with-compilation-unit (:override t)
-                        (asdf :load-system name :force (if force-own own nil))))
+                      (let ((muffles (remove nil (list (uiop:find-symbol*
+                                                        :*uninteresting-conditions* :uiop nil)
+                                                       (uiop:find-symbol*
+                                                        :*uninteresting-compiler-conditions*
+                                                        :uiop nil)
+                                                       (uiop:find-symbol*
+                                                        :*uninteresting-loader-conditions*
+                                                        :uiop nil)))))
+                        (progv muffles (if force-own
+                                           (mapcar (lambda (v) (uninteresting (symbol-value v)))
+                                                   muffles)
+                                           (mapcar (function symbol-value) muffles))
+                          (with-compilation-unit (:override t)
+                            (asdf :load-system name :force (if force-own own nil))))))
                     (when caught
                       (error "Loading ~A signalled ~D WARNING~:P that its compilation did not fail on, either when the compilation unit ended or when one of its files was loaded:~{~%  ~A~}"
                              name (length caught) (reverse caught)))))
@@ -213,6 +362,15 @@ both upcased for the standard readtable."
                                  (let ((n (dep-name d))) (when n (visit n)))))
                               (t (push name others))))))))
          (visit system)
+         ;; A strict load that finds none of the project's systems checks nothing, so it is
+         ;; refused. When ROOT matches no system's directory -- a mistyped root, or one that names some other directory -- every
+         ;; system is a dependency, every warning is muffled, and a `cons --strict' load passed
+         ;; whatever the code held. Under FORCE-OWN, which only --strict sets, that is refused,
+         ;; naming the root and the system (#960). A plain load of a library from outside the
+         ;; project is still allowed: it promises nothing about the project's code.
+         (when (and force-own (null own))
+           (error "Strict loading found no system of the project under ~A: ~A is not in that directory, so every warning would be muffled and nothing would be judged. Give the directory that holds the project's .asd files."
+                  root (asdf :coerce-name system)))
          (dolist (name (reverse others)) (quiet name))
          (own-load system)
          (when with-tests
@@ -395,6 +553,97 @@ return -- it enters the REPL, which exits the process itself."
        (or (spec:target-load tgt) (spec:target-call tgt)
            (spec:target-test tgt) (spec:target-eval tgt))))
 
+(defun %in-subprocess-p (tgt fresh)
+  "True when RUN sends TGT's work to a subprocess sbcl: with FRESH or TGT's :isolate, for a target
+that does Lisp work. RUN and %IN-IMAGE-TARGETS both decide with this, so the toolchain guard in
+cons/cli refuses exactly what would run in cons's own image (#1110)."
+  (and (or fresh (spec:target-isolate tgt)) (%lisp-target-p tgt)))
+
+(defun %in-image-work-p (tgt)
+  "True when %PERFORM, given TGT, does Lisp work in the current image: TGT has no :SH and no
+:STEPS, which %PERFORM runs in place of everything else, and it loads, tests, calls, evaluates or
+enters a REPL."
+  (and (not (spec:target-sh tgt))
+       (not (spec:target-steps tgt))
+       (or (spec:target-load tgt) (spec:target-call tgt) (spec:target-test tgt)
+           (spec:target-eval tgt) (spec:target-interactive tgt))
+       t))
+
+(defun %steps-in-order (spec tgt &optional path)
+  "TGT and every target its :STEPS run, depth first, each named once, as a list of targets.
+PATH is the chain of target names that led here. Signals an error naming the cycle when a step
+leads back to a target already on the chain, which would otherwise recurse until the stack
+ran out (#968's review)."
+  (let ((name (spec:target-name tgt)))
+    (when (member name path)
+      (error "the :steps of target ~(~A~) form a cycle: ~{~(~A~)~^ -> ~}"
+             (first (last path)) (reverse (cons name path))))
+    (cons tgt
+          (loop for step in (spec:target-steps tgt)
+                append (%steps-in-order spec (%require-target spec step) (cons name path))))))
+
+(defun %unjudged-targets (spec tgt)
+  "The targets TGT runs, following :STEPS, whose work --strict cannot judge, each named once.
+--strict judges a system by loading it through LOAD-SYSTEM-STRICTLY, which only :LOAD and :TEST
+do (#960). So these are not judged:
+- a target with :SH, whatever else it has: %PERFORM, and the --fresh path, run :SH in place of
+  its :LOAD and :TEST, which then never run (#968's review);
+- a target whose work is :EVAL or :CALL with no :LOAD or :TEST.
+Returns a list of (NAME . CLAUSES), CLAUSES the keywords of the clauses that do the work."
+  (loop for target in (remove-duplicates (%steps-in-order spec tgt)
+                                         :key #'spec:target-name :from-end t)
+        for clauses = (append (and (spec:target-eval target) '(:eval))
+                              (and (spec:target-call target) '(:call))
+                              (and (spec:target-sh target) '(:sh)))
+        when (and (not (spec:target-steps target))
+                  (or (spec:target-sh target)
+                      (and clauses
+                           (null (spec:target-load target))
+                           (null (spec:target-test target)))))
+          collect (cons (spec:target-name target) clauses)))
+
+(defun %refuse-unjudged (spec tgt)
+  "Under --strict, signal an error when TGT, or a step it runs, does work --strict cannot
+judge (%UNJUDGED-TARGETS), naming each such target once and why."
+  (let ((unjudged (%unjudged-targets spec tgt)))
+    (when unjudged
+      (error "--strict judges only what a target loads with :load or :test, so it could not check:~{~%  ~A~}~%Give the target a :load clause naming the systems it builds, and do the shell work in a separate target, or run it without --strict."
+             (loop for (name . clauses) in unjudged
+                   collect (if (member :sh clauses)
+                               (format nil "target ~(~A~) runs a shell command (:sh), and cons runs :sh in place of a target's :load and :test, so nothing is loaded for --strict to check"
+                                       name)
+                               (format nil "target ~(~A~) does its work with ~{:~(~A~)~^ and ~} and loads nothing with :load or :test"
+                                       name clauses)))))))
+
+(defun %in-image-targets (spec name fresh)
+  "The names of the targets whose Lisp work running target NAME (a string) of SPEC, with FRESH,
+would do in cons's own image, in the order they run, each once. NIL when none would: an :sh
+target runs a program, and a Lisp target with FRESH or :isolate runs in a subprocess sbcl.
+
+The steps of a :steps target are performed in this image whatever FRESH and their own :isolate
+say, as %PERFORM runs them, so each step that does Lisp work is named. Signals, as RUN does, for
+an unknown target or a :steps cycle.
+
+TOOLCHAIN-REFUSAL refuses a target when this is not NIL (#1110)."
+  (let ((tgt (%require-target spec name)))
+    (unless (%in-subprocess-p tgt fresh)
+      (loop for target in (remove-duplicates (%steps-in-order spec tgt)
+                                             :key #'spec:target-name :from-end t)
+            when (%in-image-work-p target)
+              collect (string-downcase (string (spec:target-name target)))))))
+
+(defun toolchain-refusal (spec name findings &key fresh)
+  "When target NAME (a string) of SPEC must not run, given FINDINGS from CONS/TOOLCHAIN:CHECK:
+the names of the targets that would do Lisp work in cons's own image, as %IN-IMAGE-TARGETS
+gives them. NIL, so the target runs, when FINDINGS has nothing fatal or when nothing would run
+in this image. A fatal finding, such as contribs compiled by another SBCL (#701), is about this
+image only; a subprocess runs under the sbcl on PATH, whose contribs are its own.
+
+Also NIL for an unknown target or a :steps cycle, which RUN then reports without running
+anything. cons/cli calls this before RUN."
+  (and (cons/toolchain:fatal-p findings)
+       (ignore-errors (%in-image-targets spec name fresh))))
+
 (defun %load-env (spec)
   "Load the spec's :env files (relative to the spec dir) into the environment."
   (dolist (f (spec:spec-env spec))
@@ -413,14 +662,26 @@ fasl is seen; see LOAD-SYSTEM-STRICTLY."
             (pmap (%param-map spec params))
             (*strict* strict)
             (*root* (spec:spec-dir spec)))
+        ;; A :steps cycle is refused before anything runs, strict or not; %PERFORM would
+        ;; otherwise recurse until the stack ran out (#968's review).
+        (%steps-in-order spec tgt)
+        ;; #960: --strict that would check nothing is refused before anything runs.
+        (when strict (%refuse-unjudged spec tgt))
         ;; pre-publication issue 240: before doing the work, say whether the framework this app is built
         ;; against has moved. Advisory, fail-open, no network -- see cons/upstream.
         (cons/upstream:report)
         (%load-env spec)
         (uiop:quit
-         (if (and (or fresh (spec:target-isolate tgt)) (%lisp-target-p tgt))
+         (if (%in-subprocess-p tgt fresh)
              (%run-subprocess spec tgt pmap)
-             (%perform spec tgt pmap))))
+             ;; #701: a contrib that fails to load says why, before the error itself is
+             ;; reported. Said once, since ASDF can signal the same failure more than once.
+             (let ((explained nil))
+               (handler-bind ((error (lambda (c)
+                                       (unless explained
+                                         (setf explained
+                                               (cons/toolchain:explain-contrib-failure c))))))
+                 (%perform spec tgt pmap))))))
     (error (e)
       (format *error-output* "~&cons ~A: ~A~%" name e)
       (uiop:quit 1))))

@@ -51,9 +51,11 @@
     the whole point of keeping the calling convention while dropping the library.
 
     A STREAMED BODY is a FUNCTION in body position -- (status headers (lambda (writer) ...))
-    -- answered with chunked transfer-encoding. The response stays a three-list, so no
-    middleware and no interceptor learns that streaming exists, and hyperion/server adapts
-    the same shape onto Clack so an application cannot tell which backend it is on.
+    -- answered with chunked transfer-encoding, or, for an HTTP/1.0 request, with no
+    framing and the connection closed after the body (#1244). The response stays a
+    three-list, so no middleware and no interceptor learns that streaming exists, and
+    hyperion/server adapts the same shape onto Clack so an application cannot tell which
+    backend it is on.
 
     The handler runs behind *DISPATCH*: on the loop thread by default, on a worker pool
     with POOL-DISPATCH. A streaming app wants the pool -- the file header says why.")
@@ -64,7 +66,15 @@
            #:server #:server-p #:server-host #:server-port
            #:server-loops #:server-loop-connections #:*default-loops* #:*default-scheme*
            #:*dispatch* #:*max-body-octets* #:*max-head-octets* #:*max-chunk-overhead-octets*
-           #:*max-requests-per-connection* #:*keep-alive-timeout-ms* #:*inline-dispatch*))
+           #:*max-requests-per-connection* #:*keep-alive-timeout-ms* #:*inline-dispatch*
+           ;; a connection taken over after a 101 (#376)
+           #:upgrade #:upgrade-p #:make-upgrade
+           #:upgraded #:upgraded-p #:upgraded-write #:upgraded-wait-writable #:upgraded-close
+           #:upgraded-after #:upgraded-open-p #:upgraded-on-data #:upgraded-on-close
+           #:upgraded-on-drain
+           #:upgraded-data
+           #:upgraded-closed #:upgraded-closed-reason
+           #:*upgraded-read-high-water-octets* #:*upgraded-write-high-water-octets*))
 
 (in-package #:hyperion/server-uv)
 
@@ -375,21 +385,28 @@ as pieces, not joined into a new vector first (#430)."
 
 (defun %write-head-only (conn status headers length keep-alive)
   "Answer a HEAD request: the head a GET would get, and no body (RFC 9110 9.3.2). LENGTH is
-the body's octet count, sent as Content-Length, or :CHUNKED for a streamed body, whose head
-says Transfer-Encoding: chunked as a GET's would. Returns KEEP-ALIVE, or NIL after a refused
-header has been answered with a 500, as %WRITE-RESPONSE does.
+the body's octet count, sent as Content-Length; :CHUNKED for a streamed body, whose head
+says Transfer-Encoding: chunked as a GET's would; or :CLOSE-DELIMITED for a streamed body
+asked for over HTTP/1.0, whose head has neither and says Connection: close (#1244). Returns
+KEEP-ALIVE, NIL for :CLOSE-DELIMITED, or NIL after a refused header has been answered with a
+500, as %WRITE-RESPONSE does.
 
 Nothing after the head is written. On a kept-alive connection the client reads the next
 octets as the start of the next response, so a body here would have been taken for one."
-  (let ((encoded (if (eq length :chunked)
-                     (h1:encode-head-chunked-flat
-                      status (%head-strings headers 'h1:encode-head-chunked-flat) keep-alive)
-                     (h1:encode-head-flat
-                      status (%head-strings headers 'h1:encode-head-flat) length keep-alive))))
+  (let ((encoded (case length
+                   (:chunked
+                    (h1:encode-head-chunked-flat
+                     status (%head-strings headers 'h1:encode-head-chunked-flat) keep-alive))
+                   (:close-delimited
+                    (h1:encode-head-close-delimited-flat
+                     status (%head-strings headers 'h1:encode-head-close-delimited-flat)))
+                   (t
+                    (h1:encode-head-flat
+                     status (%head-strings headers 'h1:encode-head-flat) length keep-alive)))))
     (cond
       ((h1:encode-ok? encoded)
        (net:write-bytes conn (%latin1 (h1:encode-text encoded)))
-       keep-alive)
+       (and keep-alive (not (eq length :close-delimited))))
       (t
        (log:warn "server-uv: response refused" :reason (h1:encode-reason encoded))
        (net:write-bytes conn (%latin1 (h1:encode-error 500)))
@@ -424,6 +441,7 @@ case's work early, never decide something differently."
        (when (and (consp result) (= 3 (length result)))
          (destructuring-bind (status headers body) result
            (unless (or (functionp body) (pathnamep body) (typep body 'file-stream)
+                       (upgrade-p body)
                        (and (h1:body-forbidden? status) (not (%empty-body-p body))))
              (let ((pieces (%encode-response status headers
                                              (%body-pieces (if (h1:body-forbidden? status)
@@ -496,6 +514,9 @@ simply stops, which aborts the stream, which the client sees as a truncated mess
 
 (defstruct (stream-out (:constructor %make-stream-out) (:copier nil) (:conc-name so-))
   conn app state loop keep-alive
+  ;; :CHUNKED, or :CLOSE for an HTTP/1.0 request (#1244): the octets are written as they
+  ;; are, and the body ends when the connection closes.
+  (framing :chunked)
   (open t)          ; may more chunks be written?
   (settled nil))    ; a semaphore, while a saturated write is outstanding
 
@@ -509,11 +530,19 @@ vector passes through. NIL and empty are NIL, which callers read as `write nothi
     (and octets (plusp (length octets)) octets)))
 
 (defun %stream-emit (so octets)
-  "Write one chunk: size line, the octets, CRLF. LOOP THREAD ONLY.
+  "Write one chunk: size line, the octets, CRLF. LOOP THREAD ONLY. With :CLOSE framing, an
+HTTP/1.0 request's (#1244), the octets alone.
 
 Three writes would be three small segments on the wire, and the terminating one is exactly
 the write Nagle holds -- the 44 ms defect ADR-0011 measured. One write per chunk instead, of
 three pieces that NET:WRITE-BYTES copies into one buffer (#430)."
+  (when (eq (so-framing so) :close)
+    (net:write-bytes (so-conn so) octets
+                     :on-complete (lambda (&rest _) (declare (ignore _))
+                                    (%stream-settle so))
+                     :on-error (lambda (&rest _) (declare (ignore _))
+                                 (%stream-settle so)))
+    (return-from %stream-emit))
   (let ((header (h1:encode-chunk-header (length octets))))
     (unless (h1:encode-ok? header)
       ;; Unreachable: %CHUNK-OCTETS has already refused the empty chunk, which is the only
@@ -610,13 +639,20 @@ into STREAM-WRITE-FAILED instead. See there."
 
 OK writes the terminating chunk and the connection may be reused. NOT OK closes WITHOUT it,
 which is the whole point: a truncated chunked message is an error to every client, and it is
-the only way left to say `this response is wrong' once its head is on the wire."
+the only way left to say `this response is wrong' once its head is on the wire.
+
+With :CLOSE framing, an HTTP/1.0 request's (#1244), there is no terminating chunk and the
+connection is closed either way, because closing is how that body ends. So an HTTP/1.0
+client cannot tell a body that failed after its head from a complete one; HTTP/1.0 gives the
+server no way to say so. The failure is still logged."
   (when (so-open so)
     (setf (so-open so) nil)
     (setf (conn-state-streaming (so-state so)) nil)
     (let ((conn (so-conn so)) (state (so-state so)))
       (cond
         ((conn-state-done state) nil)
+        ((and ok (eq (so-framing so) :close))
+         (%close-after conn state))
         (ok
          (net:write-bytes conn (%latin1 (coalton:coalton h1:last-chunk)))
          (if (so-keep-alive so)
@@ -644,12 +680,22 @@ header, by definition, because that is what makes a browser hold the connection 
   "Answer with a chunked response whose body is produced by BODY, a function of one
 argument -- the writer.
 
+AN HTTP/1.0 REQUEST GETS NO CHUNKED FRAMING (#1244). HTTP/1.0 has no chunked transfer
+coding, so its client would read the chunk-size lines as part of the body. Its head has no
+Transfer-Encoding and no Content-Length, the octets are written as they are, and the
+connection closes after the last of them, whatever the request said about keep-alive.
+
 The head is encoded and refused HERE, before anything is written, because it is the last
 moment a refusal can still become a 500. After it, the only report available is a truncated
 message."
-  (let ((encoded (h1:encode-head-chunked-flat status
-                                              (%head-strings headers 'h1:encode-head-chunked-flat)
-                                              keep-alive)))
+  (let* ((http-1-0 (conn-state-http-1-0 state))
+         (keep-alive (and keep-alive (not http-1-0)))
+         (encoded (if http-1-0
+                      (h1:encode-head-close-delimited-flat
+                       status (%head-strings headers 'h1:encode-head-close-delimited-flat))
+                      (h1:encode-head-chunked-flat
+                       status (%head-strings headers 'h1:encode-head-chunked-flat)
+                       keep-alive))))
     (cond
       ;; AN SSE STREAM ON THE LOOP THREAD IS NOT A TRADE-OFF, IT IS A DEAD SERVER, and it
       ;; is the one streaming case that is never correct rather than merely costly. A
@@ -676,7 +722,8 @@ message."
        (net:write-bytes conn (%latin1 (h1:encode-text encoded)))
        (let* ((loop* (net:connection-loop conn))
               (so (%make-stream-out :conn conn :app app :state state :loop loop*
-                                    :keep-alive keep-alive))
+                                    :keep-alive keep-alive
+                                    :framing (if http-1-0 :close :chunked)))
               (writer (lambda (chunk) (%stream-write so chunk))))
          ;; THE BODY IS APPLICATION CODE, so it goes through *DISPATCH* like the handler
          ;; did rather than running here on the loop thread. With a pool it occupies one
@@ -693,7 +740,7 @@ message."
                     (let ((ok (not (typep result 'condition))))
                       (unless ok
                         (log:error "server-uv: streaming body signalled"
-                                   :condition (princ-to-string result)))
+                                   :condition (log:condition-type result)))
                       (%on-loop loop* (lambda () (%stream-finish so ok))
                                 "a streamed response's finish"))))
          ;; :STREAMING, not NIL. The connection is NOT free yet -- the stream owns it until
@@ -819,7 +866,7 @@ the wire: short, and with the connection closed."
           (%file-emit fo nil))
     (error (e)
       (log:error "server-uv: a file body could not be read"
-                 :condition (princ-to-string e))
+                 :condition (log:condition-type e))
       (%file-finish fo))))
 
 (defun %file-outcome (fo)
@@ -1008,7 +1055,59 @@ different situations reach it, and they get different answers -- see %IDLE-EXPIR
   (streaming nil)
   ;; The peer's address, (HOST . PORT), asked of the socket on the connection's first request
   ;; and kept (#430). See %PEER.
-  (peer nil))
+  (peer nil)
+  ;; The request in flight is HTTP/1.0 (#1244). Its streamed body is then sent with no
+  ;; Transfer-Encoding and ends when the connection closes, because HTTP/1.0 has no chunked
+  ;; transfer coding. Set by %RESPOND for each request; one request is in flight at a time.
+  (http-1-0 nil)
+  ;; The UPGRADED this connection became after a 101 (#376), or NIL while it speaks HTTP.
+  ;; Once set, every read goes to it and none is parsed as HTTP. See %TAKE-OVER.
+  (upgraded nil))
+
+;;; The two structures of a connection taken over after a 101 (#376), defined here, before
+;;; the functions above %TAKE-OVER that test for them; the section on taking over a connection
+;;; explains them.
+
+(defstruct (upgrade (:constructor make-upgrade (on-open &key (write-head t))) (:copier nil))
+  "The body of a 101 response that takes over the connection (#376). ON-OPEN is called with
+the UPGRADED, as the connection's first event. WRITE-HEAD NIL means the application writes its
+own 101 head through UPGRADED-WRITE and server-uv writes none; the Clack handler needs that,
+because websocket-driver writes its own head."
+  (on-open nil :read-only t)
+  (write-head t :read-only t))
+
+(defstruct (upgraded (:constructor %make-upgraded) (:copier nil))
+  "A connection taken over from HTTP after a 101 (#376). See the section on taking over a
+connection."
+  conn state loop dispatch
+  (lock (sb-thread:make-mutex :name "server-uv upgraded"))
+  (written (sb-thread:make-waitqueue))
+  ;; Events not yet delivered, oldest first, each (THUNK . OCTETS), with the last cons.
+  (events '())
+  (events-tail nil)
+  ;; A delivery is queued or running; while it is, a new event is only queued.
+  (running nil)
+  ;; Octets read and not yet delivered, and whether reading is paused because of them.
+  (unread 0)
+  (paused nil)
+  ;; Octets passed to UPGRADED-WRITE and not yet reported written by libuv.
+  (unwritten 0)
+  ;; Set on the loop thread by %FINISH. CLOSE-POSTED makes the close event happen once.
+  (closed nil)
+  (close-posted nil)
+  ;; Timers made by UPGRADED-AFTER and not yet fired, closed when the connection is.
+  (timers '())
+  ;; The application's handlers, set from ON-OPEN or any later event.
+  (on-data nil)
+  (on-close nil)
+  ;; Called once, as an event, when a draining STOP begins, so the layer on this connection
+  ;; can tell its peer the server is going away (a WebSocket sends close code 1001). NIL means
+  ;; the connection is left open until the drain timeout, as a stream is. DRAIN-POSTED makes
+  ;; the event happen once.
+  (on-drain nil)
+  (drain-posted nil)
+  ;; Anything the layer built on this connection wants to keep with it.
+  (data nil))
 
 (defun %peer (conn state)
   "The peer's address as (values HOST PORT), or NILs if the socket cannot say. Asked of the
@@ -1162,7 +1261,9 @@ Idempotent, and the only place a connection's handle is closed."
     (%timer-release state)
     (let ((live (conn-state-live state)))
       (when live (remhash conn live)))
-    (ignore-errors (uv:close-handle conn))))
+    (ignore-errors (uv:close-handle conn))
+    (let ((u (conn-state-upgraded state)))
+      (when u (%upgraded-finished u)))))
 
 (defun %linger (conn state)
   "Our half-close is done and the peer has not ended its side yet. Give it
@@ -1253,9 +1354,14 @@ Draining is what makes pipelining work: a peer may put several requests in one s
 a server that handled the first and waited for another chunk would stall until the peer's
 next write -- which never comes, because the peer is waiting for the responses."
   (unless (conn-state-done state)
-    (%append-octets state chunk)
-    (%idle-cancel state)
-    (%resume conn app state)))
+    (let ((upgraded (conn-state-upgraded state)))
+      (cond
+        ;; Taken over after a 101 (#376): the octets belong to the new protocol.
+        (upgraded (%upgraded-data upgraded chunk))
+        (t
+         (%append-octets state chunk)
+         (%idle-cancel state)
+         (%resume conn app state))))))
 
 (defun %serve-one (conn app state)
   "Serve at most one request from the front of the buffer.
@@ -1443,7 +1549,7 @@ written into a closed socket."
               (cond
                 ((typep result 'condition)
                  (log:error "server-uv: handler signalled"
-                            :condition (princ-to-string result))
+                            :condition (log:condition-type result))
                  (%write-error conn 500)
                  nil)
                 ;; Encoded on the worker (#430). Written as it is, unless a drain has turned
@@ -1458,7 +1564,7 @@ written into a closed socket."
                                 (encoded-keep-alive result))
                        (error (e)
                          (log:error "server-uv: response could not be written"
-                                    :condition (princ-to-string e))
+                                    :condition (log:condition-type e))
                          nil))))
                 (t (%complete-response conn app state result keep-alive head-request)))))
         ;; THREE ANSWERS, not two. :STREAMING means the response has begun and the stream
@@ -1466,6 +1572,8 @@ written into a closed socket."
         ;; next pipelined request underneath a response still being written, and closing
         ;; would truncate the one we just promised.
         (cond ((eq kept :streaming) (setf (conn-state-streaming state) t))
+              ;; :UPGRADED: the connection is no longer HTTP's to resume or close (#376).
+              ((eq kept :upgraded))
               (kept (%resume conn app state))
               (t (%close-after conn state)))))))
 
@@ -1481,6 +1589,9 @@ true to keep the connection, :STREAMING, or NIL to close it. HEAD-REQUEST is tru
 request, which gets the head only."
   (handler-case
       (destructuring-bind (status headers body) result
+        ;; AN UPGRADE (#376): a 101 that takes the connection away from HTTP.
+        (when (upgrade-p body)
+          (return-from %complete-response (%take-over conn state status headers body)))
         ;; A 1xx, 204 or 304 carries no body, and the encoder writes no
         ;; Content-Length for one. A body a handler supplied anyway is dropped
         ;; with a warning rather than refused, as Hunchentoot does, so a Clack
@@ -1498,7 +1609,9 @@ request, which gets the head only."
           ;; and nothing after it. A streamed body's function is not called.
           ;; Hyperion's router strips a HEAD body itself; a Clack app does not.
           ((and head-request (functionp body))
-           (%write-head-only conn status headers :chunked keep-alive))
+           (%write-head-only conn status headers
+                             (if (conn-state-http-1-0 state) :close-delimited :chunked)
+                             keep-alive))
           ((and head-request (pathnamep body))
            (%write-head-only conn status headers (%file-size body) keep-alive))
           ;; AN OPEN FILE (#314): what hyperion/static returns, the handle whose path it
@@ -1529,7 +1642,7 @@ request, which gets the head only."
       ;; send, a body we cannot render. Same answer as a handler that
       ;; signalled, because from the peer's side it is the same event.
       (log:error "server-uv: response could not be written"
-                 :condition (princ-to-string e))
+                 :condition (log:condition-type e))
       (%write-error conn 500)
       nil)))
 
@@ -1547,7 +1660,8 @@ The HANDLER-CASE here catches the DISPATCHER failing, not the handler: a pool th
 accept work, or a seam somebody rebound badly. Without it that condition escapes into the
 callback guard and the request hangs -- the exact failure the boundary exists to prevent,
 one level up."
-  (setf (conn-state-in-flight state) t)
+  (setf (conn-state-in-flight state) t
+        (conn-state-http-1-0 state) (string= "HTTP/1.0" (h1:head-version head)))
   (multiple-value-bind (host port) (%peer conn state)
     (let* ((env (%env head (and (plusp (length body-octets)) body-octets) (or host "") port))
            (head-request (string= "HEAD" (h1:head-method head)))
@@ -1574,8 +1688,302 @@ one level up."
       (handler-case
           (funcall (%dispatcher state) app env k)
         (error (e)
-          (log:error "server-uv: dispatch failed" :condition (princ-to-string e))
+          (log:error "server-uv: dispatch failed" :condition (log:condition-type e))
           (funcall k e))))))
+
+;;; --- taking over a connection after a 101 (#376) ------------------------------
+;;;
+;;; A response whose body is an UPGRADE (MAKE-UPGRADE) takes the connection away from HTTP.
+;;; Its status must be 101. server-uv writes the 101 head from the response's headers, unless
+;;; the upgrade says the application writes its own; stops parsing HTTP on the connection; and
+;;; hands it to the upgrade's ON-OPEN as an UPGRADED, a connection that carries octets both
+;;; ways and nothing else. hyperion/server-uv/websocket is built on it, and so is the Clack
+;;; handler's :CLACK.IO.
+;;;
+;;; WHERE THE APPLICATION'S CODE RUNS. Reads arrive on the loop thread. Running the
+;;; application there would let one slow message handler stall every connection the loop
+;;; owns, which is why handlers run on workers. So everything the application is told about --
+;;; ON-OPEN, each read, each write it asked to hear about, its timers, and the close -- is an
+;;; EVENT, queued on the connection and delivered through the connection's dispatcher: on the
+;;; server's worker pool when it has one, on the loop thread under the inline dispatcher, as a
+;;; request's handler would be. One connection's events run one at a time and in order, so the
+;;; application never sees two reads at once or a read after the close. An idle upgraded
+;;; connection holds no worker, so many open sockets do not occupy the pool.
+;;;
+;;; BACKPRESSURE IN BOTH DIRECTIONS. Octets read and not yet delivered are counted, and
+;;; reading pauses above *UPGRADED-READ-HIGH-WATER-OCTETS* until delivery has caught up to
+;;; half of it. Octets written are counted until libuv reports them written, and
+;;; UPGRADED-WAIT-WRITABLE blocks a sender on a worker while more than
+;;; *UPGRADED-WRITE-HIGH-WATER-OCTETS* are outstanding, so a peer that stops reading cannot make
+;;; the server queue without bound.
+;;;
+;;; WRITING IS SAFE FROM ANY THREAD. UPGRADED-WRITE and UPGRADED-CLOSE move themselves onto the
+;;; loop thread as a streamed body's writer does, so writes made from one thread reach the
+;;; socket in the order they were made, and a close made after a write is sent after it.
+
+(defvar *upgraded-read-high-water-octets* (* 1024 1024)
+  "Octets read from an upgraded connection and not yet delivered to the application, above
+which reading pauses until delivery has caught up to half of it (#376).")
+
+(defvar *upgraded-write-high-water-octets* (* 1024 1024)
+  "Octets written to an upgraded connection and not yet sent, above which
+UPGRADED-WAIT-WRITABLE blocks the sender on a worker thread (#376).")
+
+(defparameter *upgraded-events-per-turn* 64
+  "How many of one connection's events a worker delivers before it gives the worker back and
+queues the rest again, so one busy connection cannot keep a worker from the others.")
+
+(define-condition upgraded-closed (error)
+  ((reason :initarg :reason :reader upgraded-closed-reason))
+  (:report (lambda (c s)
+             (format s "hyperion/server-uv: the upgraded connection is closed: ~A"
+                     (upgraded-closed-reason c))))
+  (:documentation "Signalled by UPGRADED-WRITE once the connection is closed, and by
+UPGRADED-WAIT-WRITABLE when the peer has not read what was written within its timeout."))
+
+(defun upgraded-open-p (upgraded)
+  "Whether UPGRADED's connection is still open."
+  (not (upgraded-closed upgraded)))
+
+(defun %upgraded-later (u thunk what)
+  "Run THUNK on U's loop thread on a later turn of the loop, never inside the current call,
+so a long run of deliveries does not deepen the stack. Dropped when the loop is closing."
+  (handler-case (uv:submit (upgraded-loop u) thunk)
+    (uv:loop-closed ()
+      (log:debug "server-uv: dropped work for a closing loop" :what what))))
+
+(defun %upgraded-post (u thunk &optional (octets 0))
+  "Queue THUNK as an event of U, and start a delivery if none is queued or running. OCTETS is
+how many read octets the event carries. LOOP THREAD ONLY."
+  (let ((start nil))
+    (sb-thread:with-mutex ((upgraded-lock u))
+      (let ((cell (list (cons thunk octets))))
+        (if (upgraded-events u)
+            (setf (cdr (upgraded-events-tail u)) cell)
+            (setf (upgraded-events u) cell))
+        (setf (upgraded-events-tail u) cell))
+      (incf (upgraded-unread u) octets)
+      (unless (upgraded-running u)
+        (setf (upgraded-running u) t
+              start t)))
+    (when (and (plusp octets)
+               (not (upgraded-paused u))
+               (not (upgraded-closed u))
+               (> (upgraded-unread u) *upgraded-read-high-water-octets*))
+      (setf (upgraded-paused u) t)
+      (ignore-errors (net:pause-reading (upgraded-conn u))))
+    (when start (%upgraded-dispatch u))))
+
+(defun %upgraded-dispatch (u)
+  "Hand U's queued events to its dispatcher. LOOP THREAD ONLY. When the pool refuses the work
+the events wait and the dispatcher is asked again 10 ms later; if they pile up meanwhile,
+reading pauses. Once the connection is closed, only the close event is left to deliver and
+the pool may be stopping with the server, so a refusal then delivers on the loop thread."
+  (let ((refused nil))
+    (handler-case
+        (funcall (upgraded-dispatch u)
+                 (lambda (env) (declare (ignore env)) (%upgraded-deliver u) nil)
+                 nil
+                 (lambda (result)
+                   (when (eq result *busy-response*) (setf refused t))))
+      (error (e)
+        (log:error "server-uv: an upgraded connection's events could not be dispatched"
+                   :condition (log:condition-type e))
+        (setf refused t)))
+    (when refused
+      (if (upgraded-closed u)
+          (%upgraded-deliver u)
+          (%upgraded-timer u 10 (lambda () (%upgraded-dispatch u)))))))
+
+(defun %upgraded-deliver (u)
+  "Run U's queued events in order, up to *UPGRADED-EVENTS-PER-TURN* of them, on whatever
+thread the dispatcher chose. An event that signals is logged and closes the connection."
+  (loop repeat *upgraded-events-per-turn*
+        do (let ((event (sb-thread:with-mutex ((upgraded-lock u))
+                          (let ((cell (pop (upgraded-events u))))
+                            (cond (cell (decf (upgraded-unread u) (cdr cell))
+                                        (car cell))
+                                  (t (setf (upgraded-running u) nil
+                                           (upgraded-events-tail u) nil)
+                                     nil))))))
+             (unless event (return-from %upgraded-deliver))
+             (when (and (upgraded-paused u)
+                        (<= (upgraded-unread u) (floor *upgraded-read-high-water-octets* 2)))
+               (%on-loop (upgraded-loop u)
+                         (lambda ()
+                           (when (and (upgraded-paused u) (not (upgraded-closed u)))
+                             (setf (upgraded-paused u) nil)
+                             (ignore-errors (net:resume-reading (upgraded-conn u)))))
+                         "an upgraded connection's read resume"))
+             (handler-case (funcall event)
+               (error (e)
+                 (log:error "server-uv: an upgraded connection's handler signalled; closing it"
+                            :condition (log:condition-type e))
+                 (upgraded-close u)))))
+  ;; More are queued: give the worker back and deliver the rest on a new turn.
+  (%upgraded-later u (lambda () (%upgraded-dispatch u)) "an upgraded connection's next turn"))
+
+(defun %upgraded-timer (u ms thunk)
+  "Call THUNK on the loop thread after MS milliseconds, unless U has closed by then. The timer
+is closed when it fires or when U closes. LOOP THREAD ONLY."
+  (unless (upgraded-closed u)
+    (let ((timer nil))
+      (setf timer (uv:make-timer (upgraded-loop u)
+                                 (lambda (tm)
+                                   (declare (ignore tm))
+                                   (setf (upgraded-timers u) (remove timer (upgraded-timers u)))
+                                   (ignore-errors (uv:close-handle timer))
+                                   (unless (upgraded-closed u) (funcall thunk)))))
+      (push timer (upgraded-timers u))
+      (uv:start-timer timer :after ms))))
+
+(defun upgraded-after (upgraded ms thunk)
+  "Deliver THUNK as an event of UPGRADED after MS milliseconds, unless the connection has
+closed by then. Callable from any thread."
+  (%on-loop (upgraded-loop upgraded)
+            (lambda ()
+              (%upgraded-timer upgraded ms (lambda () (%upgraded-post upgraded thunk))))
+            "an upgraded connection's timer")
+  (values))
+
+(defun %upgraded-written (u octets)
+  "OCTETS of U's writes have been sent or dropped. Wakes a sender waiting to write."
+  (sb-thread:with-mutex ((upgraded-lock u))
+    (decf (upgraded-unwritten u) octets)
+    (sb-thread:condition-broadcast (upgraded-written u))))
+
+(defun upgraded-write (upgraded octets &key on-written)
+  "Write OCTETS, an octet vector, on UPGRADED. Callable from any thread; never blocks.
+ON-WRITTEN, a function of no arguments, is delivered as an event once libuv has sent them.
+Signals UPGRADED-CLOSED when the connection is already closed. A write still queued when the
+connection closes is dropped, because the peer is gone."
+  (when (upgraded-closed upgraded)
+    (error 'upgraded-closed :reason "write after close"))
+  (let ((n (length octets))
+        (conn (upgraded-conn upgraded)))
+    (sb-thread:with-mutex ((upgraded-lock upgraded))
+      (incf (upgraded-unwritten upgraded) n))
+    (unless (%on-loop
+             (upgraded-loop upgraded)
+             (lambda ()
+               (if (or (upgraded-closed upgraded) (conn-state-done (upgraded-state upgraded)))
+                   (%upgraded-written upgraded n)
+                   (handler-case
+                       (net:write-bytes conn octets
+                                        :on-complete (lambda (&rest args)
+                                                       (declare (ignore args))
+                                                       (%upgraded-written upgraded n)
+                                                       (when on-written
+                                                         (%upgraded-post upgraded on-written)))
+                                        :on-error (lambda (&rest args)
+                                                    (declare (ignore args))
+                                                    (%upgraded-written upgraded n)))
+                     (error ()
+                       (%upgraded-written upgraded n)))))
+             "an upgraded connection's write")
+      (%upgraded-written upgraded n)))
+  (values))
+
+(defun upgraded-wait-writable (upgraded &key (timeout *stream-write-timeout-seconds*))
+  "Block while more than *UPGRADED-WRITE-HIGH-WATER-OCTETS* written to UPGRADED have not been
+sent, for at most TIMEOUT seconds. Returns at once on the loop thread, where waiting would
+stop the writes it waits for. When the peer has not read them in time, closes the connection
+and signals UPGRADED-CLOSED."
+  (unless (uv:loop-thread-p (upgraded-loop upgraded))
+    (let* ((deadline (+ (get-internal-real-time) (* timeout internal-time-units-per-second)))
+           (timed-out
+             (sb-thread:with-mutex ((upgraded-lock upgraded))
+               (loop while (and (> (upgraded-unwritten upgraded) *upgraded-write-high-water-octets*)
+                                (not (upgraded-closed upgraded)))
+                     do (let ((left (/ (- deadline (get-internal-real-time))
+                                       internal-time-units-per-second)))
+                          (when (<= left 0) (return t))
+                          (aion/dynamic:timed-wait (upgraded-written upgraded)
+                                                   (upgraded-lock upgraded)
+                                                   left))
+                     finally (return nil)))))
+      (when timed-out
+        (upgraded-close upgraded)
+        (error 'upgraded-closed
+               :reason "the peer stopped reading and the queued writes were not sent"))))
+  (values))
+
+(defun upgraded-close (upgraded)
+  "Close UPGRADED's connection once the writes made before this call have been sent.
+Callable from any thread, and idempotent. The close event follows once it has closed."
+  (%on-loop (upgraded-loop upgraded)
+            (lambda ()
+              (let ((state (upgraded-state upgraded)))
+                (unless (conn-state-done state)
+                  (%close-after (upgraded-conn upgraded) state))))
+            "an upgraded connection's close")
+  (values))
+
+(defun %upgraded-data (u chunk)
+  "CHUNK was read on U's connection. LOOP THREAD ONLY."
+  (%upgraded-post u
+                  (lambda ()
+                    (let ((f (upgraded-on-data u)))
+                      (when f (funcall f u chunk))))
+                  (length chunk)))
+
+(defun %upgraded-finished (u)
+  "U's connection has been closed, by %FINISH. LOOP THREAD ONLY. Releases its timers, wakes
+any sender waiting to write, and delivers the close event, once."
+  (setf (upgraded-closed u) t)
+  (dolist (timer (upgraded-timers u)) (ignore-errors (uv:close-handle timer)))
+  (setf (upgraded-timers u) '())
+  (sb-thread:with-mutex ((upgraded-lock u))
+    (sb-thread:condition-broadcast (upgraded-written u)))
+  (unless (upgraded-close-posted u)
+    (setf (upgraded-close-posted u) t)
+    (%upgraded-post u (lambda ()
+                        (let ((f (upgraded-on-close u)))
+                          (when f (funcall f u)))))))
+
+(defun %upgraded-drain (u)
+  "A draining STOP has begun. LOOP THREAD ONLY. Queue U's drain event, once. The event reads
+UPGRADED-ON-DRAIN when it runs, so a handler set by ON-OPEN, which is queued before it, is the
+one called."
+  (unless (or (upgraded-drain-posted u) (upgraded-closed u))
+    (setf (upgraded-drain-posted u) t)
+    (%upgraded-post u (lambda ()
+                        (let ((f (upgraded-on-drain u)))
+                          (when f (funcall f u)))))))
+
+(defun %take-over (conn state status headers upgrade)
+  "Answer with 101 and hand CONN to UPGRADE's ON-OPEN. LOOP THREAD ONLY. Returns :UPGRADED, or
+NIL after a 500 when the response cannot take the connection over."
+  (let ((encoded (and (eql status 101)
+                      (upgrade-write-head upgrade)
+                      (h1:encode-switching-protocols-flat
+                       (%head-strings headers 'h1:encode-switching-protocols-flat)))))
+    (cond
+      ((not (eql status 101))
+       (log:error "server-uv: a response that takes over the connection needs status 101"
+                  :status status)
+       (%write-error conn 500)
+       nil)
+      ((and encoded (not (h1:encode-ok? encoded)))
+       (log:warn "server-uv: 101 response refused" :reason (h1:encode-reason encoded))
+       (%write-error conn 500)
+       nil)
+      (t
+       (when encoded
+         (net:write-bytes conn (%latin1 (h1:encode-text encoded))))
+       ;; HTTP is over on this connection: no idle clock, because the new protocol keeps its
+       ;; own, and the octets the peer sent after the request are the new protocol's first.
+       (%timer-release state)
+       (let* ((u (%make-upgraded :conn conn :state state :loop (net:connection-loop conn)
+                                 :dispatch (%dispatcher state)))
+              (buffer (conn-state-buffer state))
+              (rest (and (plusp (fill-pointer buffer))
+                         (coerce buffer '(simple-array (unsigned-byte 8) (*))))))
+         (setf (fill-pointer buffer) 0
+               (conn-state-upgraded state) u)
+         (%upgraded-post u (lambda () (funcall (upgrade-on-open upgrade) u)))
+         (when rest (%upgraded-data u rest))
+         :upgraded)))))
 
 ;;; --- lifecycle -------------------------------------------------------------
 
@@ -1860,7 +2268,7 @@ Clack -- owning the socket is what makes it available at all."
                   :on-error (lambda (e connection)
                               (%finish connection state)
                               (log:debug "server-uv: connection error"
-                                         :condition (princ-to-string e))))))
+                                         :condition (log:condition-type e))))))
              (hand-off (conn next)
                ;; ON THE FIRST LOOP: give CONN to the next shard in turn (:HANDOFF).
                (let ((target (aref shards (mod (sb-ext:atomic-incf (car next)) loops))))
@@ -1878,7 +2286,7 @@ Clack -- owning the socket is what makes it available at all."
                                                               (shard-loop target) fd))
                                          (error (e)
                                            (log:debug "server-uv: a handed-off connection could not be adopted"
-                                                      :condition (princ-to-string e))))
+                                                      :condition (log:condition-type e))))
                                     (sb-ext:atomic-decf (car handoffs))))
                                 "a connection handed to another loop")
                          ;; The target loop is closing, so the socket goes nowhere: close it.
@@ -1941,7 +2349,7 @@ Clack -- owning the socket is what makes it available at all."
                   do (handler-case (%close-shard-loop shard i)
                        (error (e)
                          (log:warn "server-uv: a loop could not be closed after START failed"
-                                   :shard i :error (princ-to-string e)))))
+                                   :shard i :condition (log:condition-type e)))))
           (when workers-pool
             (%stop-workers workers-pool)))))))
 
@@ -1995,14 +2403,22 @@ waits for: a request being handled, a streamed response being written, or part o
 already received."
   (or (conn-state-in-flight state)
       (conn-state-streaming state)
+      ;; A connection taken over after a 101 (#376) is open on the application's terms; a
+      ;; draining STOP tells it the server is going away (%UPGRADED-DRAIN) and waits for it to
+      ;; close, as it waits for a stream, then closes whatever is left.
+      (conn-state-upgraded state)
       (plusp (fill-pointer (conn-state-buffer state)))))
 
 (defun %close-idle (shard)
-  "Close every connection of SHARD that is not busy, and return how many are still open.
-ON SHARD'S LOOP THREAD. An idle keep-alive connection has nothing to wait for, and while
+  "Close every connection of SHARD that is not busy, queue the drain event of every connection
+taken over after a 101, and return how many are still open. ON SHARD'S LOOP THREAD. An idle keep-alive connection has nothing to wait for, and while
 draining no new request should start on it."
   (let ((idle '()))
-    (maphash (lambda (conn state) (unless (%busy-p state) (push (cons conn state) idle)))
+    (maphash (lambda (conn state)
+               (let ((u (conn-state-upgraded state)))
+                 ;; Each check reaches a connection taken over since the last one, too.
+                 (when u (%upgraded-drain u)))
+               (unless (%busy-p state) (push (cons conn state) idle)))
              (shard-live shard))
     (loop for (conn . state) in idle do (%finish conn state))
     (hash-table-count (shard-live shard))))
@@ -2071,8 +2487,10 @@ it stopped waiting."
 
 With DRAIN-TIMEOUT, a number of seconds above zero, STOP drains first (#388): it stops
 accepting, closes idle connections, and waits up to DRAIN-TIMEOUT seconds for requests in
-flight and streamed responses to finish, each closing its connection as it does. Whatever is
-still open then is closed. With the default, 0, it closes everything at once, as it always has.
+flight, streamed responses and connections taken over after a 101 to finish, each closing its
+connection as it does; a taken-over connection is first told through UPGRADED-ON-DRAIN, which
+is how a WebSocket sends close code 1001. Whatever is still open then is closed. With the
+default, 0, it closes everything at once, as it always has.
 SERVE-FOREVER passes a timeout on SIGTERM; a grace period before that, still accepting, is
 SERVE-FOREVER's (see hyperion/server).
 

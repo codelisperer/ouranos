@@ -29,7 +29,10 @@ kind of the last of them: :SIGN-IN when its principal had to sign in, :ERROR for
 failure, or NIL after a poll that succeeded. INPUTS lists the input requests the server has
 asked of the task that the app was told of (#563), each a list (KEY SEEN ANSWERED): the
 server's key for the request, the universal time it was first seen, and true once it was
-answered. It is kept with the record so that a key is shown once, also after a restart."
+answered. It is kept with the record so that a key is shown once, also after a restart.
+PRIVATE is true when the turn that started the task withheld content, because its agent was
+private (#983); the task's events withhold content by it, whichever thread or turn polls the
+task."
   (key "" :type string)
   (connection "" :type string)
   (id "" :type string)
@@ -45,7 +48,8 @@ answered. It is kept with the record so that a key is shown once, also after a r
   (announced-at nil)
   (failures 0 :type integer)
   (failure nil)
-  (inputs '() :type list))
+  (inputs '() :type list)
+  (private nil))
 
 (defparameter +task-outcomes+ '(("ok" . :ok) ("error" . :error) ("cancelled" . :cancelled)
                                 ("expired" . :expired) ("unknown" . :unknown))
@@ -86,6 +90,7 @@ for a held turn (#531)."
               "text" (orn (task-text task)) "announced-at" (orn (task-announced-at task))
               "failures" (task-failures task)
               "failure" (orn (car (rassoc (task-failure task) +task-failures+)))
+              "private" (and (task-private task) t)
               "inputs" (coerce (mapcar (lambda (input)
                                          (destructuring-bind (key seen answered) input
                                            (%object "key" key "seen" seen
@@ -109,6 +114,8 @@ reader."
                   :text (val "text") :announced-at (val "announced-at")
                   :failures (or (val "failures") 0)
                   :failure (cdr (assoc (val "failure") +task-failures+ :test #'equal))
+                  ;; A record written before #983 has no private flag.
+                  :private (eq t (val "private"))
                   ;; A record written before #563 has no inputs.
                   :inputs (map 'list (lambda (input)
                                        (list (gethash "key" input) (gethash "seen" input)

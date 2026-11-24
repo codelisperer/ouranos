@@ -25,21 +25,49 @@
 (defclass facebook-provider (provider) ()
   (:documentation "A provider that can deliver FACEBOOK-POSTs to Facebook Pages (#822)."))
 
+(deftype facebook-page-status ()
+  "What FACEBOOK-PAGE-HEALTH says about a Page, for an admin screen (#822, #978). One of:
+
+  :CONNECTED           the stored Page token works for this Page and has every scope in
+                       +FACEBOOK-REQUIRED-SCOPES+.
+  :MISSING-PERMISSION  the token works for this Page but lacks a scope hermes needs; the missing
+                       scopes come back as FACEBOOK-PAGE-HEALTH's third value. An admin connects
+                       again and grants them.
+  :RECONNECT           the token no longer works: expired, revoked, the admin's password
+                       changed, or the admin lost their role on the Page. An admin connects again.
+  :NOT-PERMITTED       Facebook refused with a permission error: the admin cannot do the
+                       CREATE_CONTENT task on this Page.
+  :NOT-FOUND           no such Page, or the token cannot see it.
+  :WRONG-PAGE          the token stored for this Page belongs to another Page.
+  :NOT-CONNECTED       no token is stored for this Page."
+  '(member :connected :missing-permission :reconnect :not-permitted :not-found :wrong-page
+    :not-connected))
+
 (defgeneric facebook-page-health (provider page)
   (:documentation "Whether PROVIDER can post to the Facebook Page PAGE (its id), for an admin
-screen (#822). Returns two values: a status and the Page's name when Facebook gave it. STATUS is
-:CONNECTED, :RECONNECT (the Page token no longer works, or lacks pages_manage_posts: send an
-admin through the connect flow again), :NOT-PERMITTED (the token works but may not post to this
-Page), :WRONG-PAGE (the token stored for PAGE belongs to another Page), :NOT-FOUND (no such
-Page, or the token cannot see it), or :NOT-CONNECTED (no token is stored for PAGE). A PAGE that
+screen (#822). Returns up to three values: a FACEBOOK-PAGE-STATUS, the Page's name when Facebook
+gave it, and for :MISSING-PERMISSION the list of missing scope names. Checking the scopes needs
+the app's id and secret; without them a token that reads its own Page is :CONNECTED. A PAGE that
 is not a Page id signals INVALID-MESSAGE; a rate limit or a network failure is signalled, not
 answered."))
+
+(defgeneric facebook-token-info (provider page)
+  (:documentation "What Facebook says about the Page token PROVIDER holds for the Page PAGE (its
+id), as a FACEBOOK-TOKEN-INFO, from the Graph API's debug_token (#978): whether it is valid, its
+scopes, when it expires and when its access to data expires. An admin screen shows the last two
+together, because a token that never expires still loses data access. Needs the app's id and
+secret (debug_token is called with the app's token) and a stored token for PAGE, and signals
+CONFIGURATION-ERROR without them. A PAGE that is not a Page id signals INVALID-MESSAGE."))
 
 (defgeneric deliver (provider message)
   (:documentation "Deliver MESSAGE (an EMAIL or SMS) via PROVIDER. Returns a DELIVERY-RESULT
 on success; signals DELIVERY-FAILURE on a rejected/failed request, UNSUPPORTED-MESSAGE if the
 provider does not implement the message's channel, or CONFIGURATION-ERROR when a required
-credential is missing."))
+credential is missing.
+
+A method for EMAIL sends every header in EMAIL-HEADERS, or, for a provider that cannot send
+extra headers, signals INVALID-MESSAGE when EMAIL-HEADERS is not empty. It never drops them
+silently: an unsubscribe header that was set and not sent is not visible to anyone (#106)."))
 
 (defmethod deliver ((p provider) message)
   "Default: the provider does not handle this kind of message."
@@ -95,6 +123,136 @@ bot has a webhook set."))
 ;;; HERMES_TRANSPORT=dev|log forces the dev transport for every channel (local dev).
 ;;; A backend registers a no-arg constructor thunk under its name; adding a vendor is a new
 ;;; class + one REGISTER-IMPL, with the selection layer staying neutral.
+
+(defun %check-credential-url (value &key setting example credential carried-in appends-path)
+  "Signal CONFIGURATION-ERROR unless VALUE is a URL this framework may send CREDENTIAL to
+(#1077, #1092). Returns the parsed URI and, as a second value, the host that was approved as
+local.
+
+THE RULE IS AION/HTTP-CLIENT:CREDENTIAL-URL-REFUSAL, not written here (#1106). This function is
+the part that is hermes': which condition to signal. The rule moved down beside LOCAL-HOST-P so
+that hermes/blob could use it too -- blob does not depend on hermes core, and the alternative to
+moving it was either a new dependency in that direction or a fifth copy of a rule that had
+already grown three holes across two copies.
+
+CARRIED-IN says where the credential travels, and is passed through: Telegram's bot token is in
+the path of every request rather than in a header, and a refusal that described it wrongly would
+be telling the reader something false about their own configuration.
+
+WHAT CALLS THIS, AND WHAT DOES NOT. Twilio's API-BASE, SendGrid's ENDPOINT, Telegram's API-BASE,
+Facebook's GRAPH-BASE and Stripe's API-BASE all do (#1106). hermes/blob's S3 endpoint does not
+call THIS function, because it is in another system that must not depend on hermes core; it calls
+the same rule in aion directly and signals BLOB-CONFIGURATION-ERROR. Facebook's DIALOG-BASE does
+not: no credential is sent to it -- it is where a person's browser is sent -- so the rule about
+carrying a credential in the clear has nothing to say about it."
+  (multiple-value-bind (reason uri approved-local)
+      (apply #'credential-url-refusal value
+             :setting setting :example example :credential credential
+             :appends-path appends-path
+             ;; Passed only when given, so the default in CREDENTIAL-URL-REFUSAL is what decides
+             ;; the common wording rather than a NIL from here.
+             (when carried-in (list :carried-in carried-in)))
+    (when reason
+      (error 'configuration-error :missing reason))
+    (values uri approved-local)))
+
+(defun %slot-snapshot (object)
+  "Every slot of OBJECT as (NAME . (VALUE)) when bound and (NAME) when unbound, for
+%RESTORE-SLOTS, read through the MOP so a slot added to the class later is covered.
+
+THERE IS A SECOND COPY in hermes/blob's s3.lisp, deliberately: hermes/blob does not depend on
+hermes core and must not start to, and this is eight lines of mechanism rather than a rule about
+where a credential may go -- the kind of thing #1106 moved into one place."
+  (mapcar (lambda (slot)
+            (let ((name (sb-mop:slot-definition-name slot)))
+              (if (slot-boundp object name)
+                  (cons name (list (slot-value object name)))
+                  (list name))))
+          (sb-mop:class-slots (class-of object))))
+
+(defun %restore-slots (object snapshot)
+  "Put OBJECT's slots back as %SLOT-SNAPSHOT recorded them, unbinding the ones that were unbound."
+  (dolist (entry snapshot)
+    (if (cdr entry)
+        (setf (slot-value object (car entry)) (second entry))
+        (slot-makunbound object (car entry)))))
+
+(defun %call-with-url-check (provider url-slot verdict-slot check next)
+  "Run NEXT -- a provider's CALL-NEXT-METHOD -- and then check the URL in URL-SLOT, recording
+CHECK's verdict in VERDICT-SLOT; put both slots back if anything signals (#1106).
+
+THE ORDERING IS THE WHOLE CONTENT OF THIS FUNCTION, and it exists once because three reviews in
+a row found a defect in it while it was written twice, and #1106 would have made that five
+times:
+
+  - THE CHECK RUNS AFTER NEXT, and reads the slot rather than working out the value that would
+    be in effect, so a subclass that gives the URL slot its own :INITFORM is checked too. On a
+    fresh instance there is no initarg, the slot is not yet bound, and the superclass's default
+    constant is not what the slot will hold.
+  - THE VERDICT IS CLEARED BEFORE NEXT, so a failure part-way through cannot leave a verdict
+    standing beside a URL it was not about.
+  - NEXT IS INSIDE THE HANDLER, not only the check. A subclass :AFTER method on
+    SHARED-INITIALIZE runs inside CALL-NEXT-METHOD, after the URL slot has been assigned, so a
+    failure there left the new, unchecked URL in the slot.
+  - EVERY SLOT GOES BACK on a failure, so a refusal leaves the provider as it was. This said
+    \"both slots\" -- the URL and the verdict -- and restored only those two, while the same
+    CALL-NEXT-METHOD assigns every other initarg in the call before the check runs. For these
+    providers that leaked nothing, because the scheme lives in the URL slot, which was restored;
+    but hermes/blob's copy of this ordering missed SECURE the same way and was left plaintext
+    with no approval (the hub's review of #1140). A list of slots to restore is a list someone
+    has to keep complete, so none is kept: the whole object is snapshotted.
+  - THE HANDLER DECLINES. HANDLER-BIND rather than HANDLER-CASE, so the slots are restored and
+    the condition still reaches the caller unchanged.
+
+Why any of this matters: a provider whose URL check refuses is one a caller may handle and carry
+on from, and the next send then carries a credential to whatever is in the slot (#1129)."
+  (let ((snapshot (%slot-snapshot provider)))
+    (setf (slot-value provider verdict-slot) nil)
+    (handler-bind ((error (lambda (c)
+                            (declare (ignore c))
+                            (%restore-slots provider snapshot))))
+      (let ((instance (funcall next)))
+        (setf (slot-value provider verdict-slot)
+              (funcall check (slot-value provider url-slot)))
+        instance))))
+
+(defparameter *send-connect-timeout* 10
+  "Seconds a backend waits for a connection to a provider before giving up (#1077).
+
+TEN IS WHAT HAPPENED ALREADY, now stated here. #1077 was filed believing a send with no timeout
+waited for ever; it does not. AION/HTTP-CLIENT passes a timeout to dexador only when one is set,
+so an unset timeout has always meant dexador's own default, and that default is ten seconds
+(`*default-connect-timeout*` in dexador's src/util.lisp). Measured against a socket that accepts
+a connection and never answers: 10.0 seconds, with both timeouts NIL.
+
+THIS DOES NOT COVER NAME RESOLUTION. It bounds the connect itself, and a name that takes a long
+time to resolve, or hangs, is not bounded by it (#1077, the review of #1084).
+
+So this changes no behaviour. What it changes is that the figure is hermes's, written down and
+settable, instead of a number inside a dependency that an upgrade could move without anyone
+here noticing. Setting this, or passing :CONNECT-TIMEOUT to a provider's constructor, now wins
+over dexador's default. NIL still means \"say nothing to dexador\", which is dexador's ten, not
+for ever.")
+
+(defparameter *send-read-timeout* 10
+  "Seconds a backend waits for a provider's answer once the connection was made (#1077). Ten,
+for the reason in *SEND-CONNECT-TIMEOUT*: it is what dexador already did, so nothing changes for
+an app that sets nothing.
+
+THIS IS A LIMIT ON EACH SOCKET READ, NOT ON THE WHOLE RESPONSE. It is the socket's receive
+timeout, so it is reset every time a byte arrives: a provider that sends one byte every nine
+seconds holds DELIVER for as long as it cares to, and no setting here ends that. Bounding a whole
+response needs a deadline around the call, which is an app's to impose (#1077, the review of
+#1084).
+
+A send that is cut off here has reached the provider, and raising this is a judgement about
+responsiveness against failing a send that would have been answered. An app that wants to wait
+longer sets it; the default is not raised for everybody, because a hung provider would then hold
+DELIVER longer than it does today.
+
+A SEND WHOSE READ TIMES OUT MAY ALREADY HAVE BEEN DELIVERED. The request reached the provider,
+so the failure says only that no answer arrived. An app that retries one of these can deliver
+the same message twice, and it should check the provider rather than assume either way.")
 
 (defvar *impls* (make-hash-table :test #'equal)
   "Map of \"channel/name\" -> a thunk returning a fresh provider.")

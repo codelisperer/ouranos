@@ -29,6 +29,20 @@ It follows the authorization section of the MCP specification, revision 2026-07-
   - `sign-in-return-handler` at the redirect URI. It needs a `:principal-of` function that reads the signed-in user from the request's session.
   - `client-metadata-handler` at the client metadata URL, when the app publishes one.
 
+  It also has `forwarding-response`, for an app that starts a sign-in from a form; see the next section.
+
+## Starting a sign-in from a form POST
+
+If the app's Content-Security-Policy has `form-action 'self'`, do not answer the form POST that starts a sign-in with a redirect to the authorization server. The browser applies `form-action` to the target of a redirect that follows a form submission as well as to the form's own target, so it blocks the 303 to the authorization server's host. Nothing appears on the page and the browser stays where it was, while the server's log shows the client registered and the sign-in started (#1181).
+
+Do one of these instead:
+
+- Answer the POST with `(hyperion/oauth:forwarding-response url)`, where `url` is what `start-sign-in` returned. It is a 200 page with a meta refresh to the URL and a link to it, which `form-action` does not apply to. It is sent with `Cache-Control: no-store`, because the page contains the sign-in's `state` and PKCE challenge, and `Referrer-Policy: no-referrer`, so the browser does not send the app page's address to the authorization server. It refuses a URL that is not http or https, and escapes the URL in the page.
+- Start the sign-in from a link (a GET) whose handler redirects. `form-action` does not apply to a redirect that follows a link.
+- Add the authorization server's origin to `form-action`. This needs the origin of every server a user may sign in to, which an app that connects to MCP servers its users choose does not know in advance.
+
+hyperion's default policy does not set `form-action`, so this applies only to an app that sets the directive itself.
+
 ## The flow
 
 1. **The app finds out a sign-in is needed.** An MCP call answered 401 signals `praxeon/mcp:authorization-required`, carrying the `WWW-Authenticate` challenge.
@@ -49,7 +63,9 @@ It follows the authorization section of the MCP specification, revision 2026-07-
 ## What is checked
 
 - **Discovery.**
-  - The protected-resource metadata is found where the specification says: the `resource_metadata` URL in the challenge, or failing that the path-inserted well-known URL, then the root one. Its `resource` must be the connection's canonical URI.
+  - The protected-resource metadata is found where the specification says: the `resource_metadata` URL in the challenge, or failing that the path-inserted well-known URL, then the root one. Its `resource` must be the connection's canonical URI, or the same scheme, host and port, with no query, and a path that is the connection's path or a prefix of it at a `/` boundary, the origin alone included. For `https://host/mcp`, metadata naming `https://host` is accepted, and `https://host/mc`, `https://host/mcp-other`, `https://host/mcp/x` and any other origin are refused. When a shorter value is accepted, it is what the sign-in sends as the RFC 8707 `resource` parameter and what the tokens are kept under.
+
+    **This departs from RFC 9728 section 3.3 on purpose** (#1169). The section requires the metadata's `resource` to be identical to the URL the client requested. Servers built on the MCP TypeScript SDK publish metadata naming only their origin, because that SDK's client accepts exactly the prefix rule above, so an exact check refused servers that every other MCP client connects to. The maintainer ruled on 2026-11-07 to accept the same rule. The claimed `resource` must be on the server's own origin, so a server can describe itself as an ancestor path on that origin and nothing more. This restricts what the metadata claims, not where it is served: a `resource_metadata` URL in the challenge may be on another https host, as before.
   - The authorization server's metadata is looked for at the RFC 8414 URL, then the OpenID Connect ones. For an issuer with a path, the path goes after the well-known suffix. The document's `issuer` must be identical to the issuer it was fetched for.
   - The server must offer PKCE with `S256`.
 - **URLs from servers.** Every URL a server supplies must be https, or http on a loopback address. It is fetched through `aion/http-client:fetch-public`, which refuses internal addresses and here follows no redirect. A request carrying a code, a refresh token or client metadata is therefore never forwarded to another host.
@@ -62,7 +78,7 @@ It follows the authorization section of the MCP specification, revision 2026-07-
 
   A registered client is never used with another issuer. The client id is recorded with each sign-in, and the code is redeemed with that client, so a sign-in finished on another instance of the app still works. The client store should be shared by an app's instances, so that the app registers one client per issuer, not one per instance.
 - **Scopes.** The scopes come from the first source that has some: the caller's `:scopes`, the challenge's `scope`, then the protected resource's `scopes_supported`. The scopes of an earlier sign-in to the same connection are kept, so a step-up after an `insufficient_scope` 403 does not lose them. `offline_access` is added when the authorization server lists it.
-- **Tokens.** A token is kept with the resource and the issuer it was issued for. `access-token` returns it only for that resource, and only while the resource's protected-resource metadata still names that issuer. The metadata is cached per metadata URL and resource for the broker's `:metadata-lifetime`, one hour by default, and read again after the server refuses a token and after a sign-in, so the check does not cost a request on every call. Only a 200 with a JSON object is an answer. When a fetch fails, an expired answer is used for `:metadata-grace` seconds more (60 by default) and never renewed; after that `access-token` signals `oauth-error`, which `praxeon/mcp` reports as a call not run, until a fetch succeeds. A connection whose URL changes under the same name therefore needs a new sign-in. Tokens and the verifier are `aion/secret` values, and nothing is logged but connection names, issuers and outcomes.
+- **Tokens.** A token is kept with the resource and the issuer it was issued for. `access-token` returns it only for that resource, or for a URL that resource covers under the prefix rule above, and only while the resource's protected-resource metadata still names that issuer. The metadata is cached per metadata URL and resource for the broker's `:metadata-lifetime`, one hour by default, and read again after the server refuses a token and after a sign-in, so the check does not cost a request on every call. Only a 200 with a JSON object is an answer. When a fetch fails, an expired answer is used for `:metadata-grace` seconds more (60 by default) and never renewed; after that `access-token` signals `oauth-error`, which `praxeon/mcp` reports as a call not run, until a fetch succeeds. A connection whose URL changes under the same name therefore needs a new sign-in. Tokens and the verifier are `aion/secret` values, and nothing is logged but connection names, issuers and outcomes.
 
 ## Known limitations
 

@@ -1,10 +1,11 @@
 ;;;; http1.lisp --- one HTTP/1.1 exchange over a stream this client opened (#536).
 ;;;;
-;;;; On Linux and macOS a pinned request hands its connection to dexador, which writes the
-;;;; request and reads the response. On Windows dexador has no backend that takes a caller's
-;;;; connection (its usocket backend is not loaded there), so the pinned path writes the request
-;;;; and reads the response itself, with this file. It is compiled everywhere, so its tests run on
-;;;; every platform, but only Windows' %REQUEST-PINNED uses it.
+;;;; Every pinned request (:CONNECT-ADDRESS, which FETCH-PUBLIC always uses) writes its request
+;;;; and reads its response with this file, on every platform. Windows has done so since #536,
+;;;; because dexador has no backend there that takes a caller's connection. Linux and macOS
+;;;; handed the connection to dexador until #985: after any failure on a stream it was given,
+;;;; dexador opened a new connection by resolving the URL's host, which bypassed the pinned
+;;;; address, and sent the request again. Here a pinned request uses exactly one connection.
 ;;;;
 ;;;; THE RESPONSE IS UNTRUSTED INPUT. It comes from a server a user named, so every part of it is
 ;;;; read under a limit, and anything outside HTTP/1.1's grammar is refused with
@@ -18,8 +19,10 @@
 ;;;;     digits, since a response a proxy could frame two ways is how requests are smuggled;
 ;;;;   - a chunk size: hexadecimal, at most +MAX-CHUNK-SIZE-DIGITS+ digits, nothing but an
 ;;;;     extension after it; the trailer is limited like the head.
-;;;; The body's total is limited by the caller, through %READ-CAPPED and MAX-BODY-BYTES, and a
-;;;; read waits at most the socket's receive timeout, which the caller sets.
+;;;; The body's total is limited by the caller, through %READ-CAPPED and MAX-BODY-BYTES. How long a
+;;;; read may wait is set by the caller too, by a different mechanism on each OS: elsewhere, the
+;;;; socket's receive timeout; on Windows, where that timeout does not end a read, the
+;;;; %IDLE-WATCHED-STREAM in fetch.lisp, whose timer closes the socket (#985).
 ;;;;
 ;;;; The request asks for what this reader can read: Connection: close, so the body may end at
 ;;;; the close, and Accept-Encoding: identity, so nothing is compressed.
@@ -28,7 +31,8 @@
 
 (define-condition malformed-response (http-error) ()
   (:documentation "A response that does not follow HTTP/1.1's grammar, or that passed one of
-http1.lisp's limits, read on a pinned connection where this client reads the response itself."))
+http1.lisp's limits, read on a pinned connection where this client reads the response itself; or
+one WinHTTP refused as not HTTP, error 12152 (the hub's review of #979)."))
 
 (defconstant +max-line-octets+ (* 64 1024)
   "The longest status line, header line or trailer line accepted, CRLF included.")
@@ -43,6 +47,12 @@ http1.lisp's limits, read on a pinned connection where this client reads the res
 (defun %malformed (fmt &rest args)
   (error 'malformed-response :detail (apply #'format nil fmt args)))
 
+(defun %ended (fmt &rest args)
+  "Signal MALFORMED-RESPONSE for a connection that ended before the response did, with phase
+:RESPONSE. It ended after the connection was made and the request sent, so the server may have
+acted on the request, and AION/RETRY must not resend it as if no connection had been made (#974)."
+  (error 'malformed-response :detail (apply #'format nil fmt args) :phase :response))
+
 ;;; --- reading lines -------------------------------------------------------------------
 
 (defun %read-line-octets (stream budget what)
@@ -54,7 +64,7 @@ line is longer than BUDGET octets. Returns (values LINE OCTETS-READ)."
         (n 0))
     (loop
       (let ((b (read-byte stream nil nil)))
-        (unless b (%malformed "the connection ended inside the ~A" what))
+        (unless b (%ended "the connection ended inside the ~A" what))
         (incf n)
         (when (> n budget) (%malformed "the ~A is longer than ~D octets" what budget))
         (cond ((= b 10) (return (values (coerce line 'simple-string) n)))
@@ -179,7 +189,7 @@ closes the connection."))
   (if (zerop (%left s))
       :eof
       (let ((b (read-byte (%source s) nil nil)))
-        (unless b (%malformed "the connection ended ~D octets before the Content-Length" (%left s)))
+        (unless b (%ended "the connection ended ~D octets before the Content-Length" (%left s)))
         (decf (%left s))
         b)))
 
@@ -221,7 +231,7 @@ trailer and mark S done."
     (when (%done s) (return :eof))
     (when (plusp (%left s))
       (let ((b (read-byte (%source s) nil nil)))
-        (unless b (%malformed "the connection ended inside a chunk"))
+        (unless b (%ended "the connection ended inside a chunk"))
         (decf (%left s))
         (return b)))
     (%next-chunk s)))
@@ -253,6 +263,58 @@ an alist form-encoded, as dexador does."
     (list (values (sb-ext:string-to-octets (quri:url-encode-params content) :external-format :utf-8)
                   "application/x-www-form-urlencoded"))))
 
+(defclass %octet-sink (sb-gray:fundamental-binary-output-stream)
+  ((octets :initform (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0)
+           :reader %sink-octets))
+  (:documentation "A binary output stream that keeps what is written to it, for building a body."))
+
+(defmethod sb-gray:stream-write-byte ((s %octet-sink) byte)
+  (vector-push-extend byte (%sink-octets s))
+  byte)
+
+(defmethod sb-gray:stream-write-sequence ((s %octet-sink) seq &optional (start 0) end)
+  (loop for i from start below (or end (length seq))
+        do (vector-push-extend (elt seq i) (%sink-octets s)))
+  seq)
+
+(defun %multipart-p (content content-type)
+  "Whether dexador would send CONTENT, an alist, as multipart/form-data: when CONTENT-TYPE begins
+with multipart/, or when there is no CONTENT-TYPE and a field's value is a pathname. This is
+dexador's own rule, in both of its backends (dexador-20260101, src/backend/usocket.lisp lines
+496-501, and src/backend/winhttp.lisp lines 121-125), so a request sends the same body whichever
+way it goes (#1178). The prefix is compared case-sensitively, as dexador compares it. A body of
+octets is never re-encoded, whatever its type: only an alist is (#828)."
+  (and (consp content)
+       (if content-type
+           (and (>= (length content-type) 10) (string= "multipart/" content-type :end2 10))
+           (find-if #'pathnamep content :key #'cdr))))
+
+(defun %multipart-octets (content content-type)
+  "CONTENT, an alist, as a multipart body, and the Content-Type to send with it: CONTENT-TYPE, or
+multipart/form-data, with a boundary of its own. The body is written by dexador's own
+WRITE-MULTIPART-CONTENT, as dexador's WinHTTP backend writes it."
+  (let ((boundary (dexador.util:make-random-string 12))
+        (sink (make-instance '%octet-sink)))
+    (dexador.body:write-multipart-content content boundary sink)
+    (values (coerce (%sink-octets sink) '(simple-array (unsigned-byte 8) (*)))
+            (format nil "~A; boundary=~A" (%without-boundary (or content-type "multipart/form-data"))
+                    boundary))))
+
+(defun %without-boundary (content-type)
+  "CONTENT-TYPE with any boundary parameter removed and its other parameters kept. The body is
+written with a boundary of its own, so a caller's boundary=old left in place would advertise two,
+and a receiver that takes the first could not find the parts (Copilot's review of #1180)."
+  (let ((parts (mapcar (lambda (p) (string-trim '(#\Space #\Tab) p))
+                       (uiop:split-string content-type :separator ";"))))
+    (format nil "~{~A~^; ~}"
+            (cons (first parts)
+                  (remove-if (lambda (p)
+                               (let ((eq (position #\= p)))
+                                 (and eq (string-equal "boundary"
+                                                       (string-trim '(#\Space #\Tab)
+                                                                    (subseq p 0 eq))))))
+                             (rest parts))))))
+
 (defun %encode-target (string)
   "STRING with every character outside 0x21-0x7E percent-encoded as its UTF-8 octets: a space,
 a TAB, a control character, DEL and anything beyond ASCII. A URL from a server or a redirect can
@@ -279,8 +341,23 @@ are left as they are."
   "Write an HTTP/1.1 request for METHOD on URI (a QURI:URI) with HEADERS, an alist, and CONTENT
 to the binary STREAM, and force it out. Host is the URI's host (and port when it is not the
 scheme's default). Connection: close and Accept-Encoding: identity are always sent, and a
-caller's own values for those, for Host and for Content-Length are not."
-  (multiple-value-bind (body default-type) (%content-octets content)
+caller's own values for those, for Host and for Content-Length are not. User-Agent and Accept
+are dexador's defaults (its *DEFAULT-USER-AGENT* and */*) unless HEADERS sets them, so a pinned
+request identifies itself as one through dexador did (#985). For the same reason, as dexador does,
+string or octet CONTENT without a Content-Type in HEADERS is sent as text/plain, and a request
+with no CONTENT sends Content-Length: 0, except for GET and HEAD, which define no meaning for a
+body."
+  (multiple-value-bind (body default-type multipart-type)
+      ;; A MULTIPART ALIST IS SENT AS MULTIPART, as dexador sends it. This used to form-encode
+      ;; every alist and keep the caller's multipart/form-data header, so a server received
+      ;; field=value under a multipart type (#1178). dexador writes a Content-Type with its own
+      ;; boundary in place of the caller's, and so does this.
+      (let ((given (cdr (find "content-type" headers :key (lambda (h) (string (car h)))
+                                                     :test #'string-equal))))
+        (if (%multipart-p content given)
+            (multiple-value-bind (octets type) (%multipart-octets content given)
+              (values octets nil type))
+            (%content-octets content)))
     (let* ((path (let ((p (or (quri:uri-path uri) "")) (q (quri:uri-query uri)))
                    (%encode-target (format nil "~A~@[?~A~]" (if (string= p "") "/" p) q))))
            (port (quri:uri-port uri))
@@ -288,22 +365,36 @@ caller's own values for those, for Host and for Content-Length are not."
            (host (if (and port (/= port default-port))
                      (format nil "~A:~D" (quri:uri-host uri) port)
                      (quri:uri-host uri)))
-           (skip '("host" "connection" "accept-encoding" "content-length" "transfer-encoding"))
+           (skip (append '("host" "connection" "accept-encoding" "content-length" "transfer-encoding")
+                         (when multipart-type '("content-type"))))
            ;; Newest first, and reversed when written: the request line comes out first.
            (lines (list (format nil "Host: ~A" (%host-safe host))
                         (format nil "~A ~A HTTP/1.1" (string-upcase (symbol-name method))
                                 (%field-safe path "path")))))
+      (flet ((given-p (name)
+               (find name headers :key (lambda (h) (string (car h))) :test #'string-equal)))
+        (unless (given-p "user-agent")
+          (push (format nil "User-Agent: ~A" dexador.util:*default-user-agent*) lines))
+        (unless (given-p "accept")
+          (push "Accept: */*" lines)))
       (dolist (h headers)
         (let ((name (string (car h))))
           (unless (member name skip :test #'string-equal)
             (unless (and (plusp (length name)) (every #'%token-char-p name))
               (error 'http-error :detail (format nil "not a header name: ~S" name)))
             (push (format nil "~A: ~A" name (%field-safe (princ-to-string (cdr h)) name)) lines))))
-      (when (and default-type
-                 (not (find "content-type" headers :key (lambda (h) (string (car h)))
-                                                   :test #'string-equal)))
-        (push (format nil "Content-Type: ~A" default-type) lines))
-      (when body (push (format nil "Content-Length: ~D" (length body)) lines))
+      ;; CHECKED LIKE ANY OTHER FIELD: the generated type carries the caller's Content-Type, and
+      ;; skipping the caller's header in the loop above also skipped its check, so a CR LF in it
+      ;; would have written another header (Copilot's review of #1180).
+      (cond (multipart-type
+             (push (format nil "Content-Type: ~A" (%field-safe multipart-type "Content-Type"))
+                   lines))
+            ((and body
+                  (not (find "content-type" headers :key (lambda (h) (string (car h)))
+                                                    :test #'string-equal)))
+             (push (format nil "Content-Type: ~A" (or default-type "text/plain")) lines)))
+      (cond (body (push (format nil "Content-Length: ~D" (length body)) lines))
+            ((not (member method '(:get :head))) (push "Content-Length: 0" lines)))
       (push "Connection: close" lines)
       (push "Accept-Encoding: identity" lines)
       (let ((head (format nil "~{~A~C~C~}~C~C"

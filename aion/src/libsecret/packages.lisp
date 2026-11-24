@@ -32,6 +32,9 @@
    #:+g-dbus-error-service-unknown+ #:+g-dbus-error-name-has-no-owner+
    #:secret-password-storev-binary-sync #:secret-password-lookupv-binary-sync
    #:secret-password-clearv-sync
+   #:+secret-search-none+ #:+secret-search-all+
+   #:secret-service-search-sync #:secret-item-get-attributes #:g-hash-table-lookup
+   #:g-list-free-full #:g-list #:data #:next
    #:secret-value-new #:secret-value-get #:secret-value-unref
    #:secret-service-get-sync #:secret-collection-for-alias-sync #:secret-collection-get-locked
    #:secret-service-lock-dbus-paths-sync
@@ -54,4 +57,6 @@
    ;; the session bus and the service
    #:check-session-bus #:check-secret-service #:default-collection-locked-p
    ;; schemas, attributes and values
-   #:with-schema #:with-attributes #:make-secret-value #:secret-value-octets))
+   #:with-schema #:with-attributes #:make-secret-value #:secret-value-octets
+   ;; searching for items without reading any value (#1035)
+   #:search-attribute-values))

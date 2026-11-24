@@ -7,6 +7,53 @@
 ;;;; Coalton layer and a pure-CL layer. The name = immutability (values that never
 ;;;; change). See docs/roadmap.md, docs/coalton-gap-analysis.md, docs/aion-vision.md.
 
+;;; --- dexador without cl+ssl on macOS (#905) ----------------------------------------------
+;;;
+;;; On macOS, aion/http-client makes every https request over aion/tls, and Security.framework
+;;; decides whether to trust the server (#905), so nothing needs cl+ssl or OpenSSL. dexador still
+;;; loads cl+ssl unless :DEXADOR-NO-SSL is on *FEATURES* when its plan is made and its sources are
+;;; compiled: dexador.asd decides its cl+ssl dependency from the feature, and its usocket backend
+;;; tests it with reader conditionals. aion/http-client then supplies dexador's TLS itself
+;;; (src/http-client/macos-tls.lisp).
+;;;
+;;; WHY HERE, the same reason as :HUNCHENTOOT-NO-SSL at the top of hyperion.asd: ASDF reads this
+;;; file before it resolves the :DEPENDS-ON of any system below, so the tree, the gate and the
+;;; desktop build all see the feature before dexador's plan is made. The same form is at the top
+;;; of hermes.asd, praxeon.asd and hyperion.asd, the other files that name dexador. A dexador
+;;; compiled before the feature was set still imports cl+ssl; macos-tls.lisp refuses to load
+;;; with it and names the directory to delete. An application outside the tree that depends on
+;;; dexador directly must list an aion system before it, or push the feature itself.
+#+os-macosx (pushnew :dexador-no-ssl *features*)
+
+;;; A DEXADOR COMPILED BEFORE THE FEATURE. ASDF does not recompile dexador when a feature changes,
+;;; so a fasl of dexador's usocket backend cached on this machine before #905, or built since by
+;;; another project that loads dexador without aion, still imports cl+ssl. Loading it then fails
+;;; inside dexador's DEFPACKAGE with "CL+SSL does not designate any package", which says nothing
+;;; about why. This finds that fasl first, by the package name in its bytes, and says what to
+;;; delete. The directory is the one ASDF's output translations give for dexador's sources, so it
+;;; is right wherever this machine's fasl cache is. src/http-client/macos-tls.lisp checks the
+;;; dexador already in an image, for an image that loaded dexador before reading this file.
+#+os-macosx
+(let* ((source (ignore-errors (asdf:system-source-directory "dexador")))
+       (fasl (and source (asdf:apply-output-translations
+                          (merge-pathnames "src/backend/usocket.fasl" source)))))
+  (when (and fasl (probe-file fasl)
+             (with-open-file (in fasl :element-type '(unsigned-byte 8))
+               (let ((octets (make-array (file-length in) :element-type '(unsigned-byte 8))))
+                 (search (map 'vector #'char-code "CL+SSL")
+                         (subseq octets 0 (read-sequence octets in))))))
+    (error "~{~A~%~}"
+           (list "aion.asd: dexador's compiled files on this machine were built with cl+ssl."
+                 (concatenate 'string
+                              "On macOS, aion makes https requests over aion/tls and needs dexador"
+                              " compiled with :DEXADOR-NO-SSL on *FEATURES* (#905). ASDF does not"
+                              " recompile dexador when that feature changes.")
+                 ""
+                 "Delete dexador's compiled files and load again:"
+                 (format nil "  ~A" (namestring (make-pathname :name nil :type nil
+                                                               :directory (butlast (pathname-directory fasl) 2)
+                                                               :defaults fasl)))))))
+
 (defsystem "aion"
   :description "A Coalton-first functional standard library for Common Lisp."
   :author "Bob <eternal.recursion@proton.me>"
@@ -86,7 +133,28 @@
   :components ((:module "tests"
                 :serial t
                 :components ((:file "csv-types"))))
-  :perform (test-op (o c) (uiop:symbol-call :aion/csv/types/tests :run-tests)))
+  ;; Signals when a check fails, so that the exit code says so; aion/tests runs this
+  ;; through :in-order-to and relies on it (#992).
+  :perform (test-op (o c)
+             (unless (uiop:symbol-call :aion/csv/types/tests :run-tests)
+               (error "aion/csv/types/tests: a check failed; the FiveAM report above says which"))))
+
+;;; aion/sexp --- a safe reader and writer for s-expression data from outside the program
+;;; (#972). Dependency-free on purpose, like aion/csv: plain CL, its own parser, no CL:READ.
+(defsystem "aion/sexp"
+  :description "Read and write s-expression data safely: plain data only, nothing interned, every size and depth bounded."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  :depends-on ()
+  :components ((:module "src/sexp" :components ((:file "sexp"))))
+  :in-order-to ((test-op (test-op "aion/sexp/tests"))))
+
+(defsystem "aion/sexp/tests"
+  :description "Each attack #972 names, refused, beside the standard reader that falls for it; the limits; and round trips."
+  :depends-on ("aion/sexp" "fiveam")
+  :components ((:module "tests" :components ((:file "sexp"))))
+  :perform (test-op (o c) (uiop:symbol-call :aion/sexp/tests :run-tests)))
 
 (defsystem "aion/csv/tests"
   :description "Conformance tests for aion/csv (RFC 4180 + edge cases)."
@@ -95,7 +163,11 @@
   :components ((:module "tests"
                 :serial t
                 :components ((:file "csv"))))
-  :perform (test-op (o c) (uiop:symbol-call :aion/csv/tests :run-tests)))
+  ;; Signals when a check fails, so that the exit code says so; aion/tests runs this
+  ;; through :in-order-to and relies on it (#992).
+  :perform (test-op (o c)
+             (unless (uiop:symbol-call :aion/csv/tests :run-tests)
+               (error "aion/csv/tests: a check failed; the FiveAM report above says which"))))
 
 ;;; aion/uv --- libuv for Common Lisp. A separate, OPT-IN system: core aion stays pure
 ;;; and toolchain-free, while consumers that want an event loop, async/sync filesystem
@@ -113,6 +185,7 @@
   :license "MIT"
   :version "0.0.0"
   :depends-on ("cffi" "coalton"
+               "aion/path"        ; native-path is aion/path:native-name (#1103)
                "aion/platform"    ; *search-source-tree*: a bundle does not search vendor/ (#472)
                "aion/dynamic")    ; unblock-interrupts, first in the loop thread (#541)
   :serial t
@@ -171,6 +244,7 @@
   :license "MIT"
   :version "0.0.0"
   :depends-on ("cffi"
+               "aion/path"       ; a directory's native name (#1103)
                "aion/platform"   ; *search-source-tree*: a bundle does not search vendor/ (#472)
                "aion/secret")    ; a credential's token may be a secret (#429)
   :serial t
@@ -198,7 +272,8 @@
 (defsystem "aion/uv/tests"
   :description "Tests for aion/uv. Requires a built libuv (scripts/build-libuv.lisp)."
   :depends-on ("aion/uv" "fiveam"
-               "aion/platform")   ; *search-source-tree*, which the loader tests bind (#472)
+               "aion/platform"    ; *search-source-tree*, which the loader tests bind (#472)
+               "aion/dynamic")    ; *blocking-forbidden*, which a loop callback must see bound (#79)
   :serial t
   :components ((:module "tests"
                 :serial t
@@ -266,7 +341,8 @@
 
 (defsystem "aion/uv/process/tests"
   :description "Tests for aion/uv/process. Requires a built libuv (scripts/build-libuv.lisp)."
-  :depends-on ("aion/uv/process" "aion/uv" "aion/uv/net" "fiveam")  ; uv-process.lisp calls both
+  :depends-on ("aion/uv/process" "aion/uv" "aion/uv/net" "fiveam"  ; uv-process.lisp calls both
+               (:feature (:not :win32) (:require :sb-posix)))  ; pipes for the INHERIT-FDS test
   :serial t
   :components ((:module "tests"
                 :serial t
@@ -302,6 +378,33 @@
 ;;; Lives here for the reason aion/interceptor does: the shape is request-response, not web.
 ;;; It had already been reimplemented twice before it moved -- internal to hermes, and three
 ;;; raw dex:post calls in praxeon -- which is the same evidence that settled pre-publication issue 177.
+(defsystem "aion/retry"
+  :description "Retry policy as data: bounded attempts, backoff with jitter, a deadline, and a runner built on restarts (#79)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; aion/log for the line each retry and each retry not taken writes; aion/dynamic for
+  ;; *BLOCKING-FORBIDDEN*, which aion/uv binds on its loop threads. Nothing native and nothing
+  ;; from the network: the HTTP methods of TRANSIENCE and RETRY-AFTER live in aion/http-client.
+  :depends-on ("aion/log" "aion/dynamic")
+  :serial t
+  :components ((:module "src/retry"
+                :serial t
+                :components ((:file "packages")
+                             (:file "retry"))))
+  :in-order-to ((test-op (test-op "aion/retry/tests"))))
+
+(defsystem "aion/retry/tests"
+  :description "Tests for aion/retry: the schedule, the runner's restarts, Retry-After, the deadline."
+  :depends-on ("aion/retry" "fiveam"
+               "aion/dynamic"   ; binds *blocking-forbidden* to test the refusal
+               "aion/log" "log4cl")   ; captures the log lines the runner writes
+  :serial t
+  :components ((:module "tests"
+                :serial t
+                :components ((:file "retry"))))
+  :perform (test-op (o c) (uiop:symbol-call :aion/retry/tests :run-tests)))
+
 (defsystem "aion/http-client"
   :description "An interceptor-shaped HTTP client: enter stages, one round-trip, leave stages."
   :author "Bob <eternal.recursion@proton.me>"
@@ -312,28 +415,40 @@
   ;; WinHTTP; fetch.lisp opens a pinned TLS connection with it (#295). Guarded on :os-windows,
   ;; which UIOP maintains before any .asd is read (see scripts/install-deps.lisp).
   ;; On Windows a pinned connection uses aion/tls for TLS and aion/windows for Windows' verdict
-  ;; on the server's certificate (#536). aion/tls loads its mbedTLS on first use, not here.
-  :depends-on ("dexador" "quri" "usocket" (:feature (:not :os-windows) "cl+ssl")
-               (:feature :os-windows "aion/tls") (:feature :os-windows "aion/windows"))
+  ;; on the server's certificate (#536). On macOS every https request uses aion/tls, with
+  ;; aion/darwin's verdict, and cl+ssl is not loaded at all (#905, and the feature at the top of
+  ;; this file). aion/tls loads its mbedTLS on first use, not here.
+  :depends-on ("dexador" "quri" "usocket"
+               (:feature (:and (:not :os-windows) (:not :os-macosx)) "cl+ssl")
+               (:feature (:or :os-windows :os-macosx) "aion/tls")
+               (:feature :os-windows "aion/windows") (:feature :os-macosx "aion/darwin")
+               "aion/retry")   ; TRANSIENCE and RETRY-AFTER methods for HTTP-ERROR (#79)
   :serial t
   :components ((:module "src/http-client"
                 :serial t
                 :components ((:file "packages")
                              (:file "client")
                              (:file "openssl") ; a patch to cl+ssl for OpenSSL 4 (#706)
+                             ;; a saved image starts without OpenSSL (#1173)
+                             (:file "openssl-reopen")
                              (:file "http1")   ; the pinned exchange on Windows (#536)
-                             (:file "fetch"))))
+                             (:file "fetch")
+                             (:file "macos-tls") ; dexador's https over aion/tls on macOS (#905)
+                             (:file "stream"))))  ; a streamed response, cancellable (#984)
   :in-order-to ((test-op (test-op "aion/http-client/tests"))))
 
 (defsystem "aion/http-client/tests"
   :description "Tests for aion/http-client: stage order, the effect seam, and failure."
   ;; The transport tests run a small HTTP server in the test image (usocket, bordeaux-threads)
-  ;; and, off Windows, a TLS one (cl+ssl) (#295). On Windows the pinned-connection tests call
-  ;; aion/tls and aion/windows directly (#536).
+  ;; and a TLS one: cl+ssl on Linux (#295), aion/tls on Windows and macOS. On Windows and macOS
+  ;; the pinned-connection tests call aion/tls and the platform's verifier directly (#536, #905).
   :depends-on ("aion/http-client" "fiveam" "usocket" "bordeaux-threads" "aion/test-threads" "quri"
                "aion/test-http"
-               (:feature (:not :os-windows) "cl+ssl")
-               (:feature :os-windows "aion/tls") (:feature :os-windows "aion/windows"))
+               "aion/retry"   ; TRANSIENCE and RETRY-AFTER of an HTTP-ERROR (#79)
+               "dexador"      ; the default User-Agent a pinned request sends (#985)
+               (:feature (:and (:not :os-windows) (:not :os-macosx)) "cl+ssl")
+               (:feature (:or :os-windows :os-macosx) "aion/tls")
+               (:feature :os-windows "aion/windows") (:feature :os-macosx "aion/darwin"))
   :serial t
   :components ((:module "tests"
                 :serial t
@@ -406,7 +521,8 @@
                 :serial t
                 :components ((:file "packages")
                              (:file "ffi")
-                             (:file "cf"))))
+                             (:file "cf")
+                             (:file "trust"))))   ; a TLS server's certificates (#905)
   :in-order-to ((test-op (test-op "aion/darwin/tests"))))
 
 (defsystem "aion/darwin/tests"
@@ -415,7 +531,8 @@
   :serial t
   :components ((:module "tests/darwin"
                 :serial t
-                :components ((:file "cf-tests"))))
+                :components ((:file "cf-tests")
+                             (:file "trust-tests"))))   ; #905
   :perform (test-op (o c) (uiop:symbol-call :aion/darwin/tests '#:run-tests)))
 
 (defsystem "aion/libsecret"
@@ -456,6 +573,7 @@
                ;; GetFileAttributesW binding, kept in aion/fs because cons and the build scripts
                ;; load that without CFFI.
                "aion/fs"
+               "aion/path"       ; a program's, folder's or file's native name (#1103)
                "aion/dynamic")   ; unblock-interrupts, first in shell-open's thread (#896)
   :serial t
   :components ((:module "src/windows"
@@ -628,6 +746,23 @@
   :components ((:file "tests/schedule-uv"))
   :perform (test-op (o c) (uiop:symbol-call :aion/schedule/uv/tests :run-tests)))
 
+(defsystem "aion/folder-watch"
+  :description "Watching a folder for files that have settled, with an ignore filter for what sync clients and editors leave behind (#996). Requires a built libuv (scripts/build-libuv.lisp)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; A layer over aion/uv's WATCH and timers, kept out of aion/uv so its sync-client defaults
+  ;; and policy stay out of the binding (#996).
+  :depends-on ("aion/uv")
+  :components ((:file "src/folder-watch"))
+  :in-order-to ((test-op (test-op "aion/folder-watch/tests"))))
+
+(defsystem "aion/folder-watch/tests"
+  :description "Tests for aion/folder-watch, on real temporary folders. Requires a built libuv (scripts/build-libuv.lisp)."
+  :depends-on ("aion/folder-watch" "aion/uv" "aion/fs" "fiveam")
+  :components ((:file "tests/folder-watch"))
+  :perform (test-op (o c) (uiop:symbol-call :aion/folder-watch/tests :run-tests)))
+
 (defsystem "aion/interceptor"
   :description "A typed, protocol-agnostic interceptor pipeline over a context (Coalton)."
   :author "Bob <eternal.recursion@proton.me>"
@@ -682,8 +817,8 @@
   :version "0.0.0"
   ;; UIOP only, plus sb-posix on Unix (an SBCL contrib, as in cons). Windows is reached through
   ;; SB-ALIEN rather than CFFI: the build scripts load this before Quicklisp, and cons, which
-  ;; depends on it, does not carry CFFI.
-  :depends-on ((:feature :unix (:require :sb-posix)))
+  ;; depends on it, does not carry CFFI. aion/path is UIOP only as well (#1103).
+  :depends-on ("aion/path" (:feature :unix (:require :sb-posix)))
   :serial t
   :components ((:module "src/fs"
                 :serial t
@@ -694,16 +829,30 @@
                              (:file "temporary"))))
   :in-order-to ((test-op (test-op "aion/fs/tests"))))
 
+(defsystem "aion/path"
+  :description "The operating system's name for a path given as a native string or a pathname, and a directory pathname built from it, without parsing the name as a Lisp namestring (#1103)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  ;; NO DEPENDENCIES beyond UIOP, which arrives with ASDF: aion/fs depends on it, and the build
+  ;; scripts load aion/fs by path before Quicklisp (scripts/fs.lisp). Its tests are in
+  ;; aion/fs/tests.
+  :depends-on ()
+  :components ((:file "src/path/path"))
+  :in-order-to ((test-op (test-op "aion/fs/tests"))))
+
 (defsystem "aion/fs/tests"
   :description "Tests for aion/fs: links planted inside and at the root of a tree, pointing outside it."
-  :depends-on ("aion/fs" "fiveam" "aion/test-threads")   ; JOIN-ALL, for the threads test (#515)
+  :depends-on ("aion/fs" "fiveam" "aion/test-threads"   ; JOIN-ALL, for the threads test (#515)
+               "aion/path")                             ; path-tests.lisp and the . and .. root test (#1103)
   :serial t
   :components ((:module "tests/fs"
                 :serial t
                 :components ((:file "delete-tree-tests")
                              (:file "attributes-tests")
                              (:file "temporary-tests")
-                             (:file "links-tests"))))   ; #825; uses delete-tree-tests' %FRESH and %WRITE
+                             (:file "links-tests")      ; #825; uses delete-tree-tests' %FRESH and %WRITE
+                             (:file "path-tests"))))    ; aion/path (#1103)
   :perform (test-op (o c) (uiop:symbol-call :aion/fs/tests :run-tests)))
 
 (defsystem "aion/platform"
@@ -791,7 +940,7 @@
   ;; Moved out of aion/http-client's tests so the tests of aion/oauth and praxeon/mcp can run
   ;; their own servers in the test image (#527). TLS is reached through cl+ssl when a test asks
   ;; for it, and that test's system loads cl+ssl; this one does not, so it loads on Windows.
-  ;; On Windows TLS is reached through aion/tls the same way (#536).
+  ;; On Windows and macOS TLS is reached through aion/tls the same way (#536, #905).
   :depends-on ("usocket" "bordeaux-threads" "aion/test-threads")
   :components ((:file "tests/test-http")))
 
@@ -808,7 +957,11 @@
   :components ((:module "tests"
                 :serial t
                 :components ((:file "clock"))))
-  :perform (test-op (o c) (uiop:symbol-call :aion/clock/tests :run-tests)))
+  ;; Signals when a check fails, so that the exit code says so; aion/tests runs this
+  ;; through :in-order-to and relies on it (#992).
+  :perform (test-op (o c)
+             (unless (uiop:symbol-call :aion/clock/tests :run-tests)
+               (error "aion/clock/tests: a check failed; the FiveAM report above says which"))))
 
 ;;; aion/log --- a backend-neutral logging facade over log4cl. A separate opt-in system so
 ;;; core aion stays dependency-light (coalton + alexandria); consumers that want logging
@@ -839,6 +992,82 @@
                 :serial t
                 :components ((:file "random-tests"))))
   :perform (test-op (o c) (uiop:symbol-call :aion/random/tests :run-tests)))
+
+;;; --- websocket: the WebSocket protocol, pure and dependency-free (#376, #1028) ---
+;;;
+;;; Moved from hyperion in #1028, because the browser driver aion/cdp is a WebSocket client
+;;; and aion cannot depend on hyperion (dokimasia ADR-0001). It depends on nothing, so the code
+;;; that reads frames from a stranger stays inside every run of scripts/verify-tree.lisp, which
+;;; leaves the libuv systems out unless OURANOS_WITH_UV=1. The server's connection side is
+;;; hyperion/server-uv/websocket; the client's is aion/cdp.
+
+(defsystem "aion/websocket"
+  :description "The WebSocket protocol (RFC 6455) as pure functions: frames, messages, both halves of the handshake."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  :serial t
+  :components ((:module "src/websocket"
+                :serial t
+                :components ((:file "packages")
+                             (:file "frame")
+                             (:file "handshake"))))
+  :in-order-to ((test-op (test-op "aion/websocket/tests"))))
+
+(defsystem "aion/websocket/tests"
+  :description "Test suite for aion/websocket: RFC 6455's examples, adversarial frames, both halves of the handshake."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  ;; ironclad and cl-base64 are the comparison for the SHA-1 and base64 written in
+  ;; aion/websocket; both are already in the tree (docs/dependencies.md).
+  :depends-on ("aion/websocket" "fiveam" "ironclad" "cl-base64")
+  :serial t
+  :components ((:module "tests/websocket"
+                :components ((:file "websocket-tests"))))
+  :perform (test-op (o c) (uiop:symbol-call :aion/websocket/tests :run-tests)))
+
+;;; --- cdp: a Chrome DevTools Protocol client, the browser driver (#1028) -----------
+;;;
+;;; dokimasia ADR-0001, decision 1. Opt-in: nothing in aion core loads it. Headless only; see
+;;; the package documentation. Every dependency is already in the tree. Its own tests use a
+;;; CDP server written in the suite, and a real browser when one is found: a missing browser
+;;; skips those checks, and fails them when OURANOS_REQUIRE_BROWSER=1, as CI sets.
+
+(defsystem "aion/cdp"
+  :description "A Chrome DevTools Protocol client: find, launch or attach to a headless Chrome or Edge, and drive its pages."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :version "0.0.0"
+  :depends-on ("aion/websocket" "aion/random" "aion/dynamic" "aion/log" "aion/fs"
+               "com.inuoe.jzon" (:require :sb-bsd-sockets)
+               (:feature :win32 "aion/windows")
+               ;; The pipe transport (#1028, step (c)) starts the browser through libuv, which is
+               ;; loaded on first use, so aion/cdp still loads on a machine without it.
+               (:feature (:not :win32) "aion/uv") (:feature (:not :win32) "aion/uv/process")
+               (:feature (:not :win32) (:require :sb-posix)))
+  :serial t
+  :components ((:module "src/cdp"
+                :serial t
+                :components ((:file "packages")
+                             (:file "conditions")
+                             (:file "launch")
+                             (:file "connection")
+                             (:file "browser"))))
+  :in-order-to ((test-op (test-op "aion/cdp/tests"))))
+
+(defsystem "aion/cdp/tests"
+  :description "Test suite for aion/cdp: the command line, a CDP server written in the suite, and a real headless browser when one is found."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("aion/cdp" "aion/websocket" "aion/fs" "fiveam" "com.inuoe.jzon"
+               (:require :sb-bsd-sockets) (:feature :win32 "aion/windows")
+               (:feature (:not :win32) "aion/uv"))  ; to skip the browser checks without libuv
+  :serial t
+  :components ((:module "tests/cdp"
+                :serial t
+                :components ((:file "cdp-tests")
+                             (:file "browser-tests"))))
+  :perform (test-op (o c) (uiop:symbol-call :aion/cdp/tests :run-tests)))
 
 (defsystem "aion/dynamic"
   :description "Dynamic bindings that should survive a thread boundary (#158)."
@@ -887,7 +1116,11 @@
   :components ((:module "tests"
                 :serial t
                 :components ((:file "log"))))
-  :perform (test-op (o c) (uiop:symbol-call :aion/log/tests :run-tests)))
+  ;; Signals when a check fails, so that the exit code says so; aion/tests runs this
+  ;; through :in-order-to and relies on it (#992).
+  :perform (test-op (o c)
+             (unless (uiop:symbol-call :aion/log/tests :run-tests)
+               (error "aion/log/tests: a check failed; the FiveAM report above says which"))))
 
 (defsystem "aion/boundary/tests"
   :description "Tests for aion/boundary (#110)."
@@ -908,16 +1141,16 @@
   :perform (test-op (o c) (uiop:symbol-call :aion/dynamic/tests :run-tests)))
 
 (defsystem "aion/tests"
-  :description "Umbrella test suite for Aion: runs every aion sub-suite."
-  :depends-on ("aion" "aion/csv/tests" "aion/csv/types/tests" "aion/clock/tests"
-               "aion/log/tests" "fiveam")
-  :serial t
-  :components ((:module "tests"
-                :serial t
-                :components ((:file "all"))))
-  ;; RUN-TESTS prints four FiveAM reports and returns NIL if any failed. That value used to be
-  ;; dropped, so a failing sub-suite still exited 0 (#605). Signalling makes the exit code say
-  ;; so, independently of the gate reading every report's Fail line.
-  :perform (test-op (o c)
-             (unless (uiop:symbol-call :aion/tests :run-tests)
-               (error "aion/tests: a sub-suite failed; the FiveAM reports above say which"))))
+  :description "Umbrella test suite for Aion: runs every aion sub-suite through ASDF."
+  :depends-on ("aion")
+  ;; No components: core aion has no tests of its own yet, so this system only runs the
+  ;; sub-suites of aion/csv, aion/csv/types, aion/clock and aion/log, through ASDF's test-op
+  ;; (#992). Before #992 a file here called each one's RUN-TESTS, which the gate's check that
+  ;; every compiled system's /tests suite is run could not see as running them.
+  ;;
+  ;; Each sub-suite's :perform signals when a check fails, so the exit code reports a failure
+  ;; (#605). As a consequence, a red aion run STOPS AT THE FIRST FAILING SUB-SUITE: ASDF does
+  ;; not run the sub-suites after it, so their reports are missing from that run. The gate
+  ;; still fails it, and a green run counts the same checks as before.
+  :in-order-to ((test-op (test-op "aion/csv/tests" "aion/csv/types/tests" "aion/clock/tests"
+                                  "aion/log/tests"))))

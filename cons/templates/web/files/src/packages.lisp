@@ -5,6 +5,7 @@
 (cl:defpackage #:{{name}}
   (:use #:cl)
   (:local-nicknames (#:env #:cons/env)
+                    (#:log #:aion/log)
                     (#:srv #:hyperion/server))
   (:documentation "{{name}} -- a minimal Hyperion web app.")
   (:export #:version #:app #:start #:stop #:serve #:main))

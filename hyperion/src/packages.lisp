@@ -100,11 +100,11 @@
     server (hyperion/server-uv, pre-publication issue 117) be offered without core depending on libuv.
     HYPERION_SERVER overrides. START takes an already-built Ring app so app construction
     stays with the caller, and STOP takes whichever handler START returned.")
-  (:export #:default-server #:available-servers #:no-server-backend
+  (:export #:default-server #:default-workers #:available-servers #:no-server-backend
            #:native-backend-p
            #:*default-port* #:start #:stop #:handler-port
            ;; the same-origin guard for a server on this machine (#304)
-           #:loopback-host-p
+           #:loopback-host-p #:origins-setting
            ;; the blocking, production entry point (pre-publication issue 124) + its interrupt seam
            #:serve-forever #:request-shutdown #:request-shutdown-from-signal
            ;; pre-publication issue 238: the preflight, and the condition a caller may handle.
@@ -175,6 +175,7 @@
     an existing handler needs no change to be routed. PATH-PARAM reads one.")
   (:export #:route #:router #:mount #:routes #:route-p #:mount-p
            #:route-method #:route-template #:route-params #:route-handler #:route-name
+           #:route-log-path
            #:mount-prefix #:mount-router
            #:dispatch #:to-app #:describe-routes
            #:path-param #:path-params #:+params-key+
@@ -336,7 +337,9 @@
   (:export #:wrap #:request-id #:new-request-id #:*request-id*
            #:*request-id-header* #:*echo-request-id* #:*id-bits*
            ;; quiet paths: machine traffic on a timer (dev poller, health checks)
-           #:*quiet-paths* #:register-quiet-path #:quiet-path-p))
+           #:*quiet-paths* #:register-quiet-path #:quiet-path-p
+           ;; the path a log line records: the route's template, never a token in it (#1036)
+           #:logged-path #:note-route #:+max-logged-path-length+))
 
 ;;; --- Broadcast channel (fan-out to many readers) ------------------------
 (cl:defpackage #:hyperion/channel
@@ -447,6 +450,9 @@
    #:translate-current #:translate-plural-current
    #:no-translation-source #:no-translation-source-key
    #:make-json-source #:load-dictionary #:make-dictionary
+   #:empty-dictionary #:empty-dictionary-directory #:empty-dictionary-given
+   #:default-locale-not-loaded #:default-locale-not-loaded-default
+   #:default-locale-not-loaded-locales #:default-locale-not-loaded-directory
    #:dictionary #:dictionary-p #:interpolate #:locale-supported-p #:*default-locale*
    ;; locale store
    #:read-locale #:persist-locale #:cookie-store #:make-cookie-store #:lang-cookie
@@ -490,6 +496,43 @@
    #:consent-decided-p #:resolve-consent
    ;; component
    #:consent-banner))
+
+;;; --- In-page notices, and htmx error responses shown in them (#980) -------
+(cl:defpackage #:hyperion/notice
+  (:use #:cl)
+  (:local-nicknames (#:spin #:spinneret)
+                    (#:i18n #:hyperion/i18n))
+  (:documentation
+   "Notices on the page the user is on: an error, a warning or a success, in a region with
+    aria-live (assertive for errors, polite otherwise). The region's script shows an htmx 2
+    error response there instead of letting htmx drop it. Not stored; see notice.lisp.")
+  (:export #:notice #:notice-oob #:notice-region #:notices-script))
+;;; --- Appearance: theme, contrast and look, and the tokens (#981) -----------
+(cl:defpackage #:hyperion/appearance
+  (:use #:cl)
+  (:local-nicknames (#:http #:hyperion/http))
+  (:documentation
+   "The appearance settings a visitor chooses (theme, contrast, look), stored behind a
+    store protocol and applied as data-theme, data-contrast and data-look on <html>; and
+    the --hy-* tokens for every combination of the three, generated as CSS from one table
+    and checked against WCAG AA.")
+  (:export
+   ;; the visitor's choice
+   #:appearance #:appearance-p #:make-appearance #:appearance-from-strings
+   #:appearance-theme #:appearance-contrast #:appearance-look
+   #:*themes* #:*contrasts* #:*looks*
+   #:html-attributes
+   ;; store protocol + cookie backend
+   #:read-appearance #:persist-appearance
+   #:cookie-appearance-store #:make-cookie-appearance-store
+   #:appearance-cookie-value #:parse-appearance-cookie
+   ;; tokens
+   #:appearance-table #:appearance-table-p #:make-appearance-table #:token-values
+   #:appearance-css #:*default-spacing* #:*default-type-scale* #:*default-fonts*
+   ;; contrast
+   #:relative-luminance #:contrast-ratio #:background-samples
+   #:appearance-contrast-failures #:*minimum-contrast* #:*minimum-ring-contrast*
+   #:*ring-backgrounds*))
 
 ;;; --- Link-preview tags: Open Graph, Twitter cards, canonical (#821) ------
 (cl:defpackage #:hyperion/page-meta
@@ -539,7 +582,11 @@
     so user/untrusted content cannot inject markup; pass :allow-html t only for
     trusted content. Fenced code blocks (```lang) are supported. Used by chat
     bubbles, CMS content, and anywhere user-authored prose becomes HTML.")
-  (:export #:render #:escape-html))
+  (:export #:render #:escape-html
+           ;; Signalled when RENDER is asked for something it cannot do, so an app can catch
+           ;; that misuse and nothing else (#1119).
+           #:render-option-error #:render-option-error-argument #:render-option-error-value
+           #:render-option-error-detail))
 
 ;;; --- Parenscript helpers (CL -> JS, no Node) ----------------------------
 (cl:defpackage #:hyperion/js

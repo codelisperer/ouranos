@@ -42,6 +42,9 @@ DEV-LAST-FACEBOOK the last FACEBOOK-POST (#822)."))
   (%dev-render (dev-stream p) "EMAIL"
                (list "To:" (email-to m) "From:" (email-from m)
                      "Reply-To:" (email-reply-to m) "Subject:" (email-subject m)
+                     "Header:" (format nil "~{~A~^~%               ~}"
+                                       (loop for (name . value) in (email-headers m)
+                                             collect (format nil "~A: ~A" name value)))
                      "Body:" (email-text m)
                      ;; Names, types and sizes only; the content itself is not printed.
                      "Attachment:" (format nil "~{~A~^~%               ~}"
@@ -119,7 +122,10 @@ TELEGRAM-MESSAGE sent, so it is recognised by its provider."
   (%dev-render (dev-stream p) "FACEBOOK POST"
                (list "Page:" (facebook-post-page m)
                      "Link:" (facebook-post-link m)
-                     "Image:" (facebook-post-image-url m)
+                     "Image:" (or (facebook-post-image-url m)
+                                  (and (facebook-post-image-octets m)
+                                       (format nil "~A, ~D bytes" (facebook-post-image-type m)
+                                               (length (facebook-post-image-octets m)))))
                      "Body:" (facebook-post-message m)))
   (make-delivery-result :provider :dev :id (%dev-id) :status :logged
                         :destination (facebook-post-page m) :raw m))

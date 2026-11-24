@@ -72,7 +72,34 @@ jobs:
     # turn a slow cache miss into a red build. The limit was 40 minutes until 2026-10-04. By
     # then, Windows runs that missed the fasl cache (any change to an .asd file misses it) took
     # 35 to 40 minutes, and one was cancelled at the limit with every suite it had run passing.
-    timeout-minutes: 60
+    #
+    # WINDOWS GETS 90 AND THE OTHERS KEEP 60, from 2026-11-03 (#1146). The same thing happened
+    # again four weeks after the last raise: #1142's Windows leg was cancelled at 60m23s inside
+    # `Verify the tree`, and that pull request changes AGENTS.md and nothing else, so nothing in
+    # it could make a suite slower. The margins measured that day were
+    #
+    #   main 19d77df9   59m11s   49s under
+    #   #1134 a652d1ba  58m47s   1m13s under
+    #   #1120 052737ea  55m47s   4m13s under
+    #   #1141 0d8682fa  51m41s   8m19s under
+    #
+    # so two of five legs were within about a minute and which pull request got cancelled was
+    # a matter of how busy the runners were. Only Windows is raised: Linux and macOS finish well
+    # under 60 minutes, so the lower limit there still cancels a job that hangs, which is what a
+    # timeout is for.
+    #
+    # THIS IS THE SECOND RAISE, AND THAT IS THE PART TO NOTICE: 40 -> 60 -> 90, each time after
+    # a cancellation rather than before one. Raising the limit stops the cancellations without
+    # telling anyone how close the next one is, so #1146 asks for the job to print how long
+    # `Verify the tree` took and how far that was from the limit. Until it does, the figures
+    # above are the record of what the margin was when this limit was set.
+    #
+    # THE LIMIT IS A MATRIX FIELD, from 2026-11-03 (#1146), so each number is written once and
+    # used twice: here, and by the job summary, which prints how close the job came to it. It was
+    # an expression keyed on the Windows runner label, and printing the margin would have meant
+    # writing the limit a second time as the summary's argument -- two copies that would drift
+    # the way a URL written in two places does.
+    timeout-minutes: ${{ matrix.timeout }}
 
     # The credential-store tests (hades/credentials, #357) store, read and delete items in the
     # real Credential Manager, Keychain or Secret Service keyring of whoever runs them, so they
@@ -80,8 +107,13 @@ jobs:
     # sets it. On Linux the store is a GNOME Keyring the gate step starts for itself (see
     # "Secret Service (Linux)" below). A leg where they were skipped fails the gate
     # (+BACKEND-RULES+ in scripts/verify-tree.lisp).
+    #
+    # The runners for all three operating systems have Chrome, so aion/cdp's real-browser tests
+    # (#1028) must run on every leg: OURANOS_REQUIRE_BROWSER makes a missing browser fail them
+    # instead of skipping them.
     env:
       OURANOS_TEST_REAL_CREDENTIAL_STORE: "1"
+      OURANOS_REQUIRE_BROWSER: "1"
 
     strategy:
       # One OS failing must never hide the other two. The whole value of a matrix is
@@ -100,7 +132,7 @@ jobs:
         #   - Linux: tests run on ubuntu-26.04 (glibc 2.43), the current LTS image, and
         #     desktop-release.yml builds on ubuntu-24.04, because a binary built on 26.04
         #     needs glibc 2.43 and Ubuntu 24.04 desktops have 2.39 (the maintainer's ruling on
-        #     #766). SBCL's own binary sets the lowest image either can use: 2.6.9 needs
+        #     #766). SBCL's own binary sets the lowest image either can use: 2.6.10 needs
         #     GLIBC_2.38, and ubuntu-22.04 ships 2.35. See scripts/versions.env.
         #   - macOS: tests run on macos-26, and desktop-release.yml builds on an older image,
         #     because a build on macos-26 requires macOS 26 to run (#763).
@@ -108,16 +140,27 @@ jobs:
         # Linux one matters.
         include:
           - os: ubuntu-26.04
+            timeout: 60
             platform: linux-x86-64
             fasl: "~/.cache/common-lisp"
           - os: macos-26
+            timeout: 60
             platform: macos-arm64
             fasl: "~/.cache/common-lisp"
           - os: windows-2022
+            timeout: 90
             platform: windows-x86-64
             fasl: "~/AppData/Local/cache/common-lisp"
 
     steps:
+      # WHEN THE JOB STARTED, so the job summary can say how close it came to its limit (#1146).
+      # The steps context carries no timings, and the job cannot read its own start time, so it
+      # writes one down. This is the first step, after `Set up job', so the figure the summary
+      # prints overstates the margin by however long that took -- seconds, normally.
+      - name: Record when the job started
+        shell: bash
+        run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v7
 
       # --- caches -------------------------------------------------------------------
@@ -152,12 +195,17 @@ jobs:
           restore-keys: |
             toolchain-${{ matrix.platform }}-
 
+      # The macOS key also names :dexador-no-ssl (#905). On macOS dexador must be compiled with
+      # that feature, which aion.asd pushes, and aion.asd stops with an error when the cached
+      # dexador was compiled without it. Every .asd is already in the hash, so a change to
+      # aion.asd gives a cold build anyway; the name makes the macOS key differ from every key
+      # saved before #905 whatever the .asd files hash to.
       - name: Cache compiled fasls (exact match only)
         id: cache-compiled-fasls-exact-match-only
         uses: actions/cache@v6
         with:
           path: ${{ matrix.fasl }}
-          key: fasl-${{ matrix.platform }}-${{ hashFiles('scripts/versions.env', 'coalton.pin', '**/*.asd') }}
+          key: fasl-${{ matrix.platform }}${{ runner.os == 'macOS' && '-dexador-no-ssl' || '' }}-${{ hashFiles('scripts/versions.env', 'coalton.pin', '**/*.asd') }}
 
       # --- toolchain ----------------------------------------------------------------
       - name: Provision the Lisp toolchain
@@ -186,11 +234,22 @@ jobs:
       # that let a child borrow what a sibling built -- the exact borrowing verify-tree
       # runs isolated images to prevent. What is wanted from bootstrap is the ASDF
       # source-registry drop-in and bin/cons.
+      #
+      # The Linux leg bootstraps in tree-local mode (#955), so that mode has a real user in CI
+      # and not only the checkers fixtures: bootstrap writes no drop-in, and the next step
+      # gives every later step the CL_SOURCE_REGISTRY that bootstrap gave its own children.
+      # macOS and Windows write the drop-in, as a person's first bootstrap does.
       - name: Bootstrap the tree
         id: bootstrap-the-tree
         env:
           OURANOS_NO_WARM: "1"
+          OURANOS_BOOTSTRAP_LOCAL: ${{ runner.os == 'Linux' && '1' || '' }}
         run: sbcl --dynamic-space-size 4096 --script bootstrap.lisp
+
+      - name: Use this tree through CL_SOURCE_REGISTRY (Linux, tree-local)
+        id: use-this-tree-through-cl-source-registry-linux-tree-local
+        if: runner.os == 'Linux'
+        run: echo "CL_SOURCE_REGISTRY=$GITHUB_WORKSPACE//:" >> "$GITHUB_ENV"
 
       # THE STEP THAT THE FIRST CI RUN OF THIS FILE PROVED IS NOT OPTIONAL.
       #
@@ -438,8 +497,8 @@ jobs:
         if: runner.os == 'Windows'
         shell: pwsh
         env:
-          PGVECTOR_VERSION: "0.8.6"
-          PGVECTOR_COMMIT: "8ee86c96f0fd72390f890aa8a336fda6d3ab4c6c"
+          PGVECTOR_VERSION: "0.8.7"
+          PGVECTOR_COMMIT: "f37c13f68b57d2c3472b2214fbcff699d6d34876"
         run: |
           $ErrorActionPreference = 'Stop'
           # The runner image ships PostgreSQL installed but STOPPED, and the major version
@@ -467,8 +526,9 @@ jobs:
           # mnemosyne's vector operator and index tests skip on this leg and
           # praxeon/memory-db fails. It is built from the pinned tag with the image's
           # Visual Studio C++ toolset, following pgvector's own Windows instructions
-          # (nmake /F Makefile.win). 0.8.6 is the version the Linux leg's image
-          # (pgvector/pgvector:pg17) and Homebrew both shipped on 2026-09-23. The commit is
+          # (nmake /F Makefile.win). It is the version the Linux leg's image
+          # (docker-compose.test.yml, pgvector/pgvector:0.8.7-pg18) carries, so the two legs test
+          # the same pgvector; macOS takes Homebrew's (#745). The commit is
           # checked after the clone, so a tag that has moved stops the build rather than
           # building something else. Installing into the running server is enough: Postgres
           # reads extension files when an extension is listed or created, which is what the
@@ -530,6 +590,9 @@ jobs:
           OURANOS_WITH_UV: "1"
           OURANOS_WITH_TLS: "1"
           OURANOS_WITH_LIBGIT: "1"
+          # dokimasia's worked example (#1028, step 4) writes its report and screenshots here,
+          # and the next step uploads them, so a reader can see what the suite saw on each leg.
+          OURANOS_DOKIMASIA_EXAMPLE_OUT: ${{ runner.temp }}/dokimasia-example
         run: |
           set -o pipefail
           # On Linux the gate runs with a throwaway Secret Service (the step above).
@@ -537,6 +600,19 @@ jobs:
           if [ "$RUNNER_OS" = "Linux" ]; then wrap=(scripts/with-secret-service.sh); fi
           "${wrap[@]}" sbcl --dynamic-space-size 4096 --script scripts/verify-tree.lisp \
             2>&1 | tee verify.log
+
+      # The worked example's report.txt, report.json and screenshots, laid out as
+      # <case>/<row>/NN-name-viewport-scheme.png. Uploaded when the gate fails too, since that is
+      # when the screenshots are most useful. A leg where the example did not run uploads nothing.
+      - name: Upload the dokimasia example's report and screenshots
+        id: upload-the-dokimasia-example-s-report-and-screenshots
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: dokimasia-example-${{ matrix.platform }}
+          path: ${{ runner.temp }}/dokimasia-example
+          if-no-files-found: ignore
+          retention-days: 14
 
       # --- the README's numbers, against the run that just happened -------------------
       #
@@ -574,6 +650,7 @@ jobs:
         shell: bash
         env:
           STEPS_JSON: ${{ toJSON(steps) }}
+          JOB_TIMEOUT_MINUTES: ${{ matrix.timeout }}
         run: bash scripts/ci-job-summary.sh "${{ matrix.platform }}" verify.log readme.log
 
   # --- release mode ---------------------------------------------------------------
@@ -592,11 +669,33 @@ jobs:
   # well, so a representation violation is found before it merges. It skipped them while
   # the repo was private, for the same billing reason as the matrix above.
   release-mode:
-    name: release-mode (linux-x86-64)
+    name: ${{ matrix.label }}
     runs-on: ubuntu-26.04
-    timeout-minutes: 120
+    # THE LIMIT IS STATED ONCE, as a one-entry matrix, because the job summary prints how close
+    # the job came to it (#1146) and `timeout-minutes' can read the matrix context but not the
+    # job's own `env'.
+    #
+    # THE NAME COMES FROM THE MATRIX TOO, and has to. GitHub appends a job's matrix values to its
+    # name unless the name itself refers to the matrix, so with a literal name this job showed as
+    # `release-mode (linux-x86-64) (120)' -- measured on #1148's first run, against a comment here
+    # that said the literal name would prevent it. The verify job above never had the problem
+    # because its name is already `${{ matrix.platform }}'.
+    strategy:
+      matrix:
+        include:
+          - label: release-mode (linux-x86-64)
+            timeout: 120
+    timeout-minutes: ${{ matrix.timeout }}
 
     steps:
+      # WHEN THE JOB STARTED, so the job summary can say how close it came to its limit (#1146).
+      # The steps context carries no timings, and the job cannot read its own start time, so it
+      # writes one down. This is the first step, after `Set up job', so the figure the summary
+      # prints overstates the margin by however long that took -- seconds, normally.
+      - name: Record when the job started
+        shell: bash
+        run: echo "JOB_START=$(date +%s)" >> "$GITHUB_ENV"
+
       - uses: actions/checkout@v7
 
       # Its OWN cache, keyed apart from the development one. Sharing would be the exact
@@ -755,4 +854,5 @@ jobs:
         shell: bash
         env:
           STEPS_JSON: ${{ toJSON(steps) }}
-        run: bash scripts/ci-job-summary.sh "release-mode (linux-x86-64)" verify.log
+          JOB_TIMEOUT_MINUTES: ${{ matrix.timeout }}
+        run: bash scripts/ci-job-summary.sh "${{ matrix.label }}" verify.log

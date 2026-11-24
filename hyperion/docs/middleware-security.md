@@ -18,18 +18,37 @@ page the user visits posting to it, and a DNS-rebinding page reading from it.
 | `hyperion/desktop:run-app`, `:embedded` or `:hybrid` | on (`:request-guard :same-origin`) | never, unless the app does its own checking (`:none`) |
 | `hyperion/dev:serve` on loopback (127.0.0.1, ::1, localhost) | on | never for a real app; `:request-guard :none` only for a test that needs it off |
 | `hyperion/dev:serve` on any other host | off, with a warning | pass `:request-guard (:same-origin "http://HOST:PORT" ...)` with the origins you browse to |
-| `hyperion/server:start`, `serve-forever` | off (`:none`) | on (`:same-origin`) when it serves a desktop app's UI or a user's data headless on 127.0.0.1. `serve-forever`'s `:readiness-path` is always exempt (below) |
+| `hyperion/server:start`, `serve-forever` | on (`:request-guard :same-origin`) since #1037 | behind a proxy or under another name, set `HYPERION_ORIGINS` to the public origins; list the paths that take POSTs from clients that are not browsers in `:request-guard-exempt`; `:request-guard :none` turns it off. `serve-forever`'s `:readiness-path` is always exempt (below) |
 | `run-app :backend (:remote URL)` | none of its own | guard the server at URL instead |
 
 On loopback the guard accepts both `127.0.0.1:PORT` and `localhost:PORT`. A rebinding page cannot
 use either, because its Host is the attacker's domain.
 
-`server:start` is off by default because of reverse proxies. A production app behind a proxy on
-the same machine binds 127.0.0.1 but receives the public Host from the proxy, so a default guard
-would refuse every real request. For a server reached by a name other than its bind address, pass
-the origins: `:request-guard (:same-origin "https://app.example.com")`. `:same-origin` with a
-server bound to every interface (`0.0.0.0`) signals an error, because the guard cannot know which
-names are the app's own.
+`server:start` and `serve-forever` were off by default until #1037, because of reverse proxies:
+an app behind a proxy on the same machine binds 127.0.0.1 but receives the public Host from the
+proxy, so the guard refuses every request unless it knows the public origin. It is on by default
+now, because an app started with `start` was reachable from any web page its user visited, and
+the proxy case has a setting:
+
+- `HYPERION_ORIGINS` lists the origins the app is reached by, separated by commas or spaces, such
+  as `https://app.example.com`. The guard accepts them, as well as the loopback origins worked
+  out from the host and port. A deployment sets it without changing code.
+- `:request-guard (:same-origin "https://app.example.com")` names the origins in code, and only
+  those.
+- A server bound to every interface (`0.0.0.0`) with neither refuses to start, and the error names
+  both, and `:request-guard :none`, because the guard cannot know which names are the app's own.
+- With `:port 0`, the origins use the port the server actually bound.
+
+**Clients that are not browsers need their paths listed.** The guard refuses an unsafe request
+that carries neither `Origin` nor `Sec-Fetch-Site`, because it cannot tell such a request from one
+whose browser left both out. curl, API clients and webhook senders send neither, so an app that
+takes POSTs from them lists those paths in `:request-guard-exempt`, which `start` and
+`serve-forever` pass to `hyperion/csrf:wrap-same-origin` as `:exempt`. An entry is a path matched
+exactly, or a function of the request env; a prefix is not supported, so an entry exempts only
+the path it names. An exempt request skips the Origin check and still has its Host checked, so a
+DNS-rebinding page cannot reach the server through it. The guard logs the list once, at warn
+level, when the server starts, because an exempt path accepts a POST from any site. Such a path
+must check the request itself, for example by verifying the webhook sender's signature.
 
 **The readiness path is exempt from the request guard.** In `serve-forever`, a request for
 `:readiness-path` skips both the Host check and the Origin check, because a platform's health
@@ -118,6 +137,17 @@ off. Pass keywords through `start`:
 A header the application sets on its own response is never replaced, so one route can loosen
 or tighten a header (a page that must be framed by a known origin, say) without the wrapper
 knowing about it.
+
+**`form-action 'self'` also blocks a redirect after a form POST.** The default policy does not
+set `form-action`. An app that adds `form-action 'self'` should know that browsers apply the
+directive to the target of a redirect that follows a form submission, not only to the form's
+own target. A form POST answered with a 303 to another host is then blocked by the browser,
+which shows nothing and stays on the page. The case that found this is a form that starts an
+OAuth sign-in and redirects to the authorization server (#1181). Answer such a POST with a
+page that forwards the browser instead: `hyperion/oauth:forwarding-response` is one, a 200
+with a meta refresh and a link, which `form-action` does not apply to. Starting the action from
+a link (a GET) also works, and so does adding the other host's origin to `form-action`.
+[`aion/docs/oauth.md`](../../aion/docs/oauth.md) has the sign-in case in full.
 
 **HSTS** is off by default because it binds browsers to HTTPS for the whole host for
 `max-age`, and hyperion does not terminate TLS itself (#125), so it cannot know the deployment

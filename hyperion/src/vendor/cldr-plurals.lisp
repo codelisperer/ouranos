@@ -1,6 +1,6 @@
 ;;;; cldr-plurals.lisp --- GENERATED. Do not edit.
 ;;;;
-;;;; CLDR 48.2.1, plurals.json sha256 6c0a48e9bcfc25856f90202f703c2c7f89c105d6868f7712a943a6ed2dcbe8f4
+;;;; CLDR 48.2.3, plurals.json sha256 6c0a48e9bcfc25856f90202f703c2c7f89c105d6868f7712a943a6ed2dcbe8f4
 ;;;; Regenerate: sbcl --script scripts/fetch-cldr-plurals.lisp --write
 ;;;;
 ;;;; 224 locales. Each entry is (locale (category . condition) ...) where a
@@ -1610,4 +1610,4 @@
     ("zu" (:ONE :OR (:AND (:REL :I NIL :EQ ((0 . 0))))
            (:AND (:REL :N NIL :EQ ((1 . 1))))))))
 
-(defparameter +cldr-version+ "48.2.1")
+(defparameter +cldr-version+ "48.2.3")

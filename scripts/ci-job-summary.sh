@@ -22,6 +22,13 @@
 # is stored and what a growing set should do are open questions on the issue, so that part
 # is not here.
 #
+# It also says how long the job has run and how far that is from its limit (#1146), when the
+# workflow provides JOB_START (seconds since the epoch, written by the job's first step) and
+# JOB_TIMEOUT_MINUTES (the same number as the job's timeout-minutes, read from the matrix). The
+# Windows leg finished within a minute of its limit twice on one day, and nothing showed that
+# until a docs-only pull request was cancelled at it. Printing the margin on every leg makes
+# the trend visible before the next cancellation rather than after it.
+#
 # It never fails the job. A summary that cannot be written is a missing summary, not a
 # reason to turn a green leg red, so every failure here is reported and ignored.
 
@@ -87,6 +94,28 @@ BODY=$(mktemp)
     echo "**Gate:** no log at \`${LOG}\` (the gate step did not run, or failed before writing it)."
     echo
   fi
+
+  # --- how close the job came to its limit (#1146) -----------------------------
+  # Integer arithmetic only, so a value that is not a number is skipped rather than allowed to
+  # fail the summary: a missing line is better than a red leg caused by the line that reports.
+  case "${JOB_START:-}${JOB_TIMEOUT_MINUTES:-}" in
+    *[!0-9]*|"") ;;
+    *)
+      if [ -n "${JOB_START:-}" ] && [ -n "${JOB_TIMEOUT_MINUTES:-}" ]; then
+        elapsed=$(( $(date +%s) - JOB_START ))
+        margin=$(( JOB_TIMEOUT_MINUTES * 60 - elapsed ))
+        if [ "$margin" -ge 0 ]; then
+          printf '**Time:** %dm%02ds of a %d-minute limit, %dm%02ds to spare.\n' \
+            $((elapsed / 60)) $((elapsed % 60)) "$JOB_TIMEOUT_MINUTES" \
+            $((margin / 60)) $((margin % 60))
+        else
+          printf '**Time:** %dm%02ds, over the %d-minute limit.\n' \
+            $((elapsed / 60)) $((elapsed % 60)) "$JOB_TIMEOUT_MINUTES"
+        fi
+        echo
+      fi
+      ;;
+  esac
 
   # --- the README counts (Linux leg only) --------------------------------------
   if [ -f "$README_LOG" ]; then

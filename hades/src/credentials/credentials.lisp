@@ -157,7 +157,78 @@ gives its length, not its content."))
                 nil
                 (error 'credential-error :service service :account account :operation :delete
                                          :code code)))
-          t))))
+          t)))
+
+  (defun %zero-blob (cred)
+    "Write zeros over CRED's CredentialBlob, the plaintext value Windows decrypted into this
+process (#1035, the review of #1066). Called for every credential CredEnumerateW returned,
+before CredFree, so a listing does not leave secrets in freed memory."
+    (let ((size (cffi:foreign-slot-value cred '(:struct ffi:credential-w) 'ffi:credential-blob-size))
+          (blob (cffi:foreign-slot-value cred '(:struct ffi:credential-w) 'ffi:credential-blob)))
+      (when (and (integerp size) (plusp size) (not (cffi:null-pointer-p blob)))
+        (dotimes (i size) (setf (cffi:mem-aref blob :uint8 i) 0)))))
+
+  (defun %accounts (service operation)
+    "The accounts stored under SERVICE, from CredEnumerateW with the filter SERVICE/* (#1035).
+
+WINDOWS DECRYPTS THE VALUES, AND THIS ERASES THEM. There is no Windows call that lists
+credentials without their values: CredEnumerateW returns a whole CREDENTIALW for every match,
+and for a generic credential that includes CredentialBlob, the plaintext after DPAPI
+decryption, in this process's heap. CredReadW does the same. So the issue's requirement that
+this function not decrypt a value cannot be met here, and what it was for is met instead: every
+blob is zeroed (%ZERO-BLOB) before CredFree, so a listing of ten items does not leave ten
+plaintext values in freed memory. Writing zeros over a blob is not reading it. No test can see
+this, because the decryption happens inside Windows (the review of #1066).
+
+THE TARGET IS MATCHED EXACTLY, not by prefix. A target is SERVICE/ACCOUNT and either part may
+hold a slash, so the filter SERVICE/* also matches items of other services: with
+\"soloflow/anthropic-api-key\" stored under account \"user\", a prefix match reported
+\"anthropic-api-key/user\" as an account of \"soloflow\". hades writes UserName = account, so each
+target is compared with (%TARGET SERVICE USER-NAME), and the type must be CRED_TYPE_GENERIC,
+which is what FETCH-CREDENTIAL reads with. macOS and Linux match service and account exactly,
+so this is what makes the three agree.
+
+CredEnumerateW does not prompt. ERROR_NOT_FOUND means the store holds no item matching the
+filter, which is an empty list and not a failure."
+    (cffi:with-foreign-objects ((count :uint32) (creds :pointer))
+      (aion/windows:with-wide-string (filter (concatenate 'string service "/*"))
+        (when (zerop (ffi:cred-enumerate-w filter 0 count creds))
+          (let ((code (aion/windows:last-error)))
+            (if (= code ffi:+error-not-found+)
+                (return-from %accounts '())
+                (error 'credential-error :service service :account nil :operation operation
+                                         :code code)))))
+      (let ((array (cffi:mem-ref creds :pointer))
+            (n (cffi:mem-ref count :uint32)))
+        (unwind-protect
+             (loop for i below n
+                   for cred = (cffi:mem-aref array :pointer i)
+                   unless (cffi:null-pointer-p cred)
+                     append (let ((target (aion/windows:wide-string-to-lisp
+                                           (cffi:foreign-slot-value cred '(:struct ffi:credential-w)
+                                                                    'ffi:target-name)))
+                                  (user (let ((p (cffi:foreign-slot-value
+                                                  cred '(:struct ffi:credential-w) 'ffi:user-name)))
+                                          (unless (cffi:null-pointer-p p)
+                                            (aion/windows:wide-string-to-lisp p))))
+                                  (kind (cffi:foreign-slot-value cred '(:struct ffi:credential-w)
+                                                                 'ffi::type)))
+                              (when (and target user
+                                         (eql kind ffi:+cred-type-generic+)
+                                         (string= target (%target service user)))
+                                (list user))))
+          ;; Every blob is erased before the array is freed, whether the loop above finished or
+          ;; unwound.
+          (loop for i below n
+                for cred = (cffi:mem-aref array :pointer i)
+                unless (cffi:null-pointer-p cred) do (%zero-blob cred))
+          (ffi:cred-free array)))))
+
+  (defun %exists-p (service account)
+    (and (member account (%accounts service :exists-p) :test #'string=) t))
+
+  (defun %names (service)
+    (remove-duplicates (%accounts service :names) :test #'string= :from-end t)))
 
 ;;; --- macOS: the login Keychain ---------------------------------------------------------
 
@@ -234,7 +305,61 @@ FN returns."
                                     (lambda (query) (ffi:sec-item-delete query)))))
       (cond ((= status ffi:+err-sec-success+) t)
             ((= status ffi:+err-sec-item-not-found+) nil)
-            (t (%keychain-fail status service account :delete))))))
+            (t (%keychain-fail status service account :delete)))))
+
+  (defun %accounts (service account operation)
+    "The accounts of the generic-password items for SERVICE, and with ACCOUNT only that one
+item's (#1035).
+
+ATTRIBUTES ONLY, AND NO PROMPT. The query carries kSecReturnAttributes and kSecMatchLimitAll,
+and never kSecReturnData, which is the only key that returns a value. kSecUseAuthenticationUI is
+kSecUseAuthenticationUIFail, so a locked Keychain answers errSecInteractionNotAllowed instead of
+showing an unlock dialog; that becomes CREDENTIAL-STORE-UNAVAILABLE saying so, as the issue
+asks, rather than a prompt.
+
+The query is built here rather than through %CALL-WITH-QUERY, because that one always names an
+account and this must be able to ask for every account of a service."
+    (darwin:with-cf ((s (darwin:make-cf-string service))
+                     (a (when account (darwin:make-cf-string account))))
+      (cffi:with-foreign-object (out :pointer)
+        (setf (cffi:mem-ref out :pointer) (cffi:null-pointer))
+        (let* ((entries (append
+                         (list (cons (darwin:cf-constant "kSecClass")
+                                     (darwin:cf-constant "kSecClassGenericPassword"))
+                               (cons (darwin:cf-constant "kSecAttrService") s)
+                               (cons (darwin:cf-constant "kSecReturnAttributes")
+                                     (darwin:cf-constant "kCFBooleanTrue"))
+                               (cons (darwin:cf-constant "kSecMatchLimit")
+                                     (darwin:cf-constant "kSecMatchLimitAll"))
+                               (cons (darwin:cf-constant "kSecUseAuthenticationUI")
+                                     (darwin:cf-constant "kSecUseAuthenticationUIFail")))
+                         (when account
+                           (list (cons (darwin:cf-constant "kSecAttrAccount") a)))))
+               (status (darwin:with-cf ((query (darwin:make-cf-dictionary entries)))
+                         (ffi:sec-item-copy-matching query out))))
+          (cond ((= status ffi:+err-sec-item-not-found+) (return-from %accounts '()))
+                ((= status ffi:+err-sec-interaction-not-allowed+)
+                 (error 'credential-store-unavailable
+                        :service service :account account :operation operation
+                        :reason "the Keychain is locked, and this reads it without asking you to unlock it; unlock the Keychain and try again"))
+                ((/= status ffi:+err-sec-success+)
+                 (%keychain-fail status service account operation))))
+        ;; SecItemCopyMatching is a Copy: the CFArray it returned is ours to release.
+        (darwin:with-cf ((items (cffi:mem-ref out :pointer)))
+          (loop for i below (ffi:cf-array-get-count items)
+                for item = (ffi:cf-array-get-value-at-index items i)
+                for name = (unless (cffi:null-pointer-p item)
+                             (let ((value (ffi:cf-dictionary-get-value
+                                           item (darwin:cf-constant "kSecAttrAccount"))))
+                               (unless (cffi:null-pointer-p value)
+                                 (darwin:cf-string-to-lisp value))))
+                when name collect name)))))
+
+  (defun %exists-p (service account)
+    (and (member account (%accounts service account :exists-p) :test #'string=) t))
+
+  (defun %names (service)
+    (remove-duplicates (%accounts service nil :names) :test #'string= :from-end t)))
 
 ;;; --- Linux: the Secret Service ----------------------------------------------------------
 
@@ -388,12 +513,44 @@ by a CREDENTIAL-ERROR that names the item and not its bytes."
      (lambda (schema attributes)
        (or (/= 0 (libsecret:with-gerror (err "deleting the credential")
                    (ffi:secret-password-clearv-sync schema attributes (cffi:null-pointer) err)))
-           (progn (%fail-if-still-locked service account :delete) nil))))))
+           (progn (%fail-if-still-locked service account :delete) nil)))))
+
+  (defun %accounts (service account operation)
+    "The accounts stored under SERVICE, or, with ACCOUNT, the accounts of the items matching both
+(#1035). Reads attributes only: no value is fetched and no collection is unlocked, so a locked
+keyring still answers and nothing prompts.
+
+The reachability check is %UNAVAILABLE-REASON's, as for every other operation. The
+locked-and-headless refusal in %CALL-WITH-ITEM is deliberately NOT applied: that one is there
+because a lookup or a clear asks to unlock, and this search does not."
+    (libsecret:with-libsecret-lock ()
+      (let ((reason (%unavailable-reason)))
+        (when reason
+          (error 'credential-store-unavailable
+                 :service service :account account :operation operation :reason reason)))
+      (handler-case
+          (libsecret:with-schema (schema *schema-name* '("service" "account"))
+            (libsecret:with-attributes (attributes (if account
+                                                       (list (cons "service" service)
+                                                             (cons "account" account))
+                                                       (list (cons "service" service))))
+              (libsecret:search-attribute-values schema attributes "account")))
+        (libsecret:libsecret-error (e)
+          (%secret-service-fail e service account operation)))))
+
+  (defun %exists-p (service account)
+    (and (member account (%accounts service account :exists-p) :test #'string=) t))
+
+  (defun %names (service)
+    (remove-duplicates (%accounts service nil :names) :test #'string= :from-end t)))
 
 ;;; --- elsewhere: no store ----------------------------------------------------------------
 
 #-(or win32 darwin linux)
 (progn
+  (defun %exists-p (service account) (%unavailable service account :exists-p))
+  (defun %names (service) (%unavailable service nil :names))
+
   (defun %unavailable (service account operation)
     (error 'credential-store-unavailable
            :service service :account account :operation operation
@@ -504,3 +661,75 @@ CREDENTIAL-NOT-FOUND when there is none, rather than returning NIL."
 there was none."
   (%check-names service account)
   (%delete service account))
+
+(defun %check-listing-service (service operation)
+  "Signal CREDENTIAL-ERROR when SERVICE cannot be used to list items (#1035, the review of
+#1066). A `*' is refused because on Windows the service goes into CredEnumerateW's filter, where
+it is a wildcard: a service of \"*\" or \"a*\" would make Windows enumerate, and therefore decrypt,
+every credential of every application, or every one beginning with `a', before anything of ours
+looked at it. It is refused on every platform so the three agree; on macOS and Linux a `*' is an
+ordinary character in an attribute and would simply match nothing."
+  (when (find #\* service)
+    (error 'credential-error :service service :account nil :operation operation
+                             :code "a service name used for listing may not contain `*'")))
+
+(defun credential-exists-p (service account)
+  "Whether a credential is stored for SERVICE and ACCOUNT, without returning its value, and on
+macOS and Linux without decrypting one (#1035). ON WINDOWS THE VALUE IS DECRYPTED AND ERASED --
+see below, and do not read this first line as saying otherwise.
+
+An app that shows \"a key is saved\", or offers to remove one, asks this instead of fetching the
+secret to decide a label. The Keychain is asked for attributes only, and the Secret Service is
+searched and read for item attributes, which it stores unencrypted; neither decrypts a value.
+
+ON WINDOWS THE VALUE IS DECRYPTED AND THEN ERASED, because Windows offers no other way. Every
+call that lists or reads a credential, CredEnumerateW and CredReadW alike, returns the whole
+CREDENTIALW including the plaintext CredentialBlob. hades writes zeros over every blob before
+freeing what Windows returned, so nothing is left in freed memory, but the value does pass
+through this process. See %ACCOUNTS (the review of #1066).
+
+NOTHING HERE PROMPTS, as far as is tested. The macOS query sets kSecUseAuthenticationUIFail so
+that a Keychain which could only answer by asking signals CREDENTIAL-STORE-UNAVAILABLE instead;
+**that path is not covered by a test**, because no test here locks a keychain, and Apple
+documents the flag for items under access control while a file-based login keychain's prompting
+is governed by SecKeychainSetUserInteractionAllowed (the review of #1066). On Linux a locked
+keyring answers without prompting, which IS exercised, so this can be true for an item
+FETCH-CREDENTIAL would refuse to read until the keyring is unlocked.
+
+WHAT THE ANSWER REVEALS is whether the credential exists, and never its value. Existence is
+metadata the store already keeps unencrypted -- a target name in Credential Manager, an item
+attribute in the Secret Service -- so answering from it discloses nothing the value protects
+(the hub's ruling on #1035).
+
+Signals CREDENTIAL-STORE-UNAVAILABLE where this system has no store or it cannot be reached,
+and CREDENTIAL-ERROR for any other failure. A name that is empty signals, as elsewhere, and so
+does a SERVICE holding `*' (%CHECK-LISTING-SERVICE)."
+  (%check-names service account)
+  (%check-listing-service service :exists-p)
+  (%exists-p service account))
+
+(defun credential-names (service)
+  "The accounts stored under SERVICE, as a list of strings, without returning any value, and on
+macOS and Linux without decrypting one (#1035). ON WINDOWS EVERY MATCHING VALUE IS DECRYPTED AND
+ERASED -- see CREDENTIAL-EXISTS-P's docstring and %ACCOUNTS.
+The order is the store's. An app keeping its own list of which keys it has saved, which can
+drift from the store, asks this instead.
+
+Reads what CREDENTIAL-EXISTS-P reads and prompts as little, and like it returns only which
+accounts exist and never a value; see its docstring.
+
+ONLY SERVICE'S OWN ITEMS ARE RETURNED, WHICH IS NOT THE SAME AS ONLY SERVICE'S OWN ITEMS BEING
+READ. On Windows the filter handed to CredEnumerateW is SERVICE/*, and Windows decrypts every
+credential of this user whose target begins with that prefix before hades compares any target,
+including items another program stored under such a target. Those values are erased with the
+rest (%ZERO-BLOB), and none is returned, but they do pass through this process. macOS and Linux
+match the service attribute exactly in the store, so they read only SERVICE's items. Narrowing
+the Windows read to one CredReadW for the exact target is #1079, and the collision between two
+(service, account) pairs that join to the same Windows target is #1080 (the review of #1066).
+
+Nothing here is logged. hades/credentials depends on no logging facade, and an account name is
+the kind of thing a log must not carry, so the names are returned to the caller and written
+nowhere."
+  (%check-names service "unused")
+  (%check-listing-service service :names)
+  (%names service))

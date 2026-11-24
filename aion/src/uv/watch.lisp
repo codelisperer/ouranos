@@ -55,6 +55,22 @@
                      filename
                      watcher))))))
 
+(defun %watch-path (path)
+  "PATH as WATCH gives it to libuv. On Windows a trailing backslash is dropped, because libuv then
+reports each FILENAME with a backslash in front of it. A trailing / does not do that. A directory
+pathname's native name ends in a backslash on Windows, so without this, watching one reported
+a.txt with a backslash before it (#1093). The separator of a root is kept, such as that of a drive,
+of an extended-length drive or of a server's share, since without it the path names something
+else: the extended-length form of C: without its separator is the volume device, not its root
+folder. Whether libuv also puts a backslash in front of each name when a root is watched is not
+tested, because a test cannot write in a drive's root without administrator rights."
+  (let ((native (native-path path)))
+    (if (and (uiop:os-windows-p)
+             (> (length native) (%root-length native))
+             (char= #\\ (char native (1- (length native)))))
+        (subseq native 0 (1- (length native)))
+        native)))
+
 (defun watch (loop path function &key recursive)
   "Watch PATH on LOOP, calling FUNCTION with (EVENTS FILENAME WATCHER) on each change.
 
@@ -64,7 +80,7 @@ platform reports one, otherwise NIL. FUNCTION runs ON THE LOOP THREAD.
 RECURSIVE is honoured on macOS and Windows; on Linux libuv watches only the named
 directory, so a recursive watch there needs one watcher per subdirectory."
   (ensure-available)
-  (let* ((path (namestring path))
+  (let* ((path (%watch-path path))
          (pointer (cffi:foreign-alloc :char
                                       :count (ffi:uv-handle-size ffi:+uv-fs-event+))))
     (handler-bind ((error (lambda (e) (declare (ignore e)) (cffi:foreign-free pointer))))
@@ -74,10 +90,14 @@ directory, so a recursive watch there needs one watcher per subdirectory."
                                   :path path :recursive recursive)))
       (register pointer watcher)
       (push pointer (loop-owned loop))
+      ;; uv_fs_event_init has put the handle on the loop's handle queue, so when the start fails
+      ;; the handle is closed, and freed in its close callback. Freeing it here left the loop
+      ;; holding freed memory, and CLOSE-LOOP then aborted the process (the hub's review of #1095).
       (handler-bind ((error (lambda (e) (declare (ignore e))
                               (deregister pointer)
                               (setf (loop-owned loop) (remove pointer (loop-owned loop)))
-                              (cffi:foreign-free pointer))))
+                              (setf (watcher-pointer watcher) nil)
+                              (close-pointer pointer))))
         (check (ffi:uv-fs-event-start pointer (cffi:callback %fs-event-callback) path
                                       (if recursive ffi:+uv-fs-event-recursive+ 0))
                :operation :watch :path path))
