@@ -249,6 +249,23 @@ turn runs waits for that turn and cannot be stopped until it starts. A JSON clie
 turn was running. An app that renders its own page adds the button with
 `(praxeon/chat-ui:composer :cancel-action "/api/cancel")`.
 
+### Using the composer in an app's own page
+
+An app that renders the chat parts in its own page uses `praxeon/chat-ui:composer` for the
+message form (#1335). The form clears the box only after its post succeeds, so a message the app
+refuses, for example with a 409 when a usage limit is reached, stays in the box for the writer.
+The keywords, each defaulting to the form praxeon/web uses:
+
+- `:action`, the route the form posts to, `/api/message` by default.
+- `:label`, a visible label for the box; `:placeholder`, its placeholder text, `nil` for none;
+  `:autofocus`, true unless `:disabled`; `:maxlength`, a limit on the message's length.
+- `:hidden-fields`, a list of `(name . value)` strings sent with each message, such as
+  `'(("project" . "p-7") ("doc" . "d-3"))`. The name `"message"` is refused, because it is the box.
+- `:hx-target`, `:hx-swap` and `:hx-include`, the form's htmx attributes. `:hx-swap` is `"none"`
+  by default, because praxeon/web's response has nothing to show. An app whose response is the
+  rendered message passes, for example, `:hx-target "#log" :hx-swap "beforeend"`.
+- `:cancel-action`, the route of the Stop button described above, with no button by default.
+
 ### Talk to Elise in your language
 
 Elise ships an i18n dictionary (`examples/elise/resources/i18n/{en,es,ru}.json`) —

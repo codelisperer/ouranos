@@ -14,6 +14,12 @@ its tag.
 
 ### An app may have to act
 
+- **praxeon/chat-ui: the composer clears the message only after its post succeeds** (#1335).
+  `praxeon/chat-ui:composer` no longer resets the form on submit; it resets on
+  `htmx:afterRequest` when the request succeeded and came from the form itself. A message the host
+  refuses, with a 4xx or 5xx response, stays in the box. An app that relied on the box being
+  cleared after a refused post clears it itself.
+
 - **praxeon/web and praxeon/chat-ui: the agent's replies render no images and no links by
   default** (#1119, the maintainer's ruling of 2026-11-14). An image in a reply now shows as its
   alt text and is not fetched, and a link shows as its text with no `href`, because a browser
@@ -1931,6 +1937,14 @@ its tag.
     literal `<br/>` into the attribute before.
 
 ### Added
+
+- **praxeon/chat-ui: `composer` takes the options a host needs to use it as its own message
+  form** (#1335). `:label` shows a visible `<label>` tied to the box, `#msg`; `:placeholder`
+  (`nil` for none), `:autofocus` (true unless `:disabled`) and `:maxlength` set the box;
+  `:hidden-fields`, a list of `(name . value)` strings, are sent as hidden inputs with each
+  message, and the name `"message"` is refused; `:hx-target`, `:hx-swap` (`"none"` by default)
+  and `:hx-include` set the form's htmx attributes. With none of them, the form is the one it
+  rendered before.
 
 - **praxeon/web: the chat page shows the agent's reply while the model writes it, and a Stop
   button ends the turn** (#1339). While a model call streams, each page update carries the text
