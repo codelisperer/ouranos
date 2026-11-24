@@ -472,7 +472,8 @@
   :components ((:module "tests"
                 :serial t
                 :components ((:file "web-tests")
-                             (:file "web-stream-tests"))))
+                             (:file "web-stream-tests")
+                             (:file "web-service-tests"))))
   :perform (test-op (op c)
              (uiop:symbol-call :fiveam :run!
                                (uiop:find-symbol* :praxeon-web :praxeon/web/tests))))
