@@ -107,8 +107,13 @@ jobs:
     # sets it. On Linux the store is a GNOME Keyring the gate step starts for itself (see
     # "Secret Service (Linux)" below). A leg where they were skipped fails the gate
     # (+BACKEND-RULES+ in scripts/verify-tree.lisp).
+    #
+    # The runners for all three operating systems have Chrome, so aion/cdp's real-browser tests
+    # (#1028) must run on every leg: OURANOS_REQUIRE_BROWSER makes a missing browser fail them
+    # instead of skipping them.
     env:
       OURANOS_TEST_REAL_CREDENTIAL_STORE: "1"
+      OURANOS_REQUIRE_BROWSER: "1"
 
     strategy:
       # One OS failing must never hide the other two. The whole value of a matrix is

@@ -112,9 +112,9 @@ document.querySelector('#hyperion-notices-status .hyperion-notice-dismiss').clic
         while at count t do (setf start (1+ at))))
 
 (test the-notice-region-shows-htmx-error-responses-in-a-real-browser
-  (let ((browser (%smoke-browser)))
+  (let ((browser (aion/cdp:find-browser)))
     (if (null browser)
-        (skip "No Chrome or Edge found; set HYPERION_SMOKE_BROWSER to run the notice page")
+        (skip "No Chrome or Edge found; set OURANOS_BROWSER to run the notice page")
         (let ((app (%notice-app)) (port nil) (handler nil))
           (setf handler (ports:call-with-port
                          (lambda (p)

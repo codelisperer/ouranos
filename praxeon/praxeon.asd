@@ -439,6 +439,7 @@
   :depends-on ("praxeon/web" "praxeon" "hyperion"   ; web-tests.lisp calls actor: and server:
                "praxeon/chat-ui" "hyperion/assets"  ; the bubble and embed tests (#67)
                "hyperion/assets/tests" "hyperion/test-ports"  ; the embed test's headless browser
+               "aion/cdp"                    ; FIND-BROWSER names that browser (#1028)
                "hyperion/server-uv" "fiveam" "aion/test-threads" "aion/log"
                "aion/signature" "com.inuoe.jzon")  ; the #67 tests mint grants and read JSON
   :serial t
