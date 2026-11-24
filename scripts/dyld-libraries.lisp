@@ -31,12 +31,27 @@
 ;;;; executable. So a PATH line that names neither a .dylib nor anything under /usr/lib/ or
 ;;;; /System/ starts a new process under the same PID. The images that follow belong to it.
 ;;;;
+;;;; APPLE'S OPENSSL AND SECURITY.FRAMEWORK (#905). On macOS, aion/http-client checks a server's
+;;;; certificate with Security.framework. Opening it maps, among Apple's own libraries, its
+;;;; libcurl's /usr/lib/libssl.48.dylib and /usr/lib/libcrypto.46.dylib, and the system's
+;;;; /usr/lib/libsqlite3.dylib. Measured on Darwin 27.2 with praxeon/examples/sqlite-probe run
+;;;; with --https. Apple's OpenSSL is on every Mac, so a bundle does not depend on the build
+;;;; machine for it, and the rule below accepts exactly /usr/lib/libssl.*.dylib and
+;;;; /usr/lib/libcrypto.*.dylib in any process; a CL+SSL package in the image is checked
+;;;; separately. Apple's libsqlite3 is WAIVED, not accepted: aion/darwin opens Security with
+;;;; RTLD_LOCAL, so its libsqlite3 does not take part in a global symbol lookup, but the dyld log
+;;;; cannot show how an image was opened. So the waiver applies only to /usr/lib/<the carried
+;;;; file name>, only in a process that also has Security.framework loaded, and it is printed on
+;;;; every run as a WAIVED line. What the waiver gives up is checked from the app's own report
+;;;; instead: REPORTED-LIBRARY-FINDINGS reads the `SQLITE-LIBRARY: <version> <path>' line that
+;;;; the sqlite-probe prints, the path of the library whose sqlite3_open the image calls.
+;;;;
 ;;;; scripts/check-dyld-log.lisp is the command-line half, which verify-bundle-macos.sh runs.
 
 (defpackage #:ouranos-dyld-libraries
   (:use #:cl)
   (:export #:parse-dyld-log #:loaded-images #:image-pid #:image-process #:image-path
-           #:image-state #:openssl-findings #:carried-findings))
+           #:image-state #:openssl-findings #:carried-findings #:reported-library-findings))
 
 (in-package #:ouranos-dyld-libraries)
 
@@ -122,13 +137,23 @@ ignored, so the app's own output may be mixed in."
          (string= dir path :end2 (length dir))
          (char= #\/ (char path (length dir))))))
 
+(defun %apples-openssl-p (path)
+  "Whether PATH is exactly /usr/lib/libssl.*.dylib or /usr/lib/libcrypto.*.dylib: Apple's own
+copy, directly in /usr/lib, not in a directory below it."
+  (and (%inside-p path "/usr/lib")
+       (not (find #\/ path :start (length "/usr/lib/")))
+       (%openssl-p path)
+       (let ((name (%file-name path)))
+         (string= ".dylib" name :start2 (max 0 (- (length name) 6))))))
+
 (defun openssl-findings (images bundle-directory)
   "A list of (VERDICT PROCESS PID PATH), one for each loaded libssl or libcrypto in IMAGES.
 VERDICT is :CARRIED when PATH is in BUNDLE-DIRECTORY; :WEBKIT when the process is
 hyperion-view and PATH is under /usr/lib/, because WebKit loads Apple's own copy through
-Apple's libcurl and the app has no say in it; :FAIL otherwise, which is a library the app
-does not carry and that no system framework explains, such as cl+ssl falling back to Apple's
-copy or opening Homebrew's."
+Apple's libcurl and the app has no say in it; :APPLE when PATH is exactly
+/usr/lib/libssl.*.dylib or /usr/lib/libcrypto.*.dylib in any other process, Apple's own copy,
+which every Mac has and which Security.framework loads (#905); :FAIL otherwise, which is a copy
+from outside the bundle that is not Apple's, such as Homebrew's that cl+ssl opens."
   (loop for image in (loaded-images images)
         for path = (image-path image)
         when (%openssl-p path)
@@ -136,14 +161,26 @@ copy or opening Homebrew's."
                               ((and (eql 0 (search "hyperion-view" (image-process image)))
                                     (eql 0 (search "/usr/lib/" path)))
                                :webkit)
+                              ((%apples-openssl-p path) :apple)
                               (t :fail))
                         (image-process image) (image-pid image) path)))
+
+(defun %security-framework-loaded-p (images pid process)
+  "Whether Security.framework is loaded in the process PROCESS with PID."
+  (find-if (lambda (i)
+             (and (eql pid (image-pid i))
+                  (string= process (image-process i))
+                  (eql 0 (search "/System/Library/Frameworks/Security.framework/"
+                                 (image-path i)))))
+           (loaded-images images)))
 
 (defun carried-findings (images bundle-directory file-name)
   "A list of (VERDICT PROCESS PID PATH), one for each loaded image in IMAGES whose file name is
 FILE-NAME, a library the bundle carries. VERDICT is :CARRIED when PATH is in BUNDLE-DIRECTORY;
 :WEBKIT when the process is hyperion-view and PATH is under /usr/lib/, as for OPENSSL-FINDINGS;
-:FAIL otherwise.
+:SECURITY-FRAMEWORK, a waiver that is printed, when PATH is exactly /usr/lib/FILE-NAME and
+Security.framework is loaded in the same process (#905, see the top of this file); :FAIL
+otherwise.
 
 A :FAIL beside a :CARRIED is the case this exists for (#899). cl-sqlite's functions are looked
 up globally, and a global lookup returns the first library loaded that has the symbol, so an
@@ -156,5 +193,26 @@ although the bundle's copy was loaded too."
                               ((and (eql 0 (search "hyperion-view" (image-process image)))
                                     (eql 0 (search "/usr/lib/" path)))
                                :webkit)
+                              ((and (string= path (concatenate 'string "/usr/lib/" file-name))
+                                    (%security-framework-loaded-p images (image-pid image)
+                                                                  (image-process image)))
+                               :security-framework)
                               (t :fail))
                         (image-process image) (image-pid image) path)))
+
+(defun reported-library-findings (text bundle-directory)
+  "A list of (VERDICT VERSION PATH), one for each `SQLITE-LIBRARY: <version> <path>' line in
+TEXT, the line praxeon/examples/sqlite-probe prints for the library its image calls (#905).
+VERDICT is :CARRIED when PATH is in BUNDLE-DIRECTORY and :FAIL otherwise. The prefix is
+matched at the start of a line, after any spaces."
+  (with-input-from-string (in text)
+    (loop for line = (read-line in nil)
+          while line
+          for tr = (string-left-trim '(#\Space #\Tab) (string-right-trim '(#\Return) line))
+          when (eql 0 (search "SQLITE-LIBRARY: " tr))
+            collect (let* ((rest (subseq tr (length "SQLITE-LIBRARY: ")))
+                           (space (position #\Space rest))
+                           (version (subseq rest 0 space))
+                           (path (if space (subseq rest (1+ space)) "")))
+                      (list (if (%inside-p path bundle-directory) :carried :fail)
+                            version path)))))

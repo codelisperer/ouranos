@@ -42,6 +42,9 @@
   (uiop:symbol-call
    :hyperion/server :serve-forever #'app
    :server :uv :port port :log nil :banner nil :workers 4 :readiness-path "/health"
+   ;; The parent's requests are about draining and send a bare Host; the guard is tested in
+   ;; same-origin-tests.lisp (#1037).
+   :request-guard :none
    :on-ready (lambda (session)
                (declare (ignore session))
                (format t "~&READY ~D ~D~%" (sb-unix:unix-getpid) port)

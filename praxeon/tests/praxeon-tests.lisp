@@ -2089,8 +2089,13 @@ behaviour, and one that arrived without being asked for would be a surprise in a
   "Recorded as a test rather than a comment because it corrects an argument made when this
 shape was chosen. The marker lives on the SYSTEM prompt; `pinned-exchange-count' scans MESSAGES.
 So the pinning pre-publication issue 402 built is inert on the actor path -- which is fine, and it means the two
-features do not meet until a second producer marks a boundary inside the conversation. When one
-arrives, this test fails and says so."
+features do not meet until a second producer marks a boundary inside the conversation.
+
+That producer arrived with #1317 (CACHE-MESSAGES), and this is the test that says what changed.
+Without it, nothing in the request is pinned, as before. With it, the request that is sent marks
+its latest message, so PINNED-EXCHANGE-COUNT over the request counts every exchange. The trim
+still does not see it, because the mark goes on after trimming: an agent with a small history
+budget still sends less than it remembers."
   (let* ((provider (make-instance 'system-capturing))
          (agent (actor:make-agent :provider provider :system-prompt "brief" :cache-system t)))
     (actor:run-turn agent "q")
@@ -2099,7 +2104,21 @@ arrives, this test fails and says so."
           "no message carries a boundary, so nothing is pinned against trimming")
       (is-true (llm:cache-boundary-p (first (actor:agent-system-parts agent)))
                "while the system prompt does carry one -- the control, so the zero above is
-about WHERE the marker is and not about there being none"))))
+about WHERE the marker is and not about there being none")))
+  (let* ((provider (make-instance 'system-capturing))
+         (agent (actor:make-agent :provider provider :system-prompt "brief" :cache-system t
+                                  :cache-messages t :history-budget 300)))
+    (setf (actor:agent-history agent)
+          (loop for i from 1 to 8
+                append (list (llm:msg "user" (format nil "q~A ~A" i (make-string 200 :initial-element #\q)))
+                             (llm:msg "assistant" (format nil "a~A" i)))))
+    (let* ((remembered (length (actor:agent-history agent)))
+           (sent (actor:request-messages agent))
+           (exchanges (prompt:exchanges sent)))
+      (is (= (length exchanges) (prompt:pinned-exchange-count exchanges))
+          "with CACHE-MESSAGES the request's latest message is marked, so every exchange in it counts as pinned")
+      (is (< (length sent) remembered)
+          "and the trim still ran: the mark went on after it"))))
 
 ;;; --- data through parameterised means (pre-publication issue 400, ADR-0002) -----------------------
 ;;;
@@ -4781,6 +4800,315 @@ request starts with the one before it, message for message."
                        "request ~D, the batch, changed what came before" (1+ i))
                    (is (%prefix-p (nth i requests) (nth (1+ i) requests))
                        "request ~D starts with request ~D exactly" (1+ i) i))))))
+
+;;; --- a cache breakpoint on the latest message (#1317) ------------------------------------
+
+(defun %marked-parts (messages)
+  "The marked parts of MESSAGES, as (message-index . part), oldest first."
+  (loop for m in messages
+        for i from 0
+        for c = (llm:content m)
+        when (listp c)
+          append (loop for part in c
+                       when (llm:cache-boundary-p part) collect (cons i part))))
+
+(defun %unmarked (messages)
+  "MESSAGES with every :CACHE mark removed and string content as one text part, so two requests
+can be compared by what the provider caches, not by where each put its mark."
+  (mapcar (lambda (m)
+            (let ((c (llm:content m)))
+              (list :role (llm:role m)
+                    :content (mapcar (lambda (part)
+                                       (loop for (k v) on part by #'cddr
+                                             unless (eq k :cache) append (list k v)))
+                                     (if (stringp c) (list (llm:text-part c)) c)))))
+          messages))
+
+(defun %fetching-agent (n &rest agent-args)
+  "An agent whose model fetches N times and then answers, each result about 400 estimated tokens,
+and its REQUEST-LOG provider."
+  (let* ((p (make-instance 'request-log
+                           :script (append (loop for i from 1 to n
+                                                 collect (%call (format nil "c~D" i) "fetch" "n" i))
+                                           (list (llm:make-completion :text "answer" :stop-reason :end)))))
+         (agent (apply #'actor:make-agent :provider p :system-prompt "brief" agent-args)))
+    (actor:register-means agent "fetch" "fetches"
+                          (lambda (args)
+                            (format nil "result ~D ~A" (gethash "n" args)
+                                    (make-string 1600 :initial-element #\y))))
+    (values agent p)))
+
+(test each-request-marks-its-latest-message-once-when-asked
+  "#1317. Over a turn of four tool steps and an answer, with CACHE-MESSAGES, every request marks
+the last part of its latest message, and that is the only marked part in its messages. The
+history is not marked: the mark is on what is sent. The retrieved facts come after the mark.
+
+THE CONTROL is the same turn without CACHE-MESSAGES: no message part is marked, and the system
+prompt still is, as before #1317."
+  (multiple-value-bind (agent p) (%fetching-agent 4 :cache-system t :cache-messages t)
+    (ctx:add-item (actor:agent-context agent)
+                  (ctx:make-ctx-item :content "a retrieved fact" :tokens 5 :value 1 :valid-time 1))
+    (actor:run-turn agent "go" :max-steps 8)
+    (let ((requests (request-log-requests p)))
+      (is (= 5 (length requests)))
+      (loop for request in requests
+            for i from 1
+            for marks = (%marked-parts request)
+            for last = (car (last request))
+            for parts = (llm:content last)
+            do (is (= 1 (length marks)) "request ~D carries one message mark: ~S" i marks)
+               (is (= (1- (length request)) (car (first marks)))
+                   "request ~D's mark is on its latest message" i)
+               (is (search "a retrieved fact" (getf (car (last parts)) :text))
+                   "request ~D's facts are its latest message's last part" i)
+               (is (eq (cdr (first marks)) (car (last (butlast parts))))
+                   "and the marked part is the one just before them"))
+      (is (eq :tool-result (getf (cdr (first (%marked-parts (second requests)))) :type))
+          "after a tool step, the mark is on the tool result")
+      (is (null (%marked-parts (actor:agent-history agent))) "the history carries no mark")))
+  (multiple-value-bind (agent p) (%fetching-agent 2 :cache-system t)
+    (actor:run-turn agent "go" :max-steps 8)
+    (is (every #'null (mapcar #'%marked-parts (request-log-requests p)))
+        "control: without CACHE-MESSAGES no message is marked")
+    (is-true (llm:cache-boundary-p (first (actor:agent-system-parts agent)))
+             "while the system prompt is")))
+
+(test the-messages-before-the-mark-change-only-when-a-batch-is-cleared
+  "#1317 with OFFLOAD-TOOL-RESULTS clearing. Between batches, each request begins with every
+message of the request before it, up to and including the one that request marked, unchanged
+apart from the mark itself; so the next request finds that prefix in the cache. A batch changes
+them, and the comparison sees it, which is its control."
+  (multiple-value-bind (agent p) (%fetching-agent 8 :cache-messages t)
+    (let ((batches '()) (step 0))
+      (actor:offload-tool-results agent (res:make-memory-result-store) :conversation "c"
+                                  :threshold nil :clear-budget 1500 :keep-recent 1)
+      (evt:with-observer ((lambda (e)
+                            (case (evt:event-type e)
+                              (:deliberating (setf step (length (request-log-requests p))))
+                              (:results-cleared (push step batches)))))
+        (actor:run-turn agent "go" :max-steps 12))
+      (let* ((requests (request-log-requests p))
+             (n (length requests)))
+        (is (= 9 n))
+        (is (<= 1 (length batches) 2) "a batch was cleared, and not on every step: ~S" batches)
+        (loop for i from 0 below (1- n)
+              for before = (nth i requests)
+              for after = (nth (1+ i) requests)
+              for upto = (1+ (car (first (%marked-parts before))))
+              do (is (= 1 (length (%marked-parts after))) "request ~D has one message mark" (1+ i))
+                 (if (member (1+ i) batches)
+                     (is (not (%prefix-p (%unmarked (subseq before 0 upto)) (%unmarked after)))
+                         "request ~D, the batch, changed the messages before the earlier mark" (1+ i))
+                     (is (%prefix-p (%unmarked (subseq before 0 upto)) (%unmarked after))
+                         "request ~D begins with request ~D's messages up to its mark" (1+ i) i)))))))
+
+(test the-latest-message-is-not-marked-past-the-provider-s-limit
+  "#1317. Anthropic accepts four cache breakpoints in a request. With the system prompt's and two
+in the messages, the latest message is marked as the fourth; with three in the messages, or a
+marked tool spec as well, it is not. A message that is already marked, or empty, is not marked
+again."
+  (let* ((system (list (llm:text-part "brief" :cache t)))
+         (marked (lambda (text) (llm:msg "user" (list (llm:text-part text :cache t)))))
+         (two (list (funcall marked "a") (llm:msg "assistant" "b") (funcall marked "c")
+                    (llm:msg "assistant" "d") (llm:msg "user" "latest")))
+         (three (append (butlast two) (list (funcall marked "e") (llm:msg "assistant" "f")
+                                           (llm:msg "user" "latest")))))
+    (is (= 3 (length (%marked-parts (actor::%with-latest-message-marked two system))))
+        "three marks in the messages, four with the system prompt's")
+    (is-true (llm:cache-boundary-p
+              (first (llm:content (car (last (actor::%with-latest-message-marked two system)))))))
+    (is (= 3 (length (%marked-parts (actor::%with-latest-message-marked three system))))
+        "no fifth mark")
+    (is (equal "latest" (getf (first (llm:content (car (last (actor::%with-latest-message-marked
+                                                               three system)))))
+                              :text)))
+    (is (= 1 (length (%marked-parts (actor::%with-latest-message-marked
+                                     (list (funcall marked "x")) system))))
+        "an already marked latest message is left as it is")
+    (is (null (%marked-parts (actor::%with-latest-message-marked
+                              (list (llm:msg "user" "")) system)))
+        "an empty text is not marked")
+    (is (= 2 (length (%marked-parts
+                      (actor::%with-latest-message-marked
+                       two system (list (llm:make-tool-spec :name "t" :description "d" :cache t))))))
+        "a marked tool spec counts too: with it, the two marks in the messages make four")))
+
+(defun %near-budget-turn (cache-messages)
+  "A turn of six tool steps on an agent whose history of ten earlier exchanges is near its budget
+of 700 estimated tokens. Returns the requests sent, oldest first, and the steps (1-based request
+numbers) at which more exchanges were dropped than on the step before."
+  (let* ((p (make-instance 'request-log
+                           :script (append (loop for i from 1 to 6
+                                                 collect (%call (format nil "c~D" i) "fetch" "n" i))
+                                           (list (llm:make-completion :text "answer" :stop-reason :end)))))
+         (agent (actor:make-agent :provider p :history-budget 700 :cache-messages cache-messages))
+         (dropped 0)
+         (trims '()))
+    (setf (actor:agent-history agent)
+          (loop for i from 1 to 10
+                append (list (llm:msg "user" (format nil "q~D ~A" i (make-string 200 :initial-element #\q)))
+                             (llm:msg "assistant" (format nil "a~D" i)))))
+    (actor:register-means agent "fetch" "fetches"
+                          (lambda (args) (format nil "result ~D ~A" (gethash "n" args)
+                                                 (make-string 250 :initial-element #\y))))
+    (evt:with-observer ((lambda (e)
+                          (when (eq :context-trimmed (evt:event-type e))
+                            (let ((now (evt:event-get e :dropped-exchanges)))
+                              (when (> now dropped)
+                                (push (1+ (length (request-log-requests p))) trims))
+                              (setf dropped now)))))
+      (actor:run-turn agent "go" :max-steps 8))
+    (values (request-log-requests p) (reverse trims))))
+
+(test near-the-budget-the-history-is-trimmed-in-steps-when-messages-are-cached
+  "#1317, the cold review of #1321. PROMPT:TRIM-HISTORY keeps the newest exchanges that fit, so
+on an agent near its history budget a growing turn drops the oldest exchange on almost every
+step, and the messages before the cache mark change each time: every such step misses the cache
+and writes the history to it again. With CACHE-MESSAGES the history is trimmed to half the budget
+when it no longer fits, and then sent from the same first exchange until it no longer fits again.
+
+Over six tool steps, each request begins with the one before it, marks aside, except at a step
+that dropped more exchanges, and there are at most two such steps. Every request stays within
+the budget.
+
+THE CONTROL is the same turn without CACHE-MESSAGES, trimmed one exchange at a time: the
+request changes what came before it on at least four steps."
+  (multiple-value-bind (requests trims) (%near-budget-turn t)
+    (is (= 7 (length requests)))
+    (is (<= 1 (length trims) 2) "trimmed once or twice, not on every step: ~S" trims)
+    (loop for i from 0 below (1- (length requests))
+          for before = (%unmarked (nth i requests))
+          for after = (%unmarked (nth (1+ i) requests))
+          unless (member (+ 2 i) trims)
+            do (is (%prefix-p before after) "request ~D begins with request ~D" (+ 2 i) (1+ i)))
+    (is (every (lambda (r) (or (<= (prompt:messages-tokens r) 700)
+                               (= 1 (length (prompt:exchanges r)))))
+               requests)
+        "every request within the budget, or only the turn's own exchange: ~S"
+        (mapcar #'prompt:messages-tokens requests)))
+  (let ((requests (%near-budget-turn nil)))
+    (is (<= 4 (loop for i from 0 below (1- (length requests))
+                    count (not (%prefix-p (%unmarked (nth i requests))
+                                          (%unmarked (nth (1+ i) requests))))))
+        "control: one exchange at a time, the earlier messages change on most steps")))
+
+(test a-trim-point-that-is-not-in-the-history-is-not-used
+  "#1317. TRIM-FROM is where the last trim left the history. When the history is replaced by a
+shorter one, that index is not the start of an exchange in it, and the trim starts again from
+the beginning rather than sending nothing or a broken exchange."
+  (let* ((p (make-instance 'request-log :script nil))
+         (agent (actor:make-agent :provider p :history-budget 700 :cache-messages t)))
+    (setf (actor:agent-trim-from agent) (llm:msg "user" "a message of another conversation")
+          (actor:agent-history agent) (list (llm:msg "user" "q1") (llm:msg "assistant" "a1")))
+    (actor:run-turn agent "q2")
+    (is (= 3 (length (first (request-log-requests p)))) "the whole short history was sent")
+    (is (eq (first (actor:agent-history agent)) (actor:agent-trim-from agent))
+        "and the trim point is now its first message")))
+
+(defun %conversation (tag n)
+  "N exchanges of fresh messages, each user message about 55 estimated tokens."
+  (loop for i from 1 to n
+        append (list (llm:msg "user" (format nil "~A q~D ~A" tag i (make-string 200 :initial-element #\q)))
+                     (llm:msg "assistant" (format nil "~A a~D" tag i)))))
+
+(test a-workflow-merge-carries-back-the-child-s-trim-point-when-it-is-further
+  "#1317, the hub's re-review of #1321. A child's turn runs on a copy of the agent, and trimming
+moves the copy's TRIM-FROM. The merge appends the child's messages and takes the child's trim
+point when it is further into the merged history than the agent's own, so the next turn on the
+agent sends from where the child's did. When the child's is earlier, the agent keeps its own."
+  (let* ((old (%conversation "old" 4))
+         (original (actor:make-agent :provider (make-instance 'request-log :script nil)))
+         (view nil))
+    (setf (actor:agent-history original) old
+          (actor:agent-trim-from original) (nth 2 old)
+          view (copy-structure original))
+    (let ((added (%conversation "child" 2)))
+      (setf (actor:agent-history view) (append old added)
+            (actor:agent-trim-from view) (first added))
+      (praxeon/workflow::%merge-child-history original view (length old))
+      (is (= 12 (length (actor:agent-history original))) "the child's messages were appended")
+      (is (eq (first added) (actor:agent-trim-from original)) "and its further trim point taken"))
+    (let ((ours (actor:agent-trim-from original)))
+      (setf view (copy-structure original)
+            (actor:agent-trim-from view) (first old))
+      (praxeon/workflow::%merge-child-history original view 12)
+      (is (eq ours (actor:agent-trim-from original)) "an earlier trim point is not taken"))))
+
+(defclass %locked-request-log (llm:provider)
+  ((lock :initform (bt:make-lock "px-locked-request-log") :reader locked-request-log-lock)
+   (requests :initform '() :accessor locked-request-log-requests))
+  (:documentation "Answers every request with \"done\" and keeps the messages of each, under a
+lock, so the children of a parallel group can share it."))
+
+(defmethod llm:supports-tool-choice-p ((p %locked-request-log)) t)
+
+(defmethod llm:complete ((p %locked-request-log) messages
+                         &key system tools max-tokens temperature tool-choice)
+  (declare (ignore system tools max-tokens temperature tool-choice))
+  (bt:with-lock-held ((locked-request-log-lock p))
+    (setf (locked-request-log-requests p)
+          (append (locked-request-log-requests p) (list messages))))
+  (llm:make-completion :text "done" :stop-reason :end))
+
+(defun %said-p (request text)
+  "True when a message of REQUEST has TEXT in its content."
+  (some (lambda (m) (search text (format nil "~A" (llm:content m)))) request))
+
+(test a-parallel-sibling-s-turn-is-still-sent-after-another-child-trimmed-into-its-own-turn
+  "#1317, the hub's cold review of #1324. Two children of one WF:PARALLEL group share an agent
+near its history budget. The first child's turn is short and trims nothing. The second's is long
+enough that its trim drops the whole history it started from, so its trim point is its own
+prompt. After the merge, the first child's turn sits between the old history and the second
+child's turn. The step after the group must still send the first child's turn, which fits.
+
+Before this fix, the merge took the second child's trim point as it was, and every later request
+started at the second child's prompt."
+  (let* ((p (make-instance '%locked-request-log))
+         (agent (actor:make-agent :provider p :history-budget 700 :cache-messages t))
+         (long (format nil "second child ~A" (make-string 1600 :initial-element #\l)))
+         (flow (wf:make-workflow
+                :fan "fan out"
+                (wf:parallel (wf:step :first agent "first child, short")
+                             (wf:step :second agent long))
+                (wf:step :after agent "after the group"))))
+    (setf (actor:agent-history agent) (%conversation "old" 10))
+    (wf:run-workflow flow)
+    (let* ((requests (locked-request-log-requests p))
+           (second-child (find-if (lambda (r) (%said-p r "second child")) requests))
+           (after (car (last requests))))
+      (is (= 3 (length requests)) "one request per step: ~D" (length requests))
+      (is (not (%said-p second-child "old q10"))
+          "the second child's own trim dropped the history it started from")
+      (is (%said-p after "after the group") "the last request is the step after the group")
+      (is (%said-p after "second child") "it sends the second child's turn")
+      (is (%said-p after "first child, short")
+          "and the first child's turn, which the second child never saw")
+      (is (<= (prompt:messages-tokens after) 700) "within the budget: ~D"
+          (prompt:messages-tokens after)))))
+
+(test a-history-replaced-by-another-conversation-of-the-same-length-is-sent-whole
+  "#1317, the hub's re-review of #1321. The trim point is a message, compared with EQ, not an
+index. An app that replaces the history with another conversation of the same length gets every
+message of it sent when it fits, although the old trim point's index is the start of an exchange
+in the new history too.
+
+THE CONTROL keeps the first conversation: there the trim point is used, and the messages before
+it are not sent."
+  (flet ((first-request (replace)
+           (let* ((p (make-instance 'request-log :script nil))
+                  (agent (actor:make-agent :provider p :history-budget 700 :cache-messages t))
+                  (old (%conversation "old" 6)))
+             (setf (actor:agent-history agent) old
+                   (actor:agent-trim-from agent) (nth 4 old))
+             (when replace
+               (setf (actor:agent-history agent) (%conversation "new" 6)))
+             (actor:run-turn agent "go")
+             (first (request-log-requests p)))))
+    (is (= 13 (length (first-request t))) "the new conversation is sent whole, with the question")
+    (is (= 9 (length (first-request nil)))
+        "control: the same conversation is sent from its trim point, the third exchange")))
+
+
 
 (test stored-results-are-erased-with-their-conversation
   (let* ((agent (actor:make-agent :provider (make-instance 'request-log)))
@@ -9704,12 +10032,12 @@ that is not private, whose log holds it."
 
 (defparameter +moved-agent-slots+
   '("CONTEXT" "RESULT-STORE" "CONVERSATION" "RESULT-INDEX" "CLEARED" "GUARD" "UNTRUSTED-INPUTS"
-    "UNTRUSTED-CALLS" "CONVERSATION-TAINT" "THREAD-MEMORY" "HISTORY"
+    "UNTRUSTED-CALLS" "CONVERSATION-TAINT" "THREAD-MEMORY" "HISTORY" "TRIM-FROM"
     ;; Moved one way only: TO is private when either agent is (#983).
     "PRIVATE"))
 
 (defparameter +kept-agent-slots+
-  '("NAME" "PROVIDER" "SYSTEM-PROMPT" "CACHE-SYSTEM" "MEANS" "HISTORY-BUDGET" "MAX-TOKENS"
+  '("NAME" "PROVIDER" "SYSTEM-PROMPT" "CACHE-SYSTEM" "CACHE-MESSAGES" "MEANS" "HISTORY-BUDGET" "MAX-TOKENS"
     "OFFLOAD-THRESHOLD" "CLEAR-BUDGET" "CLEAR-TARGET" "KEEP-RECENT" "NEVER-CLEAR" "TAINT-SCOPE"
     "RETAIN-CONTENT"))
 
@@ -9782,14 +10110,19 @@ lower a value the app recorded on the new agent. NIL, not recorded, is lower tha
 
 (defclass %recording-provider (llm:provider)
   ((script :initarg :script :accessor %recording-script)
-   (requests :initform '() :accessor %recording-requests))
+   (requests :initform '() :accessor %recording-requests)
+   (tool-choice-p :initarg :tool-choice-p :initform nil :reader %recording-tool-choice-p))
   (:documentation "A provider that answers from SCRIPT and records, for each request, the system
-prompt and the tools it was sent, oldest first in %RECORDING-REQUESTS once reversed."))
+prompt, the tools and the tool choice it was sent, oldest first in %RECORDING-REQUESTS once
+reversed. With TOOL-CHOICE-P it says it can honour a tool choice, as Anthropic does (#1318)."))
+
+(defmethod llm:supports-tool-choice-p ((p %recording-provider))
+  (%recording-tool-choice-p p))
 
 (defmethod llm:complete ((p %recording-provider) messages
                          &key system tools max-tokens temperature tool-choice)
-  (declare (ignore messages max-tokens temperature tool-choice))
-  (push (list :system system :tools tools) (%recording-requests p))
+  (declare (ignore messages max-tokens temperature))
+  (push (list :system system :tools tools :tool-choice tool-choice) (%recording-requests p))
   (pop (%recording-script p)))
 
 (defun %looks (n)
@@ -9800,11 +10133,13 @@ prompt and the tools it was sent, oldest first in %RECORDING-REQUESTS once rever
                  :tool-calls (list (llm:make-tool-call :id (format nil "l~D" i) :name "look"
                                                        :arguments (make-hash-table :test #'equal))))))
 
-(defun %looking-agent (script)
+(defun %looking-agent (script &key tool-choice-p)
   "An agent whose provider answers from SCRIPT, with a means \"look\" that counts its runs.
-Returns the agent, the provider, and a function answering how many times \"look\" ran."
+TOOL-CHOICE-P is passed to the %RECORDING-PROVIDER. Returns the agent, the provider, and a
+function answering how many times \"look\" ran."
   (let* ((runs 0)
-         (provider (make-instance '%recording-provider :script script))
+         (provider (make-instance '%recording-provider :script script
+                                                       :tool-choice-p tool-choice-p))
          (ag (actor:make-agent :name "looker" :system-prompt "You look things up."
                                :provider provider)))
     (actor:register-means ag "look" "Look something up."
@@ -9817,7 +10152,7 @@ Returns the agent, the provider, and a function answering how many times \"look\
       (format nil "~{~A~^~%~}" (mapcar (lambda (p) (getf p :text)) system))))
 
 (test a-turn-wraps-up-on-its-last-step-and-says-so
-  "#1182. With :ON-STEP-LIMIT :WRAP-UP, the last of MAX-STEPS offers no tools and asks for the
+  "#1182. With :ON-STEP-LIMIT :WRAP-UP, the last of MAX-STEPS calls no tool and asks for the
 best answer from what was gathered. RUN-TURN returns that answer with :WRAPPED-UP, the wrap-up
 counted within MAX-STEPS, and a :USAGE event for it. The instruction goes to the system prompt
 for that call only: the history gains the answer and nothing else.
@@ -9828,7 +10163,8 @@ of steps and signals DELIBERATION-FAILURE, as before."
       (%looking-agent (append (%looks 2)
                               (list (llm:make-completion :text "Here is what I found."
                                                          :stop-reason :end
-                                                         :input-tokens 30 :output-tokens 5))))
+                                                         :input-tokens 30 :output-tokens 5)))
+                      :tool-choice-p t)
     (let ((usage 0) (before nil))
       (multiple-value-bind (text how)
           (evt:with-observer ((lambda (e) (when (eq :usage (evt:event-type e)) (incf usage))))
@@ -9841,12 +10177,13 @@ of steps and signals DELIBERATION-FAILURE, as before."
           (is (= 3 (length requests)) "three calls, within :max-steps 3")
           (is-true (and (getf (first requests) :tools) (getf (second requests) :tools))
                    "the gathering steps were offered tools")
-          (is (null (getf (third requests) :tools)) "the wrap-up was offered none")
+          (is (equalp (getf (second requests) :tools) (getf (third requests) :tools))
+              "the wrap-up was sent the same tools as the step before it (#1318)")
           (is-true (search "used every step" (%system-text (getf (third requests) :system)))
                    "and was told to answer from what it gathered")
           (is-false (search "used every step" (%system-text (getf (first requests) :system)))
                     "the earlier steps were not"))
-        (is (= 2 (funcall runs)) "\"look\" ran on the two gathering steps")
+        (is (= 2 (funcall runs)) "\"look\" ran on the two gathering steps, and no tool on the wrap-up")
         (is (= 3 usage) "a :usage event for every step, the wrap-up included")
         (let ((last-message (car (last (actor:agent-history ag)))))
           (is (equal "assistant" (getf last-message :role)) "the history ends with the answer")
@@ -9856,6 +10193,163 @@ of steps and signals DELIBERATION-FAILURE, as before."
   (let ((ag (%looking-agent (%looks 3))))
     (signals cnd:deliberation-failure
       (actor:run-turn ag "What do you know?" :max-steps 3))))
+
+(test a-wrap-up-keeps-the-tools-and-forbids-a-call-where-the-provider-can
+  "#1318. A provider renders its prompt as tools, then system, then messages, so a wrap-up sent
+without the tools could not read the cached prefix of the steps before it. Where the provider
+can honour a tool choice, the wrap-up is sent the same tools with the choice :NONE, and only the
+wrap-up: the gathering steps send no tool choice, so they are built as before. The Anthropic
+request built from the recorded arguments carries tools identical to the previous step's and
+tool_choice none.
+
+THE CONTROL is the same turn on a provider that cannot honour a tool choice: its wrap-up is sent
+no tools and no tool choice, as before #1318."
+  (flet ((turn (tool-choice-p)
+           (multiple-value-bind (ag provider runs)
+               (%looking-agent (append (%looks 1)
+                                       (list (llm:make-completion :text "Done." :stop-reason :end)))
+                               :tool-choice-p tool-choice-p)
+             (multiple-value-bind (text how)
+                 (actor:run-turn ag "What do you know?" :max-steps 2 :on-step-limit :wrap-up)
+               (is (equal "Done." text))
+               (is (eq :wrapped-up how))
+               (is (= 1 (funcall runs)) "no tool ran on the wrap-up"))
+             (reverse (%recording-requests provider)))))
+    (destructuring-bind (gather wrap) (turn t)
+      (is-true (getf gather :tools))
+      (is (null (getf gather :tool-choice)) "a gathering step sends no tool choice")
+      (is (equalp (getf gather :tools) (getf wrap :tools)) "the wrap-up keeps the same tools")
+      (is (eq :none (getf wrap :tool-choice)) "and forbids a call")
+      (let ((anthropic (make-instance 'llm:anthropic :api-key "k" :model "m")))
+        (flet ((body (request)
+                 (llm:anthropic-request-body anthropic '((:role :user :content "hi"))
+                                             :tools (getf request :tools)
+                                             :tool-choice (getf request :tool-choice))))
+          (is (equal (%json-of (gethash "tools" (body gather)))
+                     (%json-of (gethash "tools" (body wrap))))
+              "the tools Anthropic is sent are the same bytes on both steps")
+          (is (search "\"type\":\"none\"" (%json-of (gethash "tool_choice" (body wrap)))))
+          (is (null (gethash "tool_choice" (body gather)))))))
+    (destructuring-bind (gather wrap) (turn nil)
+      (is-true (getf gather :tools))
+      (is (null (getf wrap :tools)) "control: no tool choice, so the wrap-up is sent no tools")
+      (is (null (getf wrap :tool-choice)) "and no tool choice"))))
+
+(defclass %body-recording-openai (llm:openai-compatible)
+  ((script :initarg :script :accessor %body-script)
+   (bodies :initform '() :accessor %body-bodies))
+  (:documentation "An OpenAI-compatible provider that records, oldest first, the request body each
+call would send, and replies from SCRIPT without sending anything."))
+
+(defmethod llm:complete ((p %body-recording-openai) messages
+                         &key system tools max-tokens temperature tool-choice)
+  (declare (ignore max-tokens temperature))
+  (setf (%body-bodies p)
+        (append (%body-bodies p)
+                (list (llm:openai-request-body p messages :system system :tools tools
+                                                          :tool-choice tool-choice))))
+  (pop (%body-script p)))
+
+(test an-openai-compatible-wrap-up-keeps-the-tools-only-where-none-is-honoured
+  "#1318. On an OpenAI-compatible backend that honours tool_choice none (OpenRouter here), the
+wrap-up request body carries the same tools as the step before it, as the same bytes, and
+tool_choice \"none\".
+
+Ollama accepts \"none\" and lets the model call a tool anyway (measured: 3 of 3 calls with
+qwen3.5:9b on Ollama 0.40.16), so for the \"ollama\" backend, and for the \"openai\" backend on
+Ollama's default URL, the wrap-up is sent no tools and no tool_choice, as before #1318. That is
+the control: had the tools been kept there, the model could call one and the turn would fail
+instead of returning a :WRAPPED-UP answer."
+  (flet ((turn (&rest initargs)
+           (let* ((provider (apply #'make-instance '%body-recording-openai :model "m" :api-key "k"
+                                   :script (append (%looks 1)
+                                                   (list (llm:make-completion :text "Done."
+                                                                              :stop-reason :end)))
+                                   initargs))
+                  (runs 0)
+                  (ag (actor:make-agent :name "looker" :system-prompt "You look things up."
+                                        :provider provider)))
+             (actor:register-means ag "look" "Look something up."
+                                   (lambda (args) (declare (ignore args)) (incf runs) "Found a fact."))
+             (multiple-value-bind (text how)
+                 (actor:run-turn ag "What do you know?" :max-steps 2 :on-step-limit :wrap-up)
+               (is (equal "Done." text))
+               (is (eq :wrapped-up how)))
+             (is (= 1 runs))
+             (%body-bodies provider))))
+    (destructuring-bind (gather wrap)
+        (turn :impl "openrouter" :base-url "https://openrouter.ai/api/v1")
+      (is-true (gethash "tools" gather))
+      (is (equal (%json-of (gethash "tools" gather)) (%json-of (gethash "tools" wrap)))
+          "the wrap-up body carries the same tools as the step before it")
+      (is (equal "none" (gethash "tool_choice" wrap)) "with tool_choice none")
+      (is (null (gethash "tool_choice" gather)) "and only the wrap-up sends a tool choice"))
+    (dolist (initargs (list (list :impl "ollama" :base-url "http://localhost:11434/v1")
+                            (list :impl "openai" :base-url "http://localhost:11434/v1")
+                            (list :impl "openai" :base-url "http://gpu-box:11434/v1/")))
+      (destructuring-bind (gather wrap) (apply #'turn initargs)
+        (is-true (gethash "tools" gather) "~S: the gathering step is offered tools" initargs)
+        (is (null (gethash "tools" wrap)) "~S: the wrap-up is sent no tools" initargs)
+        (is (null (gethash "tool_choice" wrap)) "~S: and no tool choice" initargs)))
+    (is-false (llm:supports-tool-choice-p (make-instance 'llm:openai-compatible :impl "ollama"
+                                                         :model "m" :api-key "k"))
+              "Ollama ignores a forced choice as well (#1323), so it cannot force one either")))
+
+(test ollama-is-recognised-by-backend-or-port-and-cannot-force-a-tool-choice
+  "#1323. Ollama ignores every tool_choice, so an OPENAI-COMPATIBLE that talks to it cannot force
+a tool call or forbid one, and GENERATE-STRUCTURED asks it through response_format instead. It
+is recognised by its backend, compared without regard to case, or by a base URL on port 11434.
+A forced choice signals TOOL-CHOICE-UNSUPPORTED before anything is sent. The base URL in that
+case is a closed port, so a request would have failed differently.
+
+THE CONTROL is OpenRouter, and an \"openai\" backend on another port: both still force a choice
+and are not asked through response_format."
+  (flet ((make (&rest initargs)
+           (apply #'make-instance 'llm:openai-compatible :model "m" :api-key "k" initargs)))
+    (dolist (initargs (list (list :impl "ollama" :base-url "https://ollama.example.com/v1")
+                            (list :impl "Ollama" :base-url "https://ollama.example.com/v1")
+                            (list :impl "openai" :base-url "http://localhost:11434/v1")
+                            (list :impl "openai" :base-url "http://gpu-box:11434")
+                            ;; The port is read through userinfo, IPv6 brackets and a query.
+                            (list :impl "openai" :base-url "http://user:pw@gpu-box:11434/v1")
+                            (list :impl "openai" :base-url "http://[::1]:11434/v1")
+                            (list :impl "openai" :base-url "http://gpu-box:11434/v1?key=x")))
+      (let ((p (apply #'make initargs)))
+        (is-false (llm:supports-tool-choice-p p) "~S cannot force a choice" initargs)
+        (is-false (llm:honours-tool-choice-none-p p) "~S cannot forbid a call" initargs)
+        (is-true (llm:supports-response-format-p p) "~S is asked through response_format" initargs)))
+    (let ((p (make :impl "ollama" :base-url "http://127.0.0.1:1/v1")))
+      (is (typep (nth-value 1 (ignore-errors
+                               (llm:complete p '((:role :user :content "hi"))
+                                             :tools (list (%spec)) :tool-choice '(:tool "draft_copy"))))
+                 'cnd:tool-choice-unsupported)
+          "a forced choice signals before sending"))
+    (dolist (initargs (list (list :impl "openrouter" :base-url "https://openrouter.ai/api/v1")
+                            (list :impl "openai" :base-url "http://localhost:8080/v1")
+                            (list :impl "openai" :base-url "https://proxy.example.com/v1")
+                            ;; 11434 elsewhere in the URL is not its port.
+                            (list :impl "openai" :base-url "http://[::1]/v1?port=11434")
+                            (list :impl "openai" :base-url "http://user:11434@gpu-box/v1")))
+      (let ((p (apply #'make initargs)))
+        (is-true (llm:supports-tool-choice-p p) "control: ~S forces a choice" initargs)
+        (is-false (llm:supports-response-format-p p) "control: ~S is asked through a tool call"
+                  initargs)))))
+
+(test generate-structured-on-ollama-asks-through-response-format
+  "#1323. On Ollama, GENERATE-STRUCTURED sends the spec's schema as response_format json_schema,
+offers no tools and sends no tool_choice, and returns the JSON object in the reply's text."
+  (multiple-value-bind (port server)
+      (%serve-replies (list (%meta-text-reply "{\"headline\":\"Spring\",\"characters\":6}")))
+    (let* ((p (make-instance 'llm:openai-compatible :impl "ollama" :api-key "k" :model "m"
+                                                    :base-url (format nil "http://127.0.0.1:~D/v1" port)))
+           (result (llm:generate-structured p '((:role :user :content "Write a headline."))
+                                            (%spec)))
+           (request (first (aion/test-threads:join server :timeout 10)))
+           (sent (jzon:parse (third request))))
+      (is (string= "json_schema" (gethash "type" (gethash "response_format" sent))))
+      (is (null (nth-value 1 (gethash "tools" sent))) "no tools are offered")
+      (is (null (nth-value 1 (gethash "tool_choice" sent))) "and no tool_choice is sent")
+      (is (equal "Spring" (gethash "headline" result))))))
 
 (test a-turn-that-answers-before-its-last-step-is-not-wrapped-up
   "#1182. :WRAP-UP changes only the last step. A turn that answers on its first step was offered
@@ -9869,16 +10363,18 @@ tools as usual, and returns its text with no :WRAPPED-UP."
       (is-true (getf (first (%recording-requests provider)) :tools) "tools were offered"))))
 
 (test a-wrap-up-that-asks-for-tools-fails-without-running-or-recording-them
-  "#1182. No tools are offered on the wrap-up, but a model can still return a call. It is not run
-and not appended, because the turn has no step left for its result and a call without a result
-would break the next turn. The turn fails as it did without the option."
-  (multiple-value-bind (ag provider runs) (%looking-agent (%looks 2))
-    (declare (ignore provider))
-    (signals cnd:deliberation-failure
-      (actor:run-turn ag "What do you know?" :max-steps 2 :on-step-limit :wrap-up))
-    (is (= 1 (funcall runs)) "only the gathering step's call ran")
-    (is-false (search "l2" (format nil "~S" (actor:agent-history ag)))
-              "the wrap-up's call is not in the history")))
+  "#1182. The wrap-up forbids a tool call, but a model can still return one. It is not run and
+not appended, because the turn has no step left for its result and a call without a result would
+break the next turn. The turn fails as it did without the option. The same holds whether the
+wrap-up was sent no tools or the same tools with the choice :NONE (#1318)."
+  (dolist (tool-choice-p '(nil t))
+    (multiple-value-bind (ag provider runs) (%looking-agent (%looks 2) :tool-choice-p tool-choice-p)
+      (declare (ignore provider))
+      (signals cnd:deliberation-failure
+        (actor:run-turn ag "What do you know?" :max-steps 2 :on-step-limit :wrap-up))
+      (is (= 1 (funcall runs)) "only the gathering step's call ran")
+      (is-false (search "l2" (format nil "~S" (actor:agent-history ag)))
+                "the wrap-up's call is not in the history"))))
 
 (test on-step-limit-is-checked-before-anything-is-recorded
   "#1182. :ON-STEP-LIMIT takes NIL or :WRAP-UP, and :WRAP-UP needs at least two steps, one to

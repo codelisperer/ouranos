@@ -1580,8 +1580,8 @@ stream holds a worker, and the end of the stream is seen as the connection closi
                                                             :element-type 'character
                                                             :external-format :utf-8))
                    (text ""))
-               (format st "GET /api/events?ticket=~A HTTP/1.1~C~CHost: 127.0.0.1~C~CConnection: close~C~C~C~C"
-                       ticket #\Return #\Linefeed #\Return #\Linefeed #\Return #\Linefeed
+               (format st "GET /api/events?ticket=~A HTTP/1.1~C~CHost: 127.0.0.1:~D~C~CConnection: close~C~C~C~C"
+                       ticket #\Return #\Linefeed port #\Return #\Linefeed #\Return #\Linefeed
                        #\Return #\Linefeed)
                (finish-output st)
                (handler-case

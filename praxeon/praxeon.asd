@@ -18,6 +18,11 @@
 ;;; first in that case.
 (pushnew :hunchentoot-no-ssl *features*)
 
+;;; dexador without cl+ssl on macOS (#905): see the same form at the top of aion/aion.asd. It is
+;;; repeated here because this file names dexador, and ASDF may resolve that dependency before it
+;;; reads aion.asd.
+#+os-macosx (pushnew :dexador-no-ssl *features*)
+
 (defsystem "praxeon"
   :description "A praxeological framework for agentic AI in Common Lisp + Coalton."
   :author "Bob <eternal.recursion@proton.me>"
@@ -186,7 +191,8 @@
   :description "Clean-room probe: praxeon retrieval on the SQLite a desktop bundle carries (#899)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
-  :depends-on ("praxeon" "praxeon/retrieval" "mnemosyne")
+  ;; aion/http-client for the optional --https request (#905); praxeon already loads it.
+  :depends-on ("praxeon" "praxeon/retrieval" "mnemosyne" "aion/http-client")
   :components ((:module "examples/sqlite-probe"
                 :components ((:file "app")))))
 
@@ -399,6 +405,7 @@
                "quri"                 ; the #1034 tests read a provider's request URL as the request does
                "fiveam"
                "aion/test-threads"    ; the #531 tests continue a held turn on another thread
+               "aion/dynamic"         ; the #1172 test starts a thread through INHERITING
                ;; The #678 tests answer the meta impl from a server on 127.0.0.1. An SBCL
                ;; contrib, declared because it otherwise arrives only through usocket.
                (:require "sb-bsd-sockets"))
@@ -418,7 +425,12 @@
                              ;; #827: untrusted content in a turn, using the stub reader pattern
                              (:file "reader-guard-tests")
                              ;; #984: streaming a completion from stub servers, and cancelling it
-                             (:file "stream-tests"))))
+                             (:file "stream-tests")
+                             ;; #1293: a provider set to stay local, after stream-tests
+                             (:file "stay-local-tests")
+                             ;; #1172: vendor-specific request fields, after stream-tests,
+                             ;; whose stub servers it uses
+                             (:file "extra-body-tests"))))
   :perform (test-op (op c)
              (uiop:symbol-call :fiveam :run! (uiop:find-symbol* :praxeon :praxeon/tests))))
 

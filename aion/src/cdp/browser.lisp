@@ -31,20 +31,28 @@ on Windows for a moment, so a failure is retried for up to two seconds, and then
         finally (log:warn "aion/cdp: the browser's temporary directory could not be deleted"
                           :directory (uiop:native-namestring dir))))
 
-(defun launch-browser (&key executable arguments (timeout *default-timeout*) (transport :port))
+(defun launch-browser (&key executable arguments (timeout *default-timeout*)
+                            (transport +default-transport+))
   "Start a browser headless, with a fresh profile, connect to it, and return a BROWSER.
 
 EXECUTABLE is the browser to run; by default FIND-BROWSER's answer. ARGUMENTS are extra
 command-line arguments, checked by CHECK-BROWSER-ARGUMENTS before anything starts: none may
 set the headless mode, the debugging port or pipe, or the profile. BROWSER-COMMAND-LINE gives
 the exact command line. TIMEOUT is how many seconds the browser has to start and answer.
-TRANSPORT is :PORT, the only one until the pipe transport arrives (#1028, step (c)).
+
+TRANSPORT is how this process reaches the browser:
+- :PIPE, the default: --remote-debugging-pipe. No debugging port is opened, so no other local
+  process can reach the browser. On Linux and macOS the browser is started through
+  aion/uv/process, which needs libuv; without it LAUNCH-BROWSER signals an error naming :PORT,
+  and does not fall back by itself. On Windows it is started by aion/windows:spawn-in-job,
+  which needs no libuv.
+- :PORT: --remote-debugging-port=0, read back from the profile's DevToolsActivePort. Any local
+  process can connect to that port while the browser runs.
 
 Signals BROWSER-NOT-FOUND, BROWSER-EXITED or CDP-TIMEOUT. On any failure the process is ended
 and its profile deleted. CLOSE-BROWSER ends a browser that started; WITH-BROWSER calls it."
-  (unless (eq transport :port)
-    (error "LAUNCH-BROWSER's transport is :PORT; the pipe transport is step (c) of #1028. Got ~S."
-           transport))
+  (unless (member transport '(:pipe :port))
+    (error "LAUNCH-BROWSER's transport is :PIPE or :PORT; got ~S." transport))
   (check-browser-arguments arguments)
   (let ((exe (or executable (find-browser) (error 'browser-not-found))))
     (unless (probe-file (uiop:parse-native-namestring exe))
@@ -58,32 +66,50 @@ and its profile deleted. CLOSE-BROWSER ends a browser that started; WITH-BROWSER
       (unwind-protect
            (progn
              (ensure-directories-exist profile)
-             (setf process (%spawn (browser-command-line
-                                    exe (string-right-trim "/\\" (uiop:native-namestring profile))
-                                    :arguments arguments)
-                                   stderr))
-             (multiple-value-bind (port path)
-                 (loop
-                   (multiple-value-bind (port path) (%read-active-port profile)
-                     (when port (return (values port path))))
-                   (unless (%alive-p process)
-                     (error 'browser-exited :code (%exit-code process) :output (%file-tail stderr)))
-                   (when (<= (%remaining deadline) 0)
-                     (error 'cdp-timeout :what "The browser's start" :seconds timeout))
-                   (sleep 0.05))
-               (setf connection (%open-connection "127.0.0.1" port path
-                                                  (max 1 (%remaining deadline))))
-               (let ((b (%make-browser connection :process process :directory dir
-                                                  :stderr stderr)))
-                 (setf (browser-version b)
-                       (json-get (%command connection "Browser.getVersion" nil nil
-                                           (max 1 (%remaining deadline)))
-                                 "product"))
-                 (log:info "aion/cdp: browser started" :pid (%pid process)
-                                                       :version (browser-version b)
-                                                       :ms (round (* 1000 (- (get-internal-real-time) started))
-                                                                  internal-time-units-per-second))
-                 (setf browser b))))
+             (let ((line (browser-command-line
+                          exe (string-right-trim "/\\" (uiop:native-namestring profile))
+                          :arguments arguments :transport transport)))
+               (ecase transport
+                 (:pipe
+                  (multiple-value-bind (p to-browser from-browser) (%spawn-piped line stderr)
+                    (setf process p
+                          connection (%open-pipe-connection from-browser to-browser))))
+                 (:port
+                  (setf process (%spawn line stderr))
+                  (multiple-value-bind (port path)
+                      (loop
+                        (multiple-value-bind (port path) (%read-active-port profile)
+                          (when port (return (values port path))))
+                        (unless (%alive-p process)
+                          (error 'browser-exited :code (%exit-code process)
+                                                 :signal (%exit-signal process)
+                                                 :output (%file-tail stderr)))
+                        (when (<= (%remaining deadline) 0)
+                          (error 'cdp-timeout :what "The browser's start" :seconds timeout))
+                        (sleep 0.05))
+                    (setf connection (%open-connection "127.0.0.1" port path
+                                                       (max 1 (%remaining deadline))))))))
+             (let ((b (%make-browser connection :process process :directory dir
+                                                :stderr stderr)))
+               (setf (browser-version b)
+                     (json-get (handler-case
+                                   (%command connection "Browser.getVersion" nil nil
+                                             (max 1 (%remaining deadline)))
+                                 (connection-closed (c)
+                                   ;; Over the pipe, a browser that exits at once shows first as
+                                   ;; its end of the pipe closing.
+                                   (if (%wait-for-exit process 2)
+                                       (error 'browser-exited :code (%exit-code process)
+                                                              :signal (%exit-signal process)
+                                                              :output (%file-tail stderr))
+                                       (error c))))
+                               "product"))
+               (log:info "aion/cdp: browser started" :pid (%pid process)
+                                                     :version (browser-version b)
+                                                     :transport transport
+                                                     :ms (round (* 1000 (- (get-internal-real-time) started))
+                                                                internal-time-units-per-second))
+               (setf browser b)))
         (unless browser
           (when connection (%shutdown-connection connection))
           (when process (%kill process))
@@ -245,7 +271,7 @@ removing anything. Signals CDP-TIMEOUT, TARGET-CRASHED or CONNECTION-CLOSED."
           (error 'connection-closed :reason (connection-close-reason connection)))
         (let ((left (%remaining deadline)))
           (when (<= left 0) (error 'cdp-timeout :what what :seconds timeout))
-          (sb-thread:condition-wait (connection-queue connection) lock :timeout left))))))
+          (%wait-on connection left))))))
 
 ;;; --- commands -------------------------------------------------------------------------------
 

@@ -116,7 +116,14 @@ a read from BODY signals REQUEST-CANCELLED, and so does this function when the c
 first. A connect or TLS failure signals HTTP-ERROR.
 
 The request asks for an uncompressed body (Accept-Encoding: identity), so each piece can be
-read as it arrives. RESOLVE is for tests."
+read as it arrives. RESOLVE is for tests.
+
+A REQUEST MARKED :STAY-LOCAL (#1212) whose host is not loopback by LOOPBACK-HOST-P signals
+STAY-LOCAL-REFUSED before RESOLVE is called, and so does one whose host resolves to an address
+that is not loopback. No proxy is involved here in any case: the connection is opened directly."
+  ;; A :STAY-LOCAL request to a host that is not loopback is refused before RESOLVE runs, and its
+  ;; resolved address is checked again below (#1212).
+  (%refuse-unless-stays-local request)
   (let* ((watch (%make-watch))
          (*%watch* watch)
          (uri (quri:uri (request-url request)))
@@ -124,8 +131,9 @@ read as it arrives. RESOLVE is for tests."
                       (error 'http-error :detail (format nil "~A does not resolve"
                                                          (quri:uri-host uri)))))
          (req (copy-request request)))
-    (setf (request-connect-address req) address
-          (request-follow-redirects req) nil
+    (setf (request-connect-address req) address)
+    (%refuse-unless-stays-local req)
+    (setf (request-follow-redirects req) nil
           ;; Set only so %REQUEST-PINNED hands the body back unread; nothing here caps it.
           (request-max-body-bytes req) most-positive-fixnum
           (request-headers req) (cons '("Accept-Encoding" . "identity")

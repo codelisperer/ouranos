@@ -1,0 +1,9 @@
+dyld[8236]: <37977A52-5625-3692-AE6F-453406B71C71> /Applications/Example App.app/Contents/MacOS/sqlite-probe
+dyld[8236]: <DEAF2098-8EDD-3E5D-A821-F63A14D6C055> /usr/lib/libSystem.B.dylib
+dyld[8236]: <CAC97455-F919-359C-A17A-C78B62163965> /Applications/Example App.app/Contents/MacOS/sbcl
+dyld[8236]: <DEAF2098-8EDD-3E5D-A821-F63A14D6C055> /usr/lib/libSystem.B.dylib
+dyld[8236]: <DD2F9F90-8416-3BDC-BE13-A73BEF19C512> /Applications/Example App.app/Contents/MacOS/libsqlite3.dylib
+dyld[8236]: <36AF1D09-C97F-3FD7-B948-67DDC28C0CBD> /usr/lib/libsqlite3.dylib
+dyld[8236]: <FD30C4EE-0826-377F-8791-F5C7797BBA75> /System/Library/Frameworks/Security.framework/Versions/A/Security
+dyld[8236]: <43218186-B657-3423-B8B8-9660BEECB690> /usr/lib/libcrypto.46.dylib
+dyld[8236]: <EACC7867-BDF0-3D8A-BD4B-8A940DD2C5DA> /usr/lib/libssl.48.dylib

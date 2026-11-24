@@ -29,15 +29,23 @@
   '(#+darwin "--use-mock-keychain" #+linux "--password-store=basic")
   "Written out here rather than read from the driver, so a change to them shows in this file.")
 
-(test the-command-line-is-headless-with-a-fresh-profile-and-port-0
+(defparameter +default-debugging-switch+ "--remote-debugging-pipe"
+  "The pipe, on Linux, macOS and Windows (#1028, step (c)).")
+
+(test the-command-line-is-headless-with-a-fresh-profile-and-the-pipe-by-default
   (is (equal `("/b/chrome" "--lang=en"
-               "--headless=new" "--remote-debugging-port=0" "--user-data-dir=/tmp/p"
+               "--headless=new" ,+default-debugging-switch+ "--user-data-dir=/tmp/p"
                "--no-first-run" "--no-default-browser-check" ,@+keychain+ "about:blank")
              (cdp:browser-command-line "/b/chrome" "/tmp/p" :arguments '("--lang=en"))))
   (is (equal `("/b/chrome"
                "--headless=new" "--remote-debugging-port=0" "--user-data-dir=/tmp/p"
                "--no-first-run" "--no-default-browser-check" ,@+keychain+ "about:blank")
-             (cdp:browser-command-line "/b/chrome" "/tmp/p")))
+             (cdp:browser-command-line "/b/chrome" "/tmp/p" :transport :port)))
+  (is (equal `("/b/chrome"
+               "--headless=new" "--remote-debugging-pipe" "--user-data-dir=/tmp/p"
+               "--no-first-run" "--no-default-browser-check" ,@+keychain+ "about:blank")
+             (cdp:browser-command-line "/b/chrome" "/tmp/p" :transport :pipe)))
+  (signals error (cdp:browser-command-line "/b/chrome" "/tmp/p" :transport :socket))
   #+darwin (is (member "--use-mock-keychain" (cdp:browser-command-line "/b/c" "/p") :test #'equal)
                "on macOS the browser never opens the real Keychain")
   #+linux (is (member "--password-store=basic" (cdp:browser-command-line "/b/c" "/p") :test #'equal)
@@ -69,8 +77,11 @@
 (test launch-browser-names-a-missing-executable
   (signals cdp:browser-not-found (cdp:launch-browser :executable "/no/such/browser")))
 
-(test launch-browser-has-only-the-port-transport-until-step-c
-  (signals error (cdp:launch-browser :executable "/no/such/browser" :transport :pipe)))
+(test launch-browser-refuses-an-unknown-transport
+  (signals error (cdp:launch-browser :executable "/no/such/browser" :transport :socket))
+  ;; Both transports are accepted on every platform, so the missing executable is what is reported.
+  (signals cdp:browser-not-found
+    (cdp:launch-browser :executable "/no/such/browser" :transport :pipe)))
 
 (defmacro with-env ((&rest names-and-values) &body body)
   "Run BODY with each environment variable set to its value (\"\" for unset), restoring them."
@@ -309,6 +320,21 @@
     (signals cdp:cdp-timeout (cdp:send browser "Test.silent" :timeout 0.3))
     (is (equal "Fake/1.0" (cdp:json-get (cdp:send browser "Browser.getVersion") "product"))
         "the connection still works after a timeout")))
+
+(test a-timed-out-wait-still-holds-the-state-lock
+  "SB-THREAD:CONDITION-WAIT gives up the lock when it times out. %WAIT-ON must take it back, or the
+caller's next wait or its WITH-MUTEX acts on a lock it does not hold."
+  (let* ((connection (cdp::%make-connection nil "test"))
+         (lock (cdp::connection-lock connection)))
+    (sb-thread:with-mutex (lock)
+      (let ((results (loop repeat 50
+                           collect (list (cdp::%wait-on connection 0.0001)
+                                         (sb-thread:holding-mutex-p lock)))))
+        ;; CONDITION-WAIT may return true without a notify (a spurious wakeup), so a single wait
+        ;; returning true is not a defect. What has to hold is that waits time out at all.
+        (is (some #'null (mapcar #'first results)) "nothing woke it, so the waits timed out")
+        (is (every #'second results) "the lock is held after every timed-out wait")))
+    (is (not (sb-thread:holding-mutex-p lock)) "WITH-MUTEX released it on the way out")))
 
 (test events-reach-their-page-in-order-and-drain
   (with-fake (fake browser)

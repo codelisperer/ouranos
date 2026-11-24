@@ -30,6 +30,11 @@
 ;;; praxeon/praxeon.asd, for an app whose first dependency is a praxeon system.
 (pushnew :hunchentoot-no-ssl *features*)
 
+;;; dexador without cl+ssl on macOS (#905): see the same form at the top of aion/aion.asd. It is
+;;; repeated here because this file names dexador, and ASDF may resolve that dependency before it
+;;; reads aion.asd.
+#+os-macosx (pushnew :dexador-no-ssl *features*)
+
 (defsystem "hyperion"
   :description "A full-stack, HTMX-first web framework for Common Lisp (Coalton core)."
   :author "Bob <eternal.recursion@proton.me>"

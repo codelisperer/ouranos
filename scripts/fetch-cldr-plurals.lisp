@@ -22,8 +22,12 @@
 
 (require :asdf)
 (load (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))
+;; DEXADOR THROUGH aion/http-client, not by name (#905). On macOS aion.asd pushes
+;; :DEXADOR-NO-SSL before dexador is compiled and aion/http-client gives dexador its TLS over
+;; aion/tls. A quickload of dexador by name compiled it with cl+ssl into the machine's shared
+;; fasl cache, and every image that loaded aion afterwards stopped at aion.asd's check for that.
 (handler-bind ((warning #'muffle-warning))
-  (ql:quickload '(:dexador :com.inuoe.jzon :ironclad) :silent t))
+  (ql:quickload '(:aion/http-client :com.inuoe.jzon :ironclad) :silent t))
 
 (defpackage #:cldr-plurals (:use #:cl))
 (in-package #:cldr-plurals)

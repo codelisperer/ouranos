@@ -20,7 +20,17 @@ systems, which may reach right:
 - `dokimasia/elenchon`: cases derived from an elenchon decision table.
 
 The design is [ADR-0001](docs/adr/0001-browser-driver-and-acceptance-harness.md), and the
-work is tracked on #1028 (label `pkg:dokimasia`). No code has landed yet.
+work is tracked on #1028 (label `pkg:dokimasia`). Step b1 is the harness against a URL or a
+started app: `dokimasia/core` (the verdict, in Coalton) and `dokimasia` (definitions, targets,
+steps, the checks after every step, the report and the run). The user guide is
+[`README.md`](README.md). Step b2 adds the `:audit` step, which runs the vendored axe-core
+(`vendor/`, pinned in `vendor/ASSETS.pin`) in the page once for each colour scheme. Step b3's
+first part is `dokimasia/mnemosyne` (`src/mnemosyne/`): `define-row-probe` and
+`define-query-probe`, stored-data probes that read the app's database through mnemosyne. Its
+tests use a SQLite file and no browser. Its second part is `dokimasia/hyperion` (`src/hyperion/`):
+`hyperion-target`, which starts a hyperion app on a free port with a scratch SQLite database,
+waits for htmx in its settle check, and can sign a user in with a session made in the app's
+store. Its tests run a small hyperion app written in the suite, on `hyperion/server-uv` (#373).
 
 ## Design facts
 
@@ -39,5 +49,6 @@ work is tracked on #1028 (label `pkg:dokimasia`). No code has landed yet.
 
 ## Where to look
 
-[`docs/adr/`](docs/adr/README.md) · #1028 · `aion/cdp` and `aion/websocket` once step (a)
-lands.
+[`docs/adr/`](docs/adr/README.md) · #1028 · `aion/cdp` and `aion/websocket` ·
+`src/core/core.lisp` (the verdict rule) · `src/run.lisp` (one FiveAM test per case and row) ·
+`tests/server.lisp` (the HTTP app the browser tests run against).

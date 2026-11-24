@@ -93,7 +93,7 @@ is NIL, Connection: close, and BODY, a string (sent as UTF-8) or octets."
            (n (read-sequence buffer in)))
       (subseq buffer 0 n))))
 
-#+os-windows
+#+(or os-windows os-macosx)
 (defun %aion-tls-server-config (certificate key)
   "An aion/tls server config presenting the PEM files CERTIFICATE and KEY (#536)."
   (uiop:symbol-call :aion/tls :make-server-config
@@ -105,8 +105,8 @@ is NIL, Connection: close, and BODY, a string (sent as UTF-8) or octets."
   "Start a server on 127.0.0.1, on a port the system chooses, and return it. HANDLER is a
 function of (REQUEST STREAM) that writes the response. Every request is recorded, and so is
 its head (SERVER-HEADS, newest first). With TLS-CERTIFICATE and TLS-KEY, pathnames of PEM
-files, the server speaks TLS: through cl+ssl, and on Windows, where nothing in the tree loads
-OpenSSL, through aion/tls (#536). Either is reached by name, so the system that asks for TLS
+files, the server speaks TLS: through cl+ssl on Linux, and on Windows and macOS, where nothing
+in the tree loads OpenSSL, through aion/tls (#536, #905). Either is reached by name, so the system that asks for TLS
 loads the library and this one does not.
 
 By default the server answers one connection at a time, in the order accepted. With CONCURRENT
@@ -117,8 +117,9 @@ else meanwhile (#999, where the request for one page waited 38 seconds behind su
 connection). A connection's thread ends when the client closes the connection. STOP-SERVER does
 not wait for it, so a client that never closes its connection leaves that thread blocked in
 %READ-REQUEST after STOP-SERVER has returned."
-  (let* ((tls-config #+os-windows (and tls-certificate (%aion-tls-server-config tls-certificate tls-key))
-                     #-os-windows nil)
+  (let* ((tls-config #+(or os-windows os-macosx)
+                     (and tls-certificate (%aion-tls-server-config tls-certificate tls-key))
+                     #-(or os-windows os-macosx) nil)
          (listener (usocket:socket-listen "127.0.0.1" 0 :reuse-address t
                                                         :element-type '(unsigned-byte 8)))
          (server (make-server :port (usocket:get-local-port listener) :heads '()
@@ -142,13 +143,13 @@ not wait for it, so a client that never closes its connection leaves that thread
                             (unwind-protect
                                  (ignore-errors
                                   (let ((stream (usocket:socket-stream conn)))
-                                    #-os-windows
+                                    #-(or os-windows os-macosx)
                                     (when tls-certificate
                                       (setf stream (uiop:symbol-call
                                                     :cl+ssl :make-ssl-server-stream stream
                                                     :certificate (namestring tls-certificate)
                                                     :key (namestring tls-key))))
-                                    #+os-windows
+                                    #+(or os-windows os-macosx)
                                     (when tls-config
                                       (setf stream (uiop:symbol-call :aion/tls :make-tls-stream
                                                                      stream tls-config)))
