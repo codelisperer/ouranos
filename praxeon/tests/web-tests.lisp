@@ -462,6 +462,87 @@ posts there, escaped, and nowhere else."
   (signals type-error (praxeon/chat-ui:composer :action nil)))
 
 ;;; --------------------------------------------------------------------------
+;;; The composer as a host's own message form (#1335)
+;;; --------------------------------------------------------------------------
+
+(defun %quotes-removed (html)
+  "HTML with its double quotes removed, because spinneret quotes an attribute value only when it
+has to, and these tests are about the values."
+  (remove #\" html))
+
+(defun %tag-of (html id)
+  "The opening tag of the element with ID in HTML, quotes removed, or NIL."
+  (let* ((html (%quotes-removed html))
+         (at (search (format nil "id=~A" id) html))
+         (open (and at (position #\< html :end at :from-end t))))
+    (and open (subseq html open (1+ (position #\> html :start at))))))
+
+(test the-composer-clears-the-form-only-after-its-own-post-succeeds
+  "The form resets on htmx:afterRequest when the request succeeded and came from the form itself,
+so a refused post leaves the message in the box, and the Stop button's request inside the form
+does not clear it. Before #1335 it reset on submit. Control: the handler checks both conditions;
+removing either would fail the two SEARCHes for them."
+  (let* ((html (praxeon/chat-ui:composer))
+         (form (subseq html 0 (1+ (position #\> html)))))
+    (is (null (search "onsubmit" html)) "the form still resets on submit: ~S" form)
+    (is (search "hx-on::after-request" form) "~S" form)
+    (is (search "event.detail.successful" form) "~S" form)
+    (is (search "event.detail.elt===this" form) "~S" form)
+    (is (search "this.reset()" form) "~S" form)))
+
+(test the-composer-s-defaults-are-the-form-it-rendered-before
+  "With no new keywords: no label, the same placeholder, autofocus unless disabled, no maxlength,
+hx-swap none and no hx-target or hx-include, and no hidden inputs."
+  (let ((html (%quotes-removed (praxeon/chat-ui:composer)))
+        (box (%tag-of (praxeon/chat-ui:composer) "msg")))
+    (is (null (search "<label" html)))
+    (is (search "Say something" box) "~S" box)
+    (is (search "autofocus" box) "~S" box)
+    (is (null (search "maxlength" box)) "~S" box)
+    (is (search "hx-swap=none" html))
+    (is (null (search "hx-target" html)))
+    (is (null (search "hx-include" html)))
+    (is (null (search "type=hidden" html))))
+  (is (null (search "autofocus" (%tag-of (praxeon/chat-ui:composer :disabled t) "msg")))
+      "a disabled composer takes no focus"))
+
+(test the-composer-takes-a-label-placeholder-autofocus-and-maxlength
+  (let* ((html (praxeon/chat-ui:composer :label "Your message <to the editor>"
+                                         :placeholder "Ask about this chapter"
+                                         :autofocus nil :maxlength 4000))
+         (box (%tag-of html "msg")))
+    (is (search "<label class=label for=msg>Your message &lt;to the editor&gt;</label>"
+                (%quotes-removed html))
+        "the label is not tied to the box, or not escaped: ~S" html)
+    (is (search "placeholder=Ask about this chapter" box) "~S" box)
+    (is (null (search "Say something" box)))
+    (is (null (search "autofocus" box)) "~S" box)
+    (is (search "maxlength=4000" box) "~S" box))
+  (is (null (search "placeholder" (%tag-of (praxeon/chat-ui:composer :placeholder nil) "msg"))))
+  (signals type-error (praxeon/chat-ui:composer :maxlength 0))
+  (signals type-error (praxeon/chat-ui:composer :label 'yes)))
+
+(test the-composer-sends-hidden-fields-and-takes-the-form-s-htmx-attributes
+  "HIDDEN-FIELDS are inputs inside the form, so htmx sends them with each message; values are
+escaped so they cannot end their attribute. HX-TARGET, HX-SWAP and HX-INCLUDE replace the form's
+defaults."
+  (let ((html (%quotes-removed
+               (praxeon/chat-ui:composer
+                :hidden-fields '(("project" . "p-7") ("doc" . "a\"b<c"))
+                :hx-target "#log" :hx-swap "beforeend" :hx-include "#context"))))
+    (is (search "<input type=hidden name=project value=p-7>" html) "~S" html)
+    ;; A double quote in the value is escaped, so it cannot end the attribute; a < inside a quoted
+    ;; attribute value is valid HTML and is left as it is.
+    (is (search "name=doc value=a&quot;b<c>" html) "the value is not escaped: ~S" html)
+    (is (< (search "<form" html) (search "name=project" html) (search "</form>" html))
+        "the hidden field is not inside the form")
+    (is (search "hx-target=#log" html))
+    (is (search "hx-swap=beforeend" html))
+    (is (search "hx-include=#context" html)))
+  (dolist (bad '((("message" . "x")) (("doc" . 7)) (("" . "x")) "doc=1" (("doc"))))
+    (signals error (praxeon/chat-ui:composer :hidden-fields bad))))
+
+;;; --------------------------------------------------------------------------
 ;;; A web turn logs with the request's context (#160)
 ;;; --------------------------------------------------------------------------
 ;;;
