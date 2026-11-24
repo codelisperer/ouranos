@@ -266,6 +266,32 @@ The keywords, each defaulting to the form praxeon/web uses:
   rendered message passes, for example, `:hx-target "#log" :hx-swap "beforeend"`.
 - `:cancel-action`, the route of the Stop button described above, with no button by default.
 
+### Drawing the bubbles yourself
+
+An app that wants different markup in a bubble, such as an avatar, a timestamp, sources under a
+reply or buttons on a proposal, passes `:render-item` to `make-app`, `start` or `serve-forever`
+(#1340). It is called with the agent's name and a copy of each transcript item, and returns the
+item's HTML as a string, or `nil` to keep the default bubble:
+
+```lisp
+(praxeon/web:start
+ :agent agent
+ :render-item (lambda (agent-name item)
+                (when (eq (getf item :kind) :assistant)
+                  (format nil "<div class=\"my-reply\">~A</div>"
+                          (praxeon/chat-ui:assistant-bubble agent-name (getf item :text))))))
+```
+
+The items are plists: `(:kind :user :turn n :text text)`, `(:kind :assistant :turn n :text text)`
+and `(:kind :turn-ended :turn n :outcome outcome)`, with `:message` when the outcome is `:error`.
+The page, the poll and the event stream all draw items through the renderer. The reply shown
+while the model writes it is not an item and keeps the default bubble.
+
+What the renderer returns goes into the page unescaped. A renderer that writes a message's text
+into its own HTML escapes it first. One that calls `praxeon/chat-ui:assistant-bubble` passes
+`:images` and `:links` itself, as described under "Images and links in the agent's replies",
+because `:trusted-replies` applies only to the default bubbles.
+
 ### Talk to Elise in your language
 
 Elise ships an i18n dictionary (`examples/elise/resources/i18n/{en,es,ru}.json`) —

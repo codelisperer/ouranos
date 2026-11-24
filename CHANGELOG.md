@@ -1929,6 +1929,15 @@ its tag.
 
 ### Added
 
+- **praxeon/web: an app can draw the chat's bubbles itself** (#1340, part of #67).
+  `praxeon/web:make-app`, `start` and `serve-forever` take `:render-item`, a function of the
+  agent's name and a copy of a transcript item (a plist with `:kind` `:user`, `:assistant` or
+  `:turn-ended`, `:turn`, and `:text`, or `:outcome` and `:message`). It returns the item's HTML
+  as a string, or `nil` for the default bubble. The page, the poll and the event stream all use
+  it. Its output goes into the page as it is, so a renderer that writes a message's text into its
+  own HTML escapes it; `:trusted-replies` applies only to the default bubbles. With no
+  `:render-item`, the items are the same bytes as before.
+
 - **praxeon/chat-ui: `composer` takes the options a host needs to use it as its own message
   form** (#1335). `:label` shows a visible `<label>` tied to the box, `#msg`; `:placeholder`
   (`nil` for none), `:autofocus` (true unless `:disabled`) and `:maxlength` set the box;
