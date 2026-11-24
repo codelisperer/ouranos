@@ -466,11 +466,13 @@
                "hyperion/assets/tests" "hyperion/test-ports"  ; the embed test's headless browser
                "aion/cdp"                    ; FIND-BROWSER names that browser (#1028)
                "clack-handler-hunchentoot" "fiveam" "aion/test-threads" "aion/log"
-               "aion/signature" "com.inuoe.jzon")  ; the #67 tests mint grants and read JSON
+               "aion/signature" "com.inuoe.jzon"  ; the #67 tests mint grants and read JSON
+               "aion/test-http" "aion/http-client")  ; the #1339 tests: a stub provider, a request
   :serial t
   :components ((:module "tests"
                 :serial t
-                :components ((:file "web-tests"))))
+                :components ((:file "web-tests")
+                             (:file "web-stream-tests"))))
   :perform (test-op (op c)
              (uiop:symbol-call :fiveam :run!
                                (uiop:find-symbol* :praxeon-web :praxeon/web/tests))))

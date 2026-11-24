@@ -256,11 +256,11 @@ rendering changed for the rest of the process."
   ;; the bug fully present. Measured: under the reverted fix this test failed `f.\', one of two.
   ;; So the non-dev case runs against a :pretty image and the dev case against a :compact one.
   (let ((out:*output-style* :pretty))
-    (web::%build-app nil "Guest" "Guest" #'identity nil nil nil nil nil nil nil nil nil nil nil nil :poll nil nil)
+    (web::%build-app nil "Guest" "Guest" #'identity nil nil nil nil nil nil nil nil nil nil nil nil :poll nil nil :auto)
     (is (eq :pretty out:*output-style*)
         "a :pretty host survives a non-dev agent surface, which the defect would set :compact"))
   (let ((out:*output-style* :compact))
-    (web::%build-app nil "Guest" "Guest" #'identity nil nil t nil nil nil nil nil nil nil nil nil :poll nil nil)
+    (web::%build-app nil "Guest" "Guest" #'identity nil nil t nil nil nil nil nil nil nil nil nil :poll nil nil :auto)
     (is (eq :compact out:*output-style*)
         "and a :compact host survives a :dev one, which the defect would set :pretty")))
 
@@ -438,7 +438,7 @@ user's own message, in the same page, has both."
          (page (lambda (trusted)
                  (%articles (nth-value 2 (%call (web::%build-app agent "R" "R" #'identity nil nil
                                                                  nil nil nil nil nil nil nil nil
-                                                                 nil nil :poll nil trusted)
+                                                                 nil nil :poll nil trusted :auto)
                                                 :get "/"))
                             "px-assistant"))))
     (is (not (%fetches-or-follows-p (funcall page nil))))

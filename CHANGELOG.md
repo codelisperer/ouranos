@@ -1736,6 +1736,12 @@ its tag.
   zero such as `0127.0.0.1`. `localhost`, 127.0.0.0/8, `::1` and `::ffff:127.0.0.1` are still
   true. An app that worked around this by checking for those prefixes itself can drop the check.
 
+- **praxeon/web: `start` and `serve-forever` called without `:responder` run their turns**
+  (#1339). Their default responder was `praxeon/actor:run-turn`, which the app calls with the
+  locale as a third argument; `run-turn` read that as a keyword with no value, so every turn
+  ended with "odd number of &KEY arguments". Both now default to the same responder as
+  `make-app`. An app that passed its own `:responder` was not affected.
+
 - **praxeon: with `:cache-messages t`, an app that replaces `agent-history` with another
   conversation has all of it sent again when it fits** (#1317, follow-up to #1321). The trim
   point was kept as an index into the history, so a replacement of the same length or longer
@@ -1925,6 +1931,21 @@ its tag.
     literal `<br/>` into the attribute before.
 
 ### Added
+
+- **praxeon/web: the chat page shows the agent's reply while the model writes it, and a Stop
+  button ends the turn** (#1339). While a model call streams, each page update carries the text
+  so far in the agent's bubble, as a `#px-draft` element at the end of `#chat`; the finished reply
+  replaces it. `praxeon/web:make-app`, `start` and `serve-forever` take `:stream-text`: `:auto`,
+  the default, shows the draft only when the app gives no `:responder`, because a responder such
+  as a guardrail or a translator can change the reply after the model wrote it; `t` shows it for
+  any responder, and `nil` never. The new route `POST /api/cancel` stops the turn that is running
+  through `praxeon/actor:*turn-cancel*`, which closes the provider's connection; the turn ends
+  with a `:turn-ended` item whose outcome is `:cancelled`, the page shows "Stopped." and no reply
+  is published. A JSON client gets `{"cancelled": true}` or `false`. With grants, the route needs
+  the same session as `POST /api/message`. `praxeon/chat-ui:composer` takes `:cancel-action`,
+  which adds the button, and `praxeon/chat-ui:stop-button` is exported; the embed panel's script
+  enables the button with the composer. An app that renders its own page and wants the button
+  passes `:cancel-action "/api/cancel"` to `composer`.
 
 - **dokimasia: `cons acceptance` runs an app's suite in a headless browser from the command line**
   (#1028). `dokimasia/cons.lisp` is new, with the targets `build`, `test`, `repl` and
