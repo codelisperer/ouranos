@@ -182,7 +182,28 @@ session and has put #px-events in the page."
         (setf (@ window px-start-events) start)
         (funcall start))))))
 
-(defun composer (&key disabled (action "/api/message") cancel-action)
+(defparameter +composer-placeholder+
+  "Say something…  (Enter to send · Shift+Enter for a newline)"
+  "The composer's placeholder text when the host gives none.")
+
+(defparameter +composer-reset-js+
+  "if(event.detail.successful)if(event.detail.elt===this)this.reset()"
+  "The form's htmx:afterRequest handler: clear the form after its own post succeeded. A refused
+post (a 4xx or 5xx response, or no response) leaves the message in the box. The check on
+event.detail.elt skips requests from elements inside the form, such as the Stop button.")
+
+(defun %check-hidden-fields (fields)
+  (unless (and (listp fields)
+               (every (lambda (f)
+                        (and (consp f) (stringp (car f)) (plusp (length (car f)))
+                             (stringp (cdr f)) (string/= (car f) "message")))
+                      fields))
+    (error "praxeon/chat-ui:composer: :hidden-fields must be a list of (NAME . VALUE) pairs of strings, and no NAME may be \"message\", which is the box itself: ~S"
+           fields)))
+
+(defun composer (&key disabled (action "/api/message") cancel-action label
+                      (placeholder +composer-placeholder+) (autofocus (not disabled)) maxlength
+                      hidden-fields hx-target (hx-swap "none") hx-include)
   "The message form: a multiline box and a Send button, posting to ACTION, /api/message by
 default, which is the route praxeon/web serves. A host app that renders the chat parts in its
 own page passes its own route, for example one under a prefix or one per conversation. The
@@ -190,18 +211,42 @@ message comes back through the poll or the stream, like every other item, so the
 response has nothing to swap. DISABLED renders both disabled, for the embed panel until it has a
 session.
 
+The form is cleared after its post succeeds, not when it is submitted, so a message the host
+refuses stays in the box (#1335).
+
 With CANCEL-ACTION, the form also has a Stop button (STOP-BUTTON), hidden until an update shows
-it, which posts to CANCEL-ACTION. praxeon/web passes /api/cancel (#1339)."
+it, which posts to CANCEL-ACTION. praxeon/web passes /api/cancel (#1339).
+
+A host that uses the composer in place of its own form can set (#1335):
+- LABEL, a string shown as a visible <label> for the box, #msg. With none, there is no label.
+- PLACEHOLDER, the box's placeholder text, or NIL for none.
+- AUTOFOCUS, true unless DISABLED, and MAXLENGTH, a positive integer, NIL for no limit.
+- HIDDEN-FIELDS, a list of (NAME . VALUE) strings sent as hidden inputs with each message. NAME
+  may not be \"message\".
+- HX-TARGET, HX-SWAP and HX-INCLUDE, the form's htmx attributes. HX-SWAP is \"none\" by default,
+  because praxeon/web's response has nothing to show; a host whose response is the rendered
+  message sets HX-TARGET and HX-SWAP to append it."
   (check-type action string)
   (check-type cancel-action (or null string))
+  (check-type label (or null string))
+  (check-type placeholder (or null string))
+  (check-type maxlength (or null (integer 1)))
+  (check-type hx-target (or null string))
+  (check-type hx-swap string)
+  (check-type hx-include (or null string))
+  (%check-hidden-fields hidden-fields)
   (spinneret:with-html-string
-    (:form :hx-post action :hx-swap "none"
-           :onsubmit "setTimeout(() => this.reset(), 0)"
+    (:form :hx-post action :hx-swap hx-swap :hx-target hx-target :hx-include hx-include
+           :|hx-on::after-request| +composer-reset-js+
+      (dolist (f hidden-fields)
+        (:input :type "hidden" :name (car f) :value (cdr f)))
+      (when label
+        (:label :class "label" :for "msg" label))
       (:div :class "field has-addons"
         (:div :class "control is-expanded"
           (:textarea :id "msg" :class "textarea" :name "message" :rows "1"
-                     :placeholder "Say something…  (Enter to send · Shift+Enter for a newline)"
-                     :autofocus (not disabled) :disabled disabled))
+                     :placeholder placeholder :maxlength maxlength
+                     :autofocus (and autofocus t) :disabled disabled))
         (:div :class "control"
           (:button :id "px-send" :class "button is-primary" :disabled disabled "Send"))
         (when cancel-action
