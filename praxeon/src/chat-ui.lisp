@@ -34,7 +34,7 @@
   ;; Parenscript matches its own macros by symbol identity, so these are the real ones.
   (:import-from #:parenscript #:chain #:@ #:create #:new)
   (:export #:*chat-css* #:chat-js #:events-js #:gate-modal #:user-bubble #:assistant-bubble
-           #:composer #:embed-panel-js #:embed-loader-js))
+           #:composer #:stop-button #:embed-panel-js #:embed-loader-js))
 
 (cl:in-package #:praxeon/chat-ui)
 
@@ -182,14 +182,18 @@ session and has put #px-events in the page."
         (setf (@ window px-start-events) start)
         (funcall start))))))
 
-(defun composer (&key disabled (action "/api/message"))
+(defun composer (&key disabled (action "/api/message") cancel-action)
   "The message form: a multiline box and a Send button, posting to ACTION, /api/message by
 default, which is the route praxeon/web serves. A host app that renders the chat parts in its
 own page passes its own route, for example one under a prefix or one per conversation. The
 message comes back through the poll or the stream, like every other item, so the POST's own
 response has nothing to swap. DISABLED renders both disabled, for the embed panel until it has a
-session."
+session.
+
+With CANCEL-ACTION, the form also has a Stop button (STOP-BUTTON), hidden until an update shows
+it, which posts to CANCEL-ACTION. praxeon/web passes /api/cancel (#1339)."
   (check-type action string)
+  (check-type cancel-action (or null string))
   (spinneret:with-html-string
     (:form :hx-post action :hx-swap "none"
            :onsubmit "setTimeout(() => this.reset(), 0)"
@@ -199,14 +203,30 @@ session."
                      :placeholder "Say something…  (Enter to send · Shift+Enter for a newline)"
                      :autofocus (not disabled) :disabled disabled))
         (:div :class "control"
-          (:button :id "px-send" :class "button is-primary" :disabled disabled "Send"))))))
+          (:button :id "px-send" :class "button is-primary" :disabled disabled "Send"))
+        (when cancel-action
+          (:div :class "control"
+            (:raw (stop-button :action cancel-action :disabled disabled))))))))
+
+(defun stop-button (&key (action "/api/cancel") shown disabled oob)
+  "The Stop button, #px-stop, which posts to ACTION to stop the turn that is running. It is hidden
+unless SHOWN. praxeon/web sends it with each update, out of band (OOB true), shown while a turn
+runs, so it appears when a turn starts and goes when it ends. The POST's response has nothing to
+swap: the turn's end comes back through the poll or the stream."
+  (check-type action string)
+  (spinneret:with-html-string
+    (:button :id "px-stop" :type "button" :class "button is-light"
+             :hx-post action :hx-swap "none"
+             :hidden (not shown) :disabled disabled
+             :hx-swap-oob (when oob "true")
+             "Stop")))
 
 (defun embed-panel-js ()
   "The embed panel's side of the hand-off in this file's header. It reads the allowed origins
 (a JSON array) and the session URL from #px-embed's data-px-origins and data-px-session. On a
 session it puts the contents of the <template> #px-live into the page, processes them with htmx,
-starts the stream client if the page streams (window.pxStartEvents), and enables #msg and
-#px-send."
+starts the stream client if the page streams (window.pxStartEvents), and enables #msg,
+#px-send and #px-stop."
   (out:js-string
    '(funcall
      (lambda ()
@@ -230,7 +250,7 @@ starts the stream client if the page streams (window.pxStartEvents), and enables
                                  (chain htmx (process box)))))
                            (when (@ window px-start-events)
                              (chain window (px-start-events)))
-                           (dolist (id (list "msg" "px-send"))
+                           (dolist (id (list "msg" "px-send" "px-stop"))
                              (let ((el (chain document (get-element-by-id id))))
                                (when el (setf (@ el disabled) false))))))
                   (exchange

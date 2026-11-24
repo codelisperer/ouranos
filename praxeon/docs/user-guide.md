@@ -224,6 +224,31 @@ renders the bubbles itself passes the same options to `hyperion/markdown:render`
 (`t` or `:text`). `assistant-bubble` defaults to `:images nil :links :text`, and `user-bubble`
 to `:images t :links t`.
 
+### The reply as it is written, and the Stop button
+
+While a model call streams, the chat page shows the text the model has written so far in the
+agent's bubble (#1339). Each page update, by poll or by the event stream, carries it as a
+`#px-draft` element at the end of `#chat`, and deletes the previous one first. When the turn ends,
+the finished reply is added as usual and the draft is removed. Nothing in the draft is saved: it
+is not a transcript item, and a page loaded later shows only finished replies.
+
+`make-app`, `start` and `serve-forever` take `:stream-text`. With `:auto`, the default, the draft
+is shown only when the app gives no `:responder`. A responder can change the reply after the model
+wrote it, as a crisis guardrail or a translator does, and then the draft would show text the
+reader was never meant to see. Pass `t` to show it with a responder whose reply is the model's
+text, or `nil` to never show it.
+
+While a turn runs, the composer shows a Stop button. It posts to `/api/cancel`, which cancels the
+turn through `praxeon/actor:*turn-cancel*`: the provider's connection is closed, no reply is
+published, and the transcript records the turn as ended with the outcome `:cancelled`, shown as
+"Stopped.". A custom responder that calls `run-turn` is stopped the same way, because the app
+binds `*turn-cancel*` around it. A responder that does its own model calls without `run-turn`
+stops only when its code checks `praxeon/actor:turn-cancelled-p`. A message sent while another
+turn runs waits for that turn and cannot be stopped until it starts. A JSON client posts to
+`/api/cancel` with `Accept: application/json` and gets `{"cancelled": true}`, or `false` when no
+turn was running. An app that renders its own page adds the button with
+`(praxeon/chat-ui:composer :cancel-action "/api/cancel")`.
+
 ### Talk to Elise in your language
 
 Elise ships an i18n dictionary (`examples/elise/resources/i18n/{en,es,ru}.json`) —
