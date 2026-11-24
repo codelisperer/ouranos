@@ -4,6 +4,7 @@
 #   ./scripts/setup.sh            install what is missing, at the pinned versions
 #   ./scripts/setup.sh --check    report only; exit 1 if something is missing
 #   ./scripts/setup.sh --ci       as above, plus export PATH/env for GitHub Actions
+#   ./scripts/setup.sh --without-uv   any of the above, without building libuv (step 4)
 #
 # Installs, all at the versions pinned in scripts/versions.env:
 #   1. SBCL      -- Linux: the official binary tarball, into $SBCL_PREFIX (no sudo).
@@ -11,6 +12,10 @@
 #   2. Quicklisp -- into ~/quicklisp, with the dist pinned to a dated snapshot.
 #   3. Coalton   -- a git checkout at the pinned commit in ~/common-lisp/coalton
 #                   (it is NOT a Quicklisp system; ASDF finds ~/common-lisp by default).
+#   4. libuv     -- built from libuv.pin into vendor/libuv by scripts/build-libuv.lisp.
+#                   hyperion/server-uv, the default HTTP server, runs on it. This needs a C
+#                   compiler; without one setup stops before installing anything and says
+#                   what to install, unless --without-uv was given.
 # It does NOT run bootstrap.lisp -- that is the next step, and the caller's choice:
 #   sbcl --dynamic-space-size 4096 --script bootstrap.lisp
 #
@@ -21,11 +26,13 @@ here=$(cd "$(dirname "$0")" && pwd)
 root=$(dirname "$here")
 check_only=0
 ci=0
+with_uv=1
 for arg in "$@"; do
   case "$arg" in
     --check) check_only=1;;
     --ci)    ci=1;;
-    -h|--help) sed -n '2,18p' "$0"; exit 0;;
+    --without-uv) with_uv=0;;
+    -h|--help) sed -n '2,22p' "$0"; exit 0;;
     *) echo "setup.sh: unknown option $arg" >&2; exit 2;;
   esac
 done
@@ -155,7 +162,7 @@ linux_sbcl_url() {
 }
 
 # Whether SBCL publishes no Linux binary for this machine at the pinned version. SBCL does
-# not build a Linux binary for every architecture: no 2.6.x release up to 2.6.9 has one for
+# not build a Linux binary for every architecture: no 2.6.x release up to 2.6.10 has one for
 # arm64 (#9). This asks the download server rather than keeping a list, so it stays right
 # when a release adds or drops one. Only a 404 counts as "not published"; any other failure
 # is left for the download itself to report, because it is usually a mirror problem that a
@@ -307,6 +314,59 @@ install_quicklisp() {
   verify_sha256 "$scratch/quicklisp.lisp" "${QUICKLISP_LISP_SHA256:-}" "quicklisp.lisp"
   sbcl --non-interactive --no-userinit --load "$scratch/quicklisp.lisp" \
        --eval "(quicklisp-quickstart:install :path \"$ql_home/\")" >/dev/null
+  register_quicklisp_in_init_file
+}
+
+# Whether a plain `sbcl`, which reads the developer's own init files, starts with Quicklisp
+# loaded. This asks SBCL rather than searching ~/.sbclrc for a line, because an init file can
+# load Quicklisp in more than one way.
+plain_sbcl_has_quicklisp() {
+  _b=$(sbcl_bin)
+  [ -n "$_b" ] || return 1
+  "$_b" --non-interactive --eval '(format t "~&QL-LOADED ~A~%" (if (find-package "QL") "yes" "no"))' \
+        2>/dev/null | grep -q '^QL-LOADED yes$'
+}
+
+# The manual fix, printed by the step below when it fails and by the doctor.
+quicklisp_init_fix() {
+  printf '       fix: in sbcl, run (load "%s/setup.lisp")\n' "$ql_home"
+  printf '            then (ql:add-to-init-file) and press Enter\n'
+}
+
+# Add Quicklisp's loader to the SBCL init file (~/.sbclrc), so that a plain `sbcl` has the QL
+# package. Before #1213 setup never did this, and nothing reported it: every step here and the
+# bootstrap load setup.lisp explicitly, and the doctor only checked that ~/quicklisp exists.
+#
+# It runs only when this script installed Quicklisp itself, and not on CI, where nothing reads
+# the init file. When Quicklisp was already installed, setup does not touch ~/.sbclrc
+# (scripts/verify-tree.lisp also treats it as the developer's file). A fresh install can still
+# meet an existing ~/.sbclrc the developer wrote: if that file already makes plain sbcl load
+# Quicklisp, nothing is added; otherwise Quicklisp's block is appended to it.
+#
+# A failure here only warns. The init file is a convenience for the REPL and the build does not
+# read it, so a read-only ~/.sbclrc (a home-manager symlink, for example) must not stop the
+# Quicklisp dist and Coalton from installing. The doctor reports the missing loader on every
+# later run. ql:add-to-init-file waits for Enter before it writes, and
+# ql-util:without-prompting answers that.
+register_quicklisp_in_init_file() {
+  [ "$ci" -eq 0 ] || return 0
+  if plain_sbcl_has_quicklisp; then
+    note "the SBCL init file already loads Quicklisp; left unchanged"
+    return 0
+  fi
+  if _out=$(sbcl --non-interactive --no-userinit --load "$ql_home/setup.lisp" \
+                 --eval '(ql-util:without-prompting (format t "~&INIT-FILE ~A~%" (ql:add-to-init-file)))' 2>&1); then
+    _init=$(printf '%s\n' "$_out" | sed -n 's/^INIT-FILE //p')
+  else
+    _init=""
+  fi
+  if [ -n "$_init" ]; then
+    note "added Quicklisp to $_init, so a plain sbcl loads it"
+  else
+    note "WARNING: could not add Quicklisp to the SBCL init file; the build does not need it, a plain sbcl REPL does"
+    quicklisp_init_fix
+  fi
+  return 0
 }
 
 pin_quicklisp_dist() {
@@ -367,6 +427,78 @@ install_coalton_deps() {
   note "Coalton's Quicklisp dependencies are installed"
 }
 
+# --- 4. libuv (#504) ----------------------------------------------------------
+#
+# hyperion/server-uv is the default HTTP server, and it runs on libuv, so setup builds the
+# pinned libuv by default. scripts/build-libuv.lisp does the build; this section only decides
+# whether a compiler is there and runs it. The build takes a few seconds and is skipped when
+# vendor/libuv already holds a build of the pinned release.
+
+# Whether this machine has a C compiler build-libuv.lisp can use. It looks for the same names
+# that script does. On macOS /usr/bin/cc is present even without the Xcode Command Line Tools:
+# it is a stub that opens an installer dialog and fails. So there `xcode-select -p' is asked
+# as well; it exits non-zero, and opens nothing, when no developer tools are installed.
+have_c_compiler() {
+  have cc || have gcc || have clang || return 1
+  case "$os" in
+    Darwin) xcode-select -p >/dev/null 2>&1;;
+    *) return 0;;
+  esac
+}
+
+# Print what to install for a C compiler, and how to go on without libuv. One copy, used by
+# the prerequisite check before anything is installed and by the doctor.
+c_compiler_fix() {
+  case "$os" in
+    Darwin) printf '       fix: xcode-select --install     (the Xcode Command Line Tools)\n';;
+    *)      printf '       fix: sudo apt install build-essential   |  sudo dnf install gcc   |  sudo pacman -S gcc\n';;
+  esac
+  printf '            then run ./scripts/setup.sh again\n'
+  printf '            or, to set up without libuv: ./scripts/setup.sh --without-uv\n'
+}
+need_c_compiler() {
+  printf '  MISSING a C compiler (setup builds libuv with it; hyperion/server-uv, the default HTTP server, runs on libuv)\n' >&2
+  c_compiler_fix >&2
+  missing=$((missing+1))
+}
+
+# On Linux with root, install a compiler the way the libraries above are installed. Without
+# root the prerequisite check has already stopped setup with the command to run.
+ensure_c_compiler() {
+  have_c_compiler && return 0
+  { [ "$os" = "Linux" ] && ensure_root; } || return 0
+  info "installing a C compiler (to build libuv)"
+  # shellcheck disable=SC2086  # $as_root is a command prefix, empty when we are root
+  if have apt-get; then
+    $as_root apt-get update -qq >/dev/null 2>&1 || true
+    $as_root apt-get install -y build-essential >/dev/null 2>&1 || note "apt-get failed; install build-essential by hand"
+  elif have dnf; then $as_root dnf install -y gcc >/dev/null 2>&1 || note "dnf failed; install gcc by hand"
+  elif have pacman; then $as_root pacman -S --noconfirm gcc >/dev/null 2>&1 || note "pacman failed; install gcc by hand"
+  else note "install a C compiler yourself: apt build-essential | dnf gcc | pacman gcc"
+  fi
+}
+
+# The file build-libuv.lisp writes, by platform. Kept in step with PLATFORM-SPEC there.
+libuv_library() {
+  case "$os" in
+    Darwin) echo "$root/vendor/libuv/lib/libuv.1.dylib";;
+    *)      echo "$root/vendor/libuv/lib/libuv.so.1";;
+  esac
+}
+libuv_pin_version() { awk '/^version[[:space:]]/ {print $2; exit}' "$root/libuv.pin" 2>/dev/null; }
+libuv_built_version() { awk '/^version[[:space:]]/ {print $2; exit}' "$root/vendor/libuv/BUILT-FROM" 2>/dev/null; }
+
+build_libuv() {
+  info "building libuv from libuv.pin (scripts/build-libuv.lisp)"
+  sbcl --dynamic-space-size 4096 --script "$here/build-libuv.lisp" || {
+    echo "setup.sh: building libuv failed -- see the output above." >&2
+    echo "         hyperion/server-uv, the default HTTP server, cannot start without it." >&2
+    echo "         Fix what it names and run ./scripts/setup.sh again, or skip libuv with" >&2
+    echo "         ./scripts/setup.sh --without-uv" >&2
+    exit 1
+  }
+}
+
 # --- report / act -----------------------------------------------------------
 info "Ouranos setup on $os ($(uname -m)) -- pins: SBCL $SBCL_VERSION, QL dist $QUICKLISP_DIST, Coalton $COALTON_REF"
 
@@ -401,6 +533,14 @@ run_doctor() {
   fi
   if [ -f "$ql_home/setup.lisp" ]; then printf '  PASS    Quicklisp at %s\n' "$ql_home"
   else need "Quicklisp" "./scripts/setup.sh"; fi
+  # A WARN, not a gap: the build loads setup.lisp itself, so only the REPL is affected. Setup
+  # writes the init file only on a fresh Quicklisp install (#1213), so this line is what reports
+  # an install whose init-file step failed, on every later run. Not on CI, where nothing reads
+  # the init file.
+  if [ "$ci" -eq 0 ] && [ -f "$ql_home/setup.lisp" ] && ! plain_sbcl_has_quicklisp; then
+    printf '  WARN    a plain sbcl does not load Quicklisp (the build does not need it; the REPL does)\n'
+    quicklisp_init_fix
+  fi
   # Checking the directory EXISTS is not enough: a checkout at the wrong commit is the exact
   # drift coalton.pin exists to catch, and it is invisible until something behaves oddly.
   if [ -d "$coalton_dir/.git" ]; then
@@ -425,6 +565,21 @@ run_doctor() {
             else need "libev (Woo needs it to load hyperion)" "brew install libev"; fi
             printf '  PASS    libsqlite3 (ships with macOS)\n';;
   esac
+  # libuv, which hyperion/server-uv runs on. Built, not installed, so the check is the file
+  # build-libuv.lisp writes and the release its BUILT-FROM stamp names.
+  if [ "$with_uv" -eq 1 ]; then
+    if have_c_compiler; then printf '  PASS    C compiler (builds libuv)\n'
+    else need_c_compiler; fi
+    _lib=$(libuv_library); _pin=$(libuv_pin_version); _built=$(libuv_built_version)
+    if [ ! -f "$_lib" ]; then
+      need "libuv (hyperion/server-uv, the default HTTP server, runs on it)" "./scripts/setup.sh   (builds it into vendor/libuv)"
+    elif [ "$_built" != "$_pin" ]; then
+      need "libuv in vendor/libuv is not a build of libuv.pin's $_pin (its BUILT-FROM names '${_built:-nothing}')" "./scripts/setup.sh   (rebuilds it)"
+    else printf '  PASS    libuv %s at %s\n' "$_pin" "$_lib"; fi
+  else
+    printf '  SKIP    libuv (--without-uv). hyperion/server-uv will not start until it is built:\n'
+    printf '            ./scripts/setup.sh   (or: sbcl --script scripts/build-libuv.lisp, from %s)\n' "$root"
+  fi
   [ "$missing" -eq 0 ]
 }
 
@@ -444,6 +599,13 @@ have curl || need "curl" "apt install curl   |  brew install curl"
 have git  || need "git"  "apt install git    |  brew install git"
 have tar  || need "tar"  "apt install tar"
 if [ "$os" = "Linux" ] && ! have bzip2; then need "bzip2 (to unpack the SBCL tarball)" "apt install bzip2"; fi
+# The compiler is checked here, with the other tools, so that a machine without one learns it
+# before setup has installed anything. On Linux with root setup installs one itself below, as
+# it does libev and libsqlite3, so it is only missing when root is not available.
+if [ "$with_uv" -eq 1 ] && ! have_c_compiler; then
+  if [ "$os" = "Linux" ] && ensure_root; then :
+  else need_c_compiler; fi
+fi
 [ "$missing" -eq 0 ] || {
   echo "setup.sh: install the above first, then re-run. That is the whole list, not the first item." >&2
   exit 1
@@ -468,6 +630,12 @@ install_system_libs
 pin_quicklisp_dist
 install_coalton
 install_coalton_deps
+if [ "$with_uv" -eq 1 ]; then
+  ensure_c_compiler
+  build_libuv
+else
+  note "libuv not built (--without-uv)"
+fi
 
 # ASK THE DOCTOR RATHER THAN ASSERTING SUCCESS. "Exited 0" and "it worked" are different
 # claims, and this script used to make the first while sounding like the second.

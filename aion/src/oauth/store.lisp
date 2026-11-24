@@ -38,7 +38,9 @@ rest. Keys are compared with EQUAL."))
 (defgeneric put-token (store principal connection token-set)
   (:documentation "Keep TOKEN-SET for PRINCIPAL and CONNECTION, replacing any earlier one."))
 (defgeneric delete-token (store principal connection)
-  (:documentation "Forget the tokens for PRINCIPAL and CONNECTION."))
+  (:documentation "Forget the tokens for PRINCIPAL and CONNECTION. Called by DISCONNECT even
+when GET-TOKEN answered NIL, so that a row the store cannot read is still removed (#1175): it
+must not fail when there is no row."))
 (defgeneric get-client (store issuer redirect-uri)
   (:documentation "The client id registered with ISSUER for REDIRECT-URI, or NIL."))
 (defgeneric put-client (store issuer redirect-uri client-id)

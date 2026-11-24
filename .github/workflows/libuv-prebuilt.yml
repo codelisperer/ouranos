@@ -1,0 +1,185 @@
+# libuv-prebuilt.yml --- build the Windows libuv.dll that setup.ps1 downloads when the MSVC
+# Build Tools are absent, and publish it as a release of this repository (#1247).
+#
+# libuv publishes no Windows binaries, so this tree builds them. Each build job runs
+# scripts/build-libuv-prebuilt.ps1, which compiles libuv at libuv.pin's version with
+# scripts/build-libuv.lisp (the same compile a Windows machine with MSVC runs), checks the DLL's
+# PE machine field against the architecture, and writes
+#   libuv-<version>-windows-<arch>.dll
+#   libuv-<version>-windows-<arch>.dll.sha256
+# The publish job attaches those files to the release libuv-v<version>, from which
+# libuv-prebuilt.pin's URLs download them. The checksums then go into libuv-prebuilt.pin by hand,
+# in a commit (the steps are in that file's header).
+#
+# Triggers:
+#   - workflow_dispatch: builds and keeps the files as a workflow artifact. With publish=true it
+#     also creates the release libuv-v<libuv.pin's version> at the dispatched commit.
+#   - a pushed tag libuv-v<version>: builds and publishes to that tag's release. The tag must
+#     name libuv.pin's version, or the publish job fails.
+# A bare v* tag does not run this: framework releases and libuv builds are separate numbers.
+#
+# An asset already in the release is never replaced, so a file whose checksum is already pinned
+# keeps it. A second publish of the same version uploads only the architectures the release does
+# not have yet.
+
+name: libuv prebuilt DLL
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "Create the release libuv-v<version> and upload the DLLs"
+        required: false
+        type: boolean
+        default: false
+  push:
+    tags: ["libuv-v*"]
+
+jobs:
+  build-x64:
+    name: windows-x64
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Cache Lisp toolchain
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/AppData/Local/cache/common-lisp
+            ~/quicklisp
+            ~/common-lisp/coalton
+          key: lisp-windows-x86-64-${{ hashFiles('scripts/versions.env') }}-${{ hashFiles('**/*.asd') }}
+          restore-keys: |
+            lisp-windows-x86-64-${{ hashFiles('scripts/versions.env') }}-
+            lisp-windows-x86-64-
+
+      # -WithoutUv: the next step builds libuv itself, with --force, and packages it.
+      - name: Install SBCL (scripts/setup.ps1)
+        shell: pwsh
+        run: ./scripts/setup.ps1 -CI -WithoutUv
+
+      - name: Build and package libuv.dll
+        shell: pwsh
+        run: ./scripts/build-libuv-prebuilt.ps1 -Arch x64
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: libuv-windows-x64
+          path: dist/libuv-prebuilt/
+          if-no-files-found: error
+
+  # A separate job rather than a second matrix row, because whether libuv builds on Windows on
+  # Arm has not been measured yet (pre-publication issue 145, windows-arm64-probe.yml). It may
+  # fail without stopping the x64 DLL from being published; the publish job uploads whatever
+  # this job produced, and nothing when it failed.
+  build-arm64:
+    name: windows-arm64
+    continue-on-error: true
+    strategy:
+      matrix:
+        include:
+          - os: windows-11-arm
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Cache Lisp toolchain
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/AppData/Local/cache/common-lisp
+            ~/quicklisp
+            ~/common-lisp/coalton
+          key: lisp-windows-arm64-${{ hashFiles('scripts/versions.env') }}-${{ hashFiles('**/*.asd') }}
+          restore-keys: |
+            lisp-windows-arm64-${{ hashFiles('scripts/versions.env') }}-
+            lisp-windows-arm64-
+
+      - name: Install SBCL (scripts/setup.ps1)
+        shell: pwsh
+        run: ./scripts/setup.ps1 -CI -WithoutUv
+
+      - name: Build and package libuv.dll
+        shell: pwsh
+        run: ./scripts/build-libuv-prebuilt.ps1 -Arch arm64
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: libuv-windows-arm64
+          path: dist/libuv-prebuilt/
+          if-no-files-found: error
+
+  publish:
+    name: publish the release
+    needs: [build-x64, build-arm64]
+    # always(), so a failed arm64 job does not skip the publish; the x64 DLL is required.
+    if: >-
+      always() && needs.build-x64.result == 'success' &&
+      (github.ref_type == 'tag' || inputs.publish)
+    runs-on: ubuntu-26.04
+    # Creating a release and uploading assets with the built-in token needs write access to
+    # this repository's contents, granted to this job only.
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/download-artifact@v8
+        with:
+          path: incoming
+          pattern: libuv-windows-*
+          merge-multiple: true
+
+      - name: Check the files against their checksums and libuv.pin
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(awk '$1 == "version" {print $2; exit}' libuv.pin)
+          [ -n "$version" ] || { echo "::error::libuv.pin has no version line"; exit 1; }
+          tag="libuv-v${version}"
+          if [ "${GITHUB_REF_TYPE}" = "tag" ] && [ "${GITHUB_REF_NAME}" != "$tag" ]; then
+            echo "::error::the tag ${GITHUB_REF_NAME} does not name libuv.pin's version; push ${tag} instead"
+            exit 1
+          fi
+          cd incoming
+          ls -l
+          [ -f "libuv-${version}-windows-x64.dll" ] || { echo "::error::no x64 DLL was built"; exit 1; }
+          # Every DLL has its checksum file, and every checksum matches its DLL.
+          for dll in libuv-*.dll; do
+            [ -f "${dll}.sha256" ] || { echo "::error::${dll} has no .sha256 file"; exit 1; }
+          done
+          sha256sum -c ./*.sha256
+          echo "TAG=${tag}" >> "$GITHUB_ENV"
+          echo "LIBUV_VERSION=${version}" >> "$GITHUB_ENV"
+
+      - name: Create the release and upload the DLLs
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          notes=$(printf '%s\n' \
+            "libuv ${LIBUV_VERSION} for Windows, built by .github/workflows/libuv-prebuilt.yml from ${GITHUB_REPOSITORY}@${GITHUB_SHA} with scripts/build-libuv.lisp (MSVC, /MT, so no Visual C++ redistributable is needed)." \
+            "" \
+            "scripts/setup.ps1 downloads the DLL for its architecture when the MSVC Build Tools are not installed, and checks it against the SHA-256 in libuv-prebuilt.pin." \
+            "" \
+            "Each .sha256 file is in sha256sum's format. Architectures without a DLL here did not build in this run.")
+          # --latest=false: this repository's "Latest release" is the framework's.
+          gh release view "$TAG" >/dev/null 2>&1 ||
+            gh release create "$TAG" --latest=false --target "$GITHUB_SHA" \
+              --title "libuv ${LIBUV_VERSION} (Windows prebuilt)" --notes "$notes"
+          # An asset that already exists is kept, never replaced, so a checksum already in
+          # libuv-prebuilt.pin never changes under its URL. This also lets a later run add an
+          # architecture that failed the first time. The DLL and its .sha256 are a pair: when
+          # either exists in the release, both are left as they are.
+          existing=$(gh release view "$TAG" --json assets --jq '.assets[].name')
+          for dll in incoming/libuv-*.dll; do
+            name=$(basename "$dll")
+            if printf '%s\n' "$existing" | grep -qxF -e "$name" -e "${name}.sha256"; then
+              echo "::notice::${TAG} already has ${name}; kept it, and did not upload this run's build"
+              continue
+            fi
+            gh release upload "$TAG" "$dll" "${dll}.sha256"
+          done
+          gh release view "$TAG" --json assets --jq '.assets[].name'

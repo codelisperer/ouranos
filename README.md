@@ -2,11 +2,11 @@
 
 [![verify](https://github.com/codelisperer/ouranos/actions/workflows/verify.yml/badge.svg)](https://github.com/codelisperer/ouranos/actions/workflows/verify.yml)
 
-**A metaframework for full-stack Common Lisp — six co-evolving core frameworks (plus two
+**A metaframework for full-stack Common Lisp — six co-evolving core frameworks (plus four
 satellite leaf-libs) under one roof.**
 
 Ouranos is the monorepo home of the [codelisperer](https://github.com/codelisperer)
-ecosystem: a small, cohesive family of **Common Lisp / Coalton** frameworks for
+ecosystem: a small, cohesive family of **Common Lisp / [Coalton](https://coalton-lang.github.io/)** frameworks for
 building real applications — web, data, agentic AI, testing — *without* a JVM or a
 Node toolchain in sight.
 
@@ -76,19 +76,27 @@ right):
 | [`mnemosyne/`](mnemosyne) | **Mnemosyne** | data & persistence — Ecto-like, pluggable backends (SQLite → Postgres → XTDB 2) |
 | [`elenchon/`](elenchon) | **Elenchon** | Requirements-Based Testing via Cause-Effect Graphs |
 | [`hyperion/`](hyperion) | **Hyperion** | full-stack, HTMX-first web framework (live image, Parenscript, i18n, typed interceptors) |
-| [`praxeon/`](praxeon) | **Praxeon** | praxeological framework for agentic AI (provider-neutral LLMs, actors/means/ends) |
+| [`praxeon/`](praxeon) | **Praxeon** | praxeological framework for agentic AI (provider-neutral LLMs, actors/means/ends, an MCP client, retrieval for RAG, image generation, web search and page reading; OpenTelemetry tracing and agent evaluations *(in progress)*) |
 
-Plus two **satellite leaf-libs**, outside the linear core DAG:
+Plus four **satellite leaf-libs**, outside the linear core DAG:
 
 | Dir | Framework | Role |
 |---|---|---|
 | [`hermes/`](hermes) | **hermes** | external integrations — neutral email + SMS (SendGrid/Twilio + a dev transport, signature-verified inbound SMS), a content-addressed blob store, and payments behind a neutral protocol (Stripe backend) |
 | [`klio/`](klio) | **Klio** | git-backed content engine — markdown in version control, rendered live by hyperion; sits between a static generator and a database-backed app; reloading a production server *(in progress)* |
-| [`hades/`](hades) | **Hades** | the OS ergonomics layer over aion's raw bindings — portable facades only where every OS has a real counterpart, platform-scoped packages elsewhere *(in progress — a [charter](hades/docs/adr/0001-charter.md) and one facade, the single-instance lock)* |
+| [`hades/`](hades) | **Hades** | the OS ergonomics layer over aion's raw bindings — portable facades only where every OS has a real counterpart, platform-scoped packages elsewhere ([charter](hades/docs/adr/0001-charter.md)): a single-instance lock, a credential store over the operating system's own, a notice that works before an app has a window, and opening a file, folder or URL; an OS service facade *(in progress)* |
+| [`dokimasia/`](dokimasia) | **Dokimasia** | acceptance testing for any app that runs in a browser — test cases written as data, run against a local or deployed app through a headless Chrome or Edge, with console, network and accessibility checks and screenshots on every step; add-ons for hyperion apps and elenchon decision tables *(in progress, [#1028](https://github.com/codelisperer/ouranos/issues/1028))* |
 
-Both are **leaves**: they depend only on `aion` plus external libs, never on
-mnemosyne / hyperion / praxeon, and nothing in the core DAG depends on them. Apps consume
-them directly.
+All four are **leaves**: nothing in the core DAG depends on them, and apps consume them
+directly. hermes, hades and dokimasia depend only on `aion` plus external libs; klio
+depends on `hyperion`, because it renders through it. Dokimasia's optional add-ons for
+hyperion and elenchon depend on those frameworks; its core does not.
+
+**Daidalos**, the Ouranos IDE *(in progress)*, is built on these frameworks: a desktop of
+live windows in one page (a Coalton REPL, a CodeMirror editor that evaluates in a separate
+Coalton runtime, an agent, an inspector), with updates pushed from the server. It is a
+proof of concept today; a desktop edition for individual developers and a hosted team
+edition are planned ([#1237](https://github.com/codelisperer/ouranos/issues/1237)).
 
 Apps that *consume* the frameworks (e.g. **a consuming app**) live in their own
 repos — Ouranos is the library ecosystem, not the products.
@@ -107,10 +115,11 @@ bin/cons --help                                          # the CLI: init / setup
 ```
 
 **Starting from a bare machine?** `scripts/setup.sh` (or `setup.ps1` on Windows) installs
-all three prerequisites at their pinned versions — **SBCL**, **Quicklisp** with a dated dist
-snapshot, and **Coalton** as a git checkout at the commit in [`coalton.pin`](coalton.pin).
-It is idempotent, needs no sudo on Linux, and `--check` reports what is missing without
-changing anything:
+the three Lisp prerequisites at their pinned versions — **SBCL**, **Quicklisp** with a dated
+dist snapshot, and **Coalton** as a git checkout at the commit in [`coalton.pin`](coalton.pin)
+— and then builds **libuv** from [`libuv.pin`](libuv.pin) into `vendor/libuv`. It is
+idempotent, needs no sudo on Linux for the Lisp parts, and `--check` reports what is missing
+without changing anything:
 
 ```sh
 ./scripts/setup.sh                                       # then run the seed above
@@ -118,27 +127,41 @@ changing anything:
 
 It deliberately does *not* run `bootstrap.lisp` — that stays the caller's step.
 
-**One optional extra prerequisite, for one opt-in system.** `aion/uv` (libuv: event
-loop, async + sync filesystem, timers, file watching) binds a native library, which the
-repo builds from a pinned source tarball rather than taking from your package manager:
+**libuv, and the C compiler it needs.** `hyperion/server-uv`, the default HTTP server, runs on
+libuv, through `aion/uv` (libuv: event loop, async + sync filesystem, timers, file watching).
+The repo builds libuv from a pinned source tarball rather than taking it from your package
+manager, and setup does that build for you (`scripts/build-libuv.lisp`; a few seconds). It needs
+**a C compiler — the one your OS vendor already ships**, and nothing else:
 
-```sh
-sbcl --script scripts/build-libuv.lisp     # fetch (verified against libuv.pin), compile, done
-```
+| | Install | Then |
+|---|---|---|
+| macOS | `xcode-select --install` (the Xcode Command Line Tools) | `./scripts/setup.sh` |
+| Linux | `sudo apt install build-essential` (or `dnf install gcc`, `pacman -S gcc`) | `./scripts/setup.sh` |
+| Windows | the MSVC Build Tools: `winget install --id Microsoft.VisualStudio.2022.BuildTools --override "--quiet --add Microsoft.VisualStudio.Workload.VCTools --includeRecommended"` (about 2 GB) | `.\scripts\setup.ps1` |
 
-That needs **a C compiler — the one your OS vendor already ships**, and nothing else:
-Xcode Command Line Tools on macOS, your distribution's gcc/clang on Linux, MSVC on Windows.
+When there is no compiler, setup stops **before installing anything**, prints the line above for
+your platform, and exits 1. On Linux, when setup can get root, it installs the compiler itself,
+as it does libev and libsqlite3. On Windows without the Build Tools, `setup.ps1` instead
+downloads the prebuilt `libuv.dll` that [`libuv-prebuilt.pin`](libuv-prebuilt.pin) names for
+your architecture (built from the same `libuv.pin` release by this repository's
+`libuv-prebuilt.yml` workflow), checks its SHA-256, and installs it into `vendor\libuv`. It stops
+only when no DLL is pinned for your architecture yet, and says so. Until the first DLL is
+published, that is every architecture. To set up without libuv, pass `--without-uv` (`-WithoutUv` in
+PowerShell): setup then neither needs a compiler nor builds libuv, `--check` reports libuv as
+skipped rather than missing, and `hyperion/server-uv` will not start until libuv is built — by
+running setup again without the flag, or with `sbcl --script scripts/build-libuv.lisp` from
+this checkout.
+
 Explicitly **not** MSYS2/MinGW, even though libuv builds fine under it: requiring a
 Unix-emulation layer is one more thing to acquire before anything works, and no C toolchain
 is ever required to *load* anything here (we bind by hand rather than with a groveller). Not cmake, not make, not autotools: libuv is compiled by a single direct compiler
 invocation driven by the script, which is why the "no make / just / nmake" rule above
-still holds. Everything else in the tree needs only SBCL.
+still holds.
 
-It is deliberately **not** part of `bootstrap.lisp`. Requiring a toolchain to bootstrap
-would put a native dependency on the critical path for people who never touch libuv, and
-ADR-0011 is the cautionary tale: a load-time native dependency (libev, via Woo) made
-every Linux/macOS desktop bundle unrunnable on a clean machine. `aion/uv` therefore loads
-fine without the library present and reports what to run on first use.
+It is deliberately **not** part of `bootstrap.lisp`, which needs only SBCL. ADR-0011 is the
+cautionary tale: a load-time native dependency (libev, via Woo) made every Linux/macOS desktop
+bundle unrunnable on a clean machine. `aion/uv` therefore loads fine without the library present
+and reports what to run on first use.
 
 `bootstrap.lisp` does four things in one pass, identically on every OS: points ASDF at
 the whole tree, builds `bin/cons`, writes a standing ASDF `source-registry.conf.d`
@@ -192,18 +215,19 @@ this page and the tree, stated rather than left to be discovered.
 
 | Framework | Where it is | Checks (linux) |
 |---|---|---|
-| **hyperion** | **alpha** — HTMX + Spinneret, i18n (incl. RTL), sessions, channels, static caching, typed interceptors, a native libuv HTTP server (the default when libuv loads; `HYPERION_SERVER` chooses another), and a native-webview desktop app that builds and installs on three OSes | 5767 |
-| **aion** | **mixed** — `aion/log`, `aion/csv`, `aion/random`, `aion/signature` and the opt-in `aion/uv` (libuv) are real; the Coalton-first collections core *(in progress)* | 3419 |
+| **hyperion** | **alpha** — HTMX + Spinneret, i18n (incl. RTL), sessions, channels, static caching, typed interceptors, a native libuv HTTP server (the default when libuv loads; `HYPERION_SERVER` chooses another; WebSockets, TLS termination and the name Okeanos *(in progress)*), and a native-webview desktop app that builds and installs on three OSes | 6060 |
+| **aion** | **mixed** — `aion/log`, `aion/csv`, `aion/random`, `aion/signature` and the opt-in `aion/uv` (libuv) are real; the Coalton-first collections core *(in progress)* | 4351 |
 | **cons** | **alpha** — the bootstrap seed and the per-project task runner work; the full `build/test/serve/run` CLI *(in progress)* | 1134 |
 | **mnemosyne** | **alpha** — DDL-as-data, a CL-DBI shell over the typed backend, exercised against **both SQLite and a real Postgres**. Six design questions still open | 1566 |
 | **hermes** | **alpha** — email + SMS with signature-verified inbound, a content-addressed blob store, and payments behind a neutral protocol with a Stripe backend | 2079 |
-| **praxeon** | **alpha** — actor loop, provider-neutral LLM, translator, per-agent models, a web/REST surface, and cost/rate/auth ceilings (`budget-guard`, `meter`, `capability-guard`) | 5235 |
+| **praxeon** | **alpha** — actor loop, provider-neutral LLM, translator, per-agent models, a web/REST surface, and cost/rate/auth ceilings (`budget-guard`, `meter`, `capability-guard`), an MCP client, retrieval, image generation, and web search and page reading. OpenTelemetry tracing and agent evaluations *(in progress)* | 6231 |
 | **elenchon** | **design only** — the typed CEG ADT and five ADRs exist; the reasoning engine *(in progress)* | 46 |
 | **klio** | **alpha** — a content tree loaded from Markdown files with front matter and published all at once, served live through a hyperion site or exported to static files; collections, controlled vocabularies, tags, pagination, RSS and Atom feeds, drafts and scheduled pages, a search index, HTML comments removed on load, and reload on change in development. Telling a production server to reload *(in progress)* | 565 |
-| **hades** | **planned** *(in progress)* — a charter ADR and `hades/single-instance`, a lock that keeps a second copy of an app off the same data directory; the service facade is blocked on `aion/windows/service`, which does not exist yet | 345 |
-| **checkers** | **not a framework** — the gate's own guard scripts (`check-pins`, `check-asd-collisions` and the rest), tested against trees built to break them. A row of its own because the total is the sum of the rows, and a suite that runs in the gate but is excluded from the table would make the two disagree | 817 |
+| **hades** | **alpha** — a charter ADR and four facades: `hades/single-instance`, a lock that keeps a second copy of an app off the same data directory; `hades/credentials`, over the macOS Keychain, Windows Credential Manager and the Linux Secret Service; `hades/notify`, a notice that works before an app has a window; and `hades/open`, which opens a file, folder or URL with no shell. The service facade is blocked on `aion/windows/service`, which does not exist yet | 345 |
+| **dokimasia** | **alpha** — acceptance tests written as data: screens, cases with rows inline or from CSV and s-expression files, and suites, run through `aion/cdp` in a headless Chrome or Edge against a URL or an app the run starts. Every step is checked for console errors, same-origin 5xx responses and request loops; screenshots per viewport and colour scheme with masks; a report.txt and report.json per run; one FiveAM test per case and row; an `:audit` step that runs the vendored axe-core in each colour scheme; `dokimasia/mnemosyne`, ready-made `:expect-stored` probes that read the app's database through mnemosyne; `dokimasia/hyperion`, a target that starts a hyperion app on a scratch database, waits for htmx to settle and can sign a user in with a session. The pipe transport and a worked example *(in progress, #1028)* | 342 |
+| **checkers** | **not a framework** — the gate's own guard scripts (`check-pins`, `check-asd-collisions` and the rest), tested against trees built to break them. A row of its own because the total is the sum of the rows, and a suite that runs in the gate but is excluded from the table would make the two disagree | 842 |
 
-Counts above are from the Linux CI leg at `1ed9114`; each suite runs in its own image. Nothing here is
+Counts above are from the Linux CI leg at `976b586`; each suite runs in its own image. Nothing here is
 API-stable; expect breakage. See [`ECOSYSTEM.md`](ECOSYSTEM.md), the
 [Roadmap board](https://github.com/orgs/codelisperer/projects/1) (filter
 `label:pkg:<framework>`), and [`docs/wiki/`](docs/wiki/Home.md) for the design narrative.

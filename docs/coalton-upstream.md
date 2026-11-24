@@ -79,6 +79,7 @@ honestly; "it works" usually means "it works where I happened to run it."
 |---|---|---|---|
 | `7915fad0` | ✅ 506 checks, whole tree · ✅ 583 checks incl. a consuming app, cold rebuild from a cleared fasl cache (~86s) | ✅ suites green | ❌ **never** |
 | `024d0a17` | ✅ CI leg, run 38776966898 | ✅ 12393 checks, whole tree with every optional axis, cold · ✅ Windows CI leg, run 38776966898 | ✅ Linux CI leg (`ubuntu-latest`), run 38776966898 |
+| `a07305a5` | CI leg, recorded on #1326 | ✅ 22965 checks on WSL, whole tree with every optional axis, cold, every suite's count equal to `024d0a17`'s on the same host · Windows CI leg, recorded on #1326 | Linux CI leg, recorded on #1326 |
 
 The amd64 gap closes when pre-publication issue 87 lands,
 and until then no pin should be described as fully validated. The `024d0a17` row's native
@@ -170,9 +171,68 @@ Upstreaming is cheaper than carrying a fork, and it is the relationship a framew
 
 | | |
 |---|---|
-| **Pinned** ([`coalton.pin`](../coalton.pin)) | **`024d0a17`** — *Check type constructors before matching predicates* (2026-10-12) |
-| Adopted | 2026-10-15, from `7915fad0` (157 commits), in #697 |
-| Behind `origin/main` | **0** on 2026-10-15 |
+| **Pinned** ([`coalton.pin`](../coalton.pin)) | **`a07305a5`** — *Use sentence case for documentation headings* (2026-11-22) |
+| Adopted | 2026-11-22, from `024d0a17` (55 commits), in #1326 |
+| Behind `origin/main` | **0** on 2026-11-23 |
+
+### Adoption record — 2026-11-22
+
+55 upstream commits, from `024d0a17` to `a07305a5`, read from upstream `main` with
+`git ls-remote` on 2026-11-23 at 00:43 UTC. Upstream made no release and has published no security advisory
+(`gh api repos/coalton-lang/coalton/security-advisories` returned an empty list). What it
+changes for code built on Coalton:
+
+- Programs the compiler now rejects:
+  - `30c9eb00`: a constructor field that names a type variable the type's head does not declare
+    is an `Unknown type variable` error. See [`coalton-patterns.md`](coalton-patterns.md) §8a.
+  - `cd15e48d`: an unmatched close paren in a `coalton-toplevel` form is an error; before, the
+    input after it was dropped.
+  - `93ba26ab`: stricter value restriction, so an expansive binding such as `(cell:new [])` no
+    longer generalizes; also fixes to builder inference and keyword parameters.
+  - `4d7b6258`, `4d2d3f08`: recursive instance constraints and superclass functional
+    dependencies are expanded and checked correctly; `f3dbc436` scopes hidden superclass
+    variables during that check.
+- Output that changes without an error: `53054fc0` makes `coalton/format`'s `~A` print a
+  string's or character's contents instead of its `Show` form. Nothing in this tree uses
+  `coalton/format`.
+- Removed: heuristic inlining and its settings (`35493dda`); the `sb-mpfr` dependency, with one
+  portable `Big-Float` implementation on every Lisp (`72ec1133`). Nothing in this tree named
+  either, and no `.asd` here depends on `sb-mpfr`, so `docs/dependencies.md` is unchanged.
+- Code generation: pattern matches compile to decision DAGs (`124ea72a`), multi-entrypoint
+  calling conventions and an SBCL unboxed worker ABI (`1d0ee3f2`), scalar replacement and
+  unboxing (`2b8b0424`, `6e146fd1`), release-mode constants (`65ceda44`, `9d589ce9`,
+  `9413acf1`) and a fix to constant propagation (`34cc9323`).
+- Added: predicative rank-N polymorphism (`a7c21e65`), derived `Ord` for ADTs, structs and
+  tuples (`d4b22052`, `835bcdfa`), `Seq` operations (`69581048`), alias patterns in `catch`,
+  `handle` and resumable branches (`52cd8974`), and `FileError` as an exception (`e53270bf`).
+- Also: compiler refactors, and `coalton-compiler.asd` no longer depends on `source-error`
+  (`a5a5467c`). Nothing in this tree names that system.
+
+**Upstream rewrote `main` during this adoption.** At 2026-11-22 20:52 UTC, `main` was
+`98eda469`, and #1330 first pinned that commit. Within a few hours upstream re-made every commit
+after `72ec1133` under a new id and added 13 more, to `a07305a5`. The rewritten commit with
+`98eda469`'s subject, `f3dbc436`, has an identical tree (`git diff --stat` is empty); the other
+rewritten commits were matched by subject only. `98eda469` stopped being
+reachable from `main`, so `git fetch` no longer brought it in, and every CI leg's `setup.sh`
+failed with `commit 98eda469 not found`. The commit ids in this record are the rewritten ones.
+`024d0a17` stayed an ancestor of `main`. **Before reporting an adoption ready and again before
+merging it, check that the pin is reachable:** after a fresh fetch,
+`git merge-base --is-ancestor <pin> origin/main` must succeed.
+
+None of these needed a change in this tree: every system compiled with no warning, and no
+suite's check count changed.
+
+**Verification** (SBCL 2.6.9, Linux on WSL, x86-64; Coalton's fasls and the worktree's fasls
+deleted before each run): `verify-tree.lisp` with every optional axis
+(base+uv+tls+libgit+view), Postgres 18.6 with pgvector 0.8.7, and a throwaway Secret Service
+executed 22965 checks with Coalton at `a07305a5`, on the branch rebased onto `main` fe259264, and
+22965 with Coalton at `98eda469` on `main` 59775428. A control run on `main` 59775428 with Coalton
+at `024d0a17` executed 22965 checks too, and all 78 suite rows of all three runs match, count and
+status. All three runs failed the same four browser suites (`DOKIMASIA/TESTS`, `DOKIMASIA/HYPERION/TESTS`,
+`DOKIMASIA/EXAMPLES/ACTIVE-SEARCH/TESTS`, `AION/CDP/TESTS`), all 21 failures with "no Chrome or
+Edge was found, and OURANOS_REQUIRE_BROWSER=1": this machine has no Linux browser, and CI's
+runners do. `check-coalton.lisp` confirmed that the Coalton that loaded was the pinned one in each run. The four CI
+legs, release mode included, are recorded on #1326.
 
 ### Adoption record — 2026-10-15
 

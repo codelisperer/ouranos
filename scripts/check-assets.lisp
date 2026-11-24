@@ -60,9 +60,14 @@
     (nreverse entries)))
 
 (defun sha256-file (path)
+  ;; ironclad's DIGEST-FILE, given no buffer, reads into a 128 KB buffer declared DYNAMIC-EXTENT,
+  ;; which SBCL allocates on the stack. On the Windows leg with SBCL 2.6.10 the process exited at
+  ;; that call with code 1 and no message, while hashing the same bytes from a heap array gave the
+  ;; right digest (#1214). Passing a heap buffer avoids the stack allocation.
   (string-downcase
    (with-output-to-string (s)
-     (loop for b across (ironclad:digest-file :sha256 path)
+     (loop for b across (ironclad:digest-file :sha256 path
+                                              :buffer (make-array 65536 :element-type '(unsigned-byte 8)))
            do (format s "~2,'0x" b)))))
 
 (defun source-fingerprints ()

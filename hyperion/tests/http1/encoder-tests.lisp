@@ -298,6 +298,35 @@ this path its own."
   (is-false (h1:encode-ok? (chunked 200 (list "odd") t))
             "an odd-length flat list would silently drop the value of a header"))
 
+(defun close-delimited (status headers)
+  (h1:encode-head-close-delimited-flat status headers))
+
+(test a-close-delimited-head-has-no-framing-header-and-says-close
+  "#1244. The head of a streamed body sent to an HTTP/1.0 client: no Transfer-Encoding, no
+Content-Length, and Connection: close, because the connection closing is how that body ends.
+A framing header the caller set is dropped, as from a chunked head."
+  (let ((r (close-delimited 200 (list "Content-Type" "text/plain"
+                                      "Content-Length" "42" "Transfer-Encoding" "chunked"
+                                      "Connection" "keep-alive"))))
+    (is-true (h1:encode-ok? r) "~A" (h1:encode-reason r))
+    (is-true (search (concatenate 'string "HTTP/1.1 200 OK" +crlf+) (text-of r)))
+    (is-true (has-line r "Content-Type: text/plain"))
+    (is-true (has-line r "Connection: close"))
+    (is-false (search "Transfer-Encoding" (text-of r)))
+    (is-false (search "Content-Length" (text-of r)))
+    (is-false (search "keep-alive" (text-of r)))
+    (is (= (- (length (text-of r)) 4)
+           (search (concatenate 'string +crlf+ +crlf+) (text-of r)))
+        "the head ends once, with nothing after it")))
+
+(test a-close-delimited-head-refuses-what-a-chunked-head-refuses
+  "A status that cannot carry a body, and a header that would split the response."
+  (dolist (status '(100 204 304))
+    (is-false (h1:encode-ok? (close-delimited status nil)) "must refuse ~D" status))
+  (is-false (h1:encode-ok? (close-delimited 200 (list "X-Note" (format nil "a~Cb" +cr+)))))
+  (is-false (h1:encode-ok? (close-delimited 200 (list "odd"))))
+  (is-true (h1:encode-ok? (close-delimited 500 nil))))
+
 (test a-chunk-header-is-the-hex-length-and-nothing-else
   (let ((r (h1:encode-chunk-header 5)))
     (is-true (h1:encode-ok? r) "~A" (h1:encode-reason r))
@@ -319,3 +348,31 @@ never comes. Asserted exactly, including the empty trailer section -- a single C
 would leave the message unterminated in a way no single response reveals."
   (is (string= (concatenate 'string "0" +crlf+ +crlf+)
                (coalton:coalton h1:last-chunk))))
+
+;;; --- 101 Switching Protocols (#376) --------------------------------------------
+
+(test a-switching-protocols-head
+  (let ((r (h1:encode-switching-protocols-flat
+            (list "Upgrade" "websocket" "Sec-WebSocket-Accept" "s3pPLMBiTxaQ9kYGzzhZRbK+xOo="
+                  "Connection" "keep-alive" "Content-Length" "5"))))
+    (is-true (h1:encode-ok? r) "~A" (h1:encode-reason r))
+    (is-true (search (concatenate 'string "HTTP/1.1 101 Switching Protocols" +crlf+) (text-of r)))
+    (is-true (has-line r "Upgrade: websocket"))
+    (is-true (has-line r "Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo="))
+    (is-true (has-line r "Connection: Upgrade"))
+    (is-false (search "keep-alive" (text-of r)) "a caller's Connection header is dropped")
+    (is-false (search "Content-Length" (text-of r)) "a 101 has no body to frame")
+    (let ((s (text-of r)))
+      (is (string= (concatenate 'string +crlf+ +crlf+) (subseq s (- (length s) 4)))))))
+
+(test a-switching-protocols-head-without-upgrade-is-refused
+  (let ((r (h1:encode-switching-protocols-flat (list "Sec-WebSocket-Accept" "x"))))
+    (is-false (h1:encode-ok? r))
+    (is (search "Upgrade" (h1:encode-reason r))))
+  (is-true (h1:encode-ok? (h1:encode-switching-protocols-flat (list "upgrade" "websocket")))
+           "the name is compared without case"))
+
+(test a-switching-protocols-head-refuses-response-splitting
+  (let ((r (h1:encode-switching-protocols-flat
+            (list "Upgrade" "websocket" "X-Echo" (format nil "a~C~CSet-Cookie: x=1" #\Return #\Newline)))))
+    (is-false (h1:encode-ok? r))))

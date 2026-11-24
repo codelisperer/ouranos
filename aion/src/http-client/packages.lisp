@@ -34,6 +34,10 @@
            #:request-connect-timeout #:request-read-timeout
            #:request-follow-redirects #:request-max-body-bytes
            #:request-connect-address #:request-ca-path
+           ;; a request that must not leave this machine (#1212)
+           #:request-stay-local #:loopback-host-p
+           #:stay-local-refused #:stay-local-refused-url #:stay-local-refused-from
+           #:stay-local-refused-address
            #:response #:make-response #:response-p
            #:response-status #:response-headers #:response-body #:response-bytes
            #:responsep
@@ -63,6 +67,7 @@
            #:too-many-redirects #:too-many-redirects-url #:too-many-redirects-limit
            #:fetch-deadline-exceeded #:fetch-deadline-exceeded-url
            #:fetch-deadline-exceeded-deadline
+           #:request-deadline-exceeded
            ;; a response read as it arrives, and cancelling it (#984)
            #:open-response-stream #:read-event #:*max-event-octets*
            #:request-cancel #:make-request-cancel #:request-cancel-p

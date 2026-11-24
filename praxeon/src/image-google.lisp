@@ -68,9 +68,15 @@ whatever its reason.")
    (read-timeout :initarg :read-timeout :initform *openai-images-read-timeout*
                  :reader google-images-read-timeout)
    (connect-timeout :initarg :connect-timeout :initform 30
-                    :reader google-images-connect-timeout))
+                    :reader google-images-connect-timeout)
+   (stay-local :initarg :stay-local :initform nil :reader llm:provider-stay-local))
   (:documentation "Google's Gemini API, generateContent at BASE-URL, as an image provider. API-KEY
-is sent as x-goog-api-key. READ-TIMEOUT and CONNECT-TIMEOUT are in seconds."))
+is sent as x-goog-api-key. READ-TIMEOUT and CONNECT-TIMEOUT are in seconds.
+
+STAY-LOCAL true makes every request stay on this machine, as for the chat providers (#1293): it
+uses no proxy, is refused before anything connects when BASE-URL's host is not loopback, and a
+redirect off the machine is refused instead of followed. The refusal is
+AION/HTTP-CLIENT:STAY-LOCAL-REFUSED, signalled as itself and not as a provider failure."))
 
 (defmethod image-provider-name ((p google-images)) "google")
 (defmethod image-provider-max-references ((p google-images)) *google-max-references*)
@@ -81,12 +87,13 @@ is sent as x-goog-api-key. READ-TIMEOUT and CONNECT-TIMEOUT are in seconds."))
 neither is set. PRAXEON_IMAGE_API_KEY is the OpenAI provider's and is not read here."
   (or (%getenv "PRAXEON_GOOGLE_API_KEY") (%getenv "GEMINI_API_KEY")))
 
-(defun make-google-images (&key (api-key nil api-key-p) model base-url read-timeout)
+(defun make-google-images (&key (api-key nil api-key-p) model base-url read-timeout stay-local)
   "A GOOGLE-IMAGES provider. An API-KEY that is given is used, NIL included; the environment is
 read only when none is given (PRAXEON_GOOGLE_API_KEY, then GEMINI_API_KEY). A given key of NIL or
 \"\" is no key. MODEL defaults to PRAXEON_GOOGLE_IMAGE_MODEL, then *GOOGLE-IMAGE-MODEL*; BASE-URL
 to PRAXEON_GOOGLE_IMAGE_BASE_URL, then *GOOGLE-IMAGES-BASE-URL*; READ-TIMEOUT, in seconds, to
-*OPENAI-IMAGES-READ-TIMEOUT*. Signals MISSING-PROVIDER-KEY when there is no key."
+*OPENAI-IMAGES-READ-TIMEOUT*. STAY-LOCAL is as for the class, default NIL (#1302). Signals
+MISSING-PROVIDER-KEY when there is no key."
   (let ((key (%key api-key api-key-p #'%google-env-key)))
     (unless key
       (error 'cnd:missing-provider-key
@@ -99,13 +106,15 @@ to PRAXEON_GOOGLE_IMAGE_BASE_URL, then *GOOGLE-IMAGES-BASE-URL*; READ-TIMEOUT, i
                    :model (or model (%getenv "PRAXEON_GOOGLE_IMAGE_MODEL") *google-image-model*)
                    :base-url (or base-url (%getenv "PRAXEON_GOOGLE_IMAGE_BASE_URL")
                                  *google-images-base-url*)
-                   :read-timeout (or read-timeout *openai-images-read-timeout*))))
+                   :read-timeout (or read-timeout *openai-images-read-timeout*)
+                   :stay-local stay-local)))
 
-(defun google-images-from-env (&key (api-key nil api-key-p) model base-url read-timeout)
+(defun google-images-from-env (&key (api-key nil api-key-p) model base-url read-timeout
+                                     stay-local)
   "A GOOGLE-IMAGES provider as MAKE-GOOGLE-IMAGES builds it, or NIL when there is no key."
   (let ((key (%key api-key api-key-p #'%google-env-key)))
     (and key (make-google-images :api-key key :model model :base-url base-url
-                                 :read-timeout read-timeout))))
+                                 :read-timeout read-timeout :stay-local stay-local))))
 
 ;;; --- the request ---------------------------------------------------------------------------
 
@@ -168,7 +177,8 @@ POST so a test can read the body that is built."
          :read-timeout (google-images-read-timeout p)
          :connect-timeout (google-images-connect-timeout p)
          ;; Room for the interim images a thinking model sends, marked thought, before its result.
-         :max-body-bytes (* 4 *max-bytes-per-image*)))
+         :max-body-bytes (* 4 *max-bytes-per-image*)
+         :stay-local (llm:provider-stay-local p)))
 
 ;;; --- the reply -----------------------------------------------------------------------------
 
@@ -322,33 +332,40 @@ approximation raises the estimate rather than lowering it."
 ;;; --- registering the means ----------------------------------------------------------------
 
 (defun register-google-image (agent &key on-image (api-key nil api-key-p) model base-url
-                                         read-timeout (name "generate-image") capability source
+                                         read-timeout stay-local (name "generate-image")
+                                         capability source
                                          (qualities *qualities*) default-quality
                                          (default-size :auto) resolve-reference
-                                         (max-references 4) (requires-user-intent t))
+                                         (max-references 4) confirm
+                                         (requires-user-intent nil requires-user-intent-p))
   "Register the generate-image means on AGENT with Google's Gemini API, when there is a key.
 Returns NAME, or NIL when there is no key, in which case nothing is registered.
 
 The key is API-KEY when given, NIL included, and otherwise PRAXEON_GOOGLE_API_KEY, then
 GEMINI_API_KEY; PRAXEON_IMAGE_API_KEY, the OpenAI provider's, is not read. A given key of NIL or
 \"\" is no key, and an empty string is logged at warn. ON-IMAGE, QUALITIES, DEFAULT-QUALITY,
-DEFAULT-SIZE, RESOLVE-REFERENCE, MAX-REFERENCES and REQUIRES-USER-INTENT are as for REGISTER;
-MAX-REFERENCES may be up to *GOOGLE-MAX-REFERENCES*, and REQUIRES-USER-INTENT defaults to T, as
-it does there, because each image costs money (#827). MODEL, BASE-URL and READ-TIMEOUT are as for
+DEFAULT-SIZE, RESOLVE-REFERENCE, MAX-REFERENCES, CONFIRM and REQUIRES-USER-INTENT are as for
+REGISTER; MAX-REFERENCES may be up to *GOOGLE-MAX-REFERENCES*, and REQUIRES-USER-INTENT defaults
+as it does there: true, because each image costs money (#827), except with CONFIRM
+:AFTER-UNTRUSTED (#1189). MODEL, BASE-URL, READ-TIMEOUT and STAY-LOCAL are as for
 MAKE-GOOGLE-IMAGES."
   (when (and api-key-p (equal api-key ""))
     (log:warn "generate-image not registered: the :api-key given is the empty string"
               :name name :provider "google"))
   (let ((provider (if api-key-p
                       (google-images-from-env :api-key api-key :model model :base-url base-url
-                                              :read-timeout read-timeout)
+                                              :read-timeout read-timeout :stay-local stay-local)
                       (google-images-from-env :model model :base-url base-url
-                                              :read-timeout read-timeout))))
+                                              :read-timeout read-timeout :stay-local stay-local))))
     (and provider
-         (register agent provider :on-image on-image :name name
-                                  :capability capability :source source
-                                  :qualities qualities :default-quality default-quality
-                                  :default-size default-size
-                                  :resolve-reference resolve-reference
-                                  :max-references max-references
-                                  :requires-user-intent requires-user-intent))))
+         (apply #'register agent provider :on-image on-image :name name
+                                         :capability capability :source source
+                                         :qualities qualities :default-quality default-quality
+                                         :default-size default-size
+                                         :resolve-reference resolve-reference
+                                         :max-references max-references
+                                         :confirm confirm
+                                         ;; Only when given, so REGISTER decides the default
+                                         ;; from CONFIRM in one place (#1189).
+                                         (when requires-user-intent-p
+                                           (list :requires-user-intent requires-user-intent))))))

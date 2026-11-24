@@ -34,7 +34,7 @@
   ;; Parenscript matches its own macros by symbol identity, so these are the real ones.
   (:import-from #:parenscript #:chain #:@ #:create #:new)
   (:export #:*chat-css* #:chat-js #:events-js #:gate-modal #:user-bubble #:assistant-bubble
-           #:composer #:embed-panel-js #:embed-loader-js))
+           #:composer #:stop-button #:embed-panel-js #:embed-loader-js))
 
 (cl:in-package #:praxeon/chat-ui)
 
@@ -76,15 +76,28 @@ fail-safe -- with JS disabled it stays up, so the app is never used un-acknowled
                    (getf gate :accept)))))
     (:script :type "text/javascript" (:raw *gate-js*))))
 
-(defun user-bubble (msg)
+(defun user-bubble (msg &key (images t) (links t))
+  "The viewer's own message, rendered as Markdown. Raw HTML is escaped. IMAGES and LINKS are
+passed to `hyperion/markdown:render'; by default images and links render, as they always have,
+because the text is what this viewer typed. An app that shows other people's messages in this
+bubble passes :IMAGES NIL :LINKS :TEXT."
   (spinneret:with-html-string
     (:article :class "message px-user"
       (:div :class "message-header" (:p "you"))
       ;; Render as Markdown so paragraphs/blank lines and formatting are preserved
       ;; faithfully. Safe by default -- md:render escapes raw HTML in user input.
-      (:div :class "message-body content" (:raw (md:render msg))))))
+      (:div :class "message-body content" (:raw (md:render msg :images images :links links))))))
 
-(defun assistant-bubble (name msg)
+(defun assistant-bubble (name msg &key (images nil) (links :text))
+  "A model's reply from NAME, rendered as Markdown in `hyperion/markdown:render''s mode for
+untrusted text by default (#1119): an image renders as its alt text, with no IMG element, and a
+link as its text, with no HREF. A model's reply can contain text it was given by someone else,
+such as a web page or a document, and an image in it is fetched as soon as it is shown, with no
+click, which can send data to the image's host. In a desktop webview, following a link replaces
+the app's own page.
+
+An app whose replies are trusted passes :IMAGES T :LINKS T, as praxeon/web does when it is
+started with :TRUSTED-REPLIES T. Raw HTML is escaped either way."
   ;; px-user / px-assistant are *neutral* style hooks with default colors in
   ;; *CHAT-CSS*; an app recolors them via its own :theme-css (see START), so
   ;; app-specific look stays at the app level -- this layer is app-agnostic.
@@ -92,8 +105,7 @@ fail-safe -- with JS disabled it stays up, so the app is never used un-acknowled
     (:article :class "message px-assistant"
       (:div :class "message-header" (:p name))
       ;; LLM replies are Markdown (lists, code fences, emphasis); render them.
-      ;; Safe by default -- any raw HTML the model emits is escaped, not executed.
-      (:div :class "message-body content" (:raw (md:render msg))))))
+      (:div :class "message-body content" (:raw (md:render msg :images images :links links))))))
 
 (defun events-js ()
   "The page's stream client, for a page with a #px-events element. It opens an EventSource on the
@@ -170,31 +182,96 @@ session and has put #px-events in the page."
         (setf (@ window px-start-events) start)
         (funcall start))))))
 
-(defun composer (&key disabled (action "/api/message"))
+(defparameter +composer-placeholder+
+  "Say something…  (Enter to send · Shift+Enter for a newline)"
+  "The composer's placeholder text when the host gives none.")
+
+(defparameter +composer-reset-js+
+  "if(event.detail.successful)if(event.detail.elt===this)this.reset()"
+  "The form's htmx:afterRequest handler: clear the form after its own post succeeded. A refused
+post (a 4xx or 5xx response, or no response) leaves the message in the box. The check on
+event.detail.elt skips requests from elements inside the form, such as the Stop button.")
+
+(defun %check-hidden-fields (fields)
+  (unless (and (listp fields)
+               (every (lambda (f)
+                        (and (consp f) (stringp (car f)) (plusp (length (car f)))
+                             (stringp (cdr f)) (string/= (car f) "message")))
+                      fields))
+    (error "praxeon/chat-ui:composer: :hidden-fields must be a list of (NAME . VALUE) pairs of strings, and no NAME may be \"message\", which is the box itself: ~S"
+           fields)))
+
+(defun composer (&key disabled (action "/api/message") cancel-action label
+                      (placeholder +composer-placeholder+) (autofocus (not disabled)) maxlength
+                      hidden-fields hx-target (hx-swap "none") hx-include)
   "The message form: a multiline box and a Send button, posting to ACTION, /api/message by
 default, which is the route praxeon/web serves. A host app that renders the chat parts in its
 own page passes its own route, for example one under a prefix or one per conversation. The
 message comes back through the poll or the stream, like every other item, so the POST's own
 response has nothing to swap. DISABLED renders both disabled, for the embed panel until it has a
-session."
+session.
+
+The form is cleared after its post succeeds, not when it is submitted, so a message the host
+refuses stays in the box (#1335).
+
+With CANCEL-ACTION, the form also has a Stop button (STOP-BUTTON), hidden until an update shows
+it, which posts to CANCEL-ACTION. praxeon/web passes /api/cancel (#1339).
+
+A host that uses the composer in place of its own form can set (#1335):
+- LABEL, a string shown as a visible <label> for the box, #msg. With none, there is no label.
+- PLACEHOLDER, the box's placeholder text, or NIL for none.
+- AUTOFOCUS, true unless DISABLED, and MAXLENGTH, a positive integer, NIL for no limit.
+- HIDDEN-FIELDS, a list of (NAME . VALUE) strings sent as hidden inputs with each message. NAME
+  may not be \"message\".
+- HX-TARGET, HX-SWAP and HX-INCLUDE, the form's htmx attributes. HX-SWAP is \"none\" by default,
+  because praxeon/web's response has nothing to show; a host whose response is the rendered
+  message sets HX-TARGET and HX-SWAP to append it."
   (check-type action string)
+  (check-type cancel-action (or null string))
+  (check-type label (or null string))
+  (check-type placeholder (or null string))
+  (check-type maxlength (or null (integer 1)))
+  (check-type hx-target (or null string))
+  (check-type hx-swap string)
+  (check-type hx-include (or null string))
+  (%check-hidden-fields hidden-fields)
   (spinneret:with-html-string
-    (:form :hx-post action :hx-swap "none"
-           :onsubmit "setTimeout(() => this.reset(), 0)"
+    (:form :hx-post action :hx-swap hx-swap :hx-target hx-target :hx-include hx-include
+           :|hx-on::after-request| +composer-reset-js+
+      (dolist (f hidden-fields)
+        (:input :type "hidden" :name (car f) :value (cdr f)))
+      (when label
+        (:label :class "label" :for "msg" label))
       (:div :class "field has-addons"
         (:div :class "control is-expanded"
           (:textarea :id "msg" :class "textarea" :name "message" :rows "1"
-                     :placeholder "Say something…  (Enter to send · Shift+Enter for a newline)"
-                     :autofocus (not disabled) :disabled disabled))
+                     :placeholder placeholder :maxlength maxlength
+                     :autofocus (and autofocus t) :disabled disabled))
         (:div :class "control"
-          (:button :id "px-send" :class "button is-primary" :disabled disabled "Send"))))))
+          (:button :id "px-send" :class "button is-primary" :disabled disabled "Send"))
+        (when cancel-action
+          (:div :class "control"
+            (:raw (stop-button :action cancel-action :disabled disabled))))))))
+
+(defun stop-button (&key (action "/api/cancel") shown disabled oob)
+  "The Stop button, #px-stop, which posts to ACTION to stop the turn that is running. It is hidden
+unless SHOWN. praxeon/web sends it with each update, out of band (OOB true), shown while a turn
+runs, so it appears when a turn starts and goes when it ends. The POST's response has nothing to
+swap: the turn's end comes back through the poll or the stream."
+  (check-type action string)
+  (spinneret:with-html-string
+    (:button :id "px-stop" :type "button" :class "button is-light"
+             :hx-post action :hx-swap "none"
+             :hidden (not shown) :disabled disabled
+             :hx-swap-oob (when oob "true")
+             "Stop")))
 
 (defun embed-panel-js ()
   "The embed panel's side of the hand-off in this file's header. It reads the allowed origins
 (a JSON array) and the session URL from #px-embed's data-px-origins and data-px-session. On a
 session it puts the contents of the <template> #px-live into the page, processes them with htmx,
-starts the stream client if the page streams (window.pxStartEvents), and enables #msg and
-#px-send."
+starts the stream client if the page streams (window.pxStartEvents), and enables #msg,
+#px-send and #px-stop."
   (out:js-string
    '(funcall
      (lambda ()
@@ -218,7 +295,7 @@ starts the stream client if the page streams (window.pxStartEvents), and enables
                                  (chain htmx (process box)))))
                            (when (@ window px-start-events)
                              (chain window (px-start-events)))
-                           (dolist (id (list "msg" "px-send"))
+                           (dolist (id (list "msg" "px-send" "px-stop"))
                              (let ((el (chain document (get-element-by-id id))))
                                (when el (setf (@ el disabled) false))))))
                   (exchange

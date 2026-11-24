@@ -1323,3 +1323,51 @@ cap, so the resolver is not asked for the third and no request is made."
     (let ((result (find :tool-result events :key #'evt:event-type)))
       (is (and result (eq :not-run (getf result :outcome))))
       (is (search "not a PNG, JPEG or WebP" (getf result :content)) "~A" (getf result :content)))))
+
+;;; --- the image means takes :confirm (#1189) --------------------------------------------
+
+(test the-image-means-takes-confirm-and-defaults-requires-user-intent-from-it
+  "#1189. REGISTER, REGISTER-OPENAI-IMAGE and REGISTER-GOOGLE-IMAGE take :CONFIRM and pass it to
+REGISTER-MEANS. :REQUIRES-USER-INTENT keeps its default of true for an image, which spends the
+user's allowance, except with :CONFIRM :AFTER-UNTRUSTED, where it defaults to NIL: REGISTER-MEANS
+refuses that combination, so passing :CONFIRM :AFTER-UNTRUSTED alone used to signal. An explicit
+:REQUIRES-USER-INTENT still wins."
+  (flet ((entry (register &rest keys)
+           (let ((ag (actor:make-agent :name "painter" :provider (make-instance 'scripted :script '()))))
+             (apply register ag :api-key "k" :on-image #'identity keys)
+             (let ((e (gethash "generate-image" (actor:agent-means ag))))
+               (list (actor::means-entry-confirm e) (actor:means-entry-requires-user-intent e))))))
+    (dolist (register (list #'praxeon/image:register-openai-image
+                            #'praxeon/image:register-google-image))
+      (is (equal '(nil t) (funcall #'entry register)) "no :confirm: as before")
+      (is (equal '(t t) (funcall #'entry register :confirm t)) ":confirm t")
+      (is (equal '(:after-untrusted nil) (funcall #'entry register :confirm :after-untrusted))
+          ":after-untrusted alone no longer signals, and defaults intent to NIL")
+      (is (equal '(t nil) (funcall #'entry register :confirm t :requires-user-intent nil))
+          "an explicit :requires-user-intent wins")
+      (let ((estimate (lambda (args) (declare (ignore args)) (list :credits 4))))
+        (is (eq estimate (first (funcall #'entry register :confirm estimate)))
+            "an estimate function is passed on"))
+      (signals error (funcall #'entry register :confirm :after-untrusted :requires-user-intent t)
+        "and the contradiction is still refused"))))
+
+(test an-image-failure-answers-aion-retry
+  "#79: IMAGE-REQUEST-FAILED answers AION/RETRY's TRANSIENCE and RETRY-AFTER, so an app can run
+GENERATE-IMAGE under WITH-RETRY. A 429 is :TRANSIENT, as no image was made; a 503 is :TRANSIENT and
+a 500 :UNKNOWN, as AION/HTTP-CLIENT says of those statuses; no answer at all is :UNKNOWN, since the
+image may have been made and charged for. The Retry-After the service sent is the wait."
+  (flet ((failure (kind status retry-after)
+           (make-condition 'praxeon/image:image-request-failed :kind kind :status status
+                                                               :retry-after retry-after
+                                                               :detail "failed")))
+    (let ((rate (failure :rate-limited 429 12)))
+      (is (eq :transient (aion/retry:transience rate)))
+      (is (eql 12 (aion/retry:retry-after rate)) "the Retry-After is the wait"))
+    (is (eq :transient (aion/retry:transience (failure :server-error 503 nil))))
+    (is (eq :unknown (aion/retry:transience (failure :server-error 500 nil))))
+    (is (eq :unknown (aion/retry:transience (failure :no-answer nil nil))))
+    (is (null (aion/retry:retry-after (failure :no-answer nil nil))) "no Retry-After, no wait")
+    (is-true (aion/retry:transient-p (failure :rate-limited 429 nil))
+             "so the default policy retries a rate limit")
+    (is-false (aion/retry:transient-p (failure :no-answer nil nil))
+              "and not a lost answer, which only TRANSIENT-OR-UNKNOWN-P retries")))

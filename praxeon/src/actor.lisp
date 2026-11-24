@@ -33,7 +33,9 @@ ABSENT from the tool table unless something permits it: see AGENT-TOOL-SPECS."
   (source nil)
   ;; CONFIRM (#531): NIL runs the means as usual. T holds every call until the user decides.
   ;; A function of the arguments holds the call too, and returns an estimate plist of what the
-  ;; call will cost, such as (:credits 40), or NIL. See hold.lisp.
+  ;; call will cost, such as (:credits 40), or NIL. :AFTER-UNTRUSTED holds a call only once
+  ;; untrusted content has entered the turn, and runs it as usual otherwise (#1185). See
+  ;; hold.lisp.
   (confirm nil)
   ;; #827. UNTRUSTED: the means brings content from outside the conversation into it (a web
   ;; page, search results), so a call the model decides after it ran may have been steered by
@@ -67,6 +69,15 @@ client rendering `agent-history' still shows the whole conversation."
   ;; billing behaviour, and one that arrived without being asked for would be a surprise in a
   ;; line item. See DELIBERATE for what it does and what it deliberately does not reach.
   (cache-system nil)
+  ;; CACHE-MESSAGES (#1317): mark the latest message of every request as the end of the cacheable
+  ;; prefix, so the next step of a turn, and the next turn, read the conversation so far from the
+  ;; provider's cache. NIL by default, for the same reason as CACHE-SYSTEM. See
+  ;; %WITH-LATEST-MESSAGE-MARKED.
+  (cache-messages nil)
+  ;; TRIM-FROM (#1317): with CACHE-MESSAGES and a history budget, the first message of the history
+  ;; still sent after the last trim, as the message object itself, or NIL. Conversation state; see
+  ;; %TRIM-IN-STEPS.
+  (trim-from nil)
   (means (make-hash-table :test #'equal)) ; name(string) -> means-entry
   (context (ctx:make-context) :type ctx:context)
   ;; 120000 ESTIMATED tokens, not NIL, and the default is the decision. An opt-in bound
@@ -148,13 +159,13 @@ NIL means not recorded, so either recorded value is kept over it."
   "Give TO, an agent just made, FROM's conversation, and return TO. What moves is the history and
 the state needed to read it as it was read before: the retrieved context, the offloaded and
 cleared tool results with the store they are in, the untrusted-content records, the turn guard,
-and the thread memory. TO's conversation taint becomes the higher of the two agents' values
-(%HIGHER-TAINT), so a value the app gave TO is not lowered. TO is private when either agent is,
-so a conversation that was private stays private on an agent the app built without :PRIVATE
-(#983, the hub's review of #1027). TO keeps the rest of its own configuration: provider, system
-prompt, means, budgets, taint scope and RETAIN-CONTENT. An app does this when what an agent may
-do changes and its conversation should go on, such as praxeon/web when a session's grant
-changes (#67). The two agents share the moved tables afterwards, so FROM is not used again."
+the thread memory, and where the last trim left the history (TRIM-FROM). TO's conversation
+taint becomes the higher of the two agents' values (%HIGHER-TAINT), so a value the app gave TO is
+not lowered. TO is private when either agent is, so a conversation that was private stays
+private on an agent the app built without :PRIVATE (#983, the hub's review of #1027). TO keeps
+the rest of its own configuration: provider, system prompt and its cache settings, means,
+budgets, taint scope and RETAIN-CONTENT. An app does this when what an agent may do changes and
+its conversation should go on, such as praxeon/web when a session's grant changes (#67). The two agents share the moved tables afterwards, so FROM is not used again."
   (setf (agent-history to) (agent-history from)
         (agent-context to) (agent-context from)
         (agent-result-index to) (agent-result-index from)
@@ -165,7 +176,8 @@ changes (#67). The two agents share the moved tables afterwards, so FROM is not 
         (agent-conversation-taint to) (%higher-taint (agent-conversation-taint from)
                                                      (agent-conversation-taint to))
         (agent-private to) (or (agent-private from) (agent-private to))
-        (agent-thread-memory to) (agent-thread-memory from))
+        (agent-thread-memory to) (agent-thread-memory from)
+        (agent-trim-from to) (agent-trim-from from))
   ;; The result index names results in FROM's store, so the store goes with it.
   (when (agent-result-store from)
     (setf (agent-result-store to) (agent-result-store from)
@@ -230,8 +242,13 @@ function of one argument -- the tool arguments -- returning a string), an
 optional argument SCHEMA (a jzon-serializable JSON-schema value), and an optional
 CAPABILITY string a caller must hold to see or use it (#90). SOURCE is NIL or a plist that
 names where the means comes from; the :TOOL-CALL and :TOOL-RESULT events carry it (#527).
-CONFIRM is NIL, T or a function of the arguments returning an estimate plist: a means with one
-is held until the user decides (#531, see RUN-TURN's :ON-HOLD).
+CONFIRM is NIL, T, a function of the arguments returning an estimate plist, or :AFTER-UNTRUSTED.
+With T or a function, every call is held until the user decides (#531, see RUN-TURN's :ON-HOLD).
+With :AFTER-UNTRUSTED, a call runs as usual in a clean turn and is held for the user's decision
+once untrusted content has entered the turn, or the conversation under :TAINT-SCOPE
+:CONVERSATION (#1185): for a cheap, frequent spending means, where asking on every call is too
+much but a call a fetched page may have prompted should be confirmed. A held call carries what
+the turn had read, as :UNTRUSTED (#1183).
 
 The rest guard a turn against instructions written into content the agent reads (#827):
 
@@ -244,7 +261,10 @@ The rest guard a turn against instructions written into content the agent reads 
                         CONFIRM is given, because a means held for the user's confirmation is
                         one that spends or writes, and an app that forgets this key must not
                         leave a page able to ask for it. Pass NIL to have such a means held
-                        for confirmation after untrusted content instead of refused.
+                        for confirmation after untrusted content instead of refused; the held
+                        call's :UNTRUSTED says what was read, so the app can warn the user.
+                        With CONFIRM :AFTER-UNTRUSTED it defaults to NIL, since refusing would
+                        leave nothing to hold, and passing true with it signals an error.
   ALLOW                NIL, or a function of the call's arguments and the agent. A call runs
                         only when it returns true; otherwise, or when it signals, the call is
                         refused as not run.
@@ -252,6 +272,10 @@ The rest guard a turn against instructions written into content the agent reads 
                         one turn. Later calls are refused as not run.
 
 Returns NAME."
+  (unless (or (null confirm) (eq confirm t) (functionp confirm) (eq confirm :after-untrusted))
+    (error "REGISTER-MEANS's :CONFIRM must be NIL, T, a function of the arguments, or :AFTER-UNTRUSTED, not ~S." confirm))
+  (when (and (eq confirm :after-untrusted) requires-user-intent)
+    (error "REGISTER-MEANS's :CONFIRM :AFTER-UNTRUSTED holds a call after untrusted content, and :REQUIRES-USER-INTENT true would refuse it there instead; pass one or the other."))
   (unless (or (null allow) (functionp allow))
     (error "REGISTER-MEANS's :ALLOW must be NIL or a function of the arguments and the agent, not ~S." allow))
   (unless (or (null max-per-turn) (and (integerp max-per-turn) (plusp max-per-turn)))
@@ -262,7 +286,9 @@ Returns NAME."
                           :confirm confirm :untrusted (and untrusted t)
                           :requires-user-intent (if requires-user-intent-p
                                                     (and requires-user-intent t)
-                                                    (and confirm t))
+                                                    (and confirm
+                                                         (not (eq confirm :after-untrusted))
+                                                         t))
                           :allow allow :max-per-turn max-per-turn))
   name)
 
@@ -283,7 +309,9 @@ Returns NAME."
   ;; The agent whose turn this is, so %TAINT-GUARD can record the conversation's taint (#948).
   (agent nil)
   (counts (make-hash-table :test #'equal))
-  (urls '() :type list))
+  (urls '() :type list)
+  ;; How many calls in this turn named a means it could not call (#1196).
+  (unknown-calls 0 :type integer))
 
 (defun %taint-guard (guard)
   "Mark GUARD's turn untrusted, and record that untrusted content has entered its agent's
@@ -397,8 +425,12 @@ longer registered, whose result cannot be judged, or one recorded as untrusted w
   (let ((guard (%make-turn-guard key nil agent)))
     (%taint-guard-from guard (%history-untrusted-p agent))
     (dolist (p (%tool-uses (rest messages)))
-      (when (gethash (getf p :name) (agent-means agent))
-        (incf (gethash (getf p :name) (turn-guard-counts guard) 0)))
+      (if (gethash (getf p :name) (agent-means agent))
+          (incf (gethash (getf p :name) (turn-guard-counts guard) 0))
+          ;; Counted for the #1196 limit. The rebuild has no PERMIT, so a call to a registered
+          ;; means the caller may not use is counted as a call to that means rather than here:
+          ;; after a rebuild, such calls can again be answered up to the limit.
+          (incf (turn-guard-unknown-calls guard)))
       (when (%untrusted-call-p agent p)
         (%taint-guard guard)))
     guard))
@@ -835,6 +867,147 @@ cleared. Returns how many were erased. A stand-in that names one of them then re
     (clrhash (agent-cleared agent))
     (if store (res:forget-conversation-results store (agent-conversation agent)) 0)))
 
+;;; --- a cache breakpoint on the latest message (#1317) ------------------------------
+;;;
+;;; With CACHE-SYSTEM alone, the cached prefix is the tools and the system prompt, and every
+;;; message, tool results included, is sent at full price on every step of a turn. A consuming app
+;;; measured a 6-step tool turn: cache reads stayed at 6,573 tokens while uncached input grew from
+;;; 103 to 12,778. With CACHE-MESSAGES, each request also marks its latest message as the end of
+;;; the cacheable prefix. The next request begins with the same messages and adds to them, so the
+;;; provider finds the earlier request's prefix in its cache. Anthropic looks for a cached prefix at
+;;; the block boundaries before a breakpoint, up to about 20 blocks back, so the mark need not stay
+;;; on the earlier message, and a request carries one message mark from this producer, not one per
+;;; step.
+;;;
+;;; WHAT KEEPS THE MESSAGES BEFORE THE MARK THE SAME FROM ONE STEP TO THE NEXT:
+;;;
+;;;   - The mark goes on after trimming (so a marked message never pins the history against the
+;;;     trim) and before the retrieved facts are attached (prompt:attach-context puts them after
+;;;     the marked part, so they change without touching the prefix).
+;;;   - Every message whose content is a string is sent as one text part. Otherwise the latest
+;;;     message, marked and so sent as a part, would be sent as a string on the next step, and the
+;;;     bytes before the next mark would differ.
+;;;   - Results cleared by OFFLOAD-TOOL-RESULTS keep their stand-ins in the same places, so the
+;;;     messages change only when a new batch is cleared; the step after a batch writes the cache
+;;;     again, and the steps after it read it.
+;;;   - With a history budget, the history is trimmed in steps (%TRIM-IN-STEPS), not one exchange
+;;;     at a time. PROMPT:TRIM-HISTORY keeps the newest exchanges that fit, so near the budget it
+;;;     drops the oldest exchange on almost every step; each such step would miss the cache and
+;;;     write the whole history to it again, at 1.25 times the price of sending it uncached.
+;;;     %TRIM-IN-STEPS keeps sending from the same first exchange while the history fits the budget,
+;;;     and when it no longer fits, drops old exchanges until it fits half the budget. The cache is
+;;;     then missed once per trim. The cost is that between trims the history sent is between half
+;;;     the budget and the whole of it, where the exchange-at-a-time trim keeps it near the budget.
+;;;
+;;; WHEN THE CACHE IS STILL MISSED. The step after a batch is cleared or the history is trimmed
+;;; writes the cache again. A step that adds more than about 20 content blocks, for example an
+;;; assistant message with 10 or more tool calls in parallel (each call is one block, and each
+;;; result another), puts the previous request's mark further back than Anthropic looks, so that
+;;; step is sent and cached at the full price too. Nothing reports either case beyond the
+;;; completion's cache token counts.
+;;;
+;;; A PROVIDER'S LIMIT ON BREAKPOINTS. Anthropic accepts at most +CACHE-BREAKPOINTS-ALLOWED+ marks
+;;; in one request, counting the tool specs', the system prompt's and any in the messages, such as
+;;; the thread's observations. When the request already has that many, no mark is added. A
+;;; provider without a caller-controlled cache ignores the marks.
+
+(defparameter +cache-breakpoints-allowed+ 4
+  "The most cache breakpoints one Anthropic request may carry.")
+
+(defun %parts-of (content)
+  (if (stringp content) (list (llm:text-part content)) content))
+
+(defun %marks-in (system messages &optional tools)
+  "How many parts of SYSTEM (a string or a list of parts) and MESSAGES, and how many TOOLS (tool
+specs), are marked."
+  (+ (count-if #'llm:tool-spec-cache tools)
+     (if (listp system) (count-if #'llm:cache-boundary-p system) 0)
+     (loop for m in messages
+           for c = (llm:content m)
+           when (listp c) sum (count-if #'llm:cache-boundary-p c))))
+
+(defun %with-latest-message-marked (messages system &optional tools)
+  "MESSAGES, each string content as one text part, with the last part of the last message marked
+as the end of the cacheable prefix (#1317). Nothing is marked when that part already is, when it
+is an empty text, or when TOOLS, SYSTEM and MESSAGES already carry +CACHE-BREAKPOINTS-ALLOWED+
+marks."
+  (let* ((messages (mapcar (lambda (m)
+                             ;; A copy with its other properties kept: only the content changes.
+                             (let ((copy (copy-list m)))
+                               (setf (getf copy :content) (%parts-of (llm:content m)))
+                               copy))
+                           messages))
+         (last (car (last messages)))
+         (parts (and last (llm:content last)))
+         (final (car (last parts))))
+    (cond ((or (null final)
+               (llm:cache-boundary-p final)
+               (and (eq :text (getf final :type)) (zerop (length (getf final :text))))
+               (>= (%marks-in system messages tools) +cache-breakpoints-allowed+))
+           messages)
+          (t (let ((marked (copy-list last)))
+               (setf (getf marked :content)
+                     (append (butlast parts) (list (append final (list :cache t)))))
+               (append (butlast messages) (list marked)))))))
+
+(defun %trim-in-steps (agent history from budget)
+  "The tail of HISTORY, from index FROM on, that is sent under BUDGET when the agent caches its
+messages (#1317). Unlike PROMPT:TRIM-HISTORY, which keeps the newest exchanges that fit and so
+drops the oldest exchange on almost every step near the budget, this keeps the first message the
+last trim kept (AGENT-TRIM-FROM) for as long as the history from it fits BUDGET. When it no longer
+fits, old exchanges are dropped until what is left fits half of BUDGET, the newest exchange always
+kept, and AGENT-TRIM-FROM records where the history now starts. The messages before the cache
+mark then change once per trim rather than on every step.
+
+HISTORY is AGENT-HISTORY with cleared results replaced by their stand-ins, message for message,
+so an index into one is an index into the other. AGENT-TRIM-FROM is a message object of
+AGENT-HISTORY, compared with EQ, not an index, so a history the app replaces with another
+conversation, of any length, does not contain it: the trim then starts again from FROM, and
+everything that fits is sent. It is also ignored when it is not the first message of an exchange
+after FROM. FROM is where the thread's observations leave the history (0 without them).
+
+THE TRIM POINT IS NOT MOVED BACK. When the budget grows, as when MOVE-CONVERSATION hands the
+history to an agent with a larger budget, the history is still sent from AGENT-TRIM-FROM, so
+less is sent than the budget would allow until the history next outgrows it. Set
+AGENT-TRIM-FROM to NIL to send everything that fits at once, at the price of one cache miss.
+
+Emits :CONTEXT-TRIMMED when anything before FROM's tail is not sent, as PROMPT:TRIM-HISTORY does,
+and leaves :CONTEXT-OVERFLOW to it."
+  (let* ((tail (nthcdr from history))
+         (groups (prompt:exchanges tail))
+         ;; The index in HISTORY at which each exchange starts.
+         (starts (loop for g in groups
+                       for at = from then (+ at n)
+                       for n = (length g)
+                       collect at))
+         (marker (agent-trim-from agent))
+         (at (and marker (position marker (agent-history agent) :test #'eq)))
+         (kept-from (if (and at (member at starts)) at from))
+         (kept (nthcdr (or (position kept-from starts) 0) groups))
+         (tokens (lambda (gs) (prompt:messages-tokens (loop for g in gs append g)))))
+    (if (plusp (prompt:pinned-exchange-count groups))
+        ;; A mark in the history itself, which no producer in this file puts there: leave the
+        ;; pinning to PROMPT:TRIM-HISTORY.
+        (prompt:trim-history tail budget)
+        (progn
+          (when (> (funcall tokens kept) budget)
+            (let ((target (floor budget 2)))
+              (loop while (and (rest kept) (> (funcall tokens kept) target))
+                    do (pop kept))
+              (setf kept-from (nth (- (length groups) (length kept)) starts))))
+          (setf (agent-trim-from agent) (nth kept-from (agent-history agent)))
+          (let ((dropped (- (length groups) (length kept))))
+            (when (plusp dropped)
+              (evt:emit :context-trimmed
+                        :dropped-exchanges dropped
+                        :kept-exchanges (length kept)
+                        :pinned-exchanges 0
+                        :estimated-tokens (funcall tokens kept)
+                        :budget budget)))
+          ;; Drops nothing more: it emits :CONTEXT-OVERFLOW when the newest exchange alone is
+          ;; over BUDGET.
+          (prompt:trim-history (loop for g in kept append g) budget)))))
+
 (defun request-messages (agent)
   "The messages a deliberation SENDS. Returns (values messages estimated-tokens breakdown).
 
@@ -865,7 +1038,9 @@ untrusted, the turn becomes untrusted (#317's taint ruling)."
                    (if (and b (first observed))
                        (max 0 (- b (prompt:estimate-tokens (first observed))))
                        b)))
-         (trimmed (prompt:trim-history (if start (nthcdr start history) history) budget))
+         (trimmed (if (and (agent-cache-messages agent) budget)
+                      (%trim-in-steps agent history (or start 0) budget)
+                      (prompt:trim-history (if start (nthcdr start history) history) budget)))
          (assembled-context (ctx:assemble (agent-context agent)))
          (assembled (append assembled-context
                             ;; Subject facts go with the other context items, after the cache
@@ -890,6 +1065,11 @@ untrusted, the turn becomes untrusted (#317's taint ruling)."
     ;; the member's own wish, so its source is harder to see than the original's.
     (when (some #'ctx:ctx-item-untrusted assembled)
       (%taint-guard (%turn-guard agent)))
+    ;; After trimming, so the mark pins nothing against the trim, and before the facts, so they
+    ;; stay after it (#1317).
+    (when (agent-cache-messages agent)
+      (setf trimmed (%with-latest-message-marked trimmed (agent-system-parts agent)
+                                                 (agent-tool-specs agent))))
     (let* ((messages (if facts
                          (prompt:attach-context trimmed facts)
                          trimmed))
@@ -1017,7 +1197,8 @@ line break is any of the characters PRAXEON/PROMPT counts as one; each becomes a
   ;; A CASE ON THE CHARACTER, with the code test last. Written as a COND whose second clause was
   ;; (MEMBER (CHAR-CODE CH) '(#x0B #x85 #x2028 #x2029)), SBCL 2.6.9 compiled it so that the next
   ;; clause, (CHAR= CH #\[), was never taken, and no [ was escaped; the same COND interpreted
-  ;; escaped it. Found writing #908's forging test, which fails without the escape.
+  ;; escaped it. Found writing #908's forging test, which fails without the escape. SBCL 2.6.10
+  ;; compiles it the same way, measured on its Linux, macOS and release-mode CI legs (#911, #1214).
   (with-output-to-string (s)
     (loop for ch across text
           do (case ch
@@ -1170,14 +1351,13 @@ because it is the shape a consuming app is starting with -- one large shared bri
 short completions -- and it is where the measurement that opened pre-publication issue 401 came from (574 input
 tokens for a one-line question against an EMPTY history, essentially all prefix).
 
-WHAT IT DOES NOT DO, said here so nobody reads more into it: the conversation is not cached.
-A long history is still resent and still charged in full every turn, because nothing marks a
-boundary inside MESSAGES. That is a second producer and a separate decision -- and it is the
-one where `prompt:pinned-exchange-count' becomes load-bearing, which corrects an argument I
-made when this shape was chosen: I said the boundary interacts with history trimming, and under
-THIS producer it does not. The pinning scans messages; the marker is not in them, so
-PINNED-EXCHANGE-COUNT returns 0 on the actor path. Asserted in the suite so that when a message
-breakpoint does arrive, the test says what changed rather than passing quietly.
+WHAT IT DOES NOT DO, said here so nobody reads more into it: the conversation is not cached by
+this producer. A long history is resent and charged in full every turn unless the agent also
+sets CACHE-MESSAGES, the second producer (#1317), which marks the latest message of each request;
+see %WITH-LATEST-MESSAGE-MARKED. That mark is added after the history is trimmed, so
+`prompt:pinned-exchange-count' still finds no mark in what the trim reads, and the pinning stays
+inert on the actor path. It does find the mark in the request that is sent, which the suite
+asserts.
 
 AN EMPTY PROMPT IS NOT MARKED. Marking nothing is not a prefix, and it would put a
 `cache_control' block on an empty string for a provider to reject or ignore.
@@ -1197,7 +1377,22 @@ rather than NIL, which is the distinction pre-publication issue 401 paid for and
 agent's MAX-TOKENS slot, else `llm:*default-max-tokens*' as it is now (#326)."
   (or max-tokens (agent-max-tokens agent) llm:*default-max-tokens*))
 
-(defun deliberate (agent &key permit max-tokens)
+(defparameter +wrap-up-instruction+
+  "You have used every step this turn allows, so you cannot call any more tools. Answer the user now, as well as you can, from what you have already gathered in this conversation. If it is not enough for a full answer, say what you found and what is still missing."
+  "The instruction added to the system prompt for a turn's wrap-up step (#1182).")
+
+(defun %with-wrap-up (system)
+  "SYSTEM, a system prompt as AGENT-SYSTEM-PARTS gives it, with +WRAP-UP-INSTRUCTION+ after it.
+A list keeps its parts, so a cacheable prefix stays exactly as it was and the instruction comes
+after its boundary (#1182)."
+  (cond ((null system) +wrap-up-instruction+)
+        ((stringp system)
+         (if (zerop (length system))
+             +wrap-up-instruction+
+             (format nil "~A~%~%~A" system +wrap-up-instruction+)))
+        (t (append system (list (llm:text-part +wrap-up-instruction+))))))
+
+(defun deliberate (agent &key permit max-tokens wrap-up)
   "Ask the provider for the agent's next move given its current history,
 advertising the means PERMIT allows as tools. Returns (values COMPLETION
 ESTIMATED-INPUT-TOKENS BREAKDOWN), BREAKDOWN as PROMPT-BREAKDOWN gives it. Signals
@@ -1216,7 +1411,27 @@ and a budget enforced against an estimate nobody compares is how a bound silentl
 stops bounding.
 
 PERMIT is passed to AGENT-TOOL-SPECS, so a means the caller may not use is never described
-to the model at all (#90)."
+to the model at all (#90).
+
+WRAP-UP true makes this the turn's last call when its steps have run out (#1182):
++WRAP-UP-INSTRUCTION+ follows the system prompt, asking for the best answer from what was
+gathered, and the model is kept from calling a tool. The history is not changed. How it is kept
+from calling one depends on the provider (#1318):
+
+  - A provider whose LLM:HONOURS-TOOL-CHOICE-NONE-P is true (Anthropic, and the
+    OpenAI-compatible backends other than Meta's and Ollama) is sent the same tools as the
+    earlier steps, with the tool choice :NONE. A provider renders its prompt as tools, then
+    system, then messages, so leaving the tools out changed the prompt from its first byte, and
+    the wrap-up could read nothing from the cache. With the tools kept, it reads the cached tools
+    and system prompt, up to the system prompt's cache boundary, which the instruction follows
+    (%WITH-WRAP-UP). It does not read the cached messages: Anthropic drops the cached message
+    blocks when the tool choice changes, so the history is sent at full price.
+  - Any other provider is sent no tools, as before. It either has no setting that forbids a
+    call while tools are offered, or, like Ollama, accepts :NONE and lets the model call a tool
+    anyway.
+
+Either way a model can still return a call, and RUN-TURN fails such a wrap-up without running
+the call."
   (unless (agent-provider agent)
     (error 'cnd:deliberation-failure :detail "no provider configured"))
   (multiple-value-bind (messages estimate breakdown) (request-messages agent)
@@ -1224,20 +1439,30 @@ to the model at all (#90)."
     ;; provider had reported no input count (#984).
     (handler-bind ((cnd:completion-cancelled
                      (lambda (c) (setf (cnd:completion-cancelled-estimated-input c) estimate))))
-      (values (llm:complete (agent-provider agent)
-                            messages
-                            :system (agent-system-parts agent)
-                            :tools (agent-tool-specs agent :permit permit)
-                            :max-tokens (%output-limit agent max-tokens))
-              estimate breakdown))))
+      (let* ((provider (agent-provider agent))
+             (specs (agent-tool-specs agent :permit permit))
+             ;; True when the wrap-up keeps the tools and forbids a call through the provider's
+             ;; own setting. With no tools there is nothing to keep, and a tool choice sent
+             ;; without tools is an error at Anthropic.
+             (forbid (and wrap-up specs (llm:honours-tool-choice-none-p provider))))
+        (values (apply #'llm:complete provider
+                       messages
+                       :system (if wrap-up
+                                   (%with-wrap-up (agent-system-parts agent))
+                                   (agent-system-parts agent))
+                       :tools (if (and wrap-up (not forbid)) nil specs)
+                       :max-tokens (%output-limit agent max-tokens)
+                       ;; Only on a wrap-up, so every other request is built as before.
+                       (and forbid (list :tool-choice :none)))
+                estimate breakdown)))))
 
-(defun %deliberate-step (agent permit limit step)
+(defun %deliberate-step (agent permit limit step &optional wrap-up)
   "DELIBERATE for STEP of a turn, with the turn's cancel handle given to the provider and, while
 an observer is bound, each piece of the model's text emitted as a :TEXT-DELTA event (#984)."
   (let ((llm:*cancel* (and *turn-cancel* (turn-cancel-request *turn-cancel*)))
         (llm:*on-text* (and evt:*observer*
                             (lambda (piece) (evt:emit :text-delta :text piece :step step)))))
-    (deliberate agent :permit permit :max-tokens limit)))
+    (deliberate agent :permit permit :max-tokens limit :wrap-up wrap-up)))
 
 (defun %end-cancelled (step &optional stopped)
   "End a cancelled turn at STEP. STOPPED is the COMPLETION-CANCELLED of a model call the cancel
@@ -1402,7 +1627,7 @@ and otherwise what it already was, which an enclosing private turn has made NIL.
   (setf (agent-history agent) (append (agent-history agent) messages)))
 
 (defun run-turn (agent user-input &key (max-steps 8) permit max-tokens principal
-                                       (on-hold nil on-hold-p) held claim cancel)
+                                       (on-hold nil on-hold-p) held claim cancel on-step-limit)
   "Run one full turn: record USER-INPUT, then deliberate and act until the model
 replies with no further tool call. Returns the model's final text. MAX-STEPS
 bounds the deliberate/act cycle so a misbehaving loop stays finite.
@@ -1450,7 +1675,13 @@ means that needs a principal refuses the call.
 ON-HOLD is what the app does when the model calls a means registered with :CONFIRM (#531):
   NIL         no confirmation is available, and the call is not run. The default.
   a function  called with a plist describing the call (:PRINCIPAL :AGENT :NAME :SOURCE
-              :ARGUMENTS :ESTIMATE), on this thread; it returns :APPROVE, :DECLINE or :HOLD.
+              :ARGUMENTS :ESTIMATE :UNTRUSTED), on this thread; it returns :APPROVE, :DECLINE,
+              (:DECLINE text) or :HOLD. (:DECLINE text) declines with the app's own reason: the
+              model is told TEXT instead of the usual sentence, and :TOOL-DECIDED carries it as
+              :REASON (#1191). Any other value counts as no confirmation available. :UNTRUSTED is NIL when the turn was clean when the model decided the call,
+              and otherwise a plist saying what it had read, for a warning to the user (#1183):
+              :SCOPE (:TURN or :CONVERSATION), :DELEGATED, and :SOURCES, one (:MEANS :ID :SCOPE)
+              per call that brought the content in. A held call in a HELD-TURN carries the same.
   :HOLD       the turn ends with the call held: RUN-TURN returns NIL, :HELD and a HELD-TURN,
               which the app stores and later passes to CONTINUE-TURN with the user's decision.
 When ON-HOLD is not given, a turn uses the enclosing turn's, so a delegated sub-turn asks the
@@ -1473,7 +1704,19 @@ counts the provider had reported (usually no output count) and :ESTIMATED-OUTPUT
 model call is not added to the history. NIL keeps the handle of an enclosing turn.
 
 While an observer is bound (PRAXEON/EVENT:WITH-OBSERVER), a provider that streams sends its text
-as it is written, and the turn emits a :TEXT-DELTA event for each piece."
+as it is written, and the turn emits a :TEXT-DELTA event for each piece.
+
+ON-STEP-LIMIT is NIL, the default, or :WRAP-UP (#1182). With NIL, a turn that has used all
+MAX-STEPS without an answer signals DELIBERATION-FAILURE, as before. With :WRAP-UP, the last of
+the MAX-STEPS is a wrap-up instead: the model may not call a tool (see DELIBERATE for how each
+provider is told) and is asked for the best answer from what the turn gathered, and RUN-TURN
+returns that answer with a second value of :WRAPPED-UP, so the caller can tell it from an
+ordinary answer. The wrap-up counts as a step, so MAX-STEPS
+stays the ceiling, and emits the usual :USAGE event. A turn that answers earlier is unchanged.
+:WRAP-UP needs MAX-STEPS of at least 2; any other value, or :WRAP-UP with fewer steps, signals an
+error before anything is recorded. A wrap-up that asks for tools anyway signals
+DELIBERATION-FAILURE, and its calls are not run or recorded."
+  (%check-on-step-limit on-step-limit max-steps)
   (let* ((*principal* (or principal *principal*))
          (*turn-cancel* (or cancel *turn-cancel*))
          (*on-hold* (cond (on-hold-p on-hold)
@@ -1482,11 +1725,12 @@ as it is written, and the turn emits a :TEXT-DELTA event for each piece."
          (*hold-allowed* on-hold-p))
     (%with-agent-privacy (agent)
       (%settle-unanswered agent held claim)
-      (multiple-value-prog1 (%run-turn agent user-input max-steps permit max-tokens)
+      (multiple-value-prog1 (%run-turn agent user-input max-steps permit max-tokens
+                                       on-step-limit)
         ;; The observer is given the history after every turn (#317, step C).
         (%observe-after-turn agent)))))
 
-(defun %run-turn (agent user-input max-steps permit max-tokens)
+(defun %run-turn (agent user-input max-steps permit max-tokens &optional on-step-limit)
   "RUN-TURN's steps, with *PRINCIPAL* and *ON-HOLD* already bound."
   (let ((message (llm:msg "user" user-input)))
     (%append-history agent message)
@@ -1506,11 +1750,35 @@ as it is written, and the turn emits a :TEXT-DELTA event for each piece."
     ;; :DELEGATED, not :UNTRUSTED, so a coordinator is not marked by it (#949's review).
     (when (and *delegated* (not (eq (agent-conversation-taint agent) :untrusted)))
       (setf (agent-conversation-taint agent) :delegated)))
-  (%turn-loop agent max-steps permit (%output-limit agent max-tokens)))
+  (%turn-loop agent max-steps permit (%output-limit agent max-tokens) on-step-limit))
 
-(defun %turn-loop (agent max-steps permit limit)
+(defun %check-on-step-limit (on-step-limit max-steps)
+  "Signal unless ON-STEP-LIMIT is NIL or :WRAP-UP, or when it is :WRAP-UP with fewer than two
+steps: the wrap-up is the last step, so with one there would be nothing gathered to answer from."
+  (unless (member on-step-limit '(nil :wrap-up))
+    (error "praxeon/actor: :on-step-limit must be NIL or :wrap-up, not ~S" on-step-limit))
+  (when (and (eq on-step-limit :wrap-up) (< max-steps 2))
+    (error "praxeon/actor: :on-step-limit :wrap-up needs at least 2 steps, so that one gathers and one answers; got :max-steps ~S" max-steps)))
+
+(defun %turn-loop (agent max-steps permit limit &optional on-step-limit)
   "Deliberate and act until the model answers, at most MAX-STEPS times. Returns RUN-TURN's
-values. CONTINUE-TURN enters here too, after it has written a held step's results."
+values. CONTINUE-TURN enters here too, after it has written a held step's results.
+
+ON-STEP-LIMIT :WRAP-UP makes the last of the MAX-STEPS a wrap-up (#1182): it forbids a tool call
+(DELIBERATE, #1318) and asks for the best answer from what was gathered, and its answer is
+returned with a second value of :WRAPPED-UP. It is a step like any other, so MAX-STEPS stays the
+ceiling, and it emits the usual :USAGE event. A turn that answers before its last step is not affected.
+
+It first emits :TURN-STARTED with the agent's name, the model and provider it will call, its
+conversation id and MAX-STEPS, so an observer can tell where a turn begins and which model its
+steps use (praxeon/trace, #1225). A held turn that CONTINUE-TURN resumes emits it again."
+  (let ((provider (agent-provider agent)))
+    (evt:emit :turn-started :agent (agent-name agent)
+                            :model (and provider (llm:model-of provider))
+                            :provider (and provider
+                                           (string-downcase (class-name (class-of provider))))
+                            :conversation (agent-conversation agent)
+                            :max-steps max-steps))
   (progn
     (dotimes (step max-steps
                    (error 'cnd:deliberation-failure
@@ -1520,7 +1788,9 @@ values. CONTINUE-TURN enters here too, after it has written a held step's result
         (return (%end-cancelled step)))
       (evt:emit :deliberating :step step)
       (multiple-value-bind (completion estimate breakdown)
-          (handler-case (%deliberate-step agent permit limit step)
+          (handler-case (%deliberate-step agent permit limit step
+                                          (and (eq on-step-limit :wrap-up)
+                                               (= step (1- max-steps))))
             (cnd:completion-cancelled (c) (return (%end-cancelled step c))))
         ;; Economic calculation: report what this step cost so the scarce resource
         ;; (the token budget) is visible. :ESTIMATED-INPUT is what the history budget was
@@ -1612,12 +1882,22 @@ values. CONTINUE-TURN enters here too, after it has written a held step's result
                (cnd:abandon-turn ()
                  :report "End the turn with no answer."
                  (return (values nil :abandoned)))))
+            ;; A WRAP-UP THAT ASKS FOR TOOLS ANYWAY is not obeyed: no tools were offered, the
+            ;; turn has no steps left to run them in, and appending the calls would leave them
+            ;; without results in the history. The turn fails as it did before :WRAP-UP existed,
+            ;; and the history is left as it was (#1182).
+            ((and calls (eq on-step-limit :wrap-up) (= step (1- max-steps)))
+             (error 'cnd:deliberation-failure
+                    :detail (format nil "no final answer within ~A steps: the wrap-up step asked for tools"
+                                    max-steps)))
             (t
              (%append-history agent (%assistant-message completion))
              (if (null calls)
                  (progn
                    (evt:emit :answer :text text)
-                   (return text))
+                   (return (if (and (eq on-step-limit :wrap-up) (= step (1- max-steps)))
+                               (values text :wrapped-up)
+                               text)))
                  (multiple-value-bind (message held) (%tool-results-step agent calls permit)
                    (if held
                        ;; A call is held (#531): the step's other results wait in the held
@@ -1735,7 +2015,7 @@ acyclic to stay finite."
 
 (defun run-turn-through (agent input &key (locale "en") chain (max-steps 8) permit
                                           max-tokens principal (on-hold nil on-hold-p) held
-                                          claim)
+                                          claim on-step-limit)
   "Run one turn for AGENT through CHAIN, returning the final TURN (not a string).
 
 CHAIN is a list of stages built with PRAXEON/TURN's ENTER-STAGE / LEAVE-STAGE /
@@ -1771,6 +2051,7 @@ model's part of the turn ended, not what the final reply contains."
         (multiple-value-bind (reply ended held-value)
             (apply #'run-turn agent (turn:turn-input tn)
                    :max-steps max-steps :permit permit :max-tokens max-tokens
+                   :on-step-limit on-step-limit
                    :principal principal :held held :claim claim
                    (when on-hold-p (list :on-hold on-hold)))
           (setf outcome ended held-turn held-value)

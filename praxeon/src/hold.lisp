@@ -19,6 +19,25 @@
 (defparameter +estimate-failed+ "Not run: the cost of this call could not be estimated.")
 (defparameter +unavailable+ "Not run: the tool is no longer available.")
 (defparameter +no-such-tool+ "Not run: no such tool is available.")
+
+(defparameter *max-unknown-tool-calls* 3
+  "How many calls in one turn may name a tool the turn cannot call, an unknown name or a means the
+caller may not use, and be answered with a not-run result (#1196). The next such call goes to ACT
+as before, which signals MEANS-FAILURE, so a model that keeps inventing tools cannot spend the
+whole turn on them.")
+
+(defun %no-such-tool-text (agent name permit)
+  "What the model is told for a call to NAME, which the turn cannot call (#1196). The same text
+for a name nothing registered and for a means the caller may not use, so the answer cannot be
+used to find out which means exist, as ACT's refusal cannot; and the tools it lists are the ones
+this turn offered the model under PERMIT, never every registered means."
+  (let ((offered (sort (mapcar #'means-entry-name (agent-means-for agent :permit permit))
+                       #'string<))
+        (shown (if (> (length name) 100) (concatenate 'string (subseq name 0 100) "...") name)))
+    (if offered
+        (format nil "Not run: there is no tool named ~S. The tools available are: ~{~A~^, ~}."
+                shown offered)
+        (format nil "Not run: there is no tool named ~S, and no tools are available." shown))))
 (defparameter +turn-ended+ "Not run: the turn ended before this call was run.")
 (defparameter +may-have-run+
   "The tool may have run; its outcome is unknown. Do not call it again before checking with the user.")
@@ -28,6 +47,21 @@
 (defparameter +not-allowed+
   "Not run: the app does not allow this call here. For a web address, the user must have written it, or a web search must have returned it before anything else was read in this turn. Do not try other addresses to get around this; tell the user.")
 (defparameter +per-turn-limit+ "Not run: this tool may be called at most ~D time~:P in one turn.")
+
+(defun %reasoned-decline-p (decision)
+  "Whether DECISION is a decline with the app's own reason: (:DECLINE text), TEXT a non-empty
+string (#1191). The call is not run, as for :DECLINE, and the model is told TEXT."
+  (and (consp decision) (eq (first decision) :decline)
+       (consp (rest decision)) (stringp (second decision)) (plusp (length (second decision)))
+       (null (cddr decision))))
+
+(defun %declined-p (decision)
+  "Whether DECISION declines the call: :DECLINE, or :DECLINE with a reason."
+  (or (eq decision :decline) (%reasoned-decline-p decision)))
+
+(defun %decline-text (decision)
+  "What the model is told for a call declined by DECISION: its reason, or +DECLINED+."
+  (if (%reasoned-decline-p decision) (second decision) +declined+))
 
 (defun %guard-refusal (agent guard entry args after-untrusted)
   "The text a call to ENTRY with ARGS is refused with by the turn's guard (#827), or NIL when it
@@ -46,6 +80,56 @@ decided the call. An :ALLOW predicate that signals refuses the call."
                                    :means (means-entry-name entry) :condition (type-of e))
                          nil))))
            +not-allowed+))))
+
+(defun %untrusted-description (agent guard step-ids)
+  "What a held call reports about the untrusted content its turn had read when the model decided
+it (#1183), or NIL when the turn was clean. A plist:
+
+  :SCOPE      :TURN when calls in this turn brought the content in, :CONVERSATION when it entered
+              earlier in a conversation under :TAINT-SCOPE :CONVERSATION.
+  :DELEGATED  true when the turn is untrusted only because a coordinating agent delegated a task
+              earlier in the conversation, as the turn guard records it (#948).
+  :SOURCES    one plist per call that brought untrusted content in: (:MEANS name :ID call-id
+              :SCOPE :TURN or :CONVERSATION), oldest first.
+
+STEP-IDS are the ids of the step being decided. Its assistant message, the last of the turn, is
+left out: the model decided those calls before any of them ran. :SOURCES can be empty while the turn is untrusted. That happens when the
+content came from outside this agent's history: the untrusted call that started this delegated
+turn, or a conversation taint recorded without a history to show it."
+  (let ((taint (turn-guard-untrusted guard)))
+    (when taint
+      (let* ((messages (%current-turn-messages agent))
+             (body (rest messages))
+             ;; THE STEP'S OWN MESSAGE IS LEFT OUT WHOLE, by position rather than by matching
+             ;; call ids: ids are the model's, and a step's ids need not differ from an earlier
+             ;; step's.
+             (body (let ((last-message (car (last body))))
+                     (if (and last-message
+                              (equal "assistant" (getf last-message :role))
+                              (equal (sort (copy-list step-ids) #'string<)
+                                     (sort (mapcar (lambda (p) (getf p :id))
+                                                   (%tool-uses (list last-message)))
+                                           #'string<)))
+                         (butlast body)
+                         body)))
+             (turn (loop for p in (%tool-uses body)
+                         when (%untrusted-call-p agent p)
+                           collect (list :means (getf p :name) :id (getf p :id) :scope :turn)))
+             (earlier (and (eq (agent-taint-scope agent) :conversation)
+                           (loop for p in (%tool-uses (ldiff (agent-history agent)
+                                                             (member (first messages)
+                                                                     (agent-history agent)
+                                                                     :test #'eq)))
+                                 when (%untrusted-call-p agent p)
+                                   collect (list :means (getf p :name) :id (getf p :id)
+                                                 :scope :conversation)))))
+        ;; %HISTORY-UNTRUSTED-P has already run for this turn when its guard was made, and
+        ;; recorded what it found, so asking again neither warns nor records anything new.
+        (list :scope (cond (turn :turn)
+                           ((%history-untrusted-p agent (first messages)) :conversation)
+                           (t :turn))
+              :delegated (eq taint :delegated)
+              :sources (append earlier turn))))))
 
 ;;; --- conditions -----------------------------------------------------------------------
 
@@ -77,7 +161,8 @@ the turn cannot go on without it. Nothing is written."))
 text HELD-TURN-TO-JSON gives, next to the agent's history, and gives it to CONTINUE-TURN.
 
 ID identifies it for the app's claim. CALLS is one plist per held call: :ID (the tool-call id),
-:NAME, :SOURCE, :ARGUMENTS and :ESTIMATE. RESULTS are the tool-result parts of the step's other
+:NAME, :SOURCE, :ARGUMENTS, :ESTIMATE and :UNTRUSTED, NIL for a call held in a clean turn and
+otherwise what %UNTRUSTED-DESCRIPTION says about the untrusted content the turn had read (#1183). RESULTS are the tool-result parts of the step's other
 calls, which ran before the hold. ORDER is every call id of the step, in the model's order.
 STEPS is how many steps the turn has left, MAX-TOKENS its output limit. EXPIRES-AT is a
 universal time or NIL; the app sets it, and a held turn past it is declined."
@@ -107,10 +192,17 @@ estimate plist (a ratio included), means the call is not run."
 
 (defun %held-event (type held-id call &rest more)
   "Emit TYPE for CALL. :ID is the tool-call id, as in :TOOL-CALL and :TOOL-RESULT, and :HELD
-the held turn's id, NIL for a call decided on the spot."
+the held turn's id, NIL for a call decided on the spot. A decline with a reason is emitted as
+:DECISION :DECLINE with the text as :REASON (#1191), so an app's log keeps both."
+  (let ((decision (getf more :decision)))
+    (when (%reasoned-decline-p decision)
+      (setf more (list* :decision :decline :reason (second decision)
+                        (loop for (k v) on more by #'cddr
+                              unless (eq k :decision) append (list k v))))))
   (apply #'evt:emit type :id (getf call :id) :held held-id :principal *principal*
          :name (getf call :name)
          :source (getf call :source) :estimate (getf call :estimate)
+         :untrusted (getf call :untrusted)
          :at (get-universal-time) more))
 
 (defvar *call-records* nil
@@ -274,7 +366,9 @@ calls held so far are written as not run."
          ;; step's calls. Taken once, so every call in the step is judged on what the model
          ;; had seen when it asked for them.
          (guard (%turn-guard agent))
-         (after-untrusted (turn-guard-untrusted guard)))
+         (after-untrusted (turn-guard-untrusted guard))
+         ;; #1183: what a held call says about that content, worked out once for the step.
+         (untrusted (%untrusted-description agent guard (mapcar #'llm:tool-call-id calls))))
     (flet ((run (id name args)
              (setf current (cons id (if (%callable-p agent name permit) :running :refused)))
              (let ((entry (and (%callable-p agent name permit)
@@ -303,9 +397,24 @@ calls held so far are written as not run."
                       (args (llm:tool-call-arguments call))
                       (entry (gethash name (agent-means agent)))
                       (confirm (and entry (means-entry-confirm entry)))
+                      ;; #1185: :AFTER-UNTRUSTED holds the call only once untrusted content has
+                      ;; entered the turn, and runs it as usual in a clean turn.
+                      (confirm (if (eq confirm :after-untrusted) (and after-untrusted t) confirm))
                       (refusal (and entry (%callable-p agent name permit)
                                     (%guard-refusal agent guard entry args after-untrusted))))
                  (cond
+                   ;; #1196: A TOOL THE TURN CANNOT CALL gets a not-run result rather than ending
+                   ;; the turn, up to *MAX-UNKNOWN-TOOL-CALLS* in a turn; past that it goes to ACT,
+                   ;; which signals MEANS-FAILURE as it always has.
+                   ((and (not (%callable-p agent name permit))
+                         (< (turn-guard-unknown-calls guard) *max-unknown-tool-calls*))
+                    (incf (turn-guard-unknown-calls guard))
+                    (push (%not-run-part agent id name args
+                                         (%no-such-tool-text agent name permit))
+                          parts))
+                   ((not (%callable-p agent name permit))
+                    (incf (turn-guard-unknown-calls guard))
+                    (run id name args))
                    (refusal
                     (push (%not-run-part agent id name args refusal) parts))
                    ((null confirm)
@@ -313,7 +422,8 @@ calls held so far are written as not run."
                    (t
                     (multiple-value-bind (estimate ok) (%estimate confirm args)
                       (let ((description (list :id id :name name :source (means-entry-source entry)
-                                               :arguments args :estimate estimate)))
+                                               :arguments args :estimate estimate
+                                               :untrusted untrusted)))
                         (flet ((decided (decision &optional text)
                                  ;; The text is noted before the event, so a failing observer
                                  ;; cannot lose the decision.
@@ -335,15 +445,19 @@ calls held so far are written as not run."
                                                         (list :principal *principal*
                                                               :agent (agent-name agent) :name name
                                                               :source (means-entry-source entry)
-                                                              :arguments args :estimate estimate))
+                                                              :arguments args :estimate estimate
+                                                              :untrusted untrusted))
                                                *on-hold*)))
-                               (case policy
+                               (case (if (%reasoned-decline-p policy) :decline policy)
                                  (:approve
                                   (decided :approve)
                                   (run id name args))
                                  (:decline
-                                  (decided :decline +declined+)
-                                  (push (%not-run-part agent id name args +declined+) parts))
+                                  ;; :DECLINE, or (:DECLINE text) with the app's own reason for
+                                  ;; the model (#1191). Either way the call is not run.
+                                  (decided policy (%decline-text policy))
+                                  (push (%not-run-part agent id name args (%decline-text policy))
+                                        parts))
                                  (:hold
                                   (if *hold-allowed*
                                       (progn
@@ -399,6 +513,31 @@ true, so an estimate's booleans come back as they went."
        (loop for name being the hash-keys of object using (hash-value v)
              append (list (intern (string-upcase name) :keyword) v))))
 
+(defun %untrusted-out (untrusted)
+  "A held call's :UNTRUSTED plist as a JSON object, or null for a clean turn (#1183)."
+  (if (null untrusted)
+      'null
+      (%held-object "scope" (string-downcase (symbol-name (getf untrusted :scope)))
+                    "delegated" (and (getf untrusted :delegated) t)
+                    "sources" (map 'vector
+                                   (lambda (s)
+                                     (%held-object "means" (getf s :means) "id" (getf s :id)
+                                                   "scope" (string-downcase
+                                                            (symbol-name (getf s :scope)))))
+                                   (getf untrusted :sources)))))
+
+(defun %untrusted-in (object)
+  "The :UNTRUSTED plist %UNTRUSTED-OUT wrote as OBJECT. A held turn stored before #1183 has no
+such field, and reads back as NIL."
+  (flet ((scope (name) (if (equal name "conversation") :conversation :turn)))
+    (and (hash-table-p object)
+         (list :scope (scope (gethash "scope" object))
+               :delegated (eq t (gethash "delegated" object))
+               :sources (map 'list (lambda (s) (list :means (gethash "means" s)
+                                                     :id (gethash "id" s)
+                                                     :scope (scope (gethash "scope" s))))
+                             (gethash "sources" object))))))
+
 (defun held-turn-to-json (held)
   "HELD as JSON text, for the app to store next to the agent's history. HELD-TURN-FROM-JSON reads
 it back. Each call's arguments are written as the JSON object the model sent. An estimate's and
@@ -415,7 +554,8 @@ principal must be a string or an integer."
                              (%held-object "id" (getf c :id) "name" (getf c :name)
                                            "source" (%names-out (getf c :source))
                                            "arguments" (%or-null (getf c :arguments))
-                                           "estimate" (%names-out (getf c :estimate))))
+                                           "estimate" (%names-out (getf c :estimate))
+                                           "untrusted" (%untrusted-out (getf c :untrusted))))
                    (held-turn-calls held))
       "results" (map 'vector (lambda (p) (%held-object "id" (getf p :tool-use-id)
                                                        "content" (getf p :content)
@@ -440,7 +580,8 @@ object."
                            (list :id (gethash "id" c) :name (gethash "name" c)
                                  :source (%names-in (gethash "source" c))
                                  :arguments (%from-null (gethash "arguments" c))
-                                 :estimate (%names-in (gethash "estimate" c))))
+                                 :estimate (%names-in (gethash "estimate" c))
+                                 :untrusted (%untrusted-in (gethash "untrusted" c))))
                    (field "calls"))
        :results (map 'list (lambda (r) (llm:tool-result-part (gethash "id" r) (gethash "content" r)
                                                              (gethash "is_error" r)))
@@ -560,7 +701,11 @@ state of the history, :PENDING or :ANSWERED."
 ;;; --- writing the results of a held step ------------------------------------------------
 
 (defun %decision-of (decision id)
-  (if (listp decision) (cdr (assoc id decision :test #'equal)) decision))
+  "The decision for the held call ID: DECISION itself when it covers every call, a keyword or a
+decline with a reason (#1191), and otherwise ID's entry in the alist DECISION."
+  (if (or (atom decision) (%reasoned-decline-p decision))
+      decision
+      (cdr (assoc id decision :test #'equal))))
 
 (defun %held-means-current-p (agent call)
   "Whether the means CALL names is still registered with the source it was held with."
@@ -569,16 +714,15 @@ state of the history, :PENDING or :ANSWERED."
 
 (defun %decision-text (decision)
   "What the model is told for a held call that was not run under DECISION."
-  (case decision
-    (:decline +declined+)
-    (:expired +expired+)
-    (t +unanswered+)))
+  (cond ((%declined-p decision) (%decline-text decision))
+        ((eq decision :expired) +expired+)
+        (t +unanswered+)))
 
 (defun %held-part (agent call decision permit recorded)
   "The tool-result part for the held CALL under DECISION. RECORDED is true when the decision was
 recorded by an earlier attempt: an approval then may have run, and nothing runs now."
   (let ((id (getf call :id)) (name (getf call :name)) (args (getf call :arguments)))
-    (case decision
+    (case (if (%reasoned-decline-p decision) :decline decision)
       (:approve
        (cond (recorded
               (%not-run-part agent id name args +may-have-run+ :outcome :unknown :announce nil))
@@ -599,7 +743,7 @@ recorded by an earlier attempt: an approval then may have run, and nothing runs 
                          :outcome outcome :ms ms (when error-p (list :is-error t)))
                   (llm:tool-result-part id kept error-p))))
              (t (%not-run-part agent id name args +unavailable+ :announce nil))))
-      (:decline (%not-run-part agent id name args +declined+ :announce nil))
+      (:decline (%not-run-part agent id name args (%decline-text decision) :announce nil))
       (:expired (%not-run-part agent id name args +expired+ :announce nil))
       (t (%not-run-part agent id name args +unanswered+ :announce nil)))))
 
@@ -677,16 +821,22 @@ held call after it is written under its decision, with its own :TOOL-DECIDED eve
           (held-turn-order held)))))))
 
 (defun %valid-decision-p (decision held)
-  (or (member decision '(:approve :decline))
-      (and (listp decision)
-           (null (set-difference (%held-ids held) (mapcar #'car decision) :test #'equal))
-           (every (lambda (pair) (member (cdr pair) '(:approve :decline))) decision))))
+  (flet ((one-p (d) (or (member d '(:approve :decline)) (%reasoned-decline-p d))))
+    (or (one-p decision)
+        (and (listp decision)
+             (every #'consp decision)
+             (null (set-difference (%held-ids held) (mapcar #'car decision) :test #'equal))
+             (every (lambda (pair) (one-p (cdr pair))) decision)))))
 
 ;;; --- continuing, and moving on ---------------------------------------------------------
 
-(defun continue-turn (agent held decision &key principal permit (on-hold nil on-hold-p) claim)
+(defun continue-turn (agent held decision &key principal permit (on-hold nil on-hold-p) claim
+                                                on-step-limit)
   "Continue the turn HELD ended, with the user's DECISION: :APPROVE or :DECLINE for every held
-call, or an alist of (tool-call-id . decision) with one entry per held call. PRINCIPAL must be
+call, or an alist of (tool-call-id . decision) with one entry per held call. A decline may carry
+the app's own reason, (:DECLINE text), as the whole decision or as one call's (#1191): the call
+is not run, the model is told TEXT, and the :TOOL-DECIDED event has :DECISION :DECLINE and
+:REASON TEXT. PRINCIPAL must be
 the one the calls were held for. PERMIT and ON-HOLD are the turn's, given again because
 functions cannot be stored. Returns RUN-TURN's values, or NIL, :ALREADY-DECIDED and the decision
 recorded first.
@@ -706,7 +856,12 @@ nothing runs; a recorded approval whose result is missing may have run, so the m
 the outcome is unknown and the call is never run again.
 
 A held turn past its EXPIRES-AT is declined, as \"not run: the user did not confirm in time\". An
-approved call whose means is no longer registered with the same :SOURCE is not run."
+approved call whose means is no longer registered with the same :SOURCE is not run.
+
+ON-STEP-LIMIT is RUN-TURN's, given again (#1182): with :WRAP-UP, the last of the steps the held
+turn had left is the wrap-up."
+  (unless (member on-step-limit '(nil :wrap-up))
+    (error "praxeon/actor: :on-step-limit must be NIL or :wrap-up, not ~S" on-step-limit))
   ;; The agent's privacy, as RUN-TURN has it (#983).
   (%with-agent-privacy (agent)
     (let* ((*principal* principal)
@@ -731,7 +886,12 @@ approved call whose means is no longer registered with the same :SOURCE is not r
           ;; turn does after its last step's calls, rather than asking the model once more.
           (let ((steps (held-turn-steps held)))
             (if (and (integerp steps) (plusp steps))
-                (multiple-value-prog1 (%turn-loop agent steps permit (held-turn-max-tokens held))
+                (multiple-value-prog1 (%turn-loop agent steps permit (held-turn-max-tokens held)
+                                                  ;; Given again, like PERMIT and ON-HOLD (#1182).
+                                                  ;; With one step left, :WRAP-UP makes it the
+                                                  ;; wrap-up; the two-step minimum is about a
+                                                  ;; turn's start, not its remainder.
+                                                  on-step-limit)
                   ;; A continued turn ends here, so the observer is given the history, as after
                   ;; RUN-TURN (#317, step C).
                   (%observe-after-turn agent))

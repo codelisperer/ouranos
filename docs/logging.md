@@ -33,7 +33,7 @@ The test is: **would you want this line in production, forever?**
 | Level | For | Examples in the tree |
 |---|---|---|
 | `:trace` | Machine traffic on a timer — available on demand, invisible by default (see **Quiet paths** below). | the dev hot-reload poller; health checks |
-| `:info` | One line per meaningful unit of work. Readable at a glance in prod. | one line per HTTP request (method, path, status, ms); a migration applied |
+| `:info` | One line per meaningful unit of work. Readable at a glance in prod. | one line per HTTP request (method, route template, status, ms); a migration applied |
 | `:debug` | The detail you turn on to diagnose something. Off by default. | each SQL statement + row count + ms; LLM request/response metadata; connect/disconnect |
 | `:warn` | Recoverable, but somebody should know. | an LLM provider call failed (the caller may retry or fail over); a rollback target missing from the known set |
 | `:error` | Use `log:exception`. It attaches the condition's type (`error-type`) and a backtrace of frame names, with no arguments. The condition's report is not written, because it can quote outside data; see **Conditions** below. | an unhandled error in a request |
@@ -75,6 +75,25 @@ The **category is automatic** — `aion/log` derives it from the call-site packa
 ```lisp
 (log:level! :debug "mnemosyne")   ; just the SQL, leave everything else at :info
 ```
+
+## The path on a request line is the route's template
+
+A path can carry a token: `/reset/<token>`, `/invite/<code>`. The request log records the
+template of the route that answered instead, such as `/reset/:token`, so the token is never
+written (#1036). A request no route answered has no template; its path is cut to
+`hyperion/logging:+max-logged-path-length+` characters, so a token in an unmatched path is
+still logged up to that length. The `request start` line has no path at all, because no route
+has been chosen when it is written; its request id ties it to the `request` line.
+
+A route whose parameters are not secret, and whose log is read by value, keeps the concrete
+path:
+
+```lisp
+(rt:route :get "/items/:id" #'show-item :log-path :path)
+```
+
+Middleware that logs the path itself calls `(hyperion/logging:logged-path env)` rather than
+reading `:path-info`; the CSRF and rate-limit refusals do.
 
 ## Quiet paths — machine traffic on a timer
 

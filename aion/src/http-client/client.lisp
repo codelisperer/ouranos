@@ -103,12 +103,18 @@ compiles."))
    (verdict :initarg :verdict :reader certificate-rejected-verdict)
    (code :initarg :code :initform nil :reader certificate-rejected-code))
   (:report (lambda (c s)
-             (format s "the TLS certificate of ~A was rejected (~(~A~)~@[, Windows error #x~8,'0X~])"
-                     (certificate-rejected-host c) (certificate-rejected-verdict c)
-                     (certificate-rejected-code c))))
-  (:documentation "The operating system refused a TLS server's certificate on a pinned connection
-(#536). VERDICT is the reason as a keyword and CODE the operating system's own error code. A
-reason with its own subclass is signalled as that subclass; any other reason as this class."))
+             (let ((code (certificate-rejected-code c)))
+               (format s "the TLS certificate of ~A was rejected (~(~A~)~A)"
+                       (certificate-rejected-host c) (certificate-rejected-verdict c)
+                       (cond ((null code) "")
+                             ;; Windows' codes are HRESULTs, written in hex; macOS's are OSStatus
+                             ;; values, negative and written in decimal (#905).
+                             ((minusp code) (format nil ", macOS OSStatus ~D" code))
+                             (t (format nil ", Windows error #x~8,'0X" code)))))))
+  (:documentation "The operating system refused a TLS server's certificate: on Windows on a pinned
+connection (#536), on macOS on any https connection (#905). VERDICT is the reason as a keyword and
+CODE the operating system's own error code. A reason with its own subclass is signalled as that
+subclass; any other reason as this class."))
 
 (define-condition certificate-expired (certificate-rejected) ()
   (:documentation "The server's certificate, or one in its chain, is outside its validity period."))
@@ -118,11 +124,13 @@ reason with its own subclass is signalled as that subclass; any other reason as 
   (:documentation "The server's certificate is not valid for the URL's host name."))
 (define-condition certificate-revoked (certificate-rejected) ()
   (:documentation "A certificate in the chain is revoked. Revocation is not checked by default
-(see aion/windows:verify-server-certificate-chain), so this comes only from a policy that did."))
+(see aion/windows:verify-server-certificate-chain and aion/darwin:verify-server-certificate-chain),
+so this comes only from a policy that did."))
 (define-condition certificate-revocation-unknown (certificate-rejected) ()
   (:documentation "Revocation was checked and could not be decided, for instance offline."))
 (define-condition certificate-distrusted (certificate-rejected) ()
-  (:documentation "A certificate in the chain is in the machine's Disallowed store."))
+  (:documentation "A certificate in the chain is one the machine distrusts: in Windows' Disallowed
+store, or set to Deny in macOS's trust settings."))
 (define-condition certificate-chain-incomplete (certificate-rejected) ()
   (:documentation "No chain could be built from the server's certificate to a root."))
 (define-condition certificate-wrong-usage (certificate-rejected) ()
@@ -162,14 +170,59 @@ resolved to (:LOOPBACK, :PRIVATE, :LINK-LOCAL and so on). ADDRESS is that addres
                      (too-many-redirects-limit c) (too-many-redirects-url c))))
   (:documentation "FETCH-PUBLIC was redirected more than its MAX-REDIRECTS times."))
 
+(define-condition stay-local-refused (http-error)
+  ((url :initarg :url :reader stay-local-refused-url)
+   (from :initarg :from :initform nil :reader stay-local-refused-from)
+   (address :initarg :address :initform nil :reader stay-local-refused-address))
+  (:report (lambda (c s)
+             (let ((address (stay-local-refused-address c)))
+               (if address
+                   (format s "aion/http-client: a request marked :STAY-LOCAL to ~A was refused, because its connect address ~A is not a loopback address"
+                           (%printable-url (stay-local-refused-url c))
+                           (if (stringp address) address (address-string address)))
+                   (format s "aion/http-client: a request marked :STAY-LOCAL was refused, because ~A is not a loopback host~@[ (a redirect from ~A)~]"
+                           (%printable-url (stay-local-refused-url c))
+                           (let ((from (stay-local-refused-from c)))
+                             (and from (%printable-url from))))))))
+  (:documentation "A request made with :STAY-LOCAL T would have gone to a host that is not loopback
+by LOOPBACK-HOST-P (#1212). URL is that destination: the request's own URL, or the target of a
+redirect, in which case FROM is the URL that redirected and is NIL otherwise. ADDRESS is set
+instead when URL's host is loopback and the request's CONNECT-ADDRESS is not. Signalled before
+anything connects, and for a redirect instead of following it or returning the 3xx."))
+
+(defun %refuse-unless-stays-local (req &optional from)
+  "Signal STAY-LOCAL-REFUSED when REQ is marked :STAY-LOCAL and would go somewhere that is not
+loopback: its URL's host by LOOPBACK-HOST-P, or its CONNECT-ADDRESS. FROM is the URL that
+redirected to REQ's, when it is a redirect's hop. Decided from the text: nothing is resolved."
+  (when (request-stay-local req)
+    (let ((url (request-url req)))
+      (unless (loopback-host-p (url-host url))
+        (error 'stay-local-refused :url url :from from))
+      (let ((address (request-connect-address req)))
+        (when (and address (not (%loopback-address-p address)))
+          (error 'stay-local-refused :url url :from from :address address))))))
+
 (define-condition fetch-deadline-exceeded (http-error)
   ((url :initarg :url :reader fetch-deadline-exceeded-url)
    (deadline :initarg :deadline :reader fetch-deadline-exceeded-deadline))
   (:report (lambda (c s)
+             ;; THE URL AS A REQUEST PRINTS IT, with a query value or a password hidden (#844),
+             ;; because a report is what reaches a log. The reader still returns it as given
+             ;; (Copilot's review of #1163).
              (format s "fetch-public: ~A did not finish within its deadline of ~A seconds"
-                     (fetch-deadline-exceeded-url c) (fetch-deadline-exceeded-deadline c))))
+                     (%printable-url (fetch-deadline-exceeded-url c))
+                     (fetch-deadline-exceeded-deadline c))))
   (:documentation "FETCH-PUBLIC did not finish within its DEADLINE (#807). URL is the hop it was
 on. A body cut short by the deadline is never returned as a response."))
+
+(define-condition request-deadline-exceeded (fetch-deadline-exceeded) ()
+  (:report (lambda (c s)
+             (format s "send-request: ~A did not finish within its deadline of ~A seconds"
+                     (%printable-url (fetch-deadline-exceeded-url c))
+                     (fetch-deadline-exceeded-deadline c))))
+  (:documentation "SEND-REQUEST did not finish within its DEADLINE (#1162). URL is the hop it was
+on. A subclass of FETCH-DEADLINE-EXCEEDED, so one handler covers both, and it has the same two
+readers. A body cut short by the deadline is never returned as a response."))
 
 ;;; --- the values -----------------------------------------------------------
 
@@ -177,7 +230,7 @@ on. A body cut short by the deadline is never returned as a response."))
                                                      (headers '()) content
                                                      connect-timeout read-timeout
                                                      (follow-redirects 5) max-body-bytes
-                                                     connect-address ca-path)))
+                                                     connect-address ca-path stay-local)))
   "An outbound HTTP request being built. HEADERS is an alist of (name . value); CONTENT is a
 JSON/string body or an alist (dexador form-encodes an alist).
 
@@ -185,6 +238,13 @@ TIMEOUTS are here rather than absent because the client's second consumer needed
 its first did not: praxeon hand-rolled dexador partly because this client could not express
 a read timeout, and an LLM call without one can hang for as long as a provider is willing to
 hold the socket. NIL leaves dexador's own default in place.
+
+ON WINDOWS A READ TIMEOUT ENDS A REQUEST UP TO 4 SECONDS LATE, unless the request has a
+CONNECT-ADDRESS or SEND-REQUEST is given a DEADLINE. Such a request goes through dexador to WinHTTP,
+which checks its receive timeout every 4 seconds, so the request fails at the first multiple of 4
+seconds after the timeout: a READ-TIMEOUT of 1 ends it at about 4 seconds (#537, measured on Windows
+11). A server that answers within that time is answered normally. A caller that needs a tighter
+bound passes SEND-REQUEST a DEADLINE, which this client enforces itself.
 
 For fetching a URL a user supplied (#295; FETCH-PUBLIC builds on all four):
 
@@ -199,11 +259,20 @@ CONNECT-ADDRESS   an IP address, as a string or an octet vector, to connect to i
                   resolving the URL's host. The Host header, TLS SNI and certificate
                   verification still use the URL's host name. On every OS the request is then
                   written and its response read by this client's own HTTP/1.1 (http1.lisp,
-                  #985), not by dexador; for https it goes over aion/tls on Windows, where
-                  Windows decides about the certificate (#536), and over cl+ssl elsewhere. See
-                  %REQUEST-PINNED.
+                  #985), not by dexador; for https it goes over aion/tls on Windows and macOS,
+                  where the operating system decides about the certificate (#536, #905), and
+                  over cl+ssl on Linux. See %REQUEST-PINNED.
 CA-PATH           trust roots for certificate verification (a PEM file or a directory; on
-                  Windows a PEM file only). NIL uses the system's.
+                  Windows and macOS a PEM file only). NIL uses the system's.
+
+STAY-LOCAL        T for a request that must not leave this machine (#1212). The URL's host
+                  must be loopback by LOOPBACK-HOST-P, decided from the text with no lookup, or
+                  the request is refused before anything connects; a CONNECT-ADDRESS must be a
+                  loopback address too. No proxy is used, for http or https. A redirect is
+                  followed only to a loopback host; one to any other host signals
+                  STAY-LOCAL-REFUSED, naming the target, instead of being followed or returned.
+                  OPEN-RESPONSE-STREAM applies the same host check. NIL, the default, changes
+                  nothing.
 There is no argument for the local-host proxy exemption, deliberately: see
 *APPROVED-LOCAL-HOST*, which is not exported, because a keyword here let any caller assert an
 approval for any host (#1091, and the re-review of #1134)."
@@ -216,7 +285,8 @@ approval for any host (#1091, and the re-review of #1134)."
   (follow-redirects 5)
   (max-body-bytes nil)
   (connect-address nil)
-  (ca-path nil))
+  (ca-path nil)
+  (stay-local nil))
 
 (defparameter +no-bytes+
   (make-array 0 :element-type '(unsigned-byte 8))
@@ -419,6 +489,24 @@ reused that number."
   (%take-back-socket)
   (ignore-errors (close body)))
 
+(defvar *%pinned-body-stream* nil
+  "True while %REQUEST-PINNED must hand back every body as a stream, capped or not, so that the
+caller sees the status and headers before any of the body is read. %HTTP-UNDER-DEADLINE binds it:
+a redirect it follows has its body closed unread, and before #1178 a 302 with a slow body held the
+call, or failed it, before its Location was ever requested.")
+
+(defun %read-to-end (body)
+  "Every octet of BODY, a stream, which is closed here. No limit: for a caller that set none."
+  (unwind-protect
+       (let ((out (make-array 0 :element-type '(unsigned-byte 8) :adjustable t :fill-pointer 0))
+             (buffer (make-array 8192 :element-type '(unsigned-byte 8))))
+         (loop for end = (read-sequence buffer body)
+               while (plusp end)
+               do (loop for i below end do (vector-push-extend (aref buffer i) out))
+               while (= end (length buffer)))
+         (coerce out '(simple-array (unsigned-byte 8) (*))))
+    (%close-body body)))
+
 (defun %read-capped (body limit url)
   "BODY as octets, reading at most LIMIT of them. BODY is a stream (closed here) or a vector.
 Signals RESPONSE-TOO-LARGE when there is more than LIMIT."
@@ -492,7 +580,15 @@ every request, so no connection is reused."
 
 (defun %dex-args (req)
   "The dexador keyword arguments REQ implies, apart from the URL and the stream."
-  (let ((local (proxy-arguments (request-url req))))
+  (let ((local (let ((l (proxy-arguments (request-url req))))
+                 ;; A STAY-LOCAL REQUEST USES NO PROXY, for https as well as http (#1212).
+                 ;; PROXY-ARGUMENTS exempts plaintext only, and dexador sends an https request
+                 ;; to 127.0.0.1 to HTTPS_PROXY as a CONNECT: the content is encrypted, and the
+                 ;; request still leaves the machine and tells the proxy it was made.
+                 (if (request-stay-local req)
+                     (list* :proxy nil (loop for (k v) on l by #'cddr
+                                             unless (eq k :proxy) append (list k v)))
+                     l))))
    (append (list :method (request-method req)
                 :headers (%dex-headers req)
                 :content (request-content req)
@@ -672,7 +768,8 @@ the whole reason those two codes exist."
       :get
       method))
 
-(defun %http-following-redirects (req)
+(defun %http-following-redirects (req &key (hops (or (request-follow-redirects req) 0))
+                                           (prepare #'identity))
   "Perform REQ, following redirects one hop at a time and DROPPING THE CREDENTIAL HEADERS on a
 hop that changes origin (#1139).
 
@@ -697,13 +794,13 @@ relies on. Origin is scheme, host and port, compared as %ORIGIN compares them; a
 the three drops the headers. That is what browsers do, and the alternative considered -- refusing
 to follow any redirect for a credential-bearing request -- would have broken an API that answers
 301 for a renamed path while returning a 3xx the caller never asked to handle."
-  (let ((hops (or (request-follow-redirects req) 0))
-        (current req))
+  (let ((current req))
     (loop
-      (let* ((single (copy-request current))
+      (let* ((single (funcall prepare (copy-request current)))
              (from current)
              (budget hops)
              (next nil)
+             (offsite nil)
              (response (progn (setf (request-follow-redirects single) 0)
                               ;; THE DECISION IS MADE FROM THE STATUS AND HEADERS, BEFORE THE BODY
                               ;; IS READ. A hop this loop follows has its body closed unread, so
@@ -713,12 +810,29 @@ to follow any redirect for a credential-bearing request -- would have broken an 
                               ;; where dexador had followed it (#1156).
                               (%http-once single
                                           (lambda (status headers)
-                                            (setf next (and (plusp budget)
-                                                            (%next-hop from status headers))))))))
+                                            ;; A :STAY-LOCAL REQUEST IS NEVER REDIRECTED OFF
+                                            ;; THE MACHINE (#1212): a target that is not
+                                            ;; loopback is noted, the body is closed unread,
+                                            ;; and the refusal is signalled below.
+                                            (setf offsite (%offsite-target from status headers))
+                                            (or offsite
+                                                (setf next (and (plusp budget)
+                                                                (%next-hop from status
+                                                                           headers)))))))))
+        (when offsite
+          (error 'stay-local-refused :url offsite :from (request-url from)))
         (unless next
           (return response))
         (decf hops)
         (setf current next)))))
+
+(defun %offsite-target (current status headers)
+  "The target of a redirect, as STATUS and HEADERS give it, when CURRENT is marked :STAY-LOCAL and
+the target's host is not loopback by LOOPBACK-HOST-P; NIL otherwise (#1212)."
+  (when (request-stay-local current)
+    (let ((target (%redirect-target (make-response :status status :headers headers)
+                                    (request-url current))))
+      (and target (not (loopback-host-p (url-host target))) target))))
 
 (defun %next-hop (current status headers)
   "The request that follows CURRENT after a response with STATUS and HEADERS, or NIL when this
@@ -762,6 +876,61 @@ before the body is read (#1156)."
                   (request-headers hop) headers)
             hop))))))
 
+(defvar *%deadline-hop* nil
+  "Inside a SEND-REQUEST with a deadline, a cons whose car is the URL of the hop in progress.")
+
+(defun %http-under-deadline (req)
+  "Perform REQ, a request SEND-REQUEST is running under a DEADLINE, over connections this client
+opens itself, one hop at a time (#1162).
+
+THE SOCKET HAS TO BE ONE THIS CLIENT OPENED, because the deadline is FETCH-PUBLIC's watch (#807):
+it wakes a read blocked on a socket by shutting the socket down, and it can only do that to a
+socket that was lent to it. dexador opens its own sockets and lends nothing. So each hop is
+pinned to the first address its host resolves to and sent by %REQUEST-PINNED, which lends its
+socket. OPEN-RESPONSE-STREAM does the same for the same reason (#984).
+
+Redirects are followed by %HTTP-FOLLOWING-REDIRECTS, the loop credential-bearing requests already
+use, so a hop that changes origin drops the credential headers and never carries a body, and each
+hop is resolved and pinned again. An approved-local request follows no redirect, as on every
+other path (#1134).
+
+A REQUEST THAT WOULD GO THROUGH A PROXY IS REFUSED. A pinned connection goes straight to the
+address, so it would not go through the proxy dexador would have used, and sending a request
+directly that the machine's configuration routes through a proxy is not this client's decision
+to make. The refusal is an HTTP-ERROR before anything is sent."
+  (flet ((pin (hop)
+           (let* ((url (request-url hop))
+                  (local (proxy-arguments url)))
+             (when (and dexador.util:*default-proxy* (not (member :proxy local))
+                        ;; A :STAY-LOCAL request uses no proxy in any case (#1212).
+                        (not (request-stay-local hop)))
+               (error 'http-error
+                      :detail (format nil "~A would be sent through the proxy ~A, and a deadline cannot be kept through a proxy: a request with a deadline goes over a connection this client opens directly, so it is refused rather than sent around the proxy" (%printable-url url) (%printable-url dexador.util:*default-proxy*))))
+             ;; THE HOP'S URL IS RECORDED, so the condition names the hop the deadline found the
+             ;; call on rather than the URL it started from (Copilot's review of #1163).
+             (when *%deadline-hop* (setf (car *%deadline-hop*) url))
+             (let* ((host (quri:uri-host (quri:uri url)))
+                    (address (and host (first (resolve-host host)))))
+               ;; CHECKED BETWEEN RESOLVING AND CONNECTING. Neither can be interrupted, so a
+               ;; deadline that passed while the name was being resolved would otherwise add a
+               ;; whole connect timeout to the wait (Copilot's review of #1163). Any error after
+               ;; the deadline is reported as the deadline, by %CALL-WITH-DEADLINE.
+               (when (%fired-p *%watch*)
+                 (error 'http-error :detail "the deadline passed before the connection was opened"))
+               (unless address
+                 (error 'http-error :detail (format nil "~A does not resolve" host)))
+               (setf (request-connect-address hop) address)
+               hop))))
+    ;; EVERY BODY COMES BACK AS A STREAM, so a followed redirect's body is closed unread and
+    ;; the caller's MAX-BODY-BYTES, or none, applies only to the response returned (#1178).
+    (let ((*%pinned-body-stream* t))
+      (%http-following-redirects
+       req
+       :hops (if (eql 0 (getf (proxy-arguments (request-url req)) :max-redirects))
+               0
+               (or (request-follow-redirects req) 0))
+       :prepare #'pin))))
+
 (defun %http (req)
   "Perform REQ and return a RESPONSE, following redirects in whichever way is safe for it.
 
@@ -773,7 +942,16 @@ included.
 
 The pinned path (CONNECT-ADDRESS) follows no redirects at all by design -- a redirect's host
 would need an address of its own -- so it is already outside this question."
+  ;; BEFORE ANYTHING IS RESOLVED OR CONNECTED: a :STAY-LOCAL request to a host that is not
+  ;; loopback goes nowhere (#1212).
+  (%refuse-unless-stays-local req)
+  (when (and *%watch* (not (request-connect-address req)))
+    (return-from %http (%http-under-deadline req)))
   (if (and (or (%credential-bearing-p (request-headers req))
+               ;; A :STAY-LOCAL request follows its redirects here, where each target is checked
+               ;; before it is followed, rather than in dexador, which would follow it unchecked
+               ;; (#1212).
+               (request-stay-local req)
                ;; A BODY CAN CARRY A CREDENTIAL THAT NO HEADER LIST CAN SEE. Facebook's POST puts
                ;; access_token in the form and sends no credential header, so deciding by headers
                ;; alone sent it down dexador's own path -- and dexador re-sends the body on a
@@ -802,6 +980,9 @@ applied: the caller is a redirect loop that will not use this body (#1156).
 A non-2xx is captured as a RESPONSE rather than signalled -- dexador would signal, and that
 would decide the meaning of a status before any LEAVE stage got to. A transport-level failure
 has no response to hand back, so it signals HTTP-ERROR directly."
+  ;; Every hop comes through here, including a pinned one whose address was resolved for it, so
+  ;; the :STAY-LOCAL check is repeated on what is actually about to be connected to (#1212).
+  (%refuse-unless-stays-local req)
   (let ((limit (request-max-body-bytes req))
         (url (request-url req))
         (*%connected* nil))
@@ -819,7 +1000,9 @@ has no response to hand back, so it signals HTTP-ERROR directly."
                         :detail (format nil "~A declares a body of ~D bytes, over the limit of ~D"
                                         url declared limit))))
              (make-response :status status :headers headers
-                            :bytes (if limit (%read-capped body limit url) (%as-octets body)))))
+                            :bytes (cond (limit (%read-capped body limit url))
+                                         ((streamp body) (%read-to-end body))
+                                         (t (%as-octets body))))))
       (handler-case
           (multiple-value-bind (body status headers)
               (if (request-connect-address req)
@@ -842,15 +1025,64 @@ has no response to hand back, so it signals HTTP-ERROR directly."
                  :phase (%transport-phase e (request-connect-address req)
                                           :pooled (%pooled-p req))))))))
 
-(defun send-request (request interceptors &key (perform #'%http))
+(defun %call-with-deadline (deadline url thunk)
+  "Call THUNK with FETCH-PUBLIC's deadline watch running (#807), and signal
+REQUEST-DEADLINE-EXCEEDED for URL if DEADLINE seconds pass first (#1162). The timer, the watch and
+the rule that any failure after the deadline is the deadline's doing are FETCH-PUBLIC's, in the
+same order."
+  (let* ((watch (%make-watch))
+         ;; THREAD-LIFETIME: a timer made with :THREAD T starts its thread only when it fires.
+         ;; That thread runs %FIRE once, a socket shutdown under the watch's lock, and ends. A
+         ;; call that finishes first unschedules the timer below, and then no thread is made.
+         ;; INTERRUPTS: not needed -- SBCL makes the thread, which runs one shutdown and ends, as
+         ;; for FETCH-PUBLIC's timer. Nothing interrupts it.
+         (timer (sb-ext:make-timer (lambda () (%fire watch))
+                                   :thread t :name "send-request deadline"))
+         (*%watch* watch)
+         (*%deadline-hop* (list url)))
+    (flet ((check ()
+             (when (%fired-p watch)
+               (error 'request-deadline-exceeded :url (car *%deadline-hop*)
+                                                 :deadline deadline))))
+      (sb-ext:schedule-timer timer deadline)
+      (unwind-protect
+           (handler-bind ((error (lambda (e)
+                                   (unless (typep e 'fetch-deadline-exceeded) (check)))))
+             (prog1 (funcall thunk) (check)))
+        ;; The socket is taken from the watch before the timer is unscheduled, so a timer that
+        ;; fires in between finds nothing to shut down.
+        (%take-back-socket)
+        (sb-ext:unschedule-timer timer)))))
+
+(defun send-request (request interceptors &key (perform #'%http) deadline)
   "Run REQUEST through INTERCEPTORS around one HTTP round-trip and return the processed
 RESPONSE. ENTER runs forward, the round-trip is the effect, LEAVE runs in reverse.
 
 PERFORM is the effect, and is a parameter so a caller can substitute one -- which is how this
-is tested without a network, and how a consumer stubs it. The default performs the real call."
+is tested without a network, and how a consumer stubs it. The default performs the real call.
+
+DEADLINE, in seconds, limits the round-trip as a whole, over every redirect (#1162). Without it a
+call is bounded only by the connect timeout and the read timeout, and the read timer starts again
+on every read, so a server that sends a few bytes at a time can hold the call indefinitely. When
+the deadline passes, the socket in use is shut down and the call signals
+REQUEST-DEADLINE-EXCEEDED, a subclass of FETCH-DEADLINE-EXCEEDED. This is FETCH-PUBLIC's deadline
+(#807) and has its limits: it covers the TLS handshake, the request, the headers and the body, and
+it does not interrupt resolving a host name or opening the TCP connection, which are checked when
+they return. The interceptors run outside it.
+
+WITH A DEADLINE THE REQUEST IS SENT OVER CONNECTIONS THIS CLIENT OPENS ITSELF, as FETCH-PUBLIC's
+are, because only such a socket can be shut down when the deadline passes; see
+%HTTP-UNDER-DEADLINE. Every hop's redirect is followed by this client, and a request that would go
+through a proxy is refused. NIL, the default, sets no deadline and changes nothing.
+
+A PERFORM other than the default is run under the deadline too, but only a socket lent to the
+watch can be woken, so for a stub the deadline is checked when PERFORM returns."
   (let* ((entered (reduce (lambda (r ic) (funcall (interceptor-enter ic) r))
                           interceptors :initial-value request))
-         (resp (funcall perform entered)))
+         (resp (if deadline
+                   (%call-with-deadline deadline (request-url entered)
+                                        (lambda () (funcall perform entered)))
+                   (funcall perform entered))))
     (reduce (lambda (r ic) (funcall (interceptor-leave ic) r))
             (reverse interceptors) :initial-value resp)))
 

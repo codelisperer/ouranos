@@ -888,3 +888,154 @@ read, and the second delegation marks the coordinator."
     (let ((refused (turn :maybe)))
       (is (and (stringp refused) (search ":conversation-taint must be" refused)) "~A" refused))
     (is (equal "Hi." (turn :clean)) "control: a known value")))
+
+;;; --- a held call says what untrusted content its turn had read (#1183) ------------------
+
+(defun %holds-seen (agent input)
+  "Run a turn of AGENT on INPUT, approving every held call. Returns the :ON-HOLD plists, oldest
+first."
+  (let ((seen '()))
+    (actor:run-turn agent input :principal "u1"
+                                :on-hold (lambda (call) (push call seen) :approve))
+    (reverse seen)))
+
+(test a-call-held-after-a-page-says-what-was-read-and-where-from
+  "#1183. An app that registers a spending means with :CONFIRM T :REQUIRES-USER-INTENT NIL gets
+the call held after a page instead of refused, and the hold plist now says that untrusted content
+entered the turn and which call brought it, so the app can warn the user. THE CONTROL is the same
+means in a clean turn: :UNTRUSTED is NIL, so the app can tell the two apart."
+  (let* ((reader (make-instance '%stub-reader))
+         (ag (%guard-agent (%calls (list "read-web-page" (%args "url" "https://docs.example.com/")))
+                           (%calls (list "pay" (%args "item" "x"))))))
+    (%confirmed-spender ag :requires-user-intent nil)
+    (wp:register ag reader)
+    (let ((holds (%holds-seen ag "Read docs.example.com")))
+      (is (= 1 (length holds)))
+      (is (equal '(:scope :turn :delegated nil
+                   :sources ((:means "read-web-page" :id "c1" :scope :turn)))
+                 (getf (first holds) :untrusted))
+          "the hold names the read and its call: ~S" (getf (first holds) :untrusted))))
+  (let ((ag (%guard-agent (%calls (list "pay" (%args "item" "x"))))))
+    (%confirmed-spender ag :requires-user-intent nil)
+    (let ((holds (%holds-seen ag "Pay for x")))
+      (is (= 1 (length holds)))
+      (is (member :untrusted (first holds)) "control: the key is present")
+      (is (null (getf (first holds) :untrusted)) "control: and NIL in a clean turn"))))
+
+(test a-held-turn-keeps-the-untrusted-description-through-json
+  "#1183. A call held with :ON-HOLD :HOLD carries the same description in the HELD-TURN, and
+HELD-TURN-TO-JSON and HELD-TURN-FROM-JSON keep it, so an app that shows the decision later, from
+a stored held turn, can still show the warning. A held turn stored before #1183, with no such
+field, reads back as NIL."
+  (let* ((reader (make-instance '%stub-reader))
+         (ag (%guard-agent (%calls (list "read-web-page" (%args "url" "https://docs.example.com/")))
+                           (%calls (list "pay" (%args "item" "x"))))))
+    (%confirmed-spender ag :requires-user-intent nil)
+    (wp:register ag reader)
+    (let* ((held (nth-value 2 (actor:run-turn ag "Read docs.example.com" :principal "u1"
+                                                                          :on-hold :hold)))
+           (want '(:scope :turn :delegated nil
+                   :sources ((:means "read-web-page" :id "c1" :scope :turn)))))
+      (is (equal want (getf (first (actor:held-turn-calls held)) :untrusted))
+          "the held call carries it")
+      (let ((back (actor:held-turn-from-json (actor:held-turn-to-json held))))
+        (is (equal want (getf (first (actor:held-turn-calls back)) :untrusted))
+            "and it survives JSON"))
+      (let* ((json (com.inuoe.jzon:parse (actor:held-turn-to-json held))))
+        (remhash "untrusted" (aref (gethash "calls" json) 0))
+        (is (null (getf (first (actor:held-turn-calls
+                                (actor:held-turn-from-json (com.inuoe.jzon:stringify json))))
+                        :untrusted))
+            "a held turn stored before #1183 reads back as NIL")))))
+
+(test a-call-held-in-a-later-turn-of-a-tainted-conversation-names-the-earlier-read
+  "#1183, under :TAINT-SCOPE :CONVERSATION. A page read in the first turn keeps the conversation
+untrusted, so a spending call in the second turn is held, and its description has :SCOPE
+:CONVERSATION and names the first turn's call as a :CONVERSATION source."
+  (let* ((reader (make-instance '%stub-reader))
+         (ag (actor:make-agent
+              :name "remembers" :taint-scope :conversation
+              :provider (make-instance
+                         'scripted
+                         :script (list (%calls (list "read-web-page"
+                                                     (%args "url" "https://docs.example.com/")))
+                                       (llm:make-completion :text "Read." :stop-reason :end)
+                                       (llm:make-completion
+                                        :text "" :stop-reason :tool-use
+                                        :tool-calls (list (llm:make-tool-call
+                                                           :id "c9" :name "pay"
+                                                           :arguments (%args "item" "x"))))
+                                       (llm:make-completion :text "Done." :stop-reason :end))))))
+    (%confirmed-spender ag :requires-user-intent nil)
+    (wp:register ag reader)
+    (actor:run-turn ag "Read docs.example.com" :principal "u1")
+    (let ((holds (%holds-seen ag "Now pay for x")))
+      (is (= 1 (length holds)))
+      (is (equal '(:scope :conversation :delegated nil
+                   :sources ((:means "read-web-page" :id "c1" :scope :conversation)))
+                 (getf (first holds) :untrusted))
+          "the earlier read is named: ~S" (getf (first holds) :untrusted)))))
+
+;;; --- a means can ask only after untrusted content (#1185) ------------------------------
+
+(defun %after-untrusted-spender (agent)
+  "Register a spending means with :CONFIRM :AFTER-UNTRUSTED on AGENT (#1185). Returns a function
+that answers how many times it ran. Not %CONFIRMED-SPENDER, which passes :CONFIRM T first, and
+the first of two :CONFIRM keys is the one that counts."
+  (let ((runs 0))
+    (actor:register-means agent "pay" "Pay for something."
+                          (lambda (args) (declare (ignore args)) (incf runs) "Paid.")
+                          :confirm :after-untrusted)
+    (lambda () runs)))
+
+(test a-means-confirmed-after-untrusted-runs-in-a-clean-turn-and-is-held-after-a-page
+  "#1185. :CONFIRM :AFTER-UNTRUSTED runs a call without asking in a clean turn, and holds it for
+the user's decision once untrusted content has entered the turn, with the #1183 description. It
+does not require user intent by default, since that would refuse the call it exists to hold."
+  (let ((ag (%guard-agent (%calls (list "pay" (%args "item" "x"))))))
+    (let ((runs (%after-untrusted-spender ag)))
+      (is-false (actor:means-entry-requires-user-intent (gethash "pay" (actor:agent-means ag)))
+                "no user intent required by default")
+      (is (null (%holds-seen ag "Pay for x")) "a clean turn asks nothing")
+      (is (= 1 (funcall runs)) "and the call ran")))
+  (let* ((reader (make-instance '%stub-reader))
+         (ag (%guard-agent (%calls (list "read-web-page" (%args "url" "https://docs.example.com/")))
+                           (%calls (list "pay" (%args "item" "x"))))))
+    (let ((runs (%after-untrusted-spender ag)))
+      (wp:register ag reader)
+      (let ((holds (%holds-seen ag "Read docs.example.com")))
+        (is (= 1 (length holds)) "after a page the call is held")
+        (is (eq :turn (getf (getf (first holds) :untrusted) :scope)) "with the warning")
+        (is (= 1 (funcall runs)) "and runs once approved")))))
+
+(test confirm-after-untrusted-is-refused-with-requires-user-intent-and-unknown-values-too
+  "#1185. :CONFIRM :AFTER-UNTRUSTED with :REQUIRES-USER-INTENT true would refuse the call after
+untrusted content instead of holding it, so REGISTER-MEANS refuses the combination. A :CONFIRM
+value that is not NIL, T, a function or :AFTER-UNTRUSTED is refused too, rather than taken as T."
+  (let ((ag (actor:make-agent :name "p" :provider (make-instance 'scripted :script '()))))
+    (signals error (actor:register-means ag "pay" "Pay." #'identity
+                                         :confirm :after-untrusted :requires-user-intent t))
+    (signals error (actor:register-means ag "pay" "Pay." #'identity :confirm :always))
+    (is (equal "pay" (actor:register-means ag "pay" "Pay." #'identity
+                                           :confirm :after-untrusted :requires-user-intent nil))
+        "control: NIL with it is accepted")))
+
+(test a-held-call-does-not-name-a-read-from-its-own-step
+  "#1183. The model decides all of a step's calls before any of them runs, so a read in the same
+step as the held call cannot have steered it, and is not one of its sources. The turn reads page
+A in step 1, then asks for page B and the payment together in step 2: only page A is named.
+
+The scripted model reuses call ids from step to step, as %CALLS numbers each step from c1, so
+the step is left out by its position, not by its ids; leaving it out by id would also drop step
+1's read, which shares an id with step 2's."
+  (let* ((reader (make-instance '%stub-reader))
+         (ag (%guard-agent (%calls (list "read-web-page" (%args "url" "https://a.example.com/")))
+                           (%calls (list "read-web-page" (%args "url" "https://b.example.com/"))
+                                   (list "pay" (%args "item" "x"))))))
+    (%confirmed-spender ag :requires-user-intent nil)
+    (wp:register ag reader)
+    (let ((holds (%holds-seen ag "Read a.example.com and b.example.com")))
+      (is (= 1 (length holds)))
+      (is (equal '((:means "read-web-page" :id "c1" :scope :turn))
+                 (getf (getf (first holds) :untrusted) :sources))
+          "only step 1's read is named: ~S" (getf (first holds) :untrusted)))))

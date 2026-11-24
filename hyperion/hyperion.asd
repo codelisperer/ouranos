@@ -31,6 +31,11 @@
 ;;; clack-handler-hunchentoot must list "hyperion" before it, or push the feature itself.
 (pushnew :hunchentoot-no-ssl *features*)
 
+;;; dexador without cl+ssl on macOS (#905): see the same form at the top of aion/aion.asd. It is
+;;; repeated here because this file names dexador, and ASDF may resolve that dependency before it
+;;; reads aion.asd.
+#+os-macosx (pushnew :dexador-no-ssl *features*)
+
 (defsystem "hyperion"
   :description "A full-stack, HTMX-first web framework for Common Lisp (Coalton core)."
   :author "Bob <eternal.recursion@proton.me>"
@@ -222,12 +227,36 @@
   :components ((:file "src/server-uv"))
   :in-order-to ((test-op (test-op "hyperion/server-uv/tests"))))
 
+;;; WebSockets on server-uv (#376): the frames are parsed by aion/websocket, the connection
+;;; is server-uv's after a 101. A system of its own so server-uv does not depend on the
+;;; WebSocket code, and an application that does not use WebSockets does not load it.
+(defsystem "hyperion/server-uv/websocket"
+  :description "WebSockets (RFC 6455) on hyperion/server-uv (#376)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion/server-uv" "aion/websocket" "aion/log")
+  :serial t
+  :components ((:file "src/server-uv-websocket"))
+  :in-order-to ((test-op (test-op "hyperion/server-uv/websocket/tests"))))
+
+(defsystem "hyperion/server-uv/websocket/tests"
+  :description "WebSockets on server-uv over real sockets, with a minimal client written in the suite (#376)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("hyperion/server-uv/websocket" "hyperion/server-uv" "aion/websocket"
+               "hyperion/test-ports" "aion/pool" "fiveam" (:require "sb-bsd-sockets"))
+  :serial t
+  :components ((:module "tests/websocket"
+                :components ((:file "server-uv-websocket-tests"))))
+  :perform (test-op (o c) (uiop:symbol-call :hyperion/server-uv/websocket/tests :run-tests)))
+
 (defsystem "hyperion/clack-handler-uv"
   :description "A Clack handler for hyperion/server-uv: (clack:clackup app :server :uv) (#373, ADR-0020)."
   :author "Bob <eternal.recursion@proton.me>"
   :license "MIT"
   :depends-on ("hyperion/server-uv" "bordeaux-threads"
-               "aion/dynamic") ; the delayed-response thread inherits the request's bindings (#158)
+               "aion/dynamic" ; the delayed-response thread inherits the request's bindings (#158)
+               "clack-socket") ; the protocol the :CLACK.IO socket implements, for websocket-driver (#376)
   :serial t
   :components ((:file "src/clack-handler-uv"))
   :in-order-to ((test-op (test-op "hyperion/clack-handler-uv/tests"))))
@@ -241,9 +270,14 @@
   ;; those three were already in the tree. aion/uv for uv-error, which tells a taken port
   ;; from other listen failures (#519).
   :depends-on ("hyperion/clack-handler-uv" "hyperion/server-uv" "aion/uv" "clack" "dexador"
-               "usocket" "fiveam")
+               "usocket" "fiveam"
+               ;; websocket-driver's server, run on :uv through the :CLACK.IO socket, and the
+               ;; minimal WebSocket client of server-uv's WebSocket suite (#376). Test-only:
+               ;; no system an app loads depends on websocket-driver.
+               "websocket-driver-server" "hyperion/server-uv/websocket/tests")
   :serial t
-  :components ((:file "tests/clack-handler-uv-tests"))
+  :components ((:file "tests/clack-handler-uv-tests")
+               (:file "tests/clack-handler-uv-websocket-tests"))
   :perform (test-op (o c) (uiop:symbol-call :hyperion/clack-handler-uv/tests :run-tests)))
 
 (defsystem "hyperion/server-uv/tests"
@@ -429,7 +463,8 @@
   ;; aion/windows on Windows starts each sidecar suspended in a kill-on-close job object with no
   ;; console window (#700). Nothing here depends on hyperion, so hyperion can depend on this.
   :depends-on ("aion/log" "aion/secret" (:feature :win32 "aion/windows")
-               "aion/dynamic")   ; unblock-interrupts, first in each sidecar thread (#541)
+               "aion/dynamic"    ; unblock-interrupts, first in each sidecar thread (#541)
+               "aion/retry")     ; the restart schedule is RETRY-DELAY's (#79)
   :components ((:file "src/sidecar"))
   :in-order-to ((test-op (test-op "hyperion/sidecar/tests"))))
 
@@ -465,6 +500,8 @@
                "hyperion/test-ports" "fiveam" "ironclad" "clack-handler-hunchentoot"
                ;; kit-browser-tests runs hyperion/kit's dialogs in the smoke page's browser (#981).
                "hyperion/kit" "hyperion/list" "spinneret"
+               ;; The browser the smoke pages run in is found by aion/cdp's FIND-BROWSER (#1028).
+               "aion/cdp"
                (:require "sb-bsd-sockets"))
   :serial t
   :components ((:file "tests/assets-tests")
