@@ -351,20 +351,34 @@ than about the checker rejecting every fixture it is handed."
 (defparameter +good-assets-pin+
   "# Vendored browser assets.
 
-htmx        2.0.11   sha256 d6fdc75f204e6bdefa99b69bf1e6d4ac69b8a364f77929f45c13476b4000f717
+htmx        2.0.11   sha256 ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
             file     htmx.min.js
             url      https://unpkg.com/htmx.org@2.0.11/dist/htmx.min.js
             licence  Zero-Clause BSD (htmx.LICENSE)
             advisories https://github.com/bigskysoftware/htmx/security/advisories
             reviewed   2026-10-17
 
-bulma       1.0.4    sha256 67fa26df1ca9e95d8f2adc7c04fa1b15fa3d24257470ebc10cc68b9aab914bee
+bulma       1.0.4    sha256 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855
             file     bulma.min.css
             url      https://cdn.jsdelivr.net/npm/bulma@1.0.4/css/bulma.min.css
             licence  MIT (bulma.LICENSE)
             advisories https://github.com/jgthms/bulma/security/advisories
             reviewed   2026-10-17
 ")
+
+(defparameter +asset-contents+
+  '(("htmx.min.js" . "abc") ("bulma.min.css" . ""))
+  "The files +GOOD-ASSETS-PIN+ names, and what each holds. Their hashes in the pin are the
+published test vectors for these inputs (FIPS 180-2: SHA-256 of \"abc\" and of the empty
+string), not values computed by the code under test.")
+
+(defun %write-assets (tree pin &key (contents +asset-contents+))
+  "Write PIN as TREE's hyperion/assets/vendor/ASSETS.pin, with each file of CONTENTS beside it."
+  (let ((dir (merge-pathnames "hyperion/assets/vendor/" tree)))
+    (%write (merge-pathnames "ASSETS.pin" dir) pin)
+    (loop for (name . text) in contents
+          do (%write (merge-pathnames name dir) text))
+    tree))
 
 (test pins-detects-a-pin-below-the-root-with-no-advisory-source
   "Before #735 only the repository root was read, so a pin in a subdirectory, like
@@ -388,7 +402,7 @@ fails even when its neighbour has the field (#735)."
     (is (= 1 (loop with start = 0 for at = (search "reviewed" pin :start2 start)
                    while at count t do (setf start (1+ at))))
         "precondition: the fixture has one `reviewed' line, the htmx block's")
-    (%write (merge-pathnames "hyperion/assets/vendor/ASSETS.pin" tree) pin)
+    (%write-assets tree pin)
     (multiple-value-bind (code output)
         (%run (%install-checker tree "check-pins.lisp"))
       (is (/= 0 code) "the bulma block has no `reviewed'; exit was ~D~%~A" code output)
@@ -398,7 +412,7 @@ fails even when its neighbour has the field (#735)."
 (test pins-passes-complete-asset-blocks
   "The control for the test above."
   (let ((tree (%fresh-tree)))
-    (%write (merge-pathnames "hyperion/assets/vendor/ASSETS.pin" tree) +good-assets-pin+)
+    (%write-assets tree +good-assets-pin+)
     (multiple-value-bind (code output)
         (%run (%install-checker tree "check-pins.lisp"))
       (is (= 0 code) "complete asset blocks must pass; exit was ~D~%~A" code output)
@@ -411,10 +425,11 @@ a constant that has since changed fails loudly rather than testing the unchanged
     (unless at (error "fixture: ~S not found" old))
     (concatenate 'string (subseq text 0 at) new (subseq text (+ at (length old))))))
 
-(defun %run-pins-on-assets (assets-pin)
-  "Run check-pins on a fresh tree whose only pin is ASSETS-PIN. (values exit output)"
+(defun %run-pins-on-assets (assets-pin &key (contents +asset-contents+))
+  "Run check-pins on a fresh tree whose only pin is ASSETS-PIN, with the files of CONTENTS
+beside it. (values exit output)"
   (let ((tree (%fresh-tree)))
-    (%write (merge-pathnames "hyperion/assets/vendor/ASSETS.pin" tree) assets-pin)
+    (%write-assets tree assets-pin :contents contents)
     (%run (%install-checker tree "check-pins.lisp"))))
 
 (test pins-fails-an-asset-whose-first-line-is-malformed
@@ -424,7 +439,7 @@ line. PINS-PASSES-COMPLETE-ASSET-BLOCKS is the control: the same fixture with th
   (multiple-value-bind (code output)
       (%run-pins-on-assets
        (%replace-once +good-assets-pin+
-                      "bulma       1.0.4    sha256 67fa26df1ca9e95d8f2adc7c04fa1b15fa3d24257470ebc10cc68b9aab914bee"
+                      "bulma       1.0.4    sha256 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
                       "bulma       1.0.4    sha256"))
     (is (/= 0 code) "exit ~D~%~A" code output)
     (is (search "ASSETS.pin line 10" output) "the failure names the line: ~A" output)
@@ -441,9 +456,35 @@ line. PINS-PASSES-COMPLETE-ASSET-BLOCKS is the control: the same fixture with th
 (test pins-accepts-a-sha384-asset-line
   "The control for the malformed-line tests from the other side: sha384 is an asset's first line."
   (multiple-value-bind (code output)
-      (%run-pins-on-assets (%replace-once +good-assets-pin+ "1.0.4    sha256" "1.0.4    sha384"))
+      (%run-pins-on-assets
+       (%replace-once +good-assets-pin+ "1.0.4    sha256 e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+                      "1.0.4    sha384 38b060a751ac96384cd9327eb1b1e36a21fdb71114be07434c0cc7bf63f6e1da274edebfe76f65fbd51ad2f14898b95b"))
     (is (= 0 code) "exit ~D~%~A" code output)
     (is (search "All 2 pins" output) "~A" output)))
+
+(test pins-fails-an-asset-whose-bytes-differ-from-its-hash
+  "An asset whose file was edited, or replaced by another version without updating the pin.
+PINS-PASSES-COMPLETE-ASSET-BLOCKS is the control: the same pin, with the files it describes."
+  (multiple-value-bind (code output)
+      (%run-pins-on-assets +good-assets-pin+
+                           :contents '(("htmx.min.js" . "abd") ("bulma.min.css" . "")))
+    (is (/= 0 code) "exit ~D~%~A" code output)
+    (is (search "htmx.min.js does not match its sha256" output) "~A" output)
+    (is (search "ok    hyperion/assets/vendor/ASSETS.pin bulma" output)
+        "and the asset whose bytes match still passes: ~A" output)))
+
+(test pins-fails-an-asset-whose-file-is-missing
+  (multiple-value-bind (code output)
+      (%run-pins-on-assets +good-assets-pin+ :contents '(("htmx.min.js" . "abc")))
+    (is (/= 0 code) "exit ~D~%~A" code output)
+    (is (search "its file bulma.min.css does not exist" output) "~A" output)))
+
+(test pins-fails-an-asset-with-no-file-line
+  "Without a `file' line there is nothing to hash, so the asset's hash would go unchecked."
+  (multiple-value-bind (code output)
+      (%run-pins-on-assets (%without-line +good-assets-pin+ "bulma.min.css"))
+    (is (/= 0 code) "exit ~D~%~A" code output)
+    (is (search "no `file' line" output) "~A" output)))
 
 (defun %bad-pin () (%without-line +good-pin+ "advisories"))
 
@@ -923,9 +964,14 @@ own directory, holding this test's fixtures, is not the one deleted."
 (defun %sha256-hex (path)
   "The file's sha256, COMPUTED. A hand-written hash in a fixture is a second copy of a fact,
 and a test built on one checks that two hand-written things agree."
+  ;; ironclad's DIGEST-FILE, given no buffer, reads into a 128 KB buffer declared DYNAMIC-EXTENT,
+  ;; which SBCL allocates on the stack. On the Windows leg with SBCL 2.6.10 the process exited at
+  ;; that call with code 1 and no message, while hashing the same bytes from a heap array gave the
+  ;; right digest (#1214). Passing a heap buffer avoids the stack allocation.
   (string-downcase
    (with-output-to-string (s)
-     (loop for b across (ironclad:digest-file :sha256 path)
+     (loop for b across (ironclad:digest-file :sha256 path
+                                              :buffer (make-array 65536 :element-type '(unsigned-byte 8)))
            do (format s "~2,'0x" b)))))
 
 (defun %assets-tree (&key (body "console.log('x');") tamper stale-fingerprint)

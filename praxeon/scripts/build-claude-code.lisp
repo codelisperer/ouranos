@@ -8,8 +8,10 @@
 ;;;; UNCOMPRESSED: a compressed core is decompressed at every start, which costs the time the
 ;;;; image is there to save.
 ;;;;
-;;;; On Linux and macOS the image holds cl+ssl, through praxeon's HTTP client, and opens OpenSSL
-;;;; from the path it was built against when it starts, so it runs only where that library is.
+;;;; On Linux the image holds cl+ssl, through praxeon's HTTP client, and opens OpenSSL from the
+;;;; path it was built against when it starts, so it runs only where that library is. On macOS it
+;;;; holds no cl+ssl and opens no OpenSSL (#905); its https goes through aion/tls, which loads
+;;;; mbedTLS on the first https request.
 ;;;;
 ;;;; The executable needs no SBCL or Quicklisp to run, but see OpenSSL above. The hook's
 ;;;; `claude' backend needs the `claude' CLI on PATH; the `praxeon' backend needs a provider

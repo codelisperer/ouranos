@@ -151,7 +151,7 @@ afterwards, would break that site while passing every inheritance test."
 ;;; question about the code, which the author can answer and a reviewer can check.
 
 (defparameter +spawn-sweep-roots+
-  '("aion" "cons" "mnemosyne" "elenchon" "hyperion" "praxeon" "hermes" "klio" "hades")
+  '("aion" "cons" "mnemosyne" "elenchon" "hyperion" "praxeon" "hermes" "klio" "hades" "dokimasia")
   "The trees walked. Named rather than discovered, so adding a framework to the repo without
 adding it here is visible in this list rather than silently unswept.")
 
@@ -478,3 +478,86 @@ call to SB-THREAD:MAKE-THREAD, BT:MAKE-THREAD or MAKE-THREAD is."
   (is (equal '(1) (%undecided-in-lines (list "(sb-thread:make-thread (lambda () 1))"))))
   (is (equal '(1) (%undecided-in-lines (list "  (bt:make-thread #'f)"))))
   (is (equal '(1) (%unblocking-undecided-in-lines (list "(make-thread (lambda () 1) :name \"x\")")))))
+
+;;; --- TIMED-WAIT, and the sweep for a timed CONDITION-WAIT elsewhere (#1267) -----------
+
+(test timed-wait-holds-the-mutex-after-a-timeout
+  "SB-THREAD:CONDITION-WAIT with :TIMEOUT returns without its mutex when the time runs out.
+TIMED-WAIT must return holding it. A wakeup can be spurious, so only some of the waits are
+required to have timed out; every one must leave the mutex held."
+  (let ((mutex (sb-thread:make-mutex :name "timed-wait test"))
+        (queue (sb-thread:make-waitqueue)))
+    (sb-thread:with-mutex (mutex)
+      (let ((results (loop repeat 50
+                           collect (cons (dyn:timed-wait queue mutex 0.0001)
+                                         (sb-thread:holding-mutex-p mutex)))))
+        (is (some (lambda (r) (null (car r))) results) "no wait timed out, so this tested nothing")
+        (is (every #'cdr results) "the mutex is held after every wait")))
+    (is (not (sb-thread:holding-mutex-p mutex)) "WITH-MUTEX released it on the way out")))
+
+(test timed-wait-returns-true-holding-the-mutex-when-woken
+  (let* ((mutex (sb-thread:make-mutex :name "timed-wait test"))
+         (queue (sb-thread:make-waitqueue))
+         (ready nil)
+         (notifier nil))
+    (sb-thread:with-mutex (mutex)
+      ;; THREAD-LIFETIME: scoped -- joined below.
+      ;; INTERRUPTS: a test's own short thread, joined before the test ends.
+      (setf notifier (sb-thread:make-thread
+                      (lambda ()
+                        (sleep 0.05)
+                        (sb-thread:with-mutex (mutex)
+                          (setf ready t)
+                          (sb-thread:condition-broadcast queue)))
+                      :name "timed-wait test notifier"))
+      (let ((woken (loop until ready
+                         always (dyn:timed-wait queue mutex 10))))
+        (is-true woken "the wait ended by the notify, not by its 10-second timeout")
+        (is-true ready)
+        (is (sb-thread:holding-mutex-p mutex))))
+    (sb-thread:join-thread notifier :default nil :timeout 10)))
+
+(defun %timed-condition-waits (text)
+  "The 1-based line numbers in TEXT where a form starting `(sb-thread:condition-wait' passes
+:TIMEOUT. The form runs to its balanced close parenthesis; strings are skipped.
+
+IMPRECISE IN THE SAFE DIRECTION. A `;' comment inside the form is read as code, so a comment
+naming :TIMEOUT reports the site; it never hides one."
+  (let ((needle "(sb-thread:condition-wait")
+        (hits '()))
+    (loop with start = 0
+          for at = (search needle text :start2 start :test #'char-equal)
+          while at
+          do (let ((depth 0) (in-string nil) (end (length text)) (i at))
+               (loop while (< i (length text))
+                     do (let ((c (char text i)))
+                          (cond ((and in-string (char= c #\\)) (incf i))
+                                ((char= c #\") (setf in-string (not in-string)))
+                                (in-string)
+                                ((char= c #\() (incf depth))
+                                ((char= c #\)) (decf depth)
+                                 (when (zerop depth) (setf end (1+ i)) (return))))
+                          (incf i)))
+               (when (search ":timeout" text :start2 at :end2 end :test #'char-equal)
+                 (push (1+ (count #\Newline text :end at)) hits))
+               (setf start (1+ at))))
+    (nreverse hits)))
+
+(test no-timed-condition-wait-outside-timed-wait
+  "Every timed wait in a framework goes through AION/DYNAMIC:TIMED-WAIT, because a bare
+SB-THREAD:CONDITION-WAIT with :TIMEOUT returns without its mutex (#1266, #1267). The files walked
+are the spawn sweep's, so tests and benchmarks are not checked, minus TIMED-WAIT's own file."
+  (let ((found (loop for path in (%sweep-files)
+                     for lines = (unless (search "aion/src/dynamic/dynamic.lisp" (namestring path))
+                                   (%timed-condition-waits (uiop:read-file-string path)))
+                     when lines collect (format nil "~A:~{~D~^,~}" (enough-namestring path (asdf:system-relative-pathname :aion "../")) lines))))
+    (is (null found) "a bare SB-THREAD:CONDITION-WAIT with :TIMEOUT; use AION/DYNAMIC:TIMED-WAIT: ~{~A~^ ~}" found)))
+
+(test the-timed-wait-sweep-sees-a-bare-timed-wait
+  "The control for the sweep above: it finds a timed wait split over lines, and leaves an untimed
+one and a string that only mentions one."
+  (is (equal '(2) (%timed-condition-waits
+                   (format nil "(defun f (q m)~%  (sb-thread:condition-wait q m~%    :timeout 1))~%"))))
+  (is (null (%timed-condition-waits
+             (format nil "(sb-thread:condition-wait q m)~%(f \"(sb-thread:condition-wait q m) :timeout\")~%"))))
+  (is (< 50 (length (%sweep-files))) "the sweep walks the tree"))

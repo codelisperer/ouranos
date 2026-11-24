@@ -1104,9 +1104,9 @@ window.addEventListener('load', function () {
                                             (spinneret:escape-string (field "buffer"))))))))))))
 
 (test the-bundle-builds-the-editor-in-a-browser-and-fills-the-form
-  (let ((browser (smoke::%smoke-browser)))
+  (let ((browser (aion/cdp:find-browser)))
     (if (null browser)
-        (skip "No Chrome or Edge was found; set HYPERION_SMOKE_BROWSER to run this test.")
+        (skip "No Chrome or Edge was found; set OURANOS_BROWSER to run this test.")
         (%with-ide (app desktop)
           (let* ((port nil)
                  (handler (ports:call-with-port
@@ -1558,9 +1558,9 @@ window.addEventListener('load', function () {
       (router:route :post "/window/editor/action/close" (echo "close"))))))
 
 (test the-bundle-marks-a-modified-tab-saves-with-mod-s-and-sends-the-text-on-close
-  (let ((browser (smoke::%smoke-browser)))
+  (let ((browser (aion/cdp:find-browser)))
     (if (null browser)
-        (skip "No Chrome or Edge was found; set HYPERION_SMOKE_BROWSER to run this test.")
+        (skip "No Chrome or Edge was found; set OURANOS_BROWSER to run this test.")
         (%with-ide (app desktop)
           (%with-project (project top)
             (ide:open-file (ui:find-window desktop "editor") project "src/a.lisp")

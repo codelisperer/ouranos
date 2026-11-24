@@ -27,7 +27,7 @@
 ;;;;   a close payload of one octet, or a close code    1002. Section 7.4.
 ;;;;   that may not be sent in a close frame
 
-(cl:in-package #:hyperion/websocket)
+(cl:in-package #:aion/websocket)
 
 ;;; --- opcodes and close codes ------------------------------------------------
 

@@ -236,10 +236,14 @@ served: :CHALLENGE (named in the 401), :PATH (the path-inserted well-known URL) 
          ,@body))))
 
 (defun %broker (&rest args)
-  (apply #'oauth:make-broker :store (oauth:make-memory-store)
-         :redirect-uri "http://127.0.0.1:1/callback"
-         :address-policy (constantly :public)
-         args))
+  "A broker for the test server. ARGS come first, so that a :STORE or any other argument a test
+passes is the one used: with a repeated keyword, the first occurrence wins, and before #1175 the
+defaults came first, so a test's own :STORE was silently replaced by a memory store."
+  (apply #'oauth:make-broker
+         (append args
+                 (list :store (oauth:make-memory-store)
+                       :redirect-uri "http://127.0.0.1:1/callback"
+                       :address-policy (constantly :public)))))
 
 (defun %challenge-of (as)
   "The WWW-Authenticate of an unauthenticated request to AS's resource."
@@ -971,3 +975,54 @@ request to another host still runs."
           (is (= 1 (as-slow-prm-requests slow)) "the refused request was not sent")
           (is-true (oauth:discover broker (%resource fast) :challenge challenge)
                    "another host is not affected"))))))
+
+;;; --- a token the store cannot read (#1175) ---------------------------------------------
+
+(defvar *%keyed-store-in-lock* nil
+  "True while the keyed store's CALL-WITH-REFRESH-LOCK is running its thunk.")
+
+(defclass %keyed-store (oauth:memory-store)
+  ((key :initarg :key :accessor %keyed-store-key)
+   (rows :initform (make-hash-table :test #'equal) :reader %keyed-store-rows)
+   (deletes :initform '() :accessor %keyed-store-deletes))
+  (:documentation "A store that keeps each token set under the key it was written with, as a
+store that encrypts at rest does, and reads it back only under that key. With another key,
+GET-TOKEN answers NIL, which is what an app's store does when a key was rotated or a row is
+damaged. Each DELETE-TOKEN records whether it ran inside the refresh lock."))
+
+(defmethod oauth:get-token ((s %keyed-store) principal connection)
+  (let ((row (gethash (list principal connection) (%keyed-store-rows s))))
+    (and row (equal (car row) (%keyed-store-key s)) (cdr row))))
+(defmethod oauth:put-token ((s %keyed-store) principal connection token-set)
+  (setf (gethash (list principal connection) (%keyed-store-rows s))
+        (cons (%keyed-store-key s) token-set)))
+(defmethod oauth:delete-token ((s %keyed-store) principal connection)
+  (push *%keyed-store-in-lock* (%keyed-store-deletes s))
+  (remhash (list principal connection) (%keyed-store-rows s)))
+(defmethod oauth:call-with-refresh-lock ((s %keyed-store) key thunk)
+  (call-next-method s key (lambda () (let ((*%keyed-store-in-lock* t)) (funcall thunk)))))
+
+(net-test disconnecting-a-token-the-store-cannot-read-still-deletes-it
+  "A token stored under one key and read under another: GET-TOKEN answers NIL. DISCONNECT still
+deletes the row, inside the refresh lock, and sends no revocation, since there is no token to
+send. Control: under the key it was stored with, the same disconnect revokes and deletes."
+  (dolist (rotate '(t nil))
+    (with-as (as)
+      (let* ((store (make-instance '%keyed-store :key "key-1"))
+             (broker (%broker :store store)))
+        (%sign-in as broker)
+        (is (= 1 (hash-table-count (%keyed-store-rows store))) "signed in: one row")
+        (when rotate
+          (setf (%keyed-store-key store) "key-2")
+          (is (null (oauth:get-token store "u1" "docs")) "the row cannot be read under key-2"))
+        (is (eq t (oauth:disconnect broker "u1" "docs")))
+        (is (= 0 (hash-table-count (%keyed-store-rows store)))
+            "~:[readable~;unreadable~] token: the row is deleted" rotate)
+        (is (equal '(t) (%keyed-store-deletes store))
+            "~:[readable~;unreadable~] token: deleted once, inside the refresh lock: ~S"
+            rotate (%keyed-store-deletes store))
+        (is (= (if rotate 0 1) (length (as-revoked as)))
+            "~:[readable~;unreadable~] token: ~D revocation requests" rotate
+            (length (as-revoked as)))
+        (is (null (gethash (list "u1" "docs") oauth::*refresh-locks*))
+            "no refresh-lock entry is left")))))

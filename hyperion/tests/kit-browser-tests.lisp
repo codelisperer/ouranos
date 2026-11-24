@@ -142,9 +142,9 @@ page shows a second post of a double click."
 back to the opener; a dialog loaded by htmx opens after its contents arrive; the confirm
 starts on Cancel with the action last, closes when its request succeeds; the undo notice
 arrives in the status region, and dismiss and undo remove it."
-  (let ((browser (%smoke-browser)))
+  (let ((browser (aion/cdp:find-browser)))
     (if (null browser)
-        (skip "No Chrome or Edge found; set HYPERION_SMOKE_BROWSER to run the kit page")
+        (skip "No Chrome or Edge found; set OURANOS_BROWSER to run the kit page")
         (let* ((app (%kit-app))
                (port nil)
                (handler (ports:call-with-port
@@ -319,9 +319,9 @@ row and from its button, and becomes the current row, and a click on another con
 loads nothing; Escape and the close button empty the panel and put focus back on the current
 row's button. The button is a <button>, so the browser presses it on Enter and Space; a script
 cannot test that with a keydown it makes, because a browser does not activate a button for one."
-  (let ((browser (%smoke-browser)))
+  (let ((browser (aion/cdp:find-browser)))
     (if (null browser)
-        (skip "No Chrome or Edge found; set HYPERION_SMOKE_BROWSER to run the kit list page")
+        (skip "No Chrome or Edge found; set OURANOS_BROWSER to run the kit list page")
         (let* ((app (%kit-list-app))
                (port nil)
                (handler (ports:call-with-port
@@ -460,9 +460,9 @@ panel's contents were asked for."
 panel in a tab that is not shown loads with the page and stays loaded across tab switches; the
 launcher opens and closes its panel, says so in aria-expanded, and loads it on the first open
 only; and the page's window.htmx is still the object it loaded."
-  (let ((browser (%smoke-browser)))
+  (let ((browser (aion/cdp:find-browser)))
     (if (null browser)
-        (skip "No Chrome or Edge found; set HYPERION_SMOKE_BROWSER to run the dock page")
+        (skip "No Chrome or Edge found; set OURANOS_BROWSER to run the dock page")
         (let* ((loads (list (cons "a" 0) (cons "b" 0) (cons "c" 0)))
                (app (%dock-app loads))
                (port nil)
@@ -617,9 +617,9 @@ is refused with 400, not echoed and not triggered; a post without htmx is redire
 press is in flight the buttons are disabled, so presses made then have no effect and the page
 still shows what was stored, and focus returns to the pressed button afterwards (#1115's
 review)."
-  (let ((browser (%smoke-browser)))
+  (let ((browser (aion/cdp:find-browser)))
     (if (null browser)
-        (skip "No Chrome or Edge found; set HYPERION_SMOKE_BROWSER to run the appearance page")
+        (skip "No Chrome or Edge found; set OURANOS_BROWSER to run the appearance page")
         (let* ((app (%appearance-app))
                (port nil)
                (handler (ports:call-with-port
@@ -765,9 +765,9 @@ choice only. Focus, moved to a text field during the request, stays there when t
 arrives. Then picker one is pressed while focus is on a button of picker two, as a click that
 does not take focus leaves it: focus returns to that button when the answer arrives, because
 the focused element is kept when it is in any picker, not only the one that sent."
-  (let ((browser (%smoke-browser)))
+  (let ((browser (aion/cdp:find-browser)))
     (if (null browser)
-        (skip "No Chrome or Edge found; set HYPERION_SMOKE_BROWSER to run the two-picker page")
+        (skip "No Chrome or Edge found; set OURANOS_BROWSER to run the two-picker page")
         (let* ((app (%two-pickers-app))
                (port nil)
                (handler (ports:call-with-port

@@ -351,6 +351,39 @@ desynchronised connection, not a malformed response, so it must not reach the wi
                                     (<> (if keep-alive "keep-alive" "close") crlf))
                                 crlf))))))))))
 
+  (declare encode-head-close-delimited (UFix * (List (Tuple String String)) -> Encode-Result))
+  (define (encode-head-close-delimited status headers)
+    "The response head for a STREAMED body sent to an HTTP/1.0 client (#1244): no
+Transfer-Encoding, no Content-Length, and Connection: close.
+
+HTTP/1.0 has no chunked transfer coding, so an HTTP/1.0 client reads chunk-size lines as
+part of the body. A body whose length is not known in advance is therefore delimited by the
+server closing the connection (RFC 9112 6.3, rule 8), and this head says so. It takes no
+KEEP-ALIVE because closing is how the body ends, whatever the request asked for.
+
+Content-Length, Transfer-Encoding and Connection are dropped from HEADERS and written from
+here, as ENCODE-HEAD-CHUNKED does. REFUSED for a status that cannot carry a body, for the
+same reason."
+    (if (not (status-ok? status))
+        (Refused (<> "status is not a three-digit HTTP status: " (the String (into status))))
+        (if (body-forbidden? status)
+            (Refused (<> "status cannot carry a body, so it cannot be streamed: "
+                         (the String (into status))))
+            (match (check-headers headers)
+              ((Some why) (Refused why))
+              ((None)
+               (Encoded
+                (<> (status-line status)
+                    (<> (render-headers headers)
+                        (<> (<> "Connection: close" crlf) crlf)))))))))
+
+  (declare encode-head-close-delimited-flat (UFix * (List String) -> Encode-Result))
+  (define (encode-head-close-delimited-flat status flat)
+    "ENCODE-HEAD-CLOSE-DELIMITED taking headers as a flat (\"name\" \"value\" ...) list."
+    (match (pairs-from-flat flat Nil)
+      ((None) (Refused "header list has an odd number of elements"))
+      ((Some pairs) (encode-head-close-delimited status pairs))))
+
   (declare encode-chunk-header (UFix -> Encode-Result))
   (define (encode-chunk-header n)
     "The size line introducing a chunk of exactly N octets: the hex length and CRLF.

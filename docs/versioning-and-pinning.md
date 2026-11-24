@@ -146,7 +146,11 @@ an asset's first line (`NAME VERSION sha256 HASH`, or `sha384`) fails the check,
 whose first line is malformed is reported instead of being merged into the asset above it
 (#808). It and `scripts/check-upstream.lisp` read the same files, chosen by
 `scripts/pin-files.lisp`: everything except `.git`, the top-level build output `.gitignore`
-names (`vendor/`, `dist/`, `dist-*/`) and a checkout nested inside the tree. It is wired into
+names (`vendor/`, `dist/`, `dist-*/`) and a checkout nested inside the tree. Each asset in an
+`ASSETS.pin`-style file also names its `file`, beside the pin, and the check fails when that file
+is missing, when the block has no `file` line, or when the file's bytes do not hash to the
+sha256 or sha384 on the asset's first line (#1028; the hashing uses ironclad from the local
+Quicklisp, as `scripts/check-assets.lisp` does). It is wired into
 CI. No pin is exempt: Coalton carries them too, not because it is dangerous but because a pin
 that opts out is a pin nobody reviews, and an exemption outlives the reasoning that justified
 it.
@@ -156,6 +160,7 @@ it.
 | | checked | why |
 |---|---|---|
 | fields present | **fails the build** | deterministic, and only changes when somebody edits a pin — so the failure is attributable to the commit that caused it |
+| a vendored asset's bytes match its hash | **fails the build** | deterministic, and only changes when somebody edits the file or the pin |
 | review age | **reported, never fails** | `--report` prints the age and shouts past 180 days |
 | upstream newer than us | **not here** | needs the network |
 

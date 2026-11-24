@@ -7,7 +7,7 @@
 ;;;; hyperion/http1 is. The suite checks both against ironclad and cl-base64, so the two
 ;;;; implementations are compared, not only tested against vectors this file's author chose.
 
-(cl:in-package #:hyperion/websocket)
+(cl:in-package #:aion/websocket)
 
 ;;; --- SHA-1 (RFC 3174) ---------------------------------------------------------
 
@@ -169,3 +169,148 @@ server speaks, as section 4.4 and RFC 9110 section 15.5.22 require."
       (unless (and decoded (= 16 (length decoded)))
         (refuse 400 "Sec-WebSocket-Key is not 16 octets in base64"))
       (values :accept trimmed))))
+
+;;; --- the client's half of the handshake (RFC 6455 section 4.1, #1028) -------------
+;;;
+;;; aion/cdp is a WebSocket client, so this system gained the client's side when it moved
+;;; from hyperion. It stays pure and depends on nothing: the 16 random octets of the key are
+;;; the caller's to supply (aion/cdp takes them from aion/random), and the socket is the
+;;; caller's too.
+
+(defun client-key (nonce)
+  "The Sec-WebSocket-Key a client sends: NONCE, 16 random octets, in base64 (RFC 6455
+section 4.1). The caller supplies the octets from a secure random source, because this
+system depends on nothing. Signals an error unless NONCE is a vector of 16 octets."
+  (unless (and (typep nonce '(vector (unsigned-byte 8))) (= 16 (length nonce)))
+    (error "A Sec-WebSocket-Key nonce is 16 octets; got ~S." nonce))
+  (base64-encode nonce))
+
+(defun %check-header-text (what text)
+  (when (find-if (lambda (c) (or (char= c #\Return) (char= c #\Newline)
+                                 (> (char-code c) 255)))
+                 text)
+    (error "The ~A of a WebSocket request may not contain CR, LF or a character above 255: ~S"
+           what text))
+  text)
+
+(defun client-request-head (host path key &key protocols origin)
+  "The opening request a client sends, as a string: the request line, the headers, and the
+empty line that ends the head, each line ended with CR LF.
+
+HOST is the Host header's value, with the port when it is not the scheme's default. PATH is
+the request target, starting with /. KEY comes from CLIENT-KEY. PROTOCOLS is a list of
+subprotocol names to offer, in order of preference. ORIGIN is sent when given; a client that
+is not a browser need not send one. A value containing CR, LF or a character above 255 is a
+mistake by the caller and signals an error, because it would let the value add headers."
+  (%check-header-text "host" host)
+  (%check-header-text "path" path)
+  (%check-header-text "key" key)
+  (unless (and (plusp (length path)) (char= (char path 0) #\/))
+    (error "A WebSocket request target starts with /: ~S" path))
+  (when origin (%check-header-text "origin" origin))
+  (dolist (p protocols) (%check-header-text "protocol" p))
+  (with-output-to-string (s)
+    (flet ((line (&rest parts)
+             (dolist (p parts) (write-string p s))
+             (write-char #\Return s) (write-char #\Newline s)))
+      (line "GET " path " HTTP/1.1")
+      (line "Host: " host)
+      (line "Upgrade: websocket")
+      (line "Connection: Upgrade")
+      (line "Sec-WebSocket-Key: " key)
+      (line "Sec-WebSocket-Version: 13")
+      (when protocols
+        (line "Sec-WebSocket-Protocol: "
+              (format nil "~{~A~^, ~}" protocols)))
+      (when origin (line "Origin: " origin))
+      (line))))
+
+(defconstant max-response-head-octets 16384
+  "The longest response head PARSE-RESPONSE-HEAD reads before refusing it.")
+
+(defun %head-end (octets start end)
+  "The index just after the first CR LF CR LF in OCTETS between START and END, or NIL."
+  (loop for i from start to (- end 4)
+        when (and (= (aref octets i) 13) (= (aref octets (+ i 1)) 10)
+                  (= (aref octets (+ i 2)) 13) (= (aref octets (+ i 3)) 10))
+          return (+ i 4)))
+
+(defun %token-char-p (c)
+  (or (and (< (char-code c) 128) (alphanumericp c)) (find c "!#$%&'*+-.^_`|~")))
+
+(defun parse-response-head (octets &key (start 0) (end (length octets)))
+  "Parse the server's answer to the opening request, from OCTETS between START and END.
+
+Returns one of:
+  (values :INCOMPLETE)                 the head has not ended yet
+  (values :HEAD status headers next)   STATUS is the integer status code, HEADERS a hash
+                                       table with lowercased names (repeated headers are
+                                       joined with \", \"), NEXT the index just after the
+                                       head, where the first frame may already begin
+  (values :ERROR reason)               the octets are not an HTTP/1.1 response head, or the
+                                       head is longer than MAX-RESPONSE-HEAD-OCTETS
+
+Octets are read as ISO-8859-1, as HTTP heads are."
+  (let ((head-end (%head-end octets start end)))
+    (unless head-end
+      (return-from parse-response-head
+        (if (> (- end start) max-response-head-octets)
+            (values :error "the response head is longer than the limit")
+            :incomplete)))
+    (when (> (- head-end start) max-response-head-octets)
+      (return-from parse-response-head
+        (values :error "the response head is longer than the limit")))
+    (let* ((text (map 'string #'code-char (subseq octets start (- head-end 4))))
+           (lines (loop with at = 0
+                        for crlf = (search (coerce '(#\Return #\Newline) 'string) text :start2 at)
+                        collect (subseq text at (or crlf (length text)))
+                        while crlf
+                        do (setf at (+ crlf 2))))
+           (status-line (first lines))
+           (headers (make-hash-table :test 'equal)))
+      (flet ((fail (reason) (return-from parse-response-head (values :error reason))))
+        (unless (and (>= (length status-line) 12)
+                     (string= "HTTP/1.1 " status-line :end2 9)
+                     (every #'digit-char-p (subseq status-line 9 12))
+                     (or (= (length status-line) 12) (char= (char status-line 12) #\Space)))
+          (fail "the status line is not HTTP/1.1 with a three-digit status"))
+        (dolist (line (rest lines))
+          (let ((colon (position #\: line)))
+            (unless (and colon (plusp colon) (every #'%token-char-p (subseq line 0 colon)))
+              (fail "a header line has no valid name"))
+            (when (find #\Newline line)
+              (fail "a header line contains a bare LF"))
+            (let ((name (string-downcase (subseq line 0 colon)))
+                  (value (string-trim '(#\Space #\Tab) (subseq line (1+ colon)))))
+              (setf (gethash name headers)
+                    (let ((old (gethash name headers)))
+                      (if old (concatenate 'string old ", " value) value))))))
+        (values :head (parse-integer status-line :start 9 :end 12) headers head-end)))))
+
+(defun check-server-handshake (status headers key &key protocols)
+  "Check the server's answer to a client's opening request (RFC 6455 section 4.1, the
+client's checks on the response).
+
+STATUS and HEADERS are what PARSE-RESPONSE-HEAD returned; KEY is the Sec-WebSocket-Key the
+client sent; PROTOCOLS is the list of subprotocols it offered. Returns (values :ACCEPT
+protocol), where PROTOCOL is the subprotocol the server chose or NIL, or (values :REFUSE
+reason). The client must then close the connection without sending a frame."
+  (flet ((refuse (reason) (return-from check-server-handshake (values :refuse reason))))
+    (unless (= status 101)
+      (refuse (format nil "the server answered ~D, not 101 Switching Protocols" status)))
+    (unless (header-has-token-p (gethash "upgrade" headers) "websocket")
+      (refuse "the response's Upgrade header does not name websocket"))
+    (unless (header-has-token-p (gethash "connection" headers) "upgrade")
+      (refuse "the response's Connection header does not name upgrade"))
+    (let ((accept (gethash "sec-websocket-accept" headers)))
+      (unless (and accept (string= (string-trim '(#\Space #\Tab) accept) (accept-key key)))
+        (refuse "Sec-WebSocket-Accept is not the value for the key that was sent")))
+    (when (gethash "sec-websocket-extensions" headers)
+      (refuse "the server named an extension, and the client offered none"))
+    (let* ((value (gethash "sec-websocket-protocol" headers))
+           (chosen (and value (%tokens value))))
+      (cond ((null value) (values :accept nil))
+            ((and (= 1 (length chosen))
+                  (member (first chosen) protocols :test #'string=))
+             (values :accept (first chosen)))
+            (t (refuse "the server chose a subprotocol the client did not offer"))))))
