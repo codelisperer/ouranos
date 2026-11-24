@@ -5,6 +5,11 @@
 #   ./scripts/setup.sh --check    report only; exit 1 if something is missing
 #   ./scripts/setup.sh --ci       as above, plus export PATH/env for GitHub Actions
 #   ./scripts/setup.sh --without-uv   any of the above, without building libuv (step 4)
+#   ./scripts/setup.sh --sbcl-tarball=FILE   install SBCL from FILE, an SBCL binary tarball you
+#                     already have, instead of downloading it. FILE must match the pinned
+#                     SHA-256 for this machine, or setup stops before unpacking it (#1216).
+#   ./scripts/setup.sh --use-installed-sbcl   never download or install SBCL: use the one
+#                     installed, and stop unless its --version is exactly the pinned version.
 #
 # Installs, all at the versions pinned in scripts/versions.env:
 #   1. SBCL      -- Linux: the official binary tarball, into $SBCL_PREFIX (no sudo).
@@ -27,15 +32,31 @@ root=$(dirname "$here")
 check_only=0
 ci=0
 with_uv=1
+sbcl_tarball=""
+use_installed_sbcl=0
 for arg in "$@"; do
   case "$arg" in
     --check) check_only=1;;
     --ci)    ci=1;;
     --without-uv) with_uv=0;;
-    -h|--help) sed -n '2,22p' "$0"; exit 0;;
+    --sbcl-tarball=*) sbcl_tarball=${arg#--sbcl-tarball=};;
+    --use-installed-sbcl) use_installed_sbcl=1;;
+    -h|--help) sed -n '2,27p' "$0"; exit 0;;
     *) echo "setup.sh: unknown option $arg" >&2; exit 2;;
   esac
 done
+
+# The two ways of supplying SBCL without a download (#1216). They contradict each other, so
+# setup refuses both at once rather than choosing. The tarball's path is made absolute here,
+# because later steps change directory.
+if [ -n "$sbcl_tarball" ] && [ "$use_installed_sbcl" -eq 1 ]; then
+  echo "setup.sh: --sbcl-tarball and --use-installed-sbcl contradict each other; give one of them" >&2
+  exit 2
+fi
+if [ -n "$sbcl_tarball" ]; then
+  [ -f "$sbcl_tarball" ] || { echo "setup.sh: --sbcl-tarball: no file at $sbcl_tarball" >&2; exit 2; }
+  sbcl_tarball=$(cd "$(dirname "$sbcl_tarball")" && printf '%s/%s' "$(pwd)" "$(basename "$sbcl_tarball")")
+fi
 
 # --- the pins ---------------------------------------------------------------
 # shellcheck disable=SC2046  # deliberate: KEY=VALUE lines, no quoting/expansion
@@ -190,9 +211,46 @@ refuse_missing_linux_binary() {
   exit 1
 }
 
+# Install SBCL from the tarball given with --sbcl-tarball, for a machine that cannot download
+# it (#1216; SourceForge refuses SBCL downloads in some locations). The file must have the
+# pinned SHA-256 for this machine's architecture, checked before anything unpacks it, exactly as
+# a download is. Unlike a download, the file is never deleted: it belongs to the developer, and
+# on a mismatch the message says so and leaves it where it is. Nothing here uses the network.
+install_sbcl_from_tarball() {
+  if ! linux_sbcl_url; then
+    echo "setup.sh: --sbcl-tarball: SBCL has no Linux binary name for $(uname -m)" >&2
+    exit 1
+  fi
+  case "$sbcl_arch" in
+    x86-64) _want=${SBCL_SHA256_X86_64_LINUX:-};;
+    *)      _want="";;
+  esac
+  if [ -z "$_want" ]; then
+    echo "setup.sh: --sbcl-tarball: scripts/versions.env pins no SHA-256 for SBCL $SBCL_VERSION on $sbcl_arch-linux," >&2
+    echo "         so $sbcl_tarball cannot be checked -- refusing to install it unchecked" >&2
+    exit 1
+  fi
+  _got=$(sha256_of "$sbcl_tarball")
+  if [ "$_got" != "$_want" ]; then
+    echo "setup.sh: --sbcl-tarball: $sbcl_tarball is not the pinned SBCL $SBCL_VERSION $sbcl_arch-linux tarball" >&2
+    echo "         expected SHA-256 $_want  (SBCL_SHA256_X86_64_LINUX in scripts/versions.env)" >&2
+    echo "         got      SHA-256 $_got" >&2
+    echo "         Nothing was unpacked or installed, and the file was left where it is." >&2
+    exit 1
+  fi
+  note "$sbcl_tarball: SHA-256 verified (the pinned $tarball)"
+  have bzip2 || { echo "setup.sh: bzip2 is required to unpack the SBCL tarball (sudo apt install bzip2)" >&2; exit 1; }
+  info "installing SBCL $SBCL_VERSION from $sbcl_tarball -> $prefix"
+  need_scratch
+  tar -xjf "$sbcl_tarball" -C "$scratch"
+  (cd "$scratch/sbcl-$SBCL_VERSION-$sbcl_arch-linux" && INSTALL_ROOT="$prefix" sh install.sh >/dev/null)
+  note "sbcl -> $prefix/bin/sbcl   (SBCL_HOME=$prefix/lib/sbcl)"
+}
+
 install_sbcl() {
   case "$os" in
     Linux)
+      if [ -n "$sbcl_tarball" ]; then install_sbcl_from_tarball; return 0; fi
       if pinned_linux_binary_missing; then refuse_missing_linux_binary; fi
       # The upstream tarball is .tar.bz2, and tar shells out to the bzip2 BINARY to unpack
       # it. A minimal image (WSL, containers, CI base images) often has tar but not bzip2,
@@ -212,6 +270,10 @@ install_sbcl() {
       note "sbcl -> $prefix/bin/sbcl   (SBCL_HOME=$prefix/lib/sbcl)"
       ;;
     Darwin)
+      if [ -n "$sbcl_tarball" ]; then
+        echo "setup.sh: --sbcl-tarball installs a Linux binary tarball; on macOS SBCL comes from Homebrew" >&2
+        exit 1
+      fi
       # Upstream publishes NO macOS binaries (the 2.6.6 release carries linux + windows
       # only), so the version pin cannot be honoured here -- brew decides.
       have brew || { echo "setup.sh: Homebrew required on macOS (https://brew.sh)" >&2; exit 1; }
@@ -522,6 +584,9 @@ run_doctor() {
   if [ "$os" = "Linux" ] && ! have bzip2; then need "bzip2 (to unpack the SBCL tarball)" "sudo apt install bzip2"; fi
   v=$(sbcl_version)
   if [ -z "$v" ]; then need "SBCL" "./scripts/setup.sh   (installs $SBCL_VERSION)"
+  elif [ "$v" != "$SBCL_VERSION" ] && [ "$use_installed_sbcl" -eq 1 ]; then
+    # With --use-installed-sbcl a different version is a gap, not a warning, on every OS.
+    need "SBCL $SBCL_VERSION (found $v at $(sbcl_bin); --use-installed-sbcl needs the pinned version)" "install SBCL $SBCL_VERSION, or run setup.sh without --use-installed-sbcl"
   elif [ "$v" != "$SBCL_VERSION" ] && [ "$os" != "Darwin" ]; then
     printf '  WARN    SBCL %s installed, pin is %s\n' "$v" "$SBCL_VERSION"
   else printf '  PASS    SBCL %s\n' "$v"; fi
@@ -612,7 +677,28 @@ fi
 }
 
 v=$(sbcl_version)
-if [ -z "$v" ]; then
+if [ "$use_installed_sbcl" -eq 1 ]; then
+  # --use-installed-sbcl (#1216): no download and no install, whatever is found. A version that
+  # differs from the pin is refused, not used with a warning as below, because the developer
+  # asked for this SBCL in place of the pinned download.
+  if [ -z "$v" ]; then
+    echo "setup.sh: --use-installed-sbcl, but no sbcl was found on PATH or in $prefix/bin" >&2
+    echo "         Install SBCL $SBCL_VERSION, or run setup.sh without this option to download it." >&2
+    exit 1
+  elif [ "$v" != "$SBCL_VERSION" ]; then
+    echo "setup.sh: --use-installed-sbcl, but the installed SBCL is not the pinned version" >&2
+    echo "         pinned $SBCL_VERSION  (SBCL_VERSION in scripts/versions.env)" >&2
+    echo "         found  $v  ($(sbcl_bin))" >&2
+    echo "         Nothing was downloaded or installed." >&2
+    exit 1
+  fi
+  note "SBCL $v present at $(sbcl_bin), the pinned version (--use-installed-sbcl)"
+elif [ -n "$sbcl_tarball" ] && [ "$v" = "$SBCL_VERSION" ]; then
+  note "SBCL $v present, the pinned version -- $sbcl_tarball was not needed and was not used"
+elif [ -n "$sbcl_tarball" ]; then
+  [ -z "$v" ] || note "SBCL $v found, pin is $SBCL_VERSION -- installing the pinned build from --sbcl-tarball"
+  install_sbcl
+elif [ -z "$v" ]; then
   install_sbcl
 elif [ "$v" != "$SBCL_VERSION" ] && [ "$os" = "Linux" ] && pinned_linux_binary_missing; then
   # The SBCL already here is the one the refusal above tells the reader to install, so

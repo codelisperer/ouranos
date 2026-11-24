@@ -1985,6 +1985,19 @@ its tag.
   enables the button with the composer. An app that renders its own page and wants the button
   passes `:cancel-action "/api/cancel"` to `composer`.
 
+- **`scripts/setup.sh` can provision SBCL without downloading it** (part of #1216), for a machine
+  where SourceForge refuses SBCL downloads.
+  - `--sbcl-tarball=FILE` installs SBCL from a binary tarball you already have. setup checks FILE
+    against `SBCL_SHA256_X86_64_LINUX` in `scripts/versions.env` before unpacking it. On a
+    mismatch it stops, prints both checksums and leaves the file where it is. This path makes no
+    request to SourceForge. It is for Linux x86-64, the only Linux binary with a pinned checksum.
+  - `--use-installed-sbcl` never downloads or installs SBCL. setup uses the installed one only
+    when its `--version` is exactly `SBCL_VERSION`, and otherwise stops with the pinned and the
+    found version; with `--check`, a different version is reported as missing.
+
+  Without either option setup behaves as before. `scripts/setup.ps1` does not have these options
+  yet.
+
 - **dokimasia: `cons acceptance` runs an app's suite in a headless browser from the command line**
   (#1028). `dokimasia/cons.lisp` is new, with the targets `build`, `test`, `repl` and
   `acceptance`. `cons acceptance SYSTEM=<system> SUITE=<suite>` loads the system, runs the suite and
