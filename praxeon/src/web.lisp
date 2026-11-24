@@ -121,6 +121,9 @@ translator agent, or a locale-aware guardrail. Overridable via :responder."
   (agent nil)
   (agent-name "Praxeon")
   (responder #'%default-responder)  ; (agent message locale) -> reply; client-overridable
+  ;; MAKE-APP's :TRUSTED-REPLIES. NIL renders the agent's replies as untrusted text: no image is
+  ;; fetched and no link is followed (#1119).
+  (trusted-replies nil)
   (turn-lock (sb-thread:make-mutex :name "praxeon-web-turn"))  ; serialize turns
   (state-lock (sb-thread:make-mutex :name "praxeon-web-state"))
   (events (chan:make-channel))                                  ; the transcript, as items
@@ -429,11 +432,17 @@ is an item of its own. One that ended in an error shows the error in the agent's
 page did before items existed."
   (ecase (getf item :kind)
     (:user (ui:user-bubble (getf item :text)))
-    (:assistant (ui:assistant-bubble (conversation-agent-name conv) (getf item :text)))
+    (:assistant (%assistant-html conv (getf item :text)))
     (:turn-ended (if (eq (getf item :outcome) :error)
-                     (ui:assistant-bubble (conversation-agent-name conv)
-                                        (format nil "error: ~A" (getf item :message)))
+                     (%assistant-html conv (format nil "error: ~A" (getf item :message)))
                      ""))))
+
+(defun %assistant-html (conv text)
+  "TEXT in CONV's agent's bubble: as untrusted text unless the app was made with
+:TRUSTED-REPLIES T (#1119)."
+  (if (conversation-trusted-replies conv)
+      (ui:assistant-bubble (conversation-agent-name conv) text :images t :links t)
+      (ui:assistant-bubble (conversation-agent-name conv) text)))
 
 (defun %items-html (conv items)
   (with-output-to-string (s)
@@ -777,12 +786,13 @@ CONV counts it, so it is not dropped as idle."
              (list ""))))))
 
 (defun %new-conversation (key agent agent-name responder
-                          &key built-with rebuild (clock #'get-universal-time))
+                          &key built-with rebuild (clock #'get-universal-time) trusted-replies)
   "A conversation over AGENT, for KEY, whose transcript starts with AGENT's history. Its next turn
-is numbered after the history's last. BUILT-WITH, REBUILD and CLOCK: see the CONVERSATION slots."
+is numbered after the history's last. BUILT-WITH, REBUILD, CLOCK and TRUSTED-REPLIES: see the
+CONVERSATION slots."
   (let ((conv (make-conversation :key key :agent agent :agent-name agent-name
                                  :responder responder :built-with built-with :clock clock
-                                 :rebuild rebuild))
+                                 :rebuild rebuild :trusted-replies trusted-replies))
         (history (%history-items agent)))
     (dolist (item history) (%publish conv item))
     (setf (conversation-turns conv)
@@ -874,7 +884,7 @@ not before, and max_seconds says how long it can last at most."
                       dictionary gate conversation-key make-agent
                       grant-verifier audience sessions
                       (conversation-idle-seconds 1800) (clock #'get-universal-time)
-                      (transport :poll) embed-origins)
+                      (transport :poll) embed-origins trusted-replies)
   "A Clack app exposing an agent: GET / (chat page), POST /api/message (HTMX or JSON),
 GET /api/progress (live-progress poll). One agent holds one conversation, so turns
 are serialized; the HTMX turn runs on a background thread so no handler blocks.
@@ -958,7 +968,13 @@ Every other route keeps the default headers, so it still cannot be framed. EMBED
 GRANT-VERIFIER, and each origin is written as a browser writes one: lowercase, with no path.
 
 Returns the Clack app, and as a second value a function of no arguments that returns how many
-conversations the app holds."
+conversations the app holds.
+
+THE AGENT'S REPLIES ARE RENDERED AS UNTRUSTED TEXT (#1119): an image in a reply shows as its alt
+text and is not fetched, and a link shows as its text and has no href. A reply can repeat text
+the agent read elsewhere, and an image is fetched as soon as it is shown, which can send data to
+its host. TRUSTED-REPLIES T renders images and links in replies, as before #1119. The user's own
+messages render images and links either way."
   (cond ((and conversation-key (not make-agent))
          (error "praxeon/web: :CONVERSATION-KEY needs :MAKE-AGENT, a function of a key that returns that conversation's agent."))
         ((and make-agent (not conversation-key) (not grant-verifier))
@@ -991,7 +1007,8 @@ conversations the app holds."
   (let* ((style (if dev :pretty :compact))
          (sessions (or sessions (ws:make-session-table :clock clock)))
          (new-conversation
-           (lambda (key agent) (%new-conversation key agent agent-name responder :clock clock)))
+           (lambda (key agent) (%new-conversation key agent agent-name responder :clock clock
+                                                   :trusted-replies trusted-replies)))
          (shared (unless (or conversation-key grant-verifier) (funcall new-conversation nil agent)))
          (table (make-hash-table :test 'equal))  ; key -> %ENTRY
          (table-lock (sb-thread:make-mutex :name "praxeon-web-conversations"))
@@ -1054,7 +1071,8 @@ conversations the app holds."
                                                            agent-name responder
                                                            :built-with (%grant-terms grant)
                                                            :rebuild rebuild
-                                                           :clock clock)))
+                                                           :clock clock
+                                                           :trusted-replies trusted-replies)))
                              grant))))))
          ;; CONVERSATION-FOR returns the request's conversation, or the response that refuses it,
          ;; and with grants the session's grant as a second value.
@@ -1241,7 +1259,7 @@ other request; it is allowed on :UV, where each open page holds one of the serve
 (defun %build-app (agent agent-name title responder intro footer dev theme-css
                    dictionary gate conversation-key make-agent
                    grant-verifier audience sessions conversation-idle-seconds transport
-                   embed-origins)
+                   embed-origins trusted-replies)
   "The app START and SERVE-FOREVER serve: MAKE-APP, called with the arguments they share.
 
 BOTH ENTRY POINTS GO THROUGH HERE. START and SERVE-FOREVER differ in how they BLOCK, not
@@ -1258,19 +1276,20 @@ forget one."
             :grant-verifier grant-verifier :audience audience
             :sessions sessions
             :conversation-idle-seconds (or conversation-idle-seconds 1800)
-            :transport transport :embed-origins embed-origins))
+            :transport transport :embed-origins embed-origins
+            :trusted-replies trusted-replies))
 
 (defun start (&key agent (agent-name "Praxeon") (title "Praxeon")
                    (responder #'actor:run-turn) intro footer dev theme-css
                    dictionary gate conversation-key make-agent
                    grant-verifier audience sessions conversation-idle-seconds embed-origins
-                   (transport :auto) (server (default-server)) (port *default-port*)
+                   trusted-replies (transport :auto) (server (default-server)) (port *default-port*)
                    (host "127.0.0.1") debug)
   "Start a web server exposing AGENT and return a handler; stop it with STOP.
 Builds the agent/chat Clack app and hands it to hyperion/server:start. SERVER is
 the Clack backend (DEFAULT-SERVER, re-exported from Hyperion). RESPONDER, INTRO,
 FOOTER, THEME-CSS, DICTIONARY, CONVERSATION-KEY, MAKE-AGENT, GRANT-VERIFIER, AUDIENCE,
-SESSIONS, CONVERSATION-IDLE-SECONDS, EMBED-ORIGINS and DEV pass through to MAKE-APP -- DICTIONARY turns
+SESSIONS, CONVERSATION-IDLE-SECONDS, EMBED-ORIGINS, TRUSTED-REPLIES and DEV pass through to MAKE-APP -- DICTIONARY turns
 on per-request locale negotiation (title/intro/footer may be locale functions); DEV
 t embeds the hot-reload poller so the page auto-refreshes on (MARK-RELOADED). TRANSPORT is
 :AUTO, :POLL or :SSE: :AUTO streams the page's updates on :HUNCHENTOOT and polls on the
@@ -1281,14 +1300,15 @@ SERVE-FOREVER instead."
   (srv:start (%build-app agent agent-name title responder intro footer dev theme-css
                          dictionary gate conversation-key make-agent
                          grant-verifier audience sessions conversation-idle-seconds
-                         (%resolve-transport transport server) embed-origins)
+                         (%resolve-transport transport server) embed-origins
+                         trusted-replies)
              :server server :port port :host host :debug debug))
 
 (defun serve-forever (&key agent (agent-name "Praxeon") (title "Praxeon")
                            (responder #'actor:run-turn) intro footer dev theme-css
                            dictionary gate conversation-key make-agent
                            grant-verifier audience sessions conversation-idle-seconds embed-origins
-                           (transport :auto) (server (default-server)) (port *default-port*)
+                           trusted-replies (transport :auto) (server (default-server)) (port *default-port*)
                            (host "127.0.0.1") debug (log t)
                            (name agent-name) (banner :derive) (signals t) on-ready)
   "Start a web server exposing AGENT and BLOCK until interrupted. Returns NIL.
@@ -1313,7 +1333,8 @@ here rather than porting the symptom."
   (srv:serve-forever (%build-app agent agent-name title responder intro footer dev
                                  theme-css dictionary gate conversation-key make-agent
                                  grant-verifier audience sessions conversation-idle-seconds
-                                 (%resolve-transport transport server) embed-origins)
+                                 (%resolve-transport transport server) embed-origins
+                         trusted-replies)
                      :server server :port port :host host :debug debug :log log
                      :name name :banner banner :signals signals :on-ready on-ready))
 

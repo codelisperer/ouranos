@@ -76,15 +76,28 @@ fail-safe -- with JS disabled it stays up, so the app is never used un-acknowled
                    (getf gate :accept)))))
     (:script :type "text/javascript" (:raw *gate-js*))))
 
-(defun user-bubble (msg)
+(defun user-bubble (msg &key (images t) (links t))
+  "The viewer's own message, rendered as Markdown. Raw HTML is escaped. IMAGES and LINKS are
+passed to `hyperion/markdown:render'; by default images and links render, as they always have,
+because the text is what this viewer typed. An app that shows other people's messages in this
+bubble passes :IMAGES NIL :LINKS :TEXT."
   (spinneret:with-html-string
     (:article :class "message px-user"
       (:div :class "message-header" (:p "you"))
       ;; Render as Markdown so paragraphs/blank lines and formatting are preserved
       ;; faithfully. Safe by default -- md:render escapes raw HTML in user input.
-      (:div :class "message-body content" (:raw (md:render msg))))))
+      (:div :class "message-body content" (:raw (md:render msg :images images :links links))))))
 
-(defun assistant-bubble (name msg)
+(defun assistant-bubble (name msg &key (images nil) (links :text))
+  "A model's reply from NAME, rendered as Markdown in `hyperion/markdown:render''s mode for
+untrusted text by default (#1119): an image renders as its alt text, with no IMG element, and a
+link as its text, with no HREF. A model's reply can contain text it was given by someone else,
+such as a web page or a document, and an image in it is fetched as soon as it is shown, with no
+click, which can send data to the image's host. In a desktop webview, following a link replaces
+the app's own page.
+
+An app whose replies are trusted passes :IMAGES T :LINKS T, as praxeon/web does when it is
+started with :TRUSTED-REPLIES T. Raw HTML is escaped either way."
   ;; px-user / px-assistant are *neutral* style hooks with default colors in
   ;; *CHAT-CSS*; an app recolors them via its own :theme-css (see START), so
   ;; app-specific look stays at the app level -- this layer is app-agnostic.
@@ -92,8 +105,7 @@ fail-safe -- with JS disabled it stays up, so the app is never used un-acknowled
     (:article :class "message px-assistant"
       (:div :class "message-header" (:p name))
       ;; LLM replies are Markdown (lists, code fences, emphasis); render them.
-      ;; Safe by default -- any raw HTML the model emits is escaped, not executed.
-      (:div :class "message-body content" (:raw (md:render msg))))))
+      (:div :class "message-body content" (:raw (md:render msg :images images :links links))))))
 
 (defun events-js ()
   "The page's stream client, for a page with a #px-events element. It opens an EventSource on the
