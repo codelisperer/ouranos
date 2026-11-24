@@ -781,7 +781,8 @@ list CALLS names. The definition is put back afterwards."
     (is (jobs:wait-job job :timeout 10))
     (is (eq :timed-out (jobs:job-status job)))
     (is (not (jobs:job-thread-alive-p job)))
-    (is (<= 0.3 (jobs:job-seconds job) 5)))
+    ;; 3/10, not 0.3: JOB-SECONDS is an exact ratio, and 3/10 is less than the single-float 0.3.
+    (is (<= 3/10 (jobs:job-seconds job) 5)))
   (let ((job (jobs:start-job (lambda () :quick) :time-limit 30)))
     (is (jobs:wait-job job :timeout 10) "a job inside its limit is not kept waiting for it")
     (is (eq :done (jobs:job-status job)))))
