@@ -100,7 +100,7 @@ delay; /login signs a stored user in; /me says who is signed in."
 
 (defun app-target (&rest options)
   (apply #'dh:hyperion-target :app #'make-app :setup #'setup-app :seed #'seed-app
-                              :users +users+ :server :hunchentoot options))
+                              :users +users+ :server :uv options))
 
 ;;; --- helpers --------------------------------------------------------------------------------
 
@@ -160,7 +160,7 @@ passed and the rows of report.json keyed by \"case/row\"."
 (test a-target-whose-setup-fails-leaves-nothing-behind
   (let* ((made nil)
          (target (dh:hyperion-target
-                  :app #'make-app :server :hunchentoot
+                  :app #'make-app :server :uv
                   :setup (lambda (backend)
                            (setf made (be:sqlite-path backend))
                            (error "the migrations failed")))))

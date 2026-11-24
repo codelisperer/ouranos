@@ -8,7 +8,6 @@
 # Idempotent. Does NOT install SBCL/Quicklisp -- checks and tells you how.
 #   1. Check that Coalton is at the commit coalton.pin names (scripts/coalton-pin.sh).
 #      The monorepo's scripts/setup.sh is what clones it.
-#   2. Ensure libev is present (Woo's event loop).
 # Discovery of the frameworks is NOT this script's job -- run
 # `sbcl --script bootstrap.lisp` at the repo root once (writes the ASDF drop-in).
 #
@@ -28,18 +27,6 @@ command -v sbcl >/dev/null 2>&1 || die "SBCL not found (e.g. 'brew install sbcl'
 QL_HOME="${QUICKLISP_HOME:-$HOME/quicklisp}"
 [ -f "$QL_HOME/setup.lisp" ] || die "Quicklisp not found at $QL_HOME/setup.lisp (https://www.quicklisp.org/beta/)."
 info "SBCL $(sbcl --version | awk '{print $2}')  |  Quicklisp at $QL_HOME"
-
-# libev (Woo). Best-effort detect; auto-install with Homebrew if missing.
-have_libev() {
-  ls /opt/homebrew/lib/libev.* /opt/homebrew/opt/libev/lib/libev.* \
-     /usr/local/lib/libev.* /usr/lib/*/libev.so* /usr/lib/libev.so* >/dev/null 2>&1 && return 0
-  command -v brew >/dev/null 2>&1 && brew list libev >/dev/null 2>&1 && return 0
-  return 1
-}
-if have_libev; then info "libev present (Woo)."
-elif command -v brew >/dev/null 2>&1; then
-  info "libev not found -- installing with Homebrew ..."; brew install libev || warn "'brew install libev' failed."
-else warn "libev not found -- Woo needs it. macOS: brew install libev | Debian: sudo apt-get install libev-dev"; fi
 
 # Coalton: checked here, never cloned. scripts/coalton-pin.sh at the monorepo root stops with
 # what to run when the checkout is missing or not at the commit coalton.pin names (#751).

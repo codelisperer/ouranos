@@ -116,7 +116,9 @@ are a later part of #527.
 it (`hermes/blob`). See the DAG note below — the obvious implementation is illegal.
 
 **7. Streaming.** Polling is a deliberate, documented choice made because Woo's event loop
-could not be blocked; it becomes a limitation rather than a decision once pre-publication issue 117 lands.
+could not be blocked. The native server from pre-publication issue 117 has landed and the tree
+no longer declares Woo (#373), so polling is now the default rather than a requirement;
+`praxeon/web` streams with `:transport :sse`.
 
 ---
 

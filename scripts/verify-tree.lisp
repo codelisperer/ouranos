@@ -17,7 +17,7 @@
 ;;;; prevent.
 ;;;;
 ;;;; The earlier version loaded everything into ONE image: `+systems+` first, then
-;;;; `+test-systems+`. `+systems+` contains `praxeon/web`, which declares
+;;;; `+test-systems+`. `+systems+` contains `praxeon/web`, which then declared
 ;;;; `clack-handler-woo` on non-Windows. `hyperion/tests` declared no HTTP backend at all
 ;;;; after pre-publication issue 139 -- but by the time it ran, praxeon/web had already pulled one into the same
 ;;;; image, so `available-servers` found one and the suite passed. `asdf:test-system
@@ -220,10 +220,11 @@ scripts/build-libuv.lisp first, so their absence here is not evidence of anythin
 Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ below.")
 
 (defparameter +test-systems+
-  '(:aion/tests :aion/sexp/tests :aion/tz/tests :aion/boundary/tests :aion/dynamic/tests :aion/test-threads/tests :aion/platform/tests :aion/fs/tests :aion/pool/tests :aion/interceptor/tests :aion/signature/tests :aion/http-client/tests :aion/retry/tests :cons/tests :mnemosyne/tests :hyperion/tests :praxeon/tests :hermes/tests :hermes/payments/tests
+  '(:aion/tests :aion/sexp/tests :aion/tz/tests :aion/boundary/tests :aion/dynamic/tests :aion/test-threads/tests :aion/platform/tests :aion/fs/tests :aion/pool/tests :aion/interceptor/tests :aion/signature/tests :aion/http-client/tests :aion/retry/tests :cons/tests :mnemosyne/tests :hyperion/backends/tests :praxeon/tests :hermes/tests :hermes/payments/tests
     :elenchon/tests :klio/tests :hades/single-instance/tests :hades/credentials/tests
-    :hades/notify/tests :hades/open/tests :dokimasia/tests :dokimasia/mnemosyne/tests :dokimasia/hyperion/tests
-    :dokimasia/examples/active-search/tests
+    :hades/notify/tests :hades/open/tests :dokimasia/tests :dokimasia/mnemosyne/tests
+    ;; dokimasia/hyperion/tests and dokimasia/examples/active-search/tests serve real requests,
+    ;; so they are in +UV-TEST-SYSTEMS+ since #373, which says why.
     ;; aux suites that existed but were never run from here
     :cons/coalton-repl/tests :hyperion/session-db/tests :hyperion/auth-db/tests
     ;; The pooled-connection middleware (#325), registered in the commit that adds it.
@@ -231,7 +232,7 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
     ;; The desktop Coalton REPL example's answers to (exit), a long evaluation and a cancel
     ;; (#355), registered in the commit that adds the suite.
     :hyperion/examples/coalton-repl/tests
-    :hyperion/assets/tests :hyperion/calendar/tests :hermes/blob/tests
+    :hyperion/calendar/tests :hermes/blob/tests
     ;; The collection-page components (#981), registered in the commit that adds them.
     :hyperion/kit/tests
     ;; The list component (#488), registered in the commit that adds it. The -db suite
@@ -240,14 +241,7 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
     ;; In-app notifications (#792), registered in the commit that adds them. The -db suite
     ;; reports Postgres, and +REQUIRED-BACKEND-REPORTS+ holds it to that.
     :hyperion/notifications/tests :hyperion/notifications-db/tests
-    ;; praxeon/web's own suite (pre-publication issue 151) -- THE GAP THIS FILE ALREADY NAMES. Two entries below,
-    ;; `hyperion/update/tests' is justified as "invisible to this checker until someone
-    ;; looked, which is the praxeon/web gap exactly", and the praxeon/web gap was still open
-    ;; when that was written. `+systems+' LOADED praxeon/web, so a refactor there compiled;
-    ;; nothing EXERCISED it, so elise hand-rolled a sleep loop around a blocking entry that
-    ;; did not exist and no check count ever moved. The suite declares a Clack handler, which
-    ;; is safe here only because every suite now gets its own fresh SBCL (see the header).
-    :praxeon/web/tests
+    ;; praxeon/web's own suite (pre-publication issue 151) is in +UV-TEST-SYSTEMS+ since #373, which says why.
     ;; Observational memory in a real database (#138). Registered in the same commit that
     ;; adds it: an unregistered suite, an unrun suite and a passing suite are identical at
     ;; the exit code, and this one would be the easiest of the three to leave that way --
@@ -269,10 +263,7 @@ Build libuv, then set OURANOS_WITH_UV=1 to fold them in -- see +UV-SYSTEMS+ belo
     ;; Agent evaluations (#1224), registered in the commit that adds them. The agent and the
     ;; rubric grader's judge are stub providers, so it runs on every leg with no network.
     :praxeon/eval/tests
-    ;; Dev sidecars (#700). It was left out of the pull request's first commit, and its first CI run
-    ;; reported the same total as main; registered here so that it runs. Each sidecar is a child SBCL,
-    ;; so it needs nothing installed.
-    :hyperion/sidecar/tests
+    ;; Dev sidecars (#700): in +UV-TEST-SYSTEMS+ since #373, which says why.
     ;; The OAuth client and its routes (#527 part 2), registered in the commit that adds them.
     ;; Their authorization server runs on 127.0.0.1 in the test image.
     :aion/oauth/tests :hyperion/oauth/tests
@@ -371,7 +362,23 @@ not evidence of anything.")
     :hyperion/server-uv/tests :hyperion/clack-handler-uv/tests
     :hyperion/server-uv/websocket/tests
     :aion/schedule/uv/tests
-    :aion/folder-watch/tests)
+    :aion/folder-watch/tests
+    ;; Suites that serve real requests (#373). They declared clack-handler-hunchentoot and ran
+    ;; in +TEST-SYSTEMS+ until the maintainer's ruling of 2026-11-15 took Woo and Hunchentoot
+    ;; out of every :depends-on in the tree. They serve on hyperion/server-uv now, which needs
+    ;; a built libuv, so they are here. hyperion/tests' checks that need no server, the
+    ;; backend-choice tests among them, are in hyperion/backends/tests, which stays in
+    ;; +TEST-SYSTEMS+.
+    :hyperion/tests :hyperion/assets/tests :hyperion/sidecar/tests
+    ;; dokimasia's two suites that start a hyperion app (#1028) serve on :uv for the same reason.
+    :dokimasia/hyperion/tests :dokimasia/examples/active-search/tests
+    ;; praxeon/web's own suite (pre-publication issue 151) -- THE GAP THIS FILE ALREADY NAMES. Two entries
+    ;; in +TEST-SYSTEMS+, `hyperion/update/tests' is justified as "invisible to this checker
+    ;; until someone looked, which is the praxeon/web gap exactly", and the praxeon/web gap was
+    ;; still open when that was written. `+systems+' LOADED praxeon/web, so a refactor there
+    ;; compiled; nothing EXERCISED it, so elise hand-rolled a sleep loop around a blocking
+    ;; entry that did not exist and no check count ever moved.
+    :praxeon/web/tests)
   "Their suites -- real checks over a real libuv, verified by nothing automatic until CI.")
 
 (defparameter +tls-systems+ '(:aion/tls)

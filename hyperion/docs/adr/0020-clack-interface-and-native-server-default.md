@@ -108,6 +108,12 @@ Measured at `3d67a34`, with Clack 2.1.0 (`clack-20250622-git`, from the pinned Q
    move to `:uv`. An application that wants Woo or Hunchentoot adds the handler system to its
    own `:depends-on` and names it with `:server` or `HYPERION_SERVER`.
 
+   *Note, 2026-11-15:* point 5 landed as step 5 of #373, on the maintainer's ruling of that
+   day. The tree's suites that served real requests on Hunchentoot now run on
+   `hyperion/server-uv`, and the Clack path is run through `hyperion/clack-handler-uv`. How an
+   application chooses another server is in `hyperion/docs/user-guide.md`, "Choosing a
+   server".
+
 6. **ADR-0015's point 4 stands.** The HTTP/1.1 parser stays its own pure system,
    `hyperion/http1`, for the reason ADR-0015 gives: that keeps it inside what
    `scripts/verify-tree.lisp` checks. Decoding a chunked request body (point 2) goes in that

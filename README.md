@@ -141,7 +141,7 @@ manager, and setup does that build for you (`scripts/build-libuv.lisp`; a few se
 
 When there is no compiler, setup stops **before installing anything**, prints the line above for
 your platform, and exits 1. On Linux, when setup can get root, it installs the compiler itself,
-as it does libev and libsqlite3. On Windows without the Build Tools, `setup.ps1` instead
+as it does libsqlite3. On Windows without the Build Tools, `setup.ps1` instead
 downloads the prebuilt `libuv.dll` that [`libuv-prebuilt.pin`](libuv-prebuilt.pin) names for
 your architecture (built from the same `libuv.pin` release by this repository's
 `libuv-prebuilt.yml` workflow), checks its SHA-256, and installs it into `vendor\libuv`. It stops

@@ -4,6 +4,9 @@
 #     hyperion/bench/run.sh hunchentoot [port]
 #     hyperion/bench/run.sh woo         [port]
 #
+# The Woo backend needs libev installed separately (macOS: brew install libev; Debian/Ubuntu:
+# sudo apt-get install libev-dev). The tree's setup does not install it.
+#
 # Start the bench server, wait until it actually listens, run the load client against it,
 # stop it, print the JSON. Everything in ONE session on purpose: under WSL the distro is
 # reaped once no session holds it, which quietly kills a backgrounded server between calls.

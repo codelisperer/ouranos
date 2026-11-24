@@ -30,7 +30,7 @@ first part is `dokimasia/mnemosyne` (`src/mnemosyne/`): `define-row-probe` and
 tests use a SQLite file and no browser. Its second part is `dokimasia/hyperion` (`src/hyperion/`):
 `hyperion-target`, which starts a hyperion app on a free port with a scratch SQLite database,
 waits for htmx in its settle check, and can sign a user in with a session made in the app's
-store. Its tests run a small hyperion app written in the suite, on hunchentoot.
+store. Its tests run a small hyperion app written in the suite, on `hyperion/server-uv` (#373).
 
 ## Design facts
 

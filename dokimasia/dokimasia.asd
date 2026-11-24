@@ -114,7 +114,7 @@
   :license "MIT"
   :depends-on ("dokimasia/hyperion" "dokimasia/mnemosyne" "dokimasia" "aion/cdp" "aion/fs" "hyperion"
                "hyperion/assets" "hyperion/test-ports" "mnemosyne" "com.inuoe.jzon" "fiveam"
-               "clack-handler-hunchentoot") ; the server the test app runs on, as hyperion's tests use
+               "hyperion/server-uv") ; the server the test app runs on, as hyperion's tests use (#373)
   :serial t
   :components ((:module "tests/hyperion"
                 :serial t

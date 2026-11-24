@@ -284,6 +284,42 @@ it is the only direction of this guard that can be made to happen on purpose."
            (error () (is-true t "failed for some other reason, which is fine here")))
       (ignore-errors (sb-bsd-sockets:socket-close sock)))))
 
+;;; --- START's Clack path, served without a third-party handler (#373) -------------------
+;;;
+;;; START has two paths: the native :uv server, called directly, and every other backend,
+;;; started through clack:clackup on a thread of START's own (%CLACK-START). The tests below
+;;; are about the second path. They used to run it on Hunchentoot, which this suite declared;
+;;; since #373 no system in the tree declares a third-party Clack handler.
+;;;
+;;; hyperion/clack-handler-uv is a Clack handler like any other: clackup finds CLACK.HANDLER.UV
+;;; by name and calls its RUN. START sends :uv down its native path only because :UV is in
+;;; +NATIVE-BACKENDS+, which is data. So %CLACK-PATH-START binds that list to NIL and starts
+;;; :uv, and START then takes the Clack path end to end: WRAP-STREAMING-BODY, the readiness
+;;; nonce, the backend thread, and STOP's Clack branch. What it does not cover is anything
+;;; particular to Hunchentoot or Woo themselves.
+
+(defun %clack-path-start (app &rest args &key workers &allow-other-keys)
+  "START APP through START's Clack path, served by hyperion/clack-handler-uv. ARGS are START's,
+without :SERVER. :WORKERS defaults to NIL, so START gives the handler nothing and does not warn."
+  (let ((srv::+native-backends+ '()))
+    (apply #'srv:start app :server :uv :workers workers
+           (uiop:remove-plist-keys '(:server :workers) args))))
+
+(test the-clack-path-helper-really-takes-the-clack-path
+  "The control for every test that uses %CLACK-PATH-START: the handler it returns is a Clack
+server, and the same call without the binding returns a native one. If this fails, the Clack
+path tests below are testing the native server."
+  (let ((h (ports:call-with-port (lambda (p) (%clack-path-start (%srv-ok-app) :port p :log nil)))))
+    (unwind-protect
+         (progn
+           (is-true (srv::clack-server-p h) "the Clack path did not return a Clack server")
+           (is-false (srv::%uv-server-p h)))
+      (srv:stop h)))
+  (let ((h (ports:call-with-port
+            (lambda (p) (srv:start (%srv-ok-app) :port p :server :uv :log nil :workers nil)))))
+    (unwind-protect (is-true (srv::%uv-server-p h) "control: plain START on :uv is native")
+      (srv:stop h))))
+
 ;;; --- the streaming shim, on a real Clack backend (pre-publication issue 117 M2) ------------------
 ;;;
 ;;; THIS IS THE HALF THAT WOULD OTHERWISE GO UNTESTED. hyperion's streaming convention is a
@@ -323,10 +359,34 @@ present or absent -- which is the only way a test can tell the two apart."
                      while c do (write-char c out)))))
       (ignore-errors (sb-bsd-sockets:socket-close s)))))
 
+(defun %srv-body (response)
+  "The body of RESPONSE, a whole response read by %SRV-HTTP-GET, with chunked framing decoded
+when the head declares it. server-uv chunks every streamed body, an HTTP/1.0 request's
+included, and since #373 the Clack path here runs on server-uv. Returns NIL when a chunk size
+does not parse or a chunk runs past the end, so a broken frame fails the caller's check."
+  (let* ((sep (format nil "~C~C~C~C" #\Return #\Linefeed #\Return #\Linefeed))
+         (end (search sep response))
+         (head (subseq response 0 end))
+         (rest (subseq response (+ end 4))))
+    (if (not (search "transfer-encoding: chunked" (string-downcase head)))
+        rest
+        (with-output-to-string (out)
+          (loop with crlf = (format nil "~C~C" #\Return #\Linefeed)
+                with i = 0
+                for line-end = (search crlf rest :start2 i)
+                for size = (and line-end
+                                (parse-integer rest :start i :end line-end :radix 16
+                                                    :junk-allowed t))
+                do (cond ((null size) (return-from %srv-body nil))
+                         ((zerop size) (loop-finish))
+                         ((> (+ line-end 2 size) (length rest)) (return-from %srv-body nil))
+                         (t (write-string rest out :start (+ line-end 2)
+                                                   :end (+ line-end 2 size))
+                            (setf i (+ line-end 2 size 2)))))))))
+
 (test the-streaming-shim-serves-a-function-body-on-a-clack-backend
-  "The whole reason the shim exists: one convention, every backend. HTTP/1.0 is used
-deliberately -- it makes the backend close at the end of the body, so reading to end of
-stream is exact framing whether the backend chunked the response or not."
+  "The whole reason the shim exists: one convention, every backend. The backend may chunk the
+response or close at the end of an unframed body; %SRV-BODY reads either."
   (let* ((app (lambda (env)
                 (declare (ignore env))
                 (list 200 (list :content-type "text/plain; charset=utf-8")
@@ -337,15 +397,15 @@ stream is exact framing whether the backend chunked the response or not."
          (port nil)
          (handler (ports:call-with-port
                    (lambda (p)
-                     (prog1 (srv:start app :port p :server :hunchentoot)
+                     (prog1 (%clack-path-start app :port p)
                        (setf port p))))))
     (unwind-protect
          (progn
            (is-true (%srv-await (lambda () (ports:listening-p port))) "backend came up")
            (let ((r (%srv-http-get port "/")))
              (is-true (search "200" r) "~S" r)
-             (is-true (search "one-two" r)
-                      "both chunks arrived, in order, and the empty write did not end it")))
+             (is (equal "one-two" (%srv-body r))
+                 "both chunks arrived, in order, and the empty write did not end it: ~S" r)))
       (ignore-errors (srv:stop handler)))))
 
 (defun %adapt-stream-body (stream &key (method :get))
@@ -407,49 +467,11 @@ it owing octets."
         (is (typep condition 'error))
         (is-false (open-stream-p stream))))))
 
-(test a-failed-stream-is-reported-as-COMPLETE-by-the-clack-backends
-  "A KNOWN DIVERGENCE, asserted so it is documented rather than discovered.
-
-One convention does not buy identical semantics, and this is where the two backends part.
-When a streaming body signals mid-flight the native server closes WITHOUT the terminating
-chunk, so the client sees a truncated message and knows the response is not to be trusted
-(%STREAM-FINISH, and A-BODY-THAT-SIGNALS-MIDSTREAM-TRUNCATES-RATHER-THAN-COMPLETING in the
-server-uv suite). Hunchentoot finalises its own chunked stream while unwinding, so the
-client is told the response was WHOLE -- a silent truncation the application believes it
-delivered.
-
-The shim CANNOT fix this: the backend owns the stream and closes it after the condition has
-already left our code. Recording the behaviour in a test rather than a comment is what makes
-it a fact that stays true -- and this test failing later is the good outcome, because it
-would mean the divergence had closed.
-
-It is also the sharpest argument yet for the native path, and it is not a performance one."
-  (let* ((app (lambda (env)
-                (declare (ignore env))
-                (list 200 (list :content-type "text/plain; charset=utf-8")
-                      (lambda (writer)
-                        (funcall writer "before")
-                        (error "boom")))))
-         (port nil)
-         (handler (ports:call-with-port
-                   (lambda (p)
-                     (prog1 (srv:start app :port p :server :hunchentoot)
-                       (setf port p))))))
-    (unwind-protect
-         (progn
-           (is-true (%srv-await (lambda () (ports:listening-p port))))
-           (let ((r (%srv-http-get port "/" :version "1.1")))
-             (is-true (search "before" r) "what was written before the failure was sent")
-             (is-true (search "chunked" (string-downcase r))
-                      "1.1 with no length: the backend chunked it, so a terminator is a
-thing that could have been here")
-             (is-true (search (format nil "~C~C0~C~C~C~C" #\Return #\Linefeed
-                                      #\Return #\Linefeed #\Return #\Linefeed)
-                              r)
-                      "Hunchentoot terminated the chunked message ITSELF while unwinding,
-so the client is told a failed response was complete. The native server does not -- see the
-docstring. Asserted, not wished for.")))
-      (ignore-errors (srv:stop handler)))))
+;;; A test of Hunchentoot's own behaviour was here until #373: when a streaming body signals
+;;; mid-flight, Hunchentoot finalises the chunked message while unwinding, so the client is told
+;;; a failed response was complete, where the native server truncates it. No system in the tree
+;;; loads Hunchentoot now, so the test could not run; the divergence is recorded in
+;;; hyperion/CLAUDE.md and hyperion/docs/user-guide.md.
 
 (test a-non-streaming-response-is-untouched-by-the-shim
   "The control. WRAP-STREAMING-BODY sits in front of every Clack response, so a bug in its
@@ -495,8 +517,7 @@ invisible to a connect probe, so CHECK-PORT cannot see it and only the bind can 
          (t0 (get-internal-real-time)))
     (unwind-protect
          (let* ((c (handler-case
-                       (let ((h (srv:start (%srv-ok-app) :port port :server :hunchentoot
-                                                         :log nil)))
+                       (let ((h (%clack-path-start (%srv-ok-app) :port port :log nil)))
                          (ignore-errors (srv:stop h))
                          :started)
                      (srv:port-in-use (c) c)))
@@ -563,13 +584,17 @@ buffer, and it searched those for its nonce."
 
 (test a-listener-already-on-the-port-is-never-taken-for-our-server
   ;; Another program LISTENING on the port, with SO_REUSEADDR, before START binds it, and the
-  ;; preflight off so that only the bind and the readiness check decide. Each platform's
-  ;; outcome is asserted as measured on #188, not a weaker "either" (Linux here; macOS by
-  ;; Ouranos Claude (macOS); Windows by Ouranos Claude (Windows)):
-  ;;   Linux, macOS  the backend's bind fails: PORT-IN-USE.
-  ;;   Windows       both sockets bind and listen, sharing the port with no error; the
-  ;;                 readiness nonce never comes back from the other listener, so START
-  ;;                 gives up with SERVER-START-TIMEOUT. Before #188 it reported success.
+  ;; preflight off so that only the bind and the readiness check decide. The backend's bind
+  ;; fails, and START signals PORT-IN-USE, on every platform.
+  ;;
+  ;; ON WINDOWS THIS USED TO BE SERVER-START-TIMEOUT. #188 measured it with Hunchentoot, whose
+  ;; listening socket sets SO_REUSEADDR. Windows lets a second socket bind a port another socket
+  ;; holds when the second one sets SO_REUSEADDR, so both listened on the port, the readiness
+  ;; nonce never came back from the other listener, and START gave up. Since #373 this test
+  ;; runs on hyperion/clack-handler-uv, which binds with libuv. libuv does not set SO_REUSEADDR
+  ;; on Windows (src/win/tcp.c, above uv__tcp_try_bind, in the release libuv.pin names), so its
+  ;; bind fails with WSAEADDRINUSE as it does on Linux and macOS. Measured on Windows 11 for
+  ;; #1245, and on the Windows leg of run 43737827642.
   (let ((squatter (make-instance 'sb-bsd-sockets:inet-socket :type :stream :protocol :tcp)))
     (setf (sb-bsd-sockets:sockopt-reuse-address squatter) t)
     (sb-bsd-sockets:socket-bind squatter #(127 0 0 1) 0)
@@ -578,15 +603,12 @@ buffer, and it searched those for its nonce."
          (let* ((port (nth-value 1 (sb-bsd-sockets:socket-name squatter)))
                 (c (let ((srv:*start-timeout* 3))
                      (handler-case
-                         (let ((h (srv:start (%srv-ok-app) :port port :server :hunchentoot
-                                                           :log nil :check-port nil)))
+                         (let ((h (%clack-path-start (%srv-ok-app) :port port :log nil :check-port nil)))
                            (ignore-errors (srv:stop h))
                            :started)
                        (srv:port-in-use (c) c)
                        (srv:server-start-timeout (c) c)))))
-           #-win32 (is (typep c 'srv:port-in-use) "expected PORT-IN-USE, got ~S" c)
-           #+win32 (is (typep c 'srv:server-start-timeout)
-                       "expected SERVER-START-TIMEOUT on a shared port, got ~S" c))
+           (is (typep c 'srv:port-in-use) "expected PORT-IN-USE, got ~S" c))
       (sb-bsd-sockets:socket-close squatter))))
 
 (test start-returns-once-the-port-is-listening-and-stop-once-it-is-released
@@ -595,7 +617,7 @@ buffer, and it searched those for its nonce."
   (let* ((port nil)
          (h (ports:call-with-port
              (lambda (p)
-               (prog1 (srv:start (%srv-ok-app) :port p :server :hunchentoot :log nil)
+               (prog1 (%clack-path-start (%srv-ok-app) :port p :log nil)
                  (setf port p))))))
     (is (ports:listening-p port) "START returned before the port was listening")
     (srv:stop h)
@@ -603,26 +625,28 @@ buffer, and it searched those for its nonce."
 
 (test a-second-stop-does-not-interrupt-the-first
   "#502. Two STOPs of one server from two threads, the second arriving while the first is in
-HUNCHENTOOT:STOP. hyperion/dev does this: SERVE with :BLOCK calls UNWATCH when its wait ends,
-right after the UNWATCH that ended it. The second STOP used to terminate the backend thread
-again, which interrupted HUNCHENTOOT:STOP before it set the acceptor's shutdown flag, and the
-listener thread then went on accepting with nothing left to stop it.
+the backend's own cleanup. hyperion/dev does this: SERVE with :BLOCK calls UNWATCH when its wait
+ends, right after the UNWATCH that ended it. The second STOP used to terminate the backend
+thread again, which interrupted the cleanup. Found on Hunchentoot, where an interrupted
+HUNCHENTOOT:STOP left the listener thread accepting with nothing left to stop it.
 
-HUNCHENTOOT:STOP is held at its start until the second STOP has returned, or for 2 s, so the
-second one always arrives while the first is stopping. With the fix the second STOP waits for
-the backend thread, which is waiting for the hold, so this test takes the 2 s."
+Since #373 the Clack backend here is hyperion/clack-handler-uv, whose RUN stops its server with
+HYPERION/SERVER-UV:STOP as the thread unwinds. That call is held at its start until the second
+STOP has returned, or for 2 s, so the second one always arrives while the first is stopping.
+With the fix the second STOP waits for the backend thread, which is waiting for the hold, so
+this test takes the 2 s."
   (let* ((port nil)
          (h (ports:call-with-port
              (lambda (p)
-               (prog1 (srv:start (%srv-ok-app) :port p :server :hunchentoot :log nil)
+               (prog1 (%clack-path-start (%srv-ok-app) :port p :log nil)
                  (setf port p)))))
          (entered (sb-thread:make-semaphore))
          (release (sb-thread:make-semaphore))
-         (acceptor nil)
+         (server nil)
          (finished nil))
-    (sb-int:encapsulate 'hunchentoot:stop 'hold-the-first-stop
+    (sb-int:encapsulate 'hyperion/server-uv:stop 'hold-the-first-stop
                         (lambda (f a &rest args)
-                          (setf acceptor a)
+                          (setf server a)
                           (sb-thread:signal-semaphore entered)
                           (sb-thread:wait-on-semaphore release :timeout 2)
                           (multiple-value-prog1 (apply f a args) (setf finished t))))
@@ -631,19 +655,19 @@ the backend thread, which is waiting for the hold, so this test takes the 2 s."
                        ;; THREAD-LIFETIME: scoped -- joined below, before the assertions.
                        (lambda () (srv:stop h)) :name "first stop")))
            (is (sb-thread:wait-on-semaphore entered :timeout 5)
-               "the first STOP never reached HUNCHENTOOT:STOP")
+               "the first STOP never reached the handler's cleanup")
            (let ((second-stop (sb-thread:make-thread
                           ;; THREAD-LIFETIME: scoped -- joined on the next line.
                           (lambda () (srv:stop h)) :name "second stop")))
              (sb-thread:join-thread second-stop :timeout 10 :default nil)
              (sb-thread:signal-semaphore release)
              (sb-thread:join-thread first-stop :timeout 10 :default nil))
-           (is-true finished "the second STOP interrupted HUNCHENTOOT:STOP before it finished")
+           (is-true finished "the second STOP interrupted the handler's cleanup before it finished")
            (is (ports:await-released port)
                "the port is still accepting after both STOPs returned"))
-      (sb-int:unencapsulate 'hunchentoot:stop 'hold-the-first-stop)
-      ;; Only after a failure: the listener the interrupted stop left behind.
-      (unless finished (when acceptor (ignore-errors (hunchentoot:stop acceptor)))))))
+      (sb-int:unencapsulate 'hyperion/server-uv:stop 'hold-the-first-stop)
+      ;; Only after a failure: the server the interrupted cleanup left running.
+      (unless finished (when server (ignore-errors (hyperion/server-uv:stop server)))))))
 
 (test start-gives-up-after-its-deadline-and-stops-the-server
   ;; The only way to make readiness never arrive on demand is to replace the probe. The
@@ -652,7 +676,7 @@ the backend thread, which is waiting for the hold, so this test takes the 2 s."
          (c (let ((srv::*listening-probe* (constantly nil))
                   (srv:*start-timeout* 1))
               (handler-case
-                  (progn (srv:start (%srv-ok-app) :port port :server :hunchentoot :log nil)
+                  (progn (%clack-path-start (%srv-ok-app) :port port :log nil)
                          :returned)
                 (srv:server-start-timeout (c) c)))))
     (is (typep c 'srv:server-start-timeout) "expected a timeout, got ~S" c)
@@ -668,7 +692,7 @@ the backend thread, which is waiting for the hold, so this test takes the 2 s."
   (let* ((port nil)
          (h (ports:call-with-port
              (lambda (p)
-               (prog1 (srv:start (%srv-ok-app) :port p :server :hunchentoot :log nil)
+               (prog1 (%clack-path-start (%srv-ok-app) :port p :log nil)
                  (setf port p)))))
          (thread (srv::clack-server-thread h))
          (s (make-string-output-stream)))
@@ -681,7 +705,7 @@ the backend thread, which is waiting for the hold, so this test takes the 2 s."
            (let ((out (get-output-stream-string s)))
              (is (search "failed after it started" out)
                  "an error after START must be logged, got: ~S" out)
-             (is (and (search "hunchentoot" out) (search (princ-to-string port) out)
+             (is (and (search "uv" out) (search (princ-to-string port) out)
                       (not (search "forced after start" out)))
                  "the line names the backend and port, and not the condition's message: ~S"
                  out)))
@@ -744,8 +768,8 @@ thread, then end the thread and wait for it."
       "the guard refused although no Woo server is running"))
 
 (test the-woo-guard-does-not-refuse-other-backends
-  ;; Only Woo installs libev signal watchers. A running Woo server must not stop a
-  ;; Hunchentoot server from starting beside it.
+  ;; Only Woo installs libev signal watchers. A running Woo server must not stop another
+  ;; Clack server from starting beside it.
   (%srv-call-with-standin-woo
    (ports:candidate-port)
    (lambda (thread)
@@ -753,7 +777,7 @@ thread, then end the thread and wait for it."
      (let* ((port nil)
             (h (ports:call-with-port
                 (lambda (p)
-                  (prog1 (srv:start (%srv-ok-app) :port p :server :hunchentoot :log nil)
+                  (prog1 (%clack-path-start (%srv-ok-app) :port p :log nil)
                     (setf port p))))))
        (unwind-protect (is (ports:listening-p port))
          (srv:stop h))))))
@@ -769,8 +793,7 @@ thread, then end the thread and wait for it."
            (aion/log:setup :env :dev :level :error :stream s)
            (dotimes (i 3)
              (let ((h (ports:call-with-port
-                       (lambda (p) (srv:start (%srv-ok-app) :port p :server :hunchentoot
-                                                              :log nil)))))
+                       (lambda (p) (%clack-path-start (%srv-ok-app) :port p :log nil)))))
                (srv:stop h)))
            (let ((out (get-output-stream-string s)))
              (is (not (search "failed after it started" out))
@@ -791,7 +814,9 @@ thread, then end the thread and wait for it."
   (is (every #'null (mapcar (lambda (b) (srv::%backend-args b nil)) '(:woo :uv :hunchentoot)))
       "without :workers no backend is given anything, which is today's behaviour"))
 
-(test workers-on-hunchentoot-warn-and-still-serve
+(test workers-on-a-clack-backend-hyperion-cannot-give-workers-warn-and-still-serve
+  "On the Clack path hyperion gives :WORKERS to Woo alone. Any other Clack backend serves, with
+a warning that names it. Until #373 this ran on Hunchentoot, whose warning is worded for it."
   (let* ((warned nil)
          (port nil)
          (h (handler-bind ((warning (lambda (c)
@@ -800,29 +825,28 @@ thread, then end the thread and wait for it."
                                       (muffle-warning c))))
               (ports:call-with-port
                (lambda (p)
-                 (prog1 (srv:start (%srv-ok-app) :port p :server :hunchentoot :log nil
+                 (prog1 (%clack-path-start (%srv-ok-app) :port p :log nil
                                                  :workers 4)
                    (setf port p)))))))
     (unwind-protect
          (progn
            (is (stringp warned) "the ignored :workers was said out loud")
-           (is (and warned (search "Hunchentoot" warned)) "and the warning names the backend")
+           (is (and warned (search ":UV" warned)) "and the warning names the backend: ~S" warned)
            (is (search "200" (%srv-http-get port "/")) "the server serves anyway"))
       (srv:stop h))))
 
 (test workers-must-be-a-positive-integer
   (dolist (bad '(0 -1 2.5 "4"))
-    (is (typep (nth-value 1 (ignore-errors (srv:start (%srv-ok-app) :port 1 :server :hunchentoot
-                                                      :check-port nil :workers bad)))
+    (is (typep (nth-value 1 (ignore-errors (%clack-path-start (%srv-ok-app) :port 1 :check-port nil :workers bad)))
                'type-error)
         "~S is refused before anything starts" bad)))
 
 ;;; --- a 429 keeps its status, Retry-After and body (#372) ---------------------------------
 
-(test a-429-arrives-as-429-on-hunchentoot
-  "#372 found Woo sending a 429 as an empty 500; hyperion/woo/tests covers Woo. Hunchentoot
-already knows the phrase, and this pins that a rate-limit refusal reaches the client whole on
-it: status line, Retry-After and body."
+(test a-429-arrives-as-429-on-the-clack-path
+  "#372 found Woo sending a 429 as an empty 500; hyperion/backends/tests checks that START
+completes Woo's table. This pins that a rate-limit refusal reaches the client whole through
+START's Clack path: status line, Retry-After and body. It ran on Hunchentoot until #373."
   (let* ((app (lambda (env)
                 (declare (ignore env))
                 (list 429 (list :content-type "text/plain; charset=utf-8" :retry-after "7")
@@ -830,7 +854,7 @@ it: status line, Retry-After and body."
          (port nil)
          (handler (ports:call-with-port
                    (lambda (p)
-                     (prog1 (srv:start app :port p :server :hunchentoot :log nil)
+                     (prog1 (%clack-path-start app :port p :log nil)
                        (setf port p))))))
     (unwind-protect
          (let* ((r (%srv-http-get port "/" :version "1.1"))

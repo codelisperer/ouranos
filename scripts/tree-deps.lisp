@@ -174,12 +174,13 @@ dependencies come from ASDF, which has already handled reader conditionals."
 Returns (values NAME GUARD), where GUARD is T for an unconditional dependency.
 
 The guard is returned rather than discarded because the two callers need opposite things
-from it, and collapsing them cost a red Windows CI leg. praxeon/web declares
+from it, and collapsing them cost a red Windows CI leg. praxeon/web declared
 
   (:feature (:not :windows) \"clack-handler-woo\")
   (:feature :windows \"clack-handler-hunchentoot\")
 
-because Woo binds libev, which does not build on Windows. A DRIFT REPORT wants both names
+because Woo binds libev, which does not build on Windows. (No tree system declares either
+handler since #373; the example shows why a guard is kept.) A DRIFT REPORT wants both names
 -- they are both part of this tree's dependency surface and both belong in
 docs/dependencies.md. An INSTALLER wants only the one this platform can actually load;
 asking Quicklisp for the other is asking for a system that cannot exist here."

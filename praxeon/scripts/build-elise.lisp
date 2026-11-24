@@ -7,7 +7,7 @@
 ;;;; praxeon/elise:main and needs no SBCL/Quicklisp to run -- only a provider
 ;;;; configured via the environment or a local .env. It defaults to an
 ;;;; interactive CLI session; `bin/elise --server [--port N]` runs the web app
-;;;; instead (praxeon/web is bundled in, Woo's libev FFI survives the dump).
+;;;; instead (praxeon/web is bundled in, served on hyperion/server-uv since #373).
 
 (load (merge-pathnames "quicklisp/setup.lisp" (user-homedir-pathname)))
 ;; Discovery comes from the ambient ASDF source-registry drop-in written by the
