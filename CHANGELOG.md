@@ -1939,7 +1939,10 @@ its tag.
   `POST /api/message` and `POST /api/cancel` remain on every surface, and grants work the same
   way, with the `Session` header or a stream ticket. `:surface :service` with `:embed-origins`
   is an error. `serve-forever` reads `--service` and `--server` from the command line unless
-  given `:surface`; `praxeon/web:surface-from-arguments` is the function it uses.
+  given `:surface`; `praxeon/web:surface-from-arguments` is the function it uses. An app that
+  passes neither flag keeps `:ui`. An app whose own command line already uses `--service` or
+  `--server` for something else should pass `:surface` to `serve-forever` explicitly, or the flag
+  changes what it serves.
 
 - **praxeon/web: an app can draw the chat's bubbles itself** (#1340, part of #67).
   `praxeon/web:make-app`, `start` and `serve-forever` take `:render-item`, a function of the

@@ -326,7 +326,8 @@ are served on every surface.
 `:surface :both` serves the page and the service together; `:ui`, the default, serves only the
 page. `:embed-origins` needs the page, so it is refused with `:service`. `serve-forever` reads
 the surface from the command line unless it is given one: `--service` selects `:service`,
-`--server` `:ui`, and both together `:both`.
+`--server` `:ui`, and both together `:both`; with neither, it is `:ui`. An app whose own command
+line already uses `--service` or `--server` for something else passes `:surface` explicitly.
 
 ### Talk to Elise in your language
 
