@@ -16,12 +16,16 @@ its tag.
 
 - **hyperion/appearance: a muted text token, which Bulma's grey text classes now use** (#1281).
   The token table has `:muted-text`, written as `--hy-muted-text`: `#5c6370` (light), `#9aa3b5`
-  (dark), `#454b59` (light, high contrast) and `#bfc5cf` (dark, high contrast). `appearance-css`
-  gives Bulma's `.has-text-grey`, `.has-text-grey-light`, `.has-text-grey-lighter`,
-  `.has-text-grey-dark` and `.has-text-grey-darker` that colour with `!important`, in both looks,
-  because Bulma's own fixed greys fail WCAG AA in one of the two themes. A page that serves
-  `appearance-css` shows its grey text in the new colour in every scheme, and the five shades of
-  grey become one. `appearance-contrast-failures` checks `:muted-text` at 4.5:1 against
+  (dark), `#454b59` (light, high contrast) and `#bfc5cf` (dark, high contrast). Bulma gives its
+  grey text classes fixed colours with `!important`, the same in both themes, and each fails WCAG
+  AA in at least one theme. `appearance-css` now gives a class the muted colour, with
+  `!important`, in both looks and at both contrasts, in the themes where Bulma's grey fails on
+  hyperion's surfaces, and leaves Bulma's grey elsewhere (`*muted-text-targets*`):
+  `.has-text-grey` in the light and dark themes; `.has-text-grey-dark` and
+  `.has-text-grey-darker` in the dark theme only; `.has-text-grey-light` and
+  `.has-text-grey-lighter` in the light theme only. The theme is matched whether it is set on
+  `<html>` (`data-theme`) or left to `prefers-color-scheme`. A page that serves `appearance-css`
+  shows that grey text in the new colour. `appearance-contrast-failures` checks `:muted-text` at 4.5:1 against
   `:surface`, `:surface-raised` and `:header` (`*muted-text-backgrounds*`), so an app's own table
   whose surfaces do not pass with hyperion's muted value gets new failures in its own contrast
   test; it gives `:muted-text` in that scheme's plist to `make-appearance-table`. The token must

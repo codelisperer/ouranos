@@ -368,6 +368,12 @@ same in every combination: spacing, the text roles and the fonts."
     (loop for (font family) on (appearance-table-fonts table) by #'cddr
           do (format out "  --hy-font-~(~A~): ~A;~%" font family))))
 
+(defun %theme-media (theme)
+  "The media query that matches THEME when the page leaves the theme to the system."
+  (ecase theme
+    (:dark "(prefers-color-scheme: dark)")
+    (:light "not all and (prefers-color-scheme: dark)")))
+
 (defun %rule (out table theme contrast look theme-explicit contrast-explicit)
   "One rule for one combination. A setting given on <html> is matched by attribute; a
 setting left to the system is matched by the attribute's absence inside a media query, so
@@ -386,9 +392,7 @@ the two kinds of rule never match the same page."
         (media
           (remove nil
                   (list (unless theme-explicit
-                          (if (eq theme :dark)
-                              "(prefers-color-scheme: dark)"
-                              "not all and (prefers-color-scheme: dark)"))
+                          (%theme-media theme))
                         (unless contrast-explicit
                           (if (eq contrast :high)
                               "(prefers-contrast: more)"
@@ -415,12 +419,16 @@ also get hover, press and focus rules, because the background given here replace
 changes on hover.")
 
 (defparameter *muted-text-targets*
-  '(".has-text-grey" ".has-text-grey-light" ".has-text-grey-lighter" ".has-text-grey-dark"
-    ".has-text-grey-darker")
-  "Bulma's grey text classes, which APPEARANCE-CSS colours with --hy-muted-text in both looks
-(#1281). Bulma gives each a fixed colour with !important, the same in light and dark, so each
-fails WCAG AA in one of the themes: the light greys on a light surface and the dark greys on a dark
-one. With the token they all draw in the scheme's muted text colour.")
+  '((".has-text-grey" :light :dark)
+    (".has-text-grey-dark" :dark)
+    (".has-text-grey-darker" :dark)
+    (".has-text-grey-light" :light)
+    (".has-text-grey-lighter" :light))
+  "Bulma's grey text classes, each with the themes in which APPEARANCE-CSS colours it with
+--hy-muted-text, in both looks and at both contrasts (#1281). Bulma gives each class a fixed grey
+with !important, the same in light and dark. A class is overridden in a theme only where Bulma's
+grey fails WCAG AA on hyperion's surfaces in that theme: .has-text-grey fails in both, the two
+darker greys in dark and the two lighter greys in light. Elsewhere Bulma's own shade stays.")
 
 (defparameter *gradient-buttons* '(:button-primary :button-danger)
   "The background tokens in *GRADIENT-TARGETS* that fill a button, which get hover, press and
@@ -464,13 +472,39 @@ value for its own buttons.")
              (format out "~A:focus-visible {~%  outline: 2px solid var(--hy-focus-ring);~%  outline-offset: 2px;~%}~%"
                      scope))))
 
+(defun %muted-text-rule (out selectors)
+  (format out "~{~A~^, ~} {~%  color: var(--hy-muted-text) !important;~%}~%" selectors))
+
+(defun %muted-text-targets (out)
+  "The rules that colour *MUTED-TEXT-TARGETS* with --hy-muted-text. A class overridden in every
+theme gets one rule. A class overridden in one theme gets a rule for that theme given on <html>,
+and one inside the theme's media query for a page that leaves the theme to the system. Bulma's
+rule is `.has-text-grey{color:...!important}'; the :root prefix makes each of these more
+specific, so it wins whichever stylesheet comes first."
+  (flet ((every-theme-p (themes) (subsetp *themes* themes)))
+    (let ((everywhere (loop for (class . themes) in *muted-text-targets*
+                            when (every-theme-p themes) collect class)))
+      (when everywhere
+        (%muted-text-rule out (mapcar (lambda (c) (format nil ":root ~A" c)) everywhere))))
+    (dolist (theme *themes*)
+      (let ((classes (loop for (class . themes) in *muted-text-targets*
+                           when (and (member theme themes) (not (every-theme-p themes)))
+                             collect class)))
+        (when classes
+          (%muted-text-rule out (mapcar (lambda (c) (format nil ":root[data-theme=\"~(~A~)\"] ~A" theme c))
+                                        classes))
+          (format out "@media ~A {~%" (%theme-media theme))
+          (%muted-text-rule out (mapcar (lambda (c) (format nil ":root:not([data-theme]) ~A" c))
+                                        classes))
+          (write-line "}" out))))))
+
 (defun appearance-css (&optional (table (make-appearance-table)))
   "CSS defining every --hy-* token for every combination of theme, contrast and look, from
 TABLE (hyperion's defaults when omitted). A bare :root rule gives the light, normal-contrast,
 flat values, for a browser that matches no other rule, and the tokens that do not change with
 the settings: the spacing steps (--hy-space-1 to 7), the text roles (--hy-text-caps, -meta,
 -dense, -body, -heading, -title and -prose) and the fonts (--hy-font-ui and --hy-font-prose).
-Bulma's grey text classes, *MUTED-TEXT-TARGETS*, take --hy-muted-text in both looks.
+Bulma's grey text classes take --hy-muted-text in the themes *MUTED-TEXT-TARGETS* names.
 
 Serve it after Bulma. Bulma's own sizes, --bulma-size-1 to 7, which HYPERION/ASSETS:THEME
 sets, stay as they are; the text roles are separate tokens beside them.
@@ -489,10 +523,7 @@ page without data-contrast it shows the bare :root rule's light, flat look."
             (dolist (contrast-explicit '(t nil))
               (%rule out table theme contrast look theme-explicit contrast-explicit))))))
     (%gradient-targets out)
-    ;; Bulma's rule is `.has-text-grey{color:...!important}'; the :root prefix makes this
-    ;; one more specific, so it wins whichever stylesheet comes first.
-    (format out "~{~A~^, ~} {~%  color: var(--hy-muted-text) !important;~%}~%"
-            (mapcar (lambda (c) (format nil ":root ~A" c)) *muted-text-targets*))))
+    (%muted-text-targets out)))
 
 ;;; --- contrast check ------------------------------------------------------------
 

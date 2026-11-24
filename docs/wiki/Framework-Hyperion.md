@@ -201,8 +201,10 @@ setting that follows the system, so that the CSS media queries can decide.
 **Colours.** Components are coloured with the `--hy-*` tokens:
 - `surface`, `surface-raised`, `header`, `button`, `button-primary` and `button-danger`,
   each with a `-text` token;
-- `muted-text`, for secondary text such as a subtitle or a count, which Bulma's grey text
-  classes (`.has-text-grey` and its lighter and darker shades) take in both looks (#1281);
+- `muted-text`, for secondary text such as a subtitle or a count. Bulma's grey text classes
+  take it in the themes where Bulma's own grey fails WCAG AA (#1281): `.has-text-grey` in both
+  themes, `.has-text-grey-dark` and `-darker` in dark, and `.has-text-grey-light` and `-lighter`
+  in light;
 - `--hy-space-1` to `--hy-space-7` for spacing.
 
 An app writes its values once, as a table with one plist per scheme (light, dark, and the

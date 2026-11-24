@@ -214,14 +214,65 @@ passes."
   (signals error (appr:make-appearance-table
                   :light '(:muted-text (:gradient "#5c6370" "#000000")))))
 
-(test bulma-s-grey-text-takes-the-muted-text-token-in-both-looks
-  "#1281. Bulma colours its grey text classes with a fixed grey and !important. The rule is not
-scoped to a look, and has !important and a more specific selector, so it wins over Bulma's."
-  (let ((css (appr:appearance-css)))
-    (is (search (format nil ":root .has-text-grey, :root .has-text-grey-light, :root .has-text-grey-lighter, :root .has-text-grey-dark, :root .has-text-grey-darker {~%  color: var(--hy-muted-text) !important;~%}")
-                css))
+(test bulma-s-grey-text-takes-the-muted-text-token-in-the-themes-where-it-fails
+  "#1281. Bulma colours its grey text classes with a fixed grey and !important. .has-text-grey
+takes the token everywhere, the two darker greys in the dark theme only and the two lighter greys
+in the light theme only, whether the theme is given on <html> or left to the system. The rules
+are not scoped to a look, and have !important and a more specific selector than Bulma's."
+  (let ((css (appr:appearance-css))
+        (rule (format nil " {~%  color: var(--hy-muted-text) !important;~%}")))
+    (flet ((has (selectors) (search (format nil "~{~A~^, ~}~A" selectors rule) css)))
+      (is (has '(":root .has-text-grey")))
+      (is (has '(":root[data-theme=\"dark\"] .has-text-grey-dark"
+                 ":root[data-theme=\"dark\"] .has-text-grey-darker")))
+      (is (has '(":root[data-theme=\"light\"] .has-text-grey-light"
+                 ":root[data-theme=\"light\"] .has-text-grey-lighter")))
+      (is (search (format nil "@media (prefers-color-scheme: dark) {~%:root:not([data-theme]) .has-text-grey-dark, :root:not([data-theme]) .has-text-grey-darker~A~%}" rule)
+                  css))
+      (is (search (format nil "@media not all and (prefers-color-scheme: dark) {~%:root:not([data-theme]) .has-text-grey-light, :root:not([data-theme]) .has-text-grey-lighter~A~%}" rule)
+                  css)))
+    (is (null (search "[data-theme=\"light\"] .has-text-grey-dark" css)))
+    (is (null (search "[data-theme=\"dark\"] .has-text-grey-light" css)))
+    (is (null (search ":root .has-text-grey-" css)) "no shade is overridden in every theme")
     (is (search "--hy-muted-text: #9aa3b5;" css) "the dark value is defined")
     (is (null (search "[data-look=\"gradient\"] .has-text-grey" css)))))
+
+(defparameter *bulma-greys*
+  '((".has-text-grey-darker" "#2e333d") (".has-text-grey-dark" "#404654")
+    (".has-text-grey" "#69748c") (".has-text-grey-light" "#abb1bf")
+    (".has-text-grey-lighter" "#d6d9e0"))
+  "Bulma 1.0.4's grey text classes and the fixed colour each one sets.")
+
+(defun %lowest-grey-ratio (colour values)
+  "COLOUR's lowest contrast against every sample of the surfaces the muted text is checked on."
+  (loop for background in appr::*muted-text-backgrounds*
+        minimize (loop for sample in (appr:background-samples (getf values background))
+                       minimize (appr:contrast-ratio colour sample))))
+
+(test each-bulma-grey-is-overridden-exactly-where-its-own-colour-fails
+  "#1281. For each of Bulma's grey classes and each theme, contrast and look, with hyperion's
+default table: where APPEARANCE-CSS overrides the class, Bulma's own grey fails AA on some surface
+of that theme; where it does not, Bulma's grey passes on every surface. With the override, every
+class passes everywhere."
+  (let ((table (appr:make-appearance-table)))
+    (loop for (class colour) in *bulma-greys*
+          for themes = (rest (assoc class appr::*muted-text-targets* :test #'string=))
+          do (dolist (theme appr:*themes*)
+               (let ((bulma-fails
+                       (loop for contrast in appr:*contrasts*
+                             thereis (loop for look in appr:*looks*
+                                           thereis (< (%lowest-grey-ratio
+                                                       colour (appr:token-values table theme contrast look))
+                                                      appr:*minimum-contrast*)))))
+                 (is (eq bulma-fails (and (member theme themes) t))
+                     "~A in ~A: Bulma's ~A fails: ~A, overridden: ~A"
+                     class theme colour bulma-fails (and (member theme themes) t))
+                 (dolist (contrast appr:*contrasts*)
+                   (dolist (look appr:*looks*)
+                     (let* ((values (appr:token-values table theme contrast look))
+                            (drawn (if (member theme themes) (getf values :muted-text) colour)))
+                       (is (>= (%lowest-grey-ratio drawn values) appr:*minimum-contrast*)
+                           "~A drawn ~A in ~A ~A ~A" class drawn theme contrast look)))))))))
 
 (test a-button-is-checked-on-hover-and-when-pressed-as-well-as-at-rest
   "White on #767676 passes at rest, at 4.54:1. The hover layer lightens the fill and pressing
