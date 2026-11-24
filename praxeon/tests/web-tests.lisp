@@ -256,11 +256,11 @@ rendering changed for the rest of the process."
   ;; the bug fully present. Measured: under the reverted fix this test failed `f.\', one of two.
   ;; So the non-dev case runs against a :pretty image and the dev case against a :compact one.
   (let ((out:*output-style* :pretty))
-    (web::%build-app nil "Guest" "Guest" #'identity nil nil nil nil nil nil nil nil nil nil nil nil :poll nil)
+    (web::%build-app nil "Guest" "Guest" #'identity nil nil nil nil nil nil nil nil nil nil nil nil :poll nil nil)
     (is (eq :pretty out:*output-style*)
         "a :pretty host survives a non-dev agent surface, which the defect would set :compact"))
   (let ((out:*output-style* :compact))
-    (web::%build-app nil "Guest" "Guest" #'identity nil nil t nil nil nil nil nil nil nil nil nil :poll nil)
+    (web::%build-app nil "Guest" "Guest" #'identity nil nil t nil nil nil nil nil nil nil nil nil :poll nil nil)
     (is (eq :compact out:*output-style*)
         "and a :compact host survives a :dev one, which the defect would set :pretty")))
 
@@ -344,13 +344,105 @@ used to add nothing for it, so the page showed no count at all."
 ;;; chat uses it, for both the user's bubble and the model's.
 
 (test a-javascript-link-in-a-chat-message-is-not-an-href
+  "The model's bubble is asked for links here, because since #1119 it renders none by default,
+and the https link beside the script URL is the check that links render at all."
   (dolist (html (let ((text "look [here](javascript:alert(1)) and [there](https://example.com)"))
                   (list (praxeon/chat-ui:user-bubble text)
-                        (praxeon/chat-ui:assistant-bubble "Model" text))))
+                        (praxeon/chat-ui:assistant-bubble "Model" text :images t :links t))))
     (is (null (search "href=\"javascript" html)) "a javascript: href reached the bubble: ~S" html)
     (is (null (search "javascript:" html)) "the script URL must not appear at all: ~S" html)
     (is (search "href=\"https://example.com\"" html)
         "the ordinary link beside it must still render, or the test proves nothing: ~S" html)))
+
+;;; --------------------------------------------------------------------------
+;;; A model's reply fetches no image and follows no link, unless the app trusts it (#1119)
+;;; --------------------------------------------------------------------------
+
+(defparameter +remote-text+
+  "see ![chart](https://elsewhere.example/c.png?d=secret) and [the docs](https://elsewhere.example/docs)"
+  "A reply with an image and a link to another host.")
+
+(defun %fetches-or-follows-p (html)
+  "Whether HTML has an IMG element or an HREF, the two things #1119's mode keeps out."
+  (or (search "<img" html) (search "href=" html)))
+
+(defun %articles (html class)
+  "The <article> elements of HTML whose class contains CLASS, as one string."
+  (with-output-to-string (s)
+    (loop with start = 0
+          for at = (search (format nil "<article class=\"message ~A\"" class) html :start2 start)
+          while at
+          do (let ((end (+ (search "</article>" html :start2 at) (length "</article>"))))
+               (write-string (subseq html at end) s)
+               (setf start end)))))
+
+(test a-model-s-reply-renders-no-image-and-no-link-by-default
+  (let ((html (praxeon/chat-ui:assistant-bubble "Model" +remote-text+)))
+    (is (not (%fetches-or-follows-p html)) "an image or a link reached the bubble: ~S" html)
+    (is (not (search "elsewhere.example" html)) "the remote URL reached the bubble: ~S" html)
+    (is (search "chart" html) "the image's alt text is missing: ~S" html)
+    (is (search "the docs" html) "the link's text is missing: ~S" html)))
+
+(test the-same-reply-renders-its-image-and-link-when-trusted
+  "Control for the test above: asked for them, the same bubble renders both, so the test above
+can see an image or a link when one is there. The user's bubble renders both by default, as it
+did before #1119."
+  (dolist (html (list (praxeon/chat-ui:assistant-bubble "Model" +remote-text+ :images t :links t)
+                      (praxeon/chat-ui:user-bubble +remote-text+)))
+    (is (search "<img src=\"https://elsewhere.example/c.png?d=secret\"" html) "~S" html)
+    (is (search "href=\"https://elsewhere.example/docs\"" html) "~S" html))
+  (is (not (%fetches-or-follows-p
+            (praxeon/chat-ui:user-bubble +remote-text+ :images nil :links :text)))
+      "the user's bubble takes the untrusted mode when asked"))
+
+(defun %page-with-history (&rest keys)
+  "GET / of an app whose agent's history is a user message and a reply, both +REMOTE-TEXT+.
+KEYS go to MAKE-APP."
+  (let ((agent (actor:make-agent :name "restored"
+                                 :history (list (llm:msg "user" +remote-text+)
+                                                (llm:msg "assistant" +remote-text+)))))
+    (nth-value 2 (%call (apply #'web:make-app :agent agent :agent-name "Restored" keys)
+                        :get "/"))))
+
+(test praxeon-web-renders-the-agent-s-replies-as-untrusted-text
+  "Through the app, as a page shows the transcript: the reply has no image and no link, and the
+user's own message, in the same page, has both."
+  (let* ((page (%page-with-history))
+         (reply (%articles page "px-assistant"))
+         (mine (%articles page "px-user")))
+    (is (search "chart" reply) "the reply is not on the page: ~S" page)
+    (is (not (%fetches-or-follows-p reply)) "the reply carries an image or a link: ~S" reply)
+    (is (%fetches-or-follows-p mine) "the user's message lost its image and link: ~S" mine)))
+
+(test praxeon-web-renders-images-and-links-in-replies-with-trusted-replies
+  "Control for the test above: the same page, made with :TRUSTED-REPLIES T."
+  (let ((reply (%articles (%page-with-history :trusted-replies t) "px-assistant")))
+    (is (search "<img" reply) "~S" reply)
+    (is (search "href=\"https://elsewhere.example/docs\"" reply) "~S" reply)))
+
+(test a-failed-turn-s-message-is-rendered-as-untrusted-text-too
+  "An error's text can carry what the failing call returned, so its bubble takes the same mode."
+  (let ((app (web:make-app :agent-name "Failing"
+                           :responder (lambda (agent message locale)
+                                        (declare (ignore agent message locale))
+                                        (error "see ![x](https://elsewhere.example/e.png)")))))
+    (%say app "hi")
+    (let ((reply (%articles (%poll app 0) "px-assistant")))
+      (is (search "error:" reply) "the error bubble is missing: ~S" reply)
+      (is (not (%fetches-or-follows-p reply)) "~S" reply))))
+
+(test start-and-serve-forever-pass-trusted-replies-through
+  "They build the app through %BUILD-APP, which takes the arguments by position."
+  (let* ((agent (actor:make-agent :name "restored"
+                                  :history (list (llm:msg "assistant" +remote-text+))))
+         (page (lambda (trusted)
+                 (%articles (nth-value 2 (%call (web::%build-app agent "R" "R" #'identity nil nil
+                                                                 nil nil nil nil nil nil nil nil
+                                                                 nil nil :poll nil trusted)
+                                                :get "/"))
+                            "px-assistant"))))
+    (is (not (%fetches-or-follows-p (funcall page nil))))
+    (is (%fetches-or-follows-p (funcall page t)))))
 
 ;;; --------------------------------------------------------------------------
 ;;; The composer posts to the route its host names (#1117)

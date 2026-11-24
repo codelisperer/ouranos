@@ -152,7 +152,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: sbcl-x86-64-linux
           path: incoming
@@ -273,7 +273,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           name: sbcl-arm64-darwin
           path: incoming
@@ -345,12 +345,12 @@ jobs:
         shell: bash
         run: |
           set -eu
-          brew install postgresql@17 >/dev/null
-          brew link --overwrite --force postgresql@17 || true
-          export PATH="$(brew --prefix postgresql@17)/bin:$PATH"
-          echo "$(brew --prefix postgresql@17)/bin" >> "$GITHUB_PATH"
+          brew install postgresql@18 >/dev/null
+          brew link --overwrite --force postgresql@18 || true
+          export PATH="$(brew --prefix postgresql@18)/bin:$PATH"
+          echo "$(brew --prefix postgresql@18)/bin" >> "$GITHUB_PATH"
           brew install pgvector >/dev/null
-          brew services start postgresql@17
+          brew services start postgresql@18
           for i in $(seq 1 60); do
             pg_isready -h 127.0.0.1 -p 5432 >/dev/null 2>&1 && break
             [ "$i" = 60 ] && { echo "postgres did not come up"; exit 1; }
@@ -364,6 +364,11 @@ jobs:
             echo "pgvector installed but this server cannot see it (pg_available_extensions returned $n)."
             exit 1
           fi
+          # As in verify.yml's macOS leg (#736): the major is 18, as on Linux, and the log shows
+          # which minor and which pgvector Homebrew supplied.
+          psql -h 127.0.0.1 -d postgres -tAc "select version()"
+          psql -h 127.0.0.1 -d postgres -tAc \
+            "select 'pgvector ' || default_version from pg_available_extensions where name = 'vector'"
           createdb -h 127.0.0.1 -O ouranos ouranos_test || true
           echo "MNEMOSYNE_TEST_PG_URL=postgres://ouranos:ouranos@127.0.0.1:5432/ouranos_test?sslmode=disable" >> "$GITHUB_ENV"
 
@@ -390,7 +395,7 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@v8
         with:
           path: incoming
           pattern: sbcl-*
