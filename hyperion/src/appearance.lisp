@@ -529,6 +529,23 @@ more specific, so it wins whichever stylesheet comes first. .has-text-link has a
   (format out "html:root {~%~{  ~A: var(--hy-link-text);~%~}}~%" *bulma-link-properties*)
   (format out ":root .has-text-link {~%  color: var(--hy-link-text) !important;~%}~%"))
 
+(defparameter *link-underline-exclusions*
+  '(".button" ".tag" ".delete" ".dropdown-item" ".navbar-item" ".navbar-link" ".pagination-link"
+    ".pagination-previous" ".pagination-next" ".panel-block" ".card-footer-item"
+    ".navbar a" ".tabs a" ".panel-tabs a" ".menu-list a")
+  "The Bulma components whose element is an a but which are not plain links: buttons, tags,
+navbar, dropdown, pagination, panel and card footer items, and the links inside tabs, panel tabs
+and menus. They show hover with their own background or border, so they are left out of the
+underline %LINK-UNDERLINE writes (#1363).")
+
+(defun %link-underline (out)
+  "The rule that underlines a plain link, breadcrumb links included, on hover and while pressed.
+Since #1362 a link keeps --hy-link-text in those states, and Bulma gives a plain link no other
+hover change, so without the underline nothing shows the state. The colour does not change, so
+the contrast check needs nothing new (#1363)."
+  (format out ":root a:is(:hover, :active):not(~{~A~^, ~}) {~%  text-decoration: underline;~%}~%"
+          *link-underline-exclusions*))
+
 (defun appearance-css (&optional (table (make-appearance-table)))
   "CSS defining every --hy-* token for every combination of theme, contrast and look, from
 TABLE (hyperion's defaults when omitted). A bare :root rule gives the light, normal-contrast,
@@ -536,7 +553,9 @@ flat values, for a browser that matches no other rule, and the tokens that do no
 the settings: the spacing steps (--hy-space-1 to 7), the text roles (--hy-text-caps, -meta,
 -dense, -body, -heading, -title and -prose) and the fonts (--hy-font-ui and --hy-font-prose).
 Bulma's grey text classes take --hy-muted-text in the themes *MUTED-TEXT-TARGETS* names, and
-Bulma's link colours (*BULMA-LINK-PROPERTIES* and .has-text-link) take --hy-link-text.
+Bulma's link colours (*BULMA-LINK-PROPERTIES* and .has-text-link) take --hy-link-text, and a
+plain link, breadcrumb links included, is underlined on hover and while pressed
+(*LINK-UNDERLINE-EXCLUSIONS* lists the components left out).
 
 Serve it after Bulma. Bulma's own sizes, --bulma-size-1 to 7, which HYPERION/ASSETS:THEME
 sets, stay as they are; the text roles are separate tokens beside them.
@@ -556,7 +575,8 @@ page without data-contrast it shows the bare :root rule's light, flat look."
               (%rule out table theme contrast look theme-explicit contrast-explicit))))))
     (%gradient-targets out)
     (%muted-text-targets out)
-    (%link-text-targets out)))
+    (%link-text-targets out)
+    (%link-underline out)))
 
 ;;; --- contrast check ------------------------------------------------------------
 

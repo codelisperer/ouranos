@@ -194,11 +194,14 @@ On macOS it does the same for a library the SBCL runtime links against that is n
 machine. Pass `--allow-missing-natives` to build without them on purpose: the build warns, goes on,
 and its summary line names what is missing.
 
-**Where the window opens (#485).** On Windows and macOS, hyperion-view opens the window centred
-in the work area of its monitor, shrunk to fit when the requested size is larger. On macOS the
-work area is the screen's visible frame, which leaves out the menu bar and the Dock, and the
-requested size includes the title bar. On Linux the window manager places the window. On
-Windows, `run-app
+**Where the window opens (#485).** hyperion-view opens the window centred in the work area of
+its monitor, shrunk to fit when the requested size is larger. On macOS the work area is the
+screen's visible frame, which leaves out the menu bar and the Dock, and the requested size
+includes the title bar. On Linux the work area is the one GDK reports for the monitor, which
+leaves out panels and docks. Under a Wayland session the window is shrunk to fit, but the
+compositor decides where it goes, because Wayland does not let an application position its own
+window. On X11, including an X11 app under XWayland, the window is centred as on the other two.
+On Windows, `run-app
 :placement-file PATH` also keeps the window's last position, size and maximised state in PATH,
 one line written by hyperion-view when a move or resize made by dragging ends, when the window
 is maximised or restored, and when it is closed. It opens the window there next time if that
@@ -213,7 +216,7 @@ on, hyperion-view does two more things. It converts the invisible borders, which
 the window as created, to that monitor's frame width before checking the fit. And it sets the
 rectangle a second time after Windows has rescaled the window, so the window keeps its saved
 size. Neither has been measured on two monitors, because CI has one. Put the file in the app's
-data directory. Linux accepts the option and ignores it for now.
+data directory.
 
 On macOS, `:placement-file PATH` keeps the same line, with the frame in Cocoa points and in
 macOS's global screen coordinates (left, bottom, right, top), and a zoomed window records the
@@ -229,6 +232,21 @@ window saved zoomed opens zoomed. Unlike Windows, macOS moves a saved frame into
 than opening the window centred when it does not fit; whether Windows should do the same is
 #926. `hyperion-view --restore-placement PATH X0 Y0 X1 Y1 ...` prints the frame a window would
 open at for a given list of visible frames, without opening a window.
+
+On Linux, `:placement-file PATH` keeps the same line, with the window's position and client
+size in GDK's logical pixels, y downwards, and a maximised window records the rectangle it had
+before it was maximised. hyperion-view rewrites the file when a move or resize has stopped for
+300 ms, when the window is maximised or unmaximised, and when it is closed, and not while it is
+minimised or full screen. When the window opens, the saved rectangle is moved into the monitor
+whose work area it overlaps most, as on macOS. A rectangle that overlaps no monitor, or a file
+that is not that line, opens the window centred. A window saved maximised opens maximised.
+Under Wayland, only the size and the maximised state are restored. The compositor chooses the
+position. The position saved under Wayland is whatever GTK reports there, which is not a
+place on the screen (under WSLg it was 26 23, the width of the window's shadow). `hyperion-view
+--report-placement WIDTH HEIGHT` names the backend it ran on (`x11` or `wayland`) and says
+whether the position was applied. The CI tests use Xvfb, which has no window manager, so they
+cannot check maximising. The maximise behaviour was checked by hand under WSLg, on both
+backends; the runs are on #485.
 
 **What the bundle holds, by platform (#98).** On Linux the app is one dumped executable,
 `<name>`. On macOS and Windows it is three files, because an operating system's code signature

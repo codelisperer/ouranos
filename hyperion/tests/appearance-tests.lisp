@@ -267,6 +267,25 @@ specific than each, so the token wins. .has-text-link has a fixed colour with !i
       (is (search (format nil "--hy-link-text: ~A;" value) css) "~A is defined" value))
     (is (null (search "[data-look=\"gradient\"] .has-text-link" css)))))
 
+(test a-plain-link-is-underlined-on-hover-and-while-pressed
+  "#1363. Since #1362 a link keeps --hy-link-text on hover and while pressed, so APPEARANCE-CSS
+underlines a plain link in those states, breadcrumb links included, and sets no colour there.
+Each component it leaves out names a class that Bulma 1.0.4, as vendored here, defines."
+  (let* ((css (appr:appearance-css))
+         (start (search ":root a:is(:hover, :active):not(" css))
+         (rule (and start (subseq css start (position #\} css :start start))))
+         (bulma (uiop:read-file-string
+                 (asdf:system-relative-pathname :hyperion "assets/vendor/bulma.min.css"))))
+    (is-true rule "the underline rule is missing")
+    (when rule
+      (is (search "text-decoration: underline;" rule))
+      (is (null (search "color" rule)) "the rule changes a colour: ~A" rule)
+      (is (null (search "breadcrumb" rule)) "breadcrumb links are left out: ~A" rule)
+      (is (search (format nil "~{~A~^, ~}" appr::*link-underline-exclusions*) rule)))
+    (dolist (selector appr::*link-underline-exclusions*)
+      (let ((class (subseq selector 0 (or (position #\Space selector) (length selector)))))
+        (is (search class bulma) "Bulma defines no ~A" class)))))
+
 (defparameter *bulma-greys*
   '((".has-text-grey-darker" "#2e333d") (".has-text-grey-dark" "#404654")
     (".has-text-grey" "#69748c") (".has-text-grey-light" "#abb1bf")

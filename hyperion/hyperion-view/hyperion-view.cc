@@ -39,6 +39,11 @@
 #include <objc/objc-runtime.h>
 #else
 #include <gtk/gtk.h>
+// Window placement on Linux goes through GTK 3, which WebKitGTK 4.x uses (#485). A GTK 4 build
+// places nothing, as before.
+#if GTK_MAJOR_VERSION < 4
+#define HV_GTK3_PLACEMENT 1
+#endif
 #endif
 
 // --- macOS main menu -------------------------------------------------------
@@ -291,8 +296,8 @@ static void set_window_icon(webview_t w, const char *path) {
 // It is printed here, before webview_create, because everything after that point needs a
 // window server. A --help that requires a display is not a --help.
 // Put the window in the work area of the monitor it opened on: centred, and shrunk to fit
-// when it is larger (window-placement.h, #485). Windows and macOS; on Linux the window
-// manager places it.
+// when it is larger (window-placement.h, #485). On Linux under Wayland the window is shrunk to
+// fit and the compositor decides where it goes.
 //
 // With REPORT, it also prints one line there: the work area, the DPI, what the frame adds, the
 // placement computed, and the window's rectangle as the system reports it after placing it --
@@ -300,6 +305,73 @@ static void set_window_icon(webview_t w, const char *path) {
 // macOS the rectangles are in points, measured upwards from the bottom of the main screen, so
 // each is printed as left, bottom, right, top. A step that fails is reported as
 // "placement-failed STEP" and nothing is moved.
+#if defined(HV_GTK3_PLACEMENT)
+// --- Linux: the GTK 3 calls window placement needs (#485) --------------------------------
+//
+// GDK measures in logical pixels, its "application pixels", so the arithmetic in
+// window-placement.h runs at a DPI of 96, as on macOS in points. Under X11 (XWayland included)
+// a client places its own window. Under Wayland it cannot: the compositor decides where a window
+// goes, gtk_window_move does nothing, and gtk_window_get_position does not report a place on the
+// screen (on WSLg it reported 26 23, the decoration's shadow margin). So under Wayland
+// the window is still shrunk to fit and keeps its saved size and maximised state, and its
+// position is the compositor's (the hub's ruling on #485, 2026-11-24).
+
+// Whether the window's display is a Wayland one, where the compositor places windows.
+static bool on_wayland(GtkWidget *widget) {
+  const char *type = G_OBJECT_TYPE_NAME(gtk_widget_get_display(widget));
+  return type != nullptr && std::strstr(type, "Wayland") != nullptr;
+}
+
+// The backend's name for --report-placement: "x11", "wayland", or GDK's own type name.
+static const char *backend_name(GtkWidget *widget) {
+  const char *type = G_OBJECT_TYPE_NAME(gtk_widget_get_display(widget));
+  if (type == nullptr) return "unknown";
+  if (std::strstr(type, "Wayland") != nullptr) return "wayland";
+  if (std::strstr(type, "X11") != nullptr) return "x11";
+  return type;
+}
+
+// Let GTK and the window manager act on what has been asked of the window, for up to MS
+// milliseconds: a move or resize is a request that is answered with events.
+static void settle(int ms) {
+  gint64 end = g_get_monotonic_time() + static_cast<gint64>(ms) * 1000;
+  while (g_get_monotonic_time() < end) {
+    while (gtk_events_pending()) gtk_main_iteration_do(FALSE);
+    g_usleep(10000);
+  }
+}
+
+// The monitor the window is on, or the primary one, or the first.
+static GdkMonitor *window_monitor(GtkWidget *widget) {
+  GdkDisplay *display = gtk_widget_get_display(widget);
+  gtk_widget_realize(widget);
+  GdkWindow *gw = gtk_widget_get_window(widget);
+  GdkMonitor *m = gw != nullptr ? gdk_display_get_monitor_at_window(display, gw) : nullptr;
+  if (m == nullptr) m = gdk_display_get_primary_monitor(display);
+  if (m == nullptr && gdk_display_get_n_monitors(display) > 0) m = gdk_display_get_monitor(display, 0);
+  return m;
+}
+
+// What the decorations add to a client area of CW x CH, from the frame extents once the window
+// manager has framed the window; 0 before that, and under a window manager that adds none.
+static void frame_size(GtkWidget *widget, int cw, int ch, long *fw, long *fh) {
+  *fw = 0;
+  *fh = 0;
+  GdkWindow *gw = gtk_widget_get_window(widget);
+  if (gw == nullptr || !gdk_window_is_visible(gw)) return;
+  GdkRectangle fe;
+  gdk_window_get_frame_extents(gw, &fe);
+  if (fe.width > cw) *fw = fe.width - cw;
+  if (fe.height > ch) *fh = fe.height - ch;
+}
+
+// The window's position and client size, as GTK reports them.
+static void window_rect(GtkWindow *win, int *x, int *y, int *cw, int *ch) {
+  gtk_window_get_position(win, x, y);
+  gtk_window_get_size(win, cw, ch);
+}
+#endif
+
 static bool place_window(webview_t w, int width, int height, std::FILE *report = nullptr) {
 #if defined(_WIN32)
   auto failed = [report](const char *step) {
@@ -392,6 +464,50 @@ static bool place_window(webview_t w, int width, int height, std::FILE *report =
                  left + std::lround(placed.size.width), bottom + std::lround(placed.size.height));
   }
   return true;
+#elif defined(HV_GTK3_PLACEMENT)
+  // webview_set_size has asked for a client area of WIDTH x HEIGHT; the window manager has
+  // probably not framed the window yet, so the frame is measured after the requests settle, and
+  // counts as 0 until there is one.
+  (void)width;
+  (void)height;
+  auto failed = [report](const char *step) {
+    if (report != nullptr) std::fprintf(report, "placement-failed %s\n", step);
+    return false;
+  };
+  GtkWidget *widget = static_cast<GtkWidget *>(webview_get_window(w));
+  if (widget == nullptr) return failed("webview_get_window");
+  GtkWindow *win = GTK_WINDOW(widget);
+  settle(100);
+  GdkMonitor *monitor = window_monitor(widget);
+  if (monitor == nullptr) return failed("gdk_monitor");
+  GdkRectangle work;
+  gdk_monitor_get_workarea(monitor, &work);
+  int cw = 0, ch = 0;
+  gtk_window_get_size(win, &cw, &ch);
+  long fw = 0, fh = 0;
+  frame_size(widget, cw, ch, &fw, &fh);
+  long work_left = work.x, work_top = work.y;
+  long work_right = static_cast<long>(work.x) + work.width;
+  long work_bottom = static_cast<long>(work.y) + work.height;
+  if (!placement_inputs_in_range(work_left, work_top, work_right, work_bottom, cw, ch, 96, fw, fh))
+    return failed("out-of-range");
+  window_placement p = place_in_work_area(work_left, work_top, work_right, work_bottom, cw, ch,
+                                          96, fw, fh);
+  bool positioned = !on_wayland(widget);
+  gtk_window_resize(win, static_cast<int>(p.width - fw), static_cast<int>(p.height - fh));
+  if (positioned) gtk_window_move(win, static_cast<int>(p.x), static_cast<int>(p.y));
+  if (report != nullptr) {
+    settle(300);
+    int x = 0, y = 0, ww = 0, wh = 0;
+    window_rect(win, &x, &y, &ww, &wh);
+    std::fprintf(report,
+                 "backend %s work %ld %ld %ld %ld dpi 96 frame %ld %ld placement %ld %ld %ld %ld "
+                 "window %d %d %d %d position %s\n",
+                 backend_name(widget), work_left, work_top, work_right, work_bottom, fw, fh, p.x,
+                 p.y, p.width, p.height, x, y, x + ww, y + wh,
+                 positioned ? "applied" : "compositor");
+  }
+  return true;
 #else
   (void)w;
   (void)width;
@@ -405,7 +521,8 @@ static bool place_window(webview_t w, int width, int height, std::FILE *report =
 //
 // --placement-file PATH puts the window back where it was last time, and keeps PATH up to date
 // while it is open. The line's format and the rule for when a saved rectangle is used are in
-// window-placement.h. Windows and macOS: on Linux the option is accepted and does nothing.
+// window-placement.h. On Linux under Wayland the saved size and maximised state are restored and
+// the saved position is not, because the compositor places windows there.
 //
 // The file is written when a move or resize made by dragging ends, when the window is
 // maximised or restored, and when it is closed, not only at the end: hyperion/desktop:run-app
@@ -473,7 +590,7 @@ static bool load_saved_placement(const char *path, saved_placement *out, const c
   return true;
 }
 
-#if defined(_WIN32) || defined(__APPLE__)
+#if defined(_WIN32) || defined(__APPLE__) || defined(HV_GTK3_PLACEMENT)
 static std::string g_placement_path_utf8;
 // A save that fails is reported on stderr once per run, so an app that asked for the placement
 // to be kept learns that it is not, without a line for every move (review of #521).
@@ -1005,6 +1122,237 @@ static int exercise_placement(webview_t w, const char *path) {
 }
 #endif
 
+#if defined(HV_GTK3_PLACEMENT)
+// --- the last placement on Linux (#485) ------------------------------------------------
+//
+// The saved line has the format in window-placement.h, with the window's position as
+// gtk_window_get_position reports it and its client size as gtk_window_get_size does, in GDK's
+// logical pixels, y downwards. Under Wayland the position is not a place on the screen and is not
+// used on restore.
+// A saved rectangle is put back with restore_into_screens, as on macOS: on the monitor whose work
+// area it overlaps most, shrunk and moved into it, because a Linux laptop changes displays the
+// way a Mac does.
+//
+// GTK reports a move or resize as a stream of configure-events with no event for the end of a
+// drag, so a move or resize is saved once its events have stopped for kSaveDelayMs. A change of
+// maximised state and a close are saved at once.
+
+static const guint kSaveDelayMs = 300;
+
+// The window's rectangle when it was last saved while not maximised: what is saved while it is
+// maximised, so that unmaximising after a restore goes back there.
+static long g_normal_left = 0, g_normal_top = 0, g_normal_width = 0, g_normal_height = 0;
+static bool g_have_normal = false;
+static guint g_save_timer = 0;
+
+static void set_placement_path(const char *path) { g_placement_path_utf8 = path; }
+
+// Whether the window is maximised, from GDK's window state. GtkWindow's own flag
+// (gtk_window_is_maximized) is updated by its window-state-event class handler, which runs after
+// a handler connected to that signal, and a configure-event that comes with a maximise arrives
+// before either; reading GDK's state gives the current answer in both (found on WSLg, #485).
+static bool maximized_now(GtkWidget *widget) {
+  GdkWindow *gw = gtk_widget_get_window(widget);
+  return gw != nullptr && (gdk_window_get_state(gw) & GDK_WINDOW_STATE_MAXIMIZED) != 0;
+}
+
+// A minimised or full-screen window's rectangle is not one the user arranged.
+static bool window_saveable(GtkWidget *widget) {
+  GdkWindow *gw = gtk_widget_get_window(widget);
+  if (gw == nullptr) return false;
+  GdkWindowState state = gdk_window_get_state(gw);
+  return (state & (GDK_WINDOW_STATE_ICONIFIED | GDK_WINDOW_STATE_FULLSCREEN)) == 0;
+}
+
+static void record_normal(GtkWindow *win) {
+  int x = 0, y = 0, cw = 0, ch = 0;
+  window_rect(win, &x, &y, &cw, &ch);
+  g_normal_left = x;
+  g_normal_top = y;
+  g_normal_width = cw;
+  g_normal_height = ch;
+  g_have_normal = true;
+}
+
+// Write where WIDGET's window is to the placement file. False when there is no file, the window
+// is minimised or full screen, or the write failed. The line goes to PATH.tmp, renamed over PATH.
+static bool save_placement(GtkWidget *widget) {
+  if (g_placement_path_utf8.empty() || !window_saveable(widget)) return false;
+  GtkWindow *win = GTK_WINDOW(widget);
+  bool maximized = maximized_now(widget);
+  if (!maximized || !g_have_normal) {
+    record_normal(win);
+    maximized = false;
+  }
+  saved_placement p = {g_normal_left, g_normal_top, g_normal_left + g_normal_width,
+                       g_normal_top + g_normal_height, maximized};
+  char line[128];
+  int n = format_saved_placement(p, line, sizeof line);
+  if (n <= 0 || n >= static_cast<int>(sizeof line)) return save_failed("format");
+  std::string tmp = g_placement_path_utf8 + ".tmp";
+  std::FILE *f = std::fopen(tmp.c_str(), "wb");
+  if (f == nullptr) return save_failed("opening the temporary file");
+  bool ok = std::fwrite(line, 1, static_cast<size_t>(n), f) == static_cast<size_t>(n);
+  ok = (std::fclose(f) == 0) && ok;
+  if (!ok) {
+    std::remove(tmp.c_str());
+    return save_failed("writing the temporary file");
+  }
+  if (std::rename(tmp.c_str(), g_placement_path_utf8.c_str()) != 0) {
+    std::remove(tmp.c_str());
+    return save_failed("replacing the file");
+  }
+  g_save_count++;
+  return true;
+}
+
+static gboolean on_save_timer(gpointer widget) {
+  g_save_timer = 0;
+  save_placement(static_cast<GtkWidget *>(widget));
+  return G_SOURCE_REMOVE;
+}
+
+// A move or resize: save when its events stop. A maximised window's rectangle is not saved this
+// way; the change of state is (on_window_state).
+static gboolean on_configure(GtkWidget *widget, GdkEvent *, gpointer) {
+  if (!maximized_now(widget)) {
+    if (g_save_timer != 0) g_source_remove(g_save_timer);
+    g_save_timer = g_timeout_add(kSaveDelayMs, on_save_timer, widget);
+  }
+  return FALSE;
+}
+
+static gboolean on_window_state(GtkWidget *widget, GdkEventWindowState *event, gpointer) {
+  if (event->changed_mask & GDK_WINDOW_STATE_MAXIMIZED) {
+    // A configure-event that came with the maximise may have started the timer; the state is
+    // what is saved now, and the rectangle the timer would record is the maximised one.
+    if ((event->new_window_state & GDK_WINDOW_STATE_MAXIMIZED) != 0 && g_save_timer != 0) {
+      g_source_remove(g_save_timer);
+      g_save_timer = 0;
+    }
+    save_placement(widget);
+  }
+  return FALSE;
+}
+
+static gboolean on_delete(GtkWidget *widget, GdkEvent *, gpointer) {
+  if (g_save_timer != 0) {
+    g_source_remove(g_save_timer);
+    g_save_timer = 0;
+  }
+  save_placement(widget);
+  return FALSE;
+}
+
+// Keep PATH up to date while the window of W is open.
+static void watch_placement(webview_t w, const char *path) {
+  GtkWidget *widget = static_cast<GtkWidget *>(webview_get_window(w));
+  if (widget == nullptr) return;
+  set_placement_path(path);
+  if (!g_have_normal && !maximized_now(widget)) record_normal(GTK_WINDOW(widget));
+  g_signal_connect(widget, "configure-event", G_CALLBACK(on_configure), nullptr);
+  // After GtkWindow's own handler, so GDK and GTK agree on the state when it is read.
+  g_signal_connect_after(widget, "window-state-event", G_CALLBACK(on_window_state), nullptr);
+  g_signal_connect(widget, "delete-event", G_CALLBACK(on_delete), nullptr);
+}
+
+// Put the window of W where the file at PATH says, clamped into the work area of the monitor that
+// rectangle overlaps most. False when it was not used, and the caller places the window instead.
+// With REPORT, one line: "restored L T R B MAXIMIZED window L T R B position applied|compositor",
+// or "restore-ignored REASON". MAXIMIZE false leaves a saved maximised window unmaximised.
+static bool restore_placement(webview_t w, const char *path, std::FILE *report, bool maximize) {
+  auto ignored = [report](const char *why) {
+    if (report != nullptr) std::fprintf(report, "restore-ignored %s\n", why);
+    return false;
+  };
+  GtkWidget *widget = static_cast<GtkWidget *>(webview_get_window(w));
+  if (widget == nullptr) return ignored("webview_get_window");
+  saved_placement p;
+  const char *reason = nullptr;
+  if (!load_saved_placement(path, &p, &reason)) return ignored(reason);
+  GdkDisplay *display = gtk_widget_get_display(widget);
+  std::vector<span_rect> areas;
+  int n = gdk_display_get_n_monitors(display);
+  for (int i = 0; i < n && areas.size() < static_cast<size_t>(kMaxScreens); i++) {
+    GdkRectangle r;
+    gdk_monitor_get_workarea(gdk_display_get_monitor(display, i), &r);
+    span_rect a = {r.x, r.y, static_cast<long>(r.x) + r.width, static_cast<long>(r.y) + r.height};
+    if (a.x0 < -kMaxCoordinate || a.y0 < -kMaxCoordinate || a.x1 > kMaxCoordinate ||
+        a.y1 > kMaxCoordinate)
+      continue;
+    areas.push_back(a);
+  }
+  clamped_placement c = restore_into_screens(p, areas.data(), static_cast<int>(areas.size()));
+  if (c.ignored != nullptr) return ignored(c.ignored);
+  GtkWindow *win = GTK_WINDOW(widget);
+  bool positioned = !on_wayland(widget);
+  gtk_window_resize(win, static_cast<int>(c.x1 - c.x0), static_cast<int>(c.y1 - c.y0));
+  if (positioned) gtk_window_move(win, static_cast<int>(c.x0), static_cast<int>(c.y0));
+  g_normal_left = c.x0;
+  g_normal_top = c.y0;
+  g_normal_width = c.x1 - c.x0;
+  g_normal_height = c.y1 - c.y0;
+  g_have_normal = true;
+  if (p.maximized && maximize) gtk_window_maximize(win);
+  if (report != nullptr) {
+    settle(300);
+    int x = 0, y = 0, cw = 0, ch = 0;
+    window_rect(win, &x, &y, &cw, &ch);
+    std::fprintf(report, "restored %ld %ld %ld %ld %d window %d %d %d %d position %s\n", c.x0,
+                 c.y0, c.x1, c.y1, p.maximized ? 1 : 0, x, y, x + cw, y + ch,
+                 positioned ? "applied" : "compositor");
+  }
+  return true;
+}
+
+// --exercise-placement on Linux: what a launch does with a placement file, then a move and a
+// resize, a maximise, an unmaximise and a close, printing the file after each. Without a window
+// manager, as under Xvfb, nothing answers a maximise; "zoomed 0" says so.
+static int exercise_placement(webview_t w, const char *path) {
+  GtkWidget *widget = static_cast<GtkWidget *>(webview_get_window(w));
+  if (widget == nullptr) {
+    std::printf("placement-failed webview_get_window\n");
+    return 1;
+  }
+  GtkWindow *win = GTK_WINDOW(widget);
+  std::printf("backend %s\n", backend_name(widget));
+  // With no usable saved placement, the first-open placement is printed too, so one run shows
+  // both halves of #485.
+  if (!restore_placement(w, path, stdout, true)) place_window(w, 800, 600, stdout);
+  watch_placement(w, path);
+  settle(400);
+  std::printf("start-zoomed %d\n", maximized_now(widget) ? 1 : 0);
+  if (maximized_now(widget)) {
+    std::fflush(stdout);
+    return 0;
+  }
+  int x = 0, y = 0, cw = 0, ch = 0;
+  window_rect(win, &x, &y, &cw, &ch);
+  settle(static_cast<int>(kSaveDelayMs) + 200);
+  int saves_before_move = g_save_count;
+  if (!on_wayland(widget)) gtk_window_move(win, x + 40, y + 30);
+  gtk_window_resize(win, cw - 20, ch - 10);
+  settle(static_cast<int>(kSaveDelayMs) + 500);
+  std::printf("move-saves %d\n", g_save_count - saves_before_move);
+  window_rect(win, &x, &y, &cw, &ch);
+  std::printf("moved %d %d %d %d\n", x, y, x + cw, y + ch);
+  print_placement_file("after-move");
+  gtk_window_maximize(win);
+  settle(800);
+  std::printf("zoomed %d\n", maximized_now(widget) ? 1 : 0);
+  print_placement_file("after-maximize");
+  gtk_window_unmaximize(win);
+  settle(800);
+  print_placement_file("after-restore");
+  // What a close does to the file; the window goes when the process ends. Destroying it here
+  // would run webview.h's handler, which calls gtk_main_quit outside a main loop.
+  on_delete(widget, nullptr, nullptr);
+  print_placement_file("after-close");
+  std::fflush(stdout);
+  return 0;
+}
+#endif
+
 // --- native file dialogs (#986) --------------------------------------------
 //
 // With --dialogs, the app's page gets window.hyperionDialog(request), which shows a native open,
@@ -1407,10 +1755,11 @@ static void print_usage(std::FILE *out) {
                "  HEIGHT   window height in pixels  (default 800)\n"
                "  --icon   path to a window icon    (optional, may appear anywhere)\n"
                "  --placement-file PATH\n"
-               "           Windows and macOS: open the window where it was last time, and keep\n"
-               "           PATH up to date (optional, may appear anywhere). Windows uses it only\n"
-               "           if it still fits a monitor; macOS moves it onto the screen it overlaps\n"
-               "           most\n"
+               "           open the window where it was last time, and keep PATH up to date\n"
+               "           (optional, may appear anywhere). Windows uses it only if it still\n"
+               "           fits a monitor; macOS and Linux move it onto the screen it overlaps\n"
+               "           most. Under Wayland the compositor chooses the position, and only the\n"
+               "           size and maximised state are restored\n"
                "  --dialogs\n"
                "           give the page at URL's origin window.hyperionDialog, which shows a\n"
                "           native open, save-as or folder dialog owned by this window (#986).\n"
@@ -1434,10 +1783,12 @@ static void print_usage(std::FILE *out) {
                "               CW x CH logical pixels, at DPI, with a frame adding FW x FH, is\n"
                "               put in the work area WL,WT-WR,WB; then exit (#485)\n"
                "  --report-placement WIDTH HEIGHT [PLACEMENT-FILE]\n"
-               "               Windows and macOS: create the window, size and place it as a\n"
-               "               launch does, print the work area, DPI, frame, placement and the\n"
-               "               window's rectangle, then exit without running it. On Windows,\n"
-               "               start it hidden; on macOS the window is shown. With\n"
+               "               create the window, size and place it as a launch does, print the\n"
+               "               work area, DPI, frame, placement and the window's rectangle, then\n"
+               "               exit without running it. On Windows, start it hidden; on macOS\n"
+               "               and Linux the window is shown. On Linux the line starts with the\n"
+               "               backend (x11 or wayland) and ends with \"position applied\" or\n"
+               "               \"position compositor\". With\n"
                "               PLACEMENT-FILE, restore from it first and save to it after.\n"
                "  --saved-placement PATH WL WT WR WB [BL BT BR BB [FROM TO]]\n"
                "               print \"use L T R B MAXIMIZED\" if the placement saved at PATH would\n"
@@ -1451,7 +1802,7 @@ static void print_usage(std::FILE *out) {
                "               placement saved at PATH, given the visible frames of up to 16\n"
                "               screens, each as left, bottom, right, top; else \"ignore REASON\"\n"
                "  --exercise-placement PATH\n"
-               "               Windows and macOS, for CI: open the window as a launch with\n"
+               "               for CI: open the window as a launch with\n"
                "               --placement-file PATH does, then move, maximise, restore and\n"
                "               close it (on Windows, minimise it first), printing the file after\n"
                "               each step\n"
@@ -1558,15 +1909,17 @@ int main(int argc, char **argv) {
       webview_set_size(rv, rw, rh, WEBVIEW_HINT_NONE);
       const char *file = argc == 5 ? argv[4] : nullptr;
       bool ok = true;
-#if defined(_WIN32) || defined(__APPLE__)
+#if defined(_WIN32) || defined(__APPLE__) || defined(HV_GTK3_PLACEMENT)
       if (file == nullptr || !restore_placement(rv, file, stdout, false))
         ok = place_window(rv, rw, rh, stdout);
       if (ok && file != nullptr) {
         set_placement_path(file);
 #if defined(_WIN32)
         bool saved = save_placement(static_cast<HWND>(webview_get_window(rv)));
-#else
+#elif defined(__APPLE__)
         bool saved = save_placement(static_cast<id>(webview_get_window(rv)));
+#else
+        bool saved = save_placement(static_cast<GtkWidget *>(webview_get_window(rv)));
 #endif
         std::printf(saved ? "saved\n" : "save-failed\n");
         ok = saved;
@@ -1585,7 +1938,7 @@ int main(int argc, char **argv) {
         print_usage(stderr);
         return 2;
       }
-#if defined(_WIN32) || defined(__APPLE__)
+#if defined(_WIN32) || defined(__APPLE__) || defined(HV_GTK3_PLACEMENT)
       if (window_forbidden()) return 3;
       webview_t ev = webview_create(0, nullptr);
       if (ev == nullptr) {
@@ -1793,7 +2146,7 @@ int main(int argc, char **argv) {
   webview_t w = webview_create(0, nullptr);
   webview_set_title(w, title);
   webview_set_size(w, width, height, WEBVIEW_HINT_NONE);
-#if defined(_WIN32) || defined(__APPLE__)
+#if defined(_WIN32) || defined(__APPLE__) || defined(HV_GTK3_PLACEMENT)
   if (placement_file == nullptr || !restore_placement(w, placement_file, nullptr, true))
     place_window(w, width, height);
   if (placement_file != nullptr) watch_placement(w, placement_file);

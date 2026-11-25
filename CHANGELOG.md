@@ -14,6 +14,19 @@ its tag.
 
 ### An app may have to act
 
+- **hyperion/desktop: `run-app` places the window and honours `:placement-file` on Linux**
+  (#485). Before, Linux left the window where the window manager put it and ignored
+  `:placement-file`. hyperion-view now opens the window centred in its monitor's work area,
+  shrunk to fit when it is larger, and `:placement-file PATH` keeps the window's position, size
+  and maximised state in PATH and restores them the next time, moved into the monitor the saved
+  rectangle overlaps most, as on macOS. A window that was maximised reopens maximised, and
+  unmaximising it goes back to the size it had before. Under a Wayland session the window is
+  shrunk to fit and keeps its saved size and maximised state, but the compositor decides where it
+  opens, because Wayland does not let an application position its window; X11 and XWayland get
+  the position too. `hyperion-view --report-placement` and `--exercise-placement` now work on
+  Linux, and the report names the backend (`x11` or `wayland`). Rebuild `hyperion-view` to get
+  this. A GTK 4 build of the launcher still places nothing.
+
 - **praxeon/chat-ui: the composer clears the message only after its post succeeds** (#1335).
   `praxeon/chat-ui:composer` no longer resets the form on submit; it resets on
   `htmx:afterRequest` when the request succeeded and came from the form itself. A message the host
@@ -47,6 +60,16 @@ its tag.
   surfaces do not pass with hyperion's link value gets new failures in its own contrast test; it
   gives `:link-text` in that scheme's plist to `make-appearance-table`. The token must be a colour,
   not a gradient.
+- **hyperion/appearance: a plain link is underlined on hover and while pressed** (#1363).
+  `appearance-css` adds `:root a:is(:hover, :active):not(...) { text-decoration: underline; }`.
+  Since #1281 a link keeps `--hy-link-text` in those states, and Bulma gives a plain link no
+  other hover change, so the underline is what shows them. It covers breadcrumb links and
+  `.has-text-link`. It leaves out the Bulma components whose element is an `a` but which show
+  hover their own way: `.button`, `.tag`, `.delete`, `.dropdown-item`, `.navbar-item`,
+  `.navbar-link`, the pagination links, `.panel-block`, `.card-footer-item`, and links inside
+  `.navbar`, `.tabs`, `.panel-tabs` and `.menu-list` (`*link-underline-exclusions*`). No colour
+  changes, so contrast is unaffected. An app that styles its own link-like `a` elements with
+  another class and does not want the underline sets `text-decoration: none` on them.
 - **hyperion/appearance: a muted text token, which Bulma's grey text classes now use** (#1281).
   The token table has `:muted-text`, written as `--hy-muted-text`: `#5c6370` (light), `#9aa3b5`
   (dark), `#454b59` (light, high contrast) and `#bfc5cf` (dark, high contrast). Bulma gives its
@@ -1971,6 +1994,23 @@ its tag.
 
 ### Added
 
+- **`aion/sexp:read-data` can read keywords from outside without creating new ones, or with a
+  limit on how many it creates** (#1166). With `:intern-keywords t`, every keyword in the input
+  was interned before the caller could look at it, and an interned keyword is never freed, so a
+  server reading user input could grow its memory without bound. `:intern-keywords :existing`
+  reads a keyword that already exists as the keyword, and a new one as an
+  `aion/sexp:unknown-keyword`, whose `unknown-keyword-name` is the name upper-cased (`:foo` reads
+  as one named `"FOO"`). It interns nothing, and it is neither a string nor a symbol, so the
+  caller can tell it from the string `"FOO"` and decides what to accept. `write-data` refuses it
+  as `:unwritable`.
+  Under `:intern-keywords t`, the new `:max-new-keywords` argument (default
+  `aion/sexp:*max-new-keywords*`, `nil`, meaning no limit) is the most keywords one call
+  creates: the next new keyword is refused with `unsafe-data` reason `:too-many-new-keywords`
+  before it is interned. `:intern-keywords` now accepts only `nil`, `t` and `:existing`, where
+  any true value used to mean `t`. A keyword argument `read-data` or `write-data` does not accept
+  (`:intern-keywords`, `:max-new-keywords`, `:comments`, `:symbols`) now signals the new
+  `aion/sexp:argument-error`, with `argument-error-argument` and `argument-error-value`, instead
+  of a plain `simple-error`.
 - **praxeon/web: the chat can run as a JSON service with no page** (#1338, part of #67).
   `praxeon/web:make-app`, `start` and `serve-forever` take `:surface`: `:ui` (the default, the
   page as before), `:service` or `:both`. Under `:service` and `:both` the app serves
