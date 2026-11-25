@@ -30,6 +30,9 @@
 
 (cl:in-package #:hyperion/examples/active-search)
 
+(defparameter *appearance-css* (hyperion/appearance:appearance-css)
+  "hyperion/appearance's default tokens as CSS, written into the page's head.")
+
 ;;; --- data (in-memory) ------------------------------------------------------
 (defstruct (contact (:constructor contact (name email role)))
   name email role)
@@ -100,6 +103,10 @@ the /search fragment, so the page and the partial share one renderer."
       ;; examples are the argument for "no Node, no bundler, no asset pipeline", so
       ;; they should not be pulling their JavaScript off npm to make it.
       (:link :rel "stylesheet" :href (assets:url :bulma))
+      ;; hyperion/appearance's tokens, after Bulma. They give the grey subtitle and the
+      ;; empty-result row (.has-text-grey) a colour that passes WCAG AA in the dark scheme as
+      ;; well as the light one, which Bulma's fixed grey does not (#1281).
+      (:style (:raw *appearance-css*))
       (:script :src (assets:url :htmx) :defer t)
       (:script :src (assets:url :alpine) :defer t))
      (:body
