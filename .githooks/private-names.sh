@@ -60,8 +60,9 @@ pn_advice() {
 MSG
 }
 
-# Set PN_FILE, PN_PATTERN and PN_COUNT, the number of entries. Returns 0 with PN_PATTERN empty when no list applies here, and
-# returns 1, after saying why, when a list was configured or found but cannot be used.
+# Set PN_FILE, PN_PATTERN and PN_COUNT, the number of entries. Returns 0 with PN_PATTERN empty
+# when no list applies here, and returns 1, after saying why, when a list was configured or
+# found but cannot be used.
 pn_load() {
   PN_PATTERN=
   PN_COUNT=0

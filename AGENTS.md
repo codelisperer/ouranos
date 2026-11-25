@@ -115,10 +115,10 @@ define it.
   `git config --global ouranos.privateNames <path>`: that covers every clone and worktree on
   the machine, and a missing or empty list then refuses commits instead of skipping the
   check. The list must end with a newline; one whose last line has none is refused, because
-`wc -l` does not count that line (#1328). A refusal gives locations and the number of entries in
-the list, never the matching text, so it is safe to quote. The
-  hooks cannot see pull-request text, issues or comments; the rule above is the only guard
-  there. Details: `.githooks/private-names.sh`.
+  `wc -l` does not count that line (#1328). A refusal gives locations and the number of entries
+  in the list, never the matching text, so it is safe to quote. The hooks cannot see
+  pull-request text, issues or comments; the rule above is the only guard there. Details:
+  `.githooks/private-names.sh`.
 - **Post issue and PR text from a file, because backticks inside a double-quoted shell body are
   command substitution.** `--body "… \`foo\` …"` runs every inline code span as a command and
   substitutes empty, which deletes the span, leaves grammatical prose behind and exits 0. Safe:
