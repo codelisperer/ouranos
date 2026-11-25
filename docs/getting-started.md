@@ -25,6 +25,17 @@ this by hand:
 ./scripts/setup.sh --check  # report what is missing, change nothing
 ```
 
+**When SBCL cannot be downloaded.** setup downloads SBCL's Linux binary from SourceForge, which
+refuses SBCL downloads in some locations (#1216). Two options avoid the download:
+
+```sh
+./scripts/setup.sh --sbcl-tarball=sbcl-2.6.10-x86-64-linux-binary.tar.bz2   # a tarball you have
+./scripts/setup.sh --use-installed-sbcl     # the SBCL already installed, if it is the pinned version
+```
+
+The tarball must have the SHA-256 pinned in `scripts/versions.env`, or setup stops before unpacking
+it. With `--use-installed-sbcl`, setup stops unless `sbcl --version` is exactly `SBCL_VERSION`.
+
 **What the machine needs before that script can run.** These are ordinary tools the script
 downloads *with*, so it cannot install them for you — it names all of them in one go and
 refuses until they are there:

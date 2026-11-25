@@ -180,6 +180,49 @@
  :upstream (:manual "https://docs.voyageai.com/docs/embeddings")
  :reviewed "2026-10-17")
 
+;; APIs with no version a client can pin (#716, ruling of 2026-11-24). Each provider was checked
+;; on 2026-11-24 for a version header, a query parameter, a dated version or a versioning policy.
+;; With none to pin, each entry reads the endpoint constant. The gate then fails if that constant
+;; is renamed or removed, and, for an endpoint written in several places, if the copies disagree;
+;; a changed URL in a single place is read as the new value. The reviewed date is the only record
+;; that someone has read the provider's changes.
+;;
+;; Tavily: no version in the paths, no version header, no versioning policy. Its changelog records
+;; behaviour changes in place, such as "Basic search now returns chunks" (July 2026).
+(:name "Tavily Search API" :category :api
+ :where ((:text "praxeon/src/web-search.lisp" "(defparameter *endpoint* \"" "\""))
+ :upstream (:manual "https://docs.tavily.com/changelog")
+ :reviewed "2026-11-24")
+
+(:name "Tavily Extract API" :category :api
+ :where ((:text "praxeon/src/web-page.lisp" "(defparameter *tavily-extract-endpoint* \"" "\""))
+ :upstream (:manual "https://docs.tavily.com/changelog")
+ :reviewed "2026-11-24")
+
+;; Voyage: /v1 in the base URL, which the docs never describe as a version a client chooses, and
+;; no API changelog. The Deprecations page is where its changes are announced, as model lifecycles.
+(:name "Voyage API" :category :api
+ :where ((:text "praxeon/src/embedding.lisp" "(defparameter *voyage-base-url* \"" "\""))
+ :upstream (:manual "https://docs.voyageai.com/docs/choose-a-model")
+ :reviewed "2026-11-24")
+
+;; OpenRouter: "a single stable version, v1, selected by the URL path"; "no version headers and no
+;; date-based version pinning" (https://openrouter.ai/docs/api_reference/versioning). Breaking
+;; changes appear in its changelog under a Breaking tag. The base URL is written in three places.
+(:name "OpenRouter API" :category :api
+ :where ((:text "praxeon/src/llm.lisp" "(\"openrouter\" . \"" "\"")
+         (:text "praxeon/src/llm.lisp" "(make-openai-from-env \"openrouter\" \"" "\"")
+         (:text "praxeon/src/embedding.lisp" "\"openrouter\" \"" "\""))
+ :upstream (:manual "https://openrouter.ai/docs/changelog")
+ :reviewed "2026-11-24")
+
+;; Meta's Model API, OpenAI-compatible at /v1: no version header, no dated version, and no API
+;; changelog or deprecation policy in its docs. The API reference is the page to reread.
+(:name "Meta Model API" :category :api
+ :where ((:text "praxeon/src/llm.lisp" "(make-openai-from-env \"meta\" \"" "\""))
+ :upstream (:manual "https://dev.meta.ai/docs/api-reference")
+ :reviewed "2026-11-24")
+
 (:name "OpenAI-compatible default embedding model" :category :api
  :where ((:text "praxeon/src/embedding.lisp" "(%getenv \"PRAXEON_EMBED_MODEL\") \"" "\""))
  :upstream (:manual "https://developers.openai.com/api/docs/models")
