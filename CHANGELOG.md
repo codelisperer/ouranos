@@ -32,7 +32,6 @@ its tag.
   images and links by default. A Content-Security-Policy for `hyperion/desktop` webviews is not
   part of this change.
 
-
 - **hyperion/appearance: a link text token, which Bulma's links now use** (#1281). The token
   table has `:link-text`, written as `--hy-link-text`: `#2942ff` (light, Bulma's own light link
   colour), `#8f9cff` (dark), `#0015b8` (light, high contrast) and `#a8b2ff` (dark, high contrast).
