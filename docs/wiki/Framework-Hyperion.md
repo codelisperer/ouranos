@@ -206,7 +206,10 @@ setting that follows the system, so that the CSS media queries can decide.
   themes, `.has-text-grey-dark` and `-darker` in dark, and `.has-text-grey-light` and `-lighter`
   in light;
 - `link-text`, for links. Bulma's `--bulma-link-text`, its hover and pressed forms, and
-  `.has-text-link` take it in every scheme (#1281);
+  `.has-text-link` take it in every scheme (#1281). Because a link keeps that colour on hover
+  and while pressed, a plain link, breadcrumb links included, is underlined in those states;
+  buttons, tags, tabs, menus and navbar, dropdown, pagination, panel and card footer items are
+  left out (`*link-underline-exclusions*`, #1363);
 - `--hy-space-1` to `--hy-space-7` for spacing.
 
 An app writes its values once, as a table with one plist per scheme (light, dark, and the
