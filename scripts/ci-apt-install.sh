@@ -6,7 +6,9 @@
 # Installs what the Linux jobs in .github/workflows/verify.yml need from apt:
 #   - the webview launcher's build tools: g++, pkg-config and the WebKitGTK development package,
 #     4.1 when the mirror has it and 4.0 otherwise, as hyperion/hyperion-view/build.sh probes;
-#   - what scripts/with-secret-service.sh runs: dbus, gnome-keyring and libsecret-1-0 (#357).
+#   - what scripts/with-secret-service.sh runs: dbus, gnome-keyring and libsecret-1-0 (#357);
+#   - xvfb, so the gate runs under xvfb-run and the Linux real-window tests of hyperion-view have a
+#     display (#485). Without one they skip.
 #
 # WHY IT EXISTS. apt-get stalled on the Ubuntu mirror three times in about 26 hours (#507), each
 # time until the job's own limit cancelled it, which reads like a code failure until someone opens
@@ -109,7 +111,7 @@ else
 fi
 
 launcher=(g++ pkg-config "$webkit")
-keyring=(dbus gnome-keyring libsecret-1-0)
+keyring=(dbus gnome-keyring libsecret-1-0 xvfb)
 
 archives=/var/cache/apt/archives
 cache=${CI_APT_ARCHIVE_CACHE:-}
@@ -135,6 +137,6 @@ fi
 sudo apt-get "${apt_opts[@]}" install -y --no-download "${launcher[@]}"
 sudo apt-get "${apt_opts[@]}" install -y --no-download --no-install-recommends "${keyring[@]}"
 
-command -v dbus-run-session gnome-keyring-daemon g++ pkg-config >/dev/null
+command -v dbus-run-session gnome-keyring-daemon xvfb-run g++ pkg-config >/dev/null
 
-echo "::notice::apt packages ($webkit, keyring): $(( $(date +%s) - start ))s, $(megabytes "$(( needed - cached ))") MB downloaded, $(megabytes "$cached") MB from the cache"
+echo "::notice::apt packages ($webkit, keyring, xvfb): $(( $(date +%s) - start ))s, $(megabytes "$(( needed - cached ))") MB downloaded, $(megabytes "$cached") MB from the cache"

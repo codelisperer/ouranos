@@ -250,12 +250,11 @@ code when it did not exit 0."
 
 (test exercise-placement-takes-one-path
   ;; Refused before webview_create, so no window is made on any OS. With one path it would make
-  ;; a window, so under HYPERION_VIEW_NO_WINDOW=1 it exits 3 on Windows and macOS; on Linux the
-  ;; mode is not supported and exits 1 before making one.
+  ;; a window, so under HYPERION_VIEW_NO_WINDOW=1 it exits 3, on Linux too since #485.
   (with-launcher
     (is (eql 2 (run-launcher "--exercise-placement")) "no path")
     (is (eql 2 (run-launcher "--exercise-placement" "a" "b")) "two paths")
-    (is (eql #+(or win32 darwin) 3 #-(or win32 darwin) 1 (run-launcher "--exercise-placement" "a"))
+    (is (eql 3 (run-launcher "--exercise-placement" "a"))
         "one path: no window here")))
 
 ;;; --- the placement on a real window, on CI only (review of train 20) ----------------------
@@ -1002,6 +1001,206 @@ the file as it was. A start from a file that says ZOOMED 1 opens zoomed."
                        (is (equal "start-zoomed 1" (%report-line out "start-zoomed"))
                            "and a file saying ZOOMED 1 opened zoomed: ~S" out)))))
             (aion/fs:delete-tree dir))))))
+
+;;; --- the placement on a real Linux window (#485) ----------------------------------------
+;;;
+;;; GTK 3. Under X11 the window is moved and sized; under Wayland only sized, because the
+;;; compositor places windows there. These run on GitHub Actions only (#885), and only where a
+;;; display exists: the Linux leg has one when the gate runs under Xvfb. Xvfb has no window
+;;; manager, so the window has no frame, a move lands exactly, and nothing answers a maximise.
+;;; The maximise checks therefore run only when a maximise took effect; the WSLg runs on #485 are
+;;; the evidence for them under a window manager.
+
+(defun %linux-window-skip-reason ()
+  "NIL when a Linux test may show a real window here, or the reason it may not."
+  (cond ((not (%real-window-allowed-p))
+         "Runs only on GitHub Actions (GITHUB_ACTIONS is not set here): it shows a window")
+        ((not (or (uiop:getenvp "DISPLAY") (uiop:getenvp "WAYLAND_DISPLAY")))
+         "No display here: neither DISPLAY nor WAYLAND_DISPLAY is set (the Linux leg needs Xvfb, #485)")))
+
+(defun %linux-report (width height &rest file)
+  "`hyperion-view --report-placement WIDTH HEIGHT [FILE]' on a shown window: (values CODE OUTPUT)."
+  (apply #'%run-shown-launcher 60 "--report-placement" (princ-to-string width)
+         (princ-to-string height) (mapcar #'uiop:native-namestring file)))
+
+(defun %linux-placement-numbers (out)
+  "The 15 integers of the `backend ...' line: work area (4), DPI, frame (2), placement (4) and
+window (4); or NIL."
+  (let* ((line (%report-line out "backend "))
+         (n (and line (%report-numbers line))))
+    (and (eql 15 (length n)) n)))
+
+(test the-window-is-placed-in-the-work-area-on-a-real-linux-window
+  "On a GitHub Linux runner with a display, a real window is placed where --placement says,
+inside the monitor's work area, and a window taller than the work area is cut to its height.
+The report names the backend."
+  #-linux (skip "The GTK placement calls run on Linux only")
+  #+linux
+  (with-launcher
+    (let ((why (%linux-window-skip-reason)))
+      (if why
+          (skip why)
+          (dolist (height '(860 5000))
+            (multiple-value-bind (code out) (%linux-report 1280 height)
+              (is (eql 0 code) "--report-placement 1280 ~D exited ~S: ~A" height code out)
+              (let ((n (%linux-placement-numbers out))
+                    (applied (search "position applied" out)))
+                (is-true n "it printed a report: ~S" out)
+                (is (or applied (search "backend wayland" out))
+                    "the position is applied everywhere but Wayland: ~S" out)
+                (when n
+                  (destructuring-bind (wl wt wr wb dpi fw fh x y w h l tp r b) n
+                    (is (equal (list x y w h)
+                               (%placement wl wt wr wb 1280 height dpi fw fh))
+                        "the real calls computed what --placement computes: ~S" out)
+                    (is (equal (list (- r l) (- b tp)) (list (- w fw) (- h fh)))
+                        "GTK reports the client size the placement asked for: ~S" out)
+                    (when applied
+                      (is (equal (list l tp) (list x y))
+                          "and the window where the placement put it: ~S" out)
+                      (is (and (<= wl l) (<= wt tp) (<= r wr) (<= b wb))
+                          "inside the work area: ~S" out))
+                    (when (eql height 5000)
+                      (is (eql h (- wb wt)) "a 5000-pixel window is cut to the work area: ~S"
+                          out)))))))))))
+
+(defun %linux-work-area ()
+  (multiple-value-bind (code out) (%linux-report 1280 860)
+    (let ((n (and (eql code 0) (%linux-placement-numbers out))))
+      (and n (subseq n 0 4)))))
+
+(test a-real-linux-window-is-restored-into-the-work-area-and-saves-it
+  "On a GitHub Linux runner with a display: a saved rectangle inside the work area is restored as
+it is; one partly off the monitor is moved into it, where --restore-placement says; each is saved
+back; and a rectangle on no monitor is ignored, and the window is placed and saved as without a
+file. Under X11 only: under Wayland the saved position is not used."
+  #-linux (skip "The GTK placement calls run on Linux only")
+  #+linux
+  (with-launcher
+    (let ((why (%linux-window-skip-reason)))
+      (if why
+          (skip why)
+          (let ((dir (%fresh-dir))
+                (work (%linux-work-area)))
+            (unwind-protect
+                 (progn
+                   (is-true work "the work area was reported")
+                   (when work
+                     (destructuring-bind (wl wt wr wb) work
+                       (declare (ignore wb))
+                       (let ((file (merge-pathnames "window-placement" dir)))
+                         (flet ((restored (rect expected)
+                                  (%write-placement dir "window-placement" (%placement-line rect 0))
+                                  (multiple-value-bind (code out) (%linux-report 1280 860 file)
+                                    (is (eql 0 code) "--report-placement with a file exited ~S: ~A"
+                                        code out)
+                                    (let ((line (%report-line out "restored ")))
+                                      (is-true line "the saved rectangle was restored: ~S" out)
+                                      (when line
+                                        (is (search "position applied" line)
+                                            "under X11: ~S" line)
+                                        (is (equal (append expected (list 0) expected)
+                                                   (%report-numbers line))
+                                            "at ~S, and GTK reports the window there: ~S"
+                                            expected line)))
+                                    (is-true (%report-line out "saved") "and it was saved: ~S" out))
+                                  (is (equal (%placement-line expected 0)
+                                             (uiop:read-file-string file))
+                                      "the file holds the restored rectangle")))
+                           (let ((inside (list (+ wl 40) (+ wt 30) (+ wl 940) (+ wt 630))))
+                             (restored inside inside))
+                           ;; Partly off the right edge. --restore-placement is the macOS rule,
+                           ;; which Linux uses; the arithmetic does not depend on which way y runs.
+                           (let* ((off (list (- wr 300) (+ wt 30) (+ wr 600) (+ wt 630)))
+                                  (decision (apply #'%restore-placement
+                                                   (%write-placement dir "decision"
+                                                                     (%placement-line off 0))
+                                                   work))
+                                  (expected (subseq (%report-numbers decision) 0 4)))
+                             (is (not (equal off expected)) "the decision moved it: ~S" decision)
+                             (restored off expected)))
+                         (%write-placement dir "window-placement"
+                                           (%placement-line '(-100000 -100000 -99000 -99300) 0))
+                         (multiple-value-bind (code out) (%linux-report 1280 860 file)
+                           (is (eql 0 code) "--report-placement exited ~S: ~A" code out)
+                           (is-true (%report-line out "restore-ignored off-screen")
+                                    "a rectangle on no monitor is ignored: ~S" out)
+                           (let ((n (%linux-placement-numbers out)))
+                             (is-true n "and the window is placed as without a file: ~S" out)
+                             (when n
+                               (is (equal (%placement-line (subseq n 11 15) 0)
+                                          (uiop:read-file-string file))
+                                   "and that rectangle is saved: ~S" out))))))))
+              (aion/fs:delete-tree dir)))))))
+
+(test the-placement-is-saved-while-a-real-linux-window-is-open
+  "On a GitHub Linux runner with a display, through --exercise-placement, which connects the
+handlers a launch connects: a move and resize is saved once, when its events stop; closing leaves
+the file as it was. Where a maximise takes effect (under a window manager, not Xvfb), maximising
+saves the normal rectangle with MAXIMIZED 1, unmaximising saves it with 0, and a start from a file
+that says 1 opens maximised. A start from such a file always reads it as maximised."
+  #-linux (skip "The GTK placement calls run on Linux only")
+  #+linux
+  (with-launcher
+    (let ((why (%linux-window-skip-reason)))
+      (if why
+          (skip why)
+          (let ((dir (%fresh-dir))
+                (work (%linux-work-area))
+                (maximise-works nil))
+            (unwind-protect
+                 (progn
+                   (is-true work "the work area was reported")
+                   (when work
+                     (let* ((file (merge-pathnames "window-placement" dir))
+                            (start (list (+ (first work) 50) (+ (second work) 50)
+                                         (+ (first work) 650) (+ (second work) 500))))
+                       (%write-placement dir "window-placement" (%placement-line start 0))
+                       (multiple-value-bind (code out)
+                           (%run-shown-launcher 60 "--exercise-placement" (uiop:native-namestring file))
+                         (is (eql 0 code) "--exercise-placement exited ~S: ~A" code out)
+                         (is (equal "start-zoomed 0" (%report-line out "start-zoomed"))
+                             "it started unmaximised: ~S" out)
+                         (is (equal "move-saves 1" (%report-line out "move-saves"))
+                             "the move and resize wrote the file once, when its events stopped: ~S"
+                             out)
+                         (let* ((line (%report-line out "moved "))
+                                (moved (and line (%report-numbers line))))
+                           (is (= 4 (length moved)) "it reported where the move put the window: ~S"
+                               out)
+                           (when (= 4 (length moved))
+                             (is (not (equal moved start)) "and the move changed it: ~S" moved)
+                             (setf maximise-works (equal "zoomed 1" (%report-line out "zoomed ")))
+                             (flet ((saved (maximized)
+                                      (string-right-trim '(#\Newline) (%placement-line moved maximized)))
+                                    (after (step)
+                                      (let ((l (%report-line out (format nil "~A " step))))
+                                        (and l (subseq l (1+ (length step)))))))
+                               (is (equal (saved 0) (after "after-move"))
+                                   "the move and resize was saved: ~S" out)
+                               (if maximise-works
+                                   (progn
+                                     (is (equal (saved 1) (after "after-maximize"))
+                                         "maximising saved the normal rectangle, maximised: ~S" out)
+                                     (is (equal (saved 0) (after "after-restore"))
+                                         "unmaximising saved it unmaximised: ~S" out))
+                                   (is (equal (saved 0) (after "after-maximize"))
+                                       "a maximise nothing answered changed nothing: ~S" out))
+                               (is (equal (saved 0) (after "after-close"))
+                                   "closing left the file as it was: ~S" out)))))
+                       (%write-placement dir "window-placement" (%placement-line start 1))
+                       (multiple-value-bind (code out)
+                           (%run-shown-launcher 60 "--exercise-placement" (uiop:native-namestring file))
+                         (is (eql 0 code) "--exercise-placement exited ~S: ~A" code out)
+                         (let ((line (%report-line out "restored ")))
+                           (is-true line "the saved rectangle was restored: ~S" out)
+                           (when line
+                             (is (eql 1 (fifth (%report-numbers line)))
+                                 "and read as maximised: ~S" line)))
+                         (when maximise-works
+                           (is (equal "start-zoomed 1" (%report-line out "start-zoomed"))
+                               "and a file saying MAXIMIZED 1 opened maximised: ~S" out))))))
+              (aion/fs:delete-tree dir)))))))
 
 (defun run-tests ()
   (let ((results (run 'view)))

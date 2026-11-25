@@ -14,6 +14,19 @@ its tag.
 
 ### An app may have to act
 
+- **hyperion/desktop: `run-app` places the window and honours `:placement-file` on Linux**
+  (#485). Before, Linux left the window where the window manager put it and ignored
+  `:placement-file`. hyperion-view now opens the window centred in its monitor's work area,
+  shrunk to fit when it is larger, and `:placement-file PATH` keeps the window's position, size
+  and maximised state in PATH and restores them the next time, moved into the monitor the saved
+  rectangle overlaps most, as on macOS. A window that was maximised reopens maximised, and
+  unmaximising it goes back to the size it had before. Under a Wayland session the window is
+  shrunk to fit and keeps its saved size and maximised state, but the compositor decides where it
+  opens, because Wayland does not let an application position its window; X11 and XWayland get
+  the position too. `hyperion-view --report-placement` and `--exercise-placement` now work on
+  Linux, and the report names the backend (`x11` or `wayland`). Rebuild `hyperion-view` to get
+  this. A GTK 4 build of the launcher still places nothing.
+
 - **praxeon/chat-ui: the composer clears the message only after its post succeeds** (#1335).
   `praxeon/chat-ui:composer` no longer resets the form on submit; it resets on
   `htmx:afterRequest` when the request succeeded and came from the form itself. A message the host
