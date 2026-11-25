@@ -604,9 +604,19 @@ jobs:
           OURANOS_DOKIMASIA_EXAMPLE_OUT: ${{ runner.temp }}/dokimasia-example
         run: |
           set -o pipefail
-          # On Linux the gate runs with a throwaway Secret Service (the step above).
+          # On Linux the gate runs with a throwaway Secret Service (the step above), and under
+          # Xvfb, so hyperion-view's Linux real-window tests have a display (#485). Xvfb has no
+          # window manager, so those tests cannot check maximising; see hyperion/docs/desktop.md.
+          # Xvfb is started from display 1 (-n 1), not xvfb-run's default of 99, so :99 stays
+          # free for anything that assumes nothing runs there. The hades credentials test
+          # a-locked-keyring-is-reported-as-locked-by-every-operation once did: it set
+          # DISPLAY=:99, and with Xvfb on :99 gnome-keyring showed its unlock prompt there and
+          # the gate waited until the job's time limit (run 45500824746). That test no longer
+          # relies on it; it sets DISPLAY=no-display.invalid:0, which no server can answer on.
           wrap=()
-          if [ "$RUNNER_OS" = "Linux" ]; then wrap=(scripts/with-secret-service.sh); fi
+          if [ "$RUNNER_OS" = "Linux" ]; then
+            wrap=(xvfb-run -a -n 1 -s "-screen 0 1920x1080x24" scripts/with-secret-service.sh)
+          fi
           "${wrap[@]}" sbcl --dynamic-space-size 4096 --script scripts/verify-tree.lisp \
             2>&1 | tee verify.log
 
@@ -840,7 +850,9 @@ jobs:
           OURANOS_TEST_REAL_CREDENTIAL_STORE: "1"
         run: |
           set -o pipefail
-          scripts/with-secret-service.sh \
+          # Under Xvfb, as the matrix leg's gate is, so the same real-window tests run (#485).
+          # From display 1, not 99, for the reason given at the matrix leg's gate step.
+          xvfb-run -a -n 1 -s "-screen 0 1920x1080x24" scripts/with-secret-service.sh \
             sbcl --dynamic-space-size 4096 --script scripts/with-mode.lisp release scripts/verify-tree.lisp \
             2>&1 | tee verify.log
 
