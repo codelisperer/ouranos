@@ -60,6 +60,16 @@ its tag.
   surfaces do not pass with hyperion's link value gets new failures in its own contrast test; it
   gives `:link-text` in that scheme's plist to `make-appearance-table`. The token must be a colour,
   not a gradient.
+- **hyperion/appearance: a plain link is underlined on hover and while pressed** (#1363).
+  `appearance-css` adds `:root a:is(:hover, :active):not(...) { text-decoration: underline; }`.
+  Since #1281 a link keeps `--hy-link-text` in those states, and Bulma gives a plain link no
+  other hover change, so the underline is what shows them. It covers breadcrumb links and
+  `.has-text-link`. It leaves out the Bulma components whose element is an `a` but which show
+  hover their own way: `.button`, `.tag`, `.delete`, `.dropdown-item`, `.navbar-item`,
+  `.navbar-link`, the pagination links, `.panel-block`, `.card-footer-item`, and links inside
+  `.navbar`, `.tabs`, `.panel-tabs` and `.menu-list` (`*link-underline-exclusions*`). No colour
+  changes, so contrast is unaffected. An app that styles its own link-like `a` elements with
+  another class and does not want the underline sets `text-decoration: none` on them.
 - **hyperion/appearance: a muted text token, which Bulma's grey text classes now use** (#1281).
   The token table has `:muted-text`, written as `--hy-muted-text`: `#5c6370` (light), `#9aa3b5`
   (dark), `#454b59` (light, high contrast) and `#bfc5cf` (dark, high contrast). Bulma gives its
