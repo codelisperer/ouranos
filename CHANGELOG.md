@@ -1971,6 +1971,23 @@ its tag.
 
 ### Added
 
+- **`aion/sexp:read-data` can read keywords from outside without creating new ones, or with a
+  limit on how many it creates** (#1166). With `:intern-keywords t`, every keyword in the input
+  was interned before the caller could look at it, and an interned keyword is never freed, so a
+  server reading user input could grow its memory without bound. `:intern-keywords :existing`
+  reads a keyword that already exists as the keyword, and a new one as an
+  `aion/sexp:unknown-keyword`, whose `unknown-keyword-name` is the name upper-cased (`:foo` reads
+  as one named `"FOO"`). It interns nothing, and it is neither a string nor a symbol, so the
+  caller can tell it from the string `"FOO"` and decides what to accept. `write-data` refuses it
+  as `:unwritable`.
+  Under `:intern-keywords t`, the new `:max-new-keywords` argument (default
+  `aion/sexp:*max-new-keywords*`, `nil`, meaning no limit) is the most keywords one call
+  creates: the next new keyword is refused with `unsafe-data` reason `:too-many-new-keywords`
+  before it is interned. `:intern-keywords` now accepts only `nil`, `t` and `:existing`, where
+  any true value used to mean `t`. A keyword argument `read-data` or `write-data` does not accept
+  (`:intern-keywords`, `:max-new-keywords`, `:comments`, `:symbols`) now signals the new
+  `aion/sexp:argument-error`, with `argument-error-argument` and `argument-error-value`, instead
+  of a plain `simple-error`.
 - **praxeon/web: the chat can run as a JSON service with no page** (#1338, part of #67).
   `praxeon/web:make-app`, `start` and `serve-forever` take `:surface`: `:ui` (the default, the
   page as before), `:service` or `:both`. Under `:service` and `:both` the app serves

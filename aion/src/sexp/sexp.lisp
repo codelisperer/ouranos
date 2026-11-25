@@ -17,7 +17,9 @@
   (:export #:read-data #:write-data #:write-data-to-string
            #:unsafe-data #:unsafe-data-reason #:unsafe-data-position #:unsafe-data-detail
            #:*max-depth* #:*max-elements* #:*max-string-length* #:*max-number-digits*
-           #:*max-input*))
+           #:*max-input* #:*max-new-keywords*
+           #:unknown-keyword #:unknown-keyword-p #:unknown-keyword-name
+           #:argument-error #:argument-error-argument #:argument-error-value))
 
 (in-package #:aion/sexp)
 
@@ -33,10 +35,33 @@
   (:documentation "READ-DATA was given input, or WRITE-DATA a datum, outside what this module
 accepts. REASON is a keyword: :DISPATCH-MACRO, :READER-MACRO, :ESCAPED-SYMBOL, :COMMENT,
 :UNKNOWN-SYMBOL, :PACKAGE-PREFIX, :TOO-DEEP, :TOO-MANY-ELEMENTS, :STRING-TOO-LONG,
-:NUMBER-TOO-LONG, :NUMBER-OUT-OF-RANGE, :DIVISION-BY-ZERO, :INPUT-TOO-LONG, :SYNTAX,
-:END-OF-INPUT or, from WRITE-DATA, :UNWRITABLE. POSITION is the character offset in the input,
-or NIL from WRITE-DATA. DETAIL quotes at most the first 40 characters of the offending
-token."))
+:NUMBER-TOO-LONG, :NUMBER-OUT-OF-RANGE, :DIVISION-BY-ZERO, :INPUT-TOO-LONG,
+:TOO-MANY-NEW-KEYWORDS, :SYNTAX, :END-OF-INPUT or, from WRITE-DATA, :UNWRITABLE. POSITION is
+the character offset in the input, or NIL from WRITE-DATA. DETAIL quotes at most the first 40
+characters of the offending token."))
+
+(define-condition argument-error (error)
+  ((argument :initarg :argument :reader argument-error-argument)
+   (value :initarg :value :reader argument-error-value)
+   (expected :initarg :expected :reader %argument-error-expected))
+  (:report (lambda (c s)
+             (format s "aion/sexp: :~A must be ~A, not ~S." (argument-error-argument c)
+                     (%argument-error-expected c) (argument-error-value c))))
+  (:documentation "READ-DATA or WRITE-DATA was called with a keyword argument it does not
+accept. ARGUMENT is
+the argument's name, a keyword such as :INTERN-KEYWORDS, and VALUE what it was given. This is a
+fault in the calling code, not in the input, so it is not UNSAFE-DATA (#1166)."))
+
+(defun %argument-error (argument value expected)
+  (error 'argument-error :argument argument :value value :expected expected))
+
+(defstruct (unknown-keyword (:constructor %make-unknown-keyword (name)) (:copier nil))
+  "A keyword READ-DATA read under :INTERN-KEYWORDS :EXISTING that did not exist, so it was not
+interned. NAME is the keyword's name, upper-cased as the keyword's would be: :foo has the name
+\"FOO\". It is neither a string nor a symbol, so the caller can tell it from a string literal
+\"FOO\" and from an existing keyword, and decide what to do with it. WRITE-DATA refuses it as
+:UNWRITABLE, as it refuses anything that is not data (#1166)."
+  (name "" :type string :read-only t))
 
 (defparameter *max-depth* 64 "The deepest nesting of lists accepted.")
 (defparameter *max-elements* 100000
@@ -47,6 +72,9 @@ lists and three atoms, and () is one. READ-DATA and WRITE-DATA count the same wa
   "The most digits in an integer, in each part of a ratio, and in a float's digits. A float's
 exponent is bounded separately, by the range of a double float.")
 (defparameter *max-input* 1048576 "The most characters READ-DATA reads for one datum.")
+(defparameter *max-new-keywords* nil
+  "The most keywords READ-DATA creates for one datum when :INTERN-KEYWORDS is T, or NIL for no
+limit other than MAX-ELEMENTS. An interned keyword is never freed (#1166).")
 
 (defun %unsafe (reason position &optional detail &rest args)
   (error 'unsafe-data :reason reason :position position
@@ -71,7 +99,8 @@ exponent is bounded separately, by the range of a double float.")
 
 (defstruct (%reader (:conc-name %r-))
   stream (position 0) (elements 0) symbols intern-keywords (comments :refuse)
-  max-depth max-elements max-string-length max-number-digits max-input)
+  max-depth max-elements max-string-length max-number-digits max-input
+  max-new-keywords (new-keywords 0))
 
 (defun %peek (r)
   (peek-char nil (%r-stream r) nil nil))
@@ -228,9 +257,21 @@ value too small for the type reads as zero, or as the nearest denormal: 1e-50 is
        (every #'%constituent-p name)
        (not (every (lambda (c) (char= c #\.)) name))))
 
+(defun %new-keyword (name r start)
+  "The keyword NAME, which does not exist yet, as :INTERN-KEYWORDS decides: under :EXISTING, an
+UNKNOWN-KEYWORD holding NAME, and nothing is interned; under T, the keyword, interned once the
+count of keywords this read has created is checked against MAX-NEW-KEYWORDS (#1166)."
+  (if (eq (%r-intern-keywords r) :existing)
+      (%make-unknown-keyword name)
+      (let ((limit (%r-max-new-keywords r)))
+        (when (and limit (> (incf (%r-new-keywords r)) limit))
+          (%unsafe :too-many-new-keywords start "more than ~D new keywords" limit))
+        (intern name "KEYWORD"))))
+
 (defun %resolve-symbol (token r start)
-  "The symbol TOKEN names, looked up and never created. Case is folded to upper case, as the
-standard reader does: foo, Foo and FOO all name the symbol whose name is \"FOO\"."
+  "The symbol TOKEN names, looked up and never created, except for a keyword under
+:INTERN-KEYWORDS (%NEW-KEYWORD). Case is folded to upper case, as the standard reader does:
+foo, Foo and FOO all name the symbol whose name is \"FOO\"."
   (let ((colon (position #\: token)))
     (cond
       ((null colon)
@@ -245,7 +286,7 @@ standard reader does: foo, Foo and FOO all name the symbol whose name is \"FOO\"
        (let ((name (string-upcase (subseq token 1))))
          (multiple-value-bind (symbol status) (find-symbol name "KEYWORD")
            (cond (status symbol)
-                 ((%r-intern-keywords r) (intern name "KEYWORD"))
+                 ((%r-intern-keywords r) (%new-keyword name r start))
                  (t (%unsafe :unknown-symbol start "the keyword ~A does not exist" (%clip token)))))))
       (t (%unsafe :package-prefix start "~A names a package" (%clip token))))))
 
@@ -327,15 +368,28 @@ is read."
 (defun read-data (source &key symbols intern-keywords (comments :refuse)
                               (max-depth *max-depth*) (max-elements *max-elements*)
                               (max-string-length *max-string-length*)
-                              (max-number-digits *max-number-digits*) (max-input *max-input*))
+                              (max-number-digits *max-number-digits*) (max-input *max-input*)
+                              (max-new-keywords *max-new-keywords*))
   "Read one datum from SOURCE, a string or a character input stream, accepting plain data only.
-Returns the datum and the number of characters read. Signals UNSAFE-DATA for anything else.
+Returns the datum and the number of characters read. Signals UNSAFE-DATA for anything else, and
+ARGUMENT-ERROR for a keyword argument it does not accept.
 
 Accepted: proper and dotted lists; strings, whose only escapes are \\\\ and \\\"; integers;
 ratios; floats (see below); T and NIL; keywords that already exist; and the symbols in SYMBOLS,
-a list. Nothing is interned unless INTERN-KEYWORDS is true, which allows new keywords, still
-bounded by MAX-ELEMENTS. SYMBOL CASE: a symbol or keyword token is folded to upper case, as the
+a list. SYMBOL CASE: a symbol or keyword token is folded to upper case, as the
 standard reader folds it, so foo and FOO both name the symbol whose name is \"FOO\".
+
+NEW KEYWORDS: a keyword that does not exist yet is refused, and nothing is interned, unless
+INTERN-KEYWORDS says otherwise (#1166):
+- NIL, the default: refused as :UNKNOWN-SYMBOL.
+- :EXISTING: read as an UNKNOWN-KEYWORD, whose UNKNOWN-KEYWORD-NAME is the name upper-cased as
+  the keyword's would be, so :foo reads as one named \"FOO\". Nothing is interned. It is not a
+  string or a symbol, so the caller can tell it from the string literal \"FOO\" and from an
+  existing keyword, and decides what to accept.
+- T: interned. An interned keyword is never freed, so on input from outside each call can add
+  keywords for the life of the image. MAX-NEW-KEYWORDS, when not NIL, is the most keywords one
+  call creates; the next one is refused as :TOO-MANY-NEW-KEYWORDS before it is interned. The
+  keywords created before that stay interned.
 
 FLOATS: the exponent marker decides the type whatever *READ-DEFAULT-FLOAT-FORMAT* is: E, F and
 S, and no marker, give a single float; D and L a double float.
@@ -354,14 +408,19 @@ either way.
 For a string, text after the datum is refused unless it is whitespace, or whitespace and
 comments under :SKIP; for a stream, the stream is left just after the datum."
   (unless (member comments '(:refuse :skip))
-    (error "aion/sexp: :COMMENTS must be :REFUSE or :SKIP, not ~S." comments))
+    (%argument-error :comments comments ":REFUSE or :SKIP"))
+  (unless (member intern-keywords '(nil t :existing))
+    (%argument-error :intern-keywords intern-keywords "NIL, T or :EXISTING"))
+  (unless (or (null max-new-keywords) (typep max-new-keywords '(integer 0)))
+    (%argument-error :max-new-keywords max-new-keywords "NIL or a non-negative integer"))
   (let* ((stream (if (stringp source) (make-string-input-stream source) source))
          (r (progn (%check-symbols-argument symbols)
                    (make-%reader :stream stream :symbols symbols :intern-keywords intern-keywords
                                  :comments comments
                           :max-depth max-depth :max-elements max-elements
                           :max-string-length max-string-length
-                          :max-number-digits max-number-digits :max-input max-input)))
+                          :max-number-digits max-number-digits :max-input max-input
+                          :max-new-keywords max-new-keywords)))
          (datum (%read r)))
     (when (stringp source)
       (%skip-whitespace r)
@@ -373,7 +432,7 @@ comments under :SKIP; for a stream, the stream is left just after the datum."
 
 (defun %check-symbols-argument (symbols)
   (unless (and (listp symbols) (every #'symbolp symbols))
-    (error "aion/sexp: :SYMBOLS must be a list of symbols, not ~S." symbols)))
+    (%argument-error :symbols symbols "a list of symbols")))
 
 (defun %number-token-p (name)
   "Whether READ-DATA would read NAME as a number rather than as a symbol: through the reader's
@@ -441,7 +500,8 @@ a number, such as one out of range, counts too."
 EQUAL to it. Signals UNSAFE-DATA :UNWRITABLE, before writing anything, for a datum READ-DATA
 would refuse: a struct, a vector or another object that is not data, a symbol not in SYMBOLS or
 whose name would not read back as itself, a float that is not finite, and a datum past a
-limit, which includes a circular list. Returns DATUM."
+limit, which includes a circular list. Signals ARGUMENT-ERROR when SYMBOLS is not a list of
+symbols. Returns DATUM."
   (%check-symbols-argument symbols)
   ;; Elements are counted as READ-DATA counts them: each list once and each atom once.
   (let ((elements 0))
