@@ -311,11 +311,15 @@ child under its own scripts/with-secret-service.sh, so this machine's keyring is
                                                    :output '(:string :stripped t)))))
       (if (or (null daemon) (string= "" daemon))
           (skip "gnome-keyring-daemon is not installed, so a keyring cannot be locked here")
-          ;; :99 must have no X server on it. The Linux CI gates run under Xvfb, which
-          ;; .github/workflows/verify.yml starts from display 1 for this reason (#485): with a
-          ;; server on :99, the unlock prompt is shown there and this test waits for ever.
+          ;; The second case needs a display that is set but on which no prompt can be shown.
+          ;; It names a host under .invalid, which never resolves (RFC 6761), so no X server
+          ;; can answer on any machine. It used to be :99, and on the Linux CI leg under
+          ;; xvfb-run, whose first display is :99, the unlock prompt was shown there and this
+          ;; test waited until the job's time limit (#485, run 45500824746). Checking for
+          ;; /tmp/.X11-unix/X99 would not be enough: an X server can listen on Linux's
+          ;; abstract socket alone, as an Xvfb started without that directory does.
           (dolist (case '((("DISPLAY=" "WAYLAND_DISPLAY=") "there is no display")
-                          (("DISPLAY=:99" "WAYLAND_DISPLAY=") "the keyring is locked")))
+                          (("DISPLAY=no-display.invalid:0" "WAYLAND_DISPLAY=") "the keyring is locked")))
             (destructuring-bind (environment expected) case
               (let ((value (%marker)))
                 (multiple-value-bind (text lines)
