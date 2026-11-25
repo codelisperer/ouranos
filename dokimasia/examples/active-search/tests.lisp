@@ -110,13 +110,12 @@ given, or else a new temporary directory that is deleted afterwards."
   "Run the page case's audit in the dark scheme alone. Returns true when it passed."
   (d:run :active-search-dark :out out :viewports '(:desktop) :schemes '(:dark) :explain nil))
 
-;; Pending #1281. In the dark scheme the audit finds the grey subtitle (.subtitle) below WCAG AA
-;; contrast, in Bulma's grey, which hyperion/appearance does not yet set. The mailto links pass
-;; at rest; earlier runs that reported them read them mid-transition (#1288). The fix for #1281
-;; replaces the skip with:
-;;   (when (browser-available-p) (call-with-out (lambda (out) (is-true (run-dark-audit out)))))
+;; Before #1281 the grey subtitle (.subtitle.has-text-grey) failed this audit in the dark scheme,
+;; in Bulma's fixed grey. The example now serves hyperion/appearance's CSS, which colours Bulma's
+;; grey text classes with the scheme's muted text token.
 (test the-page-passes-the-audit-in-the-dark-scheme
-  (skip "pending #1281: the grey subtitle fails the contrast audit in the dark scheme"))
+  (when (browser-available-p)
+    (call-with-out (lambda (out) (is-true (run-dark-audit out))))))
 
 ;; The control: the same steps with a row that expects a name the search never puts first. If this
 ;; passed, the example's rows would pass whatever the app showed.

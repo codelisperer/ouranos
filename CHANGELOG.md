@@ -32,6 +32,39 @@ its tag.
   images and links by default. A Content-Security-Policy for `hyperion/desktop` webviews is not
   part of this change.
 
+- **hyperion/appearance: a link text token, which Bulma's links now use** (#1281). The token
+  table has `:link-text`, written as `--hy-link-text`: `#2942ff` (light, Bulma's own light link
+  colour), `#8f9cff` (dark), `#0015b8` (light, high contrast) and `#a8b2ff` (dark, high contrast).
+  `appearance-css` sets Bulma's `--bulma-link-text`, `--bulma-link-text-hover` and
+  `--bulma-link-text-active` to it on `html:root` (`*bulma-link-properties*`), and gives
+  `.has-text-link` its colour with `!important`, in every theme, contrast and look. Bulma's own
+  dark link colour, `#7585ff`, is 4.25:1 on hyperion's dark header gradient, below WCAG AA, and
+  `.has-text-link`'s fixed `#4258ff` fails on hyperion's surfaces in every scheme. A page that
+  serves `appearance-css` shows its links in the new colour in the dark and high-contrast
+  schemes; a breadcrumb's links no longer change colour on hover or when pressed.
+  `appearance-contrast-failures` checks `:link-text` at 4.5:1 against `:surface`,
+  `:surface-raised` and `:header` (`*link-text-backgrounds*`), so an app's own table whose
+  surfaces do not pass with hyperion's link value gets new failures in its own contrast test; it
+  gives `:link-text` in that scheme's plist to `make-appearance-table`. The token must be a colour,
+  not a gradient.
+- **hyperion/appearance: a muted text token, which Bulma's grey text classes now use** (#1281).
+  The token table has `:muted-text`, written as `--hy-muted-text`: `#5c6370` (light), `#9aa3b5`
+  (dark), `#454b59` (light, high contrast) and `#bfc5cf` (dark, high contrast). Bulma gives its
+  grey text classes fixed colours with `!important`, the same in both themes, and each fails WCAG
+  AA in at least one theme. `appearance-css` now gives a class the muted colour, with
+  `!important`, in both looks and at both contrasts, in the themes where Bulma's grey fails on
+  hyperion's surfaces, and leaves Bulma's grey elsewhere (`*muted-text-targets*`):
+  `.has-text-grey` in the light and dark themes; `.has-text-grey-dark` and
+  `.has-text-grey-darker` in the dark theme only; `.has-text-grey-light` and
+  `.has-text-grey-lighter` in the light theme only. The theme is matched whether it is set on
+  `<html>` (`data-theme`) or left to `prefers-color-scheme`. A page that serves `appearance-css`
+  shows that grey text in the new colour. `appearance-contrast-failures` checks `:muted-text` at 4.5:1 against
+  `:surface`, `:surface-raised` and `:header` (`*muted-text-backgrounds*`), so an app's own table
+  whose surfaces do not pass with hyperion's muted value gets new failures in its own contrast
+  test; it gives `:muted-text` in that scheme's plist to `make-appearance-table`. The token must
+  be a colour, not a gradient. `hyperion/examples/active-search` now serves `appearance-css`, and
+  dokimasia's dark-scheme audit of it runs instead of being skipped.
+
 - **Toolchain: the pinned Coalton is `a07305a5`** (#1326), upstream `main` of 2026-11-22, in
   `coalton.pin`, 55 commits after `024d0a17`. No file in this tree needed a change. On a
   development machine, re-run `scripts/setup.sh` or `scripts/setup.ps1`, which fetch it and check
@@ -1997,6 +2030,32 @@ its tag.
 
   Without either option setup behaves as before. `scripts/setup.ps1` does not have these options
   yet.
+
+- **`cons outdated` reports whether an app is current, and every new app records the Ouranos
+  release it was made from in `ouranos.pin`** (#716). Run from an app's directory, `cons outdated`
+  prints three sections:
+  - **framework:** the release in `ouranos.pin` against the newest `v*` release, the CHANGELOG's
+    "An app may have to act" entries in between, and whether the framework checkout is at the
+    pinned commit;
+  - **toolchain:** the running SBCL, the Coalton that loads and the Quicklisp dist, each against
+    the framework's `scripts/versions.env` and `coalton.pin`;
+  - **app pins:** the app's own `upstream.sexp`, checked as Ouranos checks its own.
+
+  It is offline unless given `--online`, which asks the framework's remote for its newest
+  release and each `upstream.sexp` entry's upstream for its latest version. It exits 0 whatever it
+  finds; with `--strict` it exits 1 on any gap, for an app's CI.
+
+  `ouranos.pin` has two fields, in the style of the tree's other `.pin` files:
+  ```
+  release v0.1.7
+  commit  9e2915f1…
+  ```
+  `release` is the newest `v*` tag at or before the framework commit the app was made from, and
+  `commit` is that commit in full. `cons init` writes it. `cons conform` writes it into an existing
+  app that has none, and never overwrites one, not even with `--force`. An app without the file
+  still works: `cons outdated` reports its release as unknown and says to run `cons conform`.
+  **An existing app can add the file with `cons conform`.** New apps also get an `upstream.sexp`
+  that lists nothing yet, with its format described in its header.
 
 - **dokimasia: `cons acceptance` runs an app's suite in a headless browser from the command line**
   (#1028). `dokimasia/cons.lisp` is new, with the targets `build`, `test`, `repl` and

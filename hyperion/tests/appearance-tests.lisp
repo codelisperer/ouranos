@@ -95,7 +95,8 @@ defaults left that token out of the gradient look."
       (dolist (contrast '(:normal :high))
         (let ((flat (appr:token-values table theme contrast :flat))
               (gradient (appr:token-values table theme contrast :gradient)))
-          (is (= 13 (/ (length flat) 2)) "six background tokens, six text tokens and the ring")
+          (is (= 15 (/ (length flat) 2))
+              "six background tokens, six text tokens, the muted text, the link text and the ring")
           (is (every #'stringp (loop for (nil v) on flat by #'cddr collect v))
               "~A ~A has a flat token that is not a colour" theme contrast)
           (dolist (token backgrounds)
@@ -172,7 +173,8 @@ to the system: 32 rules, plus the bare :root fallback."
 
 (test the-default-tokens-meet-wcag-aa-in-each-look-in-each-scheme
   "Every text token against its background, in light and dark, normal and high contrast,
-flat and gradient: 48 pairs, and for a gradient every sample along it."
+flat and gradient: 48 pairs, the muted text and the link text on three surfaces in each (24 more
+each), and for a gradient every sample along it."
   (let ((failures (appr:appearance-contrast-failures)))
     (is (null failures) "~{~S~^~%~}" failures)))
 
@@ -180,8 +182,10 @@ flat and gradient: 48 pairs, and for a gradient every sample along it."
   (let ((failures (appr:appearance-contrast-failures
                    (appr:make-appearance-table
                     :dark '(:gradient (:header (:gradient "#2a2e36" "#d0d0d0")))))))
-    ;; The header text fails, and so does the focus ring, which is also checked on the header.
-    (is (equal '(:header-text :focus-ring) (mapcar (lambda (f) (getf f :text)) failures)))
+    ;; The header text fails, and so do the muted text, the link text and the focus ring, which are
+    ;; also checked on the header.
+    (is (equal '(:header-text :muted-text :link-text :focus-ring)
+               (mapcar (lambda (f) (getf f :text)) failures)))
     (let ((f (first failures)))
       (is (eql 4.5d0 (getf f :required)))
       (is (equal '(:dark :normal :gradient :header-text :header)
@@ -189,6 +193,116 @@ flat and gradient: 48 pairs, and for a gradient every sample along it."
                        (getf f :text) (getf f :background))))
       (is (equal "#D0D0D0" (string-upcase (getf f :colour))))
       (is (< (getf f :ratio) 4.5d0)))))
+
+(test the-muted-text-is-checked-against-every-surface-it-can-sit-on
+  "#1281. Bulma's dark grey, #404654, as the dark scheme's muted text fails on the surface, the
+raised surface and the header, in both looks. The light scheme, left at hyperion's values,
+passes."
+  (let* ((failures (appr:appearance-contrast-failures
+                    (appr:make-appearance-table :dark '(:muted-text "#404654"))))
+         (muted (remove-if-not (lambda (f) (eq :muted-text (getf f :text))) failures)))
+    (is (= (length failures) (length muted)) "only the muted text fails: ~S" failures)
+    (is (equal '((:flat :surface) (:flat :surface-raised) (:flat :header)
+                 (:gradient :surface) (:gradient :surface-raised) (:gradient :header))
+               (loop for f in muted
+                     collect (list (getf f :look) (getf f :background))))
+        "~S" muted)
+    (is (every (lambda (f) (and (eq :dark (getf f :theme)) (eq :normal (getf f :contrast))
+                                (eql 4.5d0 (getf f :required))))
+               muted))))
+
+(test the-muted-text-must-be-a-colour
+  (signals error (appr:make-appearance-table
+                  :light '(:muted-text (:gradient "#5c6370" "#000000")))))
+
+(test bulma-s-grey-text-takes-the-muted-text-token-in-the-themes-where-it-fails
+  "#1281. Bulma colours its grey text classes with a fixed grey and !important. .has-text-grey
+takes the token everywhere, the two darker greys in the dark theme only and the two lighter greys
+in the light theme only, whether the theme is given on <html> or left to the system. The rules
+are not scoped to a look, and have !important and a more specific selector than Bulma's."
+  (let ((css (appr:appearance-css))
+        (rule (format nil " {~%  color: var(--hy-muted-text) !important;~%}")))
+    (flet ((has (selectors) (search (format nil "~{~A~^, ~}~A" selectors rule) css)))
+      (is (has '(":root .has-text-grey")))
+      (is (has '(":root[data-theme=\"dark\"] .has-text-grey-dark"
+                 ":root[data-theme=\"dark\"] .has-text-grey-darker")))
+      (is (has '(":root[data-theme=\"light\"] .has-text-grey-light"
+                 ":root[data-theme=\"light\"] .has-text-grey-lighter")))
+      (is (search (format nil "@media (prefers-color-scheme: dark) {~%:root:not([data-theme]) .has-text-grey-dark, :root:not([data-theme]) .has-text-grey-darker~A~%}" rule)
+                  css))
+      (is (search (format nil "@media not all and (prefers-color-scheme: dark) {~%:root:not([data-theme]) .has-text-grey-light, :root:not([data-theme]) .has-text-grey-lighter~A~%}" rule)
+                  css)))
+    (is (null (search "[data-theme=\"light\"] .has-text-grey-dark" css)))
+    (is (null (search "[data-theme=\"dark\"] .has-text-grey-light" css)))
+    (is (null (search ":root .has-text-grey-" css)) "no shade is overridden in every theme")
+    (is (search "--hy-muted-text: #9aa3b5;" css) "the dark value is defined")
+    (is (null (search "[data-look=\"gradient\"] .has-text-grey" css)))))
+
+(test the-link-text-is-checked-against-every-surface-it-can-sit-on
+  "#1281. Bulma's own dark link colour, #7585ff, as the dark scheme's link text passes on the
+surface and the raised surface, and fails on the header's gradient, whose lighter stop is #2a2e36.
+Only the link text fails, only there."
+  (let ((failures (appr:appearance-contrast-failures
+                   (appr:make-appearance-table :dark '(:link-text "#7585ff")))))
+    (is (equal '((:dark :normal :gradient :link-text :header))
+               (mapcar (lambda (f) (list (getf f :theme) (getf f :contrast) (getf f :look)
+                                         (getf f :text) (getf f :background)))
+                       failures))
+        "~S" failures)
+    (is (< (getf (first failures) :ratio) 4.5d0))))
+
+(test the-link-text-must-be-a-colour
+  (signals error (appr:make-appearance-table
+                  :dark '(:link-text (:gradient "#8f9cff" "#000000")))))
+
+(test bulma-s-links-take-the-link-text-token
+  "#1281. Bulma colours a link with --bulma-link-text, and the breadcrumb with its hover and
+pressed forms, each set on :root, [data-theme] or :root in the dark media query. html:root is more
+specific than each, so the token wins. .has-text-link has a fixed colour with !important."
+  (let ((css (appr:appearance-css)))
+    (is (search (format nil "html:root {~%  --bulma-link-text: var(--hy-link-text);~%  --bulma-link-text-hover: var(--hy-link-text);~%  --bulma-link-text-active: var(--hy-link-text);~%}")
+                css))
+    (is (search (format nil ":root .has-text-link {~%  color: var(--hy-link-text) !important;~%}") css))
+    (dolist (value '("#2942ff" "#8f9cff" "#0015b8" "#a8b2ff"))
+      (is (search (format nil "--hy-link-text: ~A;" value) css) "~A is defined" value))
+    (is (null (search "[data-look=\"gradient\"] .has-text-link" css)))))
+
+(defparameter *bulma-greys*
+  '((".has-text-grey-darker" "#2e333d") (".has-text-grey-dark" "#404654")
+    (".has-text-grey" "#69748c") (".has-text-grey-light" "#abb1bf")
+    (".has-text-grey-lighter" "#d6d9e0"))
+  "Bulma 1.0.4's grey text classes and the fixed colour each one sets.")
+
+(defun %lowest-grey-ratio (colour values)
+  "COLOUR's lowest contrast against every sample of the surfaces the muted text is checked on."
+  (loop for background in appr::*muted-text-backgrounds*
+        minimize (loop for sample in (appr:background-samples (getf values background))
+                       minimize (appr:contrast-ratio colour sample))))
+
+(test each-bulma-grey-is-overridden-exactly-where-its-own-colour-fails
+  "#1281. For each of Bulma's grey classes and each theme, contrast and look, with hyperion's
+default table: where APPEARANCE-CSS overrides the class, Bulma's own grey fails AA on some surface
+of that theme; where it does not, Bulma's grey passes on every surface. With the override, every
+class passes everywhere."
+  (let ((table (appr:make-appearance-table)))
+    (loop for (class colour) in *bulma-greys*
+          for themes = (rest (assoc class appr::*muted-text-targets* :test #'string=))
+          do (dolist (theme appr:*themes*)
+               (let ((bulma-fails
+                       (loop for contrast in appr:*contrasts*
+                             thereis (loop for look in appr:*looks*
+                                           thereis (< (%lowest-grey-ratio
+                                                       colour (appr:token-values table theme contrast look))
+                                                      appr:*minimum-contrast*)))))
+                 (is (eq bulma-fails (and (member theme themes) t))
+                     "~A in ~A: Bulma's ~A fails: ~A, overridden: ~A"
+                     class theme colour bulma-fails (and (member theme themes) t))
+                 (dolist (contrast appr:*contrasts*)
+                   (dolist (look appr:*looks*)
+                     (let* ((values (appr:token-values table theme contrast look))
+                            (drawn (if (member theme themes) (getf values :muted-text) colour)))
+                       (is (>= (%lowest-grey-ratio drawn values) appr:*minimum-contrast*)
+                           "~A drawn ~A in ~A ~A ~A" class drawn theme contrast look)))))))))
 
 (test a-button-is-checked-on-hover-and-when-pressed-as-well-as-at-rest
   "White on #767676 passes at rest, at 4.54:1. The hover layer lightens the fill and pressing
@@ -220,10 +334,12 @@ only the samples between the stops can find."
                              :gradient (:surface (:gradient "#ffffff" "#000000")))))))
     (is (>= (appr:contrast-ratio "#767676" "#ffffff") 4.5d0))
     (is (>= (appr:contrast-ratio "#767676" "#000000") 4.5d0))
-    ;; The focus ring fails on the same grey; this test is about the text.
+    ;; The focus ring, the muted text and the link text fail on the black end of the same
+    ;; gradient; this test is about the surface text.
     (is (equal '((:light :gradient :surface-text))
                (mapcar (lambda (f) (list (getf f :theme) (getf f :look) (getf f :text)))
-                       (remove :focus-ring failures :key (lambda (f) (getf f :text))))))))
+                       (remove-if (lambda (f) (member (getf f :text) '(:focus-ring :muted-text :link-text)))
+                                  failures))))))
 
 (test a-plain-colour-in-the-gradient-look-replaces-bulma-s-background
   "An app may give a plain colour as a gradient-look value. The gradient look's rules set it with

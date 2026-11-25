@@ -247,3 +247,41 @@ runs once per image cannot detect that it poisons the next run."
   (let ((dir (uiop:temporary-directory)))
     (is (null (cons/upstream:checkout-advisory dir))
         "a non-repository must produce silence")))
+
+;;; --- core cons stays free of the online check's dependencies (#716) ----------
+
+(defun %dependency-closure (system-name)
+  "The names of every system SYSTEM-NAME depends on, directly or not, as ASDF reads them.
+A (:feature F S) entry counts when F is on this host; a (:version S V) entry counts as S."
+  (let ((seen (make-hash-table :test 'equal)))
+    (labels ((name-of (spec)
+               (cond ((stringp spec) spec)
+                     ((symbolp spec) (string-downcase (symbol-name spec)))
+                     ((and (consp spec) (eq (first spec) :version)) (name-of (second spec)))
+                     ((and (consp spec) (eq (first spec) :feature))
+                      (and (uiop:featurep (second spec)) (name-of (third spec))))
+                     (t nil)))
+             (walk (name)
+               (unless (gethash name seen)
+                 (setf (gethash name seen) t)
+                 (let ((system (asdf:find-system name nil)))
+                   (when system
+                     (dolist (spec (asdf:system-depends-on system))
+                       (let ((dep (name-of spec)))
+                         (when dep (walk dep)))))))))
+      (walk system-name))
+    (remhash system-name seen)
+    (loop for k being the hash-keys of seen collect k)))
+
+(test core-cons-does-not-depend-on-the-online-check
+  "The online half of the upstream check is cons/outdated, which needs aion/http-client and jzon.
+Core cons must not reach either (the hub's ruling on #716). This suite loads cons and never
+cons/outdated, so the second check below can fail: in a suite that loaded cons/outdated, both
+packages would exist whatever core cons did."
+  (let ((closure (%dependency-closure "cons")))
+    (is (not (intersection '("aion/http-client" "com.inuoe.jzon") closure :test #'string=))
+        "core cons depends on ~S"
+        (intersection '("aion/http-client" "com.inuoe.jzon") closure :test #'string=)))
+  (is (null (or (find-package "AION/HTTP-CLIENT") (find-package "COM.INUOE.JZON")))
+      "this image, which loaded cons and not cons/outdated, has ~S"
+      (remove nil (list (find-package "AION/HTTP-CLIENT") (find-package "COM.INUOE.JZON")))))

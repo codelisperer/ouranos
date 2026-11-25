@@ -151,6 +151,11 @@ per-checker list that would go stale."
     (uiop:copy-file (merge-pathnames name *scripts*) target)
     (dolist (helper '("tree-root.lisp" "human-path.lisp" "pin-files.lisp"))
       (uiop:copy-file (merge-pathnames helper *scripts*) (merge-pathnames helper scripts)))
+    ;; check-upstream.lisp's code is cons/src/inventory.lisp, which it loads from the tree it
+    ;; sits in (#716), so a fixture tree needs that file where the script looks for it.
+    (let ((inventory (merge-pathnames "cons/src/inventory.lisp" tree)))
+      (ensure-directories-exist inventory)
+      (uiop:copy-file (merge-pathnames "../cons/src/inventory.lisp" *scripts*) inventory))
     target))
 
 (defun %install-root-markers (tree)

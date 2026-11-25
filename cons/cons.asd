@@ -34,7 +34,7 @@
   ;; hyperion/server fail to READ on Windows.
   ;; aion/secret is DEPENDENCY-FREE and Coalton-free by construction, which is what makes
   ;; it admissible here: cons's core stays trivial to install (pre-publication issue 209).
-  :depends-on ("aion/fs" "alexandria" "cons/env" "aion/secret"
+  :depends-on ("aion/fs" "alexandria" "cons/env" "aion/secret" "cons/inventory"
                (:feature :unix (:require :sb-posix)))
   :serial t
   :components ((:module "src"
@@ -42,6 +42,8 @@
                 :components ((:file "packages")
                              (:file "tempdir")  ; private scratch dirs, created not chosen
                              (:file "upstream") ; is the framework checkout behind? (pre-publication issue 240)
+                             (:file "ouranos-pin") ; ouranos.pin: the release an app was made from (#716)
+                             (:file "outdated-command") ; `cons outdated' (#716)
                              (:file "db")       ; db-repl/db-url: a session per environment
                              (:file "toolchain"); is the Lisp under us the one we think it is?
                              (:file "env-scan") ; which config keys does this project need?
@@ -80,6 +82,32 @@
   :serial t
   :components ((:file "src/coalton-repl")))
 
+;;; The offline upstream check: read an upstream.sexp and check it against the tree it describes
+;;; (#716). scripts/check-upstream.lisp LOADs the same three files directly, so the gate still
+;;; runs it with nothing but SBCL; this system is for code that loads it with ASDF, which
+;;; `cons outdated' will be. The two helpers stay in scripts/, where every other script loads
+;;; them, so there is one copy of each.
+(defsystem "cons/inventory"
+  :description "Read an upstream.sexp and check it against the tree it describes (#716)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ()
+  :serial t
+  :components ((:file "human-path" :pathname "../scripts/human-path")
+               (:file "pin-files" :pathname "../scripts/pin-files")
+               (:file "inventory" :pathname "src/inventory")))
+
+;;; The online half: ask each entry's upstream for its latest release. A separate system
+;;; because it needs aion/http-client and jzon, and core cons must not (the hub's ruling on
+;;; #716, 2026-11-24). scripts/check-upstream.lisp --online loads it.
+(defsystem "cons/outdated"
+  :description "Compare each upstream.sexp entry with its latest upstream release (#716)."
+  :author "Bob <eternal.recursion@proton.me>"
+  :license "MIT"
+  :depends-on ("cons/inventory" "aion/http-client" "com.inuoe.jzon")
+  :serial t
+  :components ((:file "src/outdated")))
+
 (defsystem "cons/tests"
   :description "Test suite for cons."
   :depends-on ("aion/fs" "cons" "cons/env" "aion/secret" "fiveam")  ; env-tests.lisp calls cons/env: directly
@@ -97,6 +125,7 @@
                              (:file "upstream-tests")
                              (:file "dev-port-tests")
                              (:file "conform-tests")
+                             (:file "outdated-tests")   ; ouranos.pin and cons outdated (#716)
                              (:file "init-tests")
                              (:file "template-tests")
                              (:file "spec-tests")
