@@ -24,7 +24,8 @@
 #
 # The list's format is the one publish-public.sh reads: one extended regular expression per
 # line, matched case-insensitively anywhere in the text. Blank lines and lines starting with #
-# are ignored, and so is trailing whitespace on a line, including Windows line endings.
+# are ignored, and so is trailing whitespace on a line, including Windows line endings. The file
+# must end with a newline; a list whose last line has none is refused (#1328).
 #
 # WHAT A REFUSAL PRINTS: where the match is -- a line of the message, a path and line number,
 # a commit -- and never the matching text. Refusals get pasted into issues, pull requests and
@@ -40,8 +41,12 @@ pn_refuse_intro() {
   printf '\n  REFUSED: %s\n\n' "$1" >&2
 }
 
-# The advice every refusal ends with.
+# The advice every refusal that found a name ends with. It starts with the number of entries in
+# the list, so a reader who cannot see which entry matched can at least compare that number with
+# what they see in the file.
 pn_advice() {
+  if [ "$PN_COUNT" -eq 1 ]; then pn_entries="1 entry"; else pn_entries="$PN_COUNT entries"; fi
+  printf '  The list in use, %s, has %s.\n\n' "$PN_FILE" "$pn_entries" >&2
   cat >&2 <<'MSG'
   This refusal gives locations only, never the matching text, so it is safe to quote in an
   issue or a log.
@@ -55,10 +60,11 @@ pn_advice() {
 MSG
 }
 
-# Set PN_FILE and PN_PATTERN. Returns 0 with PN_PATTERN empty when no list applies here, and
+# Set PN_FILE, PN_PATTERN and PN_COUNT, the number of entries. Returns 0 with PN_PATTERN empty when no list applies here, and
 # returns 1, after saying why, when a list was configured or found but cannot be used.
 pn_load() {
   PN_PATTERN=
+  PN_COUNT=0
   PN_FILE=$(git config --type=path --get ouranos.privateNames 2>/dev/null || true)
   if [ -n "$PN_FILE" ]; then
     if [ ! -f "$PN_FILE" ]; then
@@ -77,11 +83,24 @@ pn_load() {
       return 0
     fi
   fi
+  # A last line with no newline after it is read and enforced, but `wc -l` and a shell
+  # `while read` loop both stop at the last newline, so anyone checking the list that way does
+  # not see that entry. A push refused by an entry nobody could see cost a lane an hour (#1328).
+  # tail -c 1 | wc -l counts 0 when the last byte is not a newline. An empty file passes here
+  # and is refused below as empty.
+  if [ -s "$PN_FILE" ] && [ "$(tail -c 1 "$PN_FILE" | wc -l | tr -d ' ')" -eq 0 ]; then
+    pn_refuse_intro "the private-names list does not end with a newline."
+    printf '  The last line of %s has no newline after it. That entry is enforced, but\n' "$PN_FILE" >&2
+    printf '  wc -l and a shell read loop do not count it, so the list looks one entry shorter\n' >&2
+    printf '  than it is. End the file with a newline and try again.\n\n' >&2
+    return 1
+  fi
   # sed removes trailing whitespace from every line before anything else reads it, including
   # the carriage return a Windows editor saves at the end of each line. Left in place, either
   # one ends the entry with a character the text does not contain, and that entry matches
   # nothing without any error. Doing it first also makes a line holding only a CR blank.
   PN_PATTERN=$(sed 's/[[:space:]]*$//' "$PN_FILE" | grep -vE '^[[:space:]]*(#|$)' | paste -sd '|' -)
+  PN_COUNT=$(sed 's/[[:space:]]*$//' "$PN_FILE" | grep -cvE '^[[:space:]]*(#|$)' || true)
   if [ -z "$PN_PATTERN" ]; then
     pn_refuse_intro "the private-names list is empty, so the check could not fail."
     printf '  %s has no entries. Add them, or delete the file if this machine has no list.\n\n' "$PN_FILE" >&2
