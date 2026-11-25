@@ -311,6 +311,9 @@ child under its own scripts/with-secret-service.sh, so this machine's keyring is
                                                    :output '(:string :stripped t)))))
       (if (or (null daemon) (string= "" daemon))
           (skip "gnome-keyring-daemon is not installed, so a keyring cannot be locked here")
+          ;; :99 must have no X server on it. The Linux CI gates run under Xvfb, which
+          ;; .github/workflows/verify.yml starts from display 1 for this reason (#485): with a
+          ;; server on :99, the unlock prompt is shown there and this test waits for ever.
           (dolist (case '((("DISPLAY=" "WAYLAND_DISPLAY=") "there is no display")
                           (("DISPLAY=:99" "WAYLAND_DISPLAY=") "the keyring is locked")))
             (destructuring-bind (environment expected) case
