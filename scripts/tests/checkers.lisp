@@ -1959,6 +1959,53 @@ the machine's global setting."
       (is (not (%repeats-a-name-p out)) "the refusal repeats the name"))
     (is (= 0 (%commit-count repo)) "a commit got past a list with CRLF line endings")))
 
+(test name-check-refuses-a-list-whose-last-line-has-no-newline
+  ;; #1328. Such an entry is enforced, but `wc -l' and a `while read' loop do not see it, and a
+  ;; push refused by an entry nobody could see cost a lane an hour. The commit here contains no
+  ;; name, so the refusal can only come from the list. The control is the same list with a
+  ;; newline at the end: the clean commit goes through, and a name in the next message is
+  ;; still refused, so the check runs as it did before.
+  (let* ((unterminated (string-right-trim '(#\Newline) +invented-names+))
+         (repo (%hooked-repo :names unterminated))
+         (list-file (uiop:native-namestring (merge-pathnames ".private-names" repo))))
+    (%stage repo "notes.md" (format nil "nothing private here~%"))
+    (multiple-value-bind (code out) (%git repo "commit" "-q" "-m" "Add notes")
+      (is (not (zerop code)) "a list whose last line has no newline was used:~%~a" out)
+      (is (= 0 (%commit-count repo)))
+      (is (search "does not end with a newline" out) "the refusal does not say why:~%~a" out)
+      (is (search list-file out) "the refusal does not name the file:~%~a" out)
+      (is (not (%repeats-a-name-p out)) "the refusal repeats an entry"))
+    (%write (merge-pathnames ".private-names" repo) +invented-names+)
+    (multiple-value-bind (code out) (%git repo "commit" "-q" "-m" "Add notes")
+      (is (zerop code) "control: the same list with a final newline refused a clean commit:~%~a" out)
+      (is (= 1 (%commit-count repo))))
+    (%stage repo "more.md" (format nil "more~%"))
+    (multiple-value-bind (code out) (%git repo "commit" "-q" "-m" "More for ZorboCorp")
+      (is (not (zerop code)) "control: a name was committed under the terminated list")
+      (is (search "Line 1 of the message" out) "control: the refusal does not say where:~%~a" out))))
+
+(test a-refusal-that-found-a-name-says-how-many-entries-the-list-has
+  ;; #1328. The refusal cannot say which entry matched, so it gives the count, for a reader to
+  ;; compare with what they see in the file. +INVENTED-NAMES+ has a comment, a blank line and
+  ;; two entries, so the count must leave the first two out. Checked through commit-msg,
+  ;; pre-commit and pre-push.
+  (let* ((repo (%hooked-repo))
+         (remote (%bare-remote repo)))
+    (%stage repo "a.md" (format nil "clean~%"))
+    (multiple-value-bind (code out) (%git repo "commit" "-q" "-m" "Notes for ZorboCorp")
+      (is (not (zerop code)))
+      (is (search "has 2 entries." out) "commit-msg's refusal has no count:~%~a" out))
+    (%stage repo "b.md" (format nil "for Quux-Feathers~%"))
+    (multiple-value-bind (code out) (%git repo "commit" "-q" "-m" "Add b")
+      (is (not (zerop code)))
+      (is (search "has 2 entries." out) "pre-commit's refusal has no count:~%~a" out))
+    (%git! repo "commit" "-q" "--no-verify" "-m" "skipped the commit hooks")
+    (multiple-value-bind (code out) (%git repo "push" "-q" "origin" "main")
+      (is (not (zerop code)))
+      (is (search "has 2 entries." out) "pre-push's refusal has no count:~%~a" out)
+      (is (not (%repeats-a-name-p out)) "the refusal repeats the name"))
+    (is (not (%ref remote "refs/heads/main")) "the push reached the remote")))
+
 (test name-check-refuses-everything-when-the-configured-list-is-missing
   ;; Configuring a list is how a machine says it needs the check. If the list has gone, a
   ;; commit must not look the same as one that was checked and found clean.
