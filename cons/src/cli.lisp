@@ -9,6 +9,7 @@
 ;;;;   cons conform [--force]         install the AI-conformance pack (real)
 ;;;;   cons db-repl [env] [-- args]   open a DB session for an environment (real)
 ;;;;   cons db-url [env]              print that environment's URL, redacted (real)
+;;;;   cons outdated [--online] [--strict]  is this app current with its framework? (#716)
 ;;;;   cons version                   print the version
 ;;;;
 ;;;; `setup` (SBCL + Quicklisp + editor/Alive config -- zero-to-ready) is an honest
@@ -126,6 +127,16 @@ manifest here means they probably meant the built-ins, so check those."
         (format *error-output* "cons conform: ~A~%" e)
         (uiop:quit 1)))))
 
+(defun outdated/handler (cmd)
+  "Report whether the app here is current with its framework release, that framework's
+toolchain pins and its own upstream.sexp (#716). Exit 0, or 1 under --strict with a gap."
+  (handler-case
+      (uiop:quit (cons/outdated-command:run :online (and (clingon:getopt cmd :online) t)
+                                            :strict (and (clingon:getopt cmd :strict) t)))
+    (error (e)
+      (format *error-output* "cons outdated: ~A~%" e)
+      (uiop:quit 1))))
+
 (defun db-repl/handler (cmd)
   (let ((env (or (first (clingon:command-arguments cmd)) db:*default-env*))
         (extra (rest (clingon:command-arguments cmd))))
@@ -173,6 +184,14 @@ manifest here means they probably meant the built-ins, so check those."
          :flag :description "overwrite existing pack files"
          :long-name "force" :key :force)))
 
+(defun outdated-options ()
+  (list (clingon:make-option
+         :flag :description "also ask the network: the newest framework release tag, and each upstream.sexp entry's upstream"
+         :long-name "online" :key :online)
+        (clingon:make-option
+         :flag :description "exit 1 when anything is behind, unknown or different from its pin"
+         :long-name "strict" :key :strict)))
+
 (defun subcommand (name description handler &optional options)
   (clingon:make-command :name name :description description
                         :handler handler :options (or options '())))
@@ -204,6 +223,8 @@ manifest here means they probably meant the built-ins, so check those."
                      #'db-repl/handler (db-repl-options))
          (subcommand "db-url" "print the DB URL for an environment (redacted)"
                      #'db-url/handler (db-url-options))
+         (subcommand "outdated" "is this app current with its framework release, toolchain and upstream.sexp? ([--online] [--strict])"
+                     #'outdated/handler (outdated-options))
          (subcommand "env" "list every config key this project needs, and who needs it"
                      #'env/handler (env-options))
          (subcommand "version" "print the cons version" #'version/handler))))
@@ -211,7 +232,7 @@ manifest here means they probably meant the built-ins, so check those."
 ;;; --- dispatch: built-in commands vs. build-spec targets -------------------
 
 (defparameter *builtin-commands*
-  '("init" "template" "setup" "conform" "db-repl" "db-url" "env" "version" "help" "-h" "--help"
+  '("init" "template" "setup" "conform" "db-repl" "db-url" "outdated" "env" "version" "help" "-h" "--help"
     "--version")
   "First-arg tokens that select the built-in clingon surface. Anything else, inside a
 project that has a `cons.lisp`, is treated as a build-spec TARGET name.")
@@ -253,7 +274,10 @@ fasl still fails the target (#303); use it in CI. With no
         (let ((first (first rest)))
           (cond
             ((and first (member first *builtin-commands* :test #'string-equal))
-             (clingon:run (cons-command) rest))
+             ;; --strict was taken off above, for a build-spec target; `cons outdated' has its
+             ;; own --strict (#716), so it gets it back.
+             (clingon:run (cons-command)
+                          (if (and strict (string-equal first "outdated")) (append rest '("--strict")) rest)))
             (t
              (let ((build-spec
                      (handler-case (spec:load-spec)

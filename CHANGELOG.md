@@ -1998,6 +1998,32 @@ its tag.
   Without either option setup behaves as before. `scripts/setup.ps1` does not have these options
   yet.
 
+- **`cons outdated` reports whether an app is current, and every new app records the Ouranos
+  release it was made from in `ouranos.pin`** (#716). Run from an app's directory, `cons outdated`
+  prints three sections:
+  - **framework:** the release in `ouranos.pin` against the newest `v*` release, the CHANGELOG's
+    "An app may have to act" entries in between, and whether the framework checkout is at the
+    pinned commit;
+  - **toolchain:** the running SBCL, the Coalton that loads and the Quicklisp dist, each against
+    the framework's `scripts/versions.env` and `coalton.pin`;
+  - **app pins:** the app's own `upstream.sexp`, checked as Ouranos checks its own.
+
+  It is offline unless given `--online`, which asks the framework's remote for its newest
+  release and each `upstream.sexp` entry's upstream for its latest version. It exits 0 whatever it
+  finds; with `--strict` it exits 1 on any gap, for an app's CI.
+
+  `ouranos.pin` has two fields, in the style of the tree's other `.pin` files:
+  ```
+  release v0.1.7
+  commit  9e2915f1…
+  ```
+  `release` is the newest `v*` tag at or before the framework commit the app was made from, and
+  `commit` is that commit in full. `cons init` writes it. `cons conform` writes it into an existing
+  app that has none, and never overwrites one, not even with `--force`. An app without the file
+  still works: `cons outdated` reports its release as unknown and says to run `cons conform`.
+  **An existing app can add the file with `cons conform`.** New apps also get an `upstream.sexp`
+  that lists nothing yet, with its format described in its header.
+
 - **dokimasia: `cons acceptance` runs an app's suite in a headless browser from the command line**
   (#1028). `dokimasia/cons.lisp` is new, with the targets `build`, `test`, `repl` and
   `acceptance`. `cons acceptance SYSTEM=<system> SUITE=<suite>` loads the system, runs the suite and

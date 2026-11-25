@@ -146,6 +146,28 @@
   (:export #:report #:checkout-advisory #:drift-lines #:packages-touched
            #:framework-directory #:*stale-fetch-seconds*))
 
+(cl:defpackage #:cons/ouranos-pin
+  (:use #:cl)
+  (:documentation
+   "ouranos.pin: the Ouranos release an app was made from (#716). `cons init' writes it into a
+    new app and `cons conform' into an existing one that lacks it; `cons outdated' reads it.
+    Two fields, in the style of this tree's other .pin files: `release', the newest v* tag at
+    or before the framework commit, and `commit', that commit. Reading git fails open: a
+    framework that is not a git checkout gives no pin, never an error.")
+  (:export #:framework-root #:framework-release #:pin-text #:write-ouranos-pin
+           #:read-ouranos-pin #:+pin-file+ #:*framework*))
+
+(cl:defpackage #:cons/outdated-command
+  (:use #:cl)
+  (:local-nicknames (#:inv #:cons/inventory) (#:pin #:cons/ouranos-pin) (#:upstream #:cons/upstream))
+  (:documentation
+   "`cons outdated': is an app current with the framework it builds on, the toolchain that
+    framework pins, and its own upstream.sexp? (#716, point 4). Offline unless --online, which
+    loads cons/outdated at run time; core cons never depends on it. Exit 0 unless --strict, which
+    exits 1 on any gap.")
+  (:export #:run #:exit-code #:release< #:act-entries-after #:toolchain-gaps #:pin-gaps
+           #:app-pin-gaps))
+
 (cl:defpackage #:cons/db
   (:use #:cl)
   (:local-nicknames (#:sec #:aion/secret))

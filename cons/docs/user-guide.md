@@ -78,6 +78,7 @@ rlwrap sbcl
 cons init my-app --template web    # scaffold a project (lib | cli | web | agent)
 cons init my-app --template web --db sqlite   # ... with a database (sqlite | postgres)
 cons conform                       # install the AI-conformance pack into a project
+cons outdated [--online] [--strict]   # is this app current with its framework? (below)
 cons setup                         # write this project's ASDF (:tree) drop-in, per-OS
 cons env                           # which config keys does this project need?
 cons db-repl / cons db-url         # a database session per environment
@@ -151,6 +152,35 @@ warnings: the strict load leaves them out of that list while it runs.
 resolver + lockfiles (see
 [`docs/wiki/Framework-Cons.md`](../../docs/wiki/Framework-Cons.md), the dependency-source
 protocol).
+
+## `cons outdated` — is this app current?
+
+Run from an app's directory (#716). It prints three sections, one line per item, each with a
+status: `current`, `behind`, `unknown`, `differs`, `problem`, or `note`.
+
+- **framework**: the release recorded in the app's `ouranos.pin` against the newest Ouranos
+  release, with the CHANGELOG's "An app may have to act" entries in between, and whether the
+  framework checkout is at the pinned commit.
+- **toolchain**: the running SBCL, the Coalton that loads and the Quicklisp dist, against the
+  framework's `scripts/versions.env` and `coalton.pin`.
+- **app pins**: the app's own `upstream.sexp` (a new app gets one that lists nothing), checked
+  the way Ouranos checks its own.
+
+`ouranos.pin` names the release and the commit the app was made from:
+
+```
+release v0.1.7
+commit  9e2915f1…
+```
+
+`cons init` writes it, and `cons conform` writes it into an app that has none; neither ever
+overwrites it. Edit it when the app moves to a newer release. An app without it still works;
+`cons outdated` reports its release as unknown.
+
+It is offline unless given `--online`, which asks the framework's remote for its newest release
+and each `upstream.sexp` entry's upstream for its latest version. It exits 0 whatever it finds.
+`--strict` exits 1 when any line is `behind`, `unknown`, `differs`, a `problem`, or past its
+shutdown date, so an app's CI can fail on it. A `note` never counts.
 
 ## `cons.lisp` — the build spec (replaces the Makefile)
 

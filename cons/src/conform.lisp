@@ -499,6 +499,8 @@ IDE assistant generates spec-conformant code. TOOLS selects assistants:
   :claude  -> .claude/skills/{coalton-core,mnemosyne-data}/SKILL.md, and -- only with
               :WITH-CLAUDE -- a CLAUDE.md that imports AGENTS.md (so `cons init`'s own
               CLAUDE.md is not clobbered).
+It also writes ouranos.pin, naming the Ouranos release the project was made from (#716), when
+the project has none; that file is never overwritten, not even with FORCE.
 Existing files are skipped unless FORCE. Returns ROOT."
   (let ((name (or name (%dir-name root))))
     (format t "Installing AI-conformance pack in ~A (~{~(~A~)~^ ~})~%" root tools)
@@ -546,4 +548,8 @@ Existing files are skipped unless FORCE. Returns ROOT."
       (%emit root ".claude/skills/mnemosyne-data/SKILL.md" *skill-mnemosyne* :force force)
       (when with-claude
         (%emit root "CLAUDE.md" (%replace-all *claude* "{{name}}" name) :force force)))
+    ;; The release this app was made from (#716), written when missing. Never overwritten,
+    ;; not even with FORCE: --force refreshes the pack, while the pin records a choice the app
+    ;; makes, and moving it silently would hide exactly what `cons outdated' reports.
+    (cons/ouranos-pin:write-ouranos-pin root)
     root))

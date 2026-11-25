@@ -152,7 +152,7 @@ BODY, and remove the directory however BODY exits."
     (with-scaffold (root "demo" :template template)
       (dolist (relpath '("demo.asd" "src/packages.lisp" "src/demo.lisp" "cons.lisp"
                          ".gitignore" ".env.example" "README.md" "CLAUDE.md"
-                         ".vscode/settings.json" "AGENTS.md"))
+                         ".vscode/settings.json" "AGENTS.md" "upstream.sexp"))
         (is-true (%file root relpath) "~(~A~): missing ~A" template relpath)))))
 
 (test a-library-has-no-entry-point-and-no-binary
